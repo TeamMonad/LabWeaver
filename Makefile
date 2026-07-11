@@ -13,4 +13,3 @@ test:
 	cargo test --workspace
 
 check: format lint build test
-
