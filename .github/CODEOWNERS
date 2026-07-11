@@ -1,15 +1,26 @@
 * @2018wzh
 
-/crates/common-domain/ @2018wzh
-/crates/contracts/ @2018wzh
-/crates/telemetry/ @2018wzh
-/services/control-service/ @2018wzh
-/services/access-service/ @2018wzh
-/services/resource-service/ @2018wzh
-/docs/architecture/ @2018wzh
-/docs/status/ @2018wzh
-/.github/ @2018wzh
+# Shared contracts and A-owned services: A and B cross-review core changes.
+/crates/common-domain/ @2018wzh @zeyi2
+/crates/contracts/ @2018wzh @zeyi2
+/crates/telemetry/ @2018wzh @zeyi2
+/services/control-service/ @2018wzh @zeyi2
+/services/access-service/ @2018wzh @zeyi2
+/services/resource-service/ @2018wzh @zeyi2
 
-# Replace the temporary bootstrap owner with the named B/C/D accounts as soon as they join.
-# Core contracts and security-sensitive paths still require the human review policy documented
-# in AGENTS.md; CODEOWNERS alone does not satisfy dual review.
+# B-owned runtime and evaluation paths: B owns implementation; A reviews contracts and safety.
+/services/agent-service/ @zeyi2 @2018wzh
+/services/environment-service/ @zeyi2 @2018wzh
+/services/evaluation-service/ @zeyi2 @2018wzh
+/crates/agent-core/ @zeyi2 @2018wzh
+/crates/environment-domain/ @zeyi2 @2018wzh
+/crates/evaluation-domain/ @zeyi2 @2018wzh
+
+# C owns the portal; D owns test, deployment, and documentation execution evidence.
+/web/ @Nova-Lciop-J @2018wzh
+/tests/ @yingxvemiao @2018wzh
+/deploy/ @yingxvemiao @2018wzh
+/docs/ @yingxvemiao @2018wzh
+
+# Governance changes need A plus an independent core reviewer.
+/.github/ @2018wzh @zeyi2 @yingxvemiao

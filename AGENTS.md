@@ -6,6 +6,17 @@
 
 本项目采用 Scrum 模式驱动 GitHub 协作开发，项目在 `github.com/TeamMonad/LabWeaver` 上管理。Scrum 流程中，可以使用 `gh issue` 追踪任务、`gh pr` 管理代码评审、`gh project` 管理迭代计划。
 
+团队 GitHub 身份固定如下：
+
+| 角色 | GitHub 账号 | 职责 |
+| --- | --- | --- |
+| A：架构工程师 / 组长 / PM | `@2018wzh` | 架构、Control/Access/Resource、核心契约与发布判断 |
+| B：Agent / Environment / Evaluation 工程师 | `@zeyi2` | Agent、Environment、Evaluation、Runner/Checker/Collector |
+| C：前端工程师 | `@Nova-Lciop-J` | Vue 门户、编辑器、状态可视化与前端体验 |
+| D：测试 / DevOps / 文档工程师 | `@yingxvemiao` | Playwright、Fixture、CI、Ansible Verify、文档与演示复现 |
+
+`CODEOWNERS` 只负责将评审请求路由给这些账号；它不替代本文件中对核心 Rust、Migration、权限、安全策略、CRD、Agent Tool 和评分语义的双人评审要求。
+
 ## 1. 项目配置
 
 ```yaml
