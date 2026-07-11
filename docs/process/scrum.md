@@ -13,4 +13,3 @@ Any state may transition to Blocked. A Blocked item records the original diagnos
 ## Evidence rule
 
 Project metadata, Issue text, PR checks and implementation status serve different purposes. An Issue body saying `Status: Ready` does not prove that the Project item field was updated. Missing GitHub scopes or unsupported repository controls remain explicit blockers.
-

@@ -13,4 +13,3 @@
 # Replace the temporary bootstrap owner with the named B/C/D accounts as soon as they join.
 # Core contracts and security-sensitive paths still require the human review policy documented
 # in AGENTS.md; CODEOWNERS alone does not satisfy dual review.
-

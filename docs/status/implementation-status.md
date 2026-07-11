@@ -12,4 +12,3 @@ Status is proven only by the identified commit/worktree and current evidence. `d
 | C4, service boundaries and data ownership | A | documented, pending review | current documentation PR | E0 | design evidence only |
 | Frontend, Agent, EvaluationSpec and Playwright work | C/B/D | planned | assigned Sprint Issues | E0 | explicitly outside role A implementation scope |
 | Real KubeVirt path | B/D | blocked pending preflight | Issue #15 | E0 | no E3 evidence exists |
-

@@ -12,4 +12,3 @@
 Cross-domain changes use a versioned REST contract, NATS event, immutable artifact reference, or controlled service call. A service must not directly mutate another domain's tables. PostgreSQL is authoritative for durable business state; JetStream is a reliable delivery mechanism, not a state store.
 
 Provider selection is always an explicit manifest/configuration binding. Registration order and “first available” behavior are prohibited.
-

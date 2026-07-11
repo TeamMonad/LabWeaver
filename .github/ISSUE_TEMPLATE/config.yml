@@ -3,4 +3,3 @@ contact_links:
   - name: Security escalation
     url: https://github.com/TeamMonad/LabWeaver/security/advisories/new
     about: Report vulnerabilities privately. Do not place secrets or exploit payloads in an Issue.
-

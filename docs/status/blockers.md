@@ -13,4 +13,3 @@
 - Frontend build and B/C/D first branches or PRs are not role A deliverables.
 - Owner: B, C and D respectively.
 - Exit condition: each owner supplies its own reviewed PR and required evidence.
-

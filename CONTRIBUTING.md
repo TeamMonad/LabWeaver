@@ -25,4 +25,3 @@ make check
 - 目标分支 `main` 至少需要两名 Reviewer；
 - Contract、Schema、Migration、权限、安全策略和评分语义必须由 A 与 B 双人评审；
 - 作者不得自行批准并合并核心模块。
-

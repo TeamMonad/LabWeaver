@@ -38,4 +38,3 @@
 - Generated or changed by Codex:
 - Human-confirmed decisions:
 - Unresolved uncertainty:
-

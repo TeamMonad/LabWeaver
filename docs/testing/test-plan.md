@@ -15,4 +15,3 @@ The initial test surface covers liveness, readiness, correlation headers, a stab
 ## Governance verification
 
 Read back Milestones, Labels, branch protection, Sprint parents and sub-issues through GitHub APIs. Project field verification remains blocked until the credential has write `project` scope.
-

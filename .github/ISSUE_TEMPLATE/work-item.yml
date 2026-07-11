@@ -42,4 +42,3 @@ body:
       description: Owner, Reviewer, Sprint, Priority, SP, Codex Mode, Risk, due date, and evidence level.
     validations:
       required: true
-

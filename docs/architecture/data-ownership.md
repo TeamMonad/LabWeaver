@@ -11,4 +11,3 @@
 | `shared_audit` | Append-only audit boundary | audit_log, outbox_events, event_projection |
 
 All writes use a transaction plus Outbox or an equivalent atomic boundary. Consumers must reject or idempotently handle duplicates, stale events, unsupported versions and replay. No schema or Migration is implemented by ARC-01a; the table records the frozen ownership decision only.
-

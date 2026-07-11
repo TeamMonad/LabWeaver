@@ -20,4 +20,3 @@ make check
 - `docs/status/implementation-status.md`：实现状态事实源；
 - `docs/testing/test-plan.md`：测试和证据计划；
 - `docs/process/scrum.md`：GitHub Scrum 操作约束。
-

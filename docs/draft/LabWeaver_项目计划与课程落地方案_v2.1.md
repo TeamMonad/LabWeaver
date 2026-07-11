@@ -1,12 +1,12 @@
 # LabWeaver 项目计划与课程落地方案
 
-> **版本**：v2.1（LabWeaver 品牌与安全接入修订版）  
-> **日期**：2026-07-11  
-> **交付截止**：2026-07-24  
-> **团队规模**：4 人  
-> **角色**：架构工程师/项目经理、Agent 工程师、前端工程师、测试工程师  
-> **技术基线**：Rust + Axum、Kubernetes、KubeVirt、NATS JetStream、MinIO、Keycloak/OIDC、Headscale/Tailscale、Kyverno、BuildKit、Ansible、Playwright  
-> **文档定位**：课程项目计划、敏捷迭代计划、团队分工、验收与展示方案  
+> **版本**：v2.1（LabWeaver 品牌与安全接入修订版）
+> **日期**：2026-07-11
+> **交付截止**：2026-07-24
+> **团队规模**：4 人
+> **角色**：架构工程师/项目经理、Agent 工程师、前端工程师、测试工程师
+> **技术基线**：Rust + Axum、Kubernetes、KubeVirt、NATS JetStream、MinIO、Keycloak/OIDC、Headscale/Tailscale、Kyverno、BuildKit、Ansible、Playwright
+> **文档定位**：课程项目计划、敏捷迭代计划、团队分工、验收与展示方案
 > **代码仓库**：`github.com/TeamMonad/LabWeaver`
 
 前端统一采用 **Material You** 作为设计语言。信息架构、控制台密度、导航层级和运维状态表达可以参考 GCP Console，但不得复制 Google 品牌、产品命名或专有视觉资产。设计必须使用语义化动态色、清晰的 surface 层级、可辨识的 loading/empty/warning/error 状态、键盘焦点、无障碍对比度和响应式布局。详细 token、组件规格和页面细化由前端工程师在 `UI-*` Issue 中负责，本草案只冻结方向与边界。

@@ -1,11 +1,11 @@
 # LabWeaver 生产级技术实现方案
 
-> **版本**：v2.1（LabWeaver 品牌、Tailnet 接入与 Playwright 修订版）  
-> **日期**：2026-07-11  
-> **架构风格**：Rust/Axum 云原生微服务 + Kubernetes Operator + Agent + 统一评测模型 + Headscale/Tailscale 零信任接入  
-> **部署入口**：Ansible；平台组件使用 Helm/Kubernetes API 落地；Playwright 负责部署后验收与演示重放  
-> **主演示**：OJ 类编程实验 + Linux 系统 KubeVirt VM  
-> **重要决策**：不依赖 OpenJudge；LLM 只提供建议，不直接计分；GPU/云容量在测试和演示中使用 Mock  
+> **版本**：v2.1（LabWeaver 品牌、Tailnet 接入与 Playwright 修订版）
+> **日期**：2026-07-11
+> **架构风格**：Rust/Axum 云原生微服务 + Kubernetes Operator + Agent + 统一评测模型 + Headscale/Tailscale 零信任接入
+> **部署入口**：Ansible；平台组件使用 Helm/Kubernetes API 落地；Playwright 负责部署后验收与演示重放
+> **主演示**：OJ 类编程实验 + Linux 系统 KubeVirt VM
+> **重要决策**：不依赖 OpenJudge；LLM 只提供建议，不直接计分；GPU/云容量在测试和演示中使用 Mock
 > **代码仓库**：`github.com/TeamMonad/LabWeaver`
 
 Web 前端以 **Material You** 为统一设计语言。允许参考 GCP Console 的信息架构、工作区切换、表格密度、状态可读性和操作层级，但不复制 Google 品牌、产品名或专有视觉资产。实现需要以语义化 dynamic color、surface/elevation 层级、完整的 loading/empty/warning/error 状态、键盘操作、无障碍对比度和响应式行为为基础。具体 token、组件 API 和页面布局由前端 Owner 后续细化；本技术方案不把方向性选择描述成已完成 UI。

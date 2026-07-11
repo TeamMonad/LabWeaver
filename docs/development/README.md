@@ -21,4 +21,3 @@ LABWEAVER_BIND_ADDR=127.0.0.1:8080 cargo run -p control-service
 ```
 
 The service must fail when the binding is missing or invalid. Business API, persistence, messaging, provider and deployment configuration remain planned.
-
