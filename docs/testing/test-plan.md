@@ -14,4 +14,4 @@ The initial test surface covers liveness, readiness, correlation headers, a stab
 
 ## Governance verification
 
-Read back Milestones, Labels, branch protection, Sprint parents and sub-issues through GitHub APIs. Project field verification remains blocked until the credential has write `project` scope.
+Read back Milestones, Labels, branch protection, Sprint parents, sub-issues and Project fields through GitHub APIs. The verified governance result is 20 Project items and 15 P0 items with `Workflow Status=Ready`, plus Owner, Review Role, Sprint, Area, Codex Mode, Risk, SP and Evidence metadata.

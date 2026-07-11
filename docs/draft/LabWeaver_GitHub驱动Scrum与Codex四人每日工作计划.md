@@ -49,7 +49,7 @@ Codex Agent 不作为“第五名成员”。每个任务始终有一个人类 O
 
 | 字段 | 可选值 |
 |---|---|
-| Status | Backlog / Ready / In Progress / Draft PR / In Review / Verify / Done / Blocked |
+| Workflow Status | Backlog / Ready / In Progress / Draft PR / In Review / Verify / Done / Blocked |
 | Sprint | S1 Foundation / S2 Environment / S3 Evaluation / S4 Release |
 | Priority | P0 / P1 / P2 |
 | Area | Architecture / Access / Environment / Agent / Evaluation / Resource / Web / Test / Deploy / Docs |
@@ -60,6 +60,8 @@ Codex Agent 不作为“第五名成员”。每个任务始终有一个人类 O
 | SP | 1 / 2 / 3 / 5 |
 | Evidence | PR、测试报告、截图、Trace、日志或演示链接 |
 | Due Date | 7/11–7/24 |
+
+GitHub 当前将内置 `Status`、`Priority` 和 `Target date` 暴露为 Issue-derived 字段。LabWeaver 使用可写的 `Workflow Status` 与 `Delivery Priority` 保存 Scrum 状态和 P0/P1/P2；`Target date` 通过 Issue field API 更新。不得在 Issue 正文中伪造 Project 字段证据。
 
 原 Backlog 中 8 或 13 SP 的项目一律作为 Epic，拆为不超过 3 SP、最长一天可完成的子 Issue。
 

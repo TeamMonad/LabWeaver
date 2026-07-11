@@ -1,6 +1,6 @@
 # GitHub Scrum Process
 
-The organization Project is `LabWeaver Delivery`; the repository is `TeamMonad/LabWeaver`.
+The organization Project is `LabWeaver Delivery`; the repository is `TeamMonad/LabWeaver`. GitHub exposes the built-in `Status`, `Priority`, and `Target date` as Issue-derived fields. The writable Scrum projections are `Workflow Status` and `Delivery Priority`; target dates are written through the Issue field API.
 
 ## Flow
 
@@ -12,4 +12,4 @@ Any state may transition to Blocked. A Blocked item records the original diagnos
 
 ## Evidence rule
 
-Project metadata, Issue text, PR checks and implementation status serve different purposes. An Issue body saying `Status: Ready` does not prove that the Project item field was updated. Missing GitHub scopes or unsupported repository controls remain explicit blockers.
+Project metadata, Issue text, PR checks and implementation status serve different purposes. An Issue body saying `Status: Ready` does not prove that `Workflow Status` was updated. Missing GitHub scopes or unsupported repository controls remain explicit blockers.
