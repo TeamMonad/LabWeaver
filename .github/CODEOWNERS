@@ -1,0 +1,16 @@
+* @2018wzh
+
+/crates/common-domain/ @2018wzh
+/crates/contracts/ @2018wzh
+/crates/telemetry/ @2018wzh
+/services/control-service/ @2018wzh
+/services/access-service/ @2018wzh
+/services/resource-service/ @2018wzh
+/docs/architecture/ @2018wzh
+/docs/status/ @2018wzh
+/.github/ @2018wzh
+
+# Replace the temporary bootstrap owner with the named B/C/D accounts as soon as they join.
+# Core contracts and security-sensitive paths still require the human review policy documented
+# in AGENTS.md; CODEOWNERS alone does not satisfy dual review.
+
