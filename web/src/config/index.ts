@@ -1,0 +1,18 @@
+/**
+ * LabWeaver 前端运行时配置
+ * 所有以 VITE_ 开头的变量在构建时会被 Vite 注入
+ */
+
+export const APP_TITLE = import.meta.env.VITE_APP_TITLE || 'LabWeaver'
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1'
+
+export const OIDC_CONFIG = {
+  authority: import.meta.env.VITE_OIDC_AUTHORITY || '',
+  client_id: import.meta.env.VITE_OIDC_CLIENT_ID || '',
+  redirect_uri: import.meta.env.VITE_OIDC_REDIRECT_URI || window.location.origin + '/auth/callback',
+  post_logout_redirect_uri: import.meta.env.VITE_OIDC_POST_LOGOUT_REDIRECT_URI || window.location.origin + '/',
+  response_type: 'code',
+  scope: 'openid profile email',
+}
+
+export const OIDC_ENABLED = Boolean(OIDC_CONFIG.authority && OIDC_CONFIG.client_id)
