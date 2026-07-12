@@ -4,13 +4,15 @@ LabWeaver 是面向教学实验和科研工作的 Agent 驱动云原生实验平
 
 当前仓库处于 Sprint 1 Foundation 初始化阶段。设计基线位于 `docs/draft/`；实际完成度仅以 `docs/status/implementation-status.md`、当前提交和可复现测试证据为准。
 
-## 开发入口
+## 开发入口（planned，pending PR #21）
+
+当前分支尚未包含 Rust workspace、`Makefile` 或服务进程。以下命令属于待合并的 PR #21，不得在当前提交中视为可执行入口：
 
 ```sh
 make check
 ```
 
-在服务启动前必须显式设置 `LABWEAVER_BIND_ADDR`。缺失或非法配置会阻断启动，不会自动回退到隐式地址。
+PR #21 合并并在目标提交重新验证前，`LABWEAVER_BIND_ADDR`、服务启动和健康端点均为 planned。
 
 ## 文档入口
 

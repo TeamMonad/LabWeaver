@@ -1,16 +1,17 @@
 # Test Plan
 
-## API-01a gates
+## API-01a gates (planned, pending PR #21)
+
+The current branch does not contain the workspace, service crates, or `Makefile` required by these Cargo checks. They are PR #21 validation commands and must be rerun from its merged target commit:
 
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo build --workspace --locked
 cargo test --workspace --locked
-git diff --check
 ```
 
-The initial test surface covers liveness, readiness, correlation headers, a stable not-found diagnostic and fail-fast binding configuration. It does not prove database, JetStream, OIDC, KubeVirt, MinIO, authorization or business behavior.
+`git diff --check` remains applicable to the current documentation change. Liveness, readiness, correlation headers, a stable not-found diagnostic, and fail-fast binding configuration are planned capabilities pending PR #21; they are not current-branch test evidence. Database, JetStream, OIDC, KubeVirt, MinIO, authorization, and business behavior also remain unproven.
 
 ## Governance verification
 

@@ -1,9 +1,14 @@
 * @2018wzh
 
 # Shared contracts and A-owned services: A and B cross-review core changes.
+/Cargo.toml @2018wzh @zeyi2
+/Cargo.lock @2018wzh @zeyi2
+/rust-toolchain.toml @2018wzh @zeyi2
+/rustfmt.toml @2018wzh @zeyi2
 /crates/common-domain/ @2018wzh @zeyi2
 /crates/contracts/ @2018wzh @zeyi2
 /crates/telemetry/ @2018wzh @zeyi2
+/services/service_runtime.rs @2018wzh @zeyi2
 /services/control-service/ @2018wzh @zeyi2
 /services/access-service/ @2018wzh @zeyi2
 /services/resource-service/ @2018wzh @zeyi2

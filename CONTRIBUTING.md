@@ -11,7 +11,9 @@ test/<issue>-<slug>
 docs/<issue>-<slug>
 ```
 
-## 提交前验证
+## 提交前验证（planned，pending PR #21）
+
+当前分支尚未包含 `make check` 所需的 Rust workspace 和 `Makefile`。该命令只能在 PR #21 合并后的目标提交验证，不得作为当前分支的提交前检查：
 
 ```sh
 make check
