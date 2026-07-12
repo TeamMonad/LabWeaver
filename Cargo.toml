@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/common-domain",
+  "crates/contracts",
+  "crates/telemetry",
+  "services/access-service",
+  "services/agent-service",
+  "services/control-service",
+  "services/environment-service",
+  "services/evaluation-service",
+  "services/resource-service",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/TeamMonad/LabWeaver"
+rust-version = "1.85"
+
+[workspace.dependencies]
+axum = "0.8.4"
+http = "1.3.1"
+serde = { version = "1.0.219", features = ["derive"] }
+thiserror = "2.0.12"
+tokio = { version = "1.45.1", features = ["macros", "net", "rt-multi-thread", "signal"] }
+tower = { version = "0.5.2", features = ["util"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt", "json"] }
+uuid = { version = "1.16.0", features = ["serde", "v4"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

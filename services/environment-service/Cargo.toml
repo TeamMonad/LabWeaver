@@ -1,0 +1,18 @@
+[package]
+name = "environment-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axum.workspace = true
+contracts = { path = "../../crates/contracts" }
+telemetry = { path = "../../crates/telemetry" }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
