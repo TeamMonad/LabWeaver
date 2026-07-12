@@ -1,8 +1,44 @@
-ROLE.md
-target/
+# Rust
+/target/
+
+# Local private directories
 .tmp/
 .private/
 artifacts/
+
+# Environment files
 .env
 .env.*
 !.env.example
+
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+*.tsbuildinfo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Role memo (local private)
+ROLE.md
+
+# Local reference files (not part of project source)
+老师给的作业要求.pptx
+LabWeaver_生产级技术实现方案_v2.1(1).md
+LabWeaver_项目计划与课程落地方案_v2.1(1).md
+LabWeaver_GitHub驱动Scrum与Codex四人每日工作计划(1).md
