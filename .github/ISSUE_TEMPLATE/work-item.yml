@@ -1,0 +1,44 @@
+name: Scrum work item
+description: Create a bounded, evidence-driven LabWeaver work item.
+title: "[ID] "
+body:
+  - type: textarea
+    id: value
+    attributes:
+      label: User value
+      description: State the observable user or operator outcome.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and non-goals
+      description: Name the owner boundary and explicitly excluded work.
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies and blockers
+      description: Include the unblock owner and exit condition for known blockers.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Include success, failure, security, documentation, and cleanup behavior.
+      value: |
+        - [ ] Functional behavior
+        - [ ] Negative and failure behavior
+        - [ ] Authorization and data boundary
+        - [ ] Documentation and evidence
+    validations:
+      required: true
+  - type: textarea
+    id: delivery
+    attributes:
+      label: Delivery metadata
+      description: Owner, Reviewer, Sprint, Priority, SP, Codex Mode, Risk, due date, and evidence level.
+    validations:
+      required: true

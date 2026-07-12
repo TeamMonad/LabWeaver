@@ -4,6 +4,7 @@ members = [
   "crates/common-domain",
   "crates/contracts",
   "crates/telemetry",
+  "xtask",
   "services/access-service",
   "services/agent-service",
   "services/control-service",

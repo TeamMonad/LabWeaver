@@ -1,0 +1,33 @@
+* @2018wzh
+
+# Shared contracts and A-owned services: A and B cross-review core changes.
+/Cargo.toml @2018wzh @zeyi2
+/Cargo.lock @2018wzh @zeyi2
+/.cargo/ @2018wzh @zeyi2
+/xtask/ @2018wzh @zeyi2
+/rust-toolchain.toml @2018wzh @zeyi2
+/rustfmt.toml @2018wzh @zeyi2
+/crates/common-domain/ @2018wzh @zeyi2
+/crates/contracts/ @2018wzh @zeyi2
+/crates/telemetry/ @2018wzh @zeyi2
+/services/service_runtime.rs @2018wzh @zeyi2
+/services/control-service/ @2018wzh @zeyi2
+/services/access-service/ @2018wzh @zeyi2
+/services/resource-service/ @2018wzh @zeyi2
+
+# B-owned runtime and evaluation paths: B owns implementation; A reviews contracts and safety.
+/services/agent-service/ @zeyi2 @2018wzh
+/services/environment-service/ @zeyi2 @2018wzh
+/services/evaluation-service/ @zeyi2 @2018wzh
+/crates/agent-core/ @zeyi2 @2018wzh
+/crates/environment-domain/ @zeyi2 @2018wzh
+/crates/evaluation-domain/ @zeyi2 @2018wzh
+
+# C (@yingxvemiao) owns the portal; D (@Nova-Lciop-J) owns test, deployment, and documentation execution evidence.
+/web/ @yingxvemiao @2018wzh
+/tests/ @Nova-Lciop-J @2018wzh
+/deploy/ @Nova-Lciop-J @2018wzh
+/docs/ @Nova-Lciop-J @2018wzh
+
+# Governance changes need A plus an independent core reviewer.
+/.github/ @2018wzh @zeyi2 @yingxvemiao
