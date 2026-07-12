@@ -16,11 +16,11 @@
 /crates/environment-domain/ @zeyi2 @2018wzh
 /crates/evaluation-domain/ @zeyi2 @2018wzh
 
-# C owns the portal; D owns test, deployment, and documentation execution evidence.
-/web/ @Nova-Lciop-J @2018wzh
-/tests/ @yingxvemiao @2018wzh
-/deploy/ @yingxvemiao @2018wzh
-/docs/ @yingxvemiao @2018wzh
+# C (@yingxvemiao) owns the portal; D (@Nova-Lciop-J) owns test, deployment, and documentation execution evidence.
+/web/ @yingxvemiao @2018wzh
+/tests/ @Nova-Lciop-J @2018wzh
+/deploy/ @Nova-Lciop-J @2018wzh
+/docs/ @Nova-Lciop-J @2018wzh
 
 # Governance changes need A plus an independent core reviewer.
 /.github/ @2018wzh @zeyi2 @yingxvemiao
