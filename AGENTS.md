@@ -43,15 +43,15 @@ commands:
   lint: "cargo clippy --workspace --all-targets --all-features -- -D warnings && pnpm --dir web lint"
   typecheck: "pnpm --dir web typecheck"
   unit_test: "cargo test --workspace"
-  contract_test: "make test-contract"
-  integration_test: "make test-integration"
-  e2e_test: "make test-e2e"
-  package: "make package"
-  package_validate: "make package-validate"
-  release_gate: "make release-gate"
-  deploy_demo: "make ansible-deploy ENV=demo"
-  deploy_verify: "make ansible-verify ENV=demo"
-  demo_replay: "make demo-replay"
+  contract_test: "cargo xtask test --suite contract"
+  integration_test: "cargo xtask test --suite integration"
+  e2e_test: "cargo xtask test --suite e2e"
+  package: "cargo xtask package"
+  package_validate: "cargo xtask package-validate"
+  release_gate: "cargo xtask release-gate"
+  deploy_demo: "cargo xtask deploy --env demo"
+  deploy_verify: "cargo xtask verify --env demo"
+  demo_replay: "cargo xtask demo replay"
 
 status:
   source_of_truth: "docs/status/implementation-status.md"
@@ -168,7 +168,7 @@ Release Gate 是发布前唯一权威入口，必须输出版本化、machine-re
 - 设计文档写目标、边界与契约；实现文档写调用链、数据流与失败语义；状态文档写当前事实、证据和 blocker。
 - 每个工作项完成后立即更新实现状态、测试计划/矩阵、coverage、Release Gate、迁移说明、README/索引和相关手册。
 - 新模块必须同时接入 Workspace/构建、正式入口、测试矩阵、可观测性、发布门禁和用户/开发文档。
-- 文档示例使用跨平台、可复制的 `sh`/Make 命令；项目自动化优先使用 Rust、Python 或 POSIX shell，禁止提交依赖个人 PowerShell 环境的流程。
+- 文档示例使用跨平台、可复制的 `sh` 与 `cargo xtask` 命令；项目自动化优先使用 Rust、Python 或 POSIX shell，禁止提交依赖个人 PowerShell 环境的流程。
 - 中文技术文档保持自然、准确、简洁，保留 API、type、command、schema、文件名等技术术语，不使用营销式完成度表述。
 
 ## 12. Git、评审与范围控制

@@ -7,7 +7,7 @@ LabWeaver 是面向教学实验和科研工作的 Agent 驱动云原生实验平
 ## 开发入口
 
 ```sh
-make check
+cargo xtask check
 ```
 
 服务启动前必须显式设置 `LABWEAVER_BIND_ADDR`。缺失或非法配置会阻断启动，不会自动回退到隐式地址。

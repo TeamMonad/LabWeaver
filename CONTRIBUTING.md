@@ -14,7 +14,7 @@ docs/<issue>-<slug>
 ## 提交前验证
 
 ```sh
-make check
+cargo xtask check
 ```
 
 不存在的测试或缺失的依赖必须阻断，不得以空成功脚本、旧报告或 Mock 结果替代。

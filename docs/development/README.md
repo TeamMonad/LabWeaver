@@ -3,13 +3,12 @@
 ## Prerequisites
 
 - Rust stable toolchain with rustfmt and clippy;
-- GNU Make;
 - Git and GitHub CLI for the Scrum workflow.
 
 ## Rust verification
 
 ```sh
-make check
+cargo xtask check
 ```
 
 ## Service shell
