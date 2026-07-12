@@ -16,6 +16,8 @@
 
 ## Verification
 
+- [ ] 已 `git fetch origin develop` 并 rebase 到最新 `origin/develop`
+- [ ] 已确认无未说明的 merge commit，且 PR body 使用当前提交/基线
 - [ ] Format and lint
 - [ ] Unit and negative tests
 - [ ] Contract/integration/E2E tests required by the Issue

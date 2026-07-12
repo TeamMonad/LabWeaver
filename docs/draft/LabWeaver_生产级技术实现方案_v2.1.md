@@ -2343,7 +2343,7 @@ cargo xtask verify --env demo
 cargo xtask demo seed --env demo
 ```
 
-`xtask` 负责参数校验、环境策略、显式确认、结构化日志、退出码和外部命令编排；Ansible、Helm、kubectl 和 Playwright 仍由各自工具执行，不在 Rust 中重写。生产环境的部署、升级、回滚、备份和重置默认要求确认；CI 或非交互运行必须显式传入 `--yes`。当前 `xtask` 入口属于设计契约，未创建真实 workspace crate 并通过验证前不得标记为已实现。
+`xtask` crate 已存在于 workspace，并负责参数校验、环境策略、显式确认、结构化日志、退出码和外部命令编排；Ansible、Helm、kubectl 和 Playwright 仍由各自工具执行，不在 Rust 中重写。当前真实实现并已验证的命令为 `format`、`lint`、`build`、`test --suite all` 和 `check`。`deploy`、`verify`、`test --suite contract|integration|e2e`、`demo`、`playwright`、`package`、`release-gate`、升级、回滚和其他发布命令仍是 typed design contract；当前缺少底层实现时统一返回 `XTASK_NOT_IMPLEMENTED`，不得标记为已部署或已验证。生产环境的高风险操作未来接入实现后默认要求确认；CI 或非交互运行必须显式传入 `--yes`。
 
 ## 18.7 安装顺序
 

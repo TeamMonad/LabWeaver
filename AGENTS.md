@@ -176,6 +176,7 @@ Release Gate 是发布前唯一权威入口，必须输出版本化、machine-re
 - 分支遵循 `feature/<issue>-<name>`、`fix/<issue>-<name>`、`test/<issue>-<name>`、`docs/<issue>-<name>`；Release 使用 `release/<version>`。
 - 核心 Rust PR 由架构工程师与 Agent 工程师互审；EvaluationSpec、Agent Tool、CRD、Migration、安全策略必须双人评审。作者不得自行批准并合并核心模块。
 - PR 必须关联 Issue，列出范围、契约变化、测试证据、风险与回滚方式；Codex 生成代码适用同等评审和门禁。
+- 创建或更新 PR 前，必须先将当前分支 rebase 到最新 `origin/develop`；禁止带有过期 develop 基线或未说明 merge 拓扑的 PR。
 - 2026-07-13 后不增加微服务，2026-07-16 后不增加 Runner 类型，2026-07-20 后不增加用户功能；突破冻结点必须由架构师记录新的范围决策和影响。
 - 一个 Issue 连续两天未完成必须拆分或降级；阻塞超过 4 小时必须登记 `Blocked`、负责人和解除条件。
 - P1 不得占用 P0 交付时间。核心优先级为：真实 KubeVirt → Environment 闭环 → Collector → EvaluationSpec → OJ Runner → Linux Probe → AccessGrant → Playwright → Ansible → 文档与演示。

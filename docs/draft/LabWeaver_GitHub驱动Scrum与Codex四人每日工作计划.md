@@ -105,6 +105,7 @@ main
 - 默认采用 Squash Merge，PR 标题作为最终 Commit；
 - 禁止 Force Push 到受保护分支；
 - Draft PR 用于尽早暴露接口、实现方向和冲突；
+- 创建或更新 PR 前必须先 `git fetch origin develop` 并 rebase 到最新 `origin/develop`；PR body 必须记录实际基线和 rebase 后的验证结果；
 - Feature PR 目标分支为 `develop`，合并后由验收人在 Verify 完成时关闭 Issue。
 
 ## 2.4 Issue 模板

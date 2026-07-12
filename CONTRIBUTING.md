@@ -17,6 +17,8 @@ docs/<issue>-<slug>
 cargo xtask check
 ```
 
+创建或更新 Pull Request 前，必须先执行 `git fetch origin develop` 和 `git rebase origin/develop`，确认分支基于最新 `develop` 且不包含未说明的 merge commit。
+
 不存在的测试或缺失的依赖必须阻断，不得以空成功脚本、旧报告或 Mock 结果替代。
 
 ## 评审
