@@ -9,6 +9,8 @@ artifacts/
 # Environment files
 .env
 .env.*
+.env.local
+.env.*.local
 !.env.example
 
 # Dependencies
@@ -36,6 +38,9 @@ logs/
 
 # Role memo (local private)
 ROLE.md
+
+# Generated screenshots (keep script, ignore outputs)
+web/screenshots/*.png
 
 # Local reference files (not part of project source)
 老师给的作业要求.pptx
