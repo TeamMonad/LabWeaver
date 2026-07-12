@@ -975,9 +975,9 @@ Access：未授权和过期访问失败
 ### 日终门禁
 
 ```bash
-make ansible-deploy ENV=demo
-make ansible-verify ENV=demo
-make playwright-e2e
+cargo xtask deploy --env demo --yes
+cargo xtask verify --env demo
+cargo xtask test --suite e2e
 ```
 
 均通过；失败时有明确日志、截图或 Trace。
@@ -1061,13 +1061,13 @@ make playwright-e2e
 ### 最终发布命令
 
 ```bash
-make bootstrap
-make ansible-deploy ENV=demo
-make ansible-verify ENV=demo
-make test
-make playwright-e2e
-make demo-replay
-make demo-reset
+cargo xtask bootstrap
+cargo xtask deploy --env demo --yes
+cargo xtask verify --env demo
+cargo xtask test --suite all
+cargo xtask test --suite e2e
+cargo xtask demo replay
+cargo xtask demo reset --yes
 ```
 
 ### 最终 GitHub 证据

@@ -2310,6 +2310,8 @@ retention:
 
 ## 18.6 一键部署
 
+首次安装依赖或排查 `xtask` 本身时，可以直接运行以下底层命令；平台部署、验证和后续生命周期操作必须使用下方的 `cargo xtask` 入口。
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate
@@ -2331,15 +2333,17 @@ ansible-playbook \
   deploy/ansible/playbooks/verify.yml
 ```
 
-Makefile 封装：
+`cargo xtask` 封装（正式工作流入口）：
 
 ```bash
-make ansible-bootstrap
-make ansible-preflight ENV=demo
-make ansible-deploy ENV=demo
-make ansible-verify ENV=demo
-make seed-demo ENV=demo
+cargo xtask bootstrap
+cargo xtask preflight --env demo
+cargo xtask deploy --env demo
+cargo xtask verify --env demo
+cargo xtask demo seed --env demo
 ```
+
+`xtask` 负责参数校验、环境策略、显式确认、结构化日志、退出码和外部命令编排；Ansible、Helm、kubectl 和 Playwright 仍由各自工具执行，不在 Rust 中重写。生产环境的部署、升级、回滚、备份和重置默认要求确认；CI 或非交互运行必须显式传入 `--yes`。当前 `xtask` 入口属于设计契约，未创建真实 workspace crate 并通过验证前不得标记为已实现。
 
 ## 18.7 安装顺序
 
@@ -2391,9 +2395,9 @@ ansible-playbook ... --check --diff   # 支持模块范围内
 ## 18.9 Upgrade
 
 ```bash
-make ansible-backup ENV=production
-make ansible-upgrade ENV=production VERSION=1.1.0
-make ansible-verify ENV=production
+cargo xtask backup --env production --yes
+cargo xtask upgrade --env production --version 1.1.0 --yes
+cargo xtask verify --env production
 ```
 
 流程：
@@ -2415,6 +2419,16 @@ make ansible-verify ENV=production
 - YAML/事件版本不能直接删除旧消费者；
 - `rollback.yml` 接受 `release_revision`；
 - Verify 失败时停止继续操作并输出恢复步骤。
+
+正式入口：
+
+```bash
+cargo xtask rollback --env production --release-revision <revision> --yes
+cargo xtask restore --env production --backup-id <backup-id> --yes
+cargo xtask destroy --env demo --yes
+```
+
+上述命令由 `xtask` 执行参数和环境校验、确认、审计与退出码处理，再调用对应 Ansible Playbook；直接执行 Playbook 仅用于底层诊断或故障排查。
 
 ## 18.11 Demo 与 Production
 
@@ -2527,7 +2541,7 @@ labweaver/
 │   └── failure
 ├── docs/
 ├── mkdocs.yml
-├── Makefile
+├── xtask/
 └── README.md
 ```
 
@@ -2563,17 +2577,17 @@ Rust 服务在宿主机运行，便于调试。
 ## 19.3 开发命令
 
 ```bash
-make tools
-make dev-deps
-make migrate
-make dev
-make test
-make test-contract
-make test-integration
-make playwright-install
-make test-e2e
-make demo-replay
-make docs-serve
+cargo xtask tools
+cargo xtask dev-deps
+cargo xtask migrate
+cargo xtask dev
+cargo xtask test --suite all
+cargo xtask test --suite contract
+cargo xtask test --suite integration
+cargo xtask playwright install
+cargo xtask test --suite e2e
+cargo xtask demo replay
+cargo xtask docs serve
 ```
 
 ## 19.4 Rust 依赖
@@ -2782,8 +2796,8 @@ projects: [
 演示命令：
 
 ```bash
-make demo-seed
-make demo-replay
+cargo xtask demo seed
+cargo xtask demo replay
 pnpm --dir tests/e2e exec playwright show-report
 pnpm --dir tests/e2e exec playwright show-trace artifacts/demo/trace.zip
 ```

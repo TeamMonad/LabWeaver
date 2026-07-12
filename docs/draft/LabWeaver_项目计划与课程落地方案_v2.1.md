@@ -379,7 +379,7 @@ LLM 不可以：
 | US-07 | 作为科研用户，我希望申请 CPU/GPU 并查看状态，以安排任务。              | 谁审批，是否抢占，如何回收？                   | 管理员审批；显示配额、队列、租约；低优先级 GPU P1 可抢占；到期回收。                                                         |
 | US-08 | 作为管理员，我希望统一部署和升级平台，以降低运维成本。                 | 依赖多、环境差异如何处理？                     | Ansible Preflight、幂等 Roles、Helm 固定版本、Verify、Upgrade、Rollback 和 Destroy 文档齐全。                                |
 | US-09 | 作为校外用户，我希望安全访问自己的容器或虚拟机，而不需要开放公网端口。 | 身份、设备、课程权限和环境所有权如何共同校验？ | 用户经 Keycloak/OIDC 加入 Headscale Tailnet；只可到达 Access Gateway 或获授权端点；AccessGrant 到期后访问立即失效。          |
-| US-10 | 作为测试和演示人员，我希望一条命令复现完整业务流程。                   | 如何避免现场操作差异和偶发失败难定位？         | Playwright 使用固定 Seed、Fixture、角色登录状态运行黄金路径；失败自动保存 Trace、截图和录像；可用`make demo-replay` 重放。 |
+| US-10 | 作为测试和演示人员，我希望一条命令复现完整业务流程。                   | 如何避免现场操作差异和偶发失败难定位？         | Playwright 使用固定 Seed、Fixture、角色登录状态运行黄金路径；失败自动保存 Trace、截图和录像；可用`cargo xtask demo replay` 重放。 |
 
 ---
 
@@ -484,7 +484,7 @@ LLM 不可以：
 | 资源管理   | 申请、审批、Mock 分配、租约、到期回收完整演示                                                        |
 | Ansible    | 从已有 K8s 管理凭据开始，一条命令完成平台部署并通过 Verify                                           |
 | 外部接入   | 未开放环境公网端口时，已授权用户可经 Tailnet 访问；未授权用户、过期 AccessGrant 和非受信设备均被拒绝 |
-| 演示复现   | `make demo-replay` 可从固定 Seed 开始自动完成黄金路径；失败产出 Playwright Trace、截图和录像       |
+| 演示复现   | `cargo xtask demo replay` 可从固定 Seed 开始自动完成黄金路径；失败产出 Playwright Trace、截图和录像       |
 
 ## 9.2 工程指标
 
@@ -667,13 +667,13 @@ kubectl get vm,vmi -A
 ### 最终验收命令
 
 ```bash
-make bootstrap
-make ansible-deploy ENV=demo
-make ansible-verify ENV=demo
-make test
-make playwright-e2e
-make demo-replay
-make demo-reset
+cargo xtask bootstrap
+cargo xtask deploy --env demo --yes
+cargo xtask verify --env demo
+cargo xtask test --suite all
+cargo xtask test --suite e2e
+cargo xtask demo replay
+cargo xtask demo reset --yes
 ```
 
 ### Sprint 4 输出
@@ -834,7 +834,7 @@ make demo-reset
 | E2E-03      | Work 环境→安装→资源审批                     | 前端+测试  |     S4 |  5 | 主流程               | 通过                                  |
 | PW-01       | Playwright 多角色 Projects 与 storageState    | 测试       |  S1-S2 |  5 | UI-01, AUTH-01       | teacher/student/admin 独立运行        |
 | PW-02       | Tailnet 外部接入 E2E                          | 测试       |  S3-S4 |  5 | ACCESS-03            | CI Runner 经 Tailnet 访问，负例被拒绝 |
-| PW-03       | Demo Replay、Trace、截图和录像归档            | 测试+前端  |     S4 |  5 | E2E-*                | `make demo-replay` 可复现           |
+| PW-03       | Demo Replay、Trace、截图和录像归档            | 测试+前端  |     S4 |  5 | E2E-*                | `cargo xtask demo replay` 可复现           |
 | DOC-01      | 开发文档                                      | 测试       |  S1-S4 |  8 | 全部                 | 新成员走读通过                        |
 | DOC-02      | 部署/升级/回滚/备份/排障                      | 测试       |  S2-S4 |  8 | OPS-*                | 管理员走读通过                        |
 | REL-01      | Release、Tag、SBOM、Release Notes             | 架构       |     S4 |  5 | CI                   | v1.0.0                                |
@@ -906,9 +906,9 @@ tests/e2e/
 P0 采用 Chromium，使用 Projects 隔离 `teacher`、`student`、`platform-admin` 和 `tailnet-external`；登录状态由 setup project 生成 `storageState`。CI 默认 `trace: on-first-retry`，失败保留截图和录像。演示项目禁用并发，使用固定 Seed、Fixture LLM、Mock Capacity 和预构建镜像，保证动作顺序稳定。
 
 ```bash
-make demo-seed
-make playwright-e2e
-make demo-replay
+cargo xtask demo seed
+cargo xtask test --suite e2e
+cargo xtask demo replay
 pnpm exec playwright show-trace artifacts/demo/trace.zip
 ```
 
@@ -1154,7 +1154,7 @@ git tag --list
 3. 不开放学生环境公网端口，直接经 Tailnet 打开 code-server 或 VM VNC/SSH；
 4. 切换到未授权学生账号，展示 Headscale/Access Gateway 拒绝访问；
 5. 将 AccessGrant 标记为过期，再次访问被拒绝；
-6. 执行 `make demo-replay`，Playwright 自动复现教师、学生、管理员主流程；
+6. 执行 `cargo xtask demo replay`，Playwright 自动复现教师、学生、管理员主流程；
 7. 打开 Trace Viewer 展示每一步 DOM、网络、日志、截图和失败定位信息。
 
 ## 16.5 演示降级
@@ -1166,7 +1166,7 @@ git tag --list
 | 外网不可用           | 所有镜像预拉取；本地模型 Fixture；离线题面                             |
 | KubeVirt VM 启动异常 | 演示前准备 Halted VM；保留重置脚本和录像，但 D01 要求最终仍展示真实 VM |
 | 动态构建慢           | 使用缓存镜像；同时展示 BuildKit 已产生的新摘要                         |
-| 整体环境损坏         | `make demo-reset`；数据库和 MinIO Demo Seed；备用录像                |
+| 整体环境损坏         | `cargo xtask demo reset --yes`；数据库和 MinIO Demo Seed；备用录像                |
 
 ---
 
