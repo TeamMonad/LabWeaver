@@ -36,9 +36,6 @@ Thumbs.db
 *.log
 logs/
 
-# Role memo (local private)
-ROLE.md
-
 # Generated screenshots (keep script, ignore outputs)
 web/screenshots/*.png
 
