@@ -1,0 +1,40 @@
+---
+# Copy to ignored all.yml and replace every REPLACE_* value before running.
+kubernetes_minor: v1.35
+kubernetes_patch: v1.35.6
+crio_version: 1.35.5
+cilium_chart_version: 1.19.5
+gateway_api_version: v1.6.0
+metallb_chart_version: 0.16.1
+local_path_provisioner_version: v0.0.36
+nfs_csi_chart_version: 4.13.4
+cert_manager_version: v1.21.0
+kubevirt_version: v1.8.4
+cdi_version: v1.65.0
+kyverno_version: v1.18.2
+etcd_version: 3.6.6
+kubernetes_api_endpoint: REPLACE_KUBERNETES_API_DNS_NAME:6443
+kubernetes_api_advertise_address: REPLACE_CONTROL_PLANE_INTERNAL_ADDRESS
+kubernetes_pod_cidr: 10.244.0.0/16
+kubernetes_service_cidr: 10.96.0.0/12
+router_wan_interface: REPLACE_WAN_INTERFACE
+router_lan_interface: REPLACE_LAN_INTERFACE
+router_lan_address: REPLACE_ROUTER_LAN_ADDRESS
+router_lan_cidr: REPLACE_CLUSTER_LAN_CIDR
+router_dns_upstreams: []
+metallb_pool: REPLACE_METALLB_ADDRESS_RANGE
+gateway_vip: REPLACE_GATEWAY_VIP
+nfs_server: REPLACE_NFS_SERVER_ADDRESS
+nfs_share: /srv/nfs/k8s
+local_path_mount: /var/lib/k8s-local-storage
+local_path_device: REPLACE_WORKER_DATA_DEVICE
+storage_allow_format: false
+storage_expected_filesystem: xfs
+storageclass_local_path: local-path
+storageclass_nfs_rwx: nfs-rwx
+kubevirt_node_label: labweaver.io/kubevirt
+labweaver_namespaces: [labweaver-system, labweaver-data, labweaver-build, labweaver-evaluation, labweaver-demo]
+# Kubernetes node names, not IP addresses. These are used only by real storage probes.
+verify_rwo_node: REPLACE_WORKER_KUBERNETES_NODE_NAME
+verify_nfs_writer_node: REPLACE_FIRST_WORKER_KUBERNETES_NODE_NAME
+verify_nfs_reader_node: REPLACE_SECOND_WORKER_KUBERNETES_NODE_NAME

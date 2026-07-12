@@ -1,0 +1,94 @@
+---
+- name: Assert required inventory groups
+  ansible.builtin.assert:
+    that:
+      - groups['routers'] | length == 1
+      - groups['control_plane'] | length == 1
+      - groups['workers'] | length >= 2
+      - groups['nfs_servers'] | length == 1
+    fail_msg: "inventory must declare exactly one router/control plane/NFS server and at least two workers"
+  run_once: true
+  delegate_to: localhost
+
+- name: Reject unresolved configuration placeholders
+  ansible.builtin.assert:
+    that:
+      - item is string
+      - item is not match('^REPLACE_')
+      - item | length > 0
+    fail_msg: "private inventory/group variables contain an unresolved placeholder"
+  loop:
+    - "{{ kubernetes_api_endpoint }}"
+    - "{{ kubernetes_api_advertise_address }}"
+    - "{{ router_wan_interface }}"
+    - "{{ router_lan_interface }}"
+    - "{{ router_lan_address }}"
+    - "{{ router_lan_cidr }}"
+    - "{{ metallb_pool }}"
+    - "{{ gateway_vip }}"
+    - "{{ nfs_server }}"
+    - "{{ local_path_device }}"
+    - "{{ verify_rwo_node }}"
+    - "{{ verify_nfs_writer_node }}"
+    - "{{ verify_nfs_reader_node }}"
+  run_once: true
+  delegate_to: localhost
+
+- name: Assert Rocky family target
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.os_family == 'RedHat'
+      - ansible_facts.distribution_major_version | int >= 10
+    fail_msg: "only Rocky/RHEL 10+ nodes are supported by this playbook"
+  when: inventory_hostname != 'localhost'
+
+- name: Assert required interfaces are already present
+  ansible.builtin.command: "ip link show {{ item }}"
+  changed_when: false
+  loop:
+    - "{{ router_wan_interface }}"
+    - "{{ router_lan_interface }}"
+  when: inventory_hostname in groups['routers']
+
+- name: Assert Kubernetes node SELinux is enforcing
+  ansible.builtin.command: getenforce
+  changed_when: false
+  register: selinux_mode
+  failed_when: selinux_mode.stdout != 'Enforcing'
+  when: inventory_hostname in groups['k8s_cluster']
+
+- name: Assert workers expose the KVM device
+  ansible.builtin.stat:
+    path: /dev/kvm
+  register: kvm_device
+  when: inventory_hostname in groups['workers']
+
+- name: Reject workers without KVM
+  ansible.builtin.assert:
+    that: kvm_device.stat.exists and kvm_device.stat.ischr
+    fail_msg: "worker lacks /dev/kvm; hardware KVM verification cannot run"
+  when: inventory_hostname in groups['workers']
+
+- name: Assert workers expose nested virtualization CPU flags
+  ansible.builtin.command: grep -E 'vmx|svm' /proc/cpuinfo
+  changed_when: false
+  when: inventory_hostname in groups['workers']
+
+- name: Assert NFS server is running
+  ansible.builtin.command: systemctl is-active nfs-server
+  changed_when: false
+  when: inventory_hostname in groups['nfs_servers']
+
+- name: Assert the required NFS export is present
+  ansible.builtin.command: exportfs -v
+  changed_when: false
+  register: nfs_exports
+  failed_when: nfs_share not in nfs_exports.stdout
+  when: inventory_hostname in groups['nfs_servers']
+
+- name: Assert NFSv4 is reachable from every Kubernetes node
+  ansible.builtin.wait_for:
+    host: "{{ nfs_server }}"
+    port: 2049
+    timeout: 5
+  when: inventory_hostname in groups['k8s_cluster']

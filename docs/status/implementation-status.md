@@ -12,3 +12,16 @@ Status is proven only by the identified commit/worktree and current evidence. `d
 | C4, service boundaries and data ownership | A | documented, pending review | current documentation PR | E0 | design evidence only |
 | Frontend, Agent, EvaluationSpec and Playwright work | C/B/D | planned | assigned Sprint Issues | E0 | explicitly outside role A implementation scope |
 | Real KubeVirt path | B/D | blocked pending preflight | Issue #15 | E0 | no E3 evidence exists |
+
+## Kubernetes infrastructure automation
+
+State: implemented, pending review and real Ansible replay.
+
+The Ansible playbooks encode the currently validated Rocky Kubernetes baseline:
+Kubernetes/CRI-O, Cilium, MetalLB, Local Path, NFS CSI, cert-manager, KubeVirt,
+CDI, Kyverno, internal Gateway, and etcd backup. The prior manual environment
+provided E3 evidence; this branch does not claim E3 for the playbooks until a
+fresh deploy and second idempotency run complete.
+
+Blockers: private inventory, encrypted Vault, and a real replay environment are
+not committed and are required for deployment verification.

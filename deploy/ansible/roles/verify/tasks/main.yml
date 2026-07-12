@@ -1,0 +1,47 @@
+---
+- name: Assert all Kubernetes nodes are Ready
+  ansible.builtin.command: kubectl get nodes --no-headers
+  changed_when: false
+  register: nodes
+  failed_when: nodes.stdout is not search(' Ready ')
+
+- name: Verify storage classes and component availability
+  ansible.builtin.command: "{{ item }}"
+  changed_when: false
+  loop:
+    - "kubectl get storageclass {{ storageclass_local_path }} {{ storageclass_nfs_rwx }}"
+    - "kubectl -n cert-manager get deployment cert-manager cert-manager-webhook"
+    - "kubectl -n cdi get cdi cdi"
+    - "kubectl -n kyverno get deployment kyverno-admission-controller"
+    - "kubectl -n kubevirt get kubevirt kubevirt"
+    - "kubectl -n labweaver-demo get gateway public-gateway"
+
+- name: Verify Cilium control plane
+  ansible.builtin.command: cilium status --wait
+  changed_when: false
+
+- name: Create protected verification artifact directory
+  ansible.builtin.file:
+    path: "{{ verification_report_path | default('/var/lib/labweaver-artifacts/verify.json') | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Run Cilium connectivity suite with scoped log collection
+  ansible.builtin.command: cilium connectivity test --log-check-only-test-time --timeout 25m
+  changed_when: false
+
+- name: Remove Cilium verification artifacts
+  ansible.builtin.command: cilium connectivity test --cleanup
+  changed_when: false
+  when: verify_cleanup | default(true) | bool
+
+- name: Write machine-readable verification report
+  ansible.builtin.copy:
+    dest: "{{ verification_report_path | default('/var/lib/labweaver-artifacts/verify.json') }}"
+    mode: '0600'
+    content: >-
+      {{ {'schema_version': 1, 'event': 'cluster_verify_complete', 'kubernetes': kubernetes_patch,
+      'cilium': cilium_chart_version, 'kubevirt': kubevirt_version, 'cdi': cdi_version,
+      'cert_manager': cert_manager_version, 'kyverno': kyverno_version} | to_nice_json }}

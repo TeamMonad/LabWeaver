@@ -1,0 +1,47 @@
+- name: Label selected KVM-capable workers for KubeVirt scheduling
+  ansible.builtin.command: >-
+    kubectl label node {{ item }} {{ kubevirt_node_label }}=true --overwrite
+  changed_when: false
+  loop: "{{ [verify_nfs_writer_node, verify_nfs_reader_node] | unique }}"
+
+- name: Verify selected workers are schedulable for KubeVirt
+  ansible.builtin.command: "kubectl get nodes -l {{ kubevirt_node_label }}=true --no-headers"
+  changed_when: false
+  register: kubevirt_nodes
+  failed_when: kubevirt_nodes.stdout_lines | length < 2
+
+- name: Install KubeVirt operator and custom resource
+  kubernetes.core.k8s:
+    state: present
+    src: "{{ item }}"
+  loop:
+    - "https://github.com/kubevirt/kubevirt/releases/download/{{ kubevirt_version }}/kubevirt-operator.yaml"
+    - "https://github.com/kubevirt/kubevirt/releases/download/{{ kubevirt_version }}/kubevirt-cr.yaml"
+
+- name: Wait for KubeVirt availability
+  ansible.builtin.command: "kubectl -n kubevirt wait kv/kubevirt --for=condition=Available --timeout=10m"
+  changed_when: false
+
+- name: Install CDI operator and custom resource
+  kubernetes.core.k8s:
+    state: present
+    src: "{{ item }}"
+  loop:
+    - "https://github.com/kubevirt/containerized-data-importer/releases/download/{{ cdi_version }}/cdi-operator.yaml"
+    - "https://github.com/kubevirt/containerized-data-importer/releases/download/{{ cdi_version }}/cdi-cr.yaml"
+
+- name: Wait for CDI availability
+  ansible.builtin.command: kubectl -n cdi wait cdi/cdi --for=condition=Available --timeout=10m
+  changed_when: false
+
+- name: Bind CDI scratch to verified Local Path through CDI owner
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: cdi.kubevirt.io/v1beta1
+      kind: CDI
+      metadata:
+        name: cdi
+      spec:
+        config:
+          scratchSpaceStorageClass: "{{ storageclass_local_path }}"

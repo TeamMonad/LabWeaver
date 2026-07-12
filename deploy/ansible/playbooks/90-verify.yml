@@ -1,0 +1,5 @@
+---
+- name: Verify deployed cluster infrastructure
+  hosts: control_plane
+  gather_facts: false
+  roles: [verify]

@@ -1,0 +1,71 @@
+---
+- name: Install router service packages
+  ansible.builtin.dnf:
+    name: [firewalld, dnsmasq, policycoreutils-python-utils]
+    state: present
+
+- name: Enable forwarding without changing addresses or routes
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_forward
+    value: '1'
+    state: present
+    reload: true
+
+- name: Enable router services
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop: [firewalld, dnsmasq]
+
+- name: Bind existing interfaces to firewalld zones
+  ansible.posix.firewalld:
+    zone: "{{ item.zone }}"
+    interface: "{{ item.interface }}"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop:
+    - { zone: external, interface: "{{ router_wan_interface }}" }
+    - { zone: internal, interface: "{{ router_lan_interface }}" }
+
+- name: Enable external masquerade
+  ansible.posix.firewalld:
+    zone: external
+    masquerade: true
+    permanent: true
+    immediate: true
+    state: enabled
+
+- name: Check router forwarding policy file
+  ansible.builtin.stat:
+    path: /etc/firewalld/policies/internal-to-external.xml
+  register: forwarding_policy
+
+- name: Create router forwarding policy exactly once
+  ansible.builtin.command: "{{ item }}"
+  when: not forwarding_policy.stat.exists
+  loop:
+    - firewall-cmd --permanent --new-policy=internal-to-external
+    - firewall-cmd --permanent --policy=internal-to-external --add-ingress-zone=internal
+    - firewall-cmd --permanent --policy=internal-to-external --add-egress-zone=external
+    - firewall-cmd --permanent --policy=internal-to-external --set-target=ACCEPT
+    - firewall-cmd --reload
+  changed_when: true
+
+- name: Configure dnsmasq only for the existing LAN binding
+  ansible.builtin.template:
+    src: labweaver.conf.j2
+    dest: /etc/dnsmasq.d/labweaver.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart dnsmasq
+
+- name: Verify router services
+  ansible.builtin.command: "{{ item }}"
+  changed_when: false
+  loop:
+    - sysctl net.ipv4.ip_forward
+    - firewall-cmd --zone=external --query-masquerade
+    - firewall-cmd --info-policy=internal-to-external

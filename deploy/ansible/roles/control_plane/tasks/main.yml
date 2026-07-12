@@ -1,0 +1,32 @@
+---
+- name: Check control plane initialization
+  ansible.builtin.stat:
+    path: /etc/kubernetes/admin.conf
+  register: admin_conf
+
+- name: Initialize control plane exactly once
+  ansible.builtin.command: >-
+    kubeadm init
+    --apiserver-advertise-address={{ kubernetes_api_advertise_address }}
+    --control-plane-endpoint={{ kubernetes_api_endpoint }}
+    --pod-network-cidr={{ kubernetes_pod_cidr }}
+    --service-cidr={{ kubernetes_service_cidr }}
+    --skip-phases=addon/kube-proxy
+  when: not admin_conf.stat.exists
+  register: kubeadm_init
+  changed_when: kubeadm_init.rc == 0
+
+- name: Verify control plane identity
+  ansible.builtin.command: kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes
+  changed_when: false
+
+- name: Create short-lived worker join command
+  ansible.builtin.command: kubeadm token create --ttl 30m --print-join-command
+  register: join_command
+  changed_when: false
+  no_log: true
+
+- name: Publish join command only to this play
+  ansible.builtin.set_fact:
+    kubeadm_join_command: "{{ join_command.stdout }} --cri-socket unix:///var/run/crio/crio.sock"
+  no_log: true

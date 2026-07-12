@@ -19,4 +19,5 @@ cargo xtask check
 - `docs/architecture/data-ownership.md`：权威数据所有权；
 - `docs/status/implementation-status.md`：实现状态事实源；
 - `docs/testing/test-plan.md`：测试和证据计划；
-- `docs/process/scrum.md`：GitHub Scrum 操作约束。
+- `docs/process/scrum.md`：GitHub Scrum 操作约束；
+- `docs/deployment/ansible.md`：Kubernetes 基础设施的私有配置、预检、部署、验证和备份流程。

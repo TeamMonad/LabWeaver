@@ -47,3 +47,12 @@ web/screenshots/*.png
 LabWeaver_生产级技术实现方案_v2.1(1).md
 LabWeaver_项目计划与课程落地方案_v2.1(1).md
 LabWeaver_GitHub驱动Scrum与Codex四人每日工作计划(1).md
+
+# Private Ansible deployment inputs and generated controller state
+deploy/ansible/inventories/*/hosts.yml
+deploy/ansible/inventories/*/group_vars/all.yml
+deploy/ansible/inventories/*/group_vars/vault.yml
+deploy/ansible/inventories/*/group_vars/vault.yml.password
+*.retry
+__pycache__/
+.cache/

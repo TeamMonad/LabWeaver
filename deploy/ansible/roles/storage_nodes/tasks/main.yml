@@ -1,0 +1,43 @@
+---
+- name: Inspect local storage device
+  ansible.builtin.command: "lsblk --noheadings --output FSTYPE {{ local_path_device }}"
+  changed_when: false
+  register: local_device_fs
+
+- name: Reject unformatted storage unless destructive formatting is explicit
+  ansible.builtin.assert:
+    that:
+      - local_device_fs.stdout | trim == storage_expected_filesystem or storage_allow_format | bool
+    fail_msg: "storage device is unformatted; set storage_allow_format=true only after confirming data loss"
+
+- name: Format explicitly approved empty storage device
+  community.general.filesystem:
+    dev: "{{ local_path_device }}"
+    fstype: "{{ storage_expected_filesystem }}"
+    force: false
+  when:
+    - local_device_fs.stdout | trim == ''
+    - storage_allow_format | bool
+
+- name: Read local storage UUID on the managed host
+  ansible.builtin.command: "blkid -s UUID -o value {{ local_path_device }}"
+  changed_when: false
+  register: local_device_uuid
+
+- name: Mount local storage by UUID
+  ansible.posix.mount:
+    path: "{{ local_path_mount }}"
+    src: "UUID={{ local_device_uuid.stdout }}"
+    fstype: "{{ storage_expected_filesystem }}"
+    opts: defaults,noatime
+    state: mounted
+
+- name: Persist SELinux container label for Local Path
+  community.general.sefcontext:
+    target: "{{ local_path_mount }}(/.*)?"
+    setype: container_file_t
+    state: present
+
+- name: Apply Local Path SELinux context
+  ansible.builtin.command: "restorecon -RFv {{ local_path_mount }}"
+  changed_when: false

@@ -1,0 +1,4 @@
+---
+# Copy to vault.yml and encrypt it with ansible-vault before use.
+vault_ansible_ssh_private_key_file: REPLACE_PRIVATE_KEY_PATH
+vault_ansible_ssh_common_args: REPLACE_PROXY_JUMP_OR_EMPTY
