@@ -20,7 +20,7 @@ const createWrapper = () => {
 describe('RoleNav', () => {
   it('renders four role navigation links', () => {
     const wrapper = createWrapper()
-    const links = wrapper.findAll('.nav-link')
+    const links = wrapper.findAll('.nav-pill')
     expect(links).toHaveLength(4)
   })
 

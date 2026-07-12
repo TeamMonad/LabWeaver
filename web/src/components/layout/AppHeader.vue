@@ -1,14 +1,28 @@
 <template>
   <header class="app-header">
-    <div class="brand">
+    <div class="header-left">
       <RouterLink to="/" class="brand-link">
-        <span class="brand-icon">🧬</span>
-        <span class="brand-text">LabWeaver</span>
+        <span class="brand-logo" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="28" height="28">
+            <path
+              fill="currentColor"
+              d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"
+            />
+          </svg>
+        </span>
+        <div class="brand-text">
+          <span class="brand-name">LabWeaver</span>
+          <span class="brand-subtitle">智织实验云</span>
+        </div>
       </RouterLink>
     </div>
-    <RoleNav />
-    <div class="current-role">
-      <span v-if="roleStore.isAuthenticated" class="role-badge">
+
+    <div class="header-center">
+      <RoleNav />
+    </div>
+
+    <div class="header-right">
+      <span v-if="roleStore.currentRole" class="role-chip">
         {{ roleStore.roleLabel }}
       </span>
       <button v-else class="login-btn" @click="roleStore.setRole('student')">
@@ -28,56 +42,88 @@ const roleStore = useRoleStore()
 
 <style scoped>
 .app-header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
   display: flex;
   align-items: center;
   justify-content: space-between;
+  height: var(--app-header-height);
   padding: 0 24px;
-  height: 64px;
-  background: #ffffff;
-  border-bottom: 1px solid #e4e7ed;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+  background: var(--md-sys-color-surface);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  box-shadow: var(--md-sys-elevation-1);
+}
+
+.header-left,
+.header-center,
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
 }
 
 .brand-link {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   text-decoration: none;
-  color: #1a1a1a;
-  font-size: 20px;
-  font-weight: 700;
+  color: var(--md-sys-color-on-surface);
 }
 
-.brand-icon {
-  font-size: 24px;
+.brand-logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--md-sys-shape-medium);
+  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
 }
 
-.current-role {
-  min-width: 100px;
-  text-align: right;
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
 }
 
-.role-badge {
-  display: inline-block;
-  padding: 6px 14px;
-  border-radius: 16px;
-  background: #ecf5ff;
-  color: #409eff;
-  font-size: 14px;
-  font-weight: 500;
+.brand-name {
+  font: var(--md-sys-title-medium);
+  letter-spacing: 0.15px;
+}
+
+.brand-subtitle {
+  font: var(--md-sys-body-small);
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.role-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 16px;
+  border-radius: var(--md-sys-shape-full);
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+  font: var(--md-sys-label-large);
 }
 
 .login-btn {
-  padding: 6px 16px;
-  border: 1px solid #409eff;
-  border-radius: 4px;
-  background: #409eff;
-  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  height: 36px;
+  padding: 0 20px;
+  border: none;
+  border-radius: var(--md-sys-shape-full);
+  background: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+  font: var(--md-sys-label-large);
   cursor: pointer;
-  font-size: 14px;
+  transition: box-shadow 0.2s;
 }
 
 .login-btn:hover {
-  background: #66b1ff;
+  box-shadow: var(--md-sys-elevation-1);
 }
 </style>

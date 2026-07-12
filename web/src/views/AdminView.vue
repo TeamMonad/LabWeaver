@@ -1,63 +1,60 @@
 <template>
-  <div class="role-view">
-    <h2>⚙️ 管理员工作台</h2>
-    <nav class="section-nav">
-      <RouterLink to="/admin">资源审批</RouterLink>
-      <RouterLink to="/admin/policies">策略</RouterLink>
-      <RouterLink to="/admin/audit">审计</RouterLink>
-    </nav>
+  <RoleLayout
+    icon="⚙️"
+    title="管理员工作台"
+    subtitle="资源审批、平台策略与审计日志"
+    :tabs="tabs"
+  >
     <div class="placeholder">
-      <p>平台管理功能占位页</p>
-      <p class="hint">后续接入：CPU/GPU 审批、Quota、Kyverno 策略、审计日志</p>
+      <div class="placeholder-icon">🛡️</div>
+      <h3 class="placeholder-title">资源审批</h3>
+      <p class="placeholder-desc">审批 CPU/GPU 资源申请，查看平台配额、Kyverno 策略和审计日志。</p>
     </div>
-  </div>
+  </RoleLayout>
 </template>
 
 <script setup lang="ts">
-import { RouterLink } from 'vue-router'
+import RoleLayout from '@/components/layout/RoleLayout.vue'
+
+const tabs = [
+  { path: '/admin', label: '资源审批' },
+  { path: '/admin/policies', label: '策略' },
+  { path: '/admin/audit', label: '审计' },
+]
 </script>
 
 <style scoped>
-.role-view {
-  background: #fff;
-  border-radius: 12px;
-  padding: 32px;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
-}
-
-h2 {
-  margin-bottom: 20px;
-  font-size: 24px;
-}
-
-.section-nav {
-  display: flex;
-  gap: 16px;
-  margin-bottom: 24px;
-  padding-bottom: 16px;
-  border-bottom: 1px solid #e4e7ed;
-}
-
-.section-nav a {
-  color: #606266;
-  text-decoration: none;
-  font-weight: 500;
-}
-
-.section-nav a:hover {
-  color: #409eff;
-}
-
 .placeholder {
-  padding: 48px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 260px;
   text-align: center;
-  color: #909399;
-  background: #f5f7fa;
-  border-radius: 8px;
+  color: var(--md-sys-color-on-surface-variant);
 }
 
-.hint {
-  margin-top: 8px;
-  font-size: 13px;
+.placeholder-icon {
+  width: 64px;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--md-sys-shape-large);
+  background: var(--md-sys-color-surface-variant);
+  font-size: 32px;
+  margin-bottom: 16px;
+}
+
+.placeholder-title {
+  font: var(--md-sys-title-large);
+  color: var(--md-sys-color-on-surface);
+  margin-bottom: 8px;
+}
+
+.placeholder-desc {
+  font: var(--md-sys-body-medium);
+  max-width: 520px;
+  line-height: 1.6;
 }
 </style>

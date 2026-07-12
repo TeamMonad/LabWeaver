@@ -1,63 +1,60 @@
 <template>
-  <div class="role-view">
-    <h2>🎓 学生工作台</h2>
-    <nav class="section-nav">
-      <RouterLink to="/student">我的实验</RouterLink>
-      <RouterLink to="/student/environments">环境入口</RouterLink>
-      <RouterLink to="/student/results">评测结果</RouterLink>
-    </nav>
+  <RoleLayout
+    icon="🎓"
+    title="学生工作台"
+    subtitle="加入实验、启动环境、提交结果并查看反馈"
+    :tabs="tabs"
+  >
     <div class="placeholder">
-      <p>学生实验功能占位页</p>
-      <p class="hint">后续接入：实验列表、启动环境、提交与结果时间线</p>
+      <div class="placeholder-icon">🧪</div>
+      <h3 class="placeholder-title">我的实验</h3>
+      <p class="placeholder-desc">选择教师发布的实验，启动一致的容器或 VM 环境，提交后自动评测并查看证据。</p>
     </div>
-  </div>
+  </RoleLayout>
 </template>
 
 <script setup lang="ts">
-import { RouterLink } from 'vue-router'
+import RoleLayout from '@/components/layout/RoleLayout.vue'
+
+const tabs = [
+  { path: '/student', label: '我的实验' },
+  { path: '/student/environments', label: '环境入口' },
+  { path: '/student/results', label: '评测结果' },
+]
 </script>
 
 <style scoped>
-.role-view {
-  background: #fff;
-  border-radius: 12px;
-  padding: 32px;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
-}
-
-h2 {
-  margin-bottom: 20px;
-  font-size: 24px;
-}
-
-.section-nav {
-  display: flex;
-  gap: 16px;
-  margin-bottom: 24px;
-  padding-bottom: 16px;
-  border-bottom: 1px solid #e4e7ed;
-}
-
-.section-nav a {
-  color: #606266;
-  text-decoration: none;
-  font-weight: 500;
-}
-
-.section-nav a:hover {
-  color: #409eff;
-}
-
 .placeholder {
-  padding: 48px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 260px;
   text-align: center;
-  color: #909399;
-  background: #f5f7fa;
-  border-radius: 8px;
+  color: var(--md-sys-color-on-surface-variant);
 }
 
-.hint {
-  margin-top: 8px;
-  font-size: 13px;
+.placeholder-icon {
+  width: 64px;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--md-sys-shape-large);
+  background: var(--md-sys-color-surface-variant);
+  font-size: 32px;
+  margin-bottom: 16px;
+}
+
+.placeholder-title {
+  font: var(--md-sys-title-large);
+  color: var(--md-sys-color-on-surface);
+  margin-bottom: 8px;
+}
+
+.placeholder-desc {
+  font: var(--md-sys-body-medium);
+  max-width: 520px;
+  line-height: 1.6;
 }
 </style>
