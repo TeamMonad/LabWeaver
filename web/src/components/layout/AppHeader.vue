@@ -25,9 +25,7 @@
       <span v-if="roleStore.currentRole" class="role-chip">
         {{ roleStore.roleLabel }}
       </span>
-      <button v-else class="login-btn" @click="roleStore.setRole('student')">
-        登录
-      </button>
+      <span v-else class="login-status">未认证</span>
     </div>
   </header>
 </template>
@@ -109,21 +107,14 @@ const roleStore = useRoleStore()
   font: var(--md-sys-label-large);
 }
 
-.login-btn {
+.login-status {
   display: inline-flex;
   align-items: center;
-  height: 36px;
-  padding: 0 20px;
-  border: none;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--md-sys-color-outline);
   border-radius: var(--md-sys-shape-full);
-  background: var(--md-sys-color-primary);
-  color: var(--md-sys-color-on-primary);
-  font: var(--md-sys-label-large);
-  cursor: pointer;
-  transition: box-shadow 0.2s;
-}
-
-.login-btn:hover {
-  box-shadow: var(--md-sys-elevation-1);
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-label-medium);
 }
 </style>
