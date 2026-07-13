@@ -23,8 +23,8 @@ export const ROLE_PROJECTS = Object.freeze([
   Object.freeze({
     name: 'student',
     actor: 'Student',
-    aliases: ['student', 'researcher'],
-    testMatch: /(?:student|researcher)\/.*\.spec\.mjs$/,
+    aliases: ['student'],
+    testMatch: /student\/.*\.spec\.mjs$/,
     storageState: '.auth/student.json',
   }),
   Object.freeze({

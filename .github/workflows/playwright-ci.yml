@@ -30,12 +30,20 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            changed_files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+            comparison_base="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+            changed_files="$(git diff --name-only "$comparison_base" "$HEAD_SHA")"
+          elif [[ "$BEFORE_SHA" =~ ^0+$ ]]; then
+            comparison_base="$(git rev-parse "$AFTER_SHA^" 2>/dev/null || true)"
+            if [[ -n "$comparison_base" ]]; then
+              changed_files="$(git diff --name-only "$comparison_base" "$AFTER_SHA")"
+            else
+              changed_files="$(git diff-tree --no-commit-id --name-only -r "$AFTER_SHA")"
+            fi
           else
             changed_files="$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA")"
           fi
 
-          if printf '%s\n' "$changed_files" | grep -Eq '^(\.github/workflows/playwright-ci\.yml|\.gitignore|web/package\.json|web/pnpm-lock\.yaml|web/playwright\.config\.mjs|web/e2e/|web/scripts/(fixed-sleep-check|run-e2e|verify-config)\.mjs$)'; then
+          if printf '%s\n' "$changed_files" | grep -Eq '^(\.github/workflows/playwright-ci\.yml|\.gitignore|web/package\.json|web/pnpm-lock\.yaml|web/playwright\.config\.mjs|web/e2e/|web/scripts/(e2e-gate|fixed-sleep-check|run-e2e|verify-config)\.mjs$)'; then
             echo "playwright_changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "playwright_changed=false" >> "$GITHUB_OUTPUT"
@@ -64,20 +72,10 @@ jobs:
         working-directory: ./web
         run: pnpm install --frozen-lockfile
 
-      - name: Verify Playwright role-project configuration and fixed-sleep gate
+      - name: Run aggregate E1 Playwright gate without browsers
         if: steps.changes.outputs.playwright_changed == 'true'
         working-directory: ./web
-        run: pnpm test:e2e:verify
-
-      - name: Test Playwright role-project contract
-        if: steps.changes.outputs.playwright_changed == 'true'
-        working-directory: ./web
-        run: pnpm test:e2e:contract
-
-      - name: Load Playwright configuration without browsers
-        if: steps.changes.outputs.playwright_changed == 'true'
-        working-directory: ./web
-        run: pnpm test:e2e:list
+        run: pnpm test:e2e:gate
 
       - name: Upload Playwright configuration report
         if: always() && steps.changes.outputs.playwright_changed == 'true'

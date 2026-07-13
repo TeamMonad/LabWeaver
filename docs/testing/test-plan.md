@@ -185,16 +185,20 @@ The requirements baseline is PR #36 at
 `0f80e4e9c4b2334d4a833d1fb6a2263ecc3dda9a`. The integration baseline for this
 worktree is `develop` commit `8ec186599f82afeab7ff5bed346c844ce7f923d1`; it is
 not a replacement for the PR #36 requirements baseline. The `web/` pnpm workspace defines exactly `setup`,
-`teacher`, `student`, and `platform-admin` Playwright projects. By A's explicit
-mapping decision, the `student` project includes the current Web `researcher`
-alias and `platform-admin` maps to the current Web `admin` role. These are test
-classification aliases only, not runtime authorization equivalence.
+`teacher`, `student`, and `platform-admin` Playwright projects. `platform-admin`
+maps to the current Web `admin` route naming. `researcher` is an independent
+formal role and is deliberately outside Issue #9: it has no project, alias,
+test match, or shared `student` authentication state here. A future approved
+Issue must provide its project and auth state independently.
 
-`pnpm test:e2e:verify`, `pnpm test:e2e:contract`, and
-`pnpm test:e2e:list` provide E1 configuration evidence: project structure,
-artifact retention, fixed-sleep scanning, fail-fast diagnostics, and a
-machine-readable report. `pnpm test:e2e` intentionally blocks with
+`pnpm test:e2e:gate` runs `verify`, `contract`, and configuration `list`, then
+atomically writes the aggregate E1 report with every check's status and exit
+code. The report is invalidated at gate start so a failed build cannot upload a
+previous successful result. Requirements-baseline metadata and its comparison
+logic are covered by the contract tests; CI does not currently supply an
+externally pinned baseline-change input. `pnpm test:e2e` intentionally blocks with
 `PW_AUTH_SETUP_NOT_IMPLEMENTED` and `PW_NO_RUNTIME_TESTS` until an approved
 authentication contract, safe role storage states, and real runtime tests
-exist. No browser, login, Keycloak/OIDC, backend, role-isolation, E3, or E4
-claim is made by this configuration work.
+exist; subprocess contract tests verify both specified blocked entrypoints. No
+browser, login, Keycloak/OIDC, backend, role-isolation, E3, or E4 claim is made
+by this configuration work.

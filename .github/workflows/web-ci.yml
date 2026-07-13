@@ -30,7 +30,15 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            changed_files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+            comparison_base="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+            changed_files="$(git diff --name-only "$comparison_base" "$HEAD_SHA")"
+          elif [[ "$BEFORE_SHA" =~ ^0+$ ]]; then
+            comparison_base="$(git rev-parse "$AFTER_SHA^" 2>/dev/null || true)"
+            if [[ -n "$comparison_base" ]]; then
+              changed_files="$(git diff --name-only "$comparison_base" "$AFTER_SHA")"
+            else
+              changed_files="$(git diff-tree --no-commit-id --name-only -r "$AFTER_SHA")"
+            fi
           else
             changed_files="$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA")"
           fi
