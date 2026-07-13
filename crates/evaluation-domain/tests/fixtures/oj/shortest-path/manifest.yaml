@@ -20,7 +20,19 @@ problem:
       purpose: 样例输入 2（不可达场景）
     - path: samples/sample-2.out
       sha256: <public-sha256-placeholder>
-      purpose: 样例输出 2
+      purpose: 样例输出 2（不可达场景）
+    - path: samples/sample-3.in
+      sha256: <public-sha256-placeholder>
+      purpose: 样例输入 3（零权边场景）
+    - path: samples/sample-3.out
+      sha256: <public-sha256-placeholder>
+      purpose: 样例输出 3
+    - path: samples/sample-4.in
+      sha256: <public-sha256-placeholder>
+      purpose: 样例输入 4（单条边场景）
+    - path: samples/sample-4.out
+      sha256: <public-sha256-placeholder>
+      purpose: 样例输出 4
     - path: starter/main.cpp
       sha256: <public-sha256-placeholder>
       purpose: 学生 Starter，展示标准 Dijkstra 实现
