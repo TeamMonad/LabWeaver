@@ -89,6 +89,21 @@ production execution path is exercised.
 
 Read back Milestones, Labels, branch protection, Sprint parents, sub-issues and Project fields through GitHub APIs. The verified governance result is 20 Project items and 15 P0 items with `Workflow Status=Ready`, plus Owner, Review Role, Sprint, Area, Codex Mode, Risk, SP and Evidence metadata.
 
+## Environment lifecycle v1alpha1 planned gates
+
+The proposed `EnvironmentLifecycle v1alpha1` contract has no runtime test
+evidence. Before implementation can be marked complete, its contract and
+integration suites must prove the unified state transition matrix, invalid
+transition rejection, revision conflicts, idempotency-key replay and payload
+conflicts, bounded provider retry exhaustion, and explicit retry/reset paths.
+
+They must also prove Experiment baseline-reset isolation, Work Active-Lease
+requirements, reset acceptance only from `Ready`, `Stopped` and `Failed`, reset
+target convergence, serialized Work configuration, configuration-failure
+transition to `Failed`, access denial for any non-Ready or unhealthy endpoint,
+grant revocation before reset/expiry/failure/delete cleanup, deletion
+idempotency and sanitized `Deleted` tombstone evidence. Provider, Access,
+Resource and KubeVirt evidence remains planned; this documentation is E0 only.
 ## Infrastructure automation
 
 | Layer | Required evidence | Failure condition |
