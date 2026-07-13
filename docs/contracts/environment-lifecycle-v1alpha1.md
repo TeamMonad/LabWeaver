@@ -68,8 +68,8 @@ The normative transitions are:
 | `Validating` | `Building`, `Failed`, `Deleting` | validated immutable input; blocking diagnostic; cancellation. |
 | `Building` | `Provisioning`, `Failed`, `Deleting` | bound asset produced and verified; failure; cancellation. |
 | `Provisioning` | `Ready`, `Stopped`, `Failed`, `Deleting` | health observed; desired stop; bounded retries exhausted; cancellation. |
-| `Ready` | `Stopped`, `Updating`, `Expiring`, `Deleting`, `Failed` | explicit stop; approved Work configuration; Lease/course expiry; delete; unhealthy provider. |
-| `Stopped` | `Provisioning`, `Expiring`, `Deleting`, `Failed` | authorized start; expiry; delete; provider inconsistency. |
+| `Ready` | `Provisioning`, `Stopped`, `Updating`, `Expiring`, `Deleting`, `Failed` | authorized reset after grant revocation and workload quiescence; explicit stop; approved Work configuration; Lease/course expiry; delete; unhealthy provider. |
+| `Stopped` | `Provisioning`, `Expiring`, `Deleting`, `Failed` | authorized start or reset; expiry; delete; provider inconsistency. |
 | `Updating` | `Ready`, `Failed`, `Deleting` | verified configuration run; any configuration failure; delete after cancellation is recorded. |
 | `Failed` | `Validating`, `Provisioning`, `Expiring`, `Deleting` | explicit retry from recorded failed phase; authorized reset; expiry; delete. |
 | `Expiring` | `Stopped`, `Deleting`, `Failed` | grants revoked and workload stopped; retention requires cleanup; revocation/stop failure. |
@@ -80,6 +80,25 @@ Every other transition is rejected with a stable lifecycle diagnostic and
 creates no provider side effect. A provider's raw state never advances the
 domain state by itself; the Environment Service maps it through the current
 operation, revision and reconciliation rules.
+
+### Reset transition rules
+
+`reset` is legal only from observed `Ready`, `Stopped` or `Failed`. It is not a
+generic escape hatch: `Requested`, `Validating`, `Building`, `Provisioning`,
+`Updating`, `Expiring`, `Deleting` and `Deleted` reject it with a stable
+diagnostic and no provider side effect.
+
+| Source state | Required sequence | Completion target |
+| --- | --- | --- |
+| `Ready` | Revoke all eligible endpoint grants, quiesce the old workload, then enter `Provisioning` with the class-specific reset target. | `Ready` after provider observation and endpoint health succeed. |
+| `Stopped` | Enter `Provisioning` with the class-specific reset target; no grant may be issued during restore. | `Stopped` after restore validation, preserving the prior stopped intent. |
+| `Failed` | Enter `Validating`, then `Building` and `Provisioning`; revalidate the immutable reset target instead of reusing the failed provider state. | `Ready` or `Stopped`, according to the persisted desired intent. |
+
+Reset preserves the valid persisted desired intent rather than accepting an
+implicit new target. A reset from `Ready` therefore converges to `Ready`; a
+reset from `Stopped` converges to `Stopped`. The class-specific reset target is
+the Experiment's published immutable baseline or the Work environment's
+explicit authorized snapshot/configuration revision.
 
 ## Class invariants
 
@@ -132,9 +151,9 @@ desired and observed state, current revision, current/last operation, stable
 diagnostic and sanitized audit references.
 
 `retry` is authorized only from `Failed`; it resumes the recorded failed phase
-with the same immutable bindings. `reset` is a separately authorized recovery
-operation with the class-specific target above. No command may use an implicit
-provider, template, Lease, endpoint or fallback target.
+with the same immutable bindings. `reset` is authorized only from `Ready`,
+`Stopped` or `Failed` and follows the reset transition rules above. No command
+may use an implicit provider, template, Lease, endpoint or fallback target.
 
 ## Lease, endpoint and access ordering
 
@@ -142,7 +161,7 @@ provider, template, Lease, endpoint or fallback target.
 | --- | --- |
 | Work create/start | Environment Service verifies referenced Lease is Active before accepting the command. |
 | New or renewed grant | Access Service issues only when Environment reports observed `Ready`, endpoint registration and endpoint health for the same revision. |
-| Lease expiry/revocation, environment failure, expiry or delete | Access Service revokes relevant grants first; Environment waits for the recorded revocation disposition before stop or cleanup. Failure is fail closed for new access. |
+| Lease expiry/revocation, environment failure, reset, expiry or delete | Access Service revokes relevant grants first; Environment waits for the recorded revocation disposition before stop, restore or cleanup. Failure is fail closed for new access. |
 | Endpoint unhealthy or absent | No new/renewed grant; Environment records diagnosis and reconciles or fails according to the lifecycle rules. |
 | `Deleted` | Endpoint metadata and grants are no longer usable; tombstone retains only sanitized cleanup/audit evidence. |
 
@@ -172,5 +191,5 @@ This contract has E0 design evidence only. A future implementation must add
 contract and integration coverage for normal transitions, duplicate commands,
 idempotency-key payload conflicts, revision conflicts, illegal transitions,
 provider failure and retry exhaustion, class invariants, Lease expiry,
-revocation ordering, unhealthy endpoints, configuration failure, deletion
-idempotency and tombstone evidence.
+revocation ordering, unhealthy endpoints, all legal/illegal reset sources and
+targets, configuration failure, deletion idempotency and tombstone evidence.

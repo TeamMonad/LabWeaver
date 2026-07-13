@@ -35,7 +35,9 @@ publisher or access path.
 - An Experiment can be created from a published immutable release without a
   Work Lease and can reset only to that release baseline. A Work environment
   requires an Active Lease to create or start; its reset target is an explicitly
-  selected, authorized snapshot or configuration revision.
+  selected, authorized snapshot or configuration revision. Reset is legal only
+  from `Ready`, `Stopped` or `Failed`; a reset from `Ready` revokes grants before
+  restore, while a reset from `Stopped` preserves stopped intent.
 - Work configuration runs are serialized through `Updating`. Any configuration
   failure transitions the instance to `Failed`; it never silently resumes as
   `Ready`.

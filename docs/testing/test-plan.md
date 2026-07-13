@@ -43,8 +43,9 @@ transition rejection, revision conflicts, idempotency-key replay and payload
 conflicts, bounded provider retry exhaustion, and explicit retry/reset paths.
 
 They must also prove Experiment baseline-reset isolation, Work Active-Lease
-requirements, serialized Work configuration, configuration-failure transition
-to `Failed`, access denial for any non-Ready or unhealthy endpoint, grant
-revocation before expiry/failure/delete cleanup, deletion idempotency and
-sanitized `Deleted` tombstone evidence. Provider, Access, Resource and
-KubeVirt evidence remains planned; this documentation is E0 only.
+requirements, reset acceptance only from `Ready`, `Stopped` and `Failed`, reset
+target convergence, serialized Work configuration, configuration-failure
+transition to `Failed`, access denial for any non-Ready or unhealthy endpoint,
+grant revocation before reset/expiry/failure/delete cleanup, deletion
+idempotency and sanitized `Deleted` tombstone evidence. Provider, Access,
+Resource and KubeVirt evidence remains planned; this documentation is E0 only.
