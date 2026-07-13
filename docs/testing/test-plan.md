@@ -148,6 +148,18 @@ Resource and KubeVirt evidence remains planned; this documentation is E0 only.
 | Network | Cilium connectivity and internal Gateway route | failed suite or unprogrammed Gateway |
 | Recovery | etcd snapshot plus `etcdutl snapshot status` | snapshot cannot be validated |
 
+### VM-01a E3 run
+
+Issue #15 has one current-run E3 artifact at source commit
+`48cda8de9fef775f7578c90ca879356979df2706`:
+`docs/testing/evidence/vm-01a-e3-20260713.md`. It proves only a run-scoped,
+cleaned-up `local-path` RWO flow, cross-worker `nfs-rwx` RWX flow, fixed-digest
+hardware-KVM VM start/console/stop/start flow, and an existing Cilium Gateway
+request. A failed prerequisite, workload, lifecycle or cleanup makes the
+verifier non-zero. This does not promote the Ansible deployment path, Access
+path, application path or release readiness above their separately recorded
+evidence levels.
+
 ## Non-cluster CI evidence
 
 Linux CI runs fixed Ansible dependencies, lint, syntax, fictional encrypted
