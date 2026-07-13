@@ -3,46 +3,82 @@ name: web-ci
 on:
   push:
     branches: [main, develop]
-    paths:
-      - 'web/**'
-      - '.github/workflows/web-ci.yml'
   pull_request:
     branches: [main, develop]
-    paths:
-      - 'web/**'
-      - '.github/workflows/web-ci.yml'
+
+permissions:
+  contents: read
 
 jobs:
   web-gate:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./web
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect Web changes
+        id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            changed_files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+          else
+            changed_files="$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA")"
+          fi
+
+          if printf '%s\n' "$changed_files" | grep -Eq '^(web/|\.github/workflows/web-ci\.yml$)'; then
+            echo "web_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "web_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Web gate not applicable
+        if: steps.changes.outputs.web_changed != 'true'
+        shell: bash
+        run: echo "web-gate: not applicable; no Web or Web workflow files changed."
 
       - name: Setup Node.js
+        if: steps.changes.outputs.web_changed == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
       - name: Setup pnpm
+        if: steps.changes.outputs.web_changed == 'true'
         uses: pnpm/action-setup@v3
         with:
           version: 9
 
       - name: Install dependencies
+        if: steps.changes.outputs.web_changed == 'true'
+        working-directory: ./web
         run: pnpm install --frozen-lockfile
 
       - name: Lint
+        if: steps.changes.outputs.web_changed == 'true'
+        working-directory: ./web
         run: pnpm lint
 
       - name: Type check
+        if: steps.changes.outputs.web_changed == 'true'
+        working-directory: ./web
         run: pnpm typecheck
 
       - name: Unit tests
+        if: steps.changes.outputs.web_changed == 'true'
+        working-directory: ./web
         run: pnpm test
 
       - name: Build
+        if: steps.changes.outputs.web_changed == 'true'
+        working-directory: ./web
         run: pnpm build
