@@ -29,5 +29,16 @@
 /deploy/ @Nova-Lciop-J @2018wzh
 /docs/ @Nova-Lciop-J @2018wzh
 
+# Architecture lifecycle records are core-domain artifacts.  These specific
+# rules intentionally override the generic documentation evidence route above.
+# For A-authored changes, B is the required non-author Code Owner reviewer.
+/README.md @2018wzh @zeyi2
+/docs/adr/ @2018wzh @zeyi2
+/docs/architecture/ @2018wzh @zeyi2
+/docs/contracts/ @2018wzh @zeyi2
+/docs/status/implementation-status.md @2018wzh @zeyi2
+/docs/testing/test-plan.md @2018wzh @zeyi2
+/docs/testing/coverage-matrix.md @2018wzh @zeyi2
+
 # Governance changes need A plus an independent core reviewer.
 /.github/ @2018wzh @zeyi2 @yingxvemiao
