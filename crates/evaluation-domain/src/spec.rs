@@ -172,6 +172,8 @@ impl EvaluationBody {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SubmissionSpec {
     pub(crate) collector: CollectorSpec,
+    #[serde(rename = "llmReadable")]
+    pub(crate) llm_readable: Vec<String>,
 }
 
 impl SubmissionSpec {
@@ -179,6 +181,12 @@ impl SubmissionSpec {
     #[must_use]
     pub const fn collector(&self) -> &CollectorSpec {
         &self.collector
+    }
+
+    /// Returns frozen submission paths that may be disclosed to an LLM Runner.
+    #[must_use]
+    pub fn llm_readable(&self) -> &[String] {
+        &self.llm_readable
     }
 }
 
@@ -308,6 +316,14 @@ impl EvaluationStep {
         match self {
             Self::Advisory(step) => Some(&step.runner),
             Self::Gate(_) | Self::Score(_) => None,
+        }
+    }
+
+    pub(crate) fn deterministic_checker(&self) -> Option<&CheckerSpec> {
+        match self {
+            Self::Gate(step) => Some(&step.checker),
+            Self::Score(step) => Some(&step.checker),
+            Self::Advisory(_) => None,
         }
     }
 }
@@ -775,6 +791,66 @@ pub enum CheckerSpec {
         /// Required service state.
         expected: ExpectedServiceState,
     },
+}
+
+impl CheckerSpec {
+    pub(crate) fn validate_for(
+        &self,
+        runner: &DeterministicRunnerSpec,
+        step_id: &str,
+    ) -> Result<(), EvaluationSpecError> {
+        if let Self::JsonSchema { schema_ref } = self
+            && schema_ref.trim().is_empty()
+        {
+            return Err(invalid_checker(step_id, "json_schema requires schemaRef"));
+        }
+        if let Self::ServiceState { service, .. } = self
+            && service.trim().is_empty()
+        {
+            return Err(invalid_checker(
+                step_id,
+                "service_state requires a service name",
+            ));
+        }
+
+        let compatible = matches!(
+            (runner, self),
+            (
+                DeterministicRunnerSpec::FileAssertion { .. },
+                Self::ExitCode { .. }
+            ) | (
+                DeterministicRunnerSpec::Program {
+                    phase: ProgramPhase::Compile,
+                    ..
+                },
+                Self::ExitCode { .. }
+            ) | (
+                DeterministicRunnerSpec::Program {
+                    phase: ProgramPhase::Test,
+                    ..
+                },
+                Self::Exact | Self::Token | Self::JsonSchema { .. }
+            ) | (
+                DeterministicRunnerSpec::AnsibleProbe { .. },
+                Self::ExitCode { .. } | Self::JsonSchema { .. } | Self::ServiceState { .. }
+            )
+        );
+        if compatible {
+            Ok(())
+        } else {
+            Err(invalid_checker(
+                step_id,
+                "checker is incompatible with the selected runner and phase",
+            ))
+        }
+    }
+}
+
+fn invalid_checker(step_id: &str, detail: &str) -> EvaluationSpecError {
+    EvaluationSpecError::InvalidStepConfiguration {
+        step_id: step_id.to_owned(),
+        detail: detail.to_owned(),
+    }
 }
 
 /// Expected state of a system service.

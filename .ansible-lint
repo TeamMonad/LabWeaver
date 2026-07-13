@@ -1,0 +1,4 @@
+---
+# `import_playbook` entries cannot carry a play name; each imported play is named.
+skip_list:
+  - name[play]

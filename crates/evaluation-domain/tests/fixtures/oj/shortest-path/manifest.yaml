@@ -1,0 +1,119 @@
+# 受控材料清单（Controlled Materials Manifest）
+# 本文件仅记录受控材料的元数据与审计规则，不包含任何受控 payload、参考解、隐藏测试或生成器源码。
+# 受控文件本身由评测系统的私有存储持有，不进入公开 Git 仓库。
+
+problem:
+  id: shortest-path-v1
+  version: 1.0.0
+  publicMaterials:
+    - path: statement.md
+      sha256: <public-sha256-placeholder>
+      purpose: 学生可见题面、输入输出说明与数据范围
+    - path: samples/sample-1.in
+      sha256: <public-sha256-placeholder>
+      purpose: 样例输入 1
+    - path: samples/sample-1.out
+      sha256: <public-sha256-placeholder>
+      purpose: 样例输出 1
+    - path: samples/sample-2.in
+      sha256: <public-sha256-placeholder>
+      purpose: 样例输入 2（不可达场景）
+    - path: samples/sample-2.out
+      sha256: <public-sha256-placeholder>
+      purpose: 样例输出 2（不可达场景）
+    - path: samples/sample-3.in
+      sha256: <public-sha256-placeholder>
+      purpose: 样例输入 3（零权边场景）
+    - path: samples/sample-3.out
+      sha256: <public-sha256-placeholder>
+      purpose: 样例输出 3
+    - path: samples/sample-4.in
+      sha256: <public-sha256-placeholder>
+      purpose: 样例输入 4（单条边场景）
+    - path: samples/sample-4.out
+      sha256: <public-sha256-placeholder>
+      purpose: 样例输出 4
+    - path: starter/main.cpp
+      sha256: <public-sha256-placeholder>
+      purpose: 学生 Starter，展示标准 Dijkstra 实现
+
+controlledMaterials:
+  - name: reference-solution
+    purpose: 判定答案正确性的标准实现
+    version: 1.0.0
+    locator: evaluator://solutions/shortest-path/reference
+    sha256: <controlled-sha256-placeholder>
+    seedRule: 不适用
+
+  - name: oracle
+    purpose: 为隐藏测试预计算期望输出
+    version: 1.0.0
+    locator: evaluator://oracles/shortest-path
+    sha256: <controlled-sha256-placeholder>
+    seedRule: 与 hidden-tests 同步生成
+
+  - name: checker
+    purpose: 比较学生输出与期望输出
+    version: 1.0.0
+    locator: evaluator://checkers/token-exact-64bit
+    sha256: <controlled-sha256-placeholder>
+    seedRule: 不适用
+
+  - name: cyaron-generator
+    purpose: 依据 Seed 生成输入数据
+    version: 1.0.0
+    locator: evaluator://generators/shortest-path
+    sha256: <controlled-sha256-placeholder>
+    seedRule: "seed := {scenario}-{version}-{caseId}，如 normal-v1-0001"
+
+  - name: hidden-tests
+    purpose: 正式评测使用的非公开测试用例
+    version: 1.0.0
+    locator: evaluator://tests/shortest-path/hidden
+    sha256: <controlled-sha256-placeholder>
+    seedRule: "由 cyaron-generator 使用上述 Seed 规则生成"
+
+wrongSolutionSamples:
+  - id: greedy-single-path
+    purpose: 拒绝贪心只选当前最短边、不考虑全局最优的错解
+    expectedVerdict: wrong_answer
+    representativeSeed: wrong-greedy-v1-0001
+    diagnosticHint: 贪心策略无法保证全局最短路径
+
+  - id: bfs-instead-of-dijkstra
+    purpose: 拒绝将带权图当无权图做 BFS 的错解
+    expectedVerdict: wrong_answer
+    representativeSeed: wrong-bfs-v1-0001
+    diagnosticHint: BFS 不适用于带权图的最短路径
+
+  - id: int32-overflow
+    purpose: 拒绝使用 32 位 int 存储距离的错解
+    expectedVerdict: wrong_answer
+    representativeSeed: wrong-int32-overflow-v1-0001
+    diagnosticHint: 距离累加可能超出 32 位整数范围
+
+  - id: unreachable-not-handled
+    purpose: 拒绝未处理不可达情况、不输出 -1 的错解
+    expectedVerdict: wrong_answer
+    representativeSeed: wrong-unreachable-v1-0001
+    diagnosticHint: 必须输出 -1 表示不可达
+
+  - id: quadratic-degradation
+    purpose: 拒绝 O(V^2) 或更差复杂度导致超时的错解
+    expectedVerdict: time_limit_exceeded
+    representativeSeed: perf-dense-v1-0001
+    diagnosticHint: 稠密图需要优先队列优化的 Dijkstra
+
+auditRules:
+  - rule: 公开材料不得包含受控 payload、参考解、隐藏测试、生成器源码或错解样本
+  - rule: 受控材料必须通过 sha256 校验，版本号与清单一致
+  - rule: 每个受控 Cyaron Seed 必须可重放，且与预期拒绝结论一致
+  - rule: 材料缺失、hash/版本/Seed 不匹配、受控内容泄露时，输出 blocking diagnostic 并失败
+  - rule: 不得使用静默 fallback 或降级为成功
+
+blockers:
+  - id: evaluation-report-md-binding
+    description: 当前 EvaluationSpec 强制收集 report.md 并绑定 LLM advisory review，与本题"只提交源码"的要求冲突
+    owner: B
+    exitCondition: B 在后续评测契约任务中移除或替换该强制 binding
+    impact: 在 blocker 解除前，本题材料合同不得声称能够接入当前 EvaluationSpec 主路径

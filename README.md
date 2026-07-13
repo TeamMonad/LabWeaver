@@ -18,6 +18,9 @@ cargo xtask check
 - `docs/architecture/c4.md`：系统上下文与容器边界；
 - `docs/architecture/service-boundaries.md`：服务职责和依赖规则；
 - `docs/architecture/data-ownership.md`：权威数据所有权；
+- `docs/adr/0003-nats-subject-and-delivery-contract.md`：NATS Subject 与投递语义；
+- `docs/contracts/nats-event-contract-v1.md`：NATS v1 事件目录；
 - `docs/status/implementation-status.md`：实现状态事实源；
 - `docs/testing/test-plan.md`：测试和证据计划；
-- `docs/process/scrum.md`：GitHub Scrum 操作约束。
+- `docs/process/scrum.md`：GitHub Scrum 操作约束；
+- `docs/deployment/ansible.md`：Kubernetes 基础设施的私有配置、预检、部署、验证和备份流程。

@@ -1,0 +1,49 @@
+---
+- name: Assert Helm is available on the control plane
+  ansible.builtin.command: helm version --short
+  changed_when: false
+
+- name: Install pinned Gateway API Standard CRDs before enabling Gateway API
+  kubernetes.core.k8s:
+    state: present
+    src: "https://github.com/kubernetes-sigs/gateway-api/releases/download/{{ gateway_api_version }}/standard-install.yaml"
+
+- name: Add pinned Helm repositories
+  kubernetes.core.helm_repository:
+    name: "{{ item.name }}"
+    repo_url: "{{ item.url }}"
+  loop:
+    - { name: cilium, url: https://helm.cilium.io/ }
+    - { name: metallb, url: https://metallb.github.io/metallb }
+
+- name: Install Cilium with kube-proxy replacement and Gateway API
+  kubernetes.core.helm:
+    name: cilium
+    chart_ref: cilium/cilium
+    chart_version: "{{ cilium_chart_version }}"
+    release_namespace: kube-system
+    create_namespace: false
+    values:
+      kubeProxyReplacement: true
+      k8sServiceHost: "{{ kubernetes_api_advertise_address }}"
+      k8sServicePort: 6443
+      hubble:
+        relay:
+          enabled: true
+        ui:
+          enabled: true
+      gatewayAPI:
+        enabled: true
+
+- name: Install MetalLB
+  kubernetes.core.helm:
+    name: metallb
+    chart_ref: metallb/metallb
+    chart_version: "{{ metallb_chart_version }}"
+    release_namespace: metallb-system
+    create_namespace: true
+
+- name: Apply MetalLB address pool and L2 advertisement
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'metallb.yml.j2') | from_yaml_all | list }}"

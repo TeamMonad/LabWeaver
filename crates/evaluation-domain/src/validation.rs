@@ -1,9 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::path::{Component, Path};
-
 use thiserror::Error;
 
-use crate::spec::{AggregationKind, EvaluationSpec};
+use crate::spec::{AggregationKind, EvaluationSpec, SubmissionSpec};
 
 /// Stable fail-fast diagnostics for `EvaluationSpec` documents.
 #[derive(Debug, Error, PartialEq)]
@@ -45,6 +43,20 @@ pub enum EvaluationSpecError {
     /// Collector limits or inputs were empty.
     #[error("invalid collector configuration: {0}")]
     InvalidCollector(String),
+    /// An LLM-readable path was not frozen by the configured Collector.
+    #[error("LLM-readable path is not part of the frozen submission: {path}")]
+    LlmReadableNotCollected {
+        /// Path that was not frozen.
+        path: String,
+    },
+    /// An advisory step requested a path outside the submission LLM allowlist.
+    #[error("step {step_id} requested a path outside submission.llmReadable: {path}")]
+    LlmIncludeNotAllowed {
+        /// Advisory step containing the request.
+        step_id: String,
+        /// Path that was not allowlisted.
+        path: String,
+    },
     /// Runner configuration was inconsistent with its declared kind or phase.
     #[error("invalid configuration for step {step_id}: {detail}")]
     InvalidStepConfiguration {
@@ -93,6 +105,8 @@ impl EvaluationSpecError {
             Self::DependencyCycle => "LW_EVAL_DAG_CYCLE",
             Self::UnsafePath { .. } => "LW_EVAL_SUBMISSION_PATH_UNSAFE",
             Self::InvalidCollector(_) => "LW_EVAL_COLLECTOR_INVALID",
+            Self::LlmReadableNotCollected { .. } => "LW_EVAL_LLM_READABLE_NOT_COLLECTED",
+            Self::LlmIncludeNotAllowed { .. } => "LW_EVAL_LLM_INCLUDE_NOT_ALLOWED",
             Self::InvalidStepConfiguration { .. } => "LW_EVAL_STEP_CONFIG_INVALID",
             Self::AggregationScoreMismatch { .. } => "LW_EVAL_AGGREGATION_SCORE_MISMATCH",
             Self::AggregationScoreOverflow { .. } => "LW_EVAL_AGGREGATION_SCORE_OVERFLOW",
@@ -115,22 +129,7 @@ pub(crate) fn validate_spec(spec: &EvaluationSpec) -> Result<(), EvaluationSpecE
     if !body.review.teacher_approval_required_for_release() {
         return Err(EvaluationSpecError::TeacherApprovalRequired);
     }
-    if body.submission.collector.max_bytes() == 0 {
-        return Err(EvaluationSpecError::InvalidCollector(
-            "maxBytes must be non-zero".to_owned(),
-        ));
-    }
-    if !body.submission.collector.has_inputs() {
-        return Err(EvaluationSpecError::InvalidCollector(
-            "collector input list must not be empty".to_owned(),
-        ));
-    }
-    if let Some(paths) = body.submission.collector.included_paths() {
-        validate_paths("submission.collector.include", paths)?;
-    }
-    if let Some(paths) = body.submission.collector.excluded_paths() {
-        validate_paths("submission.collector.exclude", paths)?;
-    }
+    let llm_readable = validate_submission(&body.submission)?;
 
     let mut steps = BTreeMap::new();
     for step in &body.steps {
@@ -148,6 +147,13 @@ pub(crate) fn validate_spec(spec: &EvaluationSpec) -> Result<(), EvaluationSpecE
         if let Some(runner) = step.deterministic_runner() {
             runner.validate(step.id())?;
             validate_paths(step.id(), &runner.submission_paths())?;
+            let Some(checker) = step.deterministic_checker() else {
+                return Err(EvaluationSpecError::InvalidStepConfiguration {
+                    step_id: step.id().to_owned(),
+                    detail: "deterministic step requires a checker".to_owned(),
+                });
+            };
+            checker.validate_for(runner, step.id())?;
         }
         if step.score() == Some(0) {
             return Err(EvaluationSpecError::InvalidStepConfiguration {
@@ -164,6 +170,15 @@ pub(crate) fn validate_spec(spec: &EvaluationSpec) -> Result<(), EvaluationSpecE
                 });
             }
             validate_paths(step.id(), paths)?;
+            if let Some(path) = paths
+                .iter()
+                .find(|path| !llm_readable.contains(path.as_str()))
+            {
+                return Err(EvaluationSpecError::LlmIncludeNotAllowed {
+                    step_id: step.id().to_owned(),
+                    path: path.clone(),
+                });
+            }
         }
     }
 
@@ -171,16 +186,80 @@ pub(crate) fn validate_spec(spec: &EvaluationSpec) -> Result<(), EvaluationSpecE
     validate_aggregation(spec, &steps)
 }
 
+fn validate_submission(submission: &SubmissionSpec) -> Result<BTreeSet<&str>, EvaluationSpecError> {
+    if submission.collector.max_bytes() == 0 {
+        return Err(EvaluationSpecError::InvalidCollector(
+            "maxBytes must be non-zero".to_owned(),
+        ));
+    }
+    if !submission.collector.has_inputs() {
+        return Err(EvaluationSpecError::InvalidCollector(
+            "collector input list must not be empty".to_owned(),
+        ));
+    }
+    if let Some(paths) = submission.collector.included_paths() {
+        validate_paths("submission.collector.include", paths)?;
+    }
+    if let Some(paths) = submission.collector.excluded_paths() {
+        validate_paths("submission.collector.exclude", paths)?;
+    }
+    validate_paths("submission.llmReadable", &submission.llm_readable)?;
+    let llm_readable = submission
+        .llm_readable
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if llm_readable.len() != submission.llm_readable.len() {
+        return Err(EvaluationSpecError::InvalidCollector(
+            "submission.llmReadable must not contain duplicate paths".to_owned(),
+        ));
+    }
+    match submission.collector.included_paths() {
+        Some(collected) => {
+            let collected = collected
+                .iter()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
+            let excluded = submission
+                .collector
+                .excluded_paths()
+                .unwrap_or_default()
+                .iter()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
+            if let Some(path) = llm_readable.iter().find(|path| {
+                !collected.contains(**path)
+                    || excluded
+                        .iter()
+                        .any(|excluded| path_is_excluded(path, excluded))
+            }) {
+                return Err(EvaluationSpecError::LlmReadableNotCollected {
+                    path: (*path).to_owned(),
+                });
+            }
+        }
+        None => {
+            if let Some(path) = llm_readable.first() {
+                return Err(EvaluationSpecError::LlmReadableNotCollected {
+                    path: (*path).to_owned(),
+                });
+            }
+        }
+    }
+    Ok(llm_readable)
+}
+
+fn path_is_excluded(path: &str, excluded: &str) -> bool {
+    path == excluded
+        || path
+            .strip_prefix(excluded)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
 fn validate_paths<T: AsRef<str>>(location: &str, paths: &[T]) -> Result<(), EvaluationSpecError> {
     for value in paths {
         let value = value.as_ref();
-        let path = Path::new(value);
-        let safe = !value.trim().is_empty()
-            && !path.is_absolute()
-            && path
-                .components()
-                .all(|component| matches!(component, Component::Normal(_) | Component::CurDir));
-        if !safe {
+        if !is_normalized_safe_relative_path(value) {
             return Err(EvaluationSpecError::UnsafePath {
                 location: location.to_owned(),
                 path: value.to_owned(),
@@ -188,6 +267,19 @@ fn validate_paths<T: AsRef<str>>(location: &str, paths: &[T]) -> Result<(), Eval
         }
     }
     Ok(())
+}
+
+pub(crate) fn is_normalized_safe_relative_path(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value == value.trim()
+        && !value.starts_with('/')
+        && !value.contains('\\')
+        && !value
+            .chars()
+            .any(|character| matches!(character, '*' | '?' | '[' | ']' | '{' | '}'))
+        && value
+            .split('/')
+            .all(|component| !component.is_empty() && component != "." && component != "..")
 }
 
 fn validate_dependencies<'a>(

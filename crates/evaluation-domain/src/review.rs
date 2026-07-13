@@ -1,6 +1,16 @@
+use std::collections::BTreeSet;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
+
+use crate::validation::is_normalized_safe_relative_path;
+
+const MAX_FINDINGS: usize = 64;
+const MAX_EVIDENCE_PER_FINDING: usize = 16;
+const MAX_CRITERION_BYTES: usize = 1_024;
+const MAX_SUGGESTION_BYTES: usize = 4_096;
+const MAX_EVIDENCE_PATH_BYTES: usize = 1_024;
 
 /// Advisory-only review produced by an LLM backend.
 ///
@@ -13,6 +23,7 @@ pub struct GoalReview {
     assessment: GoalAssessment,
     #[schemars(range(min = 0.0, max = 1.0))]
     confidence: f64,
+    #[schemars(length(max = 64))]
     findings: Vec<GoalFinding>,
     requires_teacher_attention: bool,
 }
@@ -31,14 +42,97 @@ impl GoalReview {
         Ok(review)
     }
 
+    /// Parses an advisory review and binds every evidence location to the current step include.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable parse, intrinsic validation, or path-allowlist error.
+    pub fn from_json_against<T: AsRef<str>>(
+        input: &str,
+        allowed_paths: &[T],
+    ) -> Result<Self, GoalReviewError> {
+        let review = Self::from_json(input)?;
+        review.validate_against(allowed_paths)?;
+        Ok(review)
+    }
+
     /// Validates constraints that JSON Schema cannot express portably.
     ///
     /// # Errors
     ///
-    /// Returns an error when confidence is outside the inclusive range from zero to one.
+    /// Returns an error for invalid confidence, content, bounds, paths, or line ranges.
     pub fn validate(&self) -> Result<(), GoalReviewError> {
         if !(0.0..=1.0).contains(&self.confidence) {
             return Err(GoalReviewError::InvalidConfidence(self.confidence));
+        }
+        if self.findings.len() > MAX_FINDINGS {
+            return Err(GoalReviewError::LimitExceeded {
+                field: "findings",
+                actual: self.findings.len(),
+                max: MAX_FINDINGS,
+            });
+        }
+        for (index, finding) in self.findings.iter().enumerate() {
+            validate_non_empty(index, "criterion", &finding.criterion)?;
+            validate_length("criterion", &finding.criterion, MAX_CRITERION_BYTES)?;
+            validate_non_empty(index, "suggestion", &finding.suggestion)?;
+            validate_length("suggestion", &finding.suggestion, MAX_SUGGESTION_BYTES)?;
+            if finding.evidence.is_empty() {
+                return Err(GoalReviewError::InvalidFinding {
+                    index,
+                    detail: "evidence must not be empty",
+                });
+            }
+            if finding.evidence.len() > MAX_EVIDENCE_PER_FINDING {
+                return Err(GoalReviewError::LimitExceeded {
+                    field: "evidence",
+                    actual: finding.evidence.len(),
+                    max: MAX_EVIDENCE_PER_FINDING,
+                });
+            }
+            for evidence in &finding.evidence {
+                validate_length("evidence.path", &evidence.path, MAX_EVIDENCE_PATH_BYTES)?;
+                if !is_normalized_safe_relative_path(&evidence.path) {
+                    return Err(GoalReviewError::UnsafeEvidencePath {
+                        path: evidence.path.clone(),
+                    });
+                }
+                if evidence.start_line == 0 || evidence.end_line < evidence.start_line {
+                    return Err(GoalReviewError::InvalidEvidenceRange {
+                        path: evidence.path.clone(),
+                        start_line: evidence.start_line,
+                        end_line: evidence.end_line,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Validates intrinsic review constraints and restricts evidence to one Advisory Step include.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an evidence path is unsafe or absent from `allowed_paths`.
+    pub fn validate_against<T: AsRef<str>>(
+        &self,
+        allowed_paths: &[T],
+    ) -> Result<(), GoalReviewError> {
+        self.validate()?;
+        let allowed = allowed_paths
+            .iter()
+            .map(AsRef::as_ref)
+            .collect::<BTreeSet<_>>();
+        for evidence in self
+            .findings
+            .iter()
+            .flat_map(|finding| finding.evidence.iter())
+        {
+            if !allowed.contains(evidence.path.as_str()) {
+                return Err(GoalReviewError::EvidencePathNotAllowed {
+                    path: evidence.path.clone(),
+                });
+            }
         }
         Ok(())
     }
@@ -124,9 +218,12 @@ pub enum GoalAssessment {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GoalFinding {
+    #[schemars(length(min = 1, max = 1024))]
     criterion: String,
     result: FindingResult,
+    #[schemars(length(min = 1, max = 16))]
     evidence: Vec<EvidenceLocation>,
+    #[schemars(length(min = 1, max = 4096))]
     suggestion: String,
 }
 
@@ -174,8 +271,11 @@ pub enum FindingResult {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EvidenceLocation {
+    #[schemars(length(min = 1, max = 1024))]
     path: String,
+    #[schemars(range(min = 1))]
     start_line: u32,
+    #[schemars(range(min = 1))]
     end_line: u32,
 }
 
@@ -208,6 +308,46 @@ pub enum GoalReviewError {
     /// Confidence was outside the supported range.
     #[error("LLM review confidence must be between 0 and 1, got {0}")]
     InvalidConfidence(f64),
+    /// One finding omitted required advisory content.
+    #[error("LLM review finding {index} is invalid: {detail}")]
+    InvalidFinding {
+        /// Zero-based finding index.
+        index: usize,
+        /// Stable validation detail.
+        detail: &'static str,
+    },
+    /// A bounded review field exceeded its contract limit.
+    #[error("LLM review {field} count or length {actual} exceeds limit {max}")]
+    LimitExceeded {
+        /// Bounded field name.
+        field: &'static str,
+        /// Observed item count or UTF-8 byte length.
+        actual: usize,
+        /// Maximum accepted count or length.
+        max: usize,
+    },
+    /// An evidence path was not a normalized safe relative path.
+    #[error("LLM review evidence path is unsafe: {path}")]
+    UnsafeEvidencePath {
+        /// Rejected evidence path.
+        path: String,
+    },
+    /// An evidence path was outside the current Advisory Step include.
+    #[error("LLM review evidence path is not allowed by the advisory step: {path}")]
+    EvidencePathNotAllowed {
+        /// Rejected evidence path.
+        path: String,
+    },
+    /// An evidence location used zero or reversed line bounds.
+    #[error("LLM review evidence range is invalid for {path}: {start_line}..={end_line}")]
+    InvalidEvidenceRange {
+        /// Evidence path containing the invalid range.
+        path: String,
+        /// Inclusive first line.
+        start_line: u32,
+        /// Inclusive final line.
+        end_line: u32,
+    },
 }
 
 impl GoalReviewError {
@@ -217,6 +357,42 @@ impl GoalReviewError {
         match self {
             Self::InvalidDocument(_) => "LW_EVAL_LLM_REVIEW_INVALID",
             Self::InvalidConfidence(_) => "LW_EVAL_LLM_CONFIDENCE_INVALID",
+            Self::InvalidFinding { .. } => "LW_EVAL_LLM_FINDING_INVALID",
+            Self::LimitExceeded { .. } => "LW_EVAL_LLM_LIMIT_EXCEEDED",
+            Self::UnsafeEvidencePath { .. } => "LW_EVAL_LLM_EVIDENCE_PATH_UNSAFE",
+            Self::EvidencePathNotAllowed { .. } => "LW_EVAL_LLM_EVIDENCE_PATH_NOT_ALLOWED",
+            Self::InvalidEvidenceRange { .. } => "LW_EVAL_LLM_EVIDENCE_RANGE_INVALID",
         }
+    }
+}
+
+fn validate_non_empty(
+    index: usize,
+    field: &'static str,
+    value: &str,
+) -> Result<(), GoalReviewError> {
+    if value.trim().is_empty() {
+        Err(GoalReviewError::InvalidFinding {
+            index,
+            detail: match field {
+                "criterion" => "criterion must not be empty",
+                "suggestion" => "suggestion must not be empty",
+                _ => "required field must not be empty",
+            },
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_length(field: &'static str, value: &str, max: usize) -> Result<(), GoalReviewError> {
+    if value.len() > max {
+        Err(GoalReviewError::LimitExceeded {
+            field,
+            actual: value.len(),
+            max,
+        })
+    } else {
+        Ok(())
     }
 }
