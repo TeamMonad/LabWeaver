@@ -45,3 +45,10 @@ Read back Milestones, Labels, branch protection, Sprint parents, sub-issues and 
 | Runtime | KubeVirt VM start, console, stop/start, cleanup | no hardware KVM-backed Running VMI |
 | Network | Cilium connectivity and internal Gateway route | failed suite or unprogrammed Gateway |
 | Recovery | etcd snapshot plus `etcdutl snapshot status` | snapshot cannot be validated |
+
+## Non-cluster CI evidence
+
+Linux CI runs fixed Ansible dependencies, lint, syntax, fictional encrypted
+Vault loading, mandatory-preflight chain checks, and storage safety fixtures.
+These checks prove only E1/E2 controller behavior; they do not replace E3
+acceptance against the target cluster.

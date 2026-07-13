@@ -33,14 +33,35 @@
   register: snapshot
   changed_when: snapshot.rc == 0
 
-- name: Validate snapshot
-  ansible.builtin.command: >-
-    /usr/local/bin/etcdutl snapshot status /var/backups/labweaver/etcd-{{ ansible_date_time.iso8601_basic_short }}.db -w table
-  changed_when: false
-
 - name: Restrict snapshot permissions
   ansible.builtin.file:
     path: "/var/backups/labweaver/etcd-{{ ansible_date_time.iso8601_basic_short }}.db"
     owner: root
     group: root
     mode: '0600'
+
+- name: Read structured snapshot status
+  ansible.builtin.command: >-
+    /usr/local/bin/etcdutl snapshot status /var/backups/labweaver/etcd-{{ ansible_date_time.iso8601_basic_short }}.db -w json
+  changed_when: false
+  register: snapshot_status
+
+- name: Read snapshot hash, size, and permissions
+  ansible.builtin.stat:
+    path: "/var/backups/labweaver/etcd-{{ ansible_date_time.iso8601_basic_short }}.db"
+    checksum_algorithm: sha256
+  register: snapshot_file
+
+- name: Write current backup evidence atomically
+  ansible.builtin.copy:
+    dest: "{{ backup_report_path | default('/var/backups/labweaver/latest.json') }}"
+    owner: root
+    group: root
+    mode: '0600'
+    content: >-
+      {{ {'schema_version': 1, 'event': 'etcd_snapshot_complete', 'overall': 'passed',
+      'snapshot': {'path': snapshot_file.stat.path, 'sha256': snapshot_file.stat.checksum,
+      'size_bytes': snapshot_file.stat.size, 'mode': snapshot_file.stat.mode,
+      'revision': (snapshot_status.stdout | from_json).revision,
+      'hash': (snapshot_status.stdout | from_json).hash},
+      'etcd_version': etcd_version, 'created_at': ansible_date_time.iso8601} | to_nice_json }}

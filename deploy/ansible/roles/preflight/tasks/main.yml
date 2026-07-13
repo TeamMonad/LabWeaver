@@ -28,9 +28,12 @@
     - "{{ gateway_vip }}"
     - "{{ nfs_server }}"
     - "{{ local_path_device }}"
+    - "{{ storage_device_wwn }}"
+    - "{{ storage_device_size_bytes | string }}"
     - "{{ verify_rwo_node }}"
     - "{{ verify_nfs_writer_node }}"
     - "{{ verify_nfs_reader_node }}"
+    - "{{ verify_gateway_hostname }}"
   run_once: true
   delegate_to: localhost
 

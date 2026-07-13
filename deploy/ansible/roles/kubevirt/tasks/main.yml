@@ -22,6 +22,20 @@
   ansible.builtin.command: "kubectl -n kubevirt wait kv/kubevirt --for=condition=Available --timeout=10m"
   changed_when: false
 
+- name: Forbid software emulation for KubeVirt workloads
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: kubevirt.io/v1
+      kind: KubeVirt
+      metadata:
+        name: kubevirt
+        namespace: kubevirt
+      spec:
+        configuration:
+          developerConfiguration:
+            useEmulation: false
+
 - name: Install CDI operator and custom resource
   kubernetes.core.k8s:
     state: present

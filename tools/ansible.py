@@ -21,9 +21,9 @@ def main() -> int:
     inventory_dir = ansible_dir / "inventories" / args.env
     inputs = {
         "inventory": inventory_dir / "hosts.yml",
-        "group_vars": inventory_dir / "group_vars" / "all.yml",
-        "vault": inventory_dir / "group_vars" / "vault.yml",
-        "vault_password": inventory_dir / "group_vars" / "vault.yml.password",
+        "group_vars": inventory_dir / "group_vars" / "all" / "main.yml",
+        "vault": inventory_dir / "group_vars" / "all" / "vault.yml",
+        "vault_password": inventory_dir / ".vault-password",
     }
 
     missing = [name for name, value in inputs.items() if not value.is_file()]

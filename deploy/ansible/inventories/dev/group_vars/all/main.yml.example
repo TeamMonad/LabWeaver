@@ -30,11 +30,16 @@ local_path_mount: /var/lib/k8s-local-storage
 local_path_device: REPLACE_WORKER_DATA_DEVICE
 storage_allow_format: false
 storage_expected_filesystem: xfs
+storage_device_wwn: REPLACE_WORKER_DATA_DEVICE_WWN
+storage_device_size_bytes: REPLACE_WORKER_DATA_DEVICE_SIZE_BYTES
 storageclass_local_path: local-path
 storageclass_nfs_rwx: nfs-rwx
 kubevirt_node_label: labweaver.io/kubevirt
+kubevirt_cirros_image: quay.io/kubevirt/cirros-container-disk-demo@sha256:e2a45211b1f4a73e40b5356e503786c6dc7b5fb003b5d1d4ffa0a450a3dfdefe
 labweaver_namespaces: [labweaver-system, labweaver-data, labweaver-build, labweaver-evaluation, labweaver-demo]
 # Kubernetes node names, not IP addresses. These are used only by real storage probes.
 verify_rwo_node: REPLACE_WORKER_KUBERNETES_NODE_NAME
 verify_nfs_writer_node: REPLACE_FIRST_WORKER_KUBERNETES_NODE_NAME
 verify_nfs_reader_node: REPLACE_SECOND_WORKER_KUBERNETES_NODE_NAME
+verify_expected_kubernetes_nodes: [REPLACE_CONTROL_PLANE_KUBERNETES_NODE_NAME, REPLACE_FIRST_WORKER_KUBERNETES_NODE_NAME, REPLACE_SECOND_WORKER_KUBERNETES_NODE_NAME]
+verify_gateway_hostname: verify.labweaver.internal

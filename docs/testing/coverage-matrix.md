@@ -20,3 +20,4 @@
 | KubeVirt/CDI | A/B/D | deploy + verify | E3 real VM lifecycle | missing KVM/CDI/scratch class |
 | Gateway and policy | A/D | deploy + verify | E3 internal route | VIP not programmed or controller unavailable |
 | Backup | A | `python tools/ansible.py backup` | E2 snapshot status | snapshot integrity failure |
+| Ansible controller | D | Linux CI | E1/E2 lint, syntax, fictional Vault and storage fixtures | CI failure or missing E3 replay |

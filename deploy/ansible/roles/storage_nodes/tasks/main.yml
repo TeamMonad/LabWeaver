@@ -1,28 +1,35 @@
 ---
-- name: Inspect local storage device
+- name: Inspect destructive-formatting safety conditions
+  ansible.builtin.script: >-
+    storage_safety.py --device {{ local_path_device | quote }}
+    --expected-wwn {{ storage_device_wwn | quote }}
+    --expected-size-bytes {{ storage_device_size_bytes | quote }}
+  changed_when: false
+  register: storage_safety
+  when: storage_allow_format | bool
+
+- name: Reject storage without the expected filesystem when formatting is disabled
   ansible.builtin.command: "lsblk --noheadings --output FSTYPE {{ local_path_device }}"
   changed_when: false
   register: local_device_fs
+  failed_when: >-
+    (local_device_fs.stdout | trim != storage_expected_filesystem)
+    and not (storage_allow_format | bool)
 
-- name: Reject unformatted storage unless destructive formatting is explicit
-  ansible.builtin.assert:
-    that:
-      - local_device_fs.stdout | trim == storage_expected_filesystem or storage_allow_format | bool
-    fail_msg: "storage device is unformatted; set storage_allow_format=true only after confirming data loss"
-
-- name: Format explicitly approved empty storage device
+- name: Format only an explicitly approved, stable, unused disk
   community.general.filesystem:
     dev: "{{ local_path_device }}"
     fstype: "{{ storage_expected_filesystem }}"
     force: false
   when:
-    - local_device_fs.stdout | trim == ''
     - storage_allow_format | bool
+    - storage_safety.rc == 0
 
 - name: Read local storage UUID on the managed host
   ansible.builtin.command: "blkid -s UUID -o value {{ local_path_device }}"
   changed_when: false
   register: local_device_uuid
+  failed_when: local_device_uuid.stdout | trim == ''
 
 - name: Mount local storage by UUID
   ansible.posix.mount:

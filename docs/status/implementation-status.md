@@ -24,5 +24,8 @@ CDI, Kyverno, internal Gateway, and etcd backup. The prior manual environment
 provided E3 evidence; this branch does not claim E3 for the playbooks until a
 fresh deploy and second idempotency run complete.
 
-Blockers: private inventory, encrypted Vault, and a real replay environment are
-not committed and are required for deployment verification.
+Linux CI now provides lint, syntax, fictional encrypted-Vault, preflight-chain,
+and storage-safety fixture evidence. This is not E3 evidence. Blockers remain:
+private inventory, encrypted Vault, a Linux Ansible controller, and a real
+replay environment for first deploy, idempotency, storage, VM, Gateway, Cilium,
+and etcd acceptance.
