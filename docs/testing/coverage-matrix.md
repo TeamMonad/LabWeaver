@@ -24,3 +24,6 @@
 | Gateway and policy | A/D | deploy + verify | E3 internal route | VIP not programmed or controller unavailable |
 | Backup | A | `python tools/ansible.py backup` | E2 snapshot status | snapshot integrity failure |
 | Ansible controller | D | Linux CI | E1/E2 lint, syntax, fictional Vault and storage fixtures | CI failure or missing E3 replay |
+| Direct VM access | documented DirectAccessGrant device/IP/port scope and Router-first dual-revision activation | missing/stale Headscale or Router receipt, inactive device, wrong endpoint, IP reuse, unsupported protocol and cross-user access remain blocked | E0: ACCESS-01a documentation and ADR 0001 | E1/E2 contract and dual-enforcement tests; E3 Headscale/Router evidence; E4 multi-device containment replay |
+| Browser SSH/VNC proxy | documented Keycloak PKCE handoff, custom Guacamole extension and scoped credential boundary | handoff replay/expiry, invalid Access decision, credential disclosure and stale session are rejected | E0: ACCESS-01a documentation and ADR 0001 | E1/E2 token and extension tests; E3 deployed Guacamole path; E4 browser replay |
+| KubeVirt/Evaluation | none | none | planned/blocked | E3/E4 evidence required by release gates |
