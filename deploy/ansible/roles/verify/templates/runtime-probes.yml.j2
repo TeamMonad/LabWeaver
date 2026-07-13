@@ -1,0 +1,124 @@
+apiVersion: v1
+kind: Namespace
+metadata: { name: labweaver-verify }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: rwo, namespace: labweaver-verify }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: {{ storageclass_local_path }}
+  resources: { requests: { storage: 128Mi } }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: rwx, namespace: labweaver-verify }
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: {{ storageclass_nfs_rwx }}
+  resources: { requests: { storage: 128Mi } }
+---
+apiVersion: v1
+kind: Pod
+metadata: { name: rwo-writer, namespace: labweaver-verify }
+spec:
+  nodeSelector: { kubernetes.io/hostname: {{ verify_rwo_node }} }
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: busybox:1.36
+      command: [sh, -ec, 'printf rwo-ok > /data/probe; sleep 600']
+      volumeMounts: [{ name: data, mountPath: /data }]
+  volumes: [{ name: data, persistentVolumeClaim: { claimName: rwo } }]
+---
+apiVersion: v1
+kind: Pod
+metadata: { name: rwo-reader, namespace: labweaver-verify }
+spec:
+  nodeSelector: { kubernetes.io/hostname: {{ verify_rwo_node }} }
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: busybox:1.36
+      command: [sh, -ec, 'sleep 600']
+      volumeMounts: [{ name: data, mountPath: /data }]
+  volumes: [{ name: data, persistentVolumeClaim: { claimName: rwo } }]
+---
+apiVersion: v1
+kind: Pod
+metadata: { name: rwx-writer, namespace: labweaver-verify }
+spec:
+  nodeSelector: { kubernetes.io/hostname: {{ verify_nfs_writer_node }} }
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: busybox:1.36
+      command: [sh, -ec, 'printf rwx-ok > /data/probe; sleep 600']
+      volumeMounts: [{ name: data, mountPath: /data }]
+  volumes: [{ name: data, persistentVolumeClaim: { claimName: rwx } }]
+---
+apiVersion: v1
+kind: Pod
+metadata: { name: rwx-reader, namespace: labweaver-verify }
+spec:
+  nodeSelector: { kubernetes.io/hostname: {{ verify_nfs_reader_node }} }
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: busybox:1.36
+      command: [sh, -ec, 'sleep 600']
+      volumeMounts: [{ name: data, mountPath: /data }]
+  volumes: [{ name: data, persistentVolumeClaim: { claimName: rwx } }]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: gateway-body, namespace: labweaver-verify }
+data: { index.html: gateway-ok }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: gateway-backend, namespace: labweaver-verify }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: gateway-backend } }
+  template:
+    metadata: { labels: { app: gateway-backend } }
+    spec:
+      containers:
+        - name: httpd
+          image: busybox:1.36
+          command: [sh, -ec, 'httpd -f -p 8080 -h /www']
+          ports: [{ containerPort: 8080 }]
+          volumeMounts: [{ name: body, mountPath: /www }]
+      volumes: [{ name: body, configMap: { name: gateway-body } }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: gateway-backend, namespace: labweaver-verify }
+spec:
+  selector: { app: gateway-backend }
+  ports: [{ port: 80, targetPort: 8080 }]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: gateway-probe, namespace: labweaver-verify }
+spec:
+  parentRefs: [{ name: public-gateway, namespace: labweaver-demo }]
+  hostnames: [{{ verify_gateway_hostname | quote }}]
+  rules:
+    - backendRefs: [{ name: gateway-backend, port: 80 }]
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata: { name: kvm-probe, namespace: labweaver-verify }
+spec:
+  runStrategy: Manual
+  template:
+    metadata: { labels: { kubevirt.io/domain: kvm-probe } }
+    spec:
+      nodeSelector: { {{ kubevirt_node_label }}: 'true' }
+      domain:
+        resources: { requests: { memory: 256Mi } }
+      volumes:
+        - name: containerdisk
+          containerDisk: { image: {{ kubevirt_cirros_image | quote }} }

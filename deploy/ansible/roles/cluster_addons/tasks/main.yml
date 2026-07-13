@@ -1,0 +1,43 @@
+---
+- name: Install cert-manager
+  kubernetes.core.k8s:
+    state: present
+    src: "https://github.com/cert-manager/cert-manager/releases/download/{{ cert_manager_version }}/cert-manager.yaml"
+
+- name: Wait for cert-manager controllers
+  ansible.builtin.command: "kubectl -n cert-manager wait deployment/{{ item }} --for=condition=Available --timeout=5m"
+  changed_when: false
+  loop: [cert-manager, cert-manager-webhook]
+
+- name: Create internal development issuer
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: cert-manager.io/v1
+      kind: ClusterIssuer
+      metadata: { name: dev-selfsigned }
+      spec: { selfSigned: {} }
+
+- name: Install Kyverno using server-side apply compatible manifest
+  ansible.builtin.command: >-
+    kubectl apply --server-side -f
+    https://github.com/kyverno/kyverno/releases/download/{{ kyverno_version }}/install.yaml
+  changed_when: false
+
+- name: Wait for all Kyverno controllers
+  ansible.builtin.command: "kubectl -n kyverno rollout status deployment/{{ item }} --timeout=5m"
+  changed_when: false
+  loop:
+    - kyverno-admission-controller
+    - kyverno-background-controller
+    - kyverno-cleanup-controller
+    - kyverno-reports-controller
+
+- name: Apply namespaces, quota, Gateway, and HTTPRoute
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'gateway.yml.j2') | from_yaml_all | list }}"
+
+- name: Verify programmed internal Gateway
+  ansible.builtin.command: kubectl -n labweaver-demo wait gateway/public-gateway --for=condition=Programmed --timeout=5m
+  changed_when: false

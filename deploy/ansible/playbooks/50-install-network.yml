@@ -1,0 +1,5 @@
+---
+- name: Install Cilium, Gateway API, and MetalLB
+  hosts: control_plane
+  gather_facts: false
+  roles: [cluster_network]

@@ -1,0 +1,180 @@
+---
+- name: Create protected verification artifact directory
+  ansible.builtin.file:
+    path: "{{ verification_report_path | default('/var/lib/labweaver-artifacts/verify.json') | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Run infrastructure acceptance checks and retain diagnostics
+  block:
+    - name: Read all Kubernetes node states
+      ansible.builtin.command: kubectl get nodes -o json
+      changed_when: false
+      register: verify_nodes
+
+    - name: Require the exact expected Ready node set
+      ansible.builtin.assert:
+        that:
+          - (verify_nodes.stdout | from_json).items | map(attribute='metadata.name') | sort == verify_expected_kubernetes_nodes | sort
+          - >-
+            (verify_nodes.stdout | from_json).items | map(attribute='status.conditions') |
+            map('selectattr', 'type', 'equalto', 'Ready') |
+            map('selectattr', 'status', 'equalto', 'True') | map('list') |
+            map('length') | min > 0
+        fail_msg: NODE_NOT_READY_OR_UNEXPECTED
+
+    - name: Apply isolated runtime probe resources
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', 'runtime-probes.yml.j2') | from_yaml_all | list }}"
+
+    - name: Wait for storage and Gateway probe Pods
+      ansible.builtin.command: "kubectl -n labweaver-verify wait pod/{{ item }} --for=condition=Ready --timeout=5m"
+      changed_when: false
+      loop: [rwo-writer, rwo-reader, rwx-writer, rwx-reader]
+
+    - name: Require Local Path RWO write/read content
+      ansible.builtin.command: kubectl -n labweaver-verify exec rwo-reader -- cat /data/probe
+      changed_when: false
+      register: rwo_probe
+      failed_when: rwo_probe.stdout | trim != 'rwo-ok'
+
+    - name: Require cross-worker NFS RWX write/read content
+      ansible.builtin.command: kubectl -n labweaver-verify exec rwx-reader -- cat /data/probe
+      changed_when: false
+      register: rwx_probe
+      failed_when: rwx_probe.stdout | trim != 'rwx-ok'
+
+    - name: Wait for Gateway backend and route acceptance
+      ansible.builtin.command: "kubectl -n labweaver-verify rollout status deployment/gateway-backend --timeout=5m"
+      changed_when: false
+
+    - name: Verify internal Gateway HTTPRoute backend response
+      ansible.builtin.command: >-
+        kubectl -n labweaver-verify run gateway-client --image=busybox:1.36 --restart=Never
+        --rm -i -- wget -qO- --header=Host:{{ verify_gateway_hostname }} http://{{ gateway_vip }}
+      changed_when: false
+      register: gateway_probe
+      failed_when: gateway_probe.stdout | trim != 'gateway-ok'
+
+    - name: Start KVM-only VirtualMachine through its Manual lifecycle
+      ansible.builtin.command: virtctl -n labweaver-verify start kvm-probe
+      changed_when: false
+
+    - name: Require a Running KVM VirtualMachineInstance
+      ansible.builtin.command: >-
+        kubectl -n labweaver-verify wait vmi/kvm-probe
+        --for=jsonpath='{.status.phase}'=Running --timeout=5m
+      changed_when: false
+
+    - name: Require a functioning KubeVirt console client
+      ansible.builtin.command: virtctl version
+      changed_when: false
+
+    - name: Exercise KubeVirt console connection
+      ansible.builtin.command: timeout 15s virtctl -n labweaver-verify console kvm-probe
+      changed_when: false
+      register: console_probe
+      failed_when: console_probe.rc not in [0, 124]
+
+    - name: Stop KubeVirt VirtualMachine through its Manual lifecycle
+      ansible.builtin.command: virtctl -n labweaver-verify stop kvm-probe
+      changed_when: false
+
+    - name: Require KubeVirt VirtualMachineInstance to stop
+      ansible.builtin.command: kubectl -n labweaver-verify wait vmi/kvm-probe --for=delete --timeout=5m
+      changed_when: false
+
+    - name: Restart KubeVirt VirtualMachine through its Manual lifecycle
+      ansible.builtin.command: virtctl -n labweaver-verify start kvm-probe
+      changed_when: false
+
+    - name: Require a Running KVM VirtualMachineInstance after restart
+      ansible.builtin.command: >-
+        kubectl -n labweaver-verify wait vmi/kvm-probe
+        --for=jsonpath='{.status.phase}'=Running --timeout=5m
+      changed_when: false
+
+    - name: Verify Cilium control plane and connectivity suite
+      ansible.builtin.command: cilium connectivity test --log-check-only-test-time --timeout 25m
+      changed_when: false
+
+    - name: Read current etcd backup evidence
+      ansible.builtin.slurp:
+        src: "{{ backup_report_path | default('/var/backups/labweaver/latest.json') }}"
+      register: backup_evidence
+
+    - name: Require complete etcd backup evidence
+      ansible.builtin.assert:
+        that:
+          - (backup_evidence.content | b64decode | from_json).overall == 'passed'
+          - (backup_evidence.content | b64decode | from_json).snapshot.sha256 | length == 64
+          - (backup_evidence.content | b64decode | from_json).snapshot.revision | int > 0
+          - (backup_evidence.content | b64decode | from_json).snapshot.size_bytes | int > 0
+          - (backup_evidence.content | b64decode | from_json).snapshot.mode == '0600'
+        fail_msg: ETCD_BACKUP_EVIDENCE_INCOMPLETE
+
+  rescue:
+    - name: Capture failing acceptance diagnostic
+      ansible.builtin.set_fact:
+        verify_failure: "{{ ansible_failed_result.msg | default(ansible_failed_result.stderr | default('VERIFY_CHECK_FAILED')) }}"
+
+  always:
+    - name: Remove Cilium verification artifacts
+      ansible.builtin.command: cilium connectivity test --cleanup
+      changed_when: false
+      register: cilium_cleanup_result
+      failed_when: false
+
+    - name: Remove isolated runtime probe namespace
+      ansible.builtin.command: kubectl delete namespace labweaver-verify --ignore-not-found --wait=true --timeout=5m
+      changed_when: false
+      register: verify_cleanup_result
+      failed_when: false
+
+    - name: Record cleanup failure without suppressing acceptance failure
+      ansible.builtin.set_fact:
+        verify_cleanup_failed: >-
+          {{ cilium_cleanup_result.rc != 0 or verify_cleanup_result.rc != 0 }}
+        verify_cleanup_failure: >-
+          {{ 'CILIUM_CLEANUP_FAILED' if cilium_cleanup_result.rc != 0
+          else 'VERIFY_NAMESPACE_CLEANUP_FAILED' if verify_cleanup_result.rc != 0
+          else None }}
+
+    - name: Write machine-readable acceptance report
+      ansible.builtin.set_fact:
+        verify_report:
+          schema_version: 2
+          event: cluster_verify_complete
+          overall: "{{ 'failed' if verify_failure is defined or (verify_cleanup_failed | bool) else 'passed' }}"
+          failure: "{{ verify_failure | default(None) }}"
+          cleanup:
+            cilium_rc: "{{ cilium_cleanup_result.rc }}"
+            namespace_rc: "{{ verify_cleanup_result.rc }}"
+            failure: "{{ verify_cleanup_failure }}"
+          checks:
+            nodes: "{{ verify_nodes.stdout | default('') }}"
+            rwo: "{{ rwo_probe.stdout | default('') }}"
+            rwx: "{{ rwx_probe.stdout | default('') }}"
+            gateway: "{{ gateway_probe.stdout | default('') }}"
+            console_rc: "{{ console_probe.rc | default(None) }}"
+          build:
+            kubernetes: "{{ kubernetes_patch }}"
+            cilium: "{{ cilium_chart_version }}"
+            kubevirt: "{{ kubevirt_version }}"
+            cdi: "{{ cdi_version }}"
+            cert_manager: "{{ cert_manager_version }}"
+            kyverno: "{{ kyverno_version }}"
+
+    - name: Persist machine-readable acceptance report
+      ansible.builtin.copy:
+        dest: "{{ verification_report_path | default('/var/lib/labweaver-artifacts/verify.json') }}"
+        mode: '0600'
+        content: "{{ verify_report | to_nice_json }}"
+
+- name: Fail after preserving the verification report
+  ansible.builtin.fail:
+    msg: "{{ verify_failure | default(verify_cleanup_failure) }}"
+  when: verify_failure is defined or (verify_cleanup_failed | bool)

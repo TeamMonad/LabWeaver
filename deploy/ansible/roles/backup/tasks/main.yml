@@ -1,0 +1,67 @@
+---
+- name: Install matching etcd client tools
+  ansible.builtin.unarchive:
+    src: "https://github.com/etcd-io/etcd/releases/download/v{{ etcd_version }}/etcd-v{{ etcd_version }}-linux-amd64.tar.gz"
+    dest: /tmp
+    remote_src: true
+    creates: "/tmp/etcd-v{{ etcd_version }}-linux-amd64/etcdctl"
+
+- name: Install etcdctl and etcdutl
+  ansible.builtin.copy:
+    src: "/tmp/etcd-v{{ etcd_version }}-linux-amd64/{{ item }}"
+    dest: "/usr/local/bin/{{ item }}"
+    remote_src: true
+    mode: '0755'
+  loop: [etcdctl, etcdutl]
+
+- name: Create protected backup directory
+  ansible.builtin.file:
+    path: /var/backups/labweaver
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Create timestamped etcd snapshot
+  ansible.builtin.command: >-
+    /usr/local/bin/etcdctl snapshot save /var/backups/labweaver/etcd-{{ ansible_date_time.iso8601_basic_short }}.db
+    --endpoints=https://127.0.0.1:2379
+    --cacert=/etc/kubernetes/pki/etcd/ca.crt
+    --cert=/etc/kubernetes/pki/etcd/server.crt
+    --key=/etc/kubernetes/pki/etcd/server.key
+  environment: { ETCDCTL_API: '3' }
+  register: snapshot
+  changed_when: snapshot.rc == 0
+
+- name: Restrict snapshot permissions
+  ansible.builtin.file:
+    path: "/var/backups/labweaver/etcd-{{ ansible_date_time.iso8601_basic_short }}.db"
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Read structured snapshot status
+  ansible.builtin.command: >-
+    /usr/local/bin/etcdutl snapshot status /var/backups/labweaver/etcd-{{ ansible_date_time.iso8601_basic_short }}.db -w json
+  changed_when: false
+  register: snapshot_status
+
+- name: Read snapshot hash, size, and permissions
+  ansible.builtin.stat:
+    path: "/var/backups/labweaver/etcd-{{ ansible_date_time.iso8601_basic_short }}.db"
+    checksum_algorithm: sha256
+  register: snapshot_file
+
+- name: Write current backup evidence atomically
+  ansible.builtin.copy:
+    dest: "{{ backup_report_path | default('/var/backups/labweaver/latest.json') }}"
+    owner: root
+    group: root
+    mode: '0600'
+    content: >-
+      {{ {'schema_version': 1, 'event': 'etcd_snapshot_complete', 'overall': 'passed',
+      'snapshot': {'path': snapshot_file.stat.path, 'sha256': snapshot_file.stat.checksum,
+      'size_bytes': snapshot_file.stat.size, 'mode': snapshot_file.stat.mode,
+      'revision': (snapshot_status.stdout | from_json).revision,
+      'hash': (snapshot_status.stdout | from_json).hash},
+      'etcd_version': etcd_version, 'created_at': ansible_date_time.iso8601} | to_nice_json }}

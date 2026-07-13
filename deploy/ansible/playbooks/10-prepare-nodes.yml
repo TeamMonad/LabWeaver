@@ -1,0 +1,5 @@
+---
+- name: Prepare Rocky Kubernetes nodes
+  hosts: k8s_cluster
+  gather_facts: true
+  roles: [rocky_common]
