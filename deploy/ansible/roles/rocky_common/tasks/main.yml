@@ -1,0 +1,66 @@
+---
+- name: Install Kubernetes node prerequisites
+  ansible.builtin.dnf:
+    name:
+      - curl
+      - jq
+      - tar
+      - conntrack-tools
+      - socat
+      - ethtool
+      - qemu-guest-agent
+      - container-selinux
+      - policycoreutils-python-utils
+      - dnf-plugins-core
+      - lvm2
+      - chrony
+      - nfs-utils
+    state: present
+
+- name: Enable time sync and guest agent
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop: [chronyd, qemu-guest-agent]
+
+- name: Disable swap immediately
+  ansible.builtin.command: swapoff -a
+  changed_when: false
+
+- name: Comment swap entries in fstab
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^(?!#)(.*\s+swap\s+.*)$'
+    replace: '# \1'
+
+- name: Configure Kubernetes kernel modules
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/k8s.conf
+    mode: '0644'
+    content: "overlay\nbr_netfilter\n"
+
+- name: Load Kubernetes kernel modules
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+  loop: [overlay, br_netfilter]
+
+- name: Configure Kubernetes sysctls
+  ansible.posix.sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    state: present
+    reload: true
+  loop:
+    - { name: net.bridge.bridge-nf-call-iptables, value: '1' }
+    - { name: net.bridge.bridge-nf-call-ip6tables, value: '1' }
+    - { name: net.ipv4.ip_forward, value: '1' }
+    - { name: fs.inotify.max_user_instances, value: '8192' }
+    - { name: fs.inotify.max_user_watches, value: '1048576' }
+
+- name: Disable firewalld only on Kubernetes nodes
+  ansible.builtin.systemd_service:
+    name: firewalld
+    enabled: false
+    state: stopped

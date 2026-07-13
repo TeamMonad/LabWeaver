@@ -1,0 +1,30 @@
+---
+all:
+  vars:
+    ansible_user: rocky
+    ansible_become: true
+    ansible_ssh_private_key_file: "{{ vault_ansible_ssh_private_key_file }}"
+    ansible_ssh_common_args: "{{ vault_ansible_ssh_common_args }}"
+  children:
+    routers:
+      hosts:
+        edge-router:
+          ansible_host: REPLACE_ROUTER_MANAGEMENT_ADDRESS
+    control_plane:
+      hosts:
+        k8s-cp1:
+          ansible_host: REPLACE_CONTROL_PLANE_ADDRESS
+    workers:
+      hosts:
+        k8s-worker1:
+          ansible_host: REPLACE_WORKER1_ADDRESS
+        k8s-worker2:
+          ansible_host: REPLACE_WORKER2_ADDRESS
+    nfs_servers:
+      hosts:
+        nfs-storage:
+          ansible_host: REPLACE_NFS_ADDRESS
+    k8s_cluster:
+      children:
+        control_plane: {}
+        workers: {}

@@ -1,0 +1,5 @@
+---
+- name: Join workers through the approved control plane
+  hosts: workers
+  gather_facts: true
+  roles: [workers]
