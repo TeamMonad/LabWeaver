@@ -1,12 +1,14 @@
 # Data Ownership
 
 The domain model uses one PostgreSQL cluster with independent schemas and
-least-privilege logins. The production rules are defined by
+least-privilege logins. `platform_meta` is deployment metadata, not a business
+domain; no runtime service login can access it. The production rules are defined by
 [ADR 0002](../adr/0002-postgresql-schema-and-migration-policy.md); no schema,
 role or Migration has been implemented by this documentation work.
 
 | PostgreSQL schema | Business owner | Initial planned entities | Write boundary |
 | --- | --- | --- | --- |
+| `platform_meta` | deployment release coordinator | release ledger, lock-attempt and report identities | short-lived provisioner and restricted release-coordinator only; no runtime service access |
 | `control` | Control Service | courses, projects, lab_packages, template_versions, publication_approvals | Control runtime and Migration identities only |
 | `access` | Access Service | devices, access_grants, endpoint_grants, policy_revisions, preauth_issuances | Access runtime and Migration identities only |
 | `environment` | Environment Service | environment_instances, endpoints, configuration_requests, configuration_runs | Environment runtime and Migration identities only |
@@ -26,3 +28,8 @@ references. Cross-schema foreign keys, cascades, triggers and functions are
 prohibited. Consumers must reject or idempotently handle duplicate, stale,
 unsupported and replayed events. Runtime roles cannot run DDL or write another
 domain schema; all schema evolution is the separately controlled Migration Job.
+The short-lived provisioner owns initial schema creation, `PUBLIC` revocation
+and owner-specific default privileges. Each domain Migration login owns its
+Migration history, while runtime has only its own schema DML plus read-only
+history validation access. Connection pools cannot share identities or widen
+their fixed `search_path`.

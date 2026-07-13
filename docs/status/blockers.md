@@ -10,13 +10,16 @@
 
 - Issue #17 freezes only the schema ownership and Migration design. No SQLx
   persistence, database roles, Migration files, controlled Migration Job,
-  Outbox publisher, audit projection or readiness validation exists.
+  release/domain locks, Outbox publisher, audit projection or readiness
+  validation exists. It remains open after this documentation PR.
 - Owner: A for the persistence/release boundary; B must complete the required
-  high-risk Migration review before implementation.
+  high-risk Migration review and approve ADR 0002 with A before it can become
+  accepted.
 - Exit condition: a separately scoped implementation issue provides current
-  PostgreSQL integration evidence for role isolation, schema identity failure,
-  advisory locking, immutable Migration identity, forward repair, Outbox
-  atomicity and idempotent audit projection.
+  PostgreSQL integration evidence for bootstrap/default-privilege enforcement,
+  role and connection identity isolation, all startup/readiness diagnostics,
+  release/domain advisory locks, immutable manifest/history/report identity,
+  forward repair, Outbox atomicity and idempotent audit projection.
 
 ## Resolved blockers
 

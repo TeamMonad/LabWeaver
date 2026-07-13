@@ -51,3 +51,18 @@ atomicity, publisher retry, duplicate/replayed event handling, and
 Control-owned `shared_audit` projection idempotency. A database container and
 real Migration Job are required for this evidence; fixture-only checks cannot
 promote it above E1.
+
+The persistence suite must additionally prove that bootstrap revokes `PUBLIC`
+and default privileges, each pool uses only its assigned role and fixed
+`search_path`, and runtime history access is read-only. It must exercise the
+global release lock, domain locks, crash-released lock recovery, same-release
+retry, different-release blocking, transactional file failure and retained
+partial-domain ledger evidence. It must prove process termination for
+`DB_SCHEMA_MISSING`, `DB_SCHEMA_UNKNOWN`, `DB_SCHEMA_AHEAD`,
+`DB_SCHEMA_INCOMPLETE` and `DB_SCHEMA_CHECKSUM_MISMATCH`, plus live/NotReady
+503 behavior for `DB_SCHEMA_BEHIND` and `DB_SCHEMA_UNAVAILABLE`.
+
+Audit tests must prove that a projection failure cannot change a committed
+business transaction, that it records an unhealthy watermark, and that
+idempotent replay/backfill plus dual-write watermark comparison supports a
+future approved handoff to the audit-projection worker.
