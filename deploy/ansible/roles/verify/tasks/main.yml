@@ -18,7 +18,11 @@
       ansible.builtin.assert:
         that:
           - (verify_nodes.stdout | from_json).items | map(attribute='metadata.name') | sort == verify_expected_kubernetes_nodes | sort
-          - (verify_nodes.stdout | from_json).items | map(attribute='status.conditions') | map('selectattr', 'type', 'equalto', 'Ready') | map('selectattr', 'status', 'equalto', 'True') | map('list') | map('length') | min > 0
+          - >-
+            (verify_nodes.stdout | from_json).items | map(attribute='status.conditions') |
+            map('selectattr', 'type', 'equalto', 'Ready') |
+            map('selectattr', 'status', 'equalto', 'True') | map('list') |
+            map('length') | min > 0
         fail_msg: NODE_NOT_READY_OR_UNEXPECTED
 
     - name: Apply isolated runtime probe resources
@@ -117,18 +121,32 @@
       failed_when: false
 
     - name: Write machine-readable acceptance report
+      ansible.builtin.set_fact:
+        verify_report:
+          schema_version: 2
+          event: cluster_verify_complete
+          overall: "{{ 'failed' if verify_failure is defined else 'passed' }}"
+          failure: "{{ verify_failure | default(None) }}"
+          cleanup_rc: "{{ verify_cleanup_result.rc | default(None) }}"
+          checks:
+            nodes: "{{ verify_nodes.stdout | default('') }}"
+            rwo: "{{ rwo_probe.stdout | default('') }}"
+            rwx: "{{ rwx_probe.stdout | default('') }}"
+            gateway: "{{ gateway_probe.stdout | default('') }}"
+            console_rc: "{{ console_probe.rc | default(None) }}"
+          build:
+            kubernetes: "{{ kubernetes_patch }}"
+            cilium: "{{ cilium_chart_version }}"
+            kubevirt: "{{ kubevirt_version }}"
+            cdi: "{{ cdi_version }}"
+            cert_manager: "{{ cert_manager_version }}"
+            kyverno: "{{ kyverno_version }}"
+
+    - name: Persist machine-readable acceptance report
       ansible.builtin.copy:
         dest: "{{ verification_report_path | default('/var/lib/labweaver-artifacts/verify.json') }}"
         mode: '0600'
-        content: >-
-          {{ {'schema_version': 2, 'event': 'cluster_verify_complete',
-          'overall': 'failed' if verify_failure is defined else 'passed',
-          'failure': verify_failure | default(None), 'cleanup_rc': verify_cleanup_result.rc | default(None),
-          'checks': {'nodes': verify_nodes.stdout | default(''), 'rwo': rwo_probe.stdout | default(''),
-          'rwx': rwx_probe.stdout | default(''), 'gateway': gateway_probe.stdout | default(''),
-          'console_rc': console_probe.rc | default(None)}, 'build': {'kubernetes': kubernetes_patch,
-          'cilium': cilium_chart_version, 'kubevirt': kubevirt_version, 'cdi': cdi_version,
-          'cert_manager': cert_manager_version, 'kyverno': kyverno_version} } | to_nice_json }}
+        content: "{{ verify_report | to_nice_json }}"
 
 - name: Fail after preserving the verification report
   ansible.builtin.fail:

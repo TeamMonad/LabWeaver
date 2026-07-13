@@ -14,6 +14,10 @@ permissions:
 jobs:
   ansible-gate:
     runs-on: ubuntu-latest
+    env:
+      ANSIBLE_CONFIG: ${{ github.workspace }}/deploy/ansible/ansible.cfg
+      ANSIBLE_ROLES_PATH: ${{ github.workspace }}/deploy/ansible/roles
+      ANSIBLE_COLLECTIONS_PATH: ${{ github.workspace }}/deploy/ansible/collections
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

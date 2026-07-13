@@ -77,9 +77,15 @@
   changed_when: false
   when: inventory_hostname in groups['workers']
 
+- name: Read NFS service facts
+  ansible.builtin.service_facts:
+  when: inventory_hostname in groups['nfs_servers']
+
 - name: Assert NFS server is running
-  ansible.builtin.command: systemctl is-active nfs-server
-  changed_when: false
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.services['nfs-server.service'].state == 'running'
+    fail_msg: NFS_SERVER_NOT_RUNNING
   when: inventory_hostname in groups['nfs_servers']
 
 - name: Assert the required NFS export is present
