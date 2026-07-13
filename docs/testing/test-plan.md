@@ -1,5 +1,19 @@
 # Test Plan
 
+## Requirements-baseline traceability
+
+`docs/requirements/acceptance-criteria.md` assigns AC-01 through AC-10-P1 to
+US-01 through US-10. It is the testable requirements baseline, not evidence of
+runtime completion. The matrix records the required target evidence and the
+current `planned`, `blocked`, E0, or E1 state for each acceptance item.
+
+P0 implementation issues must add the mapped requirement IDs to their contract,
+integration, E2E, deployment, and release evidence. A test may close a
+requirement only when its result is tied to the applicable build/deployment
+identity at the evidence level named by the matrix. Fixture-only results do not
+substitute for required real KubeVirt, Access, Resource, Evaluation, Ansible,
+or Playwright proof.
+
 ## API-01a gates
 
 ```sh
