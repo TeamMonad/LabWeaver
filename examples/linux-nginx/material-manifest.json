@@ -1,0 +1,43 @@
+{
+  "schemaVersion": "linux-nginx-material-manifest/v1alpha1",
+  "labId": "linux-nginx-v1",
+  "status": "candidate",
+  "publicArtifacts": [
+    {
+      "path": "materials/index.html",
+      "version": "1.0.0",
+      "sha256": "6a9c304e025105ee43040240da506d4609976dbf2396a48ba7f1c342064fd61c"
+    },
+    {
+      "path": "statement.md",
+      "version": "1.0.0",
+      "sha256": "6c058a78799352f3e8b1e2ce8046a36714a866e58bb57c95a5b960ed068c73dc"
+    },
+    {
+      "path": "submission.yaml",
+      "version": "1.0.0",
+      "sha256": "79412f6567bec57b8aa4a0dbca401554b5b0af2ead8eef198af610c943e9f4d8"
+    },
+    {
+      "path": "evaluation-scenarios.json",
+      "version": "1.0.0",
+      "sha256": "b17681e4612a876940499a7e56487d05c49f4cee10f956b1c358143ce8927fc4"
+    }
+  ],
+  "controlledArtifacts": [
+    {
+      "id": "ubuntu-24.04-vm-image",
+      "version": "unbound",
+      "controlledLocator": "private://linux-nginx/vm-image",
+      "sha256": null,
+      "bindingState": "blocked-pending-approved-image"
+    },
+    {
+      "id": "linux-nginx-probe-profile",
+      "version": "unbound",
+      "controlledLocator": "private://linux-nginx/probe-profile",
+      "sha256": null,
+      "bindingState": "blocked-pending-b-approved-contract"
+    }
+  ]
+}
