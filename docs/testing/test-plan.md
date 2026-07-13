@@ -30,6 +30,30 @@ the allowlist. The JSON Schema and semantic reader both reject attempts to disab
 approval. Score aggregation overflow is exercised in both debug and release profiles. This is
 E1 evidence and does not execute a Runner or production evaluation path.
 
+## Agent Core gates
+
+```sh
+cargo test --locked -p agent-core
+cargo clippy -p agent-core --all-targets --all-features -- -D warnings
+```
+
+State tests cover the valid path, atomic illegal-transition rejection, cancellation, bounded repair,
+execution approval, final release approval and fail-fast entry to `Failed` from every non-terminal
+state while preserving the root-cause diagnostic. Registry tests cover explicit dispatch, missing and
+duplicate bindings, missing implementations, version/risk/capability mismatch, input Schema
+rejection, masked untrusted payloads, approval, Tool failure and incompatible output version/Schema.
+Success and every dispatch rejection/failure assert payload-free audit identity, hashes, outcome and
+diagnostic. Elevated/high-risk dispatch is fail-closed until the approval evidence contract is
+reviewed. A cross-module regression test propagates `LW_AGENT_TOOL_EXECUTION_FAILED` from Tool
+dispatch into the Agent transition record. Pending Tool tests prove bound wall timeout, cooperative
+cancellation and exactly one attempt per Registry call. Implementation failures accept only a closed
+failure-code enum; a regression test passes a secret marker as Tool input and proves neither public
+error Display nor its source chain contains the marker. All implementation failures normalize to
+`LW_AGENT_TOOL_EXECUTION_FAILED`. This is partial E1 evidence; filesystem/network/runtime
+permissions, approved dispatch and durable idempotency reservation/replay are not implemented.
+Fixture Backend belongs to AG-01b. No Agent Service, database, NATS, LLM, build, Environment or
+production execution path is exercised.
+
 ## Governance verification
 
 Read back Milestones, Labels, branch protection, Sprint parents, sub-issues and Project fields through GitHub APIs. The verified governance result is 20 Project items and 15 P0 items with `Workflow Status=Ready`, plus Owner, Review Role, Sprint, Area, Codex Mode, Risk, SP and Evidence metadata.
