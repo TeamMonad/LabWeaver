@@ -175,7 +175,7 @@ Release Gate 是发布前唯一权威入口，必须输出版本化、machine-re
 
 - 分支遵循 `feature/<issue>-<name>`、`fix/<issue>-<name>`、`test/<issue>-<name>`、`docs/<issue>-<name>`；Release 使用 `release/<version>`。
 - 核心 Rust PR 由架构工程师与 Agent 工程师互审；EvaluationSpec、Agent Tool、CRD、Migration、安全策略必须双人评审。作者不得自行批准并合并核心模块。
-- PR 必须关联 Issue，列出范围、契约变化、测试证据、风险与回滚方式；Codex 生成代码适用同等评审和门禁。
+- PR 必须在描述开头以 `Relates to #<issue-id>` 明确引用对应的 GitHub Issue，列出范围、契约变化、测试证据、风险与回滚方式；不得以无 Issue 的“顺手修改”创建 PR。日常 PR 合入 `develop` 时不得使用 `Closes #<issue-id>` 自动关闭 Issue，Issue 只能在合入并完成 Verify 后由验收人关闭。Codex 生成代码适用同等评审和门禁。
 - 创建或更新 PR 前，必须先将当前分支 rebase 到最新 `origin/develop`；禁止带有过期 develop 基线或未说明 merge 拓扑的 PR。
 - 作者创建或更新 PR 后，必须使用 `gh pr edit <pr-number> --add-reviewer <github-login>` 显式请求主 Reviewer；不得仅依赖 CODEOWNERS 的自动路由。PR 描述必须列出 Reviewer、验收人、风险等级与是否可 auto-merge。
 - 常规 PR 合入 `develop` 时，一名匹配 CODEOWNERS 的人类批准即可满足 GitHub 审批门禁。高风险路径（Contract、Schema、Migration、权限/安全、评分、Agent Tool、CRD）必须获得 A+B 两名人类批准；涉及测试、部署或运行证据时，D 必须完成 Verify。高风险 PR 禁止 auto-merge，由 A 在全部门禁通过后手动 squash。
