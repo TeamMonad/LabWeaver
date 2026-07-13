@@ -42,6 +42,12 @@ ROLE.md
 # Generated screenshots (keep script, ignore outputs)
 web/screenshots/*.png
 
+# Playwright authentication state and generated E1/E2E evidence
+web/.auth/
+web/test-results/
+web/playwright-report/
+web/artifacts/playwright/
+
 # Local reference files (not part of project source)
 老师给的作业要求.pptx
 LabWeaver_生产级技术实现方案_v2.1(1).md

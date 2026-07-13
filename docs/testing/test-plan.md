@@ -177,3 +177,24 @@ durable pull-consumer recovery, acknowledgement after durable state mutation,
 declared finite retry/backoff behaviour and quarantine with a stable
 diagnostic/alert after invalid input or retry exhaustion. Fixture-only tests do
 not promote this evidence above E1.
+
+## Playwright role-project configuration (Issue #9)
+
+The requirements baseline is PR #36 at
+`a9bc7a8ab013a35a846a4b428bad22ecc48eca1b`, merged into `develop` by
+`0f80e4e9c4b2334d4a833d1fb6a2263ecc3dda9a`. The integration baseline for this
+worktree is `develop` commit `8ec186599f82afeab7ff5bed346c844ce7f923d1`; it is
+not a replacement for the PR #36 requirements baseline. The `web/` pnpm workspace defines exactly `setup`,
+`teacher`, `student`, and `platform-admin` Playwright projects. By A's explicit
+mapping decision, the `student` project includes the current Web `researcher`
+alias and `platform-admin` maps to the current Web `admin` role. These are test
+classification aliases only, not runtime authorization equivalence.
+
+`pnpm test:e2e:verify`, `pnpm test:e2e:contract`, and
+`pnpm test:e2e:list` provide E1 configuration evidence: project structure,
+artifact retention, fixed-sleep scanning, fail-fast diagnostics, and a
+machine-readable report. `pnpm test:e2e` intentionally blocks with
+`PW_AUTH_SETUP_NOT_IMPLEMENTED` and `PW_NO_RUNTIME_TESTS` until an approved
+authentication contract, safe role storage states, and real runtime tests
+exist. No browser, login, Keycloak/OIDC, backend, role-isolation, E3, or E4
+claim is made by this configuration work.

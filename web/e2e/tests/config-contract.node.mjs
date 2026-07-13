@@ -1,0 +1,43 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { createPlaywrightConfig } from '../../playwright.config.mjs'
+import { PROJECT_NAMES, REQUIREMENTS_BASELINE, ROLE_PROJECTS_BY_NAME } from '../config/role-projects.mjs'
+import { buildReport, validateConfiguration } from '../../scripts/verify-config.mjs'
+
+test('role projects are uniquely derived from the authoritative definition', () => {
+  const config = createPlaywrightConfig({ ci: true })
+  assert.deepEqual(config.projects.map((project) => project.name), PROJECT_NAMES)
+  assert.equal(new Set(PROJECT_NAMES).size, 4)
+  assert.equal(PROJECT_NAMES.includes('researcher'), false)
+  for (const name of ['teacher', 'student', 'platform-admin']) {
+    const project = config.projects.find((candidate) => candidate.name === name)
+    assert.deepEqual(project.dependencies, ['setup'])
+    assert.equal(project.use.storageState, ROLE_PROJECTS_BY_NAME[name].storageState)
+    assert.match(project.use.storageState, /^\.auth\/[a-z-]+\.json$/)
+  }
+  assert.equal(ROLE_PROJECTS_BY_NAME.student.aliases.includes('researcher'), true)
+  assert.equal(ROLE_PROJECTS_BY_NAME['platform-admin'].aliases.includes('admin'), true)
+  assert.equal(config.forbidOnly, true)
+})
+
+test('configuration contract retains failure artifacts and reports E1 only', async () => {
+  const result = await validateConfiguration({ requirementsBaselineHead: REQUIREMENTS_BASELINE.head })
+  assert.deepEqual(result.diagnostics, [])
+  const config = createPlaywrightConfig({ ci: true })
+  assert.equal(config.use.trace, 'retain-on-failure')
+  assert.equal(config.use.screenshot, 'only-on-failure')
+  assert.equal(config.use.video, 'retain-on-failure')
+  const passed = buildReport({ diagnostics: [], overall: 'passed' })
+  const failed = buildReport({ diagnostics: ['PW_FIXED_SLEEP_DETECTED'], overall: 'failed' })
+  const blocked = buildReport({ diagnostics: ['PW_AUTH_SETUP_NOT_IMPLEMENTED'], overall: 'blocked' })
+  assert.equal(passed.event, 'playwright_role_config_verified')
+  assert.equal(failed.event, 'playwright_role_config_failed')
+  assert.equal(blocked.event, 'playwright_role_config_blocked')
+  assert.equal(passed.evidence_level, 'E1')
+  assert.equal(passed.runtime_e2e, 'not_executed')
+})
+
+test('a changed provisional baseline is a fail-fast diagnostic', async () => {
+  const result = await validateConfiguration({ requirementsBaselineHead: 'stale-head' })
+  assert.deepEqual(result.diagnostics, ['PW_REQUIREMENTS_BASELINE_CHANGED'])
+})
