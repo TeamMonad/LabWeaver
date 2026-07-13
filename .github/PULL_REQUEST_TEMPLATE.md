@@ -35,6 +35,16 @@
 - Risk:
 - Rollback or forward recovery:
 
+## Review and merge plan
+
+- Primary Reviewer (requested with `gh pr edit --add-reviewer`):
+- Acceptance owner:
+- Risk level: `risk:low` / `risk:medium` / `risk:high`
+- High-risk path present (Contract/Schema/Migration/Access/Security/Scoring/Agent Tool/CRD): yes / no
+- Auto-merge: eligible / not eligible
+- If eligible, confirm: target is `develop`; PR is ready; linked Issue has `risk:low`; no high-risk path; matching Code Owner approval, required CI, and resolved threads are required before merge.
+- If not eligible, merge owner and manual-squash plan:
+
 ## Codex usage
 
 - Generated or changed by Codex:
