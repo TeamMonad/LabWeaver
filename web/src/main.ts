@@ -2,9 +2,10 @@ import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import router from './router'
 import App from './App.vue'
+import { FIXTURE_MODE_ENABLED } from './config'
 
 async function bootstrap() {
-  if (import.meta.env.DEV) {
+  if (FIXTURE_MODE_ENABLED) {
     const { worker } = await import('./mocks/browser')
     await worker.start({ onUnhandledRequest: 'bypass' })
   }
