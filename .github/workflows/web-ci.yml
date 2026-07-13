@@ -83,26 +83,3 @@ jobs:
         if: steps.changes.outputs.web_changed == 'true'
         working-directory: ./web
         run: pnpm build
-
-      - name: Verify Playwright role-project configuration and fixed-sleep gate
-        if: steps.changes.outputs.web_changed == 'true'
-        working-directory: ./web
-        run: pnpm test:e2e:verify
-
-      - name: Test Playwright role-project contract
-        if: steps.changes.outputs.web_changed == 'true'
-        working-directory: ./web
-        run: pnpm test:e2e:contract
-
-      - name: Load Playwright configuration without browsers
-        if: steps.changes.outputs.web_changed == 'true'
-        working-directory: ./web
-        run: pnpm test:e2e:list
-
-      - name: Upload Playwright configuration report
-        if: always() && steps.changes.outputs.web_changed == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: playwright-role-config-report
-          path: web/artifacts/playwright/playwright-role-config-report.json
-          if-no-files-found: warn

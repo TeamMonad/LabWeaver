@@ -1,0 +1,88 @@
+name: playwright-ci
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+jobs:
+  playwright-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect Playwright changes
+        id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            changed_files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+          else
+            changed_files="$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA")"
+          fi
+
+          if printf '%s\n' "$changed_files" | grep -Eq '^(\.github/workflows/playwright-ci\.yml|\.gitignore|web/package\.json|web/pnpm-lock\.yaml|web/playwright\.config\.mjs|web/e2e/|web/scripts/(fixed-sleep-check|run-e2e|verify-config)\.mjs$)'; then
+            echo "playwright_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "playwright_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Playwright gate not applicable
+        if: steps.changes.outputs.playwright_changed != 'true'
+        shell: bash
+        run: |
+          echo "playwright-gate: not applicable; no Playwright configuration files changed."
+
+      - name: Setup Node.js
+        if: steps.changes.outputs.playwright_changed == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup pnpm
+        if: steps.changes.outputs.playwright_changed == 'true'
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - name: Install dependencies
+        if: steps.changes.outputs.playwright_changed == 'true'
+        working-directory: ./web
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify Playwright role-project configuration and fixed-sleep gate
+        if: steps.changes.outputs.playwright_changed == 'true'
+        working-directory: ./web
+        run: pnpm test:e2e:verify
+
+      - name: Test Playwright role-project contract
+        if: steps.changes.outputs.playwright_changed == 'true'
+        working-directory: ./web
+        run: pnpm test:e2e:contract
+
+      - name: Load Playwright configuration without browsers
+        if: steps.changes.outputs.playwright_changed == 'true'
+        working-directory: ./web
+        run: pnpm test:e2e:list
+
+      - name: Upload Playwright configuration report
+        if: always() && steps.changes.outputs.playwright_changed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-role-config-report
+          path: web/artifacts/playwright/playwright-role-config-report.json
+          if-no-files-found: warn
