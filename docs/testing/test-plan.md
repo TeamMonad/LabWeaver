@@ -1,5 +1,19 @@
 # Test Plan
 
+## Requirements-baseline traceability
+
+`docs/requirements/acceptance-criteria.md` assigns AC-01 through AC-10-P1 to
+US-01 through US-10. It is the testable requirements baseline, not evidence of
+runtime completion. The matrix records the required target evidence and the
+current `planned`, `blocked`, E0, or E1 state for each acceptance item.
+
+P0 implementation issues must add the mapped requirement IDs to their contract,
+integration, E2E, deployment, and release evidence. A test may close a
+requirement only when its result is tied to the applicable build/deployment
+identity at the evidence level named by the matrix. Fixture-only results do not
+substitute for required real KubeVirt, Access, Resource, Evaluation, Ansible,
+or Playwright proof.
+
 ## API-01a gates
 
 ```sh
@@ -30,6 +44,23 @@ the allowlist. The JSON Schema and semantic reader both reject attempts to disab
 approval. Score aggregation overflow is exercised in both debug and release profiles. This is
 E1 evidence and does not execute a Runner or production evaluation path.
 
+## Linux Nginx material-contract gates
+
+```sh
+python examples/linux-nginx/verify_material_contract.py --self-test
+cargo test --locked -p evaluation-domain
+```
+
+The Python validator proves only public material-package integrity: SHA-256
+records, required HTML markers, candidate submission constraints, controlled
+material boundary, the normal target mapping, and the two declared negative
+mappings. It also exercises missing public material, altered template,
+restricted content, and oversized report failures. The `submission.yaml` and
+`LW_LINUX_LAB_*` identifiers are candidate/planned contract material, not a
+runtime schema or implemented diagnostic. The Rust test retains the existing
+EvaluationSpec contract and does not validate HTTP, TCP/80, VM, SSH, Ansible, or
+real Probe behavior. Those remain blocked pending B's approved profile and a
+real KubeVirt E3 run.
 ## Agent Core gates
 
 ```sh
@@ -90,6 +121,46 @@ Audit tests must prove that a projection failure cannot change a committed
 business transaction, that it records an unhealthy watermark, and that
 idempotent replay/backfill plus dual-write watermark comparison supports a
 future approved handoff to the audit-projection worker.
+## Environment lifecycle v1alpha1 planned gates
+
+The proposed `EnvironmentLifecycle v1alpha1` contract has no runtime test
+evidence. Before implementation can be marked complete, its contract and
+integration suites must prove the unified state transition matrix, invalid
+transition rejection, revision conflicts, idempotency-key replay and payload
+conflicts, bounded provider retry exhaustion, and explicit retry/reset paths.
+
+They must also prove Experiment baseline-reset isolation, Work Active-Lease
+requirements, reset acceptance only from `Ready`, `Stopped` and `Failed`, reset
+target convergence, serialized Work configuration, configuration-failure
+transition to `Failed`, access denial for any non-Ready or unhealthy endpoint,
+grant revocation before reset/expiry/failure/delete cleanup, deletion
+idempotency and sanitized `Deleted` tombstone evidence. Provider, Access,
+Resource and KubeVirt evidence remains planned; this documentation is E0 only.
+## Infrastructure automation
+
+| Layer | Required evidence | Failure condition |
+| --- | --- | --- |
+| Static | `ansible-lint`, syntax check, YAML parsing | invalid task, unresolved template, unpinned component |
+| Preflight | private inventory, Vault, interfaces, SELinux, KVM, NFS reachability | any missing prerequisite blocks deploy |
+| Idempotency | two consecutive `ansible-deploy` runs | second run has an unexpected change or error |
+| Storage | Local Path RWO and NFS RWX cross-worker write/read | PVC is not Bound or data is not shared |
+| Runtime | KubeVirt VM start, console, stop/start, cleanup | no hardware KVM-backed Running VMI |
+| Network | Cilium connectivity and internal Gateway route | failed suite or unprogrammed Gateway |
+| Recovery | etcd snapshot plus `etcdutl snapshot status` | snapshot cannot be validated |
+
+## Non-cluster CI evidence
+
+Linux CI runs fixed Ansible dependencies, lint, syntax, fictional encrypted
+Vault loading, mandatory-preflight chain checks, and storage safety fixtures.
+These checks prove only E1/E2 controller behavior; they do not replace E3
+acceptance against the target cluster.
+## Access trust-boundary verification (planned)
+
+ACCESS-01a documents the required test contract; it does not supply executable authorization evidence. The implementation suite must cover valid and invalid OIDC identity, enrollment eligibility, Active-device expansion and removal, cross-user endpoint denial, unsupported protocol, missing/expired/revoked parent or direct grant, endpoint IP reuse, short-lived VNC credential scope, handoff-token replay/expiry, and no partial authorization state after a failed decision.
+
+Contract and integration tests must prove Router-first sequencing, default deny, exact device/IP/port scope, matching Headscale and Router receipts before activation, and no activation when either enforcement action fails or is stale. Revocation tests must prove that the Router blocks the affected flow and clears its connection state within 60 seconds while another valid grant to the same VM remains usable. Endpoint isolation and VM stop tests must prove that escalation is audited and VM stop is refused while any valid grant remains.
+
+Deployed verification must prove direct native SSH/VNC, browser SSH/VNC through the Guacamole handoff path, absence of public or CIDR-wide exposure, and safe traces/audit diagnostics without credentials or session payloads. Kubernetes NetworkPolicy is not accepted as the direct-session containment proof because established-connection behavior is implementation-defined.
 ## NATS Subject and delivery planned gates
 
 [ADR 0003](../adr/0003-nats-subject-and-delivery-contract.md) and the

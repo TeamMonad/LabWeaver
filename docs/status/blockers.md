@@ -20,6 +20,11 @@
   role and connection identity isolation, all startup/readiness diagnostics,
   release/domain advisory locks, immutable manifest/history/report identity,
   forward repair, Outbox atomicity and idempotent audit projection.
+## ACCESS-01a implementation evidence
+
+- The dual-path trust boundary is documented, but no Keycloak handoff, Access Service grant persistence, Headscale Grants compiler, Router firewall controller, Guacamole extension, scoped SSH/VNC credential issuer, containment receipt or VM-stop escalation exists in the current evidence identity.
+- Owner: A for Access contracts, policy boundary and Guacamole handoff; B for Environment endpoint and scoped-credential integration; D for deployed verification and replay evidence.
+- Exit condition: reviewed contracts and implementations provide E1/E2 dual-revision, device-scope and credential tests; E3 deployed Headscale, Router and Guacamole evidence; and E4 multi-device/multi-role replay proving direct and browser paths, 60-second Router isolation, unaffected valid grants and escalation behavior.
 ## NATS runtime implementation
 
 - Issue #18 freezes only the public Subject, CloudEvents, Outbox, ordering,

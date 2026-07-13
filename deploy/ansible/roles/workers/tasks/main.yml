@@ -1,0 +1,11 @@
+---
+- name: Check worker membership
+  ansible.builtin.stat:
+    path: /etc/kubernetes/kubelet.conf
+  register: kubelet_conf
+
+- name: Join worker only when it is not already a member
+  ansible.builtin.command: "{{ hostvars[groups['control_plane'][0]].kubeadm_join_command }}"
+  changed_when: true
+  when: not kubelet_conf.stat.exists
+  no_log: true

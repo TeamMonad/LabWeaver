@@ -1,0 +1,5 @@
+---
+- name: Configure existing router services without changing interface addresses
+  hosts: routers
+  gather_facts: true
+  roles: [router_services]
