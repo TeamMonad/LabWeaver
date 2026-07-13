@@ -44,7 +44,8 @@ jobs:
       - name: Web gate not applicable
         if: steps.changes.outputs.web_changed != 'true'
         shell: bash
-        run: echo "web-gate: not applicable; no Web or Web workflow files changed."
+        run: |
+          echo "web-gate: not applicable; no Web or Web workflow files changed."
 
       - name: Setup Node.js
         if: steps.changes.outputs.web_changed == 'true'
