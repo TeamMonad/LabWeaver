@@ -49,3 +49,19 @@ transition to `Failed`, access denial for any non-Ready or unhealthy endpoint,
 grant revocation before reset/expiry/failure/delete cleanup, deletion
 idempotency and sanitized `Deleted` tombstone evidence. Provider, Access,
 Resource and KubeVirt evidence remains planned; this documentation is E0 only.
+## NATS Subject and delivery planned gates
+
+[ADR 0003](../adr/0003-nats-subject-and-delivery-contract.md) and the
+[NATS Event Contract v1](../contracts/nats-event-contract-v1.md) are E0 design
+evidence only. Before a messaging path is marked implemented, tests must prove
+that every deployed Subject has one catalogued state Owner and handling
+purpose; malformed CloudEvents and Subject/type/dataschema mismatches are
+rejected before mutation; and Owner state, idempotency record and local Outbox
+row commit atomically.
+
+The E2 integration suite must use real PostgreSQL and JetStream to prove
+publish retry, duplicate/replay idempotency, stale and gap sequence blocking,
+durable pull-consumer recovery, acknowledgement after durable state mutation,
+declared finite retry/backoff behaviour and quarantine with a stable
+diagnostic/alert after invalid input or retry exhaustion. Fixture-only tests do
+not promote this evidence above E1.

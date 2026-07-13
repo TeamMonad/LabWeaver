@@ -19,6 +19,8 @@ cargo xtask check
 - `docs/architecture/data-ownership.md`：权威数据所有权；
 - `docs/contracts/environment-lifecycle-v1alpha1.md`：Experiment / Work 环境生命周期正式契约（拟议，未实现）；
 - `docs/adr/0001-environment-lifecycle-domain.md`：环境生命周期跨域决策（待人工评审）；
+- `docs/adr/0003-nats-subject-and-delivery-contract.md`：NATS Subject 与投递语义；
+- `docs/contracts/nats-event-contract-v1.md`：NATS v1 事件目录；
 - `docs/status/implementation-status.md`：实现状态事实源；
 - `docs/testing/test-plan.md`：测试和证据计划；
 - `docs/process/scrum.md`：GitHub Scrum 操作约束。
