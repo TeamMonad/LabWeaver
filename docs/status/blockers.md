@@ -24,6 +24,25 @@
   and replay idempotency, stale/gap sequence blocking, durable-consumer
   recovery, acknowledgement behaviour and terminal quarantine diagnostics.
 
+## Agent Tool permission and approval contract
+
+- Tool bindings do not yet model or enforce filesystem, network or runtime permissions.
+- Elevated/high-risk Tools fail closed because no reviewed approval evidence contract exists.
+- Owner: A freezes permission vocabulary and approval identity, revision, expiry and candidate/input
+  binding; B implements the accepted contract.
+- Exit condition: reviewed contract plus negative tests for permission escalation, stale/mismatched
+  approval and repeated or changed-input dispatch.
+- Impact: Issue #13 remains partially implemented and must not be submitted as complete.
+
+## AG-01b Fixture Backend
+
+- `environment.yaml` generation is blocked because the Environment domain vocabulary and Schema in
+  Issue #16 are not frozen or implemented.
+- Evaluation/LLM fixture generation is also deferred to AG-01b and is not evidence for AG-01a.
+- Owner: A for the Environment domain decision; B consumes the accepted contract in AG-01b.
+- Exit condition: reviewed Environment type/Schema with candidate and teacher-approval semantics.
+- Impact: Issue #13 does not claim a Fixture Backend or Environment + Evaluation generation path.
+
 ## Resolved blockers
 
 - GitHub Project write scope was restored and Issue #20 was closed as completed.
