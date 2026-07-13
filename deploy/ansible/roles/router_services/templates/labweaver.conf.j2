@@ -1,0 +1,8 @@
+interface={{ router_lan_interface }}
+listen-address={{ router_lan_address }}
+bind-interfaces
+domain=lab.lan
+expand-hosts
+{% for upstream in router_dns_upstreams %}
+server={{ upstream }}
+{% endfor %}

@@ -1,5 +1,19 @@
 # Test Plan
 
+## Requirements-baseline traceability
+
+`docs/requirements/acceptance-criteria.md` assigns AC-01 through AC-10-P1 to
+US-01 through US-10. It is the testable requirements baseline, not evidence of
+runtime completion. The matrix records the required target evidence and the
+current `planned`, `blocked`, E0, or E1 state for each acceptance item.
+
+P0 implementation issues must add the mapped requirement IDs to their contract,
+integration, E2E, deployment, and release evidence. A test may close a
+requirement only when its result is tied to the applicable build/deployment
+identity at the evidence level named by the matrix. Fixture-only results do not
+substitute for required real KubeVirt, Access, Resource, Evaluation, Ansible,
+or Playwright proof.
+
 ## API-01a gates
 
 ```sh
@@ -75,6 +89,31 @@ production execution path is exercised.
 
 Read back Milestones, Labels, branch protection, Sprint parents, sub-issues and Project fields through GitHub APIs. The verified governance result is 20 Project items and 15 P0 items with `Workflow Status=Ready`, plus Owner, Review Role, Sprint, Area, Codex Mode, Risk, SP and Evidence metadata.
 
+## Infrastructure automation
+
+| Layer | Required evidence | Failure condition |
+| --- | --- | --- |
+| Static | `ansible-lint`, syntax check, YAML parsing | invalid task, unresolved template, unpinned component |
+| Preflight | private inventory, Vault, interfaces, SELinux, KVM, NFS reachability | any missing prerequisite blocks deploy |
+| Idempotency | two consecutive `ansible-deploy` runs | second run has an unexpected change or error |
+| Storage | Local Path RWO and NFS RWX cross-worker write/read | PVC is not Bound or data is not shared |
+| Runtime | KubeVirt VM start, console, stop/start, cleanup | no hardware KVM-backed Running VMI |
+| Network | Cilium connectivity and internal Gateway route | failed suite or unprogrammed Gateway |
+| Recovery | etcd snapshot plus `etcdutl snapshot status` | snapshot cannot be validated |
+
+## Non-cluster CI evidence
+
+Linux CI runs fixed Ansible dependencies, lint, syntax, fictional encrypted
+Vault loading, mandatory-preflight chain checks, and storage safety fixtures.
+These checks prove only E1/E2 controller behavior; they do not replace E3
+acceptance against the target cluster.
+## Access trust-boundary verification (planned)
+
+ACCESS-01a documents the required test contract; it does not supply executable authorization evidence. The implementation suite must cover valid and invalid OIDC identity, enrollment eligibility, Active-device expansion and removal, cross-user endpoint denial, unsupported protocol, missing/expired/revoked parent or direct grant, endpoint IP reuse, short-lived VNC credential scope, handoff-token replay/expiry, and no partial authorization state after a failed decision.
+
+Contract and integration tests must prove Router-first sequencing, default deny, exact device/IP/port scope, matching Headscale and Router receipts before activation, and no activation when either enforcement action fails or is stale. Revocation tests must prove that the Router blocks the affected flow and clears its connection state within 60 seconds while another valid grant to the same VM remains usable. Endpoint isolation and VM stop tests must prove that escalation is audited and VM stop is refused while any valid grant remains.
+
+Deployed verification must prove direct native SSH/VNC, browser SSH/VNC through the Guacamole handoff path, absence of public or CIDR-wide exposure, and safe traces/audit diagnostics without credentials or session payloads. Kubernetes NetworkPolicy is not accepted as the direct-session containment proof because established-connection behavior is implementation-defined.
 ## NATS Subject and delivery planned gates
 
 [ADR 0003](../adr/0003-nats-subject-and-delivery-contract.md) and the

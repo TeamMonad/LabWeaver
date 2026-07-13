@@ -1,0 +1,23 @@
+schema_version: 1
+kubernetes:
+  minor: v1.35
+  patch: v1.35.6
+crio: 1.35.5
+cilium:
+  chart: 1.19.5
+  image: quay.io/cilium/cilium:v1.19.5@sha256:20fbbc14ac20b55a292c0dcda5571bf31cde30a7dbc68c29db3e709390ab0732
+gateway_api:
+  standard_channel: v1.6.0
+metallb:
+  chart: 0.16.1
+local_path_provisioner: v0.0.36
+nfs_csi:
+  chart: 4.13.4
+cert_manager: v1.21.0
+kubevirt: v1.8.4
+cdi: v1.65.0
+kyverno: v1.18.2
+etcd: 3.6.6
+test_images:
+  busybox: busybox:1.36
+  cirros: quay.io/kubevirt/cirros-container-disk-demo@sha256:e2a45211b1f4a73e40b5356e503786c6dc7b5fb003b5d1d4ffa0a450a3dfdefe
