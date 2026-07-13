@@ -13,6 +13,9 @@ spec:
       exclude:
         - build
       maxBytes: 20971520
+    llmReadable:
+      - src/main.cpp
+      - report.md
   steps:
     - role: gate
       id: preflight
@@ -21,7 +24,8 @@ spec:
         requiredFiles:
           - src/main.cpp
       checker:
-        kind: exact
+        kind: exit_code
+        expected: 0
       failurePolicy: stop
     - role: gate
       id: compile
