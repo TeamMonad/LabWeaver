@@ -6,6 +6,20 @@
 - Owner: B, C and D respectively.
 - Exit condition: each owner supplies its own reviewed PR and required evidence.
 
+## PostgreSQL persistence implementation
+
+- Issue #17 freezes only the schema ownership and Migration design. No SQLx
+  persistence, database roles, Migration files, controlled Migration Job,
+  release/domain locks, Outbox publisher, audit projection or readiness
+  validation exists. It remains open after this documentation PR.
+- Owner: A for the persistence/release boundary; B must complete the required
+  high-risk Migration review and approve ADR 0002 with A before it can become
+  accepted.
+- Exit condition: a separately scoped implementation issue provides current
+  PostgreSQL integration evidence for bootstrap/default-privilege enforcement,
+  role and connection identity isolation, all startup/readiness diagnostics,
+  release/domain advisory locks, immutable manifest/history/report identity,
+  forward repair, Outbox atomicity and idempotent audit projection.
 ## ACCESS-01a implementation evidence
 
 - The dual-path trust boundary is documented, but no Keycloak handoff, Access Service grant persistence, Headscale Grants compiler, Router firewall controller, Guacamole extension, scoped SSH/VNC credential issuer, containment receipt or VM-stop escalation exists in the current evidence identity.

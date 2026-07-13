@@ -9,6 +9,8 @@ No ADR is accepted in ARC-01a; this directory establishes the review process wit
 
 ## Proposed records
 
+- [ADR 0002: PostgreSQL Schema Ownership and Migration Policy](0002-postgresql-schema-and-migration-policy.md)
+  resolves Issue #17 at E0 design level and requires A/B review before runtime implementation.
 - [ADR 0003: NATS Subject and Delivery Contract](0003-nats-subject-and-delivery-contract.md)
   resolves Issue #18 at E0 design level and requires A/B review before runtime
   implementation.
