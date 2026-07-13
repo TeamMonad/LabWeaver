@@ -1,0 +1,24 @@
+name: VM-01a preflight
+
+on:
+  pull_request:
+    branches: [main, develop]
+    paths: ["scripts/preflight/**", "tests/preflight/**", ".github/workflows/vm01a-preflight.yml"]
+  push:
+    branches: [main, develop]
+    paths: ["scripts/preflight/**", "tests/preflight/**", ".github/workflows/vm01a-preflight.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  verifier-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Compile the verifier
+        run: python -m py_compile scripts/preflight/kubevirt_preflight.py
+      - name: Run verifier contract tests
+        run: python -m unittest discover -s tests/preflight
