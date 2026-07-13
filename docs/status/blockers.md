@@ -20,6 +20,18 @@
   role and connection identity isolation, all startup/readiness diagnostics,
   release/domain advisory locks, immutable manifest/history/report identity,
   forward repair, Outbox atomicity and idempotent audit projection.
+## NATS runtime implementation
+
+- Issue #18 freezes only the public Subject, CloudEvents, Outbox, ordering,
+  consumer and quarantine design. No NATS client, Stream, durable Consumer,
+  Outbox publisher, delivery manifest, quarantine path or runtime envelope
+  validation exists.
+- Owner: A for the contract and message boundary; B must complete the required
+  high-risk messaging review before implementation.
+- Exit condition: a separately scoped implementation issue provides E2
+  PostgreSQL and JetStream evidence for atomic Outbox publication, duplicate
+  and replay idempotency, stale/gap sequence blocking, durable-consumer
+  recovery, acknowledgement behaviour and terminal quarantine diagnostics.
 
 ## Resolved blockers
 

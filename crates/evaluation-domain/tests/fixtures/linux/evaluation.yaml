@@ -9,9 +9,9 @@ spec:
       kind: system_facts
       facts:
         - service.nginx.active
-        - network.tcp.80.listening
         - file./etc/nginx/nginx.conf.sha256
       maxBytes: 4194304
+    llmReadable: []
   steps:
     - role: gate
       id: probe-preflight
@@ -42,8 +42,6 @@ spec:
         assertions:
           - fact: service.nginx.active
             expected: true
-          - fact: network.tcp.80.listening
-            expected: true
       checker:
         kind: service_state
         service: nginx
@@ -51,16 +49,6 @@ spec:
       score:
         max: 20
       failurePolicy: continue
-    - role: advisory
-      id: report-review
-      dependsOn: [probe-preflight]
-      runner:
-        kind: llm_review
-        include:
-          - report.md
-        rubric: evaluator://rubrics/linux-report-v1.yaml
-        outputMode: goal_assessment
-      failurePolicy: continue_advisory
   aggregation:
     kind: deterministic_sum
     maxScore: 20
