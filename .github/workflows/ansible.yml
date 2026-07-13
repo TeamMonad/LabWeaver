@@ -1,6 +1,7 @@
 name: Ansible
 
 on:
+  workflow_dispatch:
   pull_request:
     branches: [main, develop]
     paths: ["deploy/ansible/**", "tools/ansible.py", "tests/ansible/**", ".github/workflows/ansible.yml"]
