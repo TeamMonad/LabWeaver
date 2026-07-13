@@ -1,5 +1,5 @@
 <template>
-  <PlaceholderPane icon="🚀" title="资源申请" description="申请 CPU/GPU 算力，查看审批状态、配额和租约剩余时间。" />
+  <PlaceholderPane icon="🚀" title="资源申请" description="申请 CPU/GPU 算力，查看审批状态、配额和租约剩余时间。"  show-mock />
 </template>
 
 <script setup lang="ts">

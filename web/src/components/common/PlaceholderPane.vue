@@ -3,17 +3,28 @@
     <div class="placeholder-icon" aria-hidden="true">{{ icon }}</div>
     <h3 class="placeholder-title">{{ title }}</h3>
     <p class="placeholder-desc">{{ description }}</p>
+    <div v-if="showMock" class="placeholder-mock">
+      <MockBadge />
+      <p class="placeholder-mock-hint">{{ mockHint }}</p>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
+import MockBadge from './MockBadge.vue'
+
 interface Props {
   icon: string
   title: string
   description: string
+  showMock?: boolean
+  mockHint?: string
 }
 
-defineProps<Props>()
+withDefaults(defineProps<Props>(), {
+  showMock: false,
+  mockHint: '此功能尚未接入后端，当前为静态占位展示。',
+})
 </script>
 
 <style scoped>
@@ -49,5 +60,19 @@ defineProps<Props>()
   font: var(--md-sys-body-medium);
   max-width: 520px;
   line-height: 1.6;
+  margin-bottom: 16px;
+}
+
+.placeholder-mock {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.placeholder-mock-hint {
+  font: var(--md-sys-body-small);
+  color: var(--md-sys-color-on-surface-variant);
+  max-width: 480px;
 }
 </style>
