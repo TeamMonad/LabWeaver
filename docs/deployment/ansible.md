@@ -1,5 +1,8 @@
 # Ansible cluster deployment
 
+集群角色、固定版本、存储、网络和证据边界见
+[`cluster-internal-configuration.md`](cluster-internal-configuration.md)。
+
 The deployment entry points are `python tools/ansible.py preflight`,
 `python tools/ansible.py deploy`, `python tools/ansible.py verify`, and
 `python tools/ansible.py backup`.
