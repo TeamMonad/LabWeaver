@@ -1,0 +1,148 @@
+{
+  "$defs": {
+    "EvidenceLocation": {
+      "additionalProperties": false,
+      "description": "Bounded source location cited by an advisory finding.",
+      "properties": {
+        "end_line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        },
+        "start_line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "start_line",
+        "end_line"
+      ],
+      "type": "object"
+    },
+    "FindingResult": {
+      "description": "Advisory result for one rubric criterion.",
+      "oneOf": [
+        {
+          "const": "met",
+          "description": "The criterion is met.",
+          "type": "string"
+        },
+        {
+          "const": "partial",
+          "description": "The criterion is partially met.",
+          "type": "string"
+        },
+        {
+          "const": "missing",
+          "description": "Required evidence or work is missing.",
+          "type": "string"
+        },
+        {
+          "const": "unclear",
+          "description": "Available evidence is unclear.",
+          "type": "string"
+        }
+      ]
+    },
+    "GoalAssessment": {
+      "description": "Overall advisory assessment of a submitted goal.",
+      "oneOf": [
+        {
+          "const": "met",
+          "description": "The goal is fully met according to the advisory rubric.",
+          "type": "string"
+        },
+        {
+          "const": "partially_met",
+          "description": "The goal is only partially met.",
+          "type": "string"
+        },
+        {
+          "const": "not_met",
+          "description": "The goal is not met.",
+          "type": "string"
+        },
+        {
+          "const": "insufficient_evidence",
+          "description": "Evidence is insufficient for an advisory assessment.",
+          "type": "string"
+        }
+      ]
+    },
+    "GoalFinding": {
+      "additionalProperties": false,
+      "description": "One advisory finding with bounded evidence locations.",
+      "properties": {
+        "criterion": {
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceLocation"
+          },
+          "type": "array"
+        },
+        "result": {
+          "$ref": "#/$defs/FindingResult"
+        },
+        "suggestion": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "criterion",
+        "result",
+        "evidence",
+        "suggestion"
+      ],
+      "type": "object"
+    },
+    "GoalReviewSchemaVersion": {
+      "enum": [
+        "goal-review/v1"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Advisory-only review produced by an LLM backend.\n\nThis contract deliberately has no score or verdict field. Unknown fields are rejected during\ndeserialization so an LLM cannot smuggle protected scoring data into the review channel.",
+  "properties": {
+    "assessment": {
+      "$ref": "#/$defs/GoalAssessment"
+    },
+    "confidence": {
+      "format": "double",
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "type": "number"
+    },
+    "findings": {
+      "items": {
+        "$ref": "#/$defs/GoalFinding"
+      },
+      "type": "array"
+    },
+    "requires_teacher_attention": {
+      "type": "boolean"
+    },
+    "schema_version": {
+      "$ref": "#/$defs/GoalReviewSchemaVersion"
+    }
+  },
+  "required": [
+    "schema_version",
+    "assessment",
+    "confidence",
+    "findings",
+    "requires_teacher_attention"
+  ],
+  "title": "GoalReview",
+  "type": "object"
+}
