@@ -1,0 +1,43 @@
+{
+  "name": "labweaver-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "lint": "eslint . --fix",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "axios": "^1.18.1",
+    "oidc-client-ts": "^3.5.0",
+    "pinia": "^2.1.7",
+    "vue": "^3.4.31",
+    "vue-router": "^4.4.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@typescript-eslint/eslint-plugin": "^7.16.0",
+    "@typescript-eslint/parser": "^7.16.0",
+    "@vitejs/plugin-vue": "^5.0.5",
+    "@vue/test-utils": "^2.4.6",
+    "eslint": "^8.57.0",
+    "eslint-plugin-vue": "^9.27.0",
+    "jsdom": "^24.1.0",
+    "msw": "^2.15.0",
+    "tsx": "^4.23.0",
+    "typescript": "^5.5.3",
+    "vite": "^5.3.3",
+    "vitest": "^2.0.2",
+    "vue-tsc": "^2.0.26"
+  },
+  "msw": {
+    "workerDirectory": [
+      "public"
+    ]
+  }
+}
