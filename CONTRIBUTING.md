@@ -23,7 +23,9 @@ cargo xtask check
 
 ## 评审
 
-- 目标分支 `develop` 至少需要一名 Reviewer；
-- 目标分支 `main` 至少需要两名 Reviewer；
-- Contract、Schema、Migration、权限、安全策略和评分语义必须由 A 与 B 双人评审；
-- 作者不得自行批准并合并核心模块。
+- 创建或更新 PR 后，作者必须使用 `gh pr edit <pr-number> --add-reviewer <github-login>` 显式请求主 Reviewer；不得只等待 CODEOWNERS 自动路由。
+- PR 描述必须列出主 Reviewer、验收人、`risk:low`/`risk:medium`/`risk:high` 和是否可 auto-merge。
+- 目标分支 `develop` 的常规路径由一名匹配 CODEOWNERS 的人类批准即可满足 GitHub 审批门禁；目标分支 `main` 至少需要两名 Reviewer。
+- Contract、Schema、Migration、权限或安全、评分、Agent Tool、CRD 必须由 A 与 B 两名人类审批；涉及测试、部署或运行证据时，D 必须完成 Verify。
+- 只有目标为 `develop`、非 Draft、关联 Issue 标记 `risk:low`、无高风险路径、已有匹配 CODEOWNERS 批准、必需 CI 全绿且 Review Thread 全部解决时，作者才可执行 `gh pr merge --auto --squash`。
+- 高风险 PR 和所有指向 `main` 的 PR 禁止 auto-merge；`main` 与 Release PR 由人工 squash。作者不得自行批准并合并核心模块。
