@@ -177,3 +177,28 @@ durable pull-consumer recovery, acknowledgement after durable state mutation,
 declared finite retry/backoff behaviour and quarantine with a stable
 diagnostic/alert after invalid input or retry exhaustion. Fixture-only tests do
 not promote this evidence above E1.
+
+## Playwright role-project configuration (Issue #9)
+
+The requirements baseline is PR #36 at
+`a9bc7a8ab013a35a846a4b428bad22ecc48eca1b`, merged into `develop` by
+`0f80e4e9c4b2334d4a833d1fb6a2263ecc3dda9a`. The integration baseline for this
+worktree is `develop` commit `8ec186599f82afeab7ff5bed346c844ce7f923d1`; it is
+not a replacement for the PR #36 requirements baseline. The `web/` pnpm workspace defines exactly `setup`,
+`teacher`, `student`, and `platform-admin` Playwright projects. `platform-admin`
+maps to the current Web `admin` route naming. `researcher` is an independent
+formal role and is deliberately outside Issue #9: it has no project, alias,
+test match, or shared `student` authentication state here. A future approved
+Issue must provide its project and auth state independently.
+
+`pnpm test:e2e:gate` runs `verify`, `contract`, and configuration `list`, then
+atomically writes the aggregate E1 report with every check's status and exit
+code. The report is invalidated at gate start so a failed build cannot upload a
+previous successful result. Requirements-baseline metadata and its comparison
+logic are covered by the contract tests; CI does not currently supply an
+externally pinned baseline-change input. `pnpm test:e2e` intentionally blocks with
+`PW_AUTH_SETUP_NOT_IMPLEMENTED` and `PW_NO_RUNTIME_TESTS` until an approved
+authentication contract, safe role storage states, and real runtime tests
+exist; subprocess contract tests verify both specified blocked entrypoints. No
+browser, login, Keycloak/OIDC, backend, role-isolation, E3, or E4 claim is made
+by this configuration work.

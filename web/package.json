@@ -10,7 +10,13 @@
     "lint": "eslint . --max-warnings=0",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "vue-tsc --noEmit"
+    "typecheck": "vue-tsc --noEmit",
+    "test:e2e:contract": "node --test e2e/tests/*.node.mjs",
+    "test:e2e:sleep": "node scripts/fixed-sleep-check.mjs",
+    "test:e2e:verify": "node scripts/verify-config.mjs",
+    "test:e2e:list": "playwright test --list --config=playwright.config.mjs",
+    "test:e2e:gate": "node scripts/e2e-gate.mjs",
+    "test:e2e": "node scripts/run-e2e.mjs"
   },
   "dependencies": {
     "axios": "^1.18.1",
