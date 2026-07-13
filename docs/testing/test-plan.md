@@ -33,3 +33,21 @@ E1 evidence and does not execute a Runner or production evaluation path.
 ## Governance verification
 
 Read back Milestones, Labels, branch protection, Sprint parents, sub-issues and Project fields through GitHub APIs. The verified governance result is 20 Project items and 15 P0 items with `Workflow Status=Ready`, plus Owner, Review Role, Sprint, Area, Codex Mode, Risk, SP and Evidence metadata.
+
+## PostgreSQL ownership and Migration planned gates
+
+[ADR 0002](../adr/0002-postgresql-schema-and-migration-policy.md) and the
+[Database Migration contract](../development/database-migrations.md) are E0
+design evidence only. Before any persistence path is marked implemented, tests
+must prove that runtime roles cannot execute DDL or cross-domain writes;
+unknown, missing, ahead, behind and checksum-mismatched schema identities deny
+readiness with stable diagnostics; and concurrent Migration Jobs serialize with
+the domain advisory lock.
+
+The integration suite must also prove repeat execution, immutable history,
+build-identity report validation, partial-failure blocking, Expand/Contract
+compatibility, reviewed forward repair, transaction-plus-domain-Outbox
+atomicity, publisher retry, duplicate/replayed event handling, and
+Control-owned `shared_audit` projection idempotency. A database container and
+real Migration Job are required for this evidence; fixture-only checks cannot
+promote it above E1.

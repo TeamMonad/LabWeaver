@@ -6,6 +6,18 @@
 - Owner: B, C and D respectively.
 - Exit condition: each owner supplies its own reviewed PR and required evidence.
 
+## PostgreSQL persistence implementation
+
+- Issue #17 freezes only the schema ownership and Migration design. No SQLx
+  persistence, database roles, Migration files, controlled Migration Job,
+  Outbox publisher, audit projection or readiness validation exists.
+- Owner: A for the persistence/release boundary; B must complete the required
+  high-risk Migration review before implementation.
+- Exit condition: a separately scoped implementation issue provides current
+  PostgreSQL integration evidence for role isolation, schema identity failure,
+  advisory locking, immutable Migration identity, forward repair, Outbox
+  atomicity and idempotent audit projection.
+
 ## Resolved blockers
 
 - GitHub Project write scope was restored and Issue #20 was closed as completed.

@@ -17,6 +17,8 @@ cargo xtask check
 - `docs/architecture/c4.md`：系统上下文与容器边界；
 - `docs/architecture/service-boundaries.md`：服务职责和依赖规则；
 - `docs/architecture/data-ownership.md`：权威数据所有权；
+- `docs/adr/0002-postgresql-schema-and-migration-policy.md`：PostgreSQL 所有权与迁移策略；
+- `docs/development/database-migrations.md`：数据库迁移正式契约；
 - `docs/status/implementation-status.md`：实现状态事实源；
 - `docs/testing/test-plan.md`：测试和证据计划；
 - `docs/process/scrum.md`：GitHub Scrum 操作约束。
