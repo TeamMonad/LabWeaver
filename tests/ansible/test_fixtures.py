@@ -61,6 +61,14 @@ class AnsibleFixtureTests(unittest.TestCase):
         site = (ROOT / "deploy/ansible/playbooks/site.yml").read_text(encoding="utf-8")
         self.assertEqual(site.splitlines()[1], "- import_playbook: 00-preflight.yml")
 
+    def test_verify_uses_manual_vm_lifecycle_and_fails_on_cleanup(self) -> None:
+        verify = (ROOT / "deploy/ansible/roles/verify/tasks/main.yml").read_text(encoding="utf-8")
+        self.assertIn("virtctl -n labweaver-verify start kvm-probe", verify)
+        self.assertIn("virtctl -n labweaver-verify stop kvm-probe", verify)
+        self.assertNotIn("patch virtualmachine/kvm-probe", verify)
+        self.assertIn("verify_cleanup_failed", verify)
+        self.assertIn("CILIUM_CLEANUP_FAILED", verify)
+
     def test_storage_safety_rejects_dangerous_devices(self) -> None:
         safe = {"path": "/dev/test", "type": "disk", "fstype": None, "wwn": "fixture-wwn", "size": 1073741824, "pkname": None, "mountpoints": [None]}
         result = SAFETY.validate([safe], "/dev/test", "fixture-wwn", 1073741824, "/dev/root", [])

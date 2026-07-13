@@ -59,8 +59,8 @@
       register: gateway_probe
       failed_when: gateway_probe.stdout | trim != 'gateway-ok'
 
-    - name: Start KVM-only VirtualMachine
-      ansible.builtin.command: kubectl -n labweaver-verify patch virtualmachine/kvm-probe --type merge -p '{"spec":{"running":true}}'
+    - name: Start KVM-only VirtualMachine through its Manual lifecycle
+      ansible.builtin.command: virtctl -n labweaver-verify start kvm-probe
       changed_when: false
 
     - name: Require a Running KVM VirtualMachineInstance
@@ -79,10 +79,23 @@
       register: console_probe
       failed_when: console_probe.rc not in [0, 124]
 
-    - name: Stop and restart KubeVirt VirtualMachine
-      ansible.builtin.command: "virtctl -n labweaver-verify {{ item }} kvm-probe"
+    - name: Stop KubeVirt VirtualMachine through its Manual lifecycle
+      ansible.builtin.command: virtctl -n labweaver-verify stop kvm-probe
       changed_when: false
-      loop: [stop, start]
+
+    - name: Require KubeVirt VirtualMachineInstance to stop
+      ansible.builtin.command: kubectl -n labweaver-verify wait vmi/kvm-probe --for=delete --timeout=5m
+      changed_when: false
+
+    - name: Restart KubeVirt VirtualMachine through its Manual lifecycle
+      ansible.builtin.command: virtctl -n labweaver-verify start kvm-probe
+      changed_when: false
+
+    - name: Require a Running KVM VirtualMachineInstance after restart
+      ansible.builtin.command: >-
+        kubectl -n labweaver-verify wait vmi/kvm-probe
+        --for=jsonpath='{.status.phase}'=Running --timeout=5m
+      changed_when: false
 
     - name: Verify Cilium control plane and connectivity suite
       ansible.builtin.command: cilium connectivity test --log-check-only-test-time --timeout 25m
@@ -112,6 +125,7 @@
     - name: Remove Cilium verification artifacts
       ansible.builtin.command: cilium connectivity test --cleanup
       changed_when: false
+      register: cilium_cleanup_result
       failed_when: false
 
     - name: Remove isolated runtime probe namespace
@@ -120,14 +134,26 @@
       register: verify_cleanup_result
       failed_when: false
 
+    - name: Record cleanup failure without suppressing acceptance failure
+      ansible.builtin.set_fact:
+        verify_cleanup_failed: >-
+          {{ cilium_cleanup_result.rc != 0 or verify_cleanup_result.rc != 0 }}
+        verify_cleanup_failure: >-
+          {{ 'CILIUM_CLEANUP_FAILED' if cilium_cleanup_result.rc != 0
+          else 'VERIFY_NAMESPACE_CLEANUP_FAILED' if verify_cleanup_result.rc != 0
+          else None }}
+
     - name: Write machine-readable acceptance report
       ansible.builtin.set_fact:
         verify_report:
           schema_version: 2
           event: cluster_verify_complete
-          overall: "{{ 'failed' if verify_failure is defined else 'passed' }}"
+          overall: "{{ 'failed' if verify_failure is defined or (verify_cleanup_failed | bool) else 'passed' }}"
           failure: "{{ verify_failure | default(None) }}"
-          cleanup_rc: "{{ verify_cleanup_result.rc | default(None) }}"
+          cleanup:
+            cilium_rc: "{{ cilium_cleanup_result.rc }}"
+            namespace_rc: "{{ verify_cleanup_result.rc }}"
+            failure: "{{ verify_cleanup_failure }}"
           checks:
             nodes: "{{ verify_nodes.stdout | default('') }}"
             rwo: "{{ rwo_probe.stdout | default('') }}"
@@ -150,5 +176,5 @@
 
 - name: Fail after preserving the verification report
   ansible.builtin.fail:
-    msg: "{{ verify_failure }}"
-  when: verify_failure is defined
+    msg: "{{ verify_failure | default(verify_cleanup_failure) }}"
+  when: verify_failure is defined or (verify_cleanup_failed | bool)
