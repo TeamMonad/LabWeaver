@@ -30,6 +30,24 @@ the allowlist. The JSON Schema and semantic reader both reject attempts to disab
 approval. Score aggregation overflow is exercised in both debug and release profiles. This is
 E1 evidence and does not execute a Runner or production evaluation path.
 
+## Linux Nginx material-contract gates
+
+```sh
+python examples/linux-nginx/verify_material_contract.py --self-test
+cargo test --locked -p evaluation-domain
+```
+
+The Python validator proves only public material-package integrity: SHA-256
+records, required HTML markers, candidate submission constraints, controlled
+material boundary, the normal target mapping, and the two declared negative
+mappings. It also exercises missing public material, altered template,
+restricted content, and oversized report failures. The `submission.yaml` and
+`LW_LINUX_LAB_*` identifiers are candidate/planned contract material, not a
+runtime schema or implemented diagnostic. The Rust test retains the existing
+EvaluationSpec contract and does not validate HTTP, TCP/80, VM, SSH, Ansible, or
+real Probe behavior. Those remain blocked pending B's approved profile and a
+real KubeVirt E3 run.
+
 ## Governance verification
 
 Read back Milestones, Labels, branch protection, Sprint parents, sub-issues and Project fields through GitHub APIs. The verified governance result is 20 Project items and 15 P0 items with `Workflow Status=Ready`, plus Owner, Review Role, Sprint, Area, Codex Mode, Risk, SP and Evidence metadata.

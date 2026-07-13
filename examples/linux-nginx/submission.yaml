@@ -1,0 +1,19 @@
+# Candidate only: no formal SubmissionManifest schema or Reader exists yet.
+apiVersion: materials.labweaver.io/v1alpha1
+kind: CandidateSubmissionManifest
+metadata:
+  name: linux-nginx-v1
+  status: candidate
+spec:
+  source: vm-submission-location
+  required:
+    - report.md
+  maxFileBytes:
+    report.md: 65536
+  llmReadable:
+    - report.md
+  missingReport:
+    disposition: advisory_failed_requires_manual_review
+    diagnostic: LW_LINUX_LAB_REPORT_MISSING
+  deterministicScoring:
+    report.md: excluded

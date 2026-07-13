@@ -12,5 +12,6 @@ Status is proven only by the identified commit/worktree and current evidence. `d
 | C4, service boundaries and data ownership | A | documented, pending review | current documentation PR | E0 | design evidence only |
 | NATS Subject v1 and delivery contract | A | documented, pending A/B review | ADR 0003 and NATS event catalog | E0 | no NATS client, JetStream Stream/Consumer, Outbox publisher, quarantine path or integration evidence |
 | EvaluationSpec v1alpha1 contract | B | implemented in current worktree, pending review | generated schemas, OJ/Linux fixtures and `evaluation-domain` contract tests | E1 | no Runner execution, persistence, messaging or production approval path |
+| Linux Nginx material contract | A | implemented in current worktree, pending review | public-safe example package, candidate manifests, Python material validator and reviewed contract | E1 | no approved VM image, SubmissionManifest Reader, full Probe capability, KubeVirt VM, or E3 evidence; B owns the blocking runtime contract |
 | Frontend, Agent runtime and Playwright work | C/B/D | planned | assigned Sprint Issues | E0 | explicitly outside role A implementation scope |
 | Real KubeVirt path | B/D | blocked pending preflight | Issue #15 | E0 | no E3 evidence exists |
