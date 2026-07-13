@@ -6,15 +6,17 @@
       "properties": {
         "end_line": {
           "format": "uint32",
-          "minimum": 0,
+          "minimum": 1,
           "type": "integer"
         },
         "path": {
+          "maxLength": 1024,
+          "minLength": 1,
           "type": "string"
         },
         "start_line": {
           "format": "uint32",
-          "minimum": 0,
+          "minimum": 1,
           "type": "integer"
         }
       },
@@ -80,18 +82,24 @@
       "description": "One advisory finding with bounded evidence locations.",
       "properties": {
         "criterion": {
+          "maxLength": 1024,
+          "minLength": 1,
           "type": "string"
         },
         "evidence": {
           "items": {
             "$ref": "#/$defs/EvidenceLocation"
           },
+          "maxItems": 16,
+          "minItems": 1,
           "type": "array"
         },
         "result": {
           "$ref": "#/$defs/FindingResult"
         },
         "suggestion": {
+          "maxLength": 4096,
+          "minLength": 1,
           "type": "string"
         }
       },
@@ -127,6 +135,7 @@
       "items": {
         "$ref": "#/$defs/GoalFinding"
       },
+      "maxItems": 64,
       "type": "array"
     },
     "requires_teacher_attention": {

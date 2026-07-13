@@ -723,10 +723,17 @@
       "properties": {
         "collector": {
           "$ref": "#/$defs/CollectorSpec"
+        },
+        "llmReadable": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "required": [
-        "collector"
+        "collector",
+        "llmReadable"
       ],
       "type": "object"
     },
