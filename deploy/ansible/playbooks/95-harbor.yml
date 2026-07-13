@@ -1,0 +1,9 @@
+---
+# This deliberately does not import site.yml. The cluster is already adopted;
+# bootstrap roles are read-only preflight inputs, never reconciliation targets.
+- import_playbook: 00-preflight.yml
+
+- name: Reconcile Harbor on an adopted LabWeaver cluster
+  hosts: control_plane
+  gather_facts: false
+  roles: [harbor]

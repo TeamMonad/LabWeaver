@@ -10,5 +10,8 @@ publish = false
 [dependencies]
 clap = { version = "4.5.40", features = ["derive"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+ansible = { package = "ansible-rs", version = "1.1.0" }
+
 [lints]
 workspace = true

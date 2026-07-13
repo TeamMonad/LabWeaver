@@ -142,11 +142,35 @@ Resource and KubeVirt evidence remains planned; this documentation is E0 only.
 | --- | --- | --- |
 | Static | `ansible-lint`, syntax check, YAML parsing | invalid task, unresolved template, unpinned component |
 | Preflight | private inventory, Vault, interfaces, SELinux, KVM, NFS reachability | any missing prerequisite blocks deploy |
-| Idempotency | two consecutive `ansible-deploy` runs | second run has an unexpected change or error |
+| Idempotency | two consecutive `cargo xtask deploy --infra --env <env> --yes` runs from the router worktree | second run has an unexpected change or error |
 | Storage | Local Path RWO and NFS RWX cross-worker write/read | PVC is not Bound or data is not shared |
 | Runtime | KubeVirt VM start, console, stop/start, cleanup | no hardware KVM-backed Running VMI |
 | Network | Cilium connectivity and internal Gateway route | failed suite or unprogrammed Gateway |
 | Recovery | etcd snapshot plus `etcdutl snapshot status` | snapshot cannot be validated |
+
+### Harbor adopted-cluster gates (Issue #23)
+
+The Harbor controller path is deliberately separate from `site.yml`. It must
+refuse an unknown cluster, a changed existing Gateway, a conflicting VIP/DNS
+record, a missing root-only secret locator, a missing storage class, an
+unlocked chart/application version, or a configuration that would invoke a
+bootstrap role. The controller must run only on the Linux router worktree and
+must fail on Windows rather than selecting a different launcher or PATH fallback.
+
+Required controller evidence is: router-side `cargo fmt --check`, Linux
+`cargo clippy` and unit tests, `ansible-lint`, playbook syntax check, and a
+check/diff before a real reconciliation. The real run must verify the dedicated
+namespace/PVCs/Pods, Gateway `Programmed`, DNS, internal-CA TLS trust,
+authenticated Harbor health and `labweaver-system` policy. A second run must
+have no undeclared mutation. This remains E2 deployment evidence until the
+declared push/pull/scan and recovery gates are separately performed.
+
+TestFlight is emitted as a run-scoped, schema-validated
+`InfrastructureTestFlightReport`; it binds the deployment manifest and cluster
+UID, records cleanup, and remains `blocked` while Harbor OIDC is not configured.
+
+OIDC is a non-goal for Issue #23. Its absence is a Release Gate blocker, not an
+optional success path.
 
 ### VM-01a E3 run
 

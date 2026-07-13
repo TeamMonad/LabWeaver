@@ -1,0 +1,13 @@
+{
+  "schema_version": "infrastructure-deployment-manifest.v1",
+  "run_id": "{{ harbor_run_id }}",
+  "commit_sha": "{{ harbor_commit_sha }}",
+  "inventory_hash": "sha256:{{ lookup('file', inventory_file) | hash('sha256') }}",
+  "component_lock_hash": "sha256:{{ lookup('file', playbook_dir ~ '/../../versions.lock.yml') | hash('sha256') }}",
+  "cluster_uid": "{{ harbor_cluster_identity }}",
+  "namespace": "harbor",
+  "chart": {"name": "harbor", "version": "1.19.1", "app_version": "2.15.1"},
+  "harbor_policy_manifest_hash": "{{ harbor_policy_hash }}",
+  "readiness": true,
+  "cleanup": {"status": "not_required"}
+}

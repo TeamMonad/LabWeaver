@@ -18,6 +18,16 @@ kubevirt: v1.8.4
 cdi: v1.65.0
 kyverno: v1.18.2
 etcd: 3.6.6
+harbor:
+  chart: 1.19.1
+  app: 2.15.1
+  oidc: disabled
+  topology: single-instance
+  persistence:
+    database: local-path
+    redis: local-path
+    registry: nfs-rwx
+    trivy: nfs-rwx
 test_images:
   busybox: busybox:1.36
   cirros: quay.io/kubevirt/cirros-container-disk-demo@sha256:e2a45211b1f4a73e40b5356e503786c6dc7b5fb003b5d1d4ffa0a450a3dfdefe

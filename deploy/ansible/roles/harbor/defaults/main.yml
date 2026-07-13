@@ -1,0 +1,3 @@
+---
+harbor_project_name: labweaver-system
+harbor_chart_archive: /var/lib/labweaver/bundle/harbor-1.19.1.tgz

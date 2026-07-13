@@ -24,16 +24,41 @@ Status is proven only by the identified commit/worktree and current evidence. `d
 
 ## Kubernetes infrastructure automation
 
-State: implemented, pending review and real Ansible replay.
+State: implemented, pending review; the router replay is complete for the
+currently scoped baseline.
 
 The Ansible playbooks encode the currently validated Rocky Kubernetes baseline:
 Kubernetes/CRI-O, Cilium, MetalLB, Local Path, NFS CSI, cert-manager, KubeVirt,
 CDI, Kyverno, internal Gateway, and etcd backup. The prior manual environment
-provided E3 evidence; this branch does not claim E3 for the playbooks until a
-fresh deploy and second idempotency run complete.
+provided E3 evidence. The router worktree has now completed a guarded deploy,
+backup, TestFlight verification, and a second idempotent deploy under the same
+source identity.
 
-Linux CI now provides lint, syntax, fictional encrypted-Vault, preflight-chain,
-and storage-safety fixture evidence. This is not E3 evidence. Blockers remain:
-private inventory, encrypted Vault, a Linux Ansible controller, and a real
-replay environment for first deploy, idempotency, storage, VM, Gateway, Cilium,
-and etcd acceptance.
+Linux CI continues to provide lint, syntax, fictional encrypted-Vault,
+preflight-chain, and storage-safety fixture evidence. The router is now the
+only Linux execution authority for the real controller path; its evidence is
+recorded below. Bootstrap remains intentionally out of scope for an adopted
+cluster, and the existing baseline is read-only validated before Harbor
+reconciliation.
+
+## Harbor infrastructure (Issue #23)
+
+State: manual adopted-cluster deployment established; guarded controller
+reconciliation, router-side ansible-rs entrypoint, and sanitized manifest schemas
+are implemented in this worktree. Router lint and syntax-check pass; the real
+ansible-rs replay, backup, TestFlight verification, and idempotency run pass.
+
+The manual deployment uses chart `1.19.1` and Harbor `2.15.1`, a dedicated
+namespace, internal CA/TLS, a separate Cilium Gateway/HTTPRoute, a dedicated
+router DNS fragment, the `local-path`/`nfs-rwx` single-instance storage split,
+and the private `labweaver-system` project. The Trivy volume ownership repair
+was scoped to the newly-created Harbor PVC after the NFS CSI provisioner created
+it with anonymous ownership. It is deployment evidence only, not a replacement
+for the future reconciler's first-run and replay evidence.
+
+The TestFlight report is schema-validated and intentionally `blocked` on
+`issue-23-oidc-not-configured`. Keycloak OIDC is intentionally not configured.
+Registry push/pull/scan policy replay, immutable-tag and retention enforcement,
+recovery drills, a reviewed Cilium policy for host-network Gateway traffic, and
+Release Gate evidence remain blockers. Issue #23 must not be closed or
+represented as release-ready.

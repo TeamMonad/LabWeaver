@@ -1,8 +1,13 @@
 # Ansible cluster deployment
 
-The deployment entry points are `python tools/ansible.py preflight`,
-`python tools/ansible.py deploy`, `python tools/ansible.py verify`, and
-`python tools/ansible.py backup`.
+The only deployment controller entry points are `cargo xtask preflight --infra
+--env <environment>`, `cargo xtask deploy --infra --env <environment> --yes`,
+`cargo xtask verify --infra --env <environment> --yes`, and `cargo xtask backup
+--infra --env <environment> --yes`. They run only on the approved Linux router
+worktree through `ansible-rs`; Windows fails with a stable unsupported-platform
+diagnostic. The removed Python launcher is not a deployment fallback.
+The router invocation must export `LABWEAVER_SOURCE_COMMIT` with the verified
+bundle commit; missing or malformed identity fails before Ansible starts.
 
 Copy the inventory and group-variable examples to ignored private files. The
 private layout is `group_vars/all/main.yml`, encrypted
@@ -25,8 +30,12 @@ The deployment controller needs Ansible and the collections in
 `deploy/ansible/requirements.yml`; it also needs the pinned Helm and Cilium CLI
 already available on the control-plane host. Their absence is a deliberate
 preflight failure, never an implicit version selection.
+Harbor also requires the verified local `harbor-1.19.1.tgz` archive declared by
+`harbor_chart_archive`; a remote repository fallback is not allowed.
 
 `ansible-lint`, syntax checks, encrypted fictional-Vault loading, and storage
-safety fixtures run on Linux CI. They are static or fixture evidence only; a
-real deployment, idempotent replay, VM, storage, Gateway, Cilium, and etcd
-acceptance run remain required E3 evidence.
+safety fixtures run on Linux CI. The approved router worktree additionally
+provides the real deploy, backup, isolated VM/storage/Gateway/Cilium probes,
+schema-validated TestFlight report, and second idempotent replay. The report
+remains blocked until OIDC, Harbor policy/recovery, and Release Gate evidence
+are completed.

@@ -1,14 +1,11 @@
-"""Linux-controller evidence for the Ansible launcher and safety policies."""
+"""Contract evidence for the router-owned Ansible controller and safety policies."""
 
 from __future__ import annotations
 
 import importlib.util
 import json
 from pathlib import Path
-import shutil
-import subprocess
 import sys
-import tempfile
 import unittest
 
 
@@ -22,40 +19,12 @@ sys.modules[SPEC.name] = SAFETY
 SPEC.loader.exec_module(SAFETY)
 
 
-def run(*command: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, cwd=cwd, text=True, capture_output=True, check=False)
-
-
 class AnsibleFixtureTests(unittest.TestCase):
-    @unittest.skipUnless(
-        shutil.which("ansible-vault") and shutil.which("ansible-playbook"),
-        "requires a Linux/Unix Ansible controller; enforced by the Linux CI gate",
-    )
-    def test_encrypted_group_vault_is_loaded_by_inventory_and_playbook(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            group_vars = root / "group_vars/all"
-            group_vars.mkdir(parents=True)
-            password = root / ".vault-password"
-            password.write_text("fictional-fixture-password\n", encoding="utf-8")
-            (root / "hosts.yml").write_text(
-                "all:\n  hosts:\n    fixture:\n      ansible_connection: local\n      ansible_user: '{{ vault_fixture_user }}'\n",
-                encoding="utf-8",
-            )
-            (group_vars / "main.yml").write_text("fixture_public_value: visible\n", encoding="utf-8")
-            encrypted = run(
-                "ansible-vault", "encrypt_string", "--vault-password-file", str(password),
-                "--name", "vault_fixture_user", "fictional-fixture-user",
-            )
-            self.assertEqual(encrypted.returncode, 0, encrypted.stderr)
-            (group_vars / "vault.yml").write_text(encrypted.stdout, encoding="utf-8")
-            playbook = root / "assert.yml"
-            playbook.write_text(
-                "- hosts: fixture\n  gather_facts: false\n  tasks:\n    - ansible.builtin.assert:\n        that:\n          - ansible_user == 'fictional-fixture-user'\n          - fixture_public_value == 'visible'\n",
-                encoding="utf-8",
-            )
-            result = run("ansible-playbook", "-i", "hosts.yml", "--vault-password-file", ".vault-password", "assert.yml", cwd=root)
-            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+    def test_controller_execution_is_router_owned(self) -> None:
+        docs = (ROOT / "docs/deployment/ansible.md").read_text(encoding="utf-8")
+        self.assertIn("cargo xtask deploy --infra", docs)
+        self.assertIn("ansible-rs", docs)
+        self.assertNotIn("tools/ansible.py", docs)
 
     def test_deploy_starts_with_preflight(self) -> None:
         site = (ROOT / "deploy/ansible/playbooks/site.yml").read_text(encoding="utf-8")
@@ -63,8 +32,9 @@ class AnsibleFixtureTests(unittest.TestCase):
 
     def test_verify_uses_manual_vm_lifecycle_and_fails_on_cleanup(self) -> None:
         verify = (ROOT / "deploy/ansible/roles/verify/tasks/main.yml").read_text(encoding="utf-8")
-        self.assertIn("virtctl -n labweaver-verify start kvm-probe", verify)
-        self.assertIn("virtctl -n labweaver-verify stop kvm-probe", verify)
+        self.assertIn("verify_runtime_namespace", verify)
+        self.assertIn("virtctl -n {{ verify_runtime_namespace }} start kvm-probe", verify)
+        self.assertIn("virtctl -n {{ verify_runtime_namespace }} stop kvm-probe", verify)
         self.assertNotIn("patch virtualmachine/kvm-probe", verify)
         self.assertIn("verify_cleanup_failed", verify)
         self.assertIn("CILIUM_CLEANUP_FAILED", verify)

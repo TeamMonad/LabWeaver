@@ -63,6 +63,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ansible-rs"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "552f8da9b2906619b6e90a2c3e0d62ba3c127fcf8f7375a93324f95eec24d2ce"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1698,6 +1709,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "ansible-rs",
  "clap",
 ]
 
