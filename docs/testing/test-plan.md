@@ -41,3 +41,19 @@ ACCESS-01a documents the required test contract; it does not supply executable a
 Contract and integration tests must prove Router-first sequencing, default deny, exact device/IP/port scope, matching Headscale and Router receipts before activation, and no activation when either enforcement action fails or is stale. Revocation tests must prove that the Router blocks the affected flow and clears its connection state within 60 seconds while another valid grant to the same VM remains usable. Endpoint isolation and VM stop tests must prove that escalation is audited and VM stop is refused while any valid grant remains.
 
 Deployed verification must prove direct native SSH/VNC, browser SSH/VNC through the Guacamole handoff path, absence of public or CIDR-wide exposure, and safe traces/audit diagnostics without credentials or session payloads. Kubernetes NetworkPolicy is not accepted as the direct-session containment proof because established-connection behavior is implementation-defined.
+## NATS Subject and delivery planned gates
+
+[ADR 0003](../adr/0003-nats-subject-and-delivery-contract.md) and the
+[NATS Event Contract v1](../contracts/nats-event-contract-v1.md) are E0 design
+evidence only. Before a messaging path is marked implemented, tests must prove
+that every deployed Subject has one catalogued state Owner and handling
+purpose; malformed CloudEvents and Subject/type/dataschema mismatches are
+rejected before mutation; and Owner state, idempotency record and local Outbox
+row commit atomically.
+
+The E2 integration suite must use real PostgreSQL and JetStream to prove
+publish retry, duplicate/replay idempotency, stale and gap sequence blocking,
+durable pull-consumer recovery, acknowledgement after durable state mutation,
+declared finite retry/backoff behaviour and quarantine with a stable
+diagnostic/alert after invalid input or retry exhaustion. Fixture-only tests do
+not promote this evidence above E1.

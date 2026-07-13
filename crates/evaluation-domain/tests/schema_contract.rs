@@ -43,6 +43,10 @@ fn external_consumers_can_read_the_domain_decomposition() -> Result<(), Box<dyn 
     };
     assert!(include.iter().any(|path| path == "src/main.cpp"));
     assert_eq!(*max_bytes, 20_971_520);
+    assert_eq!(
+        spec.body().submission().llm_readable(),
+        &["src/main.cpp".to_owned(), "report.md".to_owned()]
+    );
 
     let compile = spec
         .body()
@@ -168,6 +172,7 @@ spec:
       kind: workspace_snapshot
       include: [src/main.cpp]
       maxBytes: 1024
+    llmReadable: []
   steps:
     - role: score
       id: score-a
@@ -175,7 +180,8 @@ spec:
         kind: file_assertion
         requiredFiles: [src/main.cpp]
       checker:
-        kind: exact
+        kind: exit_code
+        expected: 0
       score:
         max: 4294967295
       failurePolicy: continue
@@ -185,7 +191,8 @@ spec:
         kind: file_assertion
         requiredFiles: [src/main.cpp]
       checker:
-        kind: exact
+        kind: exit_code
+        expected: 0
       score:
         max: 4294967295
       failurePolicy: continue
@@ -270,6 +277,115 @@ fn ansible_probe_rejects_modules_outside_the_allowlist() -> Result<(), Box<dyn E
 }
 
 #[test]
+fn llm_readable_paths_must_be_frozen_by_the_collector() -> Result<(), Box<dyn Error>> {
+    let invalid = OJ_FIXTURE.replacen(
+        "    llmReadable:\n      - src/main.cpp\n      - report.md",
+        "    llmReadable:\n      - src/main.cpp\n      - hidden.md",
+        1,
+    );
+    let error = spec_error(&invalid)?;
+    assert_eq!(
+        error.diagnostic_code(),
+        "LW_EVAL_LLM_READABLE_NOT_COLLECTED"
+    );
+
+    for excluded in ["report.md", "src"] {
+        let invalid = OJ_FIXTURE.replacen("        - build", &format!("        - {excluded}"), 1);
+        let error = spec_error(&invalid)?;
+        assert_eq!(
+            error.diagnostic_code(),
+            "LW_EVAL_LLM_READABLE_NOT_COLLECTED",
+            "LLM-readable path under excluded {excluded} was accepted"
+        );
+    }
+
+    let system_facts_with_file =
+        LINUX_FIXTURE.replacen("    llmReadable: []", "    llmReadable: [report.md]", 1);
+    let error = spec_error(&system_facts_with_file)?;
+    assert_eq!(
+        error.diagnostic_code(),
+        "LW_EVAL_LLM_READABLE_NOT_COLLECTED"
+    );
+    Ok(())
+}
+
+#[test]
+fn llm_review_include_must_be_a_subset_of_llm_readable() -> Result<(), Box<dyn Error>> {
+    let invalid = OJ_FIXTURE.replacen(
+        "        include:\n          - report.md\n          - src/main.cpp",
+        "        include:\n          - hidden.md\n          - src/main.cpp",
+        1,
+    );
+    let error = spec_error(&invalid)?;
+    assert_eq!(error.diagnostic_code(), "LW_EVAL_LLM_INCLUDE_NOT_ALLOWED");
+    Ok(())
+}
+
+#[test]
+fn runner_checker_compatibility_matrix_is_fail_closed() -> Result<(), Box<dyn Error>> {
+    let runners = [
+        (
+            "file_assertion",
+            "        kind: file_assertion\n        requiredFiles: [src/main.cpp]",
+            &["exit_code"][..],
+        ),
+        (
+            "program_compile",
+            "        kind: program\n        toolchainProfile: cpp17-approved-v1\n        phase: compile\n        input: src/main.cpp\n        limits:\n          wallTimeSeconds: 30\n          memoryBytes: 1024\n          outputBytes: 1024",
+            &["exit_code"][..],
+        ),
+        (
+            "program_test",
+            "        kind: program\n        toolchainProfile: cpp17-approved-v1\n        phase: test\n        input: src/main.cpp\n        testGroups:\n          - name: basic\n            source: evaluator://tests/basic\n            weight: 1\n        limits:\n          wallTimeSeconds: 30\n          memoryBytes: 1024\n          outputBytes: 1024",
+            &["exact", "token", "json_schema"][..],
+        ),
+        (
+            "ansible_probe",
+            "        kind: ansible_probe\n        playbookProfile: linux-probe-v1\n        moduleAllowlist: [ansible.builtin.stat]\n        readOnly: true\n        assertions:\n          - fact: host.reachable\n            expected: true",
+            &["exit_code", "json_schema", "service_state"][..],
+        ),
+    ];
+    let checkers = [
+        ("exact", "        kind: exact"),
+        ("token", "        kind: token"),
+        ("exit_code", "        kind: exit_code\n        expected: 0"),
+        (
+            "json_schema",
+            "        kind: json_schema\n        schemaRef: evaluator://schemas/result-v1.json",
+        ),
+        (
+            "service_state",
+            "        kind: service_state\n        service: nginx\n        expected: active",
+        ),
+    ];
+
+    for (runner_name, runner, allowed_checkers) in runners {
+        for (checker_name, checker) in checkers {
+            let result = EvaluationSpec::from_yaml(&compatibility_spec(runner, checker));
+            if allowed_checkers.contains(&checker_name) {
+                assert!(
+                    result.is_ok(),
+                    "{runner_name} + {checker_name} should be accepted: {result:?}"
+                );
+            } else {
+                let Err(error) = result else {
+                    return Err(format!(
+                        "unsupported {runner_name} + {checker_name} pair was accepted"
+                    )
+                    .into());
+                };
+                assert_eq!(
+                    error.diagnostic_code(),
+                    "LW_EVAL_STEP_CONFIG_INVALID",
+                    "unexpected diagnostic for {runner_name} + {checker_name}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn llm_review_output_rejects_protected_score_fields() -> Result<(), Box<dyn Error>> {
     let review = r#"{
         "schema_version": "goal-review/v1",
@@ -315,8 +431,99 @@ fn public_deserialize_cannot_bypass_goal_review_semantics() -> Result<(), Box<dy
 }
 
 #[test]
+fn goal_review_evidence_is_bounded_and_validated_against_the_step() -> Result<(), Box<dyn Error>> {
+    let valid = goal_review_json("report.md", 1, 3);
+    GoalReview::from_json_against(&valid, &["report.md"])?;
+
+    let Err(disallowed) = GoalReview::from_json_against(&valid, &["src/main.cpp"]) else {
+        return Err("evidence outside the advisory include was accepted".into());
+    };
+    assert_eq!(
+        disallowed.diagnostic_code(),
+        "LW_EVAL_LLM_EVIDENCE_PATH_NOT_ALLOWED"
+    );
+    let mut empty_evidence: serde_json::Value = serde_json::from_str(&valid)?;
+    empty_evidence["findings"][0]["evidence"] = serde_json::json!([]);
+
+    for (review, diagnostic) in [
+        (
+            goal_review_json("../../secret", 1, 1),
+            "LW_EVAL_LLM_EVIDENCE_PATH_UNSAFE",
+        ),
+        (
+            goal_review_json("report.md", 0, 1),
+            "LW_EVAL_LLM_EVIDENCE_RANGE_INVALID",
+        ),
+        (
+            goal_review_json("report.md", 3, 2),
+            "LW_EVAL_LLM_EVIDENCE_RANGE_INVALID",
+        ),
+        (
+            valid.replacen("criterion-a", " ", 1),
+            "LW_EVAL_LLM_FINDING_INVALID",
+        ),
+        (
+            valid.replacen("suggestion-a", " ", 1),
+            "LW_EVAL_LLM_FINDING_INVALID",
+        ),
+        (empty_evidence.to_string(), "LW_EVAL_LLM_FINDING_INVALID"),
+    ] {
+        let Err(error) = GoalReview::from_json(&review) else {
+            return Err("invalid GoalReview evidence unexpectedly passed".into());
+        };
+        assert_eq!(error.diagnostic_code(), diagnostic);
+    }
+    Ok(())
+}
+
+#[test]
+fn goal_review_counts_and_field_lengths_are_bounded() -> Result<(), Box<dyn Error>> {
+    let evidence = serde_json::json!({
+        "path": "report.md",
+        "start_line": 1,
+        "end_line": 1
+    });
+    let finding = serde_json::json!({
+        "criterion": "criterion-a",
+        "result": "met",
+        "evidence": [evidence.clone()],
+        "suggestion": "suggestion-a"
+    });
+    let base = serde_json::json!({
+        "schema_version": "goal-review/v1",
+        "assessment": "met",
+        "confidence": 0.9,
+        "findings": [finding.clone()],
+        "requires_teacher_attention": false
+    });
+
+    let mut too_many_findings = base.clone();
+    too_many_findings["findings"] = serde_json::Value::Array(vec![finding.clone(); 65]);
+    let mut too_many_evidence = base.clone();
+    too_many_evidence["findings"][0]["evidence"] = serde_json::Value::Array(vec![evidence; 17]);
+    let mut long_criterion = base;
+    long_criterion["findings"][0]["criterion"] = "x".repeat(1_025).into();
+
+    for review in [too_many_findings, too_many_evidence, long_criterion] {
+        let Err(error) = GoalReview::from_json(&review.to_string()) else {
+            return Err("oversized GoalReview unexpectedly passed".into());
+        };
+        assert_eq!(error.diagnostic_code(), "LW_EVAL_LLM_LIMIT_EXCEEDED");
+    }
+    Ok(())
+}
+
+#[test]
 fn submission_paths_cannot_escape_the_snapshot_root() -> Result<(), Box<dyn Error>> {
     let invalid = OJ_FIXTURE.replacen("src/main.cpp", "../secret", 1);
+    let error = spec_error(&invalid)?;
+    assert_eq!(error.diagnostic_code(), "LW_EVAL_SUBMISSION_PATH_UNSAFE");
+    Ok(())
+}
+
+#[test]
+fn collector_paths_reject_unimplemented_glob_semantics() -> Result<(), Box<dyn Error>> {
+    let invalid = OJ_FIXTURE.replacen("        - build", "        - build/**", 1);
     let error = spec_error(&invalid)?;
     assert_eq!(error.diagnostic_code(), "LW_EVAL_SUBMISSION_PATH_UNSAFE");
     Ok(())
@@ -340,6 +547,59 @@ fn program_inputs_cannot_escape_the_submission_root() -> Result<(), Box<dyn Erro
     let error = spec_error(&invalid)?;
     assert_eq!(error.diagnostic_code(), "LW_EVAL_SUBMISSION_PATH_UNSAFE");
     Ok(())
+}
+
+fn compatibility_spec(runner: &str, checker: &str) -> String {
+    format!(
+        r#"apiVersion: evaluation.labweaver.io/v1alpha1
+kind: EvaluationSpec
+metadata:
+  name: compatibility-matrix
+  version: "1.0.0"
+spec:
+  submission:
+    collector:
+      kind: workspace_snapshot
+      include: [src/main.cpp]
+      maxBytes: 1024
+    llmReadable: []
+  steps:
+    - role: gate
+      id: compatibility
+      runner:
+{runner}
+      checker:
+{checker}
+      failurePolicy: stop
+  aggregation:
+    kind: deterministic_sum
+    maxScore: 0
+    gates: []
+  review:
+    teacherApprovalRequiredForRelease: true
+    forceManualWhen: []
+"#
+    )
+}
+
+fn goal_review_json(path: &str, start_line: u32, end_line: u32) -> String {
+    serde_json::json!({
+        "schema_version": "goal-review/v1",
+        "assessment": "met",
+        "confidence": 0.9,
+        "findings": [{
+            "criterion": "criterion-a",
+            "result": "met",
+            "evidence": [{
+                "path": path,
+                "start_line": start_line,
+                "end_line": end_line
+            }],
+            "suggestion": "suggestion-a"
+        }],
+        "requires_teacher_attention": false
+    })
+    .to_string()
 }
 
 fn spec_error(input: &str) -> Result<EvaluationSpecError, Box<dyn Error>> {

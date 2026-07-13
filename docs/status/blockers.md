@@ -11,6 +11,19 @@
 - The dual-path trust boundary is documented, but no Keycloak handoff, Access Service grant persistence, Headscale Grants compiler, Router firewall controller, Guacamole extension, scoped SSH/VNC credential issuer, containment receipt or VM-stop escalation exists in the current evidence identity.
 - Owner: A for Access contracts, policy boundary and Guacamole handoff; B for Environment endpoint and scoped-credential integration; D for deployed verification and replay evidence.
 - Exit condition: reviewed contracts and implementations provide E1/E2 dual-revision, device-scope and credential tests; E3 deployed Headscale, Router and Guacamole evidence; and E4 multi-device/multi-role replay proving direct and browser paths, 60-second Router isolation, unaffected valid grants and escalation behavior.
+## NATS runtime implementation
+
+- Issue #18 freezes only the public Subject, CloudEvents, Outbox, ordering,
+  consumer and quarantine design. No NATS client, Stream, durable Consumer,
+  Outbox publisher, delivery manifest, quarantine path or runtime envelope
+  validation exists.
+- Owner: A for the contract and message boundary; B must complete the required
+  high-risk messaging review before implementation.
+- Exit condition: a separately scoped implementation issue provides E2
+  PostgreSQL and JetStream evidence for atomic Outbox publication, duplicate
+  and replay idempotency, stale/gap sequence blocking, durable-consumer
+  recovery, acknowledgement behaviour and terminal quarantine diagnostics.
+
 ## Resolved blockers
 
 - GitHub Project write scope was restored and Issue #20 was closed as completed.
