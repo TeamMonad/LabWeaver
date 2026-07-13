@@ -33,3 +33,9 @@ E1 evidence and does not execute a Runner or production evaluation path.
 ## Governance verification
 
 Read back Milestones, Labels, branch protection, Sprint parents, sub-issues and Project fields through GitHub APIs. The verified governance result is 20 Project items and 15 P0 items with `Workflow Status=Ready`, plus Owner, Review Role, Sprint, Area, Codex Mode, Risk, SP and Evidence metadata.
+
+## Access trust-boundary verification (planned)
+
+ACCESS-01a documents the required test contract; it does not supply executable authorization evidence. The implementation suite must cover valid and invalid OIDC identity, enrollment eligibility, inactive/revoked device, cross-user endpoint denial, unsupported protocol, missing/expired/revoked grant, policy compiler/application failure, and no partial authorization state after a failed decision.
+
+Deployed verification must prove that users cannot directly route to a container or VM endpoint, that new connections fail immediately after expiry/revocation, and that all active SSH, VNC, HTTP, and code-server sessions terminate within 60 seconds. Multi-role Playwright or equivalent end-to-end replay must retain safe traces and audit diagnostics without credentials or session payloads.

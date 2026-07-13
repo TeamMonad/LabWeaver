@@ -8,4 +8,5 @@
 | Telemetry | JSON subscriber initializes | invalid filter fails | E1 build and code review | captured structured-log tests |
 | EvaluationSpec v1alpha1 | OJ/Linux examples pass generated Schema and semantic validation | duplicate/missing/cyclic dependencies, unsafe paths, scoring boundary and tool allowlist are rejected | E1 contract tests in current worktree | Runner contract suite and E2 Evaluation Service integration |
 | GitHub governance | Milestones/Labels/Issues/branch rules and 15 P0 Ready items read back | insufficient scope was diagnosed and resolved in Issue #20 | E0 metadata | human review and continued Project maintenance |
-| KubeVirt/Access/Evaluation | none | none | planned/blocked | E3/E4 evidence required by release gates |
+| Access trust boundary | documented Keycloak, Headscale/Tailscale, Access Service and Gateway separation | documented Gateway-only path, enrollment, revocation and fail-closed requirements | E0: ACCESS-01a formal design; no executable access implementation | E1/E2 authorization tests, E3 deployed Gateway/policy path, E4 multi-role expiry/revocation replay |
+| KubeVirt/Evaluation | none | none | planned/blocked | E3/E4 evidence required by release gates |
