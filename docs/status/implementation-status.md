@@ -45,8 +45,9 @@ reconciliation.
 
 State: manual adopted-cluster deployment established; guarded controller
 reconciliation, router-side ansible-rs entrypoint, and sanitized manifest schemas
-are implemented in this worktree. Router lint and syntax-check pass; the real
-ansible-rs replay, backup, TestFlight verification, and idempotency run pass.
+are implemented in this worktree. The next router rerun is blocked until the
+new controller-identity locator and identity-bound backup evidence are present;
+the earlier replay must not be treated as evidence for those new controls.
 
 The manual deployment uses chart `1.19.1` and Harbor `2.15.1`, a dedicated
 namespace, internal CA/TLS, a separate Cilium Gateway/HTTPRoute, a dedicated

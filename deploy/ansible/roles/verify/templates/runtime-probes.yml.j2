@@ -26,7 +26,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: probe
-      image: busybox:1.36
+      image: {{ verify_busybox_image | quote }}
       command: [sh, -ec, 'printf rwo-ok > /data/probe; sleep 600']
       volumeMounts: [{ name: data, mountPath: /data }]
   volumes: [{ name: data, persistentVolumeClaim: { claimName: rwo } }]
@@ -39,7 +39,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: probe
-      image: busybox:1.36
+      image: {{ verify_busybox_image | quote }}
       command: [sh, -ec, 'sleep 600']
       volumeMounts: [{ name: data, mountPath: /data }]
   volumes: [{ name: data, persistentVolumeClaim: { claimName: rwo } }]
@@ -52,7 +52,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: probe
-      image: busybox:1.36
+      image: {{ verify_busybox_image | quote }}
       command: [sh, -ec, 'printf rwx-ok > /data/probe; sleep 600']
       volumeMounts: [{ name: data, mountPath: /data }]
   volumes: [{ name: data, persistentVolumeClaim: { claimName: rwx } }]
@@ -65,7 +65,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: probe
-      image: busybox:1.36
+      image: {{ verify_busybox_image | quote }}
       command: [sh, -ec, 'sleep 600']
       volumeMounts: [{ name: data, mountPath: /data }]
   volumes: [{ name: data, persistentVolumeClaim: { claimName: rwx } }]
@@ -73,55 +73,55 @@ spec:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: gateway-body
+  name: {{ verify_gateway_configmap_name }}
   namespace: labweaver-demo
-  labels: { app.kubernetes.io/part-of: labweaver-testflight }
+  labels: { app.kubernetes.io/part-of: labweaver-testflight, labweaver.io/testflight-run: {{ verify_testflight_run_id | quote }} }
 data: { index.html: gateway-ok }
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: gateway-backend
+  name: {{ verify_gateway_backend_name }}
   namespace: labweaver-demo
-  labels: { app: gateway-backend, app.kubernetes.io/part-of: labweaver-testflight }
+  labels: { app: {{ verify_gateway_backend_name | quote }}, app.kubernetes.io/part-of: labweaver-testflight, labweaver.io/testflight-run: {{ verify_testflight_run_id | quote }} }
 spec:
   replicas: 1
-  selector: { matchLabels: { app: gateway-backend } }
+  selector: { matchLabels: { app: {{ verify_gateway_backend_name | quote }}, labweaver.io/testflight-run: {{ verify_testflight_run_id | quote }} } }
   template:
-    metadata: { labels: { app: gateway-backend, app.kubernetes.io/part-of: labweaver-testflight } }
+    metadata: { labels: { app: {{ verify_gateway_backend_name | quote }}, app.kubernetes.io/part-of: labweaver-testflight, labweaver.io/testflight-run: {{ verify_testflight_run_id | quote }} } }
     spec:
       containers:
         - name: httpd
-          image: busybox:1.36
+          image: {{ verify_busybox_image | quote }}
           command: [sh, -ec, 'httpd -f -p 8080 -h /www']
           ports: [{ containerPort: 8080 }]
           resources:
             requests: { cpu: 10m, memory: 16Mi }
             limits: { cpu: 100m, memory: 64Mi }
           volumeMounts: [{ name: body, mountPath: /www }]
-      volumes: [{ name: body, configMap: { name: gateway-body } }]
+      volumes: [{ name: body, configMap: { name: {{ verify_gateway_configmap_name | quote }} } }]
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: gateway-backend
+  name: {{ verify_gateway_backend_name }}
   namespace: labweaver-demo
-  labels: { app.kubernetes.io/part-of: labweaver-testflight }
+  labels: { app.kubernetes.io/part-of: labweaver-testflight, labweaver.io/testflight-run: {{ verify_testflight_run_id | quote }} }
 spec:
-  selector: { app: gateway-backend }
+  selector: { app: {{ verify_gateway_backend_name | quote }}, labweaver.io/testflight-run: {{ verify_testflight_run_id | quote }} }
   ports: [{ port: 80, targetPort: 8080 }]
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: gateway-probe
+  name: {{ verify_gateway_route_name }}
   namespace: labweaver-demo
-  labels: { app.kubernetes.io/part-of: labweaver-testflight }
+  labels: { app.kubernetes.io/part-of: labweaver-testflight, labweaver.io/testflight-run: {{ verify_testflight_run_id | quote }} }
 spec:
   parentRefs: [{ name: public-gateway }]
   hostnames: [{{ verify_gateway_hostname | quote }}]
   rules:
-    - backendRefs: [{ name: gateway-backend, port: 80 }]
+    - backendRefs: [{ name: {{ verify_gateway_backend_name | quote }}, port: 80 }]
 ---
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine

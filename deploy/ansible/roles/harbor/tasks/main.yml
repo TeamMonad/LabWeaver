@@ -3,6 +3,11 @@
   ansible.builtin.set_fact:
     harbor_run_id: "{{ lookup('env', 'LABWEAVER_RUN_ID') | default(harbor_run_id | default(''), true) }}"
     harbor_commit_sha: "{{ lookup('env', 'LABWEAVER_COMMIT_SHA') | default(harbor_commit_sha | default(''), true) }}"
+    harbor_inventory_hash: "{{ lookup('env', 'LABWEAVER_INVENTORY_HASH') }}"
+    harbor_component_lock_hash: "{{ lookup('env', 'LABWEAVER_COMPONENT_LOCK_HASH') }}"
+    harbor_controller_id: "{{ lookup('env', 'LABWEAVER_CONTROLLER_ID') }}"
+    harbor_chart_archive_sha256: "sha256:{{ (lookup('file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml).harbor.chart_archive_sha256 | regex_replace('^sha256:', '') }}"
+    harbor_locked_images: "{{ (lookup('file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml).harbor.images }}"
 
 - name: Require explicit adopted-cluster Harbor configuration
   ansible.builtin.assert:
@@ -20,9 +25,55 @@
       - harbor_release_name == 'harbor'
       - harbor_chart_archive is string
       - harbor_chart_archive | length > 0
+      - harbor_chart_archive_sha256 is match('^sha256:[0-9a-f]{64}$')
       - harbor_run_id is match('^infra-[a-z0-9-]+$')
       - harbor_commit_sha is match('^[0-9a-f]{40,64}$')
+      - harbor_inventory_hash is match('^sha256:[0-9a-f]{64}$')
+      - harbor_component_lock_hash is match('^sha256:[0-9a-f]{64}$')
+      - harbor_controller_id == 'edge-router'
+      - harbor_locked_images | dict2items | length == 10
+      - harbor_locked_images | dict2items | map(attribute='value') | select('match', '^sha256:[0-9a-f]{64}$') | list | length == 10
     fail_msg: HARBOR_CONFIGURATION_REQUIRED
+
+- name: Verify the local Harbor chart archive before any reconciliation
+  ansible.builtin.stat:
+    path: "{{ harbor_chart_archive }}"
+    checksum_algorithm: sha256
+  register: harbor_chart_archive_stat
+
+- name: Reject a missing or mismatched Harbor chart archive
+  ansible.builtin.assert:
+    that:
+      - harbor_chart_archive_stat.stat.exists
+      - ('sha256:' ~ harbor_chart_archive_stat.stat.checksum) == harbor_chart_archive_sha256
+    fail_msg: HARBOR_CHART_ARCHIVE_IDENTITY_INVALID
+
+- name: Read the current run backup evidence before Harbor reconciliation
+  ansible.builtin.slurp:
+    src: "/var/backups/labweaver/BackupEvidence-{{ harbor_run_id }}.json"
+  register: harbor_backup_evidence_raw
+  no_log: true
+
+- name: Bind and validate the backup required for this Harbor reconciliation
+  ansible.builtin.set_fact:
+    harbor_backup_evidence: "{{ harbor_backup_evidence_raw.content | b64decode | from_json }}"
+    harbor_backup_evidence_hash: "sha256:{{ harbor_backup_evidence_raw.content | b64decode | hash('sha256') }}"
+  no_log: true
+
+- name: Reject reconciliation without a matching successful backup
+  ansible.builtin.assert:
+    that:
+      - harbor_backup_evidence.overall == 'passed'
+      - harbor_backup_evidence.run_id == harbor_run_id
+      - harbor_backup_evidence.commit_sha == harbor_commit_sha
+      - harbor_backup_evidence.inventory_hash == harbor_inventory_hash
+      - harbor_backup_evidence.component_lock_hash == harbor_component_lock_hash
+      - harbor_backup_evidence.target == 'harbor-reconcile'
+      - harbor_backup_evidence.cluster_uid | length > 0
+      - harbor_backup_evidence.snapshot.sha256 is match('^[0-9a-f]{64}$')
+      - harbor_backup_evidence.snapshot.size_bytes | int > 0
+    fail_msg: HARBOR_BACKUP_EVIDENCE_INVALID
+  no_log: true
 
 - name: Assert locked adopted-cluster storage classes exist
   ansible.builtin.command:
@@ -315,14 +366,6 @@
           auto:
             commonName: "{{ harbor_hostname }}"
       harborAdminPassword: "{{ harbor_admin_password }}"
-      database:
-        type: internal
-        internal:
-          password: "{{ harbor_database_password }}"
-      redis:
-        type: internal
-        internal:
-          password: "{{ harbor_redis_password }}"
       persistence:
         persistentVolumeClaim:
           registry:
@@ -333,8 +376,34 @@
             storageClass: "{{ storageclass_local_path }}"
           redis:
             storageClass: "{{ storageclass_local_path }}"
+      nginx:
+        image: { tag: "v2.15.1@{{ harbor_locked_images.nginx }}" }
+      portal:
+        image: { tag: "v2.15.1@{{ harbor_locked_images.portal }}" }
+      core:
+        image: { tag: "v2.15.1@{{ harbor_locked_images.core }}" }
+      jobservice:
+        image: { tag: "v2.15.1@{{ harbor_locked_images.jobservice }}" }
+      registry:
+        registry:
+          image: { tag: "v2.15.1@{{ harbor_locked_images.registry }}" }
+        controller:
+          image: { tag: "v2.15.1@{{ harbor_locked_images.registryctl }}" }
       trivy:
         enabled: true
+        image: { tag: "v2.15.1@{{ harbor_locked_images.trivy }}" }
+      database:
+        type: internal
+        internal:
+          password: "{{ harbor_database_password }}"
+          image: { tag: "v2.15.1@{{ harbor_locked_images.database }}" }
+      redis:
+        type: internal
+        internal:
+          password: "{{ harbor_redis_password }}"
+          image: { tag: "v2.15.1@{{ harbor_locked_images.redis }}" }
+      exporter:
+        image: { tag: "v2.15.1@{{ harbor_locked_images.exporter }}" }
   no_log: true
   environment:
     PATH: /usr/local/bin:/usr/bin:/bin

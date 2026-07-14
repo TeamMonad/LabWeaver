@@ -1,0 +1,5 @@
+---
+# This lock is intentionally public. The matching machine identity lives only
+# in the root-owned controller locator configured outside the repository.
+schema_version: 1
+approved_controller_id: edge-router

@@ -1,12 +1,29 @@
 ---
 - name: Bind TestFlight execution identity
   ansible.builtin.set_fact:
-    verify_testflight_run_id: "{{ lookup('env', 'LABWEAVER_TESTFLIGHT_RUN_ID') or 'testflight-manual' }}"
+    verify_testflight_run_id: "{{ lookup('env', 'LABWEAVER_TESTFLIGHT_RUN_ID') }}"
     verify_report_directory: "{{ harbor_manifest_directory | default('/var/lib/labweaver/harbor/manifests') }}"
+    verify_expected_commit_sha: "{{ lookup('env', 'LABWEAVER_COMMIT_SHA') }}"
+    verify_expected_inventory_hash: "{{ lookup('env', 'LABWEAVER_INVENTORY_HASH') }}"
+    verify_expected_component_lock_hash: "{{ lookup('env', 'LABWEAVER_COMPONENT_LOCK_HASH') }}"
 
 - name: Bind the run-scoped TestFlight namespace
   ansible.builtin.set_fact:
     verify_runtime_namespace: "labweaver-verify-{{ verify_testflight_run_id }}"
+    verify_gateway_configmap_name: "gateway-body-{{ verify_testflight_run_id }}"
+    verify_gateway_backend_name: "gateway-backend-{{ verify_testflight_run_id }}"
+    verify_gateway_route_name: "gateway-probe-{{ verify_testflight_run_id }}"
+    verify_busybox_image: "{{ (lookup('file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml).test_images.busybox }}"
+
+- name: Require a complete TestFlight execution identity and digest-pinned image
+  ansible.builtin.assert:
+    that:
+      - verify_testflight_run_id is match('^testflight-[a-z0-9-]+$')
+      - verify_expected_commit_sha is match('^[0-9a-f]{40,64}$')
+      - verify_expected_inventory_hash is match('^sha256:[0-9a-f]{64}$')
+      - verify_expected_component_lock_hash is match('^sha256:[0-9a-f]{64}$')
+      - verify_busybox_image is match('^.+@sha256:[0-9a-f]{64}$')
+    fail_msg: TESTFLIGHT_EXECUTION_IDENTITY_INVALID
 
 - name: Read the sanitized deployment manifest from the router
   ansible.builtin.slurp:
@@ -16,9 +33,19 @@
   register: verify_deployment_manifest_raw
   no_log: true
 
+- name: Read the sanitized Harbor policy manifest from the router
+  ansible.builtin.slurp:
+    src: "{{ harbor_manifest_directory | default('/var/lib/labweaver/harbor/manifests') }}/HarborPolicyManifest.json"
+  delegate_to: "{{ groups['routers'][0] }}"
+  become: true
+  register: verify_policy_manifest_raw
+  no_log: true
+
 - name: Bind and validate the deployment identity for TestFlight
   ansible.builtin.set_fact:
     verify_deployment_manifest: "{{ verify_deployment_manifest_raw.content | b64decode | from_json }}"
+    verify_deployment_manifest_hash: "sha256:{{ verify_deployment_manifest_raw.content | b64decode | hash('sha256') }}"
+    verify_policy_manifest_hash: "sha256:{{ verify_policy_manifest_raw.content | b64decode | hash('sha256') }}"
 
 - name: Reject a missing or incompatible deployment manifest
   ansible.builtin.assert:
@@ -28,7 +55,13 @@
       - verify_deployment_manifest.namespace == 'harbor'
       - verify_deployment_manifest.chart.version == '1.19.1'
       - verify_deployment_manifest.chart.app_version == '2.15.1'
-      - verify_testflight_run_id is match('^testflight-[a-z0-9-]+$')
+      - verify_deployment_manifest.commit_sha == verify_expected_commit_sha
+      - verify_deployment_manifest.inventory_hash == verify_expected_inventory_hash
+      - verify_deployment_manifest.component_lock_hash == verify_expected_component_lock_hash
+      - verify_deployment_manifest.harbor_policy_manifest_hash == verify_policy_manifest_hash
+      - verify_deployment_manifest.harbor_policy_manifest_locator == 'root-only-router:HarborPolicyManifest.json'
+      - verify_deployment_manifest.backup_evidence_locator == ('root-only-control-plane:BackupEvidence-' ~ verify_deployment_manifest.run_id ~ '.json')
+      - verify_deployment_manifest.backup_evidence_hash is match('^sha256:[0-9a-f]{64}$')
     fail_msg: TESTFLIGHT_DEPLOYMENT_IDENTITY_INVALID
 
 - name: Read the current cluster identity for TestFlight
@@ -112,13 +145,13 @@
       register: verify_rwx_probe
       failed_when: verify_rwx_probe.stdout | trim != 'rwx-ok'
 
-    - name: Wait for Gateway backend and route acceptance
-      ansible.builtin.command: "kubectl -n labweaver-demo rollout status deployment/gateway-backend --timeout=5m"
+    - name: Wait for this TestFlight Gateway backend and route acceptance
+      ansible.builtin.command: "kubectl -n labweaver-demo rollout status deployment/{{ verify_gateway_backend_name }} --timeout=5m"
       changed_when: false
 
     - name: Verify internal Gateway HTTPRoute backend response
       ansible.builtin.command: >-
-        kubectl -n {{ verify_runtime_namespace }} run gateway-client --image=busybox:1.36 --restart=Never
+        kubectl -n {{ verify_runtime_namespace }} run gateway-client --image={{ verify_busybox_image }} --restart=Never
         --rm -i -- wget -qO- --header=Host:{{ verify_gateway_hostname }} http://{{ gateway_vip }}
       changed_when: false
       register: verify_gateway_probe
@@ -184,7 +217,7 @@
 
     - name: Read current etcd backup evidence
       ansible.builtin.slurp:
-        src: "{{ backup_report_path | default('/var/backups/labweaver/latest.json') }}"
+        src: "/var/backups/labweaver/BackupEvidence-{{ verify_deployment_manifest.run_id }}.json"
       register: verify_backup_evidence
 
     - name: Require complete etcd backup evidence
@@ -195,6 +228,11 @@
           - (verify_backup_evidence.content | b64decode | from_json).snapshot.revision | int > 0
           - (verify_backup_evidence.content | b64decode | from_json).snapshot.size_bytes | int > 0
           - (verify_backup_evidence.content | b64decode | from_json).snapshot.mode == '0600'
+          - (verify_backup_evidence.content | b64decode | from_json).commit_sha == verify_expected_commit_sha
+          - (verify_backup_evidence.content | b64decode | from_json).inventory_hash == verify_expected_inventory_hash
+          - (verify_backup_evidence.content | b64decode | from_json).component_lock_hash == verify_expected_component_lock_hash
+          - (verify_backup_evidence.content | b64decode | from_json).cluster_uid == verify_cluster_uid.stdout
+          - ('sha256:' ~ (verify_backup_evidence.content | b64decode | hash('sha256'))) == verify_deployment_manifest.backup_evidence_hash
         fail_msg: ETCD_BACKUP_EVIDENCE_INCOMPLETE
 
   rescue:
@@ -226,6 +264,8 @@
           - deployment,service,configmap,httproute
           - -l
           - app.kubernetes.io/part-of=labweaver-testflight
+          - -l
+          - "labweaver.io/testflight-run={{ verify_testflight_run_id }}"
           - --ignore-not-found
           - --wait=true
       changed_when: false
@@ -264,6 +304,12 @@
           run_id: "{{ verify_testflight_run_id }}"
           deployment_run_id: "{{ verify_deployment_manifest.run_id }}"
           cluster_uid: "{{ verify_cluster_uid.stdout }}"
+          commit_sha: "{{ verify_deployment_manifest.commit_sha }}"
+          inventory_hash: "{{ verify_deployment_manifest.inventory_hash }}"
+          component_lock_hash: "{{ verify_deployment_manifest.component_lock_hash }}"
+          harbor_policy_manifest_hash: "{{ verify_deployment_manifest.harbor_policy_manifest_hash }}"
+          deployment_manifest_hash: "{{ verify_deployment_manifest_hash }}"
+          deployment_manifest_locator: "root-only-router:InfrastructureDeploymentManifest.json"
           overall: "{{ 'passed' if verify_baseline_passed | bool else 'blocked' }}"
           checks:
             - name: kubernetes-nodes

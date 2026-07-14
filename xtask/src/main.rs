@@ -4,6 +4,8 @@ use std::fmt::{Display, Formatter};
 use std::process::{Command as ProcessCommand, ExitCode};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+#[cfg(target_os = "linux")]
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -319,6 +321,10 @@ fn run_infrastructure(
         collections_path,
         roles_path,
         commit_sha,
+        controller_id,
+        inventory_hash,
+        component_lock_hash,
+        harbor_data_backup_locator,
     } = InfrastructureInputs::load(environment, playbook_name)?;
     let run_id = infrastructure_run_id("infra", "infrastructure run identity")?;
     let testflight_run_id =
@@ -336,6 +342,13 @@ fn run_infrastructure(
         .add_env("ANSIBLE_VAULT_PASSWORD_FILE", vault_password)
         .add_env("LABWEAVER_RUN_ID", run_id)
         .add_env("LABWEAVER_COMMIT_SHA", commit_sha)
+        .add_env("LABWEAVER_CONTROLLER_ID", controller_id)
+        .add_env("LABWEAVER_INVENTORY_HASH", inventory_hash)
+        .add_env("LABWEAVER_COMPONENT_LOCK_HASH", component_lock_hash)
+        .add_env(
+            "LABWEAVER_HARBOR_DATA_BACKUP_LOCATOR",
+            harbor_data_backup_locator,
+        )
         .add_env("LABWEAVER_TESTFLIGHT_RUN_ID", testflight_run_id)
         .set_inventory(&inventory);
     // ansible-rs 1.1.0 appends configured arguments twice in `run`; all
@@ -362,6 +375,10 @@ struct InfrastructureInputs {
     collections_path: String,
     roles_path: String,
     commit_sha: String,
+    controller_id: String,
+    inventory_hash: String,
+    component_lock_hash: String,
+    harbor_data_backup_locator: String,
 }
 
 #[cfg(target_os = "linux")]
@@ -382,6 +399,8 @@ impl InfrastructureInputs {
         )?;
         let ansible_config = controller_root.join("ansible.cfg");
         require_infrastructure_file("approved Ansible configuration", &ansible_config)?;
+        let controller_lock = controller_root.join("controller.lock.yml");
+        require_infrastructure_file("approved infrastructure controller lock", &controller_lock)?;
 
         let shared_controller_root = infrastructure_dependency_root()?;
         let collections_path = resolve_infrastructure_directory(
@@ -403,6 +422,11 @@ impl InfrastructureInputs {
             collections_path: infrastructure_path(&collections_path),
             roles_path: infrastructure_path(&roles_path),
             commit_sha: infrastructure_commit_sha()?,
+            controller_id: approved_controller_identity(&controller_lock)?,
+            inventory_hash: file_sha256(&inventory)?,
+            component_lock_hash: file_sha256(&root.join("deploy/versions.lock.yml"))?,
+            harbor_data_backup_locator: std::env::var("LABWEAVER_HARBOR_DATA_BACKUP_LOCATOR")
+                .unwrap_or_default(),
         })
     }
 }
@@ -498,6 +522,87 @@ fn infrastructure_commit_sha() -> Result<String, AppError> {
 }
 
 #[cfg(target_os = "linux")]
+fn file_sha256(path: &std::path::Path) -> Result<String, AppError> {
+    let data = std::fs::read(path).map_err(|error| AppError::ExternalCommand {
+        role: "infrastructure identity hash input",
+        code: None,
+        detail: Some(error.to_string()),
+    })?;
+    Ok(format!("sha256:{:x}", Sha256::digest(data)))
+}
+
+#[cfg(target_os = "linux")]
+fn approved_controller_identity(lock_path: &std::path::Path) -> Result<String, AppError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let approved = controller_identity_field(
+        &std::fs::read_to_string(lock_path).map_err(|error| AppError::ExternalCommand {
+            role: "approved infrastructure controller lock",
+            code: None,
+            detail: Some(error.to_string()),
+        })?,
+        "approved_controller_id",
+    )?;
+    let locator = std::env::var("LABWEAVER_CONTROLLER_IDENTITY_FILE").map_err(|_| {
+        AppError::ExternalCommand {
+            role: "approved router controller identity",
+            code: None,
+            detail: Some("LABWEAVER_CONTROLLER_IDENTITY_FILE is required".into()),
+        }
+    })?;
+    let locator_path = std::path::PathBuf::from(locator);
+    let metadata = std::fs::metadata(&locator_path).map_err(|error| AppError::ExternalCommand {
+        role: "approved router controller identity",
+        code: None,
+        detail: Some(error.to_string()),
+    })?;
+    if metadata.uid() != 0 || metadata.mode() & 0o077 != 0 {
+        return Err(AppError::ExternalCommand {
+            role: "approved router controller identity",
+            code: None,
+            detail: Some("identity locator must be root-owned and mode 0600 or stricter".into()),
+        });
+    }
+    let identity =
+        std::fs::read_to_string(locator_path).map_err(|error| AppError::ExternalCommand {
+            role: "approved router controller identity",
+            code: None,
+            detail: Some(error.to_string()),
+        })?;
+    let controller_id = controller_identity_field(&identity, "controller_id")?;
+    let declared_machine_id = controller_identity_field(&identity, "machine_id")?;
+    let actual_machine_id =
+        std::fs::read_to_string("/etc/machine-id").map_err(|error| AppError::ExternalCommand {
+            role: "approved router controller identity",
+            code: None,
+            detail: Some(error.to_string()),
+        })?;
+    if controller_id != approved || declared_machine_id != actual_machine_id.trim() {
+        return Err(AppError::ExternalCommand {
+            role: "approved router controller identity",
+            code: None,
+            detail: Some("controller identity does not match the approved router lock".into()),
+        });
+    }
+    Ok(controller_id)
+}
+
+#[cfg(target_os = "linux")]
+fn controller_identity_field(content: &str, key: &str) -> Result<String, AppError> {
+    content
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(&format!("{key}:")))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| AppError::ExternalCommand {
+            role: "approved router controller identity",
+            code: None,
+            detail: Some(format!("required {key} field is missing")),
+        })
+}
+
+#[cfg(target_os = "linux")]
 fn infrastructure_run_id(prefix: &str, role: &'static str) -> Result<String, AppError> {
     let seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -571,6 +676,25 @@ mod tests {
         }
         if error.to_string() != "deploy is a destructive operation and requires explicit --yes" {
             return Err("unexpected confirmation message".into());
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn controller_identity_field_rejects_an_unapproved_controller() -> Result<(), String> {
+        let locked = super::controller_identity_field(
+            "approved_controller_id: edge-router\n",
+            "approved_controller_id",
+        )
+        .map_err(|error| error.to_string())?;
+        let presented = super::controller_identity_field(
+            "controller_id: unapproved-linux-host\n",
+            "controller_id",
+        )
+        .map_err(|error| error.to_string())?;
+        if locked == presented {
+            return Err("an unapproved Linux controller was accepted".into());
         }
         Ok(())
     }

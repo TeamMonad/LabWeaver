@@ -6,4 +6,6 @@
 - name: Reconcile Harbor on an adopted LabWeaver cluster
   hosts: control_plane
   gather_facts: false
-  roles: [harbor]
+  # A new, identity-bound backup is mandatory before Harbor can reconcile.
+  # The Harbor role verifies the resulting evidence before its first mutation.
+  roles: [backup, harbor]

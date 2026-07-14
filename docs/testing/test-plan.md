@@ -153,9 +153,11 @@ Resource and KubeVirt evidence remains planned; this documentation is E0 only.
 The Harbor controller path is deliberately separate from `site.yml`. It must
 refuse an unknown cluster, a changed existing Gateway, a conflicting VIP/DNS
 record, a missing root-only secret locator, a missing storage class, an
-unlocked chart/application version, or a configuration that would invoke a
-bootstrap role. The controller must run only on the Linux router worktree and
-must fail on Windows rather than selecting a different launcher or PATH fallback.
+unlocked chart/application version, mismatched chart archive, tag-only image,
+missing bound backup evidence, an unapproved Linux controller, or a
+configuration that would invoke a bootstrap role. The controller must run only
+on the approved Linux router worktree and must fail on Windows rather than
+selecting a different launcher or PATH fallback.
 
 Required controller evidence is: router-side `cargo fmt --check`, Linux
 `cargo clippy` and unit tests, `ansible-lint`, playbook syntax check, and a
@@ -166,8 +168,9 @@ have no undeclared mutation. This remains E2 deployment evidence until the
 declared push/pull/scan and recovery gates are separately performed.
 
 TestFlight is emitted as a run-scoped, schema-validated
-`InfrastructureTestFlightReport`; it binds the deployment manifest and cluster
-UID, records cleanup, and passes only the declared `adopted-cluster-baseline`
+`InfrastructureTestFlightReport`; it binds commit, inventory, component lock,
+Harbor policy manifest, deployment-manifest hash/locator, and cluster UID,
+records cleanup, and passes only the declared `adopted-cluster-baseline`
 scope. OIDC/governance checks are explicitly recorded as deferred to #47; they
 cannot be read as a successful identity or release-gate claim.
 
