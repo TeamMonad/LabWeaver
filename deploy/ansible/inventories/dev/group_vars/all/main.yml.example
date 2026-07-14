@@ -43,3 +43,25 @@ verify_nfs_writer_node: REPLACE_FIRST_WORKER_KUBERNETES_NODE_NAME
 verify_nfs_reader_node: REPLACE_SECOND_WORKER_KUBERNETES_NODE_NAME
 verify_expected_kubernetes_nodes: [REPLACE_CONTROL_PLANE_KUBERNETES_NODE_NAME, REPLACE_FIRST_WORKER_KUBERNETES_NODE_NAME, REPLACE_SECOND_WORKER_KUBERNETES_NODE_NAME]
 verify_gateway_hostname: verify.labweaver.internal
+harbor_enabled: false
+harbor_hostname: REPLACE_HARBOR_INTERNAL_HOSTNAME
+harbor_gateway_vip: REPLACE_HARBOR_GATEWAY_VIP
+harbor_secret_locator_revision: REPLACE_HARBOR_SECRET_LOCATOR_REVISION
+harbor_chart_version: 1.19.1
+harbor_app_version: 2.15.1
+harbor_namespace: harbor
+harbor_release_name: harbor
+harbor_project_name: labweaver-system
+harbor_chart_archive: /var/lib/labweaver/bundle/harbor-1.19.1.tgz
+harbor_kubeconfig_path: /etc/kubernetes/admin.conf
+harbor_kubectl_path: /usr/bin/kubectl
+harbor_secret_locator_path: /etc/labweaver/harbor/bootstrap.env
+harbor_dns_fragment_path: /etc/dnsmasq.d/20-harbor.conf
+harbor_ca_secret_name: harbor-internal-ca
+harbor_gateway_tls_secret_name: harbor-gateway-tls
+harbor_gateway_name: harbor-gateway
+harbor_project_name: labweaver-system
+harbor_nfs_dynamic_root: /srv/nfs/k8s/dynamic
+harbor_manifest_directory: /var/lib/labweaver/harbor/manifests
+labweaver_run_id: infra-manual-0
+labweaver_commit_sha: 0000000000000000000000000000000000000000

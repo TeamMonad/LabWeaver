@@ -46,7 +46,8 @@
   when: inventory_hostname != 'localhost'
 
 - name: Assert required interfaces are already present
-  ansible.builtin.command: "ip link show {{ item }}"
+  ansible.builtin.command: "/usr/sbin/ip link show {{ item }}"
+  check_mode: false
   changed_when: false
   loop:
     - "{{ router_wan_interface }}"
@@ -54,45 +55,43 @@
   when: inventory_hostname in groups['routers']
 
 - name: Assert Kubernetes node SELinux is enforcing
-  ansible.builtin.command: getenforce
+  ansible.builtin.command: /usr/sbin/getenforce
+  check_mode: false
   changed_when: false
-  register: selinux_mode
-  failed_when: selinux_mode.stdout != 'Enforcing'
+  register: preflight_selinux_mode
+  failed_when: preflight_selinux_mode.stdout != 'Enforcing'
   when: inventory_hostname in groups['k8s_cluster']
 
 - name: Assert workers expose the KVM device
   ansible.builtin.stat:
     path: /dev/kvm
-  register: kvm_device
+  register: preflight_kvm_device
   when: inventory_hostname in groups['workers']
 
 - name: Reject workers without KVM
   ansible.builtin.assert:
-    that: kvm_device.stat.exists and kvm_device.stat.ischr
+    that: preflight_kvm_device.stat.exists and preflight_kvm_device.stat.ischr
     fail_msg: "worker lacks /dev/kvm; hardware KVM verification cannot run"
   when: inventory_hostname in groups['workers']
 
 - name: Assert workers expose nested virtualization CPU flags
-  ansible.builtin.command: grep -E 'vmx|svm' /proc/cpuinfo
+  ansible.builtin.command: /usr/bin/grep -E 'vmx|svm' /proc/cpuinfo
+  check_mode: false
   changed_when: false
   when: inventory_hostname in groups['workers']
 
-- name: Read NFS service facts
-  ansible.builtin.service_facts:
-  when: inventory_hostname in groups['nfs_servers']
-
-- name: Assert NFS server is running
-  ansible.builtin.assert:
-    that:
-      - ansible_facts.services['nfs-server.service'].state == 'running'
-    fail_msg: NFS_SERVER_NOT_RUNNING
+- name: Assert NFS server is running # noqa: command-instead-of-module
+  ansible.builtin.command: /usr/bin/systemctl is-active --quiet nfs-server.service
+  check_mode: false
+  changed_when: false
   when: inventory_hostname in groups['nfs_servers']
 
 - name: Assert the required NFS export is present
-  ansible.builtin.command: exportfs -v
+  ansible.builtin.command: /usr/sbin/exportfs -v
+  check_mode: false
   changed_when: false
-  register: nfs_exports
-  failed_when: nfs_share not in nfs_exports.stdout
+  register: preflight_nfs_exports
+  failed_when: nfs_share not in preflight_nfs_exports.stdout
   when: inventory_hostname in groups['nfs_servers']
 
 - name: Assert NFSv4 is reachable from every Kubernetes node

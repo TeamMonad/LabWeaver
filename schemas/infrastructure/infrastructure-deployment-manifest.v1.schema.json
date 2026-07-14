@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://labweaver.invalid/schemas/infrastructure-deployment-manifest.v1.schema.json",
+  "title": "InfrastructureDeploymentManifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "run_id", "commit_sha", "inventory_hash",
+    "component_lock_hash", "cluster_uid", "namespace", "chart",
+    "harbor_policy_manifest_hash", "readiness", "cleanup"
+  ],
+  "properties": {
+    "schema_version": { "const": "infrastructure-deployment-manifest.v1" },
+    "run_id": { "type": "string", "pattern": "^infra-[a-z0-9-]+$" },
+    "commit_sha": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+    "inventory_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "component_lock_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "cluster_uid": { "type": "string", "minLength": 1 },
+    "namespace": { "const": "harbor" },
+    "chart": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "version", "app_version"],
+      "properties": {
+        "name": { "const": "harbor" },
+        "version": { "const": "1.19.1" },
+        "app_version": { "const": "2.15.1" }
+      }
+    },
+    "harbor_policy_manifest_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "readiness": { "type": "boolean" },
+    "cleanup": { "type": "object", "required": ["status"], "properties": { "status": { "enum": ["not_required", "completed", "failed"] } } }
+  }
+}

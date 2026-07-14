@@ -1,0 +1,610 @@
+---
+- name: Bind verified controller run identity
+  ansible.builtin.set_fact:
+    harbor_run_id: "{{ lookup('env', 'LABWEAVER_RUN_ID') | default(harbor_run_id | default(''), true) }}"
+    harbor_commit_sha: "{{ lookup('env', 'LABWEAVER_COMMIT_SHA') | default(harbor_commit_sha | default(''), true) }}"
+    harbor_inventory_hash: "{{ lookup('env', 'LABWEAVER_INVENTORY_HASH') }}"
+    harbor_component_lock_hash: "{{ lookup('env', 'LABWEAVER_COMPONENT_LOCK_HASH') }}"
+    harbor_controller_id: "{{ lookup('env', 'LABWEAVER_CONTROLLER_ID') }}"
+    harbor_chart_archive_sha256: >-
+      sha256:{{ (lookup('file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml).harbor.chart_archive_sha256 |
+      regex_replace('^sha256:', '') }}
+    harbor_locked_images: "{{ (lookup('file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml).harbor.images }}"
+
+- name: Require explicit adopted-cluster Harbor configuration
+  ansible.builtin.assert:
+    that:
+      - harbor_enabled | bool
+      - harbor_hostname is string
+      - harbor_hostname | length > 0
+      - harbor_gateway_vip is string
+      - harbor_gateway_vip is match('^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$')
+      - harbor_secret_locator_revision is string
+      - harbor_secret_locator_revision | length > 0
+      - harbor_chart_version == '1.19.1'
+      - harbor_app_version == '2.15.1'
+      - harbor_namespace == 'harbor'
+      - harbor_release_name == 'harbor'
+      - harbor_chart_archive is string
+      - harbor_chart_archive | length > 0
+      - harbor_chart_archive_sha256 is match('^sha256:[0-9a-f]{64}$')
+      - harbor_run_id is match('^infra-[a-z0-9-]+$')
+      - harbor_commit_sha is match('^[0-9a-f]{40,64}$')
+      - harbor_inventory_hash is match('^sha256:[0-9a-f]{64}$')
+      - harbor_component_lock_hash is match('^sha256:[0-9a-f]{64}$')
+      - harbor_controller_id == 'edge-router'
+      - harbor_locked_images | dict2items | length == 10
+      - harbor_locked_images | dict2items | map(attribute='value') | select('match', '^sha256:[0-9a-f]{64}$') | list | length == 10
+      - harbor_component_resources | dict2items | length == 11
+      - harbor_component_resources | dict2items | map(attribute='value') | map(attribute='requests') | select('defined') | list | length == 11
+      - harbor_component_resources | dict2items | map(attribute='value') | map(attribute='limits') | select('defined') | list | length == 11
+    fail_msg: HARBOR_CONFIGURATION_REQUIRED
+
+- name: Verify the local Harbor chart archive before any reconciliation
+  ansible.builtin.stat:
+    path: "{{ harbor_chart_archive }}"
+    checksum_algorithm: sha256
+  register: harbor_chart_archive_stat
+
+- name: Reject a missing or mismatched Harbor chart archive
+  ansible.builtin.assert:
+    that:
+      - harbor_chart_archive_stat.stat.exists
+      - ('sha256:' ~ harbor_chart_archive_stat.stat.checksum) == harbor_chart_archive_sha256
+    fail_msg: HARBOR_CHART_ARCHIVE_IDENTITY_INVALID
+
+- name: Read the current run backup evidence before Harbor reconciliation
+  ansible.builtin.slurp:
+    src: "/var/backups/labweaver/BackupEvidence-{{ harbor_run_id }}.json"
+  register: harbor_backup_evidence_raw
+  no_log: true
+
+- name: Bind and validate the backup required for this Harbor reconciliation
+  ansible.builtin.set_fact:
+    harbor_backup_evidence: "{{ harbor_backup_evidence_raw.content | b64decode | from_json }}"
+    harbor_backup_evidence_hash: "sha256:{{ harbor_backup_evidence_raw.content | b64decode | hash('sha256') }}"
+  no_log: true
+
+- name: Reject reconciliation without a matching successful backup
+  ansible.builtin.assert:
+    that:
+      - harbor_backup_evidence.overall == 'passed'
+      - harbor_backup_evidence.run_id == harbor_run_id
+      - harbor_backup_evidence.commit_sha == harbor_commit_sha
+      - harbor_backup_evidence.inventory_hash == harbor_inventory_hash
+      - harbor_backup_evidence.component_lock_hash == harbor_component_lock_hash
+      - harbor_backup_evidence.target == 'harbor-reconcile'
+      - harbor_backup_evidence.cluster_uid | length > 0
+      - harbor_backup_evidence.snapshot.sha256 is match('^[0-9a-f]{64}$')
+      - harbor_backup_evidence.snapshot.size_bytes | int > 0
+    fail_msg: HARBOR_BACKUP_EVIDENCE_INVALID
+  no_log: true
+
+- name: Assert locked adopted-cluster storage classes exist
+  ansible.builtin.command:
+    argv:
+      - "{{ harbor_kubectl_path }}"
+      - --kubeconfig
+      - "{{ harbor_kubeconfig_path }}"
+      - get
+      - storageclass
+      - "{{ item }}"
+  check_mode: false
+  changed_when: false
+  loop:
+    - "{{ storageclass_local_path }}"
+    - "{{ storageclass_nfs_rwx }}"
+
+- name: Read existing Harbor namespace
+  ansible.builtin.command:
+    argv:
+      - "{{ harbor_kubectl_path }}"
+      - --kubeconfig
+      - "{{ harbor_kubeconfig_path }}"
+      - get
+      - namespace
+      - "{{ harbor_namespace }}"
+      - -o
+      - json
+  check_mode: false
+  changed_when: false
+  failed_when: false
+  register: harbor_namespace_read
+
+- name: Reject an existing namespace not labelled as LabWeaver infrastructure
+  ansible.builtin.assert:
+    that:
+      - harbor_namespace_read.rc != 0 or
+        ((harbor_namespace_read.stdout | from_json).metadata.labels['app.kubernetes.io/part-of'] | default('')) == 'labweaver-infrastructure'
+    fail_msg: HARBOR_NAMESPACE_UNMANAGED
+
+- name: Capture existing demo Gateway identity without modifying it
+  ansible.builtin.command:
+    argv:
+      - "{{ harbor_kubectl_path }}"
+      - --kubeconfig
+      - "{{ harbor_kubeconfig_path }}"
+      - -n
+      - labweaver-demo
+      - get
+      - gateway
+      - public-gateway
+      - -o
+      - jsonpath={.spec.gatewayClassName}{" "}{.status.addresses[0].value}
+  check_mode: false
+  changed_when: false
+  register: harbor_existing_gateway
+
+- name: Reject a changed or unsupported existing demo Gateway
+  ansible.builtin.assert:
+    that:
+      - harbor_existing_gateway.stdout.split()[0] == 'cilium'
+      - harbor_existing_gateway.stdout.split()[1] == gateway_vip
+    fail_msg: HARBOR_ADOPTED_GATEWAY_DRIFT
+
+- name: Reject a Harbor VIP collision before creating any Harbor resource
+  ansible.builtin.command:
+    argv:
+      - "{{ harbor_kubectl_path }}"
+      - --kubeconfig
+      - "{{ harbor_kubeconfig_path }}"
+      - get
+      - service
+      - --all-namespaces
+      - -o
+      - jsonpath={range .items[*]}{range .status.loadBalancer.ingress[*]}{.ip}{"\n"}{end}{end}
+  check_mode: false
+  changed_when: false
+  register: harbor_allocated_vips
+
+- name: Read the Harbor Gateway service VIP when it already exists
+  ansible.builtin.command:
+    argv:
+      - "{{ harbor_kubectl_path }}"
+      - --kubeconfig
+      - "{{ harbor_kubeconfig_path }}"
+      - -n
+      - "{{ harbor_namespace }}"
+      - get
+      - service
+      - "cilium-gateway-{{ harbor_gateway_name }}"
+      - -o
+      - jsonpath={.status.loadBalancer.ingress[0].ip}
+  check_mode: false
+  changed_when: false
+  failed_when: false
+  register: harbor_gateway_service_vip
+
+- name: Reject a Harbor VIP owned by a different service
+  ansible.builtin.assert:
+    that: >-
+      harbor_gateway_vip not in harbor_allocated_vips.stdout_lines or
+      harbor_gateway_service_vip.stdout == harbor_gateway_vip
+    fail_msg: HARBOR_VIP_CONFLICT
+
+- name: Read the root-only Harbor secret locator on the router
+  ansible.builtin.command:
+    argv:
+      - sudo
+      - -n
+      - cat
+      - "{{ harbor_secret_locator_path }}"
+  check_mode: false
+  delegate_to: "{{ groups['routers'][0] }}"
+  become: false
+  changed_when: false
+  no_log: true
+  register: harbor_secret_locator
+
+- name: Extract required Harbor credentials without logging their values
+  ansible.builtin.set_fact:
+    harbor_admin_password: "{{ harbor_secret_locator.stdout | regex_findall('(?m)^HARBOR_ADMIN_PASSWORD=(.+)$') | first }}"
+    harbor_database_password: "{{ harbor_secret_locator.stdout | regex_findall('(?m)^HARBOR_DATABASE_PASSWORD=(.+)$') | first }}"
+    harbor_redis_password: "{{ harbor_secret_locator.stdout | regex_findall('(?m)^HARBOR_REDIS_PASSWORD=(.+)$') | first }}"
+  no_log: true
+
+- name: Create the isolated Harbor namespace
+  ansible.builtin.command:
+    argv:
+      - "{{ harbor_kubectl_path }}"
+      - --kubeconfig
+      - "{{ harbor_kubeconfig_path }}"
+      - create
+      - namespace
+      - "{{ harbor_namespace }}"
+      - --dry-run=client
+      - -o
+      - yaml
+  changed_when: false
+  register: harbor_namespace_definition
+
+- name: Apply the Harbor namespace ownership boundary
+  ansible.builtin.command:
+    argv:
+      - "{{ harbor_kubectl_path }}"
+      - --kubeconfig
+      - "{{ harbor_kubeconfig_path }}"
+      - apply
+      - -f
+      - "-"
+  args:
+    stdin: "{{ harbor_namespace_definition.stdout }}"
+  changed_when: false
+  register: harbor_namespace_apply
+
+- name: Label the Harbor namespace as a restricted LabWeaver boundary
+  ansible.builtin.command:
+    argv:
+      - "{{ harbor_kubectl_path }}"
+      - --kubeconfig
+      - "{{ harbor_kubeconfig_path }}"
+      - label
+      - namespace
+      - "{{ harbor_namespace }}"
+      - app.kubernetes.io/part-of=labweaver-infrastructure
+      - pod-security.kubernetes.io/enforce=restricted
+      - --overwrite
+  changed_when: false
+
+- name: Render and apply the Harbor single-instance quota
+  ansible.builtin.template:
+    src: quota.yml.j2
+    dest: /var/tmp/labweaver-harbor-quota.yml
+    mode: '0600'
+
+- name: Apply the Harbor quota without touching other namespaces
+  ansible.builtin.command:
+    argv:
+      - "{{ harbor_kubectl_path }}"
+      - --kubeconfig
+      - "{{ harbor_kubeconfig_path }}"
+      - apply
+      - -f
+      - /var/tmp/labweaver-harbor-quota.yml
+  changed_when: false
+
+- name: Guard against an existing Harbor DNS collision
+  ansible.builtin.command:
+    argv:
+      - sudo
+      - -n
+      - grep
+      - -R
+      - --fixed-strings
+      - "{{ harbor_hostname }}"
+      - /etc/dnsmasq.conf
+      - /etc/dnsmasq.d
+  check_mode: false
+  delegate_to: "{{ groups['routers'][0] }}"
+  become: false
+  changed_when: false
+  failed_when: false
+  register: harbor_dns_records
+
+- name: Reject a DNS collision outside the dedicated Harbor fragment
+  ansible.builtin.assert:
+    that: harbor_dns_records.rc != 0 or (harbor_dns_records.stdout_lines | reject('search', harbor_dns_fragment_path) | list | length == 0)
+    fail_msg: HARBOR_DNS_CONFLICT
+
+- name: Install the dedicated Harbor DNS fragment with rollback on validation failure
+  block:
+    - name: Record the existing Harbor DNS fragment before replacement
+      ansible.builtin.stat:
+        path: "{{ harbor_dns_fragment_path }}"
+      delegate_to: "{{ groups['routers'][0] }}"
+      register: harbor_dns_fragment_stat
+
+    - name: Back up the existing Harbor DNS fragment for rollback
+      ansible.builtin.copy:
+        src: "{{ harbor_dns_fragment_path }}"
+        dest: /var/tmp/labweaver-harbor-dns.conf.backup
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0600'
+      delegate_to: "{{ groups['routers'][0] }}"
+      when: harbor_dns_fragment_stat.stat.exists
+
+    - name: Write the Harbor-only dnsmasq fragment
+      ansible.builtin.template:
+        src: dnsmasq-harbor.conf.j2
+        dest: "{{ harbor_dns_fragment_path }}"
+        owner: root
+        group: root
+        mode: '0644'
+      delegate_to: "{{ groups['routers'][0] }}"
+
+    - name: Validate dnsmasq before applying Harbor DNS
+      ansible.builtin.command: /usr/sbin/dnsmasq --test
+      delegate_to: "{{ groups['routers'][0] }}"
+      changed_when: false
+
+    - name: Restart dnsmasq after successful configuration validation
+      ansible.builtin.service:
+        name: dnsmasq
+        state: restarted
+      delegate_to: "{{ groups['routers'][0] }}"
+  rescue:
+    - name: Restore the previous Harbor DNS fragment when available
+      ansible.builtin.copy:
+        src: /var/tmp/labweaver-harbor-dns.conf.backup
+        dest: "{{ harbor_dns_fragment_path }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0644'
+      delegate_to: "{{ groups['routers'][0] }}"
+      when: harbor_dns_fragment_stat.stat.exists | default(false)
+
+    - name: Remove the new Harbor DNS fragment when none existed before
+      ansible.builtin.file:
+        path: "{{ harbor_dns_fragment_path }}"
+        state: absent
+      delegate_to: "{{ groups['routers'][0] }}"
+      when: not (harbor_dns_fragment_stat.stat.exists | default(false))
+    - name: Restore dnsmasq service after failed Harbor DNS validation
+      ansible.builtin.service:
+        name: dnsmasq
+        state: restarted
+      delegate_to: "{{ groups['routers'][0] }}"
+    - name: Stop after failed Harbor DNS validation
+      ansible.builtin.fail:
+        msg: HARBOR_DNS_VALIDATION_FAILED
+
+- name: Install or reconcile Harbor with pinned chart and internal dependencies
+  kubernetes.core.helm:
+    name: "{{ harbor_release_name }}"
+    chart_ref: "{{ harbor_chart_archive }}"
+    chart_version: "{{ harbor_chart_version }}"
+    release_namespace: "{{ harbor_namespace }}"
+    kubeconfig: "{{ harbor_kubeconfig_path }}"
+    create_namespace: false
+    wait: false
+    atomic: false
+    values:
+      externalURL: "https://{{ harbor_hostname }}"
+      expose:
+        type: clusterIP
+        tls:
+          enabled: true
+          certSource: auto
+          auto:
+            commonName: "{{ harbor_hostname }}"
+      harborAdminPassword: "{{ harbor_admin_password }}"
+      persistence:
+        persistentVolumeClaim:
+          registry:
+            storageClass: "{{ storageclass_nfs_rwx }}"
+          trivy:
+            storageClass: "{{ storageclass_nfs_rwx }}"
+          database:
+            storageClass: "{{ storageclass_local_path }}"
+          redis:
+            storageClass: "{{ storageclass_local_path }}"
+      nginx:
+        image: { tag: "v2.15.1@{{ harbor_locked_images.nginx }}" }
+        resources: "{{ harbor_component_resources.nginx }}"
+      portal:
+        image: { tag: "v2.15.1@{{ harbor_locked_images.portal }}" }
+        resources: "{{ harbor_component_resources.portal }}"
+      core:
+        image: { tag: "v2.15.1@{{ harbor_locked_images.core }}" }
+        resources: "{{ harbor_component_resources.core }}"
+      jobservice:
+        image: { tag: "v2.15.1@{{ harbor_locked_images.jobservice }}" }
+        resources: "{{ harbor_component_resources.jobservice }}"
+      registry:
+        registry:
+          image: { tag: "v2.15.1@{{ harbor_locked_images.registry }}" }
+          resources: "{{ harbor_component_resources.registry }}"
+        controller:
+          image: { tag: "v2.15.1@{{ harbor_locked_images.registryctl }}" }
+          resources: "{{ harbor_component_resources.registryctl }}"
+      trivy:
+        enabled: true
+        image: { tag: "v2.15.1@{{ harbor_locked_images.trivy }}" }
+        resources: "{{ harbor_component_resources.trivy }}"
+      database:
+        type: internal
+        internal:
+          password: "{{ harbor_database_password }}"
+          image: { tag: "v2.15.1@{{ harbor_locked_images.database }}" }
+          resources: "{{ harbor_component_resources.database }}"
+          initContainer:
+            permissions:
+              resources: "{{ harbor_component_resources.database_permissions }}"
+      redis:
+        type: internal
+        internal:
+          password: "{{ harbor_redis_password }}"
+          image: { tag: "v2.15.1@{{ harbor_locked_images.redis }}" }
+          resources: "{{ harbor_component_resources.redis }}"
+      exporter:
+        image: { tag: "v2.15.1@{{ harbor_locked_images.exporter }}" }
+        resources: "{{ harbor_component_resources.exporter }}"
+  no_log: true
+  environment:
+    PATH: /usr/local/bin:/usr/bin:/bin
+
+- name: Read the Harbor Trivy PVC binding
+  ansible.builtin.command:
+    argv:
+      - "{{ harbor_kubectl_path }}"
+      - --kubeconfig
+      - "{{ harbor_kubeconfig_path }}"
+      - -n
+      - "{{ harbor_namespace }}"
+      - get
+      - pvc
+      - data-harbor-trivy-0
+      - -o
+      - jsonpath={.spec.volumeName}
+  check_mode: false
+  changed_when: false
+  register: harbor_trivy_pv
+
+- name: Read the Harbor Trivy NFS dynamic subdirectory
+  ansible.builtin.command:
+    argv:
+      - "{{ harbor_kubectl_path }}"
+      - --kubeconfig
+      - "{{ harbor_kubeconfig_path }}"
+      - get
+      - pv
+      - "{{ harbor_trivy_pv.stdout }}"
+      - -o
+      - jsonpath={.spec.csi.volumeAttributes.subdir}
+  check_mode: false
+  changed_when: false
+  register: harbor_trivy_subdir
+
+- name: Reject an unsafe Trivy NFS subdirectory
+  ansible.builtin.assert:
+    that:
+      - harbor_trivy_subdir.stdout is match('^[a-z0-9][a-z0-9-]+$')
+    fail_msg: HARBOR_TRIVY_SUBDIR_UNSAFE
+
+- name: Repair ownership of the Harbor Trivy cache directory
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/chown
+      - 10000:10000
+      - "{{ harbor_nfs_dynamic_root }}/{{ harbor_trivy_subdir.stdout }}"
+  delegate_to: "{{ groups['nfs_servers'][0] }}"
+  become: true
+  when: not ansible_check_mode
+  changed_when: false
+
+- name: Repair permissions of the Harbor Trivy cache directory
+  ansible.builtin.file:
+    path: "{{ harbor_nfs_dynamic_root }}/{{ harbor_trivy_subdir.stdout }}"
+    owner: 10000
+    group: 10000
+    mode: '2770'
+  delegate_to: "{{ groups['nfs_servers'][0] }}"
+  become: true
+  when: not ansible_check_mode
+
+- name: Wait for Harbor Trivy readiness after cache repair
+  ansible.builtin.command:
+    argv:
+      - "{{ harbor_kubectl_path }}"
+      - --kubeconfig
+      - "{{ harbor_kubeconfig_path }}"
+      - -n
+      - "{{ harbor_namespace }}"
+      - rollout
+      - status
+      - statefulset/harbor-trivy
+      - --timeout=180s
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Render the TLS Gateway and route only after the Harbor release exists
+  ansible.builtin.template:
+    src: gateway.yml.j2
+    dest: /var/tmp/labweaver-harbor-gateway.yml
+    mode: '0600'
+
+- name: Apply the isolated Harbor TLS Gateway and route
+  ansible.builtin.command:
+    argv:
+      - "{{ harbor_kubectl_path }}"
+      - --kubeconfig
+      - "{{ harbor_kubeconfig_path }}"
+      - apply
+      - -f
+      - /var/tmp/labweaver-harbor-gateway.yml
+  changed_when: false
+
+- name: Read the adopted cluster identity
+  ansible.builtin.command:
+    argv:
+      - "{{ harbor_kubectl_path }}"
+      - --kubeconfig
+      - "{{ harbor_kubeconfig_path }}"
+      - get
+      - namespace
+      - kube-system
+      - -o
+      - jsonpath={.metadata.uid}
+  check_mode: false
+  changed_when: false
+  register: harbor_cluster_uid
+
+- name: Verify the managed Harbor system project policy
+  ansible.builtin.uri:
+    url: "https://{{ harbor_hostname }}/api/v2.0/projects?name={{ harbor_project_name | urlencode }}"
+    method: GET
+    user: admin
+    password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    validate_certs: true
+    status_code: 200
+    return_content: true
+  delegate_to: "{{ groups['control_plane'][0] }}"
+  become: false
+  check_mode: false
+  no_log: true
+  register: harbor_system_project
+
+- name: Reject a missing or non-private Harbor system project
+  ansible.builtin.assert:
+    that:
+      - harbor_system_project.json | length == 1
+      - harbor_system_project.json[0].name == harbor_project_name
+      - harbor_system_project.json[0].metadata.public == 'false'
+      - harbor_system_project.json[0].metadata.auto_scan == 'true'
+    fail_msg: HARBOR_SYSTEM_PROJECT_POLICY_DRIFT
+
+- name: Render the sanitized Harbor policy manifest
+  ansible.builtin.template:
+    src: harbor-policy-manifest.json.j2
+    dest: /var/tmp/labweaver-harbor-policy-manifest.json
+    mode: '0600'
+  delegate_to: "{{ groups['routers'][0] }}"
+  become: true
+  vars:
+    harbor_manifest_run_id: "{{ harbor_run_id }}"
+
+- name: Ensure the root-only Harbor manifest directory exists
+  ansible.builtin.file:
+    path: "{{ harbor_manifest_directory }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  delegate_to: "{{ groups['routers'][0] }}"
+  become: true
+
+- name: Publish the sanitized Harbor policy manifest
+  ansible.builtin.copy:
+    src: /var/tmp/labweaver-harbor-policy-manifest.json
+    dest: "{{ harbor_manifest_directory }}/HarborPolicyManifest.json"
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0600'
+  delegate_to: "{{ groups['routers'][0] }}"
+  become: true
+
+- name: Hash the published Harbor policy manifest bytes
+  ansible.builtin.stat:
+    path: "{{ harbor_manifest_directory }}/HarborPolicyManifest.json"
+    checksum_algorithm: sha256
+  delegate_to: "{{ groups['routers'][0] }}"
+  become: true
+  register: harbor_policy_manifest_file
+
+- name: Render the sanitized infrastructure deployment manifest
+  ansible.builtin.template:
+    src: infrastructure-deployment-manifest.json.j2
+    dest: "{{ harbor_manifest_directory }}/InfrastructureDeploymentManifest.json"
+    owner: root
+    group: root
+    mode: '0600'
+  delegate_to: "{{ groups['routers'][0] }}"
+  become: true
+  vars:
+    harbor_policy_hash: "sha256:{{ harbor_policy_manifest_file.stat.checksum }}"
+    harbor_cluster_identity: "{{ harbor_cluster_uid.stdout }}"
