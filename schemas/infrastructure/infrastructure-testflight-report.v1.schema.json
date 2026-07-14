@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://labweaver.invalid/schemas/infrastructure-testflight-report.v1.schema.json",
+  "title": "InfrastructureTestFlightReport",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "scope", "run_id", "deployment_run_id", "cluster_uid", "commit_sha", "inventory_hash", "component_lock_hash", "harbor_policy_manifest_hash", "deployment_manifest_hash", "deployment_manifest_locator", "overall", "checks", "cleanup"],
+  "properties": {
+    "schema_version": { "const": "infrastructure-testflight-report.v1" },
+    "scope": { "const": "adopted-cluster-baseline" },
+    "run_id": { "type": "string", "pattern": "^testflight-[a-z0-9-]+$" },
+    "deployment_run_id": { "type": "string", "pattern": "^infra-[a-z0-9-]+$" },
+    "cluster_uid": { "type": "string", "minLength": 1 },
+    "commit_sha": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+    "inventory_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "component_lock_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "harbor_policy_manifest_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "deployment_manifest_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "deployment_manifest_locator": { "const": "root-only-router:InfrastructureDeploymentManifest.json" },
+    "overall": { "enum": ["passed", "blocked"] },
+    "checks": { "type": "array", "minItems": 1, "items": { "type": "object", "required": ["name", "status"], "properties": { "name": { "type": "string" }, "status": { "enum": ["passed", "failed", "blocked", "deferred"] }, "diagnostic": { "type": ["string", "null"] } } } },
+    "cleanup": { "type": "object", "required": ["status"], "properties": { "status": { "enum": ["completed", "failed"] } } }
+  }
+}

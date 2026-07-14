@@ -20,20 +20,46 @@ Status is proven only by the identified commit/worktree and current evidence. `d
 | Agent state and Tool contract | B | partially implemented, blocked | `agent-core` state, capability binding, timeout/cancel/no-retry, idempotency identity propagation, output validation, diagnostic ownership, audit and negative tests | Partial E1 | role A must freeze Tool permissions and approval evidence; durable idempotency reservation/replay, service integration and AG-01b Fixture Backend remain unimplemented |
 | Playwright role-project configuration | D (implemented in `test/9-playwright-role-projects`, pending C/A review) | implemented configuration, pending review | exactly four projects, aggregate E1 gate, static/subprocess contracts and fail-fast entrypoints | E1 | requirements baseline PR #36 @ `a9bc7a8ab013a35a846a4b428bad22ecc48eca1b` merged by `0f80e4e9c4b2334d4a833d1fb6a2263ecc3dda9a`; integration baseline `develop` @ `8ec186599f82afeab7ff5bed346c844ce7f923d1`; researcher requires a separate approved Project/auth-state Issue; CI records baseline metadata but does not receive an externally pinned baseline-change input; no auth setup, browser runtime, role isolation, E3 or E4 evidence exists |
 | Frontend, Agent runtime and Playwright work | C/B/D | planned | assigned Sprint Issues | E0 | real UI behavior, authentication, authorization and browser evidence remain unimplemented |
-| Real KubeVirt VM-01a infrastructure path | B/D | implemented, pending human Verify | Issue #15, `vm-01a-e3-20260713.md` | E3 | proves bounded RWO/RWX, KVM VM lifecycle, internal Gateway request and cleanup only; no Ansible replay, Access/Headscale, application path or E4 evidence |
+| Adopted-cluster infrastructure baseline TestFlight | B/D | implemented, pending human Verify | Issue #15, scoped `InfrastructureTestFlightReport` bound to the current deployment identity | E3 baseline | proves RWO/RWX, KVM VM lifecycle, internal Gateway, Cilium control-plane, etcd backup evidence and cleanup only; OIDC/governance is deferred to #47 and extended security/recovery remains under #2 |
 
 ## Kubernetes infrastructure automation
 
-State: implemented, pending review and real Ansible replay.
+State: implemented, pending review; the router replay is complete for the
+currently scoped baseline.
 
 The Ansible playbooks encode the currently validated Rocky Kubernetes baseline:
 Kubernetes/CRI-O, Cilium, MetalLB, Local Path, NFS CSI, cert-manager, KubeVirt,
 CDI, Kyverno, internal Gateway, and etcd backup. The prior manual environment
-provided E3 evidence; this branch does not claim E3 for the playbooks until a
-fresh deploy and second idempotency run complete.
+provided E3 evidence. The router worktree has now completed a guarded deploy,
+backup, TestFlight verification, and a second idempotent deploy under the same
+source identity.
 
-Linux CI now provides lint, syntax, fictional encrypted-Vault, preflight-chain,
-and storage-safety fixture evidence. This is not E3 evidence. Blockers remain:
-private inventory, encrypted Vault, a Linux Ansible controller, and a real
-replay environment for first deploy, idempotency, storage, VM, Gateway, Cilium,
-and etcd acceptance.
+Linux CI continues to provide lint, syntax, fictional encrypted-Vault,
+preflight-chain, and storage-safety fixture evidence. The router is now the
+only Linux execution authority for the real controller path; its evidence is
+recorded below. Bootstrap remains intentionally out of scope for an adopted
+cluster, and the existing baseline is read-only validated before Harbor
+reconciliation.
+
+## Harbor infrastructure (Issue #23)
+
+State: manual adopted-cluster deployment established; guarded controller
+reconciliation, router-side ansible-rs entrypoint, and sanitized manifest schemas
+are implemented in this worktree. The next router rerun is blocked until the
+new controller-identity locator and identity-bound backup evidence are present;
+the earlier replay must not be treated as evidence for those new controls.
+
+The manual deployment uses chart `1.19.1` and Harbor `2.15.1`, a dedicated
+namespace, internal CA/TLS, a separate Cilium Gateway/HTTPRoute, a dedicated
+router DNS fragment, the `local-path`/`nfs-rwx` single-instance storage split,
+and the private `labweaver-system` project. The Trivy volume ownership repair
+was scoped to the newly-created Harbor PVC after the NFS CSI provisioner created
+it with anonymous ownership. It is deployment evidence only, not a replacement
+for the future reconciler's first-run and replay evidence.
+
+The TestFlight report is schema-validated for the `adopted-cluster-baseline`
+scope. Keycloak OIDC is intentionally deferred to #47; registry push/pull/scan
+policy replay, immutable-tag and retention enforcement, recovery drills, a
+reviewed Cilium policy for host-network Gateway traffic, and Release Gate
+evidence remain Sprint 2/#2 work. They do not make #23 or the baseline #15
+release-ready, but are not blockers for their bounded close conditions.

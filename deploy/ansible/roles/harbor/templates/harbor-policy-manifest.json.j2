@@ -1,0 +1,8 @@
+{
+  "schema_version": "harbor-policy-manifest.v1",
+  "run_id": "{{ harbor_manifest_run_id }}",
+  "project": {"name": "labweaver-system", "private": true, "auto_scan": true},
+  "oidc": {"status": "not_configured", "reason": "issue-23-non-goal"},
+  "policy_revision": "sha256:{{ (harbor_project_name ~ harbor_chart_version ~ harbor_app_version) | hash('sha256') }}",
+  "credential_locator": {"kind": "root-only-router-locator", "revision": "{{ harbor_secret_locator_revision }}"}
+}

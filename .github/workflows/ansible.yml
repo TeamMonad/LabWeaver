@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
   pull_request:
     branches: [main, develop]
-    paths: ["deploy/ansible/**", "tools/ansible.py", "tests/ansible/**", ".github/workflows/ansible.yml"]
+    paths: ["deploy/ansible/**", "deploy/versions.lock.yml", "tests/ansible/**", "xtask/**", "Cargo.lock", ".github/workflows/ansible.yml"]
   push:
     branches: [main, develop]
-    paths: ["deploy/ansible/**", "tools/ansible.py", "tests/ansible/**", ".github/workflows/ansible.yml"]
+    paths: ["deploy/ansible/**", "deploy/versions.lock.yml", "tests/ansible/**", "xtask/**", "Cargo.lock", ".github/workflows/ansible.yml"]
 
 permissions:
   contents: read
@@ -33,5 +33,9 @@ jobs:
         run: >-
           ansible-playbook --syntax-check -i deploy/ansible/inventories/dev/hosts.yml.example
           deploy/ansible/playbooks/site.yml
+          && ansible-playbook --syntax-check -i deploy/ansible/inventories/dev/hosts.yml.example
+          deploy/ansible/playbooks/95-harbor.yml
+          && ansible-playbook --syntax-check -i deploy/ansible/inventories/dev/hosts.yml.example
+          deploy/ansible/playbooks/90-verify.yml
       - name: Run fictional Vault and storage-safety fixtures
         run: python -m unittest discover -s tests/ansible

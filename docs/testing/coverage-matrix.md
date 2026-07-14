@@ -24,13 +24,13 @@
 
 | Capability | Owner | Entry point | Target evidence | Blocking condition |
 | --- | --- | --- | --- | --- |
-| Cluster preflight | A/D | `python tools/ansible.py preflight` | E1 then E3 replay | unresolved private config or network prerequisite |
-| Kubernetes baseline | A | `python tools/ansible.py deploy` | E3 | package/version/bootstrap failure |
+| Cluster preflight | A/D | `cargo xtask preflight --infra --env dev` | E1 then E3 replay | unresolved private config or network prerequisite |
+| Kubernetes baseline | A | `cargo xtask deploy --infra --env dev --yes` on the router worktree | E3 guarded adopted-cluster reconciliation; second run is idempotent | package/version/bootstrap failure or baseline drift |
 | Storage | A/D | deploy + verify | E3 RWO/RWX | unsafe formatting or mount/provision failure |
 | KubeVirt/CDI | A/B/D | deploy + verify | E3 real VM lifecycle | missing KVM/CDI/scratch class |
 | Gateway and policy | A/D | deploy + verify | E3 internal route | VIP not programmed or controller unavailable |
-| Backup | A | `python tools/ansible.py backup` | E2 snapshot status | snapshot integrity failure |
-| Ansible controller | D | Linux CI | E1/E2 lint, syntax, fictional Vault and storage fixtures | CI failure or missing E3 replay |
+| Backup | A | `cargo xtask backup --infra --env dev --yes` on the router | E3 router execution with sanitized result | snapshot integrity failure |
+| Ansible controller | D | Router Linux worktree via `ansible-rs` | E1/E2 lint and syntax plus E3 adopted-cluster baseline deploy/backup/TestFlight/idempotent replay | manifest identity failure; OIDC/governance and recovery remain #47/#2 release work |
 | Direct VM access | documented DirectAccessGrant device/IP/port scope and Router-first dual-revision activation | missing/stale Headscale or Router receipt, inactive device, wrong endpoint, IP reuse, unsupported protocol and cross-user access remain blocked | E0: ACCESS-01a documentation and ADR 0001 | E1/E2 contract and dual-enforcement tests; E3 Headscale/Router evidence; E4 multi-device containment replay |
 | Browser SSH/VNC proxy | documented Keycloak PKCE handoff, custom Guacamole extension and scoped credential boundary | handoff replay/expiry, invalid Access decision, credential disclosure and stale session are rejected | E0: ACCESS-01a documentation and ADR 0001 | E1/E2 token and extension tests; E3 deployed Guacamole path; E4 browser replay |
 | Playwright role-project configuration | exactly four projects (`setup`, `teacher`, `student`, `platform-admin`), independent configured auth-state paths, retained failure artifacts, and aggregate E1 report | invalid project set, any `researcher` alias/test match/shared auth state, fixed sleeps, missing/invalid base URL, missing authentication setup, missing storage state, or zero runtime tests fail closed | E1 static configuration, aggregate-gate, and subprocess fail-fast contract tests; runtime E2E not executed | approved auth setup, a separately approved researcher project/auth state, real browser paths, authorization isolation, and E3/E4 evidence |

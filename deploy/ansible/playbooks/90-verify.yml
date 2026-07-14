@@ -2,4 +2,7 @@
 - name: Verify deployed cluster infrastructure
   hosts: control_plane
   gather_facts: false
+  environment:
+    PATH: /usr/local/bin:/usr/bin:/bin
+    KUBECONFIG: /etc/kubernetes/admin.conf
   roles: [verify]
