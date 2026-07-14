@@ -393,14 +393,13 @@ impl InfrastructureInputs {
         require_infrastructure_file("infrastructure deployment input", &inventory)?;
         require_infrastructure_file("infrastructure deployment input", &vault_password)?;
         require_infrastructure_file("infrastructure deployment input", &playbook)?;
-        require_infrastructure_file(
-            "approved ansible-playbook binary",
-            std::path::Path::new("/usr/bin/ansible-playbook"),
-        )?;
+        let ansible_binary = std::path::Path::new("/usr/local/bin/ansible-playbook");
+        require_infrastructure_file("approved ansible-playbook binary", ansible_binary)?;
         let ansible_config = controller_root.join("ansible.cfg");
         require_infrastructure_file("approved Ansible configuration", &ansible_config)?;
         let controller_lock = controller_root.join("controller.lock.yml");
         require_infrastructure_file("approved infrastructure controller lock", &controller_lock)?;
+        require_ansible_version(&controller_lock, ansible_binary)?;
 
         let shared_controller_root = infrastructure_dependency_root()?;
         let collections_path = resolve_infrastructure_directory(
@@ -585,6 +584,36 @@ fn approved_controller_identity(lock_path: &std::path::Path) -> Result<String, A
         });
     }
     Ok(controller_id)
+}
+
+#[cfg(target_os = "linux")]
+fn require_ansible_version(
+    lock_path: &std::path::Path,
+    ansible_binary: &std::path::Path,
+) -> Result<(), AppError> {
+    let lock = std::fs::read_to_string(lock_path).map_err(|error| AppError::ExternalCommand {
+        role: "approved infrastructure controller lock",
+        code: None,
+        detail: Some(error.to_string()),
+    })?;
+    let expected = controller_identity_field(&lock, "ansible_core_version")?;
+    let output = ProcessCommand::new(ansible_binary)
+        .arg("--version")
+        .output()
+        .map_err(|error| AppError::ExternalCommand {
+            role: "approved Ansible version",
+            code: None,
+            detail: Some(error.to_string()),
+        })?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if output.status.success() && stdout.contains(&format!("core {expected}")) {
+        return Ok(());
+    }
+    Err(AppError::ExternalCommand {
+        role: "approved Ansible version",
+        code: output.status.code(),
+        detail: Some(format!("expected ansible-core {expected}")),
+    })
 }
 
 #[cfg(target_os = "linux")]
