@@ -567,12 +567,6 @@
   vars:
     harbor_manifest_run_id: "{{ harbor_run_id }}"
 
-- name: Hash the sanitized Harbor policy manifest content
-  ansible.builtin.set_fact:
-    harbor_policy_manifest_hash_value: "{{ lookup('template', 'harbor-policy-manifest.json.j2') | hash('sha256') }}"
-  vars:
-    harbor_manifest_run_id: "{{ harbor_run_id }}"
-
 - name: Ensure the root-only Harbor manifest directory exists
   ansible.builtin.file:
     path: "{{ harbor_manifest_directory }}"
@@ -594,6 +588,14 @@
   delegate_to: "{{ groups['routers'][0] }}"
   become: true
 
+- name: Hash the published Harbor policy manifest bytes
+  ansible.builtin.stat:
+    path: "{{ harbor_manifest_directory }}/HarborPolicyManifest.json"
+    checksum_algorithm: sha256
+  delegate_to: "{{ groups['routers'][0] }}"
+  become: true
+  register: harbor_policy_manifest_file
+
 - name: Render the sanitized infrastructure deployment manifest
   ansible.builtin.template:
     src: infrastructure-deployment-manifest.json.j2
@@ -604,5 +606,5 @@
   delegate_to: "{{ groups['routers'][0] }}"
   become: true
   vars:
-    harbor_policy_hash: "sha256:{{ harbor_policy_manifest_hash_value }}"
+    harbor_policy_hash: "sha256:{{ harbor_policy_manifest_file.stat.checksum }}"
     harbor_cluster_identity: "{{ harbor_cluster_uid.stdout }}"
