@@ -177,6 +177,9 @@ class AnsibleFixtureTests(unittest.TestCase):
         provision_job = (
             ROOT / "deploy/ansible/roles/identity_foundation/templates/provision-job.yml.j2"
         ).read_text(encoding="utf-8")
+        operator_rbac = (
+            ROOT / "deploy/ansible/roles/identity_foundation/templates/operator-rbac.yml.j2"
+        ).read_text(encoding="utf-8")
         pki = (ROOT / "deploy/ansible/roles/identity_foundation/templates/pki.yml.j2").read_text(
             encoding="utf-8"
         )
@@ -213,6 +216,9 @@ class AnsibleFixtureTests(unittest.TestCase):
         ).read_text(encoding="utf-8"))
         self.assertIn("IDENTITY_TOKEN_CLAIMS_INVALID", tasks)
         self.assertIn("service-account-{{ identity_workload_client_id }}", tasks)
+        self.assertIn("automountServiceAccountToken: false", operator_rbac)
+        self.assertIn("name: labweaver-cluster-observer", operator_rbac)
+        self.assertNotIn("resources: [secrets", operator_rbac)
         self.assertNotIn(":latest", workloads)
 
     def test_render_validator_rejects_mutable_and_public_images(self) -> None:

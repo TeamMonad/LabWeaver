@@ -138,6 +138,12 @@
               pod-security.kubernetes.io/audit: restricted
               pod-security.kubernetes.io/warn: restricted
 
+    - name: Reconcile time-limited operator credential RBAC
+      kubernetes.core.k8s:
+        kubeconfig: "{{ identity_kubeconfig_path }}"
+        state: present
+        definition: "{{ lookup('template', 'operator-rbac.yml.j2') | from_yaml_all | list }}"
+
     - name: Apply the namespace-scoped internal CA chain
       kubernetes.core.k8s:
         kubeconfig: "{{ identity_kubeconfig_path }}"
