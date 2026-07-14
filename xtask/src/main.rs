@@ -149,8 +149,13 @@ enum AppError {
     ConfirmationRequired {
         command: &'static str,
     },
-    Io { role: &'static str, detail: String },
-    ContractDrift { path: String },
+    Io {
+        role: &'static str,
+        detail: String,
+    },
+    ContractDrift {
+        path: String,
+    },
     #[cfg(not(target_os = "linux"))]
     UnsupportedPlatform {
         command: &'static str,
@@ -194,7 +199,9 @@ impl Display for AppError {
                 "{command} is a destructive operation and requires explicit --yes"
             ),
             Self::Io { role, detail } => write!(formatter, "{role} failed: {detail}"),
-            Self::ContractDrift { path } => write!(formatter, "generated contract differs from {path}"),
+            Self::ContractDrift { path } => {
+                write!(formatter, "generated contract differs from {path}")
+            }
             #[cfg(not(target_os = "linux"))]
             Self::UnsupportedPlatform { command } => write!(
                 formatter,
@@ -296,12 +303,15 @@ fn contracts_check() -> Result<(), AppError> {
         role: "generate contracts",
         detail: error.to_string(),
     })? {
-        let checked_in = fs::read(root.join(&artifact.relative_path)).map_err(|error| AppError::Io {
-            role: "read checked-in contract",
-            detail: format!("{}: {error}", artifact.relative_path),
-        })?;
+        let checked_in =
+            fs::read(root.join(&artifact.relative_path)).map_err(|error| AppError::Io {
+                role: "read checked-in contract",
+                detail: format!("{}: {error}", artifact.relative_path),
+            })?;
         if checked_in != artifact.bytes {
-            return Err(AppError::ContractDrift { path: artifact.relative_path });
+            return Err(AppError::ContractDrift {
+                path: artifact.relative_path,
+            });
         }
     }
     Ok(())
