@@ -1,4 +1,6 @@
 schema_version: 1
+postgresql:
+  image: postgres:17.5-alpine
 kubernetes:
   minor: v1.35
   patch: v1.35.6

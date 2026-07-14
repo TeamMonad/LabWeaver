@@ -14,6 +14,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  postgres-persistence:
+    name: postgres-persistence-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy -p persistence-sqlx --all-targets --all-features -- -D warnings
+      - run: cargo test -p persistence-sqlx --locked
   rust:
     name: rust-gate
     runs-on: ubuntu-latest

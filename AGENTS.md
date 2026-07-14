@@ -478,10 +478,6 @@ chore(ci): add schema compatibility check
 - [ ] 测试条件
 - [ ] 文档条件
 
-## 必须执行的测试
-
-## Codex 使用级别
-C0 / C1 / C2 / C3
 
 ## 风险
 Low / Medium / High
@@ -611,16 +607,7 @@ Relates to #123
 
 ### 13. Codex Agent 使用级别
 
-Codex 使用以下自主级别：
-
-| 级别 | 允许行为 | 典型任务 |
-|---|---|---|
-| `C0` | 不进行代码修改，仅由人类执行 | Secret、生产凭据、最终发布、正式审批、数据删除 |
-| `C1` | 分析、规划、设计审查、Diff 审查 | 架构、权限、评分、安全、Migration |
-| `C2` | 在接口已确定后实现局部代码并补测试 | Rust Handler、状态机、Runner、Operator、API Client |
-| `C3` | 完成边界明确的小型任务并提交 Draft PR | UI 组件、Fixture、测试脚本、文档、代码生成物 |
-
-任何高风险任务默认不得高于 `C1`，除非 Issue 明确批准。
+Codex 可以自主执行编写代码/部署/测试/文档的任务
 
 ---
 

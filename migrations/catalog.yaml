@@ -1,0 +1,37 @@
+catalogVersion: 1
+toolVersion: 0.1.0
+bootstrap:
+  id: 1
+  file: bootstrap/0001_roles_and_schemas.sql
+  sha256: 6ea23fd7fdadfeaf9eb1daa29bcff5163ef5bf32962be80af7881ea5e296837d
+domains:
+  - name: control
+    migrations:
+      - id: 1
+        file: control/0001_initial.sql
+        sha256: d74b7b556c9507e53f72e40fed4258e5a4085972da93b06d1fdd45b58e3c1792
+  - name: access
+    migrations:
+      - id: 1
+        file: access/0001_initial.sql
+        sha256: 8648b4bad88e5b9714e65c96df808d2b1c95a31ee31bc72c9674dd2064dc9ab3
+  - name: environment
+    migrations:
+      - id: 1
+        file: environment/0001_initial.sql
+        sha256: 01a6a9849c1d6c32b28f7870aad3f464e9e343284f9c3d42f05fff9cd113a2af
+  - name: agent
+    migrations:
+      - id: 1
+        file: agent/0001_initial.sql
+        sha256: dd076f0bbd58b08f0f31e81add438c6d242ff90e2d00754bae78b79849527227
+  - name: evaluation
+    migrations:
+      - id: 1
+        file: evaluation/0001_initial.sql
+        sha256: 4e58caf20d66bc9519e701abb24243f7923f7a292e59a09d096902cf486a774e
+  - name: resource
+    migrations:
+      - id: 1
+        file: resource/0001_initial.sql
+        sha256: f2a9a2f106f7f3c5f3d7a9195eecdbb4f58861753f99e5aa3b1a9ce139140362

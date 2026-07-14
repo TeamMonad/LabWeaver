@@ -74,7 +74,7 @@ runtime schema validation.
   in network-byte order. Therefore every release for the same cluster
   contends for the same lock; a domain order cannot let two releases migrate
   different domains concurrently.
-- The ledger binds the lock holder to release ID, canonical manifest SHA-256,
+- The ledger binds the lock holder to release ID, canonical catalog SHA-256,
   Git commit, build/image digest, Job identity, attempt ID, timestamps, state,
   current domain and stable failure diagnostic. A lock holder creates a
   `running` attempt before acquiring a domain lock. PostgreSQL releases the
@@ -117,18 +117,20 @@ runtime schema validation.
 
 ## Manifest, history and report identity
 
-The release manifest is canonically serialized before SHA-256 calculation and
-lists release ID, Git commit, build/image digest, Migration tool version,
-ordered domains, and every Migration ID/filename/SHA-256. The Job refuses an
-identity mismatch between its immutable image/build metadata, supplied manifest
-and checked-out Migration files. Each history row retains the domain, monotonic
+The version-controlled catalog is canonically serialized before SHA-256 calculation and
+lists Migration tool version, ordered domains, bootstrap SQL, and every Migration
+ID/filename/SHA-256. Runtime release ID, Git commit, build/image digest and Job
+identity are supplied separately by the immutable Job metadata. The Job refuses an
+identity mismatch between its immutable image/build metadata, catalog and checked-out
+Migration files. Each history row retains the domain, monotonic
 ID, filename, SHA-256, applied timestamp, outcome, executor identity and
 release identity. An already-applied file is never edited, renumbered or
 replaced.
 
-The machine-readable Job report repeats the release/manifest/build/Job
-identity, lock attempt, per-domain outcomes, applied-history identities,
-failure diagnostic and report SHA-256. The ledger records the report hash.
+The machine-readable Job report repeats the release/catalog/build/Job identity,
+lock attempt, per-domain outcomes, applied-history identities and failure
+diagnostic. Its envelope records a SHA-256 of the canonical report body, avoiding
+self-reference; the ledger records that envelope hash.
 Together, manifest, Job, files, history, ledger and report form the required
 identity chain; human logs and mutable deployment labels are not evidence.
 

@@ -10,6 +10,10 @@ publish = false
 [dependencies]
 clap = { version = "4.5.40", features = ["derive"] }
 contracts = { path = "../crates/contracts" }
+persistence-sqlx = { path = "../crates/persistence-sqlx" }
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true
