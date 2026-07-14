@@ -6,6 +6,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 
 
@@ -108,6 +109,64 @@ class AnsibleFixtureTests(unittest.TestCase):
                 self.assertRegex(line, r"@sha256:[0-9a-f]{64}$")
         self.assertNotIn(":latest", lock)
         self.assertNotIn("oauth2.sigstore.dev", tasks + values + policy + gateway)
+
+    def test_private_sigstore_lifecycle_is_allowlisted_and_backup_first(self) -> None:
+        lifecycle = ROOT / "deploy/ansible/roles/private_sigstore_lifecycle/tasks"
+        main = (lifecycle / "main.yml").read_text(encoding="utf-8")
+        provider = (lifecycle / "provider.yml").read_text(encoding="utf-8")
+        cleanup = (lifecycle / "cleanup.yml").read_text(encoding="utf-8")
+        for number, action in (
+            (97, "backup"), (98, "restore"), (99, "rotate"),
+            (100, "verify"), (101, "cleanup"), (102, "disaster-recovery"),
+        ):
+            playbook = ROOT / f"deploy/ansible/playbooks/{number}-private-sigstore-{action}.yml"
+            self.assertTrue(playbook.is_file())
+            self.assertEqual(playbook.read_text(encoding="utf-8").splitlines()[1], "- import_playbook: 00-preflight.yml")
+        self.assertLess(main.index("Create mandatory pre-change backup"), main.index("Execute restore provider"))
+        self.assertLess(main.index("Create mandatory pre-change backup"), main.index("Execute rotation provider"))
+        self.assertLess(main.index("Create mandatory pre-change backup"), main.index("Execute disaster-recovery provider"))
+        self.assertIn("SIGSTORE_LIFECYCLE_REPORT_IDENTITY_INVALID", provider)
+        self.assertIn("labweaver.io/testflight-run", provider)
+        self.assertIn("jobs,pods,configmaps", cleanup)
+        cleanup_report = (lifecycle.parent / "templates/lifecycle-report.json.j2").read_text(encoding="utf-8")
+        self.assertIn('"action": "cleanup"', cleanup_report)
+        self.assertIn('"deployment_manifest_sha256"', cleanup_report)
+        for forbidden in ("namespace,", "persistentvolumeclaim", "secret,", "deployment,"):
+            self.assertNotIn(forbidden, cleanup.lower())
+
+        lifecycle_schema = json.loads(
+            (ROOT / "schemas/contracts/v1/private-sigstore-lifecycle-report.schema.json").read_text(encoding="utf-8")
+        )
+        for field in (
+            "run_id", "commit_sha", "controller_id", "cluster_uid", "inventory_sha256",
+            "deployment_manifest_sha256", "component_lock_sha256", "chart_archive_sha256",
+            "image_digests", "trust_bundle_sha256", "tuf_root_version", "tuf_root_sha256",
+            "workload_identity_policy_sha256", "checks", "blocked_items", "generated_at",
+        ):
+            self.assertIn(field, lifecycle_schema["required"])
+
+    def test_render_validator_rejects_mutable_and_public_images(self) -> None:
+        validator_path = ROOT / "tests/ansible/validate_sigstore_render.py"
+        spec = importlib.util.spec_from_file_location("sigstore_render", validator_path)
+        assert spec is not None and spec.loader is not None
+        validator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(validator)
+        original = sys.argv
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                fixture = Path(directory) / "render.yml"
+                fixture.write_text("image: ghcr.io/example/app:latest\n", encoding="utf-8")
+                sys.argv = [str(validator_path), str(fixture)]
+                with self.assertRaisesRegex(SystemExit, "SIGSTORE_RENDER_MUTABLE_IMAGE_FORBIDDEN"):
+                    validator.main()
+                fixture.write_text(
+                    "image: ghcr.io/example/app@sha256:" + "a" * 64 + "\nvalue: fulcio.sigstore.dev\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(SystemExit, "SIGSTORE_RENDER_PUBLIC_FALLBACK_FORBIDDEN"):
+                    validator.main()
+        finally:
+            sys.argv = original
 
     def test_testflight_report_requires_deployment_identity_chain(self) -> None:
         schema = json.loads(

@@ -1,0 +1,116 @@
+---
+- name: Derive fixed run-scoped provider identity
+  ansible.builtin.set_fact:
+    sigstore_provider_job: "ps-{{ sigstore_provider_action | replace('disaster-recovery', 'dr') }}-{{ sigstore_testflight_run_id | hash('sha256') | truncate(12, true, '') }}"
+    sigstore_provider_report: "{{ private_sigstore_lifecycle_report_directory }}/{{ sigstore_testflight_run_id }}-{{ sigstore_provider_action }}.json"
+
+- name: Require approved lifecycle provider CronJob
+  kubernetes.core.k8s_info:
+    api_version: batch/v1
+    kind: CronJob
+    name: "{{ sigstore_provider_cronjob }}"
+    namespace: "{{ private_sigstore_namespace }}"
+    kubeconfig: "{{ private_sigstore_kubeconfig_path }}"
+  register: sigstore_provider_contract
+
+- name: Reject an unapproved lifecycle provider
+  ansible.builtin.assert:
+    that:
+      - sigstore_provider_contract.resources | length == 1
+      - sigstore_provider_contract.resources[0].metadata.labels['labweaver.io/private-sigstore-provider'] == sigstore_provider_action
+    fail_msg: SIGSTORE_LIFECYCLE_PROVIDER_UNAPPROVED
+
+- name: Detect existing run-scoped provider Job
+  ansible.builtin.command:
+    argv:
+      - "{{ private_sigstore_kubectl_path }}"
+      - --kubeconfig
+      - "{{ private_sigstore_kubeconfig_path }}"
+      - --namespace
+      - "{{ private_sigstore_namespace }}"
+      - get
+      - job
+      - "{{ sigstore_provider_job }}"
+  changed_when: false
+  failed_when: false
+  register: sigstore_provider_existing_job
+
+- name: Create provider Job from fixed CronJob
+  kubernetes.core.k8s:
+    state: present
+    kubeconfig: "{{ private_sigstore_kubeconfig_path }}"
+    definition:
+      apiVersion: batch/v1
+      kind: Job
+      metadata:
+        name: "{{ sigstore_provider_job }}"
+        namespace: "{{ private_sigstore_namespace }}"
+        labels:
+          labweaver.io/testflight-run: "{{ sigstore_testflight_run_id }}"
+          labweaver.io/commit: "{{ sigstore_lifecycle_commit_sha }}"
+          labweaver.io/private-sigstore-action: "{{ sigstore_provider_action }}"
+      spec: >-
+        {{ sigstore_provider_contract.resources[0].spec.jobTemplate.spec
+           | combine({'template': {'metadata': {'labels': {
+               'labweaver.io/testflight-run': sigstore_testflight_run_id,
+               'labweaver.io/commit': sigstore_lifecycle_commit_sha,
+               'labweaver.io/private-sigstore-action': sigstore_provider_action
+             }}}}, recursive=true) }}
+  when: sigstore_provider_existing_job.rc != 0
+  register: sigstore_provider_created
+
+- name: Wait for provider Job completion
+  ansible.builtin.command:
+    argv:
+      - "{{ private_sigstore_kubectl_path }}"
+      - --kubeconfig
+      - "{{ private_sigstore_kubeconfig_path }}"
+      - --namespace
+      - "{{ private_sigstore_namespace }}"
+      - wait
+      - --for=condition=complete
+      - job/{{ sigstore_provider_job }}
+      - --timeout=20m
+  changed_when: false
+  register: sigstore_provider_wait
+  failed_when: sigstore_provider_wait.rc != 0
+
+- name: Require provider report file
+  ansible.builtin.stat:
+    path: "{{ sigstore_provider_report }}"
+    checksum_algorithm: sha256
+  register: sigstore_provider_report_stat
+
+- name: Reject missing provider report
+  ansible.builtin.assert:
+    that:
+      - sigstore_provider_report_stat.stat.exists
+      - sigstore_provider_report_stat.stat.checksum is match('^[0-9a-f]{64}$')
+    fail_msg: SIGSTORE_LIFECYCLE_REPORT_MISSING
+
+- name: Read sanitized provider report for identity validation
+  ansible.builtin.slurp:
+    src: "{{ sigstore_provider_report }}"
+  register: sigstore_provider_report_raw
+  no_log: true
+
+- name: Reject stale, failed, or identity-mismatched provider report
+  ansible.builtin.assert:
+    that:
+      - (sigstore_provider_report_raw.content | b64decode | from_json).schema_version == 'private-sigstore-lifecycle-report.v1'
+      - (sigstore_provider_report_raw.content | b64decode | from_json).run_id == sigstore_testflight_run_id
+      - (sigstore_provider_report_raw.content | b64decode | from_json).commit_sha == sigstore_lifecycle_commit_sha
+      - (sigstore_provider_report_raw.content | b64decode | from_json).controller_id == sigstore_lifecycle_controller_id
+      - (sigstore_provider_report_raw.content | b64decode | from_json).cluster_uid == sigstore_lifecycle_cluster_uid.stdout
+      - (sigstore_provider_report_raw.content | b64decode | from_json).inventory_sha256 == sigstore_lifecycle_inventory_hash
+      - (sigstore_provider_report_raw.content | b64decode | from_json).component_lock_sha256 == sigstore_lifecycle_component_lock_hash
+      - (sigstore_provider_report_raw.content | b64decode | from_json).deployment_manifest_sha256 == sigstore_lifecycle_manifest_hash
+      - (sigstore_provider_report_raw.content | b64decode | from_json).chart_archive_sha256 == sigstore_lifecycle_lock.scaffold_chart_archive_sha256
+      - (sigstore_provider_report_raw.content | b64decode | from_json).trust_bundle_sha256 == private_sigstore_trust_bundle_sha256
+      - (sigstore_provider_report_raw.content | b64decode | from_json).tuf_root_version | int == private_sigstore_tuf_root_version | int
+      - (sigstore_provider_report_raw.content | b64decode | from_json).tuf_root_sha256 == private_sigstore_expected_tuf_root_sha256
+      - (sigstore_provider_report_raw.content | b64decode | from_json).workload_identity_policy_sha256 == private_sigstore_workload_identity_policy_sha256
+      - (sigstore_provider_report_raw.content | b64decode | from_json).action == sigstore_provider_action
+      - (sigstore_provider_report_raw.content | b64decode | from_json).status == 'passed'
+    fail_msg: SIGSTORE_LIFECYCLE_REPORT_IDENTITY_INVALID
+  no_log: true

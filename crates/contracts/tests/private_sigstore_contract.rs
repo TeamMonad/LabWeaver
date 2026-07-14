@@ -1,11 +1,11 @@
 //! Fail-closed Private Sigstore contract tests.
 
-use std::str::FromStr;
+use std::{collections::BTreeMap, str::FromStr};
 
 use contracts::supply_chain::{
-    PrivateSigstoreBackupIdentity, PrivateSigstoreTestFlightReport, PrivateSigstoreTrustBundle,
-    SigstoreEvidence, SupplyChainError, TestFlightCheck, TestFlightStatus, TufRootIdentity,
-    WorkloadIdentityPolicy,
+    PrivateSigstoreBackupIdentity, PrivateSigstoreLifecycleAction, PrivateSigstoreLifecycleReport,
+    PrivateSigstoreTestFlightReport, PrivateSigstoreTrustBundle, SigstoreEvidence,
+    SupplyChainError, TestFlightCheck, TestFlightStatus, TufRootIdentity, WorkloadIdentityPolicy,
 };
 use contracts::{Sha256Digest, UtcTimestamp};
 
@@ -194,9 +194,17 @@ fn required_checks(status: TestFlightStatus) -> Vec<TestFlightCheck> {
         "identity",
         "schema",
         "component_lock",
+        "chart_identity",
+        "image_identity",
         "backup",
+        "deploy",
+        "second_deploy",
+        "sign_verify",
         "restore",
+        "rotation",
+        "disaster_recovery",
         "cleanup",
+        "outage_fail_closed",
         "tls",
         "network_policy",
         "oidc",
@@ -273,4 +281,66 @@ fn testflight_report_cannot_hide_partial_failure() {
     report.unblock_owner = Some("@2018wzh".into());
     report.exit_condition = Some("run the identity-bound E3 TestFlight".into());
     assert!(report.validate().is_ok());
+}
+
+#[test]
+fn lifecycle_report_requires_prechange_backup_and_exact_identity() {
+    let backup = PrivateSigstoreBackupIdentity {
+        schema_version: "private-sigstore-backup.v1".into(),
+        run_id: "testflight-1720000000-42".into(),
+        commit_sha: "c".repeat(40),
+        cluster_uid: "11111111-2222-3333-4444-555555555555".into(),
+        inventory_sha256: digest(b"inventory"),
+        deployment_manifest_sha256: digest(b"manifest"),
+        component_lock_sha256: digest(b"lock"),
+        tuf_root_sha256: digest(b"tuf-root"),
+        trust_bundle_sha256: digest(b"bundle"),
+        artifact_sha256: digest(b"backup"),
+        generated_at: timestamp("2026-07-14T00:00:00.000Z"),
+    };
+    let mut report = PrivateSigstoreLifecycleReport {
+        schema_version: "private-sigstore-lifecycle-report.v1".into(),
+        action: PrivateSigstoreLifecycleAction::Restore,
+        status: TestFlightStatus::Passed,
+        run_id: backup.run_id.clone(),
+        commit_sha: backup.commit_sha.clone(),
+        controller_id: "edge-router".into(),
+        cluster_uid: backup.cluster_uid.clone(),
+        inventory_sha256: backup.inventory_sha256,
+        deployment_manifest_sha256: backup.deployment_manifest_sha256,
+        component_lock_sha256: backup.component_lock_sha256,
+        chart_archive_sha256: digest(b"chart"),
+        image_digests: BTreeMap::from([("fulcio".into(), digest(b"fulcio"))]),
+        trust_bundle_sha256: backup.trust_bundle_sha256,
+        tuf_root_version: 2,
+        tuf_root_sha256: backup.tuf_root_sha256,
+        workload_identity_policy_sha256: digest(b"policy"),
+        backup: Some(backup),
+        checks: vec![TestFlightCheck {
+            name: "restore".into(),
+            status: TestFlightStatus::Passed,
+            diagnostic_code: None,
+        }],
+        blocked_items: Vec::new(),
+        unblock_owner: None,
+        exit_condition: None,
+        generated_at: timestamp("2026-07-14T00:01:00.000Z"),
+    };
+    assert!(report.validate().is_ok());
+
+    report.backup = None;
+    assert_eq!(
+        report.validate(),
+        Err(SupplyChainError::TestFlightReportInvalid)
+    );
+    report.status = TestFlightStatus::Blocked;
+    report.checks[0].status = TestFlightStatus::Blocked;
+    report.checks[0].diagnostic_code = Some("SIGSTORE_C0_ROTATION_INPUT_MISSING".into());
+    report.blocked_items = vec!["rotation-input".into()];
+    report.unblock_owner = Some("@2018wzh".into());
+    report.exit_condition = Some("provide approved C0 public root metadata".into());
+    assert!(
+        report.validate().is_err(),
+        "restore still requires a bound backup"
+    );
 }

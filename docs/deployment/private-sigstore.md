@@ -7,17 +7,23 @@ drill, Kyverno consumer or Release Gate consumer has been executed.
 
 ## Controller boundary
 
-The only repository entry is:
+The only repository entry is action-scoped and allowlisted:
 
 ```sh
-cargo xtask private-sigstore --infra --env dev --yes
+cargo xtask private-sigstore --infra --env <environment> --action deploy --yes
+cargo xtask private-sigstore --infra --env <environment> --action backup --yes
+cargo xtask private-sigstore --infra --env <environment> --action restore --yes
+cargo xtask private-sigstore --infra --env <environment> --action rotate --yes
+cargo xtask private-sigstore --infra --env <environment> --action verify --yes
+cargo xtask private-sigstore --infra --env <environment> --action cleanup --yes
+cargo xtask private-sigstore --infra --env <environment> --action disaster-recovery --yes
 ```
 
 It uses the same Linux-router identity, private inventory, Vault password file,
-run ID, commit, inventory hash and component-lock hash as the adopted-cluster
+explicit run IDs, commit, inventory hash and component-lock hash as the adopted-cluster
 Ansible controller. Windows returns `XTASK_INFRA_UNSUPPORTED_PLATFORM`.
-The playbook name is compiled into `xtask`; callers cannot supply an arbitrary
-path or playbook.
+Each action maps to one playbook compiled into `xtask`; callers cannot supply an
+arbitrary path or playbook. Missing run identity or locator fails before Ansible.
 
 The controller requires three root-managed locators, never secret values. The
 namespace and named Kubernetes Secrets must already be provisioned by the C0
@@ -72,15 +78,19 @@ metadata versions.
 Before migration, rotation, upgrade or root replacement, operators must produce
 an external `private-sigstore-backup.v1` artifact binding the same commit,
 inventory, component lock, trust bundle and artifact hashes. Helm rollback alone
-is not a data recovery plan. Restore must verify the backup identity and both old
-and current-root verification windows before traffic resumes. Cleanup may target
-only resources carrying the current run identity and must never delete retained
-PVCs, signing Secrets, TUF metadata or namespaces; runtime cleanup and restore
-remain blocked until the real E3 procedure is implemented and reviewed.
+is not a data recovery plan. Restore, rotation and disaster recovery first run
+the fixed backup provider and validate its same-run manifest. Lifecycle providers
+are fixed-name, pre-approved cluster CronJobs; a missing provider or report fails
+closed. Restore must verify the backup identity and both old and current-root
+verification windows before traffic resumes. Cleanup may target only Job, Pod and
+ConfigMap resources carrying the current TestFlight identity and must never delete
+retained PVCs, signing Secrets, TUF metadata, workloads or namespaces. These
+workflows remain unproved until the same router E3 run closes each report.
 
 ## Evidence status
 
-Repository tests and schema drift checks are E1. Ansible lint/render can provide
+Repository tests and schema drift checks are E1. Checksum-pinned Helm 3.18.4
+lint/template plus Ansible lint/syntax can provide
 E1/E2 controller evidence on Linux. Real Keycloak keyless signing, SCT and Rekor
 inclusion, second-deploy idempotency, backup/restore, root rotation and cleanup
 must remain `blocked` or `not_run` in reports until one identity-bound router E3

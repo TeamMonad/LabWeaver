@@ -96,6 +96,14 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::supply_chain::PrivateSigstoreTestFlightReport
     );
     document!(
+        "schemas/contracts/v1/private-sigstore-backup-manifest.schema.json",
+        crate::supply_chain::PrivateSigstoreBackupIdentity
+    );
+    document!(
+        "schemas/contracts/v1/private-sigstore-lifecycle-report.schema.json",
+        crate::supply_chain::PrivateSigstoreLifecycleReport
+    );
+    document!(
         "schemas/contracts/v1/environment-instance.schema.json",
         crate::environment::EnvironmentInstance
     );

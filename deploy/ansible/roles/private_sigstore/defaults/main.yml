@@ -7,6 +7,12 @@ private_sigstore_chart_archive: /var/lib/labweaver/bundle/scaffold-0.6.111.tgz
 private_sigstore_kubeconfig_path: /etc/kubernetes/admin.conf
 private_sigstore_kubectl_path: /usr/bin/kubectl
 private_sigstore_manifest_directory: /var/lib/labweaver/private-sigstore/manifests
+private_sigstore_lifecycle_report_directory: /var/lib/labweaver/private-sigstore/reports
+private_sigstore_backup_provider: private-sigstore-backup
+private_sigstore_restore_provider: private-sigstore-restore
+private_sigstore_rotation_provider: private-sigstore-rotate
+private_sigstore_verify_provider: private-sigstore-verify
+private_sigstore_dr_provider: private-sigstore-disaster-recovery
 private_sigstore_storage_class: local-path
 private_sigstore_replicas: 2
 private_sigstore_fulcio_secret_name: private-sigstore-fulcio-ca

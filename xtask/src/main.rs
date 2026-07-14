@@ -32,8 +32,8 @@ enum Command {
     Deploy(EnvironmentArgs),
     Verify(EnvironmentArgs),
     Backup(EnvironmentArgs),
-    /// Reconcile the allowlisted Private Sigstore trust plane.
-    PrivateSigstore(EnvironmentArgs),
+    /// Run an allowlisted Private Sigstore lifecycle action.
+    PrivateSigstore(PrivateSigstoreArgs),
     Upgrade(UpgradeArgs),
     Rollback(RollbackArgs),
     Restore(RestoreArgs),
@@ -77,6 +77,39 @@ struct EnvironmentArgs {
     infra: bool,
     #[arg(long)]
     yes: bool,
+}
+
+#[derive(Debug, Args)]
+struct PrivateSigstoreArgs {
+    #[command(flatten)]
+    environment: EnvironmentArgs,
+    #[arg(long, value_enum)]
+    action: PrivateSigstoreAction,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum PrivateSigstoreAction {
+    Deploy,
+    Backup,
+    Restore,
+    Rotate,
+    Verify,
+    Cleanup,
+    DisasterRecovery,
+}
+
+impl PrivateSigstoreAction {
+    const fn playbook(self) -> &'static str {
+        match self {
+            Self::Deploy => "96-private-sigstore.yml",
+            Self::Backup => "97-private-sigstore-backup.yml",
+            Self::Restore => "98-private-sigstore-restore.yml",
+            Self::Rotate => "99-private-sigstore-rotate.yml",
+            Self::Verify => "100-private-sigstore-verify.yml",
+            Self::Cleanup => "101-private-sigstore-cleanup.yml",
+            Self::DisasterRecovery => "102-private-sigstore-disaster-recovery.yml",
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -387,16 +420,16 @@ fn backup(args: &EnvironmentArgs) -> Result<(), AppError> {
     run_infrastructure(&args.env, "85-backup.yml", "backup --infra")
 }
 
-fn private_sigstore(args: &EnvironmentArgs) -> Result<(), AppError> {
-    if !args.yes {
+fn private_sigstore(args: &PrivateSigstoreArgs) -> Result<(), AppError> {
+    if !args.environment.yes {
         return Err(AppError::ConfirmationRequired {
             command: "private-sigstore",
         });
     }
-    require_infrastructure(args, "private-sigstore --infra")?;
+    require_infrastructure(&args.environment, "private-sigstore --infra")?;
     run_infrastructure(
-        &args.env,
-        "96-private-sigstore.yml",
+        &args.environment.env,
+        args.action.playbook(),
         "private-sigstore --infra",
     )
 }
@@ -454,9 +487,11 @@ fn run_infrastructure(
         sigstore_tuf_root_locator,
         deployment_manifest_hash,
     } = InfrastructureInputs::load(environment, playbook_name)?;
-    let run_id = infrastructure_run_id("infra", "infrastructure run identity")?;
-    let testflight_run_id =
-        infrastructure_run_id("testflight", "infrastructure TestFlight identity")?;
+    let run_id = required_run_id("LABWEAVER_RUN_ID", "infrastructure run identity")?;
+    let testflight_run_id = required_run_id(
+        "LABWEAVER_TESTFLIGHT_RUN_ID",
+        "infrastructure TestFlight identity",
+    )?;
     let mut runner = Playbook::default();
     runner
         .set_system_envs()
@@ -555,6 +590,60 @@ impl InfrastructureInputs {
             "roles",
         )?;
 
+        let private_sigstore = matches!(
+            playbook_name,
+            "96-private-sigstore.yml"
+                | "97-private-sigstore-backup.yml"
+                | "98-private-sigstore-restore.yml"
+                | "99-private-sigstore-rotate.yml"
+                | "100-private-sigstore-verify.yml"
+                | "101-private-sigstore-cleanup.yml"
+                | "102-private-sigstore-disaster-recovery.yml"
+        );
+        let sigstore_backup_locator = if private_sigstore {
+            required_environment_value(
+                "LABWEAVER_SIGSTORE_BACKUP_LOCATOR",
+                "Private Sigstore backup locator",
+            )?
+        } else {
+            std::env::var("LABWEAVER_SIGSTORE_BACKUP_LOCATOR").unwrap_or_default()
+        };
+        let sigstore_secret_locator = if private_sigstore {
+            required_environment_value(
+                "LABWEAVER_SIGSTORE_SECRET_LOCATOR",
+                "Private Sigstore secret locator",
+            )?
+        } else {
+            std::env::var("LABWEAVER_SIGSTORE_SECRET_LOCATOR").unwrap_or_default()
+        };
+        let sigstore_tuf_root_locator = if private_sigstore {
+            required_environment_value(
+                "LABWEAVER_SIGSTORE_TUF_ROOT_LOCATOR",
+                "Private Sigstore TUF root locator",
+            )?
+        } else {
+            std::env::var("LABWEAVER_SIGSTORE_TUF_ROOT_LOCATOR").unwrap_or_default()
+        };
+        let deployment_manifest_hash = if private_sigstore {
+            let value = required_environment_value(
+                "LABWEAVER_DEPLOYMENT_MANIFEST_HASH",
+                "deployment manifest identity",
+            )?;
+            if !is_sha256_identity(&value) {
+                return Err(AppError::ExternalCommand {
+                    role: "deployment manifest identity",
+                    code: None,
+                    detail: Some(
+                        "LABWEAVER_DEPLOYMENT_MANIFEST_HASH must be sha256:<64 lowercase hex>"
+                            .into(),
+                    ),
+                });
+            }
+            value
+        } else {
+            std::env::var("LABWEAVER_DEPLOYMENT_MANIFEST_HASH").unwrap_or_default()
+        };
+
         Ok(Self {
             inventory: infrastructure_path(&inventory),
             vault_password: infrastructure_path(&vault_password),
@@ -568,16 +657,34 @@ impl InfrastructureInputs {
             component_lock_hash: file_sha256(&root.join("deploy/versions.lock.yml"))?,
             harbor_data_backup_locator: std::env::var("LABWEAVER_HARBOR_DATA_BACKUP_LOCATOR")
                 .unwrap_or_default(),
-            sigstore_backup_locator: std::env::var("LABWEAVER_SIGSTORE_BACKUP_LOCATOR")
-                .unwrap_or_default(),
-            sigstore_secret_locator: std::env::var("LABWEAVER_SIGSTORE_SECRET_LOCATOR")
-                .unwrap_or_default(),
-            sigstore_tuf_root_locator: std::env::var("LABWEAVER_SIGSTORE_TUF_ROOT_LOCATOR")
-                .unwrap_or_default(),
-            deployment_manifest_hash: std::env::var("LABWEAVER_DEPLOYMENT_MANIFEST_HASH")
-                .unwrap_or_default(),
+            sigstore_backup_locator,
+            sigstore_secret_locator,
+            sigstore_tuf_root_locator,
+            deployment_manifest_hash,
         })
     }
+}
+
+#[cfg(target_os = "linux")]
+fn required_environment_value(variable: &str, role: &'static str) -> Result<String, AppError> {
+    std::env::var(variable)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| AppError::ExternalCommand {
+            role,
+            code: None,
+            detail: Some(format!("{variable} is required")),
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn is_sha256_identity(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -782,16 +889,28 @@ fn controller_identity_field(content: &str, key: &str) -> Result<String, AppErro
 }
 
 #[cfg(target_os = "linux")]
-fn infrastructure_run_id(prefix: &str, role: &'static str) -> Result<String, AppError> {
-    let seconds = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| AppError::ExternalCommand {
+fn required_run_id(variable: &str, role: &'static str) -> Result<String, AppError> {
+    let value = std::env::var(variable).map_err(|_| AppError::ExternalCommand {
+        role,
+        code: None,
+        detail: Some(format!("{variable} is required")),
+    })?;
+    let valid = (8..=96).contains(&value.len())
+        && value.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    if valid {
+        Ok(value)
+    } else {
+        Err(AppError::ExternalCommand {
             role,
             code: None,
-            detail: Some(error.to_string()),
-        })?
-        .as_secs();
-    Ok(format!("{prefix}-{seconds}-{}", std::process::id()))
+            detail: Some(format!(
+                "{variable} must be an explicit lowercase run identifier"
+            )),
+        })
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -838,7 +957,20 @@ fn not_implemented(command: impl Into<String>) -> Result<(), AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{EnvironmentArgs, deploy, private_sigstore};
+    use super::{
+        EnvironmentArgs, PrivateSigstoreAction, PrivateSigstoreArgs, deploy, private_sigstore,
+    };
+
+    fn sigstore_args(env: &str, infra: bool, yes: bool) -> PrivateSigstoreArgs {
+        PrivateSigstoreArgs {
+            environment: EnvironmentArgs {
+                env: env.into(),
+                infra,
+                yes,
+            },
+            action: PrivateSigstoreAction::Deploy,
+        }
+    }
 
     #[test]
     fn infrastructure_deploy_requires_explicit_confirmation() -> Result<(), String> {
@@ -901,22 +1033,14 @@ mod tests {
 
     #[test]
     fn private_sigstore_requires_confirmation_and_infra_boundary() -> Result<(), String> {
-        let Err(unconfirmed) = private_sigstore(&EnvironmentArgs {
-            env: "dev".into(),
-            infra: true,
-            yes: false,
-        }) else {
+        let Err(unconfirmed) = private_sigstore(&sigstore_args("dev", true, false)) else {
             return Err("Private Sigstore deployment without --yes must fail".into());
         };
         if unconfirmed.diagnostic_code() != "XTASK_CONFIRMATION_REQUIRED" {
             return Err("unexpected Private Sigstore confirmation diagnostic".into());
         }
 
-        let Err(product_path) = private_sigstore(&EnvironmentArgs {
-            env: "dev".into(),
-            infra: false,
-            yes: true,
-        }) else {
+        let Err(product_path) = private_sigstore(&sigstore_args("dev", false, true)) else {
             return Err("Private Sigstore must not run through the product path".into());
         };
         if product_path.diagnostic_code() != "XTASK_NOT_IMPLEMENTED" {
@@ -927,11 +1051,7 @@ mod tests {
 
     #[test]
     fn private_sigstore_rejects_path_traversal_before_platform_dispatch() -> Result<(), String> {
-        let Err(error) = private_sigstore(&EnvironmentArgs {
-            env: "../../private".into(),
-            infra: true,
-            yes: true,
-        }) else {
+        let Err(error) = private_sigstore(&sigstore_args("../../private", true, true)) else {
             return Err("an environment path traversal must fail".into());
         };
         if error.diagnostic_code() != "XTASK_INVALID_ARGUMENT" {
@@ -960,16 +1080,46 @@ mod tests {
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn private_sigstore_has_a_stable_non_linux_diagnostic() -> Result<(), String> {
-        let Err(error) = private_sigstore(&EnvironmentArgs {
-            env: "dev".into(),
-            infra: true,
-            yes: true,
-        }) else {
+        let Err(error) = private_sigstore(&sigstore_args("dev", true, true)) else {
             return Err("non-Linux Private Sigstore deployment must fail".into());
         };
         if error.diagnostic_code() != "XTASK_INFRA_UNSUPPORTED_PLATFORM" {
             return Err("unexpected Private Sigstore non-Linux diagnostic".into());
         }
         Ok(())
+    }
+
+    #[test]
+    fn private_sigstore_actions_are_fixed_playbooks() {
+        let mappings = [
+            (PrivateSigstoreAction::Deploy, "96-private-sigstore.yml"),
+            (
+                PrivateSigstoreAction::Backup,
+                "97-private-sigstore-backup.yml",
+            ),
+            (
+                PrivateSigstoreAction::Restore,
+                "98-private-sigstore-restore.yml",
+            ),
+            (
+                PrivateSigstoreAction::Rotate,
+                "99-private-sigstore-rotate.yml",
+            ),
+            (
+                PrivateSigstoreAction::Verify,
+                "100-private-sigstore-verify.yml",
+            ),
+            (
+                PrivateSigstoreAction::Cleanup,
+                "101-private-sigstore-cleanup.yml",
+            ),
+            (
+                PrivateSigstoreAction::DisasterRecovery,
+                "102-private-sigstore-disaster-recovery.yml",
+            ),
+        ];
+        for (action, expected) in mappings {
+            assert_eq!(action.playbook(), expected);
+        }
     }
 }

@@ -1,0 +1,14 @@
+---
+private_sigstore_namespace: sigstore-system
+private_sigstore_kubeconfig_path: /etc/kubernetes/admin.conf
+private_sigstore_kubectl_path: /usr/bin/kubectl
+private_sigstore_lifecycle_report_directory: /var/lib/labweaver/private-sigstore/reports
+private_sigstore_backup_provider: private-sigstore-backup
+private_sigstore_restore_provider: private-sigstore-restore
+private_sigstore_rotation_provider: private-sigstore-rotate
+private_sigstore_verify_provider: private-sigstore-verify
+private_sigstore_dr_provider: private-sigstore-disaster-recovery
+private_sigstore_trust_bundle_sha256: ""
+private_sigstore_workload_identity_policy_sha256: ""
+private_sigstore_tuf_root_version: 0
+private_sigstore_expected_tuf_root_sha256: ""

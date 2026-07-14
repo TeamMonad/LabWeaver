@@ -1,5 +1,7 @@
 //! Build, scan, signing, immutable runtime artifact, and release contracts.
 
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -222,6 +224,91 @@ pub struct PrivateSigstoreBackupIdentity {
     pub generated_at: UtcTimestamp,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrivateSigstoreLifecycleAction {
+    Backup,
+    Restore,
+    Rotate,
+    Verify,
+    Cleanup,
+    DisasterRecovery,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct PrivateSigstoreLifecycleReport {
+    pub schema_version: String,
+    pub action: PrivateSigstoreLifecycleAction,
+    pub status: TestFlightStatus,
+    pub run_id: String,
+    pub commit_sha: String,
+    pub controller_id: String,
+    pub cluster_uid: String,
+    pub inventory_sha256: Sha256Digest,
+    pub deployment_manifest_sha256: Sha256Digest,
+    pub component_lock_sha256: Sha256Digest,
+    pub chart_archive_sha256: Sha256Digest,
+    pub image_digests: BTreeMap<String, Sha256Digest>,
+    pub trust_bundle_sha256: Sha256Digest,
+    pub tuf_root_version: u64,
+    pub tuf_root_sha256: Sha256Digest,
+    pub workload_identity_policy_sha256: Sha256Digest,
+    pub backup: Option<PrivateSigstoreBackupIdentity>,
+    pub checks: Vec<TestFlightCheck>,
+    pub blocked_items: Vec<String>,
+    pub unblock_owner: Option<String>,
+    pub exit_condition: Option<String>,
+    pub generated_at: UtcTimestamp,
+}
+
+impl PrivateSigstoreLifecycleReport {
+    pub fn validate(&self) -> Result<(), SupplyChainError> {
+        let all_passed = !self.checks.is_empty()
+            && self
+                .checks
+                .iter()
+                .all(|check| check.status == TestFlightStatus::Passed);
+        let backup_required = matches!(
+            self.action,
+            PrivateSigstoreLifecycleAction::Restore
+                | PrivateSigstoreLifecycleAction::Rotate
+                | PrivateSigstoreLifecycleAction::DisasterRecovery
+        );
+        if self.schema_version != "private-sigstore-lifecycle-report.v1"
+            || self.run_id.trim().is_empty()
+            || !is_hex_sha(&self.commit_sha, 40, 64)
+            || self.controller_id.trim().is_empty()
+            || self.cluster_uid.trim().is_empty()
+            || self.image_digests.is_empty()
+            || self.tuf_root_version == 0
+            || self.checks.iter().any(|check| {
+                check.name.trim().is_empty()
+                    || (check.status != TestFlightStatus::Passed
+                        && check.diagnostic_code.as_deref().is_none_or(str::is_empty))
+            })
+            || (self.status == TestFlightStatus::Passed) != all_passed
+            || (backup_required
+                && self.backup.as_ref().is_none_or(|backup| {
+                    backup.schema_version != "private-sigstore-backup.v1"
+                        || backup.run_id != self.run_id
+                        || backup.commit_sha != self.commit_sha
+                        || backup.cluster_uid != self.cluster_uid
+                        || backup.inventory_sha256 != self.inventory_sha256
+                        || backup.deployment_manifest_sha256 != self.deployment_manifest_sha256
+                        || backup.component_lock_sha256 != self.component_lock_sha256
+                }))
+            || (self.status == TestFlightStatus::Blocked
+                && (self.blocked_items.is_empty()
+                    || self.unblock_owner.as_deref().is_none_or(str::is_empty)
+                    || self.exit_condition.as_deref().is_none_or(str::is_empty)))
+        {
+            return Err(SupplyChainError::TestFlightReportInvalid);
+        }
+        Ok(())
+    }
+}
+
 impl PrivateSigstoreBackupIdentity {
     fn matches_report(&self, report: &PrivateSigstoreTestFlightReport) -> bool {
         self.schema_version == "private-sigstore-backup.v1"
@@ -266,9 +353,17 @@ impl PrivateSigstoreTestFlightReport {
             "identity",
             "schema",
             "component_lock",
+            "chart_identity",
+            "image_identity",
             "backup",
+            "deploy",
+            "second_deploy",
+            "sign_verify",
             "restore",
+            "rotation",
+            "disaster_recovery",
             "cleanup",
+            "outage_fail_closed",
             "tls",
             "network_policy",
             "oidc",

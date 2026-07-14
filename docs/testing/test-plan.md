@@ -179,8 +179,8 @@ Neither deferred set is part of the baseline close condition for #23 or #15.
 
 ### Private Sigstore gates (Issue #61)
 
-`cargo xtask private-sigstore --infra --env <env> --yes` is the only deployment
-entry. Contract tests reject public/wildcard/human workload identities, stale or
+`cargo xtask private-sigstore --infra --env <env> --action <action> --yes` is the
+only lifecycle entry; `<action>` is a Rust enum, not a path. Contract tests reject public/wildcard/human workload identities, stale or
 tampered bundles, TUF rollback and reports that hide a required failure. Linux
 controller checks must additionally prove the official chart hash, fixed image
 digests, missing locator failure, backup-before-existing-state, ClusterIP-only
@@ -188,8 +188,9 @@ component services, TLS Gateway, default-deny policy and restricted pod context.
 
 The real TestFlight must bind commit, run, cluster UID, inventory, deployment
 manifest, component lock, trust bundle, workload policy and backup. Each of
-identity, schema, backup, restore, cleanup, TLS, NetworkPolicy, OIDC, SCT, Rekor
-inclusion and TUF has an independent status and diagnostic. Any non-passed
+identity, schema, chart/image identity, backup, deploy, second deploy,
+sign/verify, restore, rotation, disaster recovery, cleanup, outage fail-closed,
+TLS, NetworkPolicy, OIDC, SCT, Rekor inclusion and TUF has an independent status and diagnostic. Any non-passed
 required check prevents overall `passed`. Until Keycloak, offline root and the
 private cluster are available, those E3 checks remain `blocked`/`not_run`.
 
