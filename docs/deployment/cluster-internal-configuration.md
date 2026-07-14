@@ -15,6 +15,12 @@ PVE、NetworkManager 连接、接口/IP、WAN/LAN 地址分配、Tailnet 地址�
 
 ## 2. 网络、入口与策略
 
+- 路由器位于 LabWeaver 内网边界，可使用 rocky 并采用密钥登录，可以借助路由器作为跳板使用 rocky + 路由器密钥登录到集群中其他机器上。使用 Cloudflare One 时路由器的访问 IP 为 10.20.0.1，使用 Tailscale 访问时路由器的访问 IP 为 100.63.0.202。
+- Kubernetes 集群内部节点 IP ：
+    - control plane: 10.20.0.21
+    - Worker-01: 10.20.0.22
+    - Worker-02: 10.20.0.23
+    - NFS server: 10.20.0.24
 - Kubernetes Pod CIDR 为 `10.244.0.0/16`，Service CIDR 为 `10.96.0.0/12`。
 - Cilium 启用 kube-proxy replacement、Hubble 和 Gateway API；Gateway API 使用 Standard CRD channel `v1.6.0`。
 - MetalLB 使用经 private inventory 声明的地址池与 L2 Advertisement。固定 VIP 通过 Gateway 的 `metallb.io/loadBalancerIPs` 基础设施注解分配，不使用 Cilium LB-IPAM 专用的 `spec.addresses`。
