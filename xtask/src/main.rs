@@ -404,12 +404,12 @@ impl InfrastructureInputs {
         )?;
 
         Ok(Self {
-            inventory: infrastructure_path(inventory),
-            vault_password: infrastructure_path(vault_password),
-            playbook: infrastructure_path(playbook),
-            ansible_config: infrastructure_path(ansible_config),
-            collections_path: infrastructure_path(collections_path),
-            roles_path: infrastructure_path(roles_path),
+            inventory: infrastructure_path(&inventory),
+            vault_password: infrastructure_path(&vault_password),
+            playbook: infrastructure_path(&playbook),
+            ansible_config: infrastructure_path(&ansible_config),
+            collections_path: infrastructure_path(&collections_path),
+            roles_path: infrastructure_path(&roles_path),
             commit_sha: infrastructure_commit_sha()?,
         })
     }
@@ -454,7 +454,7 @@ fn resolve_infrastructure_directory(
 }
 
 #[cfg(target_os = "linux")]
-fn infrastructure_path(path: std::path::PathBuf) -> String {
+fn infrastructure_path(path: &std::path::PathBuf) -> String {
     path.to_string_lossy().into_owned()
 }
 
