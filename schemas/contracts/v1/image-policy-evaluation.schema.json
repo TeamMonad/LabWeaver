@@ -1,0 +1,144 @@
+{
+  "$defs": {
+    "ImageArtifactId": {
+      "description": "Strongly typed UUIDv7 identifier for `ImageArtifactId`.",
+      "type": "string"
+    },
+    "PolicyId": {
+      "description": "Strongly typed UUIDv7 identifier for `PolicyId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "Sha256Digest": {
+      "description": "Canonical lowercase SHA-256 digest.",
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    },
+    "VulnerabilitySummary": {
+      "additionalProperties": false,
+      "description": "Vulnerability counts by severity.",
+      "properties": {
+        "critical": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "high": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "low": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "medium": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unknown": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "unknown",
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Deterministic scan and trust-policy evaluation.",
+  "properties": {
+    "artifactId": {
+      "$ref": "#/$defs/ImageArtifactId"
+    },
+    "artifactSha256": {
+      "$ref": "#/$defs/Sha256Digest"
+    },
+    "evaluatedAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "expectedCertificateSubject": {
+      "type": "string"
+    },
+    "expectedFulcioIssuer": {
+      "type": "string"
+    },
+    "maxEvidenceAgeMilliseconds": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "passed": {
+      "type": "boolean"
+    },
+    "policyId": {
+      "$ref": "#/$defs/PolicyId"
+    },
+    "policyRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "requireCtSct": {
+      "type": "boolean"
+    },
+    "requireRekorInclusion": {
+      "type": "boolean"
+    },
+    "scannerDatabaseSha256": {
+      "$ref": "#/$defs/Sha256Digest"
+    },
+    "scannerName": {
+      "type": "string"
+    },
+    "scannerVersion": {
+      "type": "string"
+    },
+    "trustBundleSha256": {
+      "$ref": "#/$defs/Sha256Digest"
+    },
+    "validUntil": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "vulnerabilities": {
+      "$ref": "#/$defs/VulnerabilitySummary"
+    }
+  },
+  "required": [
+    "artifactId",
+    "artifactSha256",
+    "policyId",
+    "policyRevision",
+    "scannerName",
+    "scannerVersion",
+    "scannerDatabaseSha256",
+    "vulnerabilities",
+    "trustBundleSha256",
+    "expectedFulcioIssuer",
+    "expectedCertificateSubject",
+    "requireRekorInclusion",
+    "requireCtSct",
+    "evaluatedAt",
+    "maxEvidenceAgeMilliseconds",
+    "validUntil",
+    "passed"
+  ],
+  "title": "ImagePolicyEvaluation",
+  "type": "object"
+}

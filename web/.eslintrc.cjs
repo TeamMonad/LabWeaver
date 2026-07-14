@@ -21,5 +21,6 @@ module.exports = {
     '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
     'vue/multi-word-component-names': 'off',
   },
-  ignorePatterns: ['dist', 'node_modules'],
+  // Generated SDK is byte-checked against OpenAPI and type-checked; its upstream templates are not hand-linted.
+  ignorePatterns: ['dist', 'node_modules', 'src/generated/contracts'],
 }

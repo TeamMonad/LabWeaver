@@ -23,7 +23,20 @@ jobs:
         with:
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.18.0'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - name: Install Web contract dependencies
+        working-directory: ./web
+        run: pnpm install --frozen-lockfile
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo xtask contracts check
+      - name: Compile generated TypeScript contracts
+        working-directory: ./web
+        run: pnpm typecheck
       - run: cargo build --workspace --locked
       - run: cargo test --workspace --locked

@@ -1,0 +1,20 @@
+{
+  "$defs": {
+    "Sha256Digest": {
+      "description": "Canonical lowercase SHA-256 digest.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "manifestSha256": {
+      "$ref": "#/$defs/Sha256Digest"
+    }
+  },
+  "required": [
+    "manifestSha256"
+  ],
+  "title": "CompleteProblemPackageUploadRequest",
+  "type": "object"
+}

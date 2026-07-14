@@ -35,7 +35,7 @@ The following identifiers are material-contract reservations, not implemented ru
 
 The future approved Probe must be read-only and emit versioned, sanitized facts for host reachability, Nginx installation and observed version, default-site configuration and root, systemd state, TCP/80 listener, HTTP status/body, and the three required HTML markers. It must not restart Nginx, write configuration, repair the VM, invoke shell, or fall back to an unapproved provider.
 
-The current `evaluation-spec/v1alpha1` allowlist permits only package facts, service facts, and file stat. It cannot yet observe TCP/80 or the HTTP response needed by this contract. B must approve and implement a versioned, read-only Probe profile, its minimum capability contract, formal SubmissionManifest schema/Reader, and stable runtime diagnostics before any full Probe or E3 claim. Until then, incomplete capability is an explicit blocker, not a reason to use a Mock or weaken the expected facts.
+The current `evaluation-spec/v1` allowlist permits only package facts, service facts, and file stat. It cannot yet observe TCP/80 or the HTTP response needed by this contract. B must approve and implement a versioned, read-only Probe profile, its minimum capability contract, SubmissionManifest runtime Reader, and stable runtime diagnostics before any full Probe or E3 claim. Until then, incomplete capability is an explicit blocker, not a reason to use a Mock or weaken the expected facts.
 
 ## E1 validation
 
@@ -43,7 +43,7 @@ Run the following from the repository root:
 
 ```sh
 python examples/linux-nginx/verify_material_contract.py --self-test
-cargo test --locked -p evaluation-domain
+cargo xtask test --suite contract
 ```
 
 The Python validator checks public SHA-256 records, HTML identity, candidate submission limits, controlled-material boundary, normal/negative scenario mapping, missing material, altered template, restricted content, and oversized report handling. The Rust test only preserves the existing EvaluationSpec E1 contract; it does not validate the planned Probe behavior.

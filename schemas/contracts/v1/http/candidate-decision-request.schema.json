@@ -1,0 +1,59 @@
+{
+  "$defs": {
+    "CandidateDecision": {
+      "description": "Append-only candidate decision.",
+      "enum": [
+        "approved",
+        "rejected",
+        "withdrawn"
+      ],
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "Sha256Digest": {
+      "description": "Canonical lowercase SHA-256 digest.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "candidateRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "candidateSha256": {
+      "$ref": "#/$defs/Sha256Digest"
+    },
+    "decision": {
+      "$ref": "#/$defs/CandidateDecision"
+    },
+    "policyRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "schemaSha256": {
+      "$ref": "#/$defs/Sha256Digest"
+    },
+    "trustRevision": {
+      "$ref": "#/$defs/Revision"
+    }
+  },
+  "required": [
+    "candidateRevision",
+    "candidateSha256",
+    "policyRevision",
+    "schemaSha256",
+    "trustRevision",
+    "decision",
+    "reason"
+  ],
+  "title": "CandidateDecisionRequest",
+  "type": "object"
+}
