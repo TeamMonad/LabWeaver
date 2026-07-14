@@ -1,0 +1,37 @@
+{
+  "$defs": {
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Request from AuthorizedKeysCommand over mTLS. It deliberately has no target field.",
+  "properties": {
+    "alias": {
+      "type": "string"
+    },
+    "connectionId": {
+      "type": "string"
+    },
+    "gatewayIdentity": {
+      "type": "string"
+    },
+    "requestedAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "sourceAddressHash": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "alias",
+    "gatewayIdentity",
+    "connectionId",
+    "sourceAddressHash",
+    "requestedAt"
+  ],
+  "title": "SshAuthorizationRequest",
+  "type": "object"
+}

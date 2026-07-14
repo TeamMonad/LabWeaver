@@ -1,0 +1,24 @@
+{
+  "$defs": {
+    "AccessGrantId": {
+      "description": "Strongly typed UUIDv7 identifier for `AccessGrantId`.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "grantId": {
+      "$ref": "#/$defs/AccessGrantId"
+    },
+    "reasonCode": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "grantId",
+    "reasonCode"
+  ],
+  "title": "RevokeAccessGrantRequest",
+  "type": "object"
+}

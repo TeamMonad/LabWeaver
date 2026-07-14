@@ -14,3 +14,9 @@ No ADR is accepted in ARC-01a; this directory establishes the review process wit
 - [ADR 0003: NATS Subject and Delivery Contract](0003-nats-subject-and-delivery-contract.md)
   resolves Issue #18 at E0 design level and requires A/B review before runtime
   implementation.
+- [ADR 0004: Environment Lifecycle Domain](0004-environment-lifecycle-domain.md)
+  freezes desired/observed state, operation concurrency, restart/reset and cleanup semantics.
+- [ADR 0005: Contracts SSOT and Environment-first Release](0005-contracts-ssot-environment-first-release.md)
+  makes the Rust `contracts` crate the sole public semantic authority.
+- [ADR 0006: Trusted Runtime Artifact Supply Chain](0006-trusted-runtime-artifact-supply-chain.md)
+  freezes immutable Container/VM artifact, scan, signature and release evidence bindings.

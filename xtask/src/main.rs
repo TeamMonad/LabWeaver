@@ -1,6 +1,8 @@
 //! Repository workflow entry point for `LabWeaver`.
 
 use std::fmt::{Display, Formatter};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -45,6 +47,8 @@ enum Command {
     Package,
     PackageValidate,
     ReleaseGate,
+    #[command(subcommand)]
+    Contracts(ContractsCommand),
 }
 
 #[derive(Debug, Args)]
@@ -122,6 +126,12 @@ enum DocsCommand {
     Serve,
 }
 
+#[derive(Debug, Subcommand)]
+enum ContractsCommand {
+    Generate,
+    Check,
+}
+
 #[derive(Debug)]
 enum AppError {
     ExternalCommand {
@@ -135,6 +145,13 @@ enum AppError {
     ConfirmationRequired {
         command: &'static str,
     },
+    Io {
+        role: &'static str,
+        detail: String,
+    },
+    ContractDrift {
+        path: String,
+    },
 }
 
 impl AppError {
@@ -143,6 +160,8 @@ impl AppError {
             Self::ExternalCommand { .. } => "XTASK_EXTERNAL_COMMAND_FAILED",
             Self::NotImplemented { .. } => "XTASK_NOT_IMPLEMENTED",
             Self::ConfirmationRequired { .. } => "XTASK_CONFIRMATION_REQUIRED",
+            Self::Io { .. } => "XTASK_IO_FAILED",
+            Self::ContractDrift { .. } => "LW_CONTRACT_DRIFT",
         }
     }
 }
@@ -169,6 +188,10 @@ impl Display for AppError {
                 formatter,
                 "{command} is a destructive operation and requires explicit --yes"
             ),
+            Self::Io { role, detail } => write!(formatter, "{role} failed: {detail}"),
+            Self::ContractDrift { path } => {
+                write!(formatter, "generated contract differs from {path}")
+            }
         }
     }
 }
@@ -203,7 +226,10 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::Build => run_cargo("build", ["build", "--workspace", "--exclude", "xtask"]),
         Command::Test(args) => match args.suite {
             TestSuite::All => run_cargo("test", ["test", "--workspace", "--exclude", "xtask"]),
-            TestSuite::Contract => not_implemented("test --suite contract"),
+            TestSuite::Contract => {
+                run_cargo("contract tests", ["test", "-p", "contracts", "--locked"])?;
+                contracts_check()
+            }
             TestSuite::Integration => not_implemented("test --suite integration"),
             TestSuite::E2e => not_implemented("test --suite e2e"),
         },
@@ -246,7 +272,120 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::Package => not_implemented("package"),
         Command::PackageValidate => not_implemented("package-validate"),
         Command::ReleaseGate => not_implemented("release-gate"),
+        Command::Contracts(ContractsCommand::Generate) => contracts_generate(),
+        Command::Contracts(ContractsCommand::Check) => contracts_check(),
     }
+}
+
+fn repository_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
+}
+
+fn contracts_generate() -> Result<(), AppError> {
+    write_contract_artifacts(&repository_root())?;
+    run_web_script("generate TypeScript contracts", "contracts:generate")
+}
+
+fn contracts_check() -> Result<(), AppError> {
+    let root = repository_root();
+    let temporary = std::env::temp_dir().join(format!(
+        "labweaver-contracts-check-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| AppError::Io {
+                role: "create contract check identity",
+                detail: error.to_string()
+            })?
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temporary).map_err(|error| AppError::Io {
+        role: "create contract check directory",
+        detail: error.to_string(),
+    })?;
+    let result = (|| {
+        write_contract_artifacts(&temporary)?;
+        for artifact in contracts::schema::generate_all().map_err(|error| AppError::Io {
+            role: "generate contracts",
+            detail: error.to_string(),
+        })? {
+            let checked_in =
+                fs::read(root.join(&artifact.relative_path)).map_err(|error| AppError::Io {
+                    role: "read checked-in contract",
+                    detail: format!("{}: {error}", artifact.relative_path),
+                })?;
+            let regenerated =
+                fs::read(temporary.join(&artifact.relative_path)).map_err(|error| {
+                    AppError::Io {
+                        role: "read regenerated contract",
+                        detail: format!("{}: {error}", artifact.relative_path),
+                    }
+                })?;
+            if checked_in != regenerated {
+                return Err(AppError::ContractDrift {
+                    path: artifact.relative_path,
+                });
+            }
+        }
+        Ok(())
+    })();
+    let cleanup = fs::remove_dir_all(&temporary).map_err(|error| AppError::Io {
+        role: "remove contract check directory",
+        detail: error.to_string(),
+    });
+    result?;
+    cleanup?;
+    run_web_script("check TypeScript contract drift", "contracts:check")
+}
+
+fn run_web_script(role: &'static str, script: &str) -> Result<(), AppError> {
+    let status = ProcessCommand::new("pnpm")
+        .args(["run", script])
+        .current_dir(repository_root().join("web"))
+        .status()
+        .map_err(|error| AppError::ExternalCommand {
+            role,
+            code: None,
+            detail: Some(error.to_string()),
+        })?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(AppError::ExternalCommand {
+            role,
+            code: status.code(),
+            detail: None,
+        })
+    }
+}
+
+fn write_contract_artifacts(root: &Path) -> Result<(), AppError> {
+    let schema_root = root.join("schemas/contracts/v1");
+    if schema_root.exists() {
+        fs::remove_dir_all(&schema_root).map_err(|error| AppError::Io {
+            role: "remove stale generated contract schemas",
+            detail: error.to_string(),
+        })?;
+    }
+    for artifact in contracts::schema::generate_all().map_err(|error| AppError::Io {
+        role: "generate contracts",
+        detail: error.to_string(),
+    })? {
+        let destination = root.join(&artifact.relative_path);
+        let parent = destination.parent().ok_or_else(|| AppError::Io {
+            role: "resolve contract output",
+            detail: artifact.relative_path.clone(),
+        })?;
+        fs::create_dir_all(parent).map_err(|error| AppError::Io {
+            role: "create contract output directory",
+            detail: error.to_string(),
+        })?;
+        fs::write(&destination, artifact.bytes).map_err(|error| AppError::Io {
+            role: "write contract output",
+            detail: format!("{}: {error}", artifact.relative_path),
+        })?;
+    }
+    Ok(())
 }
 
 fn run_cargo<const N: usize>(role: &'static str, arguments: [&str; N]) -> Result<(), AppError> {

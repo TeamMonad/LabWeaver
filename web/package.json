@@ -11,6 +11,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "vue-tsc --noEmit",
+    "contracts:generate": "openapi-ts",
+    "contracts:check": "node scripts/contracts-check.mjs",
     "test:e2e:contract": "node --test e2e/tests/*.node.mjs",
     "test:e2e:sleep": "node scripts/fixed-sleep-check.mjs",
     "test:e2e:verify": "node scripts/verify-config.mjs",
@@ -19,6 +21,7 @@
     "test:e2e": "node scripts/run-e2e.mjs"
   },
   "dependencies": {
+    "@hey-api/client-axios": "0.9.1",
     "axios": "^1.18.1",
     "oidc-client-ts": "^3.5.0",
     "pinia": "^2.1.7",
@@ -26,6 +29,7 @@
     "vue-router": "^4.4.0"
   },
   "devDependencies": {
+    "@hey-api/openapi-ts": "0.99.0",
     "@playwright/test": "^1.61.1",
     "@typescript-eslint/eslint-plugin": "^7.16.0",
     "@typescript-eslint/parser": "^7.16.0",

@@ -1,0 +1,161 @@
+{
+  "$defs": {
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "DeniedDataClass": {
+      "description": "Non-overridable content classifications at the LLM boundary.",
+      "enum": [
+        "secret",
+        "token",
+        "private_key",
+        "personally_identifiable_information",
+        "unallowlisted_student_submission"
+      ],
+      "type": "string"
+    },
+    "LlmBudget": {
+      "additionalProperties": false,
+      "description": "Per-attempt bounded LLM budget.",
+      "properties": {
+        "maxCostMicrousd": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxInputTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxOutputTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxRequests": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxSchemaRepairs": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxTransientRetries": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "timeoutMilliseconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "maxInputTokens",
+        "maxOutputTokens",
+        "maxRequests",
+        "maxCostMicrousd",
+        "timeoutMilliseconds",
+        "maxTransientRetries",
+        "maxSchemaRepairs"
+      ],
+      "type": "object"
+    },
+    "OpenAiResponsesBindingV1": {
+      "additionalProperties": false,
+      "description": "OpenAI Responses API is the only v1 LLM provider binding.",
+      "properties": {
+        "model": {
+          "description": "Explicit model identifier.",
+          "type": "string"
+        },
+        "providerBinding": {
+          "description": "Deployment-owned provider binding; never an API key or arbitrary URL.",
+          "type": "string"
+        },
+        "strictStructuredOutputs": {
+          "description": "Strict Structured Outputs schema mode.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "providerBinding",
+        "model",
+        "strictStructuredOutputs"
+      ],
+      "type": "object"
+    },
+    "PolicyId": {
+      "description": "Strongly typed UUIDv7 identifier for `PolicyId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "StudentContentMode": {
+      "description": "Only explicit SubmissionManifest paths may disclose student content.",
+      "enum": [
+        "manifest_allowlist_only"
+      ],
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Versioned course policy governing all LLM egress.",
+  "properties": {
+    "activatedAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "binding": {
+      "$ref": "#/$defs/OpenAiResponsesBindingV1"
+    },
+    "budget": {
+      "$ref": "#/$defs/LlmBudget"
+    },
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    },
+    "deniedDataClasses": {
+      "items": {
+        "$ref": "#/$defs/DeniedDataClass"
+      },
+      "type": "array"
+    },
+    "id": {
+      "$ref": "#/$defs/PolicyId"
+    },
+    "revision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "studentContentMode": {
+      "$ref": "#/$defs/StudentContentMode"
+    }
+  },
+  "required": [
+    "id",
+    "courseId",
+    "revision",
+    "binding",
+    "budget",
+    "deniedDataClasses",
+    "studentContentMode",
+    "activatedAt"
+  ],
+  "title": "CourseLlmEgressPolicy",
+  "type": "object"
+}
