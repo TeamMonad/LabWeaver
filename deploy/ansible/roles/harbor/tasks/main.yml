@@ -6,7 +6,9 @@
     harbor_inventory_hash: "{{ lookup('env', 'LABWEAVER_INVENTORY_HASH') }}"
     harbor_component_lock_hash: "{{ lookup('env', 'LABWEAVER_COMPONENT_LOCK_HASH') }}"
     harbor_controller_id: "{{ lookup('env', 'LABWEAVER_CONTROLLER_ID') }}"
-    harbor_chart_archive_sha256: "sha256:{{ (lookup('file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml).harbor.chart_archive_sha256 | regex_replace('^sha256:', '') }}"
+    harbor_chart_archive_sha256: >-
+      sha256:{{ (lookup('file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml).harbor.chart_archive_sha256 |
+      regex_replace('^sha256:', '') }}
     harbor_locked_images: "{{ (lookup('file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml).harbor.images }}"
 
 - name: Require explicit adopted-cluster Harbor configuration
