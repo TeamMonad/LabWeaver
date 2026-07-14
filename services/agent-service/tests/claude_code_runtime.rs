@@ -1,6 +1,6 @@
 //! Black-box regression coverage for the Claude Code worker boundary.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1234,7 +1234,7 @@ async fn tokio_process_clears_inheritance_and_isolates_invocation_directories()
     permissions.set_mode(0o755);
     std::fs::set_permissions(&binary, permissions)?;
 
-    let environment = BTreeMap::from([
+    let environment = std::collections::BTreeMap::from([
         (
             "PATH".to_owned(),
             fixture.path().to_string_lossy().into_owned(),

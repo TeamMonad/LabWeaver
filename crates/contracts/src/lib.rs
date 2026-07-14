@@ -17,6 +17,7 @@
 )]
 
 pub mod access;
+pub mod auth;
 pub mod authoring;
 pub mod diagnostic;
 pub mod environment;
@@ -28,8 +29,14 @@ pub mod schema;
 pub mod submission;
 pub mod supply_chain;
 
+pub use auth::{
+    AuthSession, AuthenticatedActor, AuthorizationDecision, AuthorizationDecisionRequest,
+    AuthorizationScope, CourseMembership, CsrfTokenResponse, MembershipState, PlatformRole,
+    ProjectMembership,
+};
 pub use diagnostic::{DiagnosticCode, ProblemDetails, Violation};
 pub use foundation::*;
+pub use http::{OperationScopeKind, operation_authorization};
 
 /// Stable public REST major version.
 pub const API_VERSION: &str = "v1";

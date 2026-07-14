@@ -1,6 +1,6 @@
 # Access Trust Boundary
 
-Status: documented design baseline for ACCESS-01a; pending B security review and D verification review. This document is E0 design evidence only. It does not prove OIDC, Headscale, Subnet Router firewall enforcement, Guacamole, KubeVirt, session isolation, or a production network path is implemented.
+Status: ACCESS-01a remains an E0 design baseline, while the Issue #47 OIDC/BFF and Access-to-Environment owner-resolution slice has local E2 evidence pending A+B review and D Verify. This document does not prove Headscale, Subnet Router firewall enforcement, Guacamole, KubeVirt, or a deployed production network path.
 
 ## Purpose and non-goals
 
@@ -20,6 +20,18 @@ It does not define a REST API, NATS subject, database schema, Headscale instance
 | Environment Service | endpoint metadata and short-lived SSH/VNC credentials | caller identity, course membership or external network policy |
 
 PostgreSQL is the planned durable source of truth for Access Service state. Headscale Grants, Router firewall state, Guacamole session state and caches are derived enforcement state; none may independently grant access.
+
+## Issue #47 identity and internal service defaults
+
+All deployment-variable values are in `deploy/config/access-auth.yaml.example`; code must not embed issuer URLs, audiences, claim paths, Keycloak role names, certificate locations, Gateway SANs, listener addresses, cookie names, lifetimes, or runtime-pool sizing. The production configuration manager supplies the corresponding non-secret values and secret-file locators. The example uses the recommended `realm_access.roles` source, maps `teacher`, `student`, and `platform-admin`, uses a host-only `__Host-labweaver_session` cookie and `X-CSRF-Token`, and sets a 15-minute absolute / 5-minute idle session lifetime with a 5-minute OIDC transaction lifetime. These are deployment defaults, not protocol constants: role claim path and Keycloak-to-platform role mapping are explicit configuration and are validated at startup. Every browser mutation must have both a live BFF session and a constant-time synchronizer token, and the request `Origin` must exactly match the configured HTTPS origin allowlist.
+
+The same file fixes the bearer-token issuer, API audience, asymmetric signing-algorithm allowlist, and JWKS refresh/retry intervals. The Access runtime validates `exp`, `nbf`, issuer, audience and `azp`, refreshes the JWKS only on an unknown `kid`, and rejects a bearer request when discovery, refresh, signature, claim, or role mapping validation fails. The audited `jwt-authorizer` 0.15.0 patch retains the deployment-configured HTTP client during refresh, merges concurrent refreshes with its mutex and rate-bounds repeated misses by the retry interval, so private-CA rotation cannot silently fall back to a different trust store. No token, cookie, PKCE verifier, or certificate body is permitted in the configuration file or ordinary logs.
+
+Only roles selected by the configured signed-claim path and explicit mapping become `Teacher`, `Student`, or `PlatformAdmin`; absent, malformed, or otherwise unmapped role claims deny authentication. Course and resource access still requires current Access Service membership and owner checks.
+
+The approved Gateway mTLS identity is SAN URI `spiffe://labweaver/gateway`. The internal listener trusts only the configured CA locator, requires a currently valid leaf certificate with `clientAuth` EKU and this exact SAN, and fails closed for missing, expired, untrusted, or unregistered identities. Certificate rotation keeps both reviewed CA/key versions only for their explicit overlap window. The `POST /internal/v1/auth/decision` caller must present this mTLS identity, a live opaque BFF session ID and matching actor ID; Access reloads membership truth for that decision and returns a role/scope decision whose `validUntil` is the maximum cache horizon. The caller-provided revision is advisory only and can never extend a permit.
+
+Operation role and scope policy is generated from the contracts catalog into both OpenAPI surfaces (`x-labweaver-allowed-roles` and `x-labweaver-scope`). Course and project scopes are evaluated only against Access-owned memberships. After #51 merged, Environment scope calls its owner resolver over configured rustls mTLS and binds the environment, course, actor and exact Environment revision to the strong-ETag response. Resolver denial returns 403; transport, store, expiry, identity, revision or response mismatch fails closed. The recommended deployment defaults are a 2-second timeout, one retry after a 100-millisecond backoff and a 5-second decision cache horizon; all remain explicit startup-validated configuration.
 
 ## P0 access paths
 
@@ -70,4 +82,4 @@ Future contracts must expose stable diagnostics for invalid identity, inactive d
 
 Audit records and machine-readable reports may contain identifiers, timestamps, revisions, decision outcomes, hashes and safe diagnostics. They must not contain bearer tokens, handoff tokens, enrollment keys, SSH/VNC credentials, cookies, full request payloads, terminal streams or session content.
 
-Required evidence remains unavailable: contract and negative authorization tests (E1/E2), a deployed Router/Headscale/Guacamole path with receipts (E3), and multi-device, multi-role replay proving native and browser-path containment (E4).
+The OIDC/BFF slice has E1/E2 contract, PostgreSQL, real HTTPS Keycloak, JWKS rotation/outage and real mTLS owner-resolver evidence. Still unavailable are deployed Gateway/Keycloak/internal-DNS evidence plus the Router/Headscale/Guacamole path with receipts (E3), and multi-device, multi-role replay proving native and browser-path containment (E4).

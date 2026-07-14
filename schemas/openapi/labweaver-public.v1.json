@@ -13,6 +13,18 @@
       }
     },
     "schemas": {
+      "AuthSession": {
+        "$ref": "../contracts/v1/auth-session.schema.json"
+      },
+      "AuthorizationDecision": {
+        "$ref": "../contracts/v1/authorization-decision.schema.json"
+      },
+      "AuthorizationDecisionRequest": {
+        "$ref": "../contracts/v1/authorization-decision-request.schema.json"
+      },
+      "CsrfTokenResponse": {
+        "$ref": "../contracts/v1/csrf-token-response.schema.json"
+      },
       "OperationAccepted": {
         "additionalProperties": false,
         "properties": {
@@ -109,10 +121,20 @@
       }
     },
     "securitySchemes": {
+      "bearerJwt": {
+        "bearerFormat": "JWT",
+        "scheme": "bearer",
+        "type": "http"
+      },
+      "bffSession": {
+        "in": "cookie",
+        "name": "__Host-labweaver_session",
+        "type": "apiKey"
+      },
       "oidc": {
         "flows": {
           "authorizationCode": {
-            "authorizationUrl": "/oidc/authorize",
+            "authorizationUrl": "/auth/login",
             "scopes": {}
           }
         },
@@ -203,6 +225,10 @@
           }
         ],
         "summary": "getAccessGrant",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -214,6 +240,7 @@
         "x-labweaver-permission": "access_grant:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "environment",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -319,6 +346,10 @@
           }
         ],
         "summary": "revokeAccessGrant",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -330,7 +361,69 @@
         "x-labweaver-permission": "access_grant:revoke",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "environment",
         "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/auth/csrf": {
+      "get": {
+        "operationId": "issueCsrfToken",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CsrfTokenResponse"
+                }
+              }
+            },
+            "description": "Short-lived synchronizer token"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "bffSession": []
+          }
+        ],
+        "summary": "Issue a synchronizer token for the current BFF session"
+      }
+    },
+    "/api/v1/auth/session": {
+      "get": {
+        "operationId": "getAuthSession",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthSession"
+                }
+              }
+            },
+            "description": "Current authentication session"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "bffSession": []
+          },
+          {
+            "bearerJwt": []
+          }
+        ],
+        "summary": "Return the safe actor and current authoritative scopes"
       }
     },
     "/api/v1/courses/{courseId}/agent-runs": {
@@ -427,6 +520,9 @@
           }
         ],
         "summary": "createAgentRun",
+        "x-labweaver-allowed-roles": [
+          "teacher"
+        ],
         "x-labweaver-cancellable": true,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -438,6 +534,7 @@
         "x-labweaver-permission": "agent_run:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "course",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -526,6 +623,9 @@
           }
         ],
         "summary": "getAgentRun",
+        "x-labweaver-allowed-roles": [
+          "teacher"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -537,6 +637,7 @@
         "x-labweaver-permission": "agent_run:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "course",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -641,6 +742,9 @@
           }
         ],
         "summary": "cancelAgentRun",
+        "x-labweaver-allowed-roles": [
+          "teacher"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -652,6 +756,7 @@
         "x-labweaver-permission": "agent_run:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "course",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -765,6 +870,9 @@
           }
         ],
         "summary": "retryAgentRunTrack",
+        "x-labweaver-allowed-roles": [
+          "teacher"
+        ],
         "x-labweaver-cancellable": true,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -776,6 +884,7 @@
         "x-labweaver-permission": "agent_run:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "course",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -864,6 +973,9 @@
           }
         ],
         "summary": "getEnvironmentCandidate",
+        "x-labweaver-allowed-roles": [
+          "teacher"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -875,6 +987,7 @@
         "x-labweaver-permission": "candidate:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "course",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -989,6 +1102,9 @@
           }
         ],
         "summary": "appendEnvironmentCandidateDecision",
+        "x-labweaver-allowed-roles": [
+          "teacher"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -1000,6 +1116,7 @@
         "x-labweaver-permission": "candidate:approve",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": false,
+        "x-labweaver-scope": "course",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -1117,6 +1234,10 @@
           }
         ],
         "summary": "listEnvironmentTemplateReleases",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -1128,6 +1249,7 @@
         "x-labweaver-permission": "release:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "course",
         "x-labweaver-timeout-ms": 30000
       },
       "post": {
@@ -1223,6 +1345,9 @@
           }
         ],
         "summary": "createEnvironmentTemplateRelease",
+        "x-labweaver-allowed-roles": [
+          "teacher"
+        ],
         "x-labweaver-cancellable": true,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -1234,6 +1359,7 @@
         "x-labweaver-permission": "release:publish",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "course",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -1322,6 +1448,10 @@
           }
         ],
         "summary": "getEnvironmentTemplateRelease",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -1333,6 +1463,7 @@
         "x-labweaver-permission": "release:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "course",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -1430,6 +1561,9 @@
           }
         ],
         "summary": "withdrawEnvironmentTemplateRelease",
+        "x-labweaver-allowed-roles": [
+          "teacher"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -1441,6 +1575,7 @@
         "x-labweaver-permission": "release:withdraw",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": false,
+        "x-labweaver-scope": "course",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -1529,6 +1664,9 @@
           }
         ],
         "summary": "getEvaluationCandidate",
+        "x-labweaver-allowed-roles": [
+          "teacher"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -1540,6 +1678,7 @@
         "x-labweaver-permission": "candidate:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "course",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -1654,6 +1793,9 @@
           }
         ],
         "summary": "appendEvaluationCandidateDecision",
+        "x-labweaver-allowed-roles": [
+          "teacher"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -1665,6 +1807,7 @@
         "x-labweaver-permission": "candidate:approve",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": false,
+        "x-labweaver-scope": "course",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -1762,6 +1905,9 @@
           }
         ],
         "summary": "createCourseLlmPolicy",
+        "x-labweaver-allowed-roles": [
+          "teacher"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -1773,6 +1919,7 @@
         "x-labweaver-permission": "llm_policy:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "course",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -1852,6 +1999,9 @@
           }
         ],
         "summary": "getActiveCourseLlmPolicy",
+        "x-labweaver-allowed-roles": [
+          "teacher"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -1863,6 +2013,7 @@
         "x-labweaver-permission": "llm_policy:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "course",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -1960,6 +2111,9 @@
           }
         ],
         "summary": "createProblemPackageUpload",
+        "x-labweaver-allowed-roles": [
+          "teacher"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -1971,6 +2125,7 @@
         "x-labweaver-permission": "problem_package:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "course",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -2085,6 +2240,9 @@
           }
         ],
         "summary": "completeProblemPackageUpload",
+        "x-labweaver-allowed-roles": [
+          "teacher"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -2096,6 +2254,7 @@
         "x-labweaver-permission": "problem_package:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "course",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -2184,6 +2343,10 @@
           }
         ],
         "summary": "getProblemPackage",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -2195,6 +2358,7 @@
         "x-labweaver-permission": "problem_package:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "course",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -2283,6 +2447,10 @@
           }
         ],
         "summary": "createEnvironment",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
         "x-labweaver-cancellable": true,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -2294,6 +2462,7 @@
         "x-labweaver-permission": "environment:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "course",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -2389,6 +2558,10 @@
           }
         ],
         "summary": "deleteEnvironment",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
         "x-labweaver-cancellable": true,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -2400,6 +2573,7 @@
         "x-labweaver-permission": "environment:delete",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "environment",
         "x-labweaver-timeout-ms": 30000
       },
       "get": {
@@ -2477,6 +2651,10 @@
           }
         ],
         "summary": "getEnvironment",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -2488,6 +2666,7 @@
         "x-labweaver-permission": "environment:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "environment",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -2585,6 +2764,10 @@
           }
         ],
         "summary": "createAccessGrant",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -2596,6 +2779,7 @@
         "x-labweaver-permission": "access_grant:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "environment",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -2691,6 +2875,10 @@
           }
         ],
         "summary": "cancelEnvironmentOperation",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -2702,6 +2890,7 @@
         "x-labweaver-permission": "environment:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "environment",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -2792,6 +2981,10 @@
           }
         ],
         "summary": "listEnvironmentEndpoints",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -2803,6 +2996,7 @@
         "x-labweaver-permission": "environment:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "environment",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -2908,6 +3102,10 @@
           }
         ],
         "summary": "freezeSubmission",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
         "x-labweaver-cancellable": true,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -2919,6 +3117,7 @@
         "x-labweaver-permission": "submission:freeze",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "environment",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -3014,6 +3213,10 @@
           }
         ],
         "summary": "recoverEnvironment",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
         "x-labweaver-cancellable": true,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -3025,6 +3228,7 @@
         "x-labweaver-permission": "environment:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "environment",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -3120,6 +3324,10 @@
           }
         ],
         "summary": "resetEnvironment",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
         "x-labweaver-cancellable": true,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -3131,6 +3339,7 @@
         "x-labweaver-permission": "environment:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "environment",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -3226,6 +3435,10 @@
           }
         ],
         "summary": "restartEnvironment",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
         "x-labweaver-cancellable": true,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -3237,6 +3450,7 @@
         "x-labweaver-permission": "environment:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "environment",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -3332,6 +3546,10 @@
           }
         ],
         "summary": "retryEnvironment",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
         "x-labweaver-cancellable": true,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -3343,6 +3561,7 @@
         "x-labweaver-permission": "environment:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "environment",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -3438,6 +3657,10 @@
           }
         ],
         "summary": "startEnvironment",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
         "x-labweaver-cancellable": true,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -3449,6 +3672,7 @@
         "x-labweaver-permission": "environment:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "environment",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -3544,6 +3768,10 @@
           }
         ],
         "summary": "stopEnvironment",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
         "x-labweaver-cancellable": true,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -3555,6 +3783,7 @@
         "x-labweaver-permission": "environment:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "environment",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -3645,6 +3874,10 @@
           }
         ],
         "summary": "streamCourseEvents",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -3656,6 +3889,7 @@
         "x-labweaver-permission": "events:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "course",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -3735,6 +3969,10 @@
           }
         ],
         "summary": "getFrozenSubmission",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -3746,6 +3984,7 @@
         "x-labweaver-permission": "submission:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "environment",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -3854,6 +4093,10 @@
           }
         ],
         "summary": "listSshPublicKeys",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -3865,6 +4108,7 @@
         "x-labweaver-permission": "ssh_key:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "global",
         "x-labweaver-timeout-ms": 30000
       },
       "post": {
@@ -3951,6 +4195,10 @@
           }
         ],
         "summary": "createSshPublicKey",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -3962,6 +4210,7 @@
         "x-labweaver-permission": "ssh_key:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": false,
+        "x-labweaver-scope": "global",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -4050,6 +4299,10 @@
           }
         ],
         "summary": "deleteSshPublicKey",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -4061,7 +4314,152 @@
         "x-labweaver-permission": "ssh_key:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "global",
         "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/auth/backchannel-logout": {
+      "post": {
+        "operationId": "consumeOidcBackchannelLogout",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "logout_token": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "logout_token"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Matching sessions revoked"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [],
+        "summary": "Consume a signed, replay-protected OIDC back-channel logout token"
+      }
+    },
+    "/auth/callback": {
+      "get": {
+        "operationId": "completeOidcLogin",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "code",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Session established and redirected to the allowlisted return URL"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [],
+        "summary": "Complete the one-time OIDC callback"
+      }
+    },
+    "/auth/login": {
+      "get": {
+        "operationId": "beginOidcLogin",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "return_to",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Redirect to the configured OIDC provider"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [],
+        "summary": "Begin OIDC Authorization Code + PKCE login"
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "operationId": "logoutBrowserSession",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "format": "uri",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-CSRF-Token",
+            "required": true,
+            "schema": {
+              "maxLength": 43,
+              "minLength": 43,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Session revoked and redirected to provider logout"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "bffSession": []
+          }
+        ],
+        "summary": "Revoke the BFF session and begin provider logout"
       }
     }
   },

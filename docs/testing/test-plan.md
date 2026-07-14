@@ -34,6 +34,51 @@ cargo clippy -p contracts --all-targets --all-features -- -D warnings
 pnpm --dir web typecheck
 ```
 
+`cargo xtask test --suite contract` is the executable aggregate contract gate.
+It first rejects Rust-generated Schema/OpenAPI drift, then runs the complete
+`contracts` crate target set and finally rejects generated Web SDK drift through
+the checked-in `pnpm contracts:check` entry point. Missing Cargo or pnpm tooling,
+test failure, or drift fails the aggregate command.
+
+## Issue #47 controlled Keycloak verification
+
+The ignored `auth` Keycloak integration test is an explicit E2 entry point. It
+requires a caller-owned disposable Keycloak 26.3 HTTPS container, its controlled
+CA file and disposable bootstrap-admin credentials; it has no public endpoint
+or fixture-only fallback. It drives the HTML login form through Authorization
+Code + PKCE, exchanges the code, validates nonce/issuer/audience/`azp` and role
+claims, and executes RP-Initiated Logout. It then creates two new Keycloak RSA
+providers, proves unknown-`kid` refresh through the same private-CA client, and
+removes the authoritative key providers to prove fail-closed JWKS outage. The
+realm fixture and admin credentials are test-only and must never be used by a
+deployment.
+
+The recorded local run used
+`quay.io/keycloak/keycloak@sha256:08a31919cfcd814bf1b465142b1a716c4d1a8830f772bb5c9dffcbd96de3fba6`.
+After starting that disposable HTTPS container with the checked-in realm fixture,
+run the gate with caller-controlled values:
+
+```sh
+LABWEAVER_KEYCLOAK_TEST_ISSUER='https://localhost:18443/realms/labweaver-test' \
+LABWEAVER_KEYCLOAK_TEST_CA_FILE='<controlled-ca-file>' \
+LABWEAVER_KEYCLOAK_TEST_ADMIN_USERNAME='<disposable-admin>' \
+LABWEAVER_KEYCLOAK_TEST_ADMIN_PASSWORD='<disposable-password>' \
+cargo test -p auth --test keycloak_discovery -- --ignored --nocapture
+```
+
+The test mutates and removes signing-key providers, so the Keycloak instance
+must be disposable and must be destroyed after the run.
+
+The controlled PostgreSQL integration entry point also applies the immutable
+migration catalog, verifies the runtime cannot perform schema DDL, and covers
+encrypted BFF-session restoration, CSRF verification, direct/SID revocation,
+authoritative membership reload and registered service identity checks. The
+Rustls mTLS tests generate ephemeral CA, server and `clientAuth` certificates.
+They cover allowlisted URI SAN extraction and a real Access-to-Environment
+handshake, exact owner/course/environment/revision and strong-ETag binding,
+denial, response tamper and bounded outage. A deployed Gateway decision call
+and controlled certificate rotation remain E3 work.
+
 The contract tests validate OJ and Linux examples against generated JSON Schema and semantic rules.
 An external-crate integration test reads Metadata, Submission, Step, Runner, Checker, Aggregation and
 Review values through the public immutable domain API. Direct public Serde deserialization is tested
@@ -231,9 +276,9 @@ grant revocation before reset/expiry/failure/delete cleanup, deletion
 idempotency and sanitized `Deleted` tombstone evidence. The current slice proves
 the transport and state-owner boundaries; concrete Container/KubeVirt Provider,
 Access-owned revocation responder, Resource-owned Lease responder and E3
-deployment evidence remain planned. #47 must not consume the resolver result until the
-current PostgreSQL+JetStream+mTLS evidence and build identity receive the
-required A review and D Verify.
+deployment evidence remain planned. #47 now consumes the merged #51 resolver
+contract through mTLS, but the combined build identity still requires A+B
+review and D Verify before Issue closure.
 ## Infrastructure automation
 
 | Layer | Required evidence | Failure condition |

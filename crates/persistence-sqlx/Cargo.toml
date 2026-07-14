@@ -20,6 +20,7 @@ tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+auth = { path = "../auth" }
 log = "0.4.28"
 testcontainers = { version = "0.25.0", features = ["blocking"] }
 testcontainers-modules = { version = "0.13.0", features = ["postgres"] }

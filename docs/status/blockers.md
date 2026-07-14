@@ -56,8 +56,9 @@
   responder, Resource-owned Lease responder, formal Container/KubeVirt Provider
   and deployed mTLS NATS path remain explicit adjacent/E3 dependencies and may
   not be replaced with integration fixtures or fallback evidence.
-- Impact: #47 must continue rejecting Environment-scope authorization until the
-  resolver and E2 identity are reviewed and verified.
+- Impact: #47 now binds Environment-scope authorization to the merged resolver
+  through real mTLS E2 coverage. A+B review, D same-build Verify and deployed
+  Gateway/internal-DNS evidence remain blockers for Issue closure and E3.
 
 ## Agent Tool permission and approval contract
 
