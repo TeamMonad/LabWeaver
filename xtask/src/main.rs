@@ -455,13 +455,22 @@ fn run_migrate(command: MigrateCommand) -> Result<(), AppError> {
                 let identity = migration_identity()?;
                 let coordinator = connect_env("LABWEAVER_DB_RELEASE_COORDINATOR_URL").await?;
                 let pools = migration_pools().await?;
-                let executor = MigrationCoordinator::new(coordinator, pools, identity)
+                let executor = MigrationCoordinator::new(coordinator, pools, identity.clone())
                     .map_err(persistence_error)?;
-                let envelope = executor
-                    .apply(&catalog, &root)
-                    .await
-                    .map_err(persistence_error)?;
-                envelope.write(&report).map_err(persistence_error)
+                match executor.apply(&catalog, &root).await {
+                    Ok(envelope) => envelope.write(&report).map_err(persistence_error),
+                    Err(error) => {
+                        let envelope = MigrationReportEnvelope::failure(
+                            catalog.sha256().map_err(persistence_error)?,
+                            identity,
+                            Vec::new(),
+                            error.diagnostic_code(),
+                        )
+                        .map_err(persistence_error)?;
+                        envelope.write(&report).map_err(persistence_error)?;
+                        Err(persistence_error(error))
+                    }
+                }
             }
             MigrateCommand::Verify(args) => {
                 let (catalog, _) = load_catalog(&args.catalog)?;

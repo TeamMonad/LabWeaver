@@ -21,10 +21,11 @@ CREATE TABLE inbox_events (
     consumer text NOT NULL, event_id uuid NOT NULL, aggregate_id uuid NOT NULL,
     aggregate_sequence bigint NOT NULL CHECK (aggregate_sequence > 0),
     payload_sha256 text NOT NULL CHECK (payload_sha256 ~ '^[0-9a-f]{64}$'),
-    processed_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (consumer, event_id)
+    processed_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (consumer, event_id),
+    UNIQUE (consumer, aggregate_id, aggregate_sequence)
 );
 CREATE TABLE inbox_watermarks (
-    consumer text NOT NULL, aggregate_id uuid NOT NULL, last_sequence bigint NOT NULL CHECK (last_sequence > 0),
+    consumer text NOT NULL, aggregate_id uuid NOT NULL, last_sequence bigint NOT NULL CHECK (last_sequence >= 0),
     updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (consumer, aggregate_id)
 );
 CREATE TABLE candidates (

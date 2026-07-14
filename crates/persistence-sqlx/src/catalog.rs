@@ -54,7 +54,7 @@ impl MigrationCatalog {
         let root = path.parent().ok_or_else(|| {
             PersistenceError::Catalog("catalog path has no parent directory".to_owned())
         })?;
-        catalog.validate(root)?;
+        catalog.verify_files(root)?;
         Ok(catalog)
     }
 
@@ -62,6 +62,34 @@ impl MigrationCatalog {
     pub fn sha256(&self) -> Result<Sha256Digest, PersistenceError> {
         Sha256Digest::of_canonical(self)
             .map_err(|error| PersistenceError::Catalog(error.to_string()))
+    }
+
+    /// Verifies the complete catalog shape and every checked-in SQL file.
+    pub fn verify_files(&self, root: &Path) -> Result<(), PersistenceError> {
+        self.validate(root)
+    }
+
+    /// Reads one SQL file and verifies its exact bytes immediately before use.
+    pub fn read_verified_sql(
+        root: &Path,
+        migration: &CatalogMigration,
+    ) -> Result<String, PersistenceError> {
+        let path = Self::migration_path(root, &migration.file)?;
+        let bytes = fs::read(&path).map_err(|error| {
+            PersistenceError::Catalog(format!("cannot read {}: {error}", path.display()))
+        })?;
+        let observed = Sha256Digest::of_bytes(&bytes);
+        if observed != migration.sha256 {
+            return Err(PersistenceError::IdentityMismatch(format!(
+                "{} expected {} but observed {}",
+                migration.file, migration.sha256, observed
+            )));
+        }
+        let sql = String::from_utf8(bytes).map_err(|error| {
+            PersistenceError::Catalog(format!("{} is not UTF-8: {error}", migration.file))
+        })?;
+        reject_non_transactional_sql(&migration.file, &sql)?;
+        Ok(sql)
     }
 
     /// Resolves a catalog-relative SQL path without allowing traversal.
@@ -124,21 +152,7 @@ impl MigrationCatalog {
     }
 
     fn verify_file(root: &Path, migration: &CatalogMigration) -> Result<(), PersistenceError> {
-        let path = Self::migration_path(root, &migration.file)?;
-        let bytes = fs::read(&path).map_err(|error| {
-            PersistenceError::Catalog(format!("cannot read {}: {error}", path.display()))
-        })?;
-        let observed = Sha256Digest::of_bytes(&bytes);
-        if observed != migration.sha256 {
-            return Err(PersistenceError::IdentityMismatch(format!(
-                "{} expected {} but observed {}",
-                migration.file, migration.sha256, observed
-            )));
-        }
-        let sql = std::str::from_utf8(&bytes).map_err(|error| {
-            PersistenceError::Catalog(format!("{} is not UTF-8: {error}", migration.file))
-        })?;
-        reject_non_transactional_sql(&migration.file, sql)
+        Self::read_verified_sql(root, migration).map(|_| ())
     }
 }
 

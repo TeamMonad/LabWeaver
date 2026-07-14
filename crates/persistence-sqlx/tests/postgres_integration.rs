@@ -6,8 +6,8 @@ use std::str::FromStr;
 
 use contracts::Sha256Digest;
 use persistence_sqlx::{
-    Domain, IdempotencyDecision, IdempotencyStore, MigrationCatalog, MigrationCoordinator,
-    MigrationIdentity, OutboxStore, SchemaStatus, SchemaVerifier,
+    Domain, IdempotencyDecision, IdempotencyStore, InboxDecision, InboxStore, MigrationCatalog,
+    MigrationCoordinator, MigrationIdentity, OutboxStore, SchemaStatus, SchemaVerifier,
 };
 use serde_json::json;
 use sqlx::{
@@ -50,6 +50,8 @@ async fn bootstrap_migrate_and_enforce_domain_boundaries() -> Result<(), Box<dyn
     let coordinator = MigrationCoordinator::new(coordinator, migration_pools, identity)?;
     let report = coordinator.apply(&catalog, &root).await?;
     assert_eq!(report.report.outcome, "succeeded");
+    let reused = coordinator.apply(&catalog, &root).await.unwrap_err();
+    assert_eq!(reused.diagnostic_code(), "DB_MIGRATION_ATTEMPT_REUSED");
 
     let runtime_pools = pools_for(&provisioner_url, "runtime").await?;
     for catalog_domain in &catalog.domains {
@@ -107,6 +109,46 @@ async fn bootstrap_migrate_and_enforce_domain_boundaries() -> Result<(), Box<dyn
         IdempotencyDecision::Replay(json!({"id": "one"}))
     );
     replay.rollback().await?;
+
+    let aggregate_id = Uuid::now_v7();
+    let first_event = Uuid::now_v7();
+    let mut first = control.begin().await?;
+    assert_eq!(
+        InboxStore::accept(
+            &mut first,
+            Domain::Control,
+            "concurrent-consumer",
+            first_event,
+            aggregate_id,
+            1,
+            Sha256Digest::of_bytes(b"first"),
+        )
+        .await?,
+        InboxDecision::Accepted
+    );
+    let second_pool = control.clone();
+    let second = tokio::spawn(async move {
+        let mut transaction = second_pool.begin().await?;
+        let decision = InboxStore::accept(
+            &mut transaction,
+            Domain::Control,
+            "concurrent-consumer",
+            Uuid::now_v7(),
+            aggregate_id,
+            1,
+            Sha256Digest::of_bytes(b"second"),
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok::<_, persistence_sqlx::PersistenceError>(decision)
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !second.is_finished(),
+        "second first-sequence reservation must wait on the watermark row"
+    );
+    first.commit().await?;
+    assert_eq!(second.await??, InboxDecision::Stale);
 
     assert!(
         sqlx::query("CREATE TABLE forbidden_runtime_ddl (id integer)")

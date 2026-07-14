@@ -1,6 +1,7 @@
 DO $bootstrap$
 DECLARE
     role_name text;
+    parent_role text;
 BEGIN
     FOREACH role_name IN ARRAY ARRAY[
         'lw_release_coordinator', 'lw_audit_projection',
@@ -12,12 +13,22 @@ BEGIN
         'lw_resource_owner', 'lw_resource_migration', 'lw_resource_runtime'
     ] LOOP
         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
-            IF role_name LIKE '%_owner' THEN
-                EXECUTE format('CREATE ROLE %I NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION', role_name);
-            ELSE
-                EXECUTE format('CREATE ROLE %I LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION', role_name);
-            END IF;
+            EXECUTE format('CREATE ROLE %I', role_name);
         END IF;
+        IF role_name LIKE '%_owner' THEN
+            EXECUTE format('ALTER ROLE %I NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS', role_name);
+        ELSE
+            EXECUTE format('ALTER ROLE %I LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS', role_name);
+        END IF;
+        EXECUTE format('ALTER ROLE %I RESET ALL', role_name);
+        FOR parent_role IN
+            SELECT parent.rolname FROM pg_auth_members membership
+            JOIN pg_roles parent ON parent.oid = membership.roleid
+            JOIN pg_roles member ON member.oid = membership.member
+            WHERE member.rolname = role_name
+        LOOP
+            EXECUTE format('REVOKE %I FROM %I', parent_role, role_name);
+        END LOOP;
     END LOOP;
 END
 $bootstrap$;
@@ -32,6 +43,15 @@ CREATE SCHEMA IF NOT EXISTS environment AUTHORIZATION lw_environment_owner;
 CREATE SCHEMA IF NOT EXISTS agent AUTHORIZATION lw_agent_owner;
 CREATE SCHEMA IF NOT EXISTS evaluation AUTHORIZATION lw_evaluation_owner;
 CREATE SCHEMA IF NOT EXISTS resource AUTHORIZATION lw_resource_owner;
+
+ALTER SCHEMA platform_meta OWNER TO lw_release_coordinator;
+ALTER SCHEMA shared_audit OWNER TO lw_audit_projection;
+ALTER SCHEMA control OWNER TO lw_control_owner;
+ALTER SCHEMA access OWNER TO lw_access_owner;
+ALTER SCHEMA environment OWNER TO lw_environment_owner;
+ALTER SCHEMA agent OWNER TO lw_agent_owner;
+ALTER SCHEMA evaluation OWNER TO lw_evaluation_owner;
+ALTER SCHEMA resource OWNER TO lw_resource_owner;
 
 REVOKE ALL ON SCHEMA platform_meta, shared_audit, control, access, environment, agent, evaluation, resource FROM PUBLIC;
 GRANT USAGE ON SCHEMA platform_meta TO lw_release_coordinator;

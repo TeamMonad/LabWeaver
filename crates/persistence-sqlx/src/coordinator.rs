@@ -105,6 +105,23 @@ impl MigrationReportEnvelope {
         })
     }
 
+    /// Creates an evidence envelope for a failed operation.
+    pub fn failure(
+        catalog_sha256: Sha256Digest,
+        identity: MigrationIdentity,
+        domains: Vec<DomainMigrationReport>,
+        diagnostic: &str,
+    ) -> Result<Self, PersistenceError> {
+        Self::new(MigrationReport {
+            schema_version: 1,
+            catalog_sha256,
+            identity,
+            outcome: "failed".to_owned(),
+            domains,
+            diagnostic: Some(diagnostic.to_owned()),
+        })
+    }
+
     fn new(report: MigrationReport) -> Result<Self, PersistenceError> {
         let report_sha256 = Sha256Digest::of_canonical(&report)
             .map_err(|error| PersistenceError::Report(error.to_string()))?;
@@ -151,10 +168,8 @@ impl MigrationCoordinator {
         catalog: &MigrationCatalog,
         catalog_root: &Path,
     ) -> Result<(), PersistenceError> {
-        let path = MigrationCatalog::migration_path(catalog_root, &catalog.bootstrap.file)?;
-        let sql = fs::read_to_string(&path).map_err(|error| {
-            PersistenceError::Catalog(format!("cannot read {}: {error}", path.display()))
-        })?;
+        catalog.verify_files(catalog_root)?;
+        let sql = MigrationCatalog::read_verified_sql(catalog_root, &catalog.bootstrap)?;
         let mut connection = provisioner.acquire().await?;
         let row = sqlx::query(
             "SELECT rolsuper OR rolcreaterole AS permitted FROM pg_roles WHERE rolname = current_user",
@@ -201,9 +216,11 @@ impl MigrationCoordinator {
         catalog: &MigrationCatalog,
         catalog_root: &Path,
     ) -> Result<MigrationReportEnvelope, PersistenceError> {
+        catalog.verify_files(catalog_root)?;
         let catalog_hash = catalog.sha256()?;
         let mut coordinator = self.coordinator.acquire().await?;
-        require_current_user(&mut coordinator, "lw_release_coordinator").await?;
+        require_connection_identity(&mut coordinator, "lw_release_coordinator", "platform_meta")
+            .await?;
         let (global_a, global_b) =
             lock_keys(&self.identity.cluster_uuid, "labweaver:migration-release");
         sqlx::query("SELECT pg_advisory_lock($1, $2)")
@@ -227,7 +244,23 @@ impl MigrationCoordinator {
                     status: "ready".to_owned(),
                 }),
                 Err(error) => {
-                    self.fail_attempt(&mut coordinator, error.diagnostic_code())
+                    let envelope = MigrationReportEnvelope::failure(
+                        catalog_hash,
+                        self.identity.clone(),
+                        reports,
+                        error.diagnostic_code(),
+                    )?;
+                    self.finish_attempt(
+                        &mut coordinator,
+                        "failed",
+                        error.diagnostic_code(),
+                        Some(&envelope.report_sha256),
+                    )
+                    .await?;
+                    sqlx::query("SELECT pg_advisory_unlock($1, $2)")
+                        .bind(global_a)
+                        .bind(global_b)
+                        .execute(&mut *coordinator)
                         .await?;
                     return Err(error);
                 }
@@ -235,14 +268,18 @@ impl MigrationCoordinator {
         }
         let envelope =
             MigrationReportEnvelope::success(catalog_hash, self.identity.clone(), reports)?;
-        sqlx::query(
-            "UPDATE platform_meta.release_attempts SET state = 'succeeded', finished_at = now(), \
-             report_sha256 = $2 WHERE attempt_id = $1 AND state = 'running'",
+        self.finish_attempt(
+            &mut coordinator,
+            "succeeded",
+            "",
+            Some(&envelope.report_sha256),
         )
-        .bind(&self.identity.attempt_id)
-        .bind(envelope.report_sha256.to_string())
-        .execute(&mut *coordinator)
         .await?;
+        sqlx::query("SELECT pg_advisory_unlock($1, $2)")
+            .bind(global_a)
+            .bind(global_b)
+            .execute(&mut *coordinator)
+            .await?;
         Ok(envelope)
     }
 
@@ -275,11 +312,16 @@ impl MigrationCoordinator {
                 ));
             }
         }
-        sqlx::query(
+        let existing = sqlx::query(
+            "SELECT attempt_id FROM platform_meta.release_attempts WHERE attempt_id = $1 FOR UPDATE",
+        ).bind(&self.identity.attempt_id).fetch_optional(&mut *connection).await?;
+        if existing.is_some() {
+            return Err(PersistenceError::AttemptReused);
+        }
+        let inserted = sqlx::query(
             "INSERT INTO platform_meta.release_attempts \
              (attempt_id, release_id, catalog_sha256, git_commit, build_digest, job_id, state) \
-             VALUES ($1, $2, $3, $4, $5, $6, 'running') \
-             ON CONFLICT (attempt_id) DO NOTHING",
+             VALUES ($1, $2, $3, $4, $5, $6, 'running')",
         )
         .bind(&self.identity.attempt_id)
         .bind(&self.identity.release_id)
@@ -289,6 +331,9 @@ impl MigrationCoordinator {
         .bind(&self.identity.job_id)
         .execute(&mut *connection)
         .await?;
+        if inserted.rows_affected() != 1 {
+            return Err(PersistenceError::AttemptReused);
+        }
         Ok(())
     }
 
@@ -297,7 +342,7 @@ impl MigrationCoordinator {
         connection: &mut PgConnection,
         domain: Domain,
     ) -> Result<(), PersistenceError> {
-        sqlx::query(
+        let updated = sqlx::query(
             "UPDATE platform_meta.release_attempts SET current_domain = $2 \
              WHERE attempt_id = $1 AND state = 'running'",
         )
@@ -305,22 +350,32 @@ impl MigrationCoordinator {
         .bind(domain.to_string())
         .execute(connection)
         .await?;
+        if updated.rows_affected() != 1 {
+            return Err(PersistenceError::AttemptReused);
+        }
         Ok(())
     }
 
-    async fn fail_attempt(
+    async fn finish_attempt(
         &self,
         connection: &mut PgConnection,
+        state: &str,
         diagnostic: &str,
+        report_sha256: Option<&Sha256Digest>,
     ) -> Result<(), PersistenceError> {
-        sqlx::query(
-            "UPDATE platform_meta.release_attempts SET state = 'failed', finished_at = now(), diagnostic = $2 \
+        let updated = sqlx::query(
+            "UPDATE platform_meta.release_attempts SET state = $2, finished_at = now(), diagnostic = NULLIF($3, ''), report_sha256 = $4 \
              WHERE attempt_id = $1 AND state = 'running'",
         )
         .bind(&self.identity.attempt_id)
+        .bind(state)
         .bind(diagnostic)
-        .execute(connection)
+        .bind(report_sha256.map(ToString::to_string))
+        .execute(&mut *connection)
         .await?;
+        if updated.rows_affected() != 1 {
+            return Err(PersistenceError::AttemptReused);
+        }
         Ok(())
     }
 
@@ -334,7 +389,12 @@ impl MigrationCoordinator {
             PersistenceError::Configuration(format!("missing {} Migration pool", catalog.name))
         })?;
         let mut connection = pool.acquire().await?;
-        require_current_user(&mut connection, catalog.name.migration_role()).await?;
+        require_connection_identity(
+            &mut connection,
+            catalog.name.migration_role(),
+            catalog.name.schema(),
+        )
+        .await?;
         let (lock_a, lock_b) = lock_keys(
             &self.identity.cluster_uuid,
             &format!("labweaver:migration-domain:{}", catalog.name),
@@ -366,10 +426,7 @@ impl MigrationCoordinator {
         })?;
         let mut applied = 0_u64;
         for migration in catalog.migrations.iter().skip(start) {
-            let path = MigrationCatalog::migration_path(root, &migration.file)?;
-            let sql = fs::read_to_string(&path).map_err(|error| {
-                PersistenceError::Catalog(format!("cannot read {}: {error}", path.display()))
-            })?;
+            let sql = MigrationCatalog::read_verified_sql(root, migration)?;
             let mut transaction = connection.begin().await?;
             let set_role = format!("SET LOCAL ROLE {}", catalog.name.owner_role());
             sqlx::query(&set_role).execute(&mut *transaction).await?;
@@ -395,21 +452,37 @@ impl MigrationCoordinator {
             transaction.commit().await?;
             applied = applied.saturating_add(1);
         }
+        sqlx::query("SELECT pg_advisory_unlock($1, $2)")
+            .bind(lock_a)
+            .bind(lock_b)
+            .execute(&mut *connection)
+            .await?;
         Ok(applied)
     }
 }
 
-async fn require_current_user(
+async fn require_connection_identity(
     connection: &mut PgConnection,
     expected: &str,
+    schema: &str,
 ) -> Result<(), PersistenceError> {
     let observed: String = sqlx::query("SELECT current_user::text AS current_user")
-        .fetch_one(connection)
+        .fetch_one(&mut *connection)
         .await?
         .try_get("current_user")?;
     if observed != expected {
         return Err(PersistenceError::IdentityMismatch(format!(
             "expected database role {expected}, observed {observed}"
+        )));
+    }
+    let observed_path: String = sqlx::query("SHOW search_path")
+        .fetch_one(&mut *connection)
+        .await?
+        .try_get("search_path")?;
+    let expected_path = format!("{schema}, pg_catalog");
+    if observed_path.replace(' ', "") != expected_path.replace(' ', "") {
+        return Err(PersistenceError::IdentityMismatch(format!(
+            "expected search_path {expected_path}, observed {observed_path}"
         )));
     }
     Ok(())

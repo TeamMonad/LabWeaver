@@ -26,6 +26,9 @@ pub enum PersistenceError {
     /// An immutable identity differs from the expected value.
     #[error("migration identity mismatch: {0}")]
     IdentityMismatch(String),
+    /// An execution attempt identifier already exists and cannot be reused.
+    #[error("migration attempt ID was reused")]
+    AttemptReused,
     /// A release cannot continue until a reviewed forward repair resolves an earlier attempt.
     #[error("migration release is blocked: {0}")]
     ReleaseBlocked(String),
@@ -45,6 +48,7 @@ impl PersistenceError {
             Self::Catalog(_) => "DB_MIGRATION_CATALOG_INVALID",
             Self::Configuration(_) => "DB_MIGRATION_CONFIGURATION_INVALID",
             Self::IdentityMismatch(_) => "DB_MIGRATION_IDENTITY_MISMATCH",
+            Self::AttemptReused => "DB_MIGRATION_ATTEMPT_REUSED",
             Self::ReleaseBlocked(_) => "DB_MIGRATION_RELEASE_BLOCKED",
             Self::Database(_) => "DB_MIGRATION_DATABASE_FAILED",
             Self::Report(_) => "DB_MIGRATION_REPORT_FAILED",

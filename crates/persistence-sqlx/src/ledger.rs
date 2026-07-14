@@ -198,6 +198,16 @@ impl InboxStore {
             }
             return Ok(InboxDecision::Duplicate);
         }
+        let create_watermark = format!(
+            "INSERT INTO {}.inbox_watermarks (consumer, aggregate_id, last_sequence) VALUES ($1, $2, 0) \
+             ON CONFLICT (consumer, aggregate_id) DO NOTHING",
+            domain.schema()
+        );
+        sqlx::query(&create_watermark)
+            .bind(consumer)
+            .bind(aggregate_id)
+            .execute(&mut **transaction)
+            .await?;
         let watermark_query = format!(
             "SELECT last_sequence FROM {}.inbox_watermarks \
              WHERE consumer = $1 AND aggregate_id = $2 FOR UPDATE",
@@ -206,11 +216,10 @@ impl InboxStore {
         let last = sqlx::query(&watermark_query)
             .bind(consumer)
             .bind(aggregate_id)
-            .fetch_optional(&mut **transaction)
+            .fetch_one(&mut **transaction)
             .await?
-            .map(|row| row.try_get::<i64, _>("last_sequence"))
-            .transpose()?;
-        let expected = last.map_or(1, |value| value.saturating_add(1));
+            .try_get::<i64, _>("last_sequence")?;
+        let expected = last.saturating_add(1);
         if sequence < expected {
             return Ok(InboxDecision::Stale);
         }
@@ -231,17 +240,23 @@ impl InboxStore {
             .bind(payload_hash.to_string())
             .execute(&mut **transaction)
             .await?;
-        let upsert = format!(
-            "INSERT INTO {}.inbox_watermarks (consumer, aggregate_id, last_sequence) VALUES ($1, $2, $3) \
-             ON CONFLICT (consumer, aggregate_id) DO UPDATE SET last_sequence = EXCLUDED.last_sequence, updated_at = now()",
+        let update = format!(
+            "UPDATE {}.inbox_watermarks SET last_sequence = $3, updated_at = now() \
+             WHERE consumer = $1 AND aggregate_id = $2 AND last_sequence = $4",
             domain.schema()
         );
-        sqlx::query(&upsert)
+        let updated = sqlx::query(&update)
             .bind(consumer)
             .bind(aggregate_id)
             .bind(sequence)
+            .bind(last)
             .execute(&mut **transaction)
             .await?;
+        if updated.rows_affected() != 1 {
+            return Err(PersistenceError::IdentityMismatch(
+                "Inbox watermark changed while its row lock was held".to_owned(),
+            ));
+        }
         Ok(InboxDecision::Accepted)
     }
 }
