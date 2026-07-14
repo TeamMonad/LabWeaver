@@ -7,7 +7,10 @@ The only deployment controller entry points are `cargo xtask preflight --infra
 worktree through `ansible-rs`; Windows fails with a stable unsupported-platform
 diagnostic. The removed Python launcher is not a deployment fallback.
 The router invocation must export `LABWEAVER_SOURCE_COMMIT` with the verified
-bundle commit; missing or malformed identity fails before Ansible starts.
+bundle commit and `LABWEAVER_ANSIBLE_DEPENDENCY_ROOT` with the absolute router
+controller directory that contains the locked collections. Missing, malformed,
+or unreadable identity/dependency inputs fail before Ansible starts; the bundle
+does not infer a dependency directory from its temporary extraction path.
 
 Copy the inventory and group-variable examples to ignored private files. The
 private layout is `group_vars/all/main.yml`, encrypted

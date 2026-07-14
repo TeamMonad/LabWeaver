@@ -383,15 +383,7 @@ impl InfrastructureInputs {
         let ansible_config = controller_root.join("ansible.cfg");
         require_infrastructure_file("approved Ansible configuration", &ansible_config)?;
 
-        let shared_controller_root = root
-            .parent()
-            .and_then(std::path::Path::parent)
-            .map(|path| path.join("deploy/ansible"))
-            .ok_or_else(|| AppError::ExternalCommand {
-                role: "approved Ansible dependency root",
-                code: None,
-                detail: Some("router Ansible dependency root is missing".into()),
-            })?;
+        let shared_controller_root = infrastructure_dependency_root()?;
         let collections_path = resolve_infrastructure_directory(
             "approved Ansible collections",
             [controller_root.as_path(), shared_controller_root.as_path()],
@@ -421,6 +413,29 @@ fn infrastructure_root() -> Result<std::path::PathBuf, AppError> {
         role: "infrastructure controller working directory",
         code: None,
         detail: Some(error.to_string()),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn infrastructure_dependency_root() -> Result<std::path::PathBuf, AppError> {
+    let dependency_root = std::env::var("LABWEAVER_ANSIBLE_DEPENDENCY_ROOT").map_err(|_| {
+        AppError::ExternalCommand {
+            role: "approved Ansible dependency root",
+            code: None,
+            detail: Some(
+                "LABWEAVER_ANSIBLE_DEPENDENCY_ROOT is required for the router-controlled collections"
+                    .into(),
+            ),
+        }
+    })?;
+    let dependency_root = std::path::PathBuf::from(dependency_root);
+    if dependency_root.is_dir() {
+        return Ok(dependency_root);
+    }
+    Err(AppError::ExternalCommand {
+        role: "approved Ansible dependency root",
+        code: None,
+        detail: Some("LABWEAVER_ANSIBLE_DEPENDENCY_ROOT is not a readable directory".into()),
     })
 }
 
