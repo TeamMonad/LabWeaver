@@ -86,7 +86,7 @@ status:
 
 ## 4. 模块边界与所有权
 
-- `common-domain` 与 `contracts` 定义稳定领域类型和跨边界契约，不依赖 UI、具体基础设施 Provider 或服务实现。
+- `contracts` 是所有公共领域类型、状态机、REST/SSE、NATS、JSON Schema、OpenAPI 与 Web SDK 的唯一语义事实源；不得在服务、前端或其他 crate 重复定义同一语义。它不依赖业务 crate、UI、Axum/Tower 或具体基础设施 Provider。
 - Control、Access、Environment、Evaluation、Resource 与 Agent 域各自拥有其权威状态；跨域只通过版本化 API、事件、DTO 或受控 service 调用协作。
 - PostgreSQL 是业务持久状态真源；NATS JetStream 负责可靠事件传递，不得将缓存、日志、前端状态或消息投递顺序当作权威状态。
 - Runtime、Runner、Collector、Checker、Capacity、LLM 与 Artifact Provider 必须由 manifest/configuration/registry 的明确 binding 选择；禁止按注册顺序或“第一个可用实现”选择。
@@ -109,6 +109,7 @@ status:
 - Agent Tool、Ansible Module、Runner 镜像、网络访问、挂载路径和 Kubernetes 权限必须采用 allowlist 与最小权限。
 - Evaluation Job 使用受限 SecurityContext、资源上限、超时、输出上限和网络策略；生成脚本在批准前不得执行。
 - Secret、token、密钥、原始提交、完整材料、日志 payload 和可复原商业内容不得进入 Git、镜像、普通日志或发布报告。
+- 原始或未授权学生内容禁止出站。`SubmissionManifest.llmReadable` 只是候选 allowlist；命中路径仍必须通过敏感信息分类、大小、内容和课程 LLM egress policy 门禁，禁止整包或隐式出站。
 - 敏感数据只能进入被忽略的 private 目录或受控对象存储；可提交证据仅包含经审计的 schema、manifest、hash、尺寸、计数、coverage 和 diagnostic。
 - 仓库内容、构建产物和报告只使用项目相对路径或受控 locator，不写入个人机器的绝对路径、用户名和私有环境值。
 

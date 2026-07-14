@@ -1,0 +1,196 @@
+{
+  "$defs": {
+    "ApprovalId": {
+      "description": "Strongly typed UUIDv7 identifier for `ApprovalId`.",
+      "type": "string"
+    },
+    "ArtifactId": {
+      "description": "Strongly typed UUIDv7 identifier for `ArtifactId`.",
+      "type": "string"
+    },
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "description": "Immutable object-store identity without a machine-local path or credential.",
+      "properties": {
+        "artifactId": {
+          "$ref": "#/$defs/ArtifactId",
+          "description": "Stable metadata identity resolved by the owning service."
+        },
+        "mediaType": {
+          "description": "Registered media type.",
+          "type": "string"
+        },
+        "objectVersion": {
+          "description": "Immutable backend object version.",
+          "type": "string"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Exact content digest."
+        },
+        "sizeBytes": {
+          "description": "Raw object length.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "storeBinding": {
+          "description": "Explicit object-store binding from deployment configuration.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifactId",
+        "storeBinding",
+        "objectVersion",
+        "sha256",
+        "sizeBytes",
+        "mediaType"
+      ],
+      "type": "object"
+    },
+    "BuildNetworkPolicy": {
+      "description": "Explicit BuildKit network posture.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "const": "deny_all",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "allowed_registries": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "mode": {
+              "const": "restricted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "allowed_registries"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "BuildRequestId": {
+      "description": "Strongly typed UUIDv7 identifier for `BuildRequestId`.",
+      "type": "string"
+    },
+    "CandidateId": {
+      "description": "Strongly typed UUIDv7 identifier for `CandidateId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "Sha256Digest": {
+      "description": "Canonical lowercase SHA-256 digest.",
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Approved, immutable build request.",
+  "properties": {
+    "approvalId": {
+      "$ref": "#/$defs/ApprovalId"
+    },
+    "baseImageDigest": {
+      "type": "string"
+    },
+    "builderBinding": {
+      "type": "string"
+    },
+    "candidateId": {
+      "$ref": "#/$defs/CandidateId"
+    },
+    "candidateRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "candidateSha256": {
+      "$ref": "#/$defs/Sha256Digest"
+    },
+    "context": {
+      "$ref": "#/$defs/ArtifactRef"
+    },
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    },
+    "createdAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "dockerfilePath": {
+      "type": "string"
+    },
+    "id": {
+      "$ref": "#/$defs/BuildRequestId"
+    },
+    "maxCpuMillicores": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "maxDurationMilliseconds": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "maxMemoryBytes": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "network": {
+      "$ref": "#/$defs/BuildNetworkPolicy"
+    },
+    "outputRepository": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "courseId",
+    "candidateId",
+    "candidateRevision",
+    "candidateSha256",
+    "approvalId",
+    "builderBinding",
+    "context",
+    "dockerfilePath",
+    "baseImageDigest",
+    "outputRepository",
+    "network",
+    "maxDurationMilliseconds",
+    "maxCpuMillicores",
+    "maxMemoryBytes",
+    "createdAt"
+  ],
+  "title": "BuildRequest",
+  "type": "object"
+}

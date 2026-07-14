@@ -23,5 +23,5 @@ Access Service issues or renews grants only for Environment-observed `Ready`
 instances with healthy registered endpoints, and revokes relevant grants before
 the Environment Service stops or cleans up an expired, failed or deleting
 instance. The proposed detailed contract is
-[`EnvironmentLifecycle v1alpha1`](../contracts/environment-lifecycle-v1alpha1.md).
+[`EnvironmentLifecycle v1`](../contracts/environment-lifecycle-v1.md).
 For the P0 external-access path, Keycloak authenticates users and Access Service is the authorization truth. HTTP endpoints use Access Gateway. Native SSH/VNC uses only an active DirectAccessGrant through exact Headscale Grants and Router enforcement; browser SSH/VNC uses the Guacamole handoff path. Network reachability is not authorization, and no derived policy, Router or Guacamole state may independently allow an endpoint. See [Access Trust Boundary](access-trust-boundary.md).

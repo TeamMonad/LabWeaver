@@ -1,0 +1,99 @@
+{
+  "$defs": {
+    "AccessGrantId": {
+      "description": "Strongly typed UUIDv7 identifier for `AccessGrantId`.",
+      "type": "string"
+    },
+    "EndpointAction": {
+      "description": "Allowed endpoint action.",
+      "enum": [
+        "connect"
+      ],
+      "type": "string"
+    },
+    "EndpointGrantId": {
+      "description": "Strongly typed UUIDv7 identifier for `EndpointGrantId`.",
+      "type": "string"
+    },
+    "EndpointHealth": {
+      "description": "Endpoint health gates new AccessGrants.",
+      "enum": [
+        "pending",
+        "healthy",
+        "unhealthy",
+        "removed"
+      ],
+      "type": "string"
+    },
+    "EndpointId": {
+      "description": "Strongly typed UUIDv7 identifier for `EndpointId`.",
+      "type": "string"
+    },
+    "EndpointProtocol": {
+      "description": "Supported controlled protocols.",
+      "enum": [
+        "http",
+        "https",
+        "ssh"
+      ],
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Child grant for one exact endpoint revision.",
+  "properties": {
+    "accessGrantId": {
+      "$ref": "#/$defs/AccessGrantId"
+    },
+    "action": {
+      "$ref": "#/$defs/EndpointAction"
+    },
+    "alias": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "endpointId": {
+      "$ref": "#/$defs/EndpointId"
+    },
+    "endpointRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "expiresAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "health": {
+      "$ref": "#/$defs/EndpointHealth"
+    },
+    "id": {
+      "$ref": "#/$defs/EndpointGrantId"
+    },
+    "protocol": {
+      "$ref": "#/$defs/EndpointProtocol"
+    }
+  },
+  "required": [
+    "id",
+    "accessGrantId",
+    "endpointId",
+    "endpointRevision",
+    "protocol",
+    "action",
+    "health",
+    "expiresAt"
+  ],
+  "title": "EndpointGrant",
+  "type": "object"
+}

@@ -1,0 +1,67 @@
+{
+  "$defs": {
+    "AccessGrantId": {
+      "description": "Strongly typed UUIDv7 identifier for `AccessGrantId`.",
+      "type": "string"
+    },
+    "EndpointGrantId": {
+      "description": "Strongly typed UUIDv7 identifier for `EndpointGrantId`.",
+      "type": "string"
+    },
+    "EndpointId": {
+      "description": "Strongly typed UUIDv7 identifier for `EndpointId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Fail-closed SSH authorization result.",
+  "properties": {
+    "accessGrantId": {
+      "$ref": "#/$defs/AccessGrantId"
+    },
+    "accessGrantRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "authorizationId": {
+      "type": "string"
+    },
+    "endpointGrantId": {
+      "$ref": "#/$defs/EndpointGrantId"
+    },
+    "endpointId": {
+      "$ref": "#/$defs/EndpointId"
+    },
+    "forceCommandToken": {
+      "type": "string"
+    },
+    "normalizedAuthorizedKey": {
+      "type": "string"
+    },
+    "validUntil": {
+      "$ref": "#/$defs/UtcTimestamp"
+    }
+  },
+  "required": [
+    "authorizationId",
+    "accessGrantId",
+    "accessGrantRevision",
+    "endpointGrantId",
+    "endpointId",
+    "normalizedAuthorizedKey",
+    "forceCommandToken",
+    "validUntil"
+  ],
+  "title": "SshAuthorization",
+  "type": "object"
+}

@@ -20,8 +20,11 @@ cargo xtask check
 - `docs/architecture/data-ownership.md`：权威数据所有权；
 - `docs/adr/0002-postgresql-schema-and-migration-policy.md`：PostgreSQL 所有权与迁移策略；
 - `docs/development/database-migrations.md`：数据库迁移正式契约；
-- `docs/contracts/environment-lifecycle-v1alpha1.md`：Experiment / Work 环境生命周期正式契约（拟议，未实现）；
-- `docs/adr/0001-environment-lifecycle-domain.md`：环境生命周期跨域决策（待人工评审）；
+- `docs/contracts/contracts-v1.md`：公共类型、REST/SSE、Gateway、生成物和兼容策略；
+- `docs/contracts/environment-lifecycle-v1.md`：Experiment / Work 环境生命周期 v1 契约；
+- `docs/adr/0004-environment-lifecycle-domain.md`：环境生命周期跨域决策；
+- `docs/adr/0005-contracts-ssot-environment-first-release.md`：Contracts SSOT 与 Environment-first Release；
+- `docs/adr/0006-trusted-runtime-artifact-supply-chain.md`：可信 Runtime Artifact 供应链；
 - `docs/adr/0003-nats-subject-and-delivery-contract.md`：NATS Subject 与投递语义；
 - `docs/contracts/nats-event-contract-v1.md`：NATS v1 事件目录；
 - `docs/status/implementation-status.md`：实现状态事实源；

@@ -1,0 +1,188 @@
+{
+  "$defs": {
+    "ArtifactId": {
+      "description": "Strongly typed UUIDv7 identifier for `ArtifactId`.",
+      "type": "string"
+    },
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "description": "Immutable object-store identity without a machine-local path or credential.",
+      "properties": {
+        "artifactId": {
+          "$ref": "#/$defs/ArtifactId",
+          "description": "Stable metadata identity resolved by the owning service."
+        },
+        "mediaType": {
+          "description": "Registered media type.",
+          "type": "string"
+        },
+        "objectVersion": {
+          "description": "Immutable backend object version.",
+          "type": "string"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Exact content digest."
+        },
+        "sizeBytes": {
+          "description": "Raw object length.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "storeBinding": {
+          "description": "Explicit object-store binding from deployment configuration.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifactId",
+        "storeBinding",
+        "objectVersion",
+        "sha256",
+        "sizeBytes",
+        "mediaType"
+      ],
+      "type": "object"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "PackageFile": {
+      "additionalProperties": false,
+      "description": "One immutable file in a teacher ProblemPackage.",
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/ArtifactRef",
+          "description": "Immutable object reference."
+        },
+        "path": {
+          "description": "Normalized package-relative file path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "object"
+      ],
+      "type": "object"
+    },
+    "PolicyId": {
+      "description": "Strongly typed UUIDv7 identifier for `PolicyId`.",
+      "type": "string"
+    },
+    "ProblemPackageId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProblemPackageId`.",
+      "type": "string"
+    },
+    "RetentionClass": {
+      "description": "Retention classes with distinct privacy and recovery requirements.",
+      "enum": [
+        "course_material",
+        "build_evidence",
+        "run_evidence",
+        "student_submission",
+        "security_audit"
+      ],
+      "type": "string"
+    },
+    "RetentionDisposition": {
+      "description": "Required action after retention expires.",
+      "enum": [
+        "delete",
+        "purge_after_export",
+        "retain_sanitized_receipt"
+      ],
+      "type": "string"
+    },
+    "RetentionSnapshot": {
+      "additionalProperties": false,
+      "description": "Frozen data-retention decision for an immutable resource.",
+      "properties": {
+        "class": {
+          "$ref": "#/$defs/RetentionClass",
+          "description": "Stable retention class."
+        },
+        "disposition": {
+          "$ref": "#/$defs/RetentionDisposition",
+          "description": "Required terminal disposition."
+        },
+        "policyId": {
+          "$ref": "#/$defs/PolicyId",
+          "description": "Policy identity."
+        },
+        "policyRevision": {
+          "$ref": "#/$defs/Revision",
+          "description": "Exact policy revision used at creation."
+        },
+        "retainUntil": {
+          "$ref": "#/$defs/UtcTimestamp",
+          "description": "Absolute retention boundary."
+        }
+      },
+      "required": [
+        "policyId",
+        "policyRevision",
+        "class",
+        "retainUntil",
+        "disposition"
+      ],
+      "type": "object"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "Sha256Digest": {
+      "description": "Canonical lowercase SHA-256 digest.",
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Immutable, atomically completed teacher material package.",
+  "properties": {
+    "completedAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    },
+    "files": {
+      "items": {
+        "$ref": "#/$defs/PackageFile"
+      },
+      "type": "array"
+    },
+    "id": {
+      "$ref": "#/$defs/ProblemPackageId"
+    },
+    "manifestSha256": {
+      "$ref": "#/$defs/Sha256Digest"
+    },
+    "retention": {
+      "$ref": "#/$defs/RetentionSnapshot"
+    },
+    "revision": {
+      "$ref": "#/$defs/Revision"
+    }
+  },
+  "required": [
+    "id",
+    "courseId",
+    "revision",
+    "files",
+    "manifestSha256",
+    "retention",
+    "completedAt"
+  ],
+  "title": "ProblemPackage",
+  "type": "object"
+}

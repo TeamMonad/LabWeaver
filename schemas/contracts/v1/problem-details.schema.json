@@ -1,0 +1,97 @@
+{
+  "$defs": {
+    "DiagnosticCode": {
+      "description": "Stable machine-readable diagnostic code.\n\nConsumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so\nadditive diagnostics do not force a wire-version change.",
+      "type": "string"
+    },
+    "Violation": {
+      "additionalProperties": false,
+      "description": "One safe field-level contract violation.",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/DiagnosticCode",
+          "description": "Stable diagnostic for this field."
+        },
+        "field": {
+          "description": "JSON Pointer or stable logical field path.",
+          "type": "string"
+        },
+        "message": {
+          "description": "Bounded, client-safe explanation.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "field",
+        "code",
+        "message"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "RFC 9457 Problem Details with LabWeaver correlation and retry semantics.",
+  "properties": {
+    "detail": {
+      "description": "Safe detail; never includes secrets, submissions, or raw provider payloads.",
+      "type": "string"
+    },
+    "diagnosticCode": {
+      "$ref": "#/$defs/DiagnosticCode",
+      "description": "Stable LabWeaver diagnostic."
+    },
+    "instance": {
+      "description": "Request-local problem instance URI.",
+      "type": "string"
+    },
+    "requestId": {
+      "description": "Request correlation identity.",
+      "type": "string"
+    },
+    "retryable": {
+      "description": "Whether the same operation may be retried without changing its input.",
+      "type": "boolean"
+    },
+    "status": {
+      "description": "HTTP status represented by the response.",
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "title": {
+      "description": "Short safe title.",
+      "type": "string"
+    },
+    "traceId": {
+      "description": "Distributed trace identity, when available.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "type": {
+      "description": "Stable problem type URI.",
+      "type": "string"
+    },
+    "violations": {
+      "description": "Bounded field violations.",
+      "items": {
+        "$ref": "#/$defs/Violation"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "type",
+    "title",
+    "status",
+    "detail",
+    "instance",
+    "diagnosticCode",
+    "requestId",
+    "retryable"
+  ],
+  "title": "ProblemDetails",
+  "type": "object"
+}

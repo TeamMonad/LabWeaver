@@ -25,12 +25,13 @@ cargo test --workspace --locked
 
 The current test surface covers liveness, readiness, correlation headers, a stable not-found diagnostic and fail-fast binding configuration. It does not prove database, JetStream, OIDC, KubeVirt, MinIO, authorization or business behavior.
 
-## EvaluationSpec v1alpha1 gates
+## Contracts v1 gates
 
 ```sh
-cargo run --locked -p evaluation-domain --example export_schema -- schemas/evaluation
-cargo test --locked -p evaluation-domain
-cargo clippy -p evaluation-domain --all-targets --all-features -- -D warnings
+cargo xtask contracts check
+cargo xtask test --suite contract
+cargo clippy -p contracts --all-targets --all-features -- -D warnings
+pnpm --dir web typecheck
 ```
 
 The contract tests validate OJ and Linux examples against generated JSON Schema and semantic rules.
@@ -48,7 +49,7 @@ E1 evidence and does not execute a Runner or production evaluation path.
 
 ```sh
 python examples/linux-nginx/verify_material_contract.py --self-test
-cargo test --locked -p evaluation-domain
+cargo xtask test --suite contract
 ```
 
 The Python validator proves only public material-package integrity: SHA-256
@@ -121,11 +122,10 @@ Audit tests must prove that a projection failure cannot change a committed
 business transaction, that it records an unhealthy watermark, and that
 idempotent replay/backfill plus dual-write watermark comparison supports a
 future approved handoff to the audit-projection worker.
-## Environment lifecycle v1alpha1 planned gates
+## Environment lifecycle v1 runtime gates
 
-The proposed `EnvironmentLifecycle v1alpha1` contract has no runtime test
-evidence. Before implementation can be marked complete, its contract and
-integration suites must prove the unified state transition matrix, invalid
+`EnvironmentLifecycle v1` has E1 state-transition and schema evidence only. Before runtime implementation can be marked complete, integration
+suites must prove the unified state transition matrix, invalid
 transition rejection, revision conflicts, idempotency-key replay and payload
 conflicts, bounded provider retry exhaustion, and explicit retry/reset paths.
 
@@ -135,7 +135,7 @@ target convergence, serialized Work configuration, configuration-failure
 transition to `Failed`, access denial for any non-Ready or unhealthy endpoint,
 grant revocation before reset/expiry/failure/delete cleanup, deletion
 idempotency and sanitized `Deleted` tombstone evidence. Provider, Access,
-Resource and KubeVirt evidence remains planned; this documentation is E0 only.
+Resource and KubeVirt runtime evidence remains planned; the current contract evidence remains E1 only.
 ## Infrastructure automation
 
 | Layer | Required evidence | Failure condition |
@@ -204,9 +204,10 @@ Contract and integration tests must prove Router-first sequencing, default deny,
 Deployed verification must prove direct native SSH/VNC, browser SSH/VNC through the Guacamole handoff path, absence of public or CIDR-wide exposure, and safe traces/audit diagnostics without credentials or session payloads. Kubernetes NetworkPolicy is not accepted as the direct-session containment proof because established-connection behavior is implementation-defined.
 ## NATS Subject and delivery planned gates
 
-[ADR 0003](../adr/0003-nats-subject-and-delivery-contract.md) and the
-[NATS Event Contract v1](../contracts/nats-event-contract-v1.md) are E0 design
-evidence only. Before a messaging path is marked implemented, tests must prove
+[ADR 0003](../adr/0003-nats-subject-and-delivery-contract.md) remains design evidence. The
+[NATS Event Contract v1](../contracts/nats-event-contract-v1.md) now has E1 typed payload,
+registry, schema, sequence and protected-payload evidence from `contracts`; it is not messaging
+runtime evidence. Before a messaging path is marked implemented, E2 tests must prove
 that every deployed Subject has one catalogued state Owner and handling
 purpose; malformed CloudEvents and Subject/type/dataschema mismatches are
 rejected before mutation; and Owner state, idempotency record and local Outbox

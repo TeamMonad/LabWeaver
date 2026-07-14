@@ -5,7 +5,7 @@
 This is the human-readable, normative v1 catalog for cross-service NATS
 messages. It implements the design decision in
 [ADR 0003](../adr/0003-nats-subject-and-delivery-contract.md) and resolves
-Issue #18 at E0. It is not a generated schema and does not prove a running
+Issue #18 at E0 and is now backed by Issue #45 Rust payloads and generated schemas at E1. It does not prove a running
 JetStream path.
 
 All public Subjects use `labweaver.<owner>.<aggregate>.<event>.v1`. The Owner
@@ -28,7 +28,7 @@ Each message is a CloudEvents 1.0 structured JSON document with
 | `type` | Exactly the NATS Subject receiving the message. |
 | `subject` | `<aggregate_type>/<aggregate_id>`; no local or user-specific path. |
 | `time` | RFC 3339 UTC occurrence time recorded by the Owner. |
-| `dataschema` | `urn:labweaver:contracts:nats:<full-subject>`; it identifies the matching catalogued v1 payload, not a machine-local file. |
+| `dataschema` | The exact generated `schemas/contracts/v1/events/<name>.schema.json` identity; it identifies the matching catalogued v1 payload, not a machine-local file. |
 | `lwaggregatetype` / `lwaggregateid` | Must equal the aggregate represented by `subject`. |
 | `lwsequence` | Non-negative, strictly increasing sequence within the aggregate. |
 | `lwcorrelationid` / `lwcausationid` | Required correlation and immediate predecessor identity; the initial command uses its own `id` as causation ID. |
@@ -75,6 +75,7 @@ needed by the handling Owner; they never carry untrusted executable text.
 | --- | --- | --- | --- |
 | `labweaver.control.lab_package.created.v1` | Event / EVENTS | Control → Agent planning | `lab_package`; immutable package/version references, hashes and approval state. |
 | `labweaver.control.lab_release.approved.v1` | Event / EVENTS | Control → Environment, Evaluation | `lab_release`; approved release ID, version, immutable spec hashes and actor audit reference. |
+| `labweaver.control.environment_template_release.published.v1` | Event / EVENTS + AUDIT | Control → Environment | `environment_template_release`; exact spec hash, approved release version and verified Container/VM artifact identity. This is the only new Subject added by Issue #45. |
 | `labweaver.control.course.closed.v1` | Event / EVENTS + AUDIT | Control → Environment, Evaluation, Resource purge planning | `course`; closure revision and approved purge policy reference; no user data. |
 | `labweaver.agent.run.requested.v1` | Command / COMMANDS | Agent → Agent run executor | `agent_run`; run type, validated immutable inputs, approval reference and idempotency key. |
 | `labweaver.agent.run.completed.v1` | Event / EVENTS + AUDIT | Agent → Control review | `agent_run`; result reference/hash, validation summary and terminal state. |

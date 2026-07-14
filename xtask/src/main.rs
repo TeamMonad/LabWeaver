@@ -1,6 +1,8 @@
 //! Repository workflow entry point for `LabWeaver`.
 
 use std::fmt::{Display, Formatter};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -47,6 +49,8 @@ enum Command {
     Package,
     PackageValidate,
     ReleaseGate,
+    #[command(subcommand)]
+    Contracts(ContractsCommand),
 }
 
 #[derive(Debug, Args)]
@@ -126,6 +130,12 @@ enum DocsCommand {
     Serve,
 }
 
+#[derive(Debug, Subcommand)]
+enum ContractsCommand {
+    Generate,
+    Check,
+}
+
 #[derive(Debug)]
 enum AppError {
     ExternalCommand {
@@ -139,6 +149,8 @@ enum AppError {
     ConfirmationRequired {
         command: &'static str,
     },
+    Io { role: &'static str, detail: String },
+    ContractDrift { path: String },
     #[cfg(not(target_os = "linux"))]
     UnsupportedPlatform {
         command: &'static str,
@@ -151,6 +163,8 @@ impl AppError {
             Self::ExternalCommand { .. } => "XTASK_EXTERNAL_COMMAND_FAILED",
             Self::NotImplemented { .. } => "XTASK_NOT_IMPLEMENTED",
             Self::ConfirmationRequired { .. } => "XTASK_CONFIRMATION_REQUIRED",
+            Self::Io { .. } => "XTASK_IO_FAILED",
+            Self::ContractDrift { .. } => "LW_CONTRACT_DRIFT",
             #[cfg(not(target_os = "linux"))]
             Self::UnsupportedPlatform { .. } => "XTASK_INFRA_UNSUPPORTED_PLATFORM",
         }
@@ -179,6 +193,8 @@ impl Display for AppError {
                 formatter,
                 "{command} is a destructive operation and requires explicit --yes"
             ),
+            Self::Io { role, detail } => write!(formatter, "{role} failed: {detail}"),
+            Self::ContractDrift { path } => write!(formatter, "generated contract differs from {path}"),
             #[cfg(not(target_os = "linux"))]
             Self::UnsupportedPlatform { command } => write!(
                 formatter,
@@ -261,7 +277,56 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::Package => not_implemented("package"),
         Command::PackageValidate => not_implemented("package-validate"),
         Command::ReleaseGate => not_implemented("release-gate"),
+        Command::Contracts(ContractsCommand::Generate) => contracts_generate(),
+        Command::Contracts(ContractsCommand::Check) => contracts_check(),
     }
+}
+
+fn repository_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
+}
+
+fn contracts_generate() -> Result<(), AppError> {
+    write_contract_artifacts(&repository_root())
+}
+
+fn contracts_check() -> Result<(), AppError> {
+    let root = repository_root();
+    for artifact in contracts::schema::generate_all().map_err(|error| AppError::Io {
+        role: "generate contracts",
+        detail: error.to_string(),
+    })? {
+        let checked_in = fs::read(root.join(&artifact.relative_path)).map_err(|error| AppError::Io {
+            role: "read checked-in contract",
+            detail: format!("{}: {error}", artifact.relative_path),
+        })?;
+        if checked_in != artifact.bytes {
+            return Err(AppError::ContractDrift { path: artifact.relative_path });
+        }
+    }
+    Ok(())
+}
+
+fn write_contract_artifacts(root: &Path) -> Result<(), AppError> {
+    for artifact in contracts::schema::generate_all().map_err(|error| AppError::Io {
+        role: "generate contracts",
+        detail: error.to_string(),
+    })? {
+        let destination = root.join(&artifact.relative_path);
+        let parent = destination.parent().ok_or_else(|| AppError::Io {
+            role: "resolve contract output",
+            detail: artifact.relative_path.clone(),
+        })?;
+        fs::create_dir_all(parent).map_err(|error| AppError::Io {
+            role: "create contract output directory",
+            detail: error.to_string(),
+        })?;
+        fs::write(destination, artifact.bytes).map_err(|error| AppError::Io {
+            role: "write contract output",
+            detail: error.to_string(),
+        })?;
+    }
+    Ok(())
 }
 
 fn deploy(args: &EnvironmentArgs) -> Result<(), AppError> {
