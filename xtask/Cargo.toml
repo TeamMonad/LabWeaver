@@ -11,6 +11,10 @@ publish = false
 clap = { version = "4.5.40", features = ["derive"] }
 sha2 = "0.10"
 contracts = { path = "../crates/contracts" }
+persistence-sqlx = { path = "../crates/persistence-sqlx" }
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ansible = { package = "ansible-rs", version = "1.1.0" }

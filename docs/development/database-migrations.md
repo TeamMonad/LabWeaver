@@ -65,12 +65,13 @@ migrations/
   resource/
 ```
 
-`manifest.yaml` is canonically serialized before calculating its SHA-256. It
-is a reviewed, version-controlled deployment input that binds the release ID,
-Git commit, immutable build/image digest, Migration-tool version, fixed domain
-order, and every Migration ID, filename and SHA-256. The Job verifies the
-manifest identity against its own immutable build metadata and checked-out
-files before it locks or changes a schema.
+`migrations/catalog.yaml` is canonically serialized before calculating its
+SHA-256. It is a reviewed, version-controlled input that binds the Migration
+tool version, fixed domain order, bootstrap SQL and every Migration ID,
+filename and SHA-256. Runtime release ID, Git commit, immutable build/image
+digest, Job ID and attempt ID are separate required Job metadata; this avoids
+an impossible self-referential checked-in commit hash while preserving the
+catalog-plus-runtime identity chain.
 
 Domain directories use monotonically increasing IDs. Each domain owns a
 schema-local Migration history and obtains a domain-specific PostgreSQL
@@ -95,17 +96,15 @@ The sole production execution boundary is the dedicated Migration Job,
 orchestrated by Ansible through the typed command:
 
 ```sh
-cargo xtask migrate --yes
+cargo xtask migrate bootstrap --catalog migrations/catalog.yaml --report artifacts/migration-bootstrap.json --yes
+cargo xtask migrate apply --catalog migrations/catalog.yaml --report artifacts/migration-apply.json --yes
+cargo xtask migrate verify --catalog migrations/catalog.yaml
 ```
 
-At the PR's verified current Head, this command exits non-zero and emits
-`[XTASK_NOT_IMPLEMENTED] migrate is declared in the design but has no
-implementation in this checkout`. The PR body records that exact commit and
-verification output. This is a documented blocking diagnostic, not Migration
-evidence. Direct SQL and service-start migration are not supported production
-paths. Environment selection is not implemented in the current `migrate`
-command; adding it requires a reviewed CLI contract and must not infer a target
-from local configuration.
+The commands require explicit repository-relative catalog/report paths. URLs
+are read only from fixed role-specific environment variables; missing binding,
+identity or role/search-path mismatch fails with a stable diagnostic. Direct
+SQL and service-start migration are not supported production paths.
 
 ## Startup, failure and recovery
 

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "crates/agent-core",
   "crates/contracts",
+  "crates/persistence-sqlx",
   "crates/telemetry",
   "xtask",
   "services/access-service",
@@ -31,6 +32,7 @@ serde_jcs = "0.2.0"
 serde_json = "1.0.140"
 serde_yaml = "0.9.34"
 sha2 = "0.10.9"
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "postgres", "json", "uuid", "time"] }
 ssh-key = { version = "0.6.7", default-features = false, features = ["std"] }
 thiserror = "2.0.12"
 time = { version = "=0.3.41", features = ["formatting", "parsing", "serde"] }
