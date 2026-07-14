@@ -81,6 +81,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         lock = (ROOT / "deploy/versions.lock.yml").read_text(encoding="utf-8")
 
         self.assertEqual(playbook.splitlines()[1], "- import_playbook: 00-preflight.yml")
+        self.assertIn("labweaver_preflight_scope: private-sigstore", playbook)
         self.assertIn("SIGSTORE_BACKUP_REQUIRED", tasks)
         self.assertIn("SIGSTORE_CHART_IDENTITY_MISMATCH", tasks)
         self.assertIn("SIGSTORE_PUBLIC_ENDPOINT_FORBIDDEN", tasks)
@@ -122,6 +123,10 @@ class AnsibleFixtureTests(unittest.TestCase):
             playbook = ROOT / f"deploy/ansible/playbooks/{number}-private-sigstore-{action}.yml"
             self.assertTrue(playbook.is_file())
             self.assertEqual(playbook.read_text(encoding="utf-8").splitlines()[1], "- import_playbook: 00-preflight.yml")
+            self.assertIn(
+                "labweaver_preflight_scope: private-sigstore",
+                playbook.read_text(encoding="utf-8"),
+            )
         self.assertLess(main.index("Create mandatory pre-change backup"), main.index("Execute restore provider"))
         self.assertLess(main.index("Create mandatory pre-change backup"), main.index("Execute rotation provider"))
         self.assertLess(main.index("Create mandatory pre-change backup"), main.index("Execute disaster-recovery provider"))
@@ -144,6 +149,20 @@ class AnsibleFixtureTests(unittest.TestCase):
             "workload_identity_policy_sha256", "checks", "blocked_items", "generated_at",
         ):
             self.assertIn(field, lifecycle_schema["required"])
+
+    def test_private_sigstore_preflight_rejects_worker_and_nfs_targets(self) -> None:
+        preflight = (
+            ROOT / "deploy/ansible/roles/preflight/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        docs = (ROOT / "docs/deployment/private-sigstore.md").read_text(encoding="utf-8")
+        self.assertIn("SIGSTORE_INVENTORY_SCOPE_INVALID", preflight)
+        self.assertIn("groups.get('workers', []) | length == 0", preflight)
+        self.assertIn("groups.get('nfs_servers', []) | length == 0", preflight)
+        self.assertIn("(groups.get('control_plane', []) | sort) == ['k8s-cp1']", preflight)
+        self.assertIn("when: (labweaver_preflight_scope | default('cluster')) == 'cluster'", preflight)
+        self.assertNotIn("- item is not match('^REPLACE_')", preflight)
+        self.assertIn("sigstore_controller_inputs | select('match', '^REPLACE_')", preflight)
+        self.assertIn("rejects Worker or NFS inventory", docs)
 
     def test_render_validator_rejects_mutable_and_public_images(self) -> None:
         validator_path = ROOT / "tests/ansible/validate_sigstore_render.py"

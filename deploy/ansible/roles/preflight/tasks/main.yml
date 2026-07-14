@@ -1,5 +1,12 @@
 ---
-- name: Assert required inventory groups
+- name: Require an approved preflight scope
+  ansible.builtin.assert:
+    that: (labweaver_preflight_scope | default('cluster')) in ['cluster', 'private-sigstore']
+    fail_msg: PREFLIGHT_SCOPE_INVALID
+  run_once: true
+  delegate_to: localhost
+
+- name: Assert required full-cluster inventory groups
   ansible.builtin.assert:
     that:
       - groups['routers'] | length == 1
@@ -9,33 +16,67 @@
     fail_msg: "inventory must declare exactly one router/control plane/NFS server and at least two workers"
   run_once: true
   delegate_to: localhost
+  when: (labweaver_preflight_scope | default('cluster')) == 'cluster'
+
+- name: Assert the minimal Private Sigstore inventory boundary
+  ansible.builtin.assert:
+    that:
+      - (groups.get('routers', []) | sort) == ['edge-router']
+      - (groups.get('control_plane', []) | sort) == ['k8s-cp1']
+      - (groups.get('k8s_cluster', []) | sort) == ['k8s-cp1']
+      - groups.get('workers', []) | length == 0
+      - groups.get('nfs_servers', []) | length == 0
+    fail_msg: SIGSTORE_INVENTORY_SCOPE_INVALID
+  run_once: true
+  delegate_to: localhost
+  when: (labweaver_preflight_scope | default('cluster')) == 'private-sigstore'
 
 - name: Reject unresolved configuration placeholders
   ansible.builtin.assert:
     that:
-      - item is string
-      - item is not match('^REPLACE_')
-      - item | length > 0
+      - preflight_required_inputs | select('match', '^REPLACE_') | list | length == 0
+      - preflight_required_inputs | select('equalto', '') | list | length == 0
     fail_msg: "private inventory/group variables contain an unresolved placeholder"
-  loop:
-    - "{{ kubernetes_api_endpoint }}"
-    - "{{ kubernetes_api_advertise_address }}"
-    - "{{ router_wan_interface }}"
-    - "{{ router_lan_interface }}"
-    - "{{ router_lan_address }}"
-    - "{{ router_lan_cidr }}"
-    - "{{ metallb_pool }}"
-    - "{{ gateway_vip }}"
-    - "{{ nfs_server }}"
-    - "{{ local_path_device }}"
-    - "{{ storage_device_wwn }}"
-    - "{{ storage_device_size_bytes | string }}"
-    - "{{ verify_rwo_node }}"
-    - "{{ verify_nfs_writer_node }}"
-    - "{{ verify_nfs_reader_node }}"
-    - "{{ verify_gateway_hostname }}"
+  vars:
+    preflight_required_inputs:
+      - "{{ kubernetes_api_endpoint | string }}"
+      - "{{ kubernetes_api_advertise_address | string }}"
+      - "{{ router_wan_interface | string }}"
+      - "{{ router_lan_interface | string }}"
+      - "{{ router_lan_address | string }}"
+      - "{{ router_lan_cidr | string }}"
+      - "{{ metallb_pool | string }}"
+      - "{{ gateway_vip | string }}"
+      - "{{ nfs_server | string }}"
+      - "{{ local_path_device | string }}"
+      - "{{ storage_device_wwn | string }}"
+      - "{{ storage_device_size_bytes | string }}"
+      - "{{ verify_rwo_node | string }}"
+      - "{{ verify_nfs_writer_node | string }}"
+      - "{{ verify_nfs_reader_node | string }}"
+      - "{{ verify_gateway_hostname | string }}"
   run_once: true
   delegate_to: localhost
+  when: (labweaver_preflight_scope | default('cluster')) == 'cluster'
+
+- name: Reject unresolved Private Sigstore controller placeholders
+  ansible.builtin.assert:
+    that:
+      - sigstore_controller_inputs | select('match', '^REPLACE_') | list | length == 0
+      - sigstore_controller_inputs | select('equalto', '') | list | length == 0
+    fail_msg: "private inventory/controller variables contain an unresolved placeholder"
+  vars:
+    sigstore_controller_inputs:
+      - "{{ kubernetes_api_endpoint | string }}"
+      - "{{ kubernetes_api_advertise_address | string }}"
+      - "{{ router_wan_interface | string }}"
+      - "{{ router_lan_interface | string }}"
+      - "{{ router_lan_address | string }}"
+      - "{{ router_lan_cidr | string }}"
+      - "{{ nfs_server | string }}"
+  run_once: true
+  delegate_to: localhost
+  when: (labweaver_preflight_scope | default('cluster')) == 'private-sigstore'
 
 - name: Assert Rocky family target
   ansible.builtin.assert:
@@ -66,25 +107,25 @@
   ansible.builtin.stat:
     path: /dev/kvm
   register: preflight_kvm_device
-  when: inventory_hostname in groups['workers']
+  when: inventory_hostname in groups.get('workers', [])
 
 - name: Reject workers without KVM
   ansible.builtin.assert:
     that: preflight_kvm_device.stat.exists and preflight_kvm_device.stat.ischr
     fail_msg: "worker lacks /dev/kvm; hardware KVM verification cannot run"
-  when: inventory_hostname in groups['workers']
+  when: inventory_hostname in groups.get('workers', [])
 
 - name: Assert workers expose nested virtualization CPU flags
   ansible.builtin.command: /usr/bin/grep -E 'vmx|svm' /proc/cpuinfo
   check_mode: false
   changed_when: false
-  when: inventory_hostname in groups['workers']
+  when: inventory_hostname in groups.get('workers', [])
 
 - name: Assert NFS server is running # noqa: command-instead-of-module
   ansible.builtin.command: /usr/bin/systemctl is-active --quiet nfs-server.service
   check_mode: false
   changed_when: false
-  when: inventory_hostname in groups['nfs_servers']
+  when: inventory_hostname in groups.get('nfs_servers', [])
 
 - name: Assert the required NFS export is present
   ansible.builtin.command: /usr/sbin/exportfs -v
@@ -92,7 +133,7 @@
   changed_when: false
   register: preflight_nfs_exports
   failed_when: nfs_share not in preflight_nfs_exports.stdout
-  when: inventory_hostname in groups['nfs_servers']
+  when: inventory_hostname in groups.get('nfs_servers', [])
 
 - name: Assert NFSv4 is reachable from every Kubernetes node
   ansible.builtin.wait_for:

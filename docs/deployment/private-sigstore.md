@@ -25,6 +25,15 @@ Ansible controller. Windows returns `XTASK_INFRA_UNSUPPORTED_PLATFORM`.
 Each action maps to one playbook compiled into `xtask`; callers cannot supply an
 arbitrary path or playbook. Missing run identity or locator fails before Ansible.
 
+The Private Sigstore inventory is deliberately narrower than the adopted-cluster
+bootstrap inventory: it contains exactly the approved router and one
+`k8s-cp1` control-plane target. Playbooks 96--102 select the fixed
+`private-sigstore` preflight scope, which rejects Worker or NFS inventory
+targets while retaining read-only control-plane checks for the existing storage
+endpoint. The normal cluster and Harbor paths keep the full-cluster preflight
+contract. Placeholder validation reports a stable task diagnostic without
+printing private inventory values.
+
 The controller requires three root-managed locators, never secret values. The
 namespace and named Kubernetes Secrets must already be provisioned by the C0
 secret ceremony; the deployment role never generates keys or imports raw key

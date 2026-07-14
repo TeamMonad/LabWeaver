@@ -1,5 +1,7 @@
 ---
 - import_playbook: 00-preflight.yml
+  vars:
+    labweaver_preflight_scope: private-sigstore
 - name: Back up Private Sigstore state
   hosts: control_plane
   gather_facts: false
