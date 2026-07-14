@@ -142,11 +142,40 @@ Resource and KubeVirt runtime evidence remains planned; the current contract evi
 | --- | --- | --- |
 | Static | `ansible-lint`, syntax check, YAML parsing | invalid task, unresolved template, unpinned component |
 | Preflight | private inventory, Vault, interfaces, SELinux, KVM, NFS reachability | any missing prerequisite blocks deploy |
-| Idempotency | two consecutive `ansible-deploy` runs | second run has an unexpected change or error |
+| Idempotency | two consecutive `cargo xtask deploy --infra --env <env> --yes` runs from the router worktree | second run has an unexpected change or error |
 | Storage | Local Path RWO and NFS RWX cross-worker write/read | PVC is not Bound or data is not shared |
 | Runtime | KubeVirt VM start, console, stop/start, cleanup | no hardware KVM-backed Running VMI |
 | Network | Cilium connectivity and internal Gateway route | failed suite or unprogrammed Gateway |
 | Recovery | etcd snapshot plus `etcdutl snapshot status` | snapshot cannot be validated |
+
+### Harbor adopted-cluster gates (Issue #23)
+
+The Harbor controller path is deliberately separate from `site.yml`. It must
+refuse an unknown cluster, a changed existing Gateway, a conflicting VIP/DNS
+record, a missing root-only secret locator, a missing storage class, an
+unlocked chart/application version, mismatched chart archive, tag-only image,
+missing bound backup evidence, an unapproved Linux controller, or a
+configuration that would invoke a bootstrap role. The controller must run only
+on the approved Linux router worktree and must fail on Windows rather than
+selecting a different launcher or PATH fallback.
+
+Required controller evidence is: router-side `cargo fmt --check`, Linux
+`cargo clippy` and unit tests, `ansible-lint`, playbook syntax check, and a
+check/diff before a real reconciliation. The real run must verify the dedicated
+namespace/PVCs/Pods, Gateway `Programmed`, DNS, internal-CA TLS trust,
+authenticated Harbor health and `labweaver-system` policy. A second run must
+have no undeclared mutation. This remains E2 deployment evidence until the
+declared push/pull/scan and recovery gates are separately performed.
+
+TestFlight is emitted as a run-scoped, schema-validated
+`InfrastructureTestFlightReport`; it binds commit, inventory, component lock,
+Harbor policy manifest, deployment-manifest hash/locator, and cluster UID,
+records cleanup, and passes only the declared `adopted-cluster-baseline`
+scope. OIDC/governance checks are explicitly recorded as deferred to #47; they
+cannot be read as a successful identity or release-gate claim.
+
+The security/recovery expansion remains under the existing Sprint 2 parent #2.
+Neither deferred set is part of the baseline close condition for #23 or #15.
 
 ### VM-01a E3 run
 

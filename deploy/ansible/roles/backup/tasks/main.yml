@@ -1,4 +1,83 @@
 ---
+- name: Bind the backup to the current infrastructure reconciliation identity
+  ansible.builtin.set_fact:
+    backup_run_id: "{{ lookup('env', 'LABWEAVER_RUN_ID') }}"
+    backup_commit_sha: "{{ lookup('env', 'LABWEAVER_COMMIT_SHA') }}"
+    backup_inventory_hash: "{{ lookup('env', 'LABWEAVER_INVENTORY_HASH') }}"
+    backup_component_lock_hash: "{{ lookup('env', 'LABWEAVER_COMPONENT_LOCK_HASH') }}"
+
+- name: Require a complete backup identity before snapshot creation
+  ansible.builtin.assert:
+    that:
+      - backup_run_id is match('^infra-[a-z0-9-]+$')
+      - backup_commit_sha is match('^[0-9a-f]{40,64}$')
+      - backup_inventory_hash is match('^sha256:[0-9a-f]{64}$')
+      - backup_component_lock_hash is match('^sha256:[0-9a-f]{64}$')
+    fail_msg: BACKUP_EXECUTION_IDENTITY_INVALID
+
+- name: Read the adopted cluster identity before backup creation
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/kubectl
+      - --kubeconfig
+      - /etc/kubernetes/admin.conf
+      - get
+      - namespace
+      - kube-system
+      - -o
+      - jsonpath={.metadata.uid}
+  changed_when: false
+  register: backup_cluster_uid
+
+- name: Detect an existing Harbor namespace before taking a Harbor reconcile backup
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/kubectl
+      - --kubeconfig
+      - /etc/kubernetes/admin.conf
+      - get
+      - namespace
+      - harbor
+      - -o
+      - json
+  changed_when: false
+  failed_when: false
+  register: backup_harbor_namespace
+
+- name: Bind the externally retained Harbor data backup locator
+  ansible.builtin.set_fact:
+    backup_harbor_data_locator: "{{ lookup('env', 'LABWEAVER_HARBOR_DATA_BACKUP_LOCATOR') }}"
+    backup_existing_harbor: "{{ backup_harbor_namespace.rc == 0 }}"
+
+- name: Require a data backup locator before reconciling an existing Harbor release
+  ansible.builtin.assert:
+    that:
+      - backup_harbor_data_locator | length > 0
+    fail_msg: HARBOR_DATA_BACKUP_REQUIRED
+  when: backup_existing_harbor | bool
+
+- name: Read the externally retained Harbor data backup evidence
+  ansible.builtin.slurp:
+    src: "{{ backup_harbor_data_locator }}"
+  register: backup_harbor_data_raw
+  no_log: true
+  when: backup_existing_harbor | bool
+
+- name: Require Harbor data backup evidence to bind the target deployment
+  ansible.builtin.assert:
+    that:
+      - (backup_harbor_data_raw.content | b64decode | from_json).schema_version == 'harbor-data-backup.v1'
+      - (backup_harbor_data_raw.content | b64decode | from_json).cluster_uid == backup_cluster_uid.stdout
+      - (backup_harbor_data_raw.content | b64decode | from_json).commit_sha == backup_commit_sha
+      - (backup_harbor_data_raw.content | b64decode | from_json).inventory_hash == backup_inventory_hash
+      - (backup_harbor_data_raw.content | b64decode | from_json).component_lock_hash == backup_component_lock_hash
+      - (backup_harbor_data_raw.content | b64decode | from_json).target == 'harbor-reconcile'
+      - (backup_harbor_data_raw.content | b64decode | from_json).database.sha256 is match('^sha256:[0-9a-f]{64}$')
+      - (backup_harbor_data_raw.content | b64decode | from_json).registry.sha256 is match('^sha256:[0-9a-f]{64}$')
+    fail_msg: HARBOR_DATA_BACKUP_IDENTITY_INVALID
+  no_log: true
+  when: backup_existing_harbor | bool
+
 - name: Install matching etcd client tools
   ansible.builtin.unarchive:
     src: "https://github.com/etcd-io/etcd/releases/download/v{{ etcd_version }}/etcd-v{{ etcd_version }}-linux-amd64.tar.gz"
@@ -54,12 +133,18 @@
 
 - name: Write current backup evidence atomically
   ansible.builtin.copy:
-    dest: "{{ backup_report_path | default('/var/backups/labweaver/latest.json') }}"
+    dest: "/var/backups/labweaver/BackupEvidence-{{ backup_run_id }}.json"
     owner: root
     group: root
     mode: '0600'
     content: >-
       {{ {'schema_version': 1, 'event': 'etcd_snapshot_complete', 'overall': 'passed',
+      'run_id': backup_run_id, 'commit_sha': backup_commit_sha,
+      'inventory_hash': backup_inventory_hash, 'component_lock_hash': backup_component_lock_hash,
+      'cluster_uid': backup_cluster_uid.stdout, 'target': 'harbor-reconcile',
+      'harbor_data_backup': {'status': ('captured' if backup_existing_harbor | bool else 'not_required'),
+      'locator': (backup_harbor_data_locator if backup_existing_harbor | bool else None),
+      'sha256': ('sha256:' ~ (backup_harbor_data_raw.content | b64decode | hash('sha256')) if backup_existing_harbor | bool else None)},
       'snapshot': {'path': snapshot_file.stat.path, 'sha256': snapshot_file.stat.checksum,
       'size_bytes': snapshot_file.stat.size, 'mode': snapshot_file.stat.mode,
       'revision': (snapshot_status.stdout | from_json).revision,

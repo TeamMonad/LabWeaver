@@ -1,0 +1,7 @@
+---
+# This lock is intentionally public. The matching machine identity lives only
+# in the root-owned controller locator configured outside the repository.
+schema_version: 1
+approved_controller_id: edge-router
+ansible_core_version: 2.18.6
+ansible_lint_version: 25.6.1
