@@ -311,136 +311,18 @@ fn run_infrastructure(
 ) -> Result<(), AppError> {
     use ansible::{Play, Playbook};
 
-    let root = std::env::current_dir().map_err(|error| AppError::ExternalCommand {
-        role: "infrastructure controller working directory",
-        code: None,
-        detail: Some(error.to_string()),
-    })?;
-    let inventory = root
-        .join("deploy/ansible/inventories")
-        .join(environment)
-        .join("hosts.yml");
-    let vault_password = root
-        .join("deploy/ansible/inventories")
-        .join(environment)
-        .join(".vault-password");
-    let playbook = root.join("deploy/ansible/playbooks").join(playbook_name);
-    for input in [&inventory, &vault_password, &playbook] {
-        if !input.is_file() {
-            return Err(AppError::ExternalCommand {
-                role: "infrastructure deployment input",
-                code: None,
-                detail: Some(format!("required file is missing: {}", input.display())),
-            });
-        }
-    }
-
-    let ansible_binary = std::path::Path::new("/usr/bin/ansible-playbook");
-    if !ansible_binary.is_file() {
-        return Err(AppError::ExternalCommand {
-            role: "approved ansible-playbook binary",
-            code: None,
-            detail: Some(
-                "/usr/bin/ansible-playbook is required; PATH discovery is disabled".into(),
-            ),
-        });
-    }
-    let ansible_config = root.join("deploy/ansible/ansible.cfg");
-    if !ansible_config.is_file() {
-        return Err(AppError::ExternalCommand {
-            role: "approved Ansible configuration",
-            code: None,
-            detail: Some(format!(
-                "required file is missing: {}",
-                ansible_config.display()
-            )),
-        });
-    }
-
-    let inventory = inventory.to_string_lossy().into_owned();
-    let vault_password = vault_password.to_string_lossy().into_owned();
-    let playbook = playbook.to_string_lossy().into_owned();
-    let ansible_config = ansible_config.to_string_lossy().into_owned();
-    let local_controller_root = root.join("deploy/ansible");
-    let shared_controller_root = root
-        .parent()
-        .and_then(std::path::Path::parent)
-        .map(|path| path.join("deploy/ansible"));
-    let shared_controller_root =
-        shared_controller_root.ok_or_else(|| AppError::ExternalCommand {
-            role: "approved Ansible dependency root",
-            code: None,
-            detail: Some("router Ansible dependency root is missing".into()),
-        })?;
-    let collections_path = [
-        local_controller_root.join("collections"),
-        shared_controller_root.join("collections"),
-    ]
-    .into_iter()
-    .find(|path| path.is_dir())
-    .ok_or_else(|| AppError::ExternalCommand {
-        role: "approved Ansible collections",
-        code: None,
-        detail: Some("locked Ansible collections are missing".into()),
-    })?;
-    let roles_path = [
-        local_controller_root.join("roles"),
-        shared_controller_root.join("roles"),
-    ]
-    .into_iter()
-    .find(|path| path.is_dir())
-    .ok_or_else(|| AppError::ExternalCommand {
-        role: "approved Ansible roles",
-        code: None,
-        detail: Some("locked Ansible roles are missing".into()),
-    })?;
-    let collections_path = collections_path.to_string_lossy().into_owned();
-    let roles_path = roles_path.to_string_lossy().into_owned();
-    let commit_sha =
-        std::env::var("LABWEAVER_SOURCE_COMMIT").map_err(|_| AppError::ExternalCommand {
-            role: "infrastructure source identity",
-            code: None,
-            detail: Some(
-                "LABWEAVER_SOURCE_COMMIT is required and must be the verified bundle commit".into(),
-            ),
-        })?;
-    if !commit_sha
-        .chars()
-        .all(|character| character.is_ascii_hexdigit())
-        || !(40..=64).contains(&commit_sha.len())
-    {
-        return Err(AppError::ExternalCommand {
-            role: "infrastructure source identity",
-            code: None,
-            detail: Some(
-                "LABWEAVER_SOURCE_COMMIT must contain 40-64 hexadecimal characters".into(),
-            ),
-        });
-    }
-    let run_id = format!(
-        "infra-{}-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|error| AppError::ExternalCommand {
-                role: "infrastructure run identity",
-                code: None,
-                detail: Some(error.to_string()),
-            })?
-            .as_secs(),
-        std::process::id()
-    );
-    let testflight_run_id = format!(
-        "testflight-{}-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|error| AppError::ExternalCommand {
-                role: "infrastructure TestFlight identity",
-                code: None,
-                detail: Some(error.to_string()),
-            })?
-            .as_secs(),
-        std::process::id()
-    );
+    let InfrastructureInputs {
+        inventory,
+        vault_password,
+        playbook,
+        ansible_config,
+        collections_path,
+        roles_path,
+        commit_sha,
+    } = InfrastructureInputs::load(environment, playbook_name)?;
+    let run_id = infrastructure_run_id("infra", "infrastructure run identity")?;
+    let testflight_run_id =
+        infrastructure_run_id("testflight", "infrastructure TestFlight identity")?;
     let mut runner = Playbook::default();
     runner
         .set_system_envs()
@@ -469,6 +351,148 @@ fn run_infrastructure(
                 "ansible-rs returned a non-zero result; inspect the controller event log".into(),
             ),
         })
+}
+
+#[cfg(target_os = "linux")]
+struct InfrastructureInputs {
+    inventory: String,
+    vault_password: String,
+    playbook: String,
+    ansible_config: String,
+    collections_path: String,
+    roles_path: String,
+    commit_sha: String,
+}
+
+#[cfg(target_os = "linux")]
+impl InfrastructureInputs {
+    fn load(environment: &str, playbook_name: &str) -> Result<Self, AppError> {
+        let root = infrastructure_root()?;
+        let controller_root = root.join("deploy/ansible");
+        let inventory_root = controller_root.join("inventories").join(environment);
+        let inventory = inventory_root.join("hosts.yml");
+        let vault_password = inventory_root.join(".vault-password");
+        let playbook = controller_root.join("playbooks").join(playbook_name);
+        require_infrastructure_file("infrastructure deployment input", &inventory)?;
+        require_infrastructure_file("infrastructure deployment input", &vault_password)?;
+        require_infrastructure_file("infrastructure deployment input", &playbook)?;
+        require_infrastructure_file(
+            "approved ansible-playbook binary",
+            std::path::Path::new("/usr/bin/ansible-playbook"),
+        )?;
+        let ansible_config = controller_root.join("ansible.cfg");
+        require_infrastructure_file("approved Ansible configuration", &ansible_config)?;
+
+        let shared_controller_root = root
+            .parent()
+            .and_then(std::path::Path::parent)
+            .map(|path| path.join("deploy/ansible"))
+            .ok_or_else(|| AppError::ExternalCommand {
+                role: "approved Ansible dependency root",
+                code: None,
+                detail: Some("router Ansible dependency root is missing".into()),
+            })?;
+        let collections_path = resolve_infrastructure_directory(
+            "approved Ansible collections",
+            [&controller_root, &shared_controller_root],
+            "collections",
+        )?;
+        let roles_path = resolve_infrastructure_directory(
+            "approved Ansible roles",
+            [&controller_root, &shared_controller_root],
+            "roles",
+        )?;
+
+        Ok(Self {
+            inventory: infrastructure_path(inventory),
+            vault_password: infrastructure_path(vault_password),
+            playbook: infrastructure_path(playbook),
+            ansible_config: infrastructure_path(ansible_config),
+            collections_path: infrastructure_path(collections_path),
+            roles_path: infrastructure_path(roles_path),
+            commit_sha: infrastructure_commit_sha()?,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn infrastructure_root() -> Result<std::path::PathBuf, AppError> {
+    std::env::current_dir().map_err(|error| AppError::ExternalCommand {
+        role: "infrastructure controller working directory",
+        code: None,
+        detail: Some(error.to_string()),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn require_infrastructure_file(role: &'static str, path: &std::path::Path) -> Result<(), AppError> {
+    if path.is_file() {
+        return Ok(());
+    }
+    Err(AppError::ExternalCommand {
+        role,
+        code: None,
+        detail: Some(format!("required file is missing: {}", path.display())),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_infrastructure_directory(
+    role: &'static str,
+    roots: [&std::path::PathBuf; 2],
+    leaf: &str,
+) -> Result<std::path::PathBuf, AppError> {
+    roots
+        .into_iter()
+        .map(|root| root.join(leaf))
+        .find(|path| path.is_dir())
+        .ok_or_else(|| AppError::ExternalCommand {
+            role,
+            code: None,
+            detail: Some(format!("locked Ansible {leaf} are missing")),
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn infrastructure_path(path: std::path::PathBuf) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+#[cfg(target_os = "linux")]
+fn infrastructure_commit_sha() -> Result<String, AppError> {
+    let commit_sha =
+        std::env::var("LABWEAVER_SOURCE_COMMIT").map_err(|_| AppError::ExternalCommand {
+            role: "infrastructure source identity",
+            code: None,
+            detail: Some(
+                "LABWEAVER_SOURCE_COMMIT is required and must be the verified bundle commit".into(),
+            ),
+        })?;
+    if commit_sha
+        .chars()
+        .all(|character| character.is_ascii_hexdigit())
+        && (40..=64).contains(&commit_sha.len())
+    {
+        return Ok(commit_sha);
+    }
+    Err(AppError::ExternalCommand {
+        role: "infrastructure source identity",
+        code: None,
+        detail: Some("LABWEAVER_SOURCE_COMMIT must contain 40-64 hexadecimal characters".into()),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn infrastructure_run_id(prefix: &str, role: &'static str) -> Result<String, AppError> {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| AppError::ExternalCommand {
+            role,
+            code: None,
+            detail: Some(error.to_string()),
+        })?
+        .as_secs();
+    Ok(format!("{prefix}-{seconds}-{}", std::process::id()))
 }
 
 #[cfg(not(target_os = "linux"))]
