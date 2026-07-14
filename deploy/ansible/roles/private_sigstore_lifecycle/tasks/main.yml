@@ -29,18 +29,18 @@
       - sigstore_lifecycle_tuf_locator | length > 0
       - sigstore_lifecycle_lock.scaffold_chart_archive_sha256 is match('^sha256:[0-9a-f]{64}$')
       - sigstore_lifecycle_lock.images.values() | reject('match', '^.+@sha256:[0-9a-f]{64}$') | list | length == 0
-      - private_sigstore_trust_bundle_sha256 is match('^sha256:[0-9a-f]{64}$')
-      - private_sigstore_workload_identity_policy_sha256 is match('^sha256:[0-9a-f]{64}$')
-      - private_sigstore_expected_tuf_root_sha256 is match('^sha256:[0-9a-f]{64}$')
-      - private_sigstore_tuf_root_version | int > 0
+      - private_sigstore_lifecycle_trust_bundle_sha256 is match('^sha256:[0-9a-f]{64}$')
+      - private_sigstore_lifecycle_workload_identity_policy_sha256 is match('^sha256:[0-9a-f]{64}$')
+      - private_sigstore_lifecycle_expected_tuf_root_sha256 is match('^sha256:[0-9a-f]{64}$')
+      - private_sigstore_lifecycle_tuf_root_version | int > 0
     fail_msg: SIGSTORE_LIFECYCLE_IDENTITY_INVALID
 
 - name: Read adopted cluster UID
   ansible.builtin.command:
     argv:
-      - "{{ private_sigstore_kubectl_path }}"
+      - "{{ private_sigstore_lifecycle_kubectl_path }}"
       - --kubeconfig
-      - "{{ private_sigstore_kubeconfig_path }}"
+      - "{{ private_sigstore_lifecycle_kubeconfig_path }}"
       - get
       - namespace
       - kube-system
@@ -52,12 +52,12 @@
 - name: Require existing Private Sigstore namespace
   ansible.builtin.command:
     argv:
-      - "{{ private_sigstore_kubectl_path }}"
+      - "{{ private_sigstore_lifecycle_kubectl_path }}"
       - --kubeconfig
-      - "{{ private_sigstore_kubeconfig_path }}"
+      - "{{ private_sigstore_lifecycle_kubeconfig_path }}"
       - get
       - namespace
-      - "{{ private_sigstore_namespace }}"
+      - "{{ private_sigstore_lifecycle_namespace }}"
   changed_when: false
 
 - name: Validate sensitive locators without reading their content
@@ -83,7 +83,7 @@
   ansible.builtin.include_tasks: provider.yml
   vars:
     sigstore_provider_action: backup
-    sigstore_provider_cronjob: "{{ private_sigstore_backup_provider }}"
+    sigstore_provider_cronjob: "{{ private_sigstore_lifecycle_backup_provider }}"
   when: private_sigstore_lifecycle_action == 'backup'
 
 - name: Validate backup manifest identity
@@ -94,14 +94,14 @@
   ansible.builtin.include_tasks: provider.yml
   vars:
     sigstore_provider_action: verify
-    sigstore_provider_cronjob: "{{ private_sigstore_verify_provider }}"
+    sigstore_provider_cronjob: "{{ private_sigstore_lifecycle_verify_provider }}"
   when: private_sigstore_lifecycle_action == 'verify'
 
 - name: Create mandatory pre-change backup
   ansible.builtin.include_tasks: provider.yml
   vars:
     sigstore_provider_action: backup
-    sigstore_provider_cronjob: "{{ private_sigstore_backup_provider }}"
+    sigstore_provider_cronjob: "{{ private_sigstore_lifecycle_backup_provider }}"
   when: private_sigstore_lifecycle_action in ['restore', 'rotate', 'disaster-recovery']
 
 - name: Validate pre-change backup identity
@@ -112,19 +112,19 @@
   ansible.builtin.include_tasks: provider.yml
   vars:
     sigstore_provider_action: restore
-    sigstore_provider_cronjob: "{{ private_sigstore_restore_provider }}"
+    sigstore_provider_cronjob: "{{ private_sigstore_lifecycle_restore_provider }}"
   when: private_sigstore_lifecycle_action == 'restore'
 
 - name: Execute rotation provider without root-key generation
   ansible.builtin.include_tasks: provider.yml
   vars:
     sigstore_provider_action: rotate
-    sigstore_provider_cronjob: "{{ private_sigstore_rotation_provider }}"
+    sigstore_provider_cronjob: "{{ private_sigstore_lifecycle_rotation_provider }}"
   when: private_sigstore_lifecycle_action == 'rotate'
 
 - name: Execute disaster-recovery provider
   ansible.builtin.include_tasks: provider.yml
   vars:
     sigstore_provider_action: disaster-recovery
-    sigstore_provider_cronjob: "{{ private_sigstore_dr_provider }}"
+    sigstore_provider_cronjob: "{{ private_sigstore_lifecycle_dr_provider }}"
   when: private_sigstore_lifecycle_action == 'disaster-recovery'

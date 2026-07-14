@@ -2,11 +2,11 @@
 - name: Build cleanup plan for current TestFlight run
   ansible.builtin.command:
     argv:
-      - "{{ private_sigstore_kubectl_path }}"
+      - "{{ private_sigstore_lifecycle_kubectl_path }}"
       - --kubeconfig
-      - "{{ private_sigstore_kubeconfig_path }}"
+      - "{{ private_sigstore_lifecycle_kubeconfig_path }}"
       - --namespace
-      - "{{ private_sigstore_namespace }}"
+      - "{{ private_sigstore_lifecycle_namespace }}"
       - get
       - jobs,pods,configmaps
       - --selector
@@ -25,11 +25,11 @@
 - name: Delete only current-run temporary resources
   ansible.builtin.command:
     argv:
-      - "{{ private_sigstore_kubectl_path }}"
+      - "{{ private_sigstore_lifecycle_kubectl_path }}"
       - --kubeconfig
-      - "{{ private_sigstore_kubeconfig_path }}"
+      - "{{ private_sigstore_lifecycle_kubeconfig_path }}"
       - --namespace
-      - "{{ private_sigstore_namespace }}"
+      - "{{ private_sigstore_lifecycle_namespace }}"
       - delete
       - jobs,pods,configmaps
       - --selector
@@ -42,11 +42,11 @@
 - name: Verify cleanup completed
   ansible.builtin.command:
     argv:
-      - "{{ private_sigstore_kubectl_path }}"
+      - "{{ private_sigstore_lifecycle_kubectl_path }}"
       - --kubeconfig
-      - "{{ private_sigstore_kubeconfig_path }}"
+      - "{{ private_sigstore_lifecycle_kubeconfig_path }}"
       - --namespace
-      - "{{ private_sigstore_namespace }}"
+      - "{{ private_sigstore_lifecycle_namespace }}"
       - get
       - jobs,pods,configmaps
       - --selector

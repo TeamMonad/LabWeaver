@@ -15,10 +15,10 @@
     {{ name | to_json }}: {{ (image.split('@') | last) | to_json }}{{ ',' if not loop.last else '' }}
 {% endfor %}
   },
-  "trust_bundle_sha256": {{ private_sigstore_trust_bundle_sha256 | to_json }},
-  "tuf_root_version": {{ private_sigstore_tuf_root_version | int }},
-  "tuf_root_sha256": {{ private_sigstore_expected_tuf_root_sha256 | to_json }},
-  "workload_identity_policy_sha256": {{ private_sigstore_workload_identity_policy_sha256 | to_json }},
+  "trust_bundle_sha256": {{ private_sigstore_lifecycle_trust_bundle_sha256 | to_json }},
+  "tuf_root_version": {{ private_sigstore_lifecycle_tuf_root_version | int }},
+  "tuf_root_sha256": {{ private_sigstore_lifecycle_expected_tuf_root_sha256 | to_json }},
+  "workload_identity_policy_sha256": {{ private_sigstore_lifecycle_workload_identity_policy_sha256 | to_json }},
   "backup": null,
   "checks": [{"name": "cleanup", "status": "passed", "diagnosticCode": null}],
   "blocked_items": [],
