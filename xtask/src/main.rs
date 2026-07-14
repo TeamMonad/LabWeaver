@@ -394,12 +394,12 @@ impl InfrastructureInputs {
             })?;
         let collections_path = resolve_infrastructure_directory(
             "approved Ansible collections",
-            [&controller_root, &shared_controller_root],
+            [controller_root.as_path(), shared_controller_root.as_path()],
             "collections",
         )?;
         let roles_path = resolve_infrastructure_directory(
             "approved Ansible roles",
-            [&controller_root, &shared_controller_root],
+            [controller_root.as_path(), shared_controller_root.as_path()],
             "roles",
         )?;
 
@@ -439,7 +439,7 @@ fn require_infrastructure_file(role: &'static str, path: &std::path::Path) -> Re
 #[cfg(target_os = "linux")]
 fn resolve_infrastructure_directory(
     role: &'static str,
-    roots: [&std::path::PathBuf; 2],
+    roots: [&std::path::Path; 2],
     leaf: &str,
 ) -> Result<std::path::PathBuf, AppError> {
     roots
@@ -454,7 +454,7 @@ fn resolve_infrastructure_directory(
 }
 
 #[cfg(target_os = "linux")]
-fn infrastructure_path(path: &std::path::PathBuf) -> String {
+fn infrastructure_path(path: &std::path::Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
