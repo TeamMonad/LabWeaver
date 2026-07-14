@@ -177,13 +177,34 @@ fn reject_non_transactional_sql(file: &str, sql: &str) -> Result<(), Persistence
 
 #[cfg(test)]
 mod tests {
-    use super::MigrationCatalog;
+    use super::{CatalogMigration, MigrationCatalog};
+    use contracts::Sha256Digest;
 
     #[test]
     fn repository_catalog_is_valid_and_deterministic() -> Result<(), Box<dyn std::error::Error>> {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
         let catalog = MigrationCatalog::load(&root.join("catalog.yaml"))?;
         assert_eq!(catalog.sha256()?, catalog.sha256()?);
+        Ok(())
+    }
+
+    #[test]
+    fn execution_time_read_rejects_post_load_tampering() -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!("labweaver-catalog-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(root.join("control"))?;
+        let file = root.join("control/0001.sql");
+        std::fs::write(&file, "CREATE TABLE expected_identity (id integer);")?;
+        let migration = CatalogMigration {
+            id: 1,
+            file: "control/0001.sql".to_owned(),
+            sha256: Sha256Digest::of_bytes(b"CREATE TABLE expected_identity (id integer);"),
+        };
+        std::fs::write(&file, "CREATE TABLE substituted_identity (id integer);")?;
+        let Err(error) = MigrationCatalog::read_verified_sql(&root, &migration) else {
+            return Err("tampered migration was accepted".into());
+        };
+        assert_eq!(error.diagnostic_code(), "DB_MIGRATION_IDENTITY_MISMATCH");
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

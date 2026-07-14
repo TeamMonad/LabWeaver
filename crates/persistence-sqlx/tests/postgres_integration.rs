@@ -11,7 +11,7 @@ use persistence_sqlx::{
 };
 use serde_json::json;
 use sqlx::{
-    ConnectOptions, PgPool,
+    ConnectOptions, PgPool, Row,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
 use testcontainers::{ImageExt, runners::AsyncRunner};
@@ -21,6 +21,7 @@ use uuid::Uuid;
 const TEST_PASSWORD: &str = "labweaver-test-only-password";
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn bootstrap_migrate_and_enforce_domain_boundaries() -> Result<(), Box<dyn std::error::Error>>
 {
     let container = Postgres::default().with_tag("17.5-alpine").start().await?;
@@ -35,6 +36,30 @@ async fn bootstrap_migrate_and_enforce_domain_boundaries() -> Result<(), Box<dyn
         .connect(&provisioner_url)
         .await?;
     MigrationCoordinator::bootstrap(&provisioner, &catalog, &root).await?;
+    sqlx::query("ALTER ROLE lw_control_runtime SUPERUSER CREATEROLE INHERIT")
+        .execute(&provisioner)
+        .await?;
+    sqlx::query("GRANT lw_access_owner TO lw_control_runtime")
+        .execute(&provisioner)
+        .await?;
+    MigrationCoordinator::bootstrap(&provisioner, &catalog, &root).await?;
+    let role = sqlx::query(
+        "SELECT rolsuper, rolcreaterole, rolinherit FROM pg_roles WHERE rolname = 'lw_control_runtime'",
+    )
+    .fetch_one(&provisioner)
+    .await?;
+    assert!(!role.try_get::<bool, _>("rolsuper")?);
+    assert!(!role.try_get::<bool, _>("rolcreaterole")?);
+    assert!(!role.try_get::<bool, _>("rolinherit")?);
+    let memberships: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM pg_auth_members membership \
+         JOIN pg_roles parent ON parent.oid = membership.roleid \
+         JOIN pg_roles member ON member.oid = membership.member \
+         WHERE parent.rolname = 'lw_access_owner' AND member.rolname = 'lw_control_runtime'",
+    )
+    .fetch_one(&provisioner)
+    .await?;
+    assert_eq!(memberships, 0);
     set_role_passwords(&provisioner).await?;
 
     let coordinator = role_pool(&provisioner_url, "lw_release_coordinator").await?;
@@ -47,10 +72,27 @@ async fn bootstrap_migrate_and_enforce_domain_boundaries() -> Result<(), Box<dyn
         job_id: "integration-job".to_owned(),
         attempt_id: Uuid::now_v7().to_string(),
     };
+    sqlx::query(
+        "INSERT INTO platform_meta.release_attempts \
+         (attempt_id, release_id, catalog_sha256, git_commit, build_digest, job_id, state) \
+         VALUES ('abandoned-attempt', 'integration-release', $1, 'integration-commit', \
+                 'sha256:integration-build', 'integration-job', 'running')",
+    )
+    .bind(catalog.sha256()?.to_string())
+    .execute(&provisioner)
+    .await?;
     let coordinator = MigrationCoordinator::new(coordinator, migration_pools, identity)?;
     let report = coordinator.apply(&catalog, &root).await?;
     assert_eq!(report.report.outcome, "succeeded");
-    let reused = coordinator.apply(&catalog, &root).await.unwrap_err();
+    let abandoned: String = sqlx::query_scalar(
+        "SELECT diagnostic FROM platform_meta.release_attempts WHERE attempt_id = 'abandoned-attempt'",
+    )
+    .fetch_one(&provisioner)
+    .await?;
+    assert_eq!(abandoned, "DB_MIGRATION_ABANDONED_ATTEMPT");
+    let Err(reused) = coordinator.apply(&catalog, &root).await else {
+        return Err("reused attempt ID was accepted".into());
+    };
     assert_eq!(reused.diagnostic_code(), "DB_MIGRATION_ATTEMPT_REUSED");
 
     let runtime_pools = pools_for(&provisioner_url, "runtime").await?;
