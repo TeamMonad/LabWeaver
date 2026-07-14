@@ -86,6 +86,71 @@ permissions, approved dispatch and durable idempotency reservation/replay are no
 Fixture Backend belongs to AG-01b. No Agent Service, database, NATS, LLM, build, Environment or
 production execution path is exercised.
 
+## Claude Code Agent runtime gates
+
+```sh
+cargo test --locked -p contracts --test authoring_contract
+cargo test --locked -p agent-service
+cargo clippy -p agent-service --all-targets --all-features -- -D warnings
+cargo xtask contracts check
+pnpm --dir web contracts:check
+
+# Requires a disposable PostgreSQL server with CREATEDB, supplied by
+# LABWEAVER_TEST_DATABASE_URL, or a Docker-backed PostgreSQL container.
+cargo test --locked -p agent-service --test claude_code_runtime \
+  postgres_run_is_atomic_and_exact_replay_is_not_billed_twice -- --ignored --exact
+
+# Billable: provider environment must already be exported by the caller.
+# The test and production worker never source ~/.zshrc or another startup file.
+LABWEAVER_LIVE_CLAUDE_MODEL='<exact-model-id>' \
+  cargo test --locked -p agent-service --test claude_code_runtime \
+  live_claude_code_generates_environment_candidate -- --ignored --exact --nocapture
+```
+
+Contract tests prove that the only accepted binding is a provider-opaque
+`ClaudeCodeBindingV1` with an explicit runtime profile, exact non-alias model,
+CLI version, worker-image hash and runtime-configuration hash; the retired
+OpenAI-shaped binding is rejected. Package-gate tests cover manifest/object
+identity, revision-bound classifier identity, hard-denied data and prompt
+injection retained only as untrusted structured content. Worker tests prove CLI
+version matching, direct process invocation without a shell, immutable stdin
+identity, bounded timeout/request/token/cost configuration, no session
+persistence, no Chrome, no built-in subagents, no MCP discovery and an empty
+Tool set.
+
+Result tests cover supported `stream-json` envelopes, progress-event handling,
+terminal-result completion without waiting for process EOF, usage accounting,
+exact typed EnvironmentSpec validation, protected authority fields, budget overflow,
+provider failure classification, payload-free stderr handling and independent
+dual-track partial success. The explicit PostgreSQL integration test additionally
+checks atomic idempotency reservation, requested/terminal Outbox rows, two
+candidate checkpoints and an exact replay with no second process invocation.
+It passed on 2026-07-14 against an ephemeral PostgreSQL 17 instance, using an
+isolated per-run database, and supplies E2 persistence evidence. It does not
+prove the deployment credential path, real provider compatibility, container
+isolation, HTTP/worker handoff, Kubernetes Job execution, Control candidate
+projection, object-store checkpoint references or JetStream delivery; those
+runtime paths remain at E1 or unimplemented as listed in the status matrix.
+On 2026-07-14, the provider's internal StructuredOutput path failed for the
+complete Schema, so the worker protocol was reduced to the intended single
+operation: reproduce the complete authoritative Schema in the prompt, require
+one bare JSON object, and validate it locally without a weaker Schema or model
+fallback. With Claude Code `2.1.209`, the complete Environment candidate test
+passed in 9.31 seconds and audited 34,755 microusd. The local probe inherited
+provider variables exported by login zsh; it does not prove Secret/Config
+injection in the worker container. Evaluation, the real dual-track call and the
+container/Kubernetes path remain explicit E3 blockers. Timeout tests also
+require `usageObserved=false`: absence of a terminal result envelope must not
+be reported as confirmed zero provider usage.
+
+The live debug session isolated the Schema feature boundary: a nested `$ref`
+dispatched Claude Code's internal `StructuredOutput` Tool, while a nested
+`oneOf` did not. Deployment Verify therefore targets the actual v1 protocol:
+the complete official Schema in the prompt, one JSON candidate, terminal
+`stream-json` result, and successful local typed/semantic validation. The
+worker remains NotReady if any of those checks fail; replacing the official
+Schema with a weaker provider Schema is not an accepted fallback.
+
 ## Governance verification
 
 Read back Milestones, Labels, branch protection, Sprint parents, sub-issues and Project fields through GitHub APIs. The verified governance result is 20 Project items and 15 P0 items with `Workflow Status=Ready`, plus Owner, Review Role, Sprint, Area, Codex Mode, Risk, SP and Evidence metadata.
