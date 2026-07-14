@@ -35,6 +35,9 @@
       - harbor_controller_id == 'edge-router'
       - harbor_locked_images | dict2items | length == 10
       - harbor_locked_images | dict2items | map(attribute='value') | select('match', '^sha256:[0-9a-f]{64}$') | list | length == 10
+      - harbor_component_resources | dict2items | length == 11
+      - harbor_component_resources | dict2items | map(attribute='value') | map(attribute='requests') | select('defined') | list | length == 11
+      - harbor_component_resources | dict2items | map(attribute='value') | map(attribute='limits') | select('defined') | list | length == 11
     fail_msg: HARBOR_CONFIGURATION_REQUIRED
 
 - name: Verify the local Harbor chart archive before any reconciliation
@@ -380,32 +383,45 @@
             storageClass: "{{ storageclass_local_path }}"
       nginx:
         image: { tag: "v2.15.1@{{ harbor_locked_images.nginx }}" }
+        resources: "{{ harbor_component_resources.nginx }}"
       portal:
         image: { tag: "v2.15.1@{{ harbor_locked_images.portal }}" }
+        resources: "{{ harbor_component_resources.portal }}"
       core:
         image: { tag: "v2.15.1@{{ harbor_locked_images.core }}" }
+        resources: "{{ harbor_component_resources.core }}"
       jobservice:
         image: { tag: "v2.15.1@{{ harbor_locked_images.jobservice }}" }
+        resources: "{{ harbor_component_resources.jobservice }}"
       registry:
         registry:
           image: { tag: "v2.15.1@{{ harbor_locked_images.registry }}" }
+          resources: "{{ harbor_component_resources.registry }}"
         controller:
           image: { tag: "v2.15.1@{{ harbor_locked_images.registryctl }}" }
+          resources: "{{ harbor_component_resources.registryctl }}"
       trivy:
         enabled: true
         image: { tag: "v2.15.1@{{ harbor_locked_images.trivy }}" }
+        resources: "{{ harbor_component_resources.trivy }}"
       database:
         type: internal
         internal:
           password: "{{ harbor_database_password }}"
           image: { tag: "v2.15.1@{{ harbor_locked_images.database }}" }
+          resources: "{{ harbor_component_resources.database }}"
+          initContainer:
+            permissions:
+              resources: "{{ harbor_component_resources.database_permissions }}"
       redis:
         type: internal
         internal:
           password: "{{ harbor_redis_password }}"
           image: { tag: "v2.15.1@{{ harbor_locked_images.redis }}" }
+          resources: "{{ harbor_component_resources.redis }}"
       exporter:
         image: { tag: "v2.15.1@{{ harbor_locked_images.exporter }}" }
+        resources: "{{ harbor_component_resources.exporter }}"
   no_log: true
   environment:
     PATH: /usr/local/bin:/usr/bin:/bin

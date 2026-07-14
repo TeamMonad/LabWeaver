@@ -56,6 +56,8 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("roles: [backup, harbor]", playbook)
         self.assertIn("HARBOR_BACKUP_EVIDENCE_INVALID", harbor)
         self.assertIn("HARBOR_CHART_ARCHIVE_IDENTITY_INVALID", harbor)
+        self.assertIn("database_permissions", harbor)
+        self.assertIn("harbor_component_resources", harbor)
         self.assertIn("chart_archive_sha256", lock)
         self.assertNotIn("busybox:1.36", lock)
 
