@@ -167,10 +167,12 @@ declared push/pull/scan and recovery gates are separately performed.
 
 TestFlight is emitted as a run-scoped, schema-validated
 `InfrastructureTestFlightReport`; it binds the deployment manifest and cluster
-UID, records cleanup, and remains `blocked` while Harbor OIDC is not configured.
+UID, records cleanup, and passes only the declared `adopted-cluster-baseline`
+scope. OIDC/governance checks are explicitly recorded as deferred to #47; they
+cannot be read as a successful identity or release-gate claim.
 
-OIDC is a non-goal for Issue #23. Its absence is a Release Gate blocker, not an
-optional success path.
+The security/recovery expansion remains under the existing Sprint 2 parent #2.
+Neither deferred set is part of the baseline close condition for #23 or #15.
 
 ### VM-01a E3 run
 

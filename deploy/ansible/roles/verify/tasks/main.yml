@@ -161,6 +161,7 @@
         kubectl -n {{ verify_runtime_namespace }} wait vmi/kvm-probe
         --for=jsonpath='{.status.phase}'=Running --timeout=5m
       changed_when: false
+      register: verify_kubevirt_restart
 
     - name: Verify Cilium daemonset readiness
       ansible.builtin.command:
@@ -241,14 +242,29 @@
           else 'VERIFY_GATEWAY_CLEANUP_FAILED' if verify_gateway_cleanup_result.rc != 0
           else None }}
 
+    - name: Determine the adopted-cluster baseline TestFlight outcome
+      ansible.builtin.set_fact:
+        verify_baseline_passed: >-
+          {{ verify_nodes is defined and verify_nodes.rc == 0 and
+          verify_rwo_probe is defined and verify_rwo_probe.rc == 0 and
+          verify_rwx_probe is defined and verify_rwx_probe.rc == 0 and
+          verify_gateway_probe is defined and verify_gateway_probe.rc == 0 and
+          verify_cilium_status is defined and verify_cilium_status.rc == 0 and
+          verify_console_probe is defined and verify_console_probe.rc in [0, 124] and
+          verify_kubevirt_restart is defined and verify_kubevirt_restart.rc == 0 and
+          verify_backup_evidence is defined and
+          (verify_backup_evidence.content | b64decode | from_json).overall == 'passed' and
+          not (verify_cleanup_failed | default(false) | bool) }}
+
     - name: Write machine-readable acceptance report
       ansible.builtin.set_fact:
         verify_report:
           schema_version: infrastructure-testflight-report.v1
+          scope: adopted-cluster-baseline
           run_id: "{{ verify_testflight_run_id }}"
           deployment_run_id: "{{ verify_deployment_manifest.run_id }}"
           cluster_uid: "{{ verify_cluster_uid.stdout }}"
-          overall: blocked
+          overall: "{{ 'passed' if verify_baseline_passed | bool else 'blocked' }}"
           checks:
             - name: kubernetes-nodes
               status: "{{ 'passed' if verify_nodes is defined and verify_nodes.rc == 0 else 'failed' }}"
@@ -265,9 +281,18 @@
             - name: cilium-control-plane
               status: "{{ 'passed' if verify_cilium_status is defined and verify_cilium_status.rc == 0 else 'failed' }}"
               diagnostic: "{{ None if verify_cilium_status is defined and verify_cilium_status.rc == 0 else 'CILIUM_CONTROL_PLANE_FAILED' }}"
-            - name: harbor-oidc
-              status: blocked
-              diagnostic: issue-23-oidc-not-configured
+            - name: kubevirt-vm-lifecycle
+              status: "{{ 'passed' if verify_kubevirt_restart is defined and verify_kubevirt_restart.rc == 0 else 'failed' }}"
+              diagnostic: "{{ None if verify_kubevirt_restart is defined and verify_kubevirt_restart.rc == 0 else 'KUBEVIRT_VM_LIFECYCLE_FAILED' }}"
+            - name: etcd-backup-evidence
+              status: "{{ 'passed' if verify_backup_evidence is defined else 'failed' }}"
+              diagnostic: "{{ None if verify_backup_evidence is defined else 'ETCD_BACKUP_EVIDENCE_INCOMPLETE' }}"
+            - name: harbor-oidc-and-governance
+              status: deferred
+              diagnostic: deferred-to-issue-47
+            - name: extended-security-recovery-testflight
+              status: deferred
+              diagnostic: deferred-to-issue-2
           cleanup:
             status: "{{ 'failed' if (verify_cleanup_failed | default(false) | bool) else 'completed' }}"
 

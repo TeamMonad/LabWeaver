@@ -39,6 +39,18 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("verify_cleanup_failed", verify)
         self.assertIn("CILIUM_CLEANUP_FAILED", verify)
 
+    def test_baseline_testflight_defers_identity_governance(self) -> None:
+        verify = (ROOT / "deploy/ansible/roles/verify/tasks/main.yml").read_text(encoding="utf-8")
+        schema = json.loads(
+            (ROOT / "schemas/infrastructure/infrastructure-testflight-report.v1.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertIn("adopted-cluster-baseline", verify)
+        self.assertIn("deferred-to-issue-47", verify)
+        self.assertIn("deferred-to-issue-2", verify)
+        self.assertIn("deferred", schema["properties"]["checks"]["items"]["properties"]["status"]["enum"])
+
     def test_storage_safety_rejects_dangerous_devices(self) -> None:
         safe = {"path": "/dev/test", "type": "disk", "fstype": None, "wwn": "fixture-wwn", "size": 1073741824, "pkname": None, "mountpoints": [None]}
         result = SAFETY.validate([safe], "/dev/test", "fixture-wwn", 1073741824, "/dev/root", [])

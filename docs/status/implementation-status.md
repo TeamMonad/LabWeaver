@@ -56,9 +56,9 @@ was scoped to the newly-created Harbor PVC after the NFS CSI provisioner created
 it with anonymous ownership. It is deployment evidence only, not a replacement
 for the future reconciler's first-run and replay evidence.
 
-The TestFlight report is schema-validated and intentionally `blocked` on
-`issue-23-oidc-not-configured`. Keycloak OIDC is intentionally not configured.
-Registry push/pull/scan policy replay, immutable-tag and retention enforcement,
-recovery drills, a reviewed Cilium policy for host-network Gateway traffic, and
-Release Gate evidence remain blockers. Issue #23 must not be closed or
-represented as release-ready.
+The TestFlight report is schema-validated for the `adopted-cluster-baseline`
+scope. Keycloak OIDC is intentionally deferred to #47; registry push/pull/scan
+policy replay, immutable-tag and retention enforcement, recovery drills, a
+reviewed Cilium policy for host-network Gateway traffic, and Release Gate
+evidence remain Sprint 2/#2 work. They do not make #23 or the baseline #15
+release-ready, but are not blockers for their bounded close conditions.
