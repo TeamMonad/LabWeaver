@@ -1,0 +1,111 @@
+apiVersion: v1
+kind: Service
+metadata: {name: identity-postgres, namespace: {{ identity_namespace }}}
+spec:
+  selector: {app.kubernetes.io/name: identity-postgres}
+  ports: [{name: postgres, port: 5432, targetPort: 5432}]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: identity-postgres, namespace: {{ identity_namespace }}}
+spec:
+  serviceName: identity-postgres
+  replicas: 1
+  selector: {matchLabels: {app.kubernetes.io/name: identity-postgres}}
+  template:
+    metadata: {labels: {app.kubernetes.io/name: identity-postgres, app.kubernetes.io/part-of: labweaver-identity}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}, fsGroup: 70, fsGroupChangePolicy: OnRootMismatch}
+      containers:
+        - name: postgres
+          image: {{ identity_lock.images.postgres }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: POSTGRES_DB, value: keycloak}
+            - {name: POSTGRES_USER, value: keycloak}
+            - name: POSTGRES_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ identity_database_secret_name }}, key: password}}
+            - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+          ports: [{name: postgres, containerPort: 5432}]
+          readinessProbe: {exec: {command: [pg_isready, -U, keycloak, -d, keycloak]}, initialDelaySeconds: 10, periodSeconds: 10}
+          livenessProbe: {exec: {command: [pg_isready, -U, keycloak, -d, keycloak]}, initialDelaySeconds: 30, periodSeconds: 20}
+          resources: {requests: {cpu: 200m, memory: 256Mi}, limits: {cpu: "1", memory: 1Gi}}
+          securityContext: {runAsUser: 70, runAsGroup: 70, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          volumeMounts: [{name: data, mountPath: /var/lib/postgresql/data}]
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: {{ identity_storage_class }}
+        resources: {requests: {storage: {{ identity_postgres_storage }}}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: identity-realm-bootstrap, namespace: {{ identity_namespace }}}
+data:
+  workloads-realm.json: |
+    {"realm":"{{ identity_realm }}","enabled":true,"sslRequired":"external","registrationAllowed":false,"resetPasswordAllowed":false,"loginWithEmailAllowed":false,"bruteForceProtected":true}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: {{ identity_name }}-http, namespace: {{ identity_namespace }}}
+spec:
+  selector: {app.kubernetes.io/name: {{ identity_name }}}
+  ports: [{name: http, port: 8080, targetPort: 8080}, {name: management, port: 9000, targetPort: 9000}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: {{ identity_name }}, namespace: {{ identity_namespace }}}
+spec:
+  replicas: {{ identity_keycloak_replicas }}
+  strategy: {type: RollingUpdate, rollingUpdate: {maxUnavailable: 0, maxSurge: 1}}
+  selector: {matchLabels: {app.kubernetes.io/name: {{ identity_name }}}}
+  template:
+    metadata: {labels: {app.kubernetes.io/name: {{ identity_name }}, app.kubernetes.io/part-of: labweaver-identity}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+      initContainers:
+        - name: wait-for-database
+          image: {{ identity_lock.images.postgres }}
+          command: [sh, -ec, "until pg_isready -h identity-postgres -U keycloak -d keycloak; do sleep 2; done"]
+          securityContext: {runAsUser: 70, runAsGroup: 70, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {cpu: 100m, memory: 128Mi}}
+      containers:
+        - name: keycloak
+          image: {{ identity_lock.images.keycloak }}
+          imagePullPolicy: IfNotPresent
+          args: [start, --import-realm]
+          env:
+            - {name: KC_DB, value: postgres}
+            - {name: KC_DB_URL_HOST, value: identity-postgres}
+            - {name: KC_DB_URL_DATABASE, value: keycloak}
+            - {name: KC_DB_USERNAME, value: keycloak}
+            - name: KC_DB_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ identity_database_secret_name }}, key: password}}
+            - {name: KC_HOSTNAME, value: "https://{{ identity_hostname }}"}
+            - {name: KC_HTTP_ENABLED, value: "true"}
+            - {name: KC_PROXY_HEADERS, value: xforwarded}
+            - {name: KC_HEALTH_ENABLED, value: "true"}
+            - {name: KC_METRICS_ENABLED, value: "true"}
+            - {name: KC_CACHE, value: ispn}
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              valueFrom: {secretKeyRef: {name: {{ identity_bootstrap_secret_name }}, key: username}}
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ identity_bootstrap_secret_name }}, key: password}}
+          ports: [{name: http, containerPort: 8080}, {name: management, containerPort: 9000}]
+          startupProbe: {httpGet: {path: /health/started, port: management}, failureThreshold: 60, periodSeconds: 5}
+          readinessProbe: {httpGet: {path: /health/ready, port: management}, periodSeconds: 10}
+          livenessProbe: {httpGet: {path: /health/live, port: management}, periodSeconds: 20}
+          resources: {requests: {cpu: 500m, memory: 768Mi}, limits: {cpu: "2", memory: 2Gi}}
+          securityContext: {runAsUser: 1000, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          volumeMounts: [{name: realm, mountPath: /opt/keycloak/data/import, readOnly: true}]
+      volumes: [{name: realm, configMap: {name: identity-realm-bootstrap}}]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: {{ identity_name }}, namespace: {{ identity_namespace }}}
+spec:
+  minAvailable: 1
+  selector: {matchLabels: {app.kubernetes.io/name: {{ identity_name }}}}

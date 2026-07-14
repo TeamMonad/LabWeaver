@@ -1,0 +1,417 @@
+---
+- name: Bind identity-foundation execution and component identity
+  ansible.builtin.set_fact:
+    identity_run_id: "{{ lookup('env', 'LABWEAVER_RUN_ID') }}"
+    identity_commit_sha: "{{ lookup('env', 'LABWEAVER_COMMIT_SHA') }}"
+    identity_inventory_hash: "{{ lookup('env', 'LABWEAVER_INVENTORY_HASH') }}"
+    identity_component_lock_hash: "{{ lookup('env', 'LABWEAVER_COMPONENT_LOCK_HASH') }}"
+    identity_secret_locator: "{{ lookup('env', 'LABWEAVER_IDENTITY_SECRET_LOCATOR') }}"
+    identity_lock: "{{ (lookup('file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml).identity_foundation }}"
+    identity_run_suffix: "{{ lookup('env', 'LABWEAVER_RUN_ID') | hash('sha256') | truncate(12, true, '') }}"
+
+- name: Reject incomplete or mutable identity-foundation configuration
+  ansible.builtin.assert:
+    that:
+      - identity_foundation_enabled | bool
+      - identity_run_id is match('^infra-[a-z0-9-]+$')
+      - identity_commit_sha is match('^[0-9a-f]{40,64}$')
+      - identity_inventory_hash is match('^sha256:[0-9a-f]{64}$')
+      - identity_component_lock_hash is match('^sha256:[0-9a-f]{64}$')
+      - identity_hostname == 'keycloak.labweaver.internal'
+      - identity_gateway_vip == '10.20.0.222'
+      - identity_realm == 'workloads'
+      - identity_workload_client_id == identity_workload_audience
+      - identity_secret_locator | length > 0
+      - identity_secret_locator_sha256 is match('^sha256:[0-9a-f]{64}$')
+      - identity_lock.keycloak == '26.7.0'
+      - identity_lock.postgres == '17.6-alpine'
+      - identity_lock.images.values() | reject('match', '^.+@sha256:[0-9a-f]{64}$') | list | length == 0
+    fail_msg: IDENTITY_CONFIGURATION_INVALID
+
+- name: Hash the root-managed identity secret locator on the controller
+  ansible.builtin.stat:
+    path: "{{ identity_secret_locator }}"
+    checksum_algorithm: sha256
+  become: true
+  delegate_to: edge-router
+  register: identity_locator_stat
+  no_log: true
+
+- name: Reject a missing or changed identity secret locator
+  ansible.builtin.assert:
+    that:
+      - identity_locator_stat.stat.exists
+      - identity_locator_stat.stat.pw_name == 'root'
+      - identity_locator_stat.stat.mode == '0600'
+      - ('sha256:' ~ identity_locator_stat.stat.checksum) == identity_secret_locator_sha256
+    fail_msg: IDENTITY_SECRET_LOCATOR_INVALID
+
+- name: Read the identity bootstrap locator without logging it
+  ansible.builtin.slurp:
+    src: "{{ identity_secret_locator }}"
+  become: true
+  delegate_to: edge-router
+  register: identity_locator_raw
+  no_log: true
+
+- name: Decode the identity bootstrap inputs
+  ansible.builtin.set_fact:
+    identity_secrets: "{{ identity_locator_raw.content | b64decode | from_yaml }}"
+  no_log: true
+
+- name: Validate bootstrap secret shape without exposing values
+  ansible.builtin.assert:
+    that:
+      - identity_secrets.schema_version == 'identity-bootstrap.v1'
+      - identity_secrets.database_password | length >= 32
+      - identity_secrets.bootstrap_admin_password | length >= 32
+      - identity_secrets.workload_client_secret | length >= 32
+      - identity_secrets.revision is match('^[a-z0-9][a-z0-9.-]{0,63}$')
+    fail_msg: IDENTITY_BOOTSTRAP_SECRET_INVALID
+  no_log: true
+
+- name: Read the adopted cluster identity
+  ansible.builtin.command:
+    argv: ["{{ identity_kubectl_path }}", --kubeconfig, "{{ identity_kubeconfig_path }}", get, namespace, kube-system, -o, 'jsonpath={.metadata.uid}']
+  changed_when: false
+  register: identity_cluster_uid
+
+- name: Read existing Gateway allocation before mutation
+  ansible.builtin.command:
+    argv: ["{{ identity_kubectl_path }}", --kubeconfig, "{{ identity_kubeconfig_path }}", get, gateway, -A, -o, json]
+  changed_when: false
+  register: identity_gateways_raw
+
+- name: Reject a conflicting Gateway VIP
+  ansible.builtin.assert:
+    that:
+      - >-
+        (identity_gateways_raw.stdout | from_json)['items']
+        | rejectattr('metadata.name', 'equalto', 'identity-gateway')
+        | map(attribute='status.addresses', default=[])
+        | flatten
+        | selectattr('value', 'equalto', identity_gateway_vip)
+        | list | length == 0
+    fail_msg: IDENTITY_GATEWAY_VIP_CONFLICT
+
+- name: Require an existing healthy identity foundation in verify-only mode
+  ansible.builtin.command:
+    argv:
+      - "{{ identity_kubectl_path }}"
+      - --kubeconfig
+      - "{{ identity_kubeconfig_path }}"
+      - -n
+      - "{{ identity_namespace }}"
+      - rollout
+      - status
+      - "deployment/{{ identity_name }}"
+      - --timeout=1s
+  changed_when: false
+  when: identity_foundation_verify_only | bool
+
+- name: Reconcile identity foundation
+  when: not (identity_foundation_verify_only | bool)
+  block:
+    - name: Install the locked Kubernetes Python client on the control plane
+      ansible.builtin.dnf:
+        name: "{{ identity_lock.python_kubernetes_rpm }}"
+        state: present
+
+    - name: Verify the locked Kubernetes Python client identity
+      ansible.builtin.command:
+        argv: [rpm, -q, --queryformat, '%{NAME}-%{VERSION}-%{RELEASE}', python3-kubernetes]
+      changed_when: false
+      register: identity_python_kubernetes_rpm
+      failed_when: identity_python_kubernetes_rpm.stdout != identity_lock.python_kubernetes_rpm
+
+    - name: Create the restricted identity namespace
+      kubernetes.core.k8s:
+        kubeconfig: "{{ identity_kubeconfig_path }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ identity_namespace }}"
+            labels:
+              pod-security.kubernetes.io/enforce: restricted
+              pod-security.kubernetes.io/audit: restricted
+              pod-security.kubernetes.io/warn: restricted
+
+    - name: Apply the namespace-scoped internal CA chain
+      kubernetes.core.k8s:
+        kubeconfig: "{{ identity_kubeconfig_path }}"
+        state: present
+        definition: "{{ lookup('template', 'pki.yml.j2') | from_yaml_all | list }}"
+
+    - name: Wait for the root and serving certificates
+      ansible.builtin.command:
+        argv:
+          - "{{ identity_kubectl_path }}"
+          - --kubeconfig
+          - "{{ identity_kubeconfig_path }}"
+          - -n
+          - "{{ identity_namespace }}"
+          - wait
+          - "certificate/{{ item }}"
+          - --for=condition=Ready
+          - --timeout=5m
+      changed_when: false
+      loop: [identity-root-ca, keycloak-internal]
+
+    - name: Install identity credentials from the root-only locator
+      kubernetes.core.k8s:
+        kubeconfig: "{{ identity_kubeconfig_path }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata: {name: "{{ item.name }}", namespace: "{{ identity_namespace }}"}
+          type: Opaque
+          stringData: "{{ item.data }}"
+      loop:
+        - {name: "{{ identity_database_secret_name }}", data: {password: "{{ identity_secrets.database_password }}"}}
+        - {name: "{{ identity_bootstrap_secret_name }}", data: {username: platform-bootstrap, password: "{{ identity_secrets.bootstrap_admin_password }}"}}
+        - {name: "{{ identity_workload_secret_name }}", data: {client-secret: "{{ identity_secrets.workload_client_secret }}"}}
+      no_log: true
+
+    - name: Apply PostgreSQL and Keycloak workloads
+      kubernetes.core.k8s:
+        kubeconfig: "{{ identity_kubeconfig_path }}"
+        state: present
+        definition: "{{ lookup('template', 'workloads.yml.j2') | from_yaml_all | list }}"
+
+    - name: Wait for identity workloads
+      ansible.builtin.command:
+        argv:
+          - "{{ identity_kubectl_path }}"
+          - --kubeconfig
+          - "{{ identity_kubeconfig_path }}"
+          - -n
+          - "{{ identity_namespace }}"
+          - rollout
+          - status
+          - "{{ item }}"
+          - --timeout=15m
+      changed_when: false
+      loop: [statefulset/identity-postgres, "deployment/{{ identity_name }}"]
+
+    - name: Provision the workload-only OIDC client
+      kubernetes.core.k8s:
+        kubeconfig: "{{ identity_kubeconfig_path }}"
+        state: present
+        definition: "{{ lookup('template', 'provision-job.yml.j2') | from_yaml }}"
+      no_log: true
+
+    - name: Wait for workload client provisioning
+      ansible.builtin.command:
+        argv:
+          - "{{ identity_kubectl_path }}"
+          - --kubeconfig
+          - "{{ identity_kubeconfig_path }}"
+          - -n
+          - "{{ identity_namespace }}"
+          - wait
+          - "job/identity-provision-{{ identity_run_suffix }}"
+          - --for=condition=Complete
+          - --timeout=5m
+      changed_when: false
+
+    - name: Apply the internal Gateway and network policy
+      kubernetes.core.k8s:
+        kubeconfig: "{{ identity_kubeconfig_path }}"
+        state: present
+        definition: "{{ lookup('template', item) | from_yaml_all | list }}"
+      loop: [gateway.yml.j2, policy.yml.j2]
+
+    - name: Read existing Keycloak DNS records
+      ansible.builtin.command:
+        argv: [grep, -R, --fixed-strings, "{{ identity_hostname }}", /etc/dnsmasq.conf, /etc/dnsmasq.d]
+      delegate_to: edge-router
+      become: true
+      changed_when: false
+      failed_when: false
+      register: identity_dns_records
+
+    - name: Reject a Keycloak DNS collision outside the owned fragment
+      ansible.builtin.assert:
+        that: >-
+          identity_dns_records.rc != 0 or
+          (identity_dns_records.stdout_lines | reject('search', identity_dns_fragment_path) | list | length == 0)
+        fail_msg: IDENTITY_DNS_CONFLICT
+
+    - name: Install the Keycloak-only DNS fragment with rollback
+      block:
+        - name: Inspect the previous Keycloak DNS fragment
+          ansible.builtin.stat:
+            path: "{{ identity_dns_fragment_path }}"
+          delegate_to: edge-router
+          become: true
+          register: identity_dns_fragment_stat
+
+        - name: Back up the previous Keycloak DNS fragment
+          ansible.builtin.copy:
+            src: "{{ identity_dns_fragment_path }}"
+            dest: /var/tmp/labweaver-keycloak-dns.conf.backup
+            remote_src: true
+            owner: root
+            group: root
+            mode: '0600'
+          delegate_to: edge-router
+          become: true
+          when: identity_dns_fragment_stat.stat.exists
+
+        - name: Write the Keycloak-only DNS fragment
+          ansible.builtin.template:
+            src: dnsmasq-keycloak.conf.j2
+            dest: "{{ identity_dns_fragment_path }}"
+            owner: root
+            group: root
+            mode: '0644'
+          delegate_to: edge-router
+          become: true
+
+        - name: Validate dnsmasq before applying Keycloak DNS
+          ansible.builtin.command: /usr/sbin/dnsmasq --test
+          delegate_to: edge-router
+          become: true
+          changed_when: false
+
+        - name: Restart dnsmasq after successful validation
+          ansible.builtin.service: {name: dnsmasq, state: restarted}
+          delegate_to: edge-router
+          become: true
+      rescue:
+        - name: Restore the previous Keycloak DNS fragment
+          ansible.builtin.copy:
+            src: /var/tmp/labweaver-keycloak-dns.conf.backup
+            dest: "{{ identity_dns_fragment_path }}"
+            remote_src: true
+            owner: root
+            group: root
+            mode: '0644'
+          delegate_to: edge-router
+          become: true
+          when: identity_dns_fragment_stat.stat.exists | default(false)
+
+        - name: Remove the newly introduced invalid DNS fragment
+          ansible.builtin.file: {path: "{{ identity_dns_fragment_path }}", state: absent}
+          delegate_to: edge-router
+          become: true
+          when: not (identity_dns_fragment_stat.stat.exists | default(false))
+
+        - name: Restore dnsmasq after rollback
+          ansible.builtin.service: {name: dnsmasq, state: restarted}
+          delegate_to: edge-router
+          become: true
+
+        - name: Stop after failed Keycloak DNS validation
+          ansible.builtin.fail: {msg: IDENTITY_DNS_VALIDATION_FAILED}
+
+- name: Wait for the identity Gateway
+  ansible.builtin.command:
+    argv:
+      - "{{ identity_kubectl_path }}"
+      - --kubeconfig
+      - "{{ identity_kubeconfig_path }}"
+      - -n
+      - "{{ identity_namespace }}"
+      - wait
+      - gateway/identity-gateway
+      - --for=condition=Programmed
+      - --timeout=5m
+  changed_when: false
+
+- name: Verify the exact OIDC issuer over the internal CA
+  ansible.builtin.shell: |
+    set -euo pipefail
+    ca_file=$(mktemp)
+    trap 'rm -f "$ca_file"' EXIT
+    {{ identity_kubectl_path }} \
+      --kubeconfig {{ identity_kubeconfig_path | quote }} \
+      -n {{ identity_namespace | quote }} get secret {{ identity_ca_secret_name | quote }} \
+      -o jsonpath='{.data.tls\.crt}' | base64 -d > "$ca_file"
+    curl --fail --silent --show-error --cacert "$ca_file" \
+      --resolve {{ identity_hostname }}:443:{{ identity_gateway_vip }} \
+      https://{{ identity_hostname }}/realms/{{ identity_realm }}/.well-known/openid-configuration \
+      | grep -F '"issuer":"https://{{ identity_hostname }}/realms/{{ identity_realm }}"' >/dev/null
+  args: {executable: /bin/bash}
+  changed_when: false
+
+- name: Verify workload token identity without exposing the credential or token
+  ansible.builtin.shell: |
+    set -euo pipefail
+    work_dir=$(mktemp -d)
+    trap 'rm -rf "$work_dir"' EXIT
+    chmod 0700 "$work_dir"
+    {{ identity_kubectl_path }} \
+      --kubeconfig {{ identity_kubeconfig_path | quote }} \
+      -n {{ identity_namespace | quote }} get secret {{ identity_workload_secret_name | quote }} \
+      -o jsonpath='{.data.client-secret}' | base64 -d > "$work_dir/client-secret"
+    chmod 0600 "$work_dir/client-secret"
+    {
+      printf 'url = "https://{{ identity_hostname }}/realms/{{ identity_realm }}/protocol/openid-connect/token"\n'
+      printf 'cacert = "%s"\n' "$work_dir/ca.crt"
+      printf 'resolve = "{{ identity_hostname }}:443:{{ identity_gateway_vip }}"\n'
+      printf 'request = "POST"\n'
+      printf 'data = "grant_type=client_credentials"\n'
+      printf 'data = "client_id={{ identity_workload_client_id }}"\n'
+      printf 'data = "client_secret=%s"\n' "$(cat "$work_dir/client-secret")"
+      printf 'fail\n silent\n show-error\n'
+    } > "$work_dir/curl.conf"
+    chmod 0600 "$work_dir/curl.conf"
+    {{ identity_kubectl_path }} \
+      --kubeconfig {{ identity_kubeconfig_path | quote }} \
+      -n {{ identity_namespace | quote }} get secret {{ identity_ca_secret_name | quote }} \
+      -o jsonpath='{.data.tls\.crt}' | base64 -d > "$work_dir/ca.crt"
+    curl --config "$work_dir/curl.conf" > "$work_dir/token.json"
+    python3 - "$work_dir/token.json" <<'PY'
+    import base64
+    import json
+    import pathlib
+    import sys
+
+    token = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["access_token"]
+    payload = token.split(".")[1]
+    payload += "=" * (-len(payload) % 4)
+    claims = json.loads(base64.urlsafe_b64decode(payload))
+    audience = claims.get("aud", [])
+    if isinstance(audience, str):
+        audience = [audience]
+    expected = {
+        "iss": "https://{{ identity_hostname }}/realms/{{ identity_realm }}",
+        "azp": "{{ identity_workload_client_id }}",
+        "preferred_username": "service-account-{{ identity_workload_client_id }}",
+    }
+    if any(claims.get(key) != value for key, value in expected.items()):
+        raise SystemExit(2)
+    if "{{ identity_workload_audience }}" not in audience:
+        raise SystemExit(3)
+    PY
+  args: {executable: /bin/bash}
+  register: identity_token_claims_check
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Reject an invalid workload token identity
+  ansible.builtin.assert:
+    that: identity_token_claims_check.rc == 0
+    fail_msg: IDENTITY_TOKEN_CLAIMS_INVALID
+  no_log: true
+
+- name: Create the root-only identity manifest directory
+  ansible.builtin.file:
+    path: "{{ identity_manifest_directory }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Publish the sanitized identity deployment manifest
+  ansible.builtin.template:
+    src: deployment-manifest.json.j2
+    dest: "{{ identity_manifest_directory }}/IdentityFoundationDeploymentManifest.json"
+    owner: root
+    group: root
+    mode: '0600'

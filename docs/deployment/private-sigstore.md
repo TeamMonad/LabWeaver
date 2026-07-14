@@ -5,6 +5,31 @@ Fulcio, Rekor, CT log, Trillian and TUF trust plane. It does not claim that the
 production Keycloak client, offline root ceremony, cluster deployment, restore
 drill, Kyverno consumer or Release Gate consumer has been executed.
 
+## Identity foundation prerequisite
+
+The adopted cluster uses a separately managed Keycloak Stage 0 before Private
+Sigstore. The router-only allowlisted entries are:
+
+```sh
+cargo xtask identity-foundation --infra --env <environment> --action deploy --yes
+cargo xtask identity-foundation --infra --env <environment> --action verify --yes
+```
+
+The private-lab identity is fixed to
+`https://keycloak.labweaver.internal/realms/workloads`, Gateway VIP
+`10.20.0.222`, and confidential service-account client
+`labweaver-buildkit`. A namespace-scoped self-signed bootstrap Issuer creates a
+private CA; a separate namespace-scoped CA Issuer signs the Gateway
+certificate. This is a private-lab bootstrap trust root, not a public PKI or an
+offline Sigstore root.
+
+Keycloak and PostgreSQL images are digest-pinned. PostgreSQL uses persistent
+RWO storage, Keycloak runs two replicas, and interactive/direct-access grants
+are disabled for the workload client. The root-managed bootstrap locator is
+supplied through `LABWEAVER_IDENTITY_SECRET_LOCATOR`, must be root-owned mode
+`0600`, and has its SHA-256 pinned in private inventory. Secret values and
+tokens never enter reports or Git.
+
 ## Controller boundary
 
 The only repository entry is action-scoped and allowlisted:

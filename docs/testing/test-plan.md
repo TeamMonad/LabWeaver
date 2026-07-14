@@ -179,6 +179,15 @@ Neither deferred set is part of the baseline close condition for #23 or #15.
 
 ### Private Sigstore gates (Issue #61)
 
+The identity prerequisite is deployed only through
+`cargo xtask identity-foundation --infra --env <env> --action <deploy|verify>
+--yes`. It must reject an unapproved controller, missing or changed root-owned
+secret locator, mutable image, conflicting VIP/DNS, unexpected issuer, direct
+access grant or interactive flow. E3 evidence requires an exact discovery
+issuer, service-account token with the approved audience and
+`preferred_username`, two Ready Keycloak replicas, persistent PostgreSQL, a
+Programmed internal Gateway and trusted private CA.
+
 `cargo xtask private-sigstore --infra --env <env> --action <action> --yes` is the
 only lifecycle entry; `<action>` is a Rust enum, not a path. Contract tests reject public/wildcard/human workload identities, stale or
 tampered bundles, TUF rollback and reports that hide a required failure. Linux

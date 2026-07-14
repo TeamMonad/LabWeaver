@@ -95,5 +95,17 @@ private_sigstore_manifest_directory: /var/lib/labweaver/private-sigstore/manifes
 private_sigstore_trust_bundle_sha256: sha256:REPLACE_TRUST_BUNDLE_SHA256
 private_sigstore_workload_identity_policy_sha256: sha256:REPLACE_WORKLOAD_IDENTITY_POLICY_SHA256
 private_sigstore_tuf_root_version: REPLACE_TUF_ROOT_VERSION
+identity_foundation_enabled: false
+identity_namespace: keycloak-system
+identity_name: labweaver-keycloak
+identity_hostname: keycloak.labweaver.internal
+identity_gateway_vip: 10.20.0.222
+identity_realm: workloads
+identity_workload_client_id: labweaver-buildkit
+identity_workload_audience: labweaver-buildkit
+identity_secret_locator_sha256: sha256:REPLACE_IDENTITY_SECRET_LOCATOR_SHA256
+identity_storage_class: local-path
+identity_postgres_storage: 20Gi
+identity_keycloak_replicas: 2
 labweaver_run_id: infra-manual-0
 labweaver_commit_sha: 0000000000000000000000000000000000000000

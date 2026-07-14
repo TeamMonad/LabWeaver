@@ -1,0 +1,11 @@
+---
+- import_playbook: 00-preflight.yml
+  vars:
+    labweaver_preflight_scope: identity-foundation
+
+- name: Verify the private identity foundation
+  hosts: control_plane
+  gather_facts: false
+  vars:
+    identity_foundation_verify_only: true
+  roles: [identity_foundation]

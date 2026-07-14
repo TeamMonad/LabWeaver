@@ -1,7 +1,7 @@
 ---
 - name: Require an approved preflight scope
   ansible.builtin.assert:
-    that: (labweaver_preflight_scope | default('cluster')) in ['cluster', 'private-sigstore']
+    that: (labweaver_preflight_scope | default('cluster')) in ['cluster', 'private-sigstore', 'identity-foundation']
     fail_msg: PREFLIGHT_SCOPE_INVALID
   run_once: true
   delegate_to: localhost
@@ -29,7 +29,7 @@
     fail_msg: SIGSTORE_INVENTORY_SCOPE_INVALID
   run_once: true
   delegate_to: localhost
-  when: (labweaver_preflight_scope | default('cluster')) == 'private-sigstore'
+  when: (labweaver_preflight_scope | default('cluster')) in ['private-sigstore', 'identity-foundation']
 
 - name: Reject unresolved configuration placeholders
   ansible.builtin.assert:
@@ -76,7 +76,7 @@
       - "{{ nfs_server | string }}"
   run_once: true
   delegate_to: localhost
-  when: (labweaver_preflight_scope | default('cluster')) == 'private-sigstore'
+  when: (labweaver_preflight_scope | default('cluster')) in ['private-sigstore', 'identity-foundation']
 
 - name: Assert Rocky family target
   ansible.builtin.assert:

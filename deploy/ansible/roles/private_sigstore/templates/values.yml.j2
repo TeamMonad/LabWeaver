@@ -10,7 +10,7 @@ fulcio:
           ClientID: {{ private_sigstore_oidc_audience | to_json }}
           Type: username
           SubjectDomain: {{ private_sigstore_oidc_subject_domain | to_json }}
-          ChallengeClaim: sub
+          ChallengeClaim: preferred_username
   createcerts: {enabled: false}
   server:
     replicaCount: {{ private_sigstore_replicas }}

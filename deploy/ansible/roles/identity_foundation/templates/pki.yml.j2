@@ -1,0 +1,33 @@
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata: {name: identity-bootstrap-selfsigned, namespace: {{ identity_namespace }}}
+spec: {selfSigned: {}}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata: {name: identity-root-ca, namespace: {{ identity_namespace }}}
+spec:
+  isCA: true
+  commonName: LabWeaver Identity Root CA
+  secretName: {{ identity_ca_secret_name }}
+  duration: 87600h
+  renewBefore: 8760h
+  privateKey: {algorithm: ECDSA, size: 256, rotationPolicy: Never}
+  issuerRef: {name: identity-bootstrap-selfsigned, kind: Issuer}
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata: {name: identity-internal-ca, namespace: {{ identity_namespace }}}
+spec: {ca: {secretName: {{ identity_ca_secret_name }}}}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata: {name: keycloak-internal, namespace: {{ identity_namespace }}}
+spec:
+  secretName: {{ identity_tls_secret_name }}
+  commonName: {{ identity_hostname }}
+  dnsNames: [{{ identity_hostname }}, {{ identity_name }}-http.{{ identity_namespace }}.svc]
+  duration: 8760h
+  renewBefore: 720h
+  privateKey: {algorithm: ECDSA, size: 256, rotationPolicy: Always}
+  issuerRef: {name: identity-internal-ca, kind: Issuer}

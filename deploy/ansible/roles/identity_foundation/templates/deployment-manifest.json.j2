@@ -1,0 +1,14 @@
+{
+  "schema_version": "identity-foundation-deployment.v1",
+  "run_id": {{ identity_run_id | to_json }},
+  "commit_sha": {{ identity_commit_sha | to_json }},
+  "cluster_uid": {{ identity_cluster_uid.stdout | to_json }},
+  "inventory_sha256": {{ identity_inventory_hash | to_json }},
+  "component_lock_sha256": {{ identity_component_lock_hash | to_json }},
+  "secret_locator_sha256": {{ identity_secret_locator_sha256 | to_json }},
+  "issuer": {{ ('https://' ~ identity_hostname ~ '/realms/' ~ identity_realm) | to_json }},
+  "client_id": {{ identity_workload_client_id | to_json }},
+  "gateway_vip": {{ identity_gateway_vip | to_json }},
+  "keycloak_image": {{ identity_lock.images.keycloak | to_json }},
+  "postgres_image": {{ identity_lock.images.postgres | to_json }}
+}

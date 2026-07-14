@@ -34,6 +34,8 @@ enum Command {
     Backup(EnvironmentArgs),
     /// Run an allowlisted Private Sigstore lifecycle action.
     PrivateSigstore(PrivateSigstoreArgs),
+    /// Reconcile or verify the private Keycloak identity foundation.
+    IdentityFoundation(IdentityFoundationArgs),
     Upgrade(UpgradeArgs),
     Rollback(RollbackArgs),
     Restore(RestoreArgs),
@@ -85,6 +87,29 @@ struct PrivateSigstoreArgs {
     environment: EnvironmentArgs,
     #[arg(long, value_enum)]
     action: PrivateSigstoreAction,
+}
+
+#[derive(Debug, Args)]
+struct IdentityFoundationArgs {
+    #[command(flatten)]
+    environment: EnvironmentArgs,
+    #[arg(long, value_enum)]
+    action: IdentityFoundationAction,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum IdentityFoundationAction {
+    Deploy,
+    Verify,
+}
+
+impl IdentityFoundationAction {
+    const fn playbook(self) -> &'static str {
+        match self {
+            Self::Deploy => "91-identity-foundation.yml",
+            Self::Verify => "92-identity-foundation-verify.yml",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -315,6 +340,7 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::Verify(args) => verify(&args),
         Command::Backup(args) => backup(&args),
         Command::PrivateSigstore(args) => private_sigstore(&args),
+        Command::IdentityFoundation(args) => identity_foundation(&args),
         Command::Upgrade(args) => destructive_not_implemented("upgrade", args.yes),
         Command::Rollback(args) => destructive_not_implemented("rollback", args.yes),
         Command::Restore(args) => destructive_not_implemented("restore", args.yes),
@@ -434,6 +460,20 @@ fn private_sigstore(args: &PrivateSigstoreArgs) -> Result<(), AppError> {
     )
 }
 
+fn identity_foundation(args: &IdentityFoundationArgs) -> Result<(), AppError> {
+    if !args.environment.yes {
+        return Err(AppError::ConfirmationRequired {
+            command: "identity-foundation",
+        });
+    }
+    require_infrastructure(&args.environment, "identity-foundation --infra")?;
+    run_infrastructure(
+        &args.environment.env,
+        args.action.playbook(),
+        "identity-foundation --infra",
+    )
+}
+
 fn require_infrastructure(args: &EnvironmentArgs, command: &'static str) -> Result<(), AppError> {
     if !args.infra {
         return Err(AppError::NotImplemented {
@@ -486,6 +526,7 @@ fn run_infrastructure(
         sigstore_secret_locator,
         sigstore_tuf_root_locator,
         deployment_manifest_hash,
+        identity_secret_locator,
     } = InfrastructureInputs::load(environment, playbook_name)?;
     let run_id = required_run_id("LABWEAVER_RUN_ID", "infrastructure run identity")?;
     let testflight_run_id = required_run_id(
@@ -523,6 +564,7 @@ fn run_infrastructure(
             "LABWEAVER_DEPLOYMENT_MANIFEST_HASH",
             deployment_manifest_hash,
         )
+        .add_env("LABWEAVER_IDENTITY_SECRET_LOCATOR", identity_secret_locator)
         .set_inventory(&inventory);
     // ansible-rs 1.1.0 appends configured arguments twice in `run`; all
     // controller identity and vault inputs therefore travel through the
@@ -556,6 +598,7 @@ struct InfrastructureInputs {
     sigstore_secret_locator: String,
     sigstore_tuf_root_locator: String,
     deployment_manifest_hash: String,
+    identity_secret_locator: String,
 }
 
 #[cfg(target_os = "linux")]
@@ -600,6 +643,10 @@ impl InfrastructureInputs {
                 | "101-private-sigstore-cleanup.yml"
                 | "102-private-sigstore-disaster-recovery.yml"
         );
+        let identity_foundation = matches!(
+            playbook_name,
+            "91-identity-foundation.yml" | "92-identity-foundation-verify.yml"
+        );
         let sigstore_backup_locator = if private_sigstore {
             required_environment_value(
                 "LABWEAVER_SIGSTORE_BACKUP_LOCATOR",
@@ -643,6 +690,14 @@ impl InfrastructureInputs {
         } else {
             std::env::var("LABWEAVER_DEPLOYMENT_MANIFEST_HASH").unwrap_or_default()
         };
+        let identity_secret_locator = if identity_foundation {
+            required_environment_value(
+                "LABWEAVER_IDENTITY_SECRET_LOCATOR",
+                "identity-foundation secret locator",
+            )?
+        } else {
+            std::env::var("LABWEAVER_IDENTITY_SECRET_LOCATOR").unwrap_or_default()
+        };
 
         Ok(Self {
             inventory: infrastructure_path(&inventory),
@@ -661,6 +716,7 @@ impl InfrastructureInputs {
             sigstore_secret_locator,
             sigstore_tuf_root_locator,
             deployment_manifest_hash,
+            identity_secret_locator,
         })
     }
 }
@@ -958,7 +1014,8 @@ fn not_implemented(command: impl Into<String>) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        EnvironmentArgs, PrivateSigstoreAction, PrivateSigstoreArgs, deploy, private_sigstore,
+        EnvironmentArgs, IdentityFoundationAction, IdentityFoundationArgs, PrivateSigstoreAction,
+        PrivateSigstoreArgs, deploy, identity_foundation, private_sigstore,
     };
 
     fn sigstore_args(env: &str, infra: bool, yes: bool) -> PrivateSigstoreArgs {
@@ -969,6 +1026,17 @@ mod tests {
                 yes,
             },
             action: PrivateSigstoreAction::Deploy,
+        }
+    }
+
+    fn identity_args(env: &str, infra: bool, yes: bool) -> IdentityFoundationArgs {
+        IdentityFoundationArgs {
+            environment: EnvironmentArgs {
+                env: env.into(),
+                infra,
+                yes,
+            },
+            action: IdentityFoundationAction::Deploy,
         }
     }
 
@@ -1121,5 +1189,22 @@ mod tests {
         for (action, expected) in mappings {
             assert_eq!(action.playbook(), expected);
         }
+    }
+
+    #[test]
+    fn identity_foundation_requires_confirmation_and_fixed_playbooks() -> Result<(), String> {
+        let Err(error) = identity_foundation(&identity_args("dev", true, false)) else {
+            return Err("identity-foundation without --yes must fail".into());
+        };
+        assert_eq!(error.diagnostic_code(), "XTASK_CONFIRMATION_REQUIRED");
+        assert_eq!(
+            IdentityFoundationAction::Deploy.playbook(),
+            "91-identity-foundation.yml"
+        );
+        assert_eq!(
+            IdentityFoundationAction::Verify.playbook(),
+            "92-identity-foundation-verify.yml"
+        );
+        Ok(())
     }
 }

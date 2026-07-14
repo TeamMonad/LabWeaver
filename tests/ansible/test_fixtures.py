@@ -164,6 +164,57 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("sigstore_controller_inputs | select('match', '^REPLACE_')", preflight)
         self.assertIn("rejects Worker or NFS inventory", docs)
 
+    def test_identity_foundation_is_pinned_private_and_fail_closed(self) -> None:
+        deploy = (ROOT / "deploy/ansible/playbooks/91-identity-foundation.yml").read_text(
+            encoding="utf-8"
+        )
+        tasks = (ROOT / "deploy/ansible/roles/identity_foundation/tasks/main.yml").read_text(
+            encoding="utf-8"
+        )
+        workloads = (
+            ROOT / "deploy/ansible/roles/identity_foundation/templates/workloads.yml.j2"
+        ).read_text(encoding="utf-8")
+        provision_job = (
+            ROOT / "deploy/ansible/roles/identity_foundation/templates/provision-job.yml.j2"
+        ).read_text(encoding="utf-8")
+        pki = (ROOT / "deploy/ansible/roles/identity_foundation/templates/pki.yml.j2").read_text(
+            encoding="utf-8"
+        )
+        lock = (ROOT / "deploy/versions.lock.yml").read_text(encoding="utf-8")
+        sigstore_values = (
+            ROOT / "deploy/ansible/roles/private_sigstore/templates/values.yml.j2"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(deploy.splitlines()[1], "- import_playbook: 00-preflight.yml")
+        self.assertIn("labweaver_preflight_scope: identity-foundation", deploy)
+        self.assertIn("IDENTITY_SECRET_LOCATOR_INVALID", tasks)
+        self.assertIn("IDENTITY_GATEWAY_VIP_CONFLICT", tasks)
+        self.assertIn("IDENTITY_DNS_CONFLICT", tasks)
+        self.assertIn("no_log: true", tasks)
+        self.assertIn("kind: Issuer", pki)
+        self.assertNotIn("kind: ClusterIssuer", pki)
+        self.assertIn("rotationPolicy: Never", pki)
+        self.assertIn("replicas: {{ identity_keycloak_replicas }}", workloads)
+        self.assertIn("standardFlowEnabled=false", provision_job)
+        self.assertIn("directAccessGrantsEnabled=false", provision_job)
+        self.assertIn("keycloak: docker.io/keycloak/keycloak:26.7.0@sha256:", lock)
+        self.assertIn("postgres: docker.io/library/postgres:17.6-alpine@sha256:", lock)
+        self.assertIn("python_kubernetes_rpm: python3-kubernetes-34.1.0-2.el10_2", lock)
+        self.assertIn("identity_lock.python_kubernetes_rpm", tasks)
+        self.assertIn("ChallengeClaim: preferred_username", sigstore_values)
+        self.assertIn("runAsUser: 70, runAsGroup: 70", workloads)
+        self.assertIn("runAsUser: 1000", workloads)
+        self.assertIn("oidc-audience-mapper", provision_job)
+        self.assertIn("metallb.io/loadBalancerIPs", (
+            ROOT / "deploy/ansible/roles/identity_foundation/templates/gateway.yml.j2"
+        ).read_text(encoding="utf-8"))
+        self.assertIn("fromEntities: [ingress]", (
+            ROOT / "deploy/ansible/roles/identity_foundation/templates/policy.yml.j2"
+        ).read_text(encoding="utf-8"))
+        self.assertIn("IDENTITY_TOKEN_CLAIMS_INVALID", tasks)
+        self.assertIn("service-account-{{ identity_workload_client_id }}", tasks)
+        self.assertNotIn(":latest", workloads)
+
     def test_render_validator_rejects_mutable_and_public_images(self) -> None:
         validator_path = ROOT / "tests/ansible/validate_sigstore_render.py"
         spec = importlib.util.spec_from_file_location("sigstore_render", validator_path)
