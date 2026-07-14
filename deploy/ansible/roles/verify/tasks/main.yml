@@ -172,7 +172,9 @@
       changed_when: false
 
     - name: Exercise KubeVirt console connection
-      ansible.builtin.command: "timeout 15s virtctl -n {{ verify_runtime_namespace }} console kvm-probe"
+      ansible.builtin.command: >-
+        timeout --foreground --kill-after=5s 15s
+        virtctl -n {{ verify_runtime_namespace }} console kvm-probe
       changed_when: false
       register: verify_console_probe
       failed_when: verify_console_probe.rc not in [0, 124]
