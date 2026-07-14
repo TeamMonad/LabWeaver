@@ -1,0 +1,34 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny, namespace: {{ private_sigstore_namespace }}}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: sigstore-internal-only, namespace: {{ private_sigstore_namespace }}}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/instance: {{ private_sigstore_release_name }}}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ private_sigstore_namespace }}}}
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ private_sigstore_build_namespace }}}}
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+  egress:
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ private_sigstore_namespace }}}}
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ private_sigstore_keycloak_namespace }}}}
+      ports: [{protocol: TCP, port: 443}]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: private-sigstore, namespace: {{ private_sigstore_namespace }}}
+spec:
+  minAvailable: 1
+  selector: {matchLabels: {app.kubernetes.io/instance: {{ private_sigstore_release_name }}}}

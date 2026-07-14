@@ -1,0 +1,392 @@
+---
+- name: Bind Private Sigstore execution identity and locked components
+  ansible.builtin.set_fact:
+    sigstore_run_id: "{{ lookup('env', 'LABWEAVER_RUN_ID') }}"
+    sigstore_commit_sha: "{{ lookup('env', 'LABWEAVER_COMMIT_SHA') }}"
+    sigstore_inventory_hash: "{{ lookup('env', 'LABWEAVER_INVENTORY_HASH') }}"
+    sigstore_component_lock_hash: "{{ lookup('env', 'LABWEAVER_COMPONENT_LOCK_HASH') }}"
+    sigstore_backup_locator: "{{ lookup('env', 'LABWEAVER_SIGSTORE_BACKUP_LOCATOR') }}"
+    sigstore_secret_locator: "{{ lookup('env', 'LABWEAVER_SIGSTORE_SECRET_LOCATOR') }}"
+    sigstore_tuf_root_locator: "{{ lookup('env', 'LABWEAVER_SIGSTORE_TUF_ROOT_LOCATOR') }}"
+    sigstore_deployment_manifest_hash: "{{ lookup('env', 'LABWEAVER_DEPLOYMENT_MANIFEST_HASH') }}"
+    sigstore_lock: "{{ (lookup('file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml).private_sigstore }}"
+
+- name: Require explicit fail-closed Private Sigstore configuration
+  ansible.builtin.assert:
+    that:
+      - private_sigstore_enabled | bool
+      - sigstore_run_id is match('^infra-[a-z0-9-]+$')
+      - sigstore_commit_sha is match('^[0-9a-f]{40,64}$')
+      - sigstore_inventory_hash is match('^sha256:[0-9a-f]{64}$')
+      - sigstore_component_lock_hash is match('^sha256:[0-9a-f]{64}$')
+      - sigstore_deployment_manifest_hash is match('^sha256:[0-9a-f]{64}$')
+      - private_sigstore_chart_version == '0.6.111'
+      - sigstore_lock.scaffold_chart == '0.6.111'
+      - sigstore_lock.cosign == '3.0.6'
+      - sigstore_lock.scaffold_chart_archive_sha256 is match('^sha256:[0-9a-f]{64}$')
+      - sigstore_lock.images.values() | reject('match', '^.+@sha256:[0-9a-f]{64}$') | list | length == 0
+      - private_sigstore_namespace == 'sigstore-system'
+      - private_sigstore_replicas | int >= 2
+      - (private_sigstore_rekor_tree_id | string) is match('^[1-9][0-9]+$')
+      - (private_sigstore_ctlog_tree_id | string) is match('^[1-9][0-9]+$')
+      - (private_sigstore_rekor_tree_id | string) != (private_sigstore_ctlog_tree_id | string)
+      - private_sigstore_internal_dns is match('^[a-z0-9.-]+\\.internal$')
+      - private_sigstore_oidc_issuer is match('^https://[a-z0-9.-]+/realms/[a-z0-9-]+$')
+      - '"sigstore.dev" not in private_sigstore_oidc_issuer'
+      - private_sigstore_oidc_audience | length > 0
+      - private_sigstore_oidc_client_id | length > 0
+      - private_sigstore_oidc_audience == private_sigstore_oidc_client_id
+      - private_sigstore_oidc_subject_domain is match('^[a-z0-9.-]+\\.internal$')
+      - private_sigstore_keycloak_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - private_sigstore_build_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - private_sigstore_allowed_subjects | length == 1
+      - private_sigstore_allowed_subjects[0] == ('service-account-' ~ private_sigstore_oidc_client_id ~ '!' ~ private_sigstore_oidc_subject_domain)
+      - private_sigstore_allowed_subjects | select('search', '\\*') | list | length == 0
+      - sigstore_secret_locator | length > 0
+      - private_sigstore_secret_locator_sha256 is match('^sha256:[0-9a-f]{64}$')
+      - sigstore_tuf_root_locator | length > 0
+      - private_sigstore_tls_secret_name | length > 0
+      - private_sigstore_gateway_vip is match('^(?:10\\.|172\\.(?:1[6-9]|2[0-9]|3[01])\\.|192\\.168\\.)')
+      - private_sigstore_rotation_owner | length > 0
+      - private_sigstore_rollback_owner | length > 0
+    fail_msg: SIGSTORE_CONFIGURATION_INVALID
+
+- name: Reject placeholder Private Sigstore inputs
+  ansible.builtin.assert:
+    that:
+      - private_sigstore_internal_dns is not search('REPLACE_')
+      - private_sigstore_oidc_issuer is not search('REPLACE_')
+      - private_sigstore_oidc_audience is not search('REPLACE_')
+      - private_sigstore_oidc_client_id is not search('REPLACE_')
+      - private_sigstore_oidc_subject_domain is not search('REPLACE_')
+      - private_sigstore_rekor_tree_id | string is not search('REPLACE_')
+      - private_sigstore_ctlog_tree_id | string is not search('REPLACE_')
+      - sigstore_secret_locator is not search('REPLACE_')
+      - sigstore_tuf_root_locator is not search('REPLACE_')
+    fail_msg: SIGSTORE_PLACEHOLDER_INPUT_REJECTED
+
+- name: Verify the pinned scaffold chart archive
+  ansible.builtin.stat:
+    path: "{{ private_sigstore_chart_archive }}"
+    checksum_algorithm: sha256
+  register: sigstore_chart
+
+- name: Reject missing or mismatched scaffold chart bytes
+  ansible.builtin.assert:
+    that:
+      - sigstore_chart.stat.exists
+      - ('sha256:' ~ sigstore_chart.stat.checksum) == sigstore_lock.scaffold_chart_archive_sha256
+    fail_msg: SIGSTORE_CHART_IDENTITY_MISMATCH
+
+- name: Read the public TUF root metadata without logging it
+  ansible.builtin.slurp:
+    src: "{{ sigstore_tuf_root_locator }}"
+  register: sigstore_tuf_root_raw
+  no_log: true
+
+- name: Require the expected public TUF root identity
+  ansible.builtin.assert:
+    that:
+      - (sigstore_tuf_root_raw.content | b64decode | hash('sha256')) == private_sigstore_expected_tuf_root_sha256 | regex_replace('^sha256:', '')
+      - (sigstore_tuf_root_raw.content | b64decode | from_json).signed.version | int >= 1
+      - (sigstore_tuf_root_raw.content | b64decode | from_json).signed.expires | length > 0
+    fail_msg: SIGSTORE_TUF_ROOT_IDENTITY_INVALID
+  no_log: true
+
+- name: Detect existing Private Sigstore state before any mutation
+  ansible.builtin.command:
+    argv:
+      - "{{ private_sigstore_kubectl_path }}"
+      - --kubeconfig
+      - "{{ private_sigstore_kubeconfig_path }}"
+      - get
+      - namespace
+      - "{{ private_sigstore_namespace }}"
+      - --output
+      - json
+  changed_when: false
+  failed_when: false
+  register: sigstore_existing_namespace
+
+- name: Require the C0 provisioned namespace before chart reconciliation
+  ansible.builtin.assert:
+    that: sigstore_existing_namespace.rc == 0
+    fail_msg: SIGSTORE_NAMESPACE_NOT_PROVISIONED
+
+- name: Detect retained Private Sigstore persistent state before any mutation
+  ansible.builtin.command:
+    argv:
+      - "{{ private_sigstore_kubectl_path }}"
+      - --kubeconfig
+      - "{{ private_sigstore_kubeconfig_path }}"
+      - --namespace
+      - "{{ private_sigstore_namespace }}"
+      - get
+      - persistentvolumeclaims
+      - --output
+      - name
+  changed_when: false
+  register: sigstore_existing_pvcs
+
+- name: Read the adopted cluster UID for backup binding
+  ansible.builtin.command:
+    argv:
+      - "{{ private_sigstore_kubectl_path }}"
+      - --kubeconfig
+      - "{{ private_sigstore_kubeconfig_path }}"
+      - get
+      - namespace
+      - kube-system
+      - --output
+      - jsonpath={.metadata.uid}
+  changed_when: false
+  register: sigstore_cluster_uid
+
+- name: Require an identity-bound backup before reconciling existing state
+  ansible.builtin.assert:
+    that: sigstore_backup_locator | length > 0
+    fail_msg: SIGSTORE_BACKUP_REQUIRED
+  when: sigstore_existing_pvcs.stdout_lines | length > 0
+
+- name: Read existing-state backup evidence without logging locators or content
+  ansible.builtin.slurp:
+    src: "{{ sigstore_backup_locator }}"
+  register: sigstore_backup_raw
+  no_log: true
+  when: sigstore_existing_pvcs.stdout_lines | length > 0
+
+- name: Bind backup evidence to this exact reconciliation
+  ansible.builtin.assert:
+    that:
+      - (sigstore_backup_raw.content | b64decode | from_json).schema_version == 'private-sigstore-backup.v1'
+      - (sigstore_backup_raw.content | b64decode | from_json).commit_sha == sigstore_commit_sha
+      - (sigstore_backup_raw.content | b64decode | from_json).inventory_sha256 == sigstore_inventory_hash
+      - (sigstore_backup_raw.content | b64decode | from_json).component_lock_sha256 == sigstore_component_lock_hash
+      - (sigstore_backup_raw.content | b64decode | from_json).cluster_uid == sigstore_cluster_uid.stdout
+      - (sigstore_backup_raw.content | b64decode | from_json).deployment_manifest_sha256 == sigstore_deployment_manifest_hash
+      - (sigstore_backup_raw.content | b64decode | from_json).tuf_root_sha256 == private_sigstore_expected_tuf_root_sha256
+      - (sigstore_backup_raw.content | b64decode | from_json).trust_bundle_sha256 is match('^sha256:[0-9a-f]{64}$')
+      - (sigstore_backup_raw.content | b64decode | from_json).artifact_sha256 is match('^sha256:[0-9a-f]{64}$')
+    fail_msg: SIGSTORE_BACKUP_IDENTITY_INVALID
+  no_log: true
+  when: sigstore_existing_pvcs.stdout_lines | length > 0
+
+- name: Require root-managed secret locator without exposing its content
+  ansible.builtin.command:
+    argv: [sudo, -n, test, -r, "{{ sigstore_secret_locator }}"]
+  changed_when: false
+  no_log: true
+
+- name: Hash the root-managed secret locator identity without exposing content
+  ansible.builtin.stat:
+    path: "{{ sigstore_secret_locator }}"
+    checksum_algorithm: sha256
+  register: sigstore_secret_locator_stat
+  no_log: true
+
+- name: Reject a changed secret locator identity
+  ansible.builtin.assert:
+    that:
+      - ('sha256:' ~ sigstore_secret_locator_stat.stat.checksum) == private_sigstore_secret_locator_sha256
+    fail_msg: SIGSTORE_SECRET_LOCATOR_IDENTITY_INVALID
+  no_log: true
+
+- name: Require externally provisioned signing TUF and TLS Secrets
+  ansible.builtin.command:
+    argv:
+      - "{{ private_sigstore_kubectl_path }}"
+      - --kubeconfig
+      - "{{ private_sigstore_kubeconfig_path }}"
+      - --namespace
+      - "{{ private_sigstore_namespace }}"
+      - get
+      - secret
+      - "{{ private_sigstore_fulcio_secret_name }}"
+      - "{{ private_sigstore_rekor_secret_name }}"
+      - "{{ private_sigstore_ctlog_secret_name }}"
+      - "{{ private_sigstore_trillian_mysql_secret_name }}"
+      - "{{ private_sigstore_tls_secret_name }}"
+      - --output
+      - name
+  changed_when: false
+  no_log: true
+
+- name: Validate externally provisioned Secret key contracts without logging values
+  ansible.builtin.command:
+    argv:
+      - "{{ private_sigstore_kubectl_path }}"
+      - --kubeconfig
+      - "{{ private_sigstore_kubeconfig_path }}"
+      - --namespace
+      - "{{ private_sigstore_namespace }}"
+      - get
+      - secret
+      - "{{ item.name }}"
+      - --output
+      - "jsonpath={.data.{{ item.key }}}"
+  loop:
+    - {name: "{{ private_sigstore_fulcio_secret_name }}", key: cert}
+    - {name: "{{ private_sigstore_fulcio_secret_name }}", key: private}
+    - {name: "{{ private_sigstore_rekor_secret_name }}", key: public}
+    - {name: "{{ private_sigstore_rekor_secret_name }}", key: private}
+    - {name: "{{ private_sigstore_ctlog_secret_name }}", key: public}
+    - {name: "{{ private_sigstore_ctlog_secret_name }}", key: private}
+    - {name: "{{ private_sigstore_trillian_mysql_secret_name }}", key: mysql-root-password}
+    - {name: "{{ private_sigstore_trillian_mysql_secret_name }}", key: mysql-user}
+    - {name: "{{ private_sigstore_trillian_mysql_secret_name }}", key: mysql-password}
+    - {name: "{{ private_sigstore_trillian_mysql_secret_name }}", key: mysql-database}
+    - {name: "{{ private_sigstore_tls_secret_name }}", key: 'tls\\.crt'}
+    - {name: "{{ private_sigstore_tls_secret_name }}", key: 'tls\\.key'}
+  loop_control:
+    label: "{{ item.name }}:{{ item.key }}"
+  changed_when: false
+  no_log: true
+  register: sigstore_secret_keys
+
+- name: Reject missing or empty externally provisioned Secret keys
+  ansible.builtin.assert:
+    that:
+      - >-
+        sigstore_secret_keys.results
+        | selectattr('stdout', 'defined')
+        | rejectattr('stdout', 'equalto', '')
+        | list | length == sigstore_secret_keys.results | length
+    fail_msg: SIGSTORE_SECRET_KEY_CONTRACT_INVALID
+  no_log: true
+
+- name: Enforce restricted Pod Security on the namespace
+  ansible.builtin.command:
+    argv:
+      - "{{ private_sigstore_kubectl_path }}"
+      - --kubeconfig
+      - "{{ private_sigstore_kubeconfig_path }}"
+      - label
+      - namespace
+      - "{{ private_sigstore_namespace }}"
+      - pod-security.kubernetes.io/enforce=restricted
+      - app.kubernetes.io/part-of=labweaver-infrastructure
+      - --overwrite
+  register: sigstore_namespace_labels
+  changed_when: "'not labeled' not in sigstore_namespace_labels.stdout"
+
+- name: Render isolation and availability policy before workload creation
+  ansible.builtin.template:
+    src: policy.yml.j2
+    dest: /var/tmp/labweaver-private-sigstore-policy.yml
+    mode: '0600'
+
+- name: Apply fail-closed isolation before workload creation
+  ansible.builtin.command:
+    argv:
+      - "{{ private_sigstore_kubectl_path }}"
+      - --kubeconfig
+      - "{{ private_sigstore_kubeconfig_path }}"
+      - apply
+      - --filename
+      - /var/tmp/labweaver-private-sigstore-policy.yml
+  register: sigstore_policy_apply
+  changed_when: "'unchanged' not in sigstore_policy_apply.stdout"
+
+- name: Render private scaffold values
+  ansible.builtin.template:
+    src: values.yml.j2
+    dest: /var/tmp/labweaver-private-sigstore-values.yml
+    mode: '0600'
+
+- name: Reconcile the pinned Private Sigstore chart
+  kubernetes.core.helm:
+    name: "{{ private_sigstore_release_name }}"
+    chart_ref: "{{ private_sigstore_chart_archive }}"
+    chart_version: "{{ private_sigstore_chart_version }}"
+    release_namespace: "{{ private_sigstore_namespace }}"
+    kubeconfig: "{{ private_sigstore_kubeconfig_path }}"
+    create_namespace: false
+    values_files: [/var/tmp/labweaver-private-sigstore-values.yml]
+    atomic: true
+    wait: true
+    wait_timeout: 10m
+  no_log: true
+
+- name: Render the internal TLS Gateway
+  ansible.builtin.template:
+    src: gateway.yml.j2
+    dest: /var/tmp/labweaver-private-sigstore-gateway.yml
+    mode: '0600'
+
+- name: Apply the internal-only TLS Gateway
+  ansible.builtin.command:
+    argv:
+      - "{{ private_sigstore_kubectl_path }}"
+      - --kubeconfig
+      - "{{ private_sigstore_kubeconfig_path }}"
+      - apply
+      - --filename
+      - /var/tmp/labweaver-private-sigstore-gateway.yml
+  register: sigstore_gateway_apply
+  changed_when: "'unchanged' not in sigstore_gateway_apply.stdout"
+
+- name: Read all Private Sigstore service exposure types
+  ansible.builtin.command:
+    argv:
+      - "{{ private_sigstore_kubectl_path }}"
+      - --kubeconfig
+      - "{{ private_sigstore_kubeconfig_path }}"
+      - get
+      - service
+      - --all-namespaces
+      - --selector
+      - "app.kubernetes.io/instance={{ private_sigstore_release_name }}"
+      - --output
+      - 'jsonpath={range .items[*]}{.spec.type}{"\n"}{end}'
+  changed_when: false
+  register: sigstore_service_types
+
+- name: Reject public or node-level service exposure
+  ansible.builtin.assert:
+    that:
+      - "'NodePort' not in sigstore_service_types.stdout_lines"
+      - "'LoadBalancer' not in sigstore_service_types.stdout_lines"
+    fail_msg: SIGSTORE_PUBLIC_ENDPOINT_FORBIDDEN
+
+- name: Read deployed images for immutable identity verification
+  ansible.builtin.command:
+    argv:
+      - "{{ private_sigstore_kubectl_path }}"
+      - --kubeconfig
+      - "{{ private_sigstore_kubeconfig_path }}"
+      - get
+      - pods
+      - --all-namespaces
+      - --selector
+      - "app.kubernetes.io/instance={{ private_sigstore_release_name }}"
+      - --output
+      - 'jsonpath={range .items[*].spec.containers[*]}{.image}{"\n"}{end}'
+  changed_when: false
+  register: sigstore_deployed_images
+
+- name: Reject mutable deployed image identities
+  ansible.builtin.assert:
+    that:
+      - sigstore_deployed_images.stdout_lines | length > 0
+      - sigstore_deployed_images.stdout_lines | reject('match', '^.+@sha256:[0-9a-f]{64}$') | list | length == 0
+    fail_msg: SIGSTORE_MUTABLE_IMAGE_FORBIDDEN
+
+- name: Create the root-only Private Sigstore manifest directory
+  ansible.builtin.file:
+    path: "{{ private_sigstore_manifest_directory }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  delegate_to: "{{ groups['routers'][0] }}"
+  become: true
+
+- name: Publish the sanitized identity-bound deployment manifest
+  ansible.builtin.template:
+    src: deployment-manifest.json.j2
+    dest: "{{ private_sigstore_manifest_directory }}/PrivateSigstoreDeploymentManifest.json"
+    owner: root
+    group: root
+    mode: '0600'
+  delegate_to: "{{ groups['routers'][0] }}"
+  become: true

@@ -30,12 +30,11 @@ jobs:
       - name: Lint roles and playbooks
         run: ansible-lint deploy/ansible/playbooks deploy/ansible/roles
       - name: Check playbook syntax
-        run: >-
-          ansible-playbook --syntax-check -i deploy/ansible/inventories/dev/hosts.yml.example
-          deploy/ansible/playbooks/site.yml
-          && ansible-playbook --syntax-check -i deploy/ansible/inventories/dev/hosts.yml.example
-          deploy/ansible/playbooks/95-harbor.yml
-          && ansible-playbook --syntax-check -i deploy/ansible/inventories/dev/hosts.yml.example
-          deploy/ansible/playbooks/90-verify.yml
+        run: |
+          cp deploy/ansible/inventories/dev/hosts.yml.example /tmp/labweaver-hosts.yml
+          ansible-playbook --syntax-check -i /tmp/labweaver-hosts.yml deploy/ansible/playbooks/site.yml
+          ansible-playbook --syntax-check -i /tmp/labweaver-hosts.yml deploy/ansible/playbooks/95-harbor.yml
+          ansible-playbook --syntax-check -i /tmp/labweaver-hosts.yml deploy/ansible/playbooks/90-verify.yml
+          ansible-playbook --syntax-check -i /tmp/labweaver-hosts.yml deploy/ansible/playbooks/96-private-sigstore.yml
       - name: Run fictional Vault and storage-safety fixtures
         run: python -m unittest discover -s tests/ansible

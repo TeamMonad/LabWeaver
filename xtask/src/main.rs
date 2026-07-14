@@ -32,6 +32,8 @@ enum Command {
     Deploy(EnvironmentArgs),
     Verify(EnvironmentArgs),
     Backup(EnvironmentArgs),
+    /// Reconcile the allowlisted Private Sigstore trust plane.
+    PrivateSigstore(EnvironmentArgs),
     Upgrade(UpgradeArgs),
     Rollback(RollbackArgs),
     Restore(RestoreArgs),
@@ -156,6 +158,9 @@ enum AppError {
     ContractDrift {
         path: String,
     },
+    InvalidArgument {
+        role: &'static str,
+    },
     #[cfg(not(target_os = "linux"))]
     UnsupportedPlatform {
         command: &'static str,
@@ -170,6 +175,7 @@ impl AppError {
             Self::ConfirmationRequired { .. } => "XTASK_CONFIRMATION_REQUIRED",
             Self::Io { .. } => "XTASK_IO_FAILED",
             Self::ContractDrift { .. } => "LW_CONTRACT_DRIFT",
+            Self::InvalidArgument { .. } => "XTASK_INVALID_ARGUMENT",
             #[cfg(not(target_os = "linux"))]
             Self::UnsupportedPlatform { .. } => "XTASK_INFRA_UNSUPPORTED_PLATFORM",
         }
@@ -201,6 +207,12 @@ impl Display for AppError {
             Self::Io { role, detail } => write!(formatter, "{role} failed: {detail}"),
             Self::ContractDrift { path } => {
                 write!(formatter, "generated contract differs from {path}")
+            }
+            Self::InvalidArgument { role } => {
+                write!(
+                    formatter,
+                    "{role} must use a lowercase allowlisted identifier"
+                )
             }
             #[cfg(not(target_os = "linux"))]
             Self::UnsupportedPlatform { command } => write!(
@@ -241,7 +253,10 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::Build => run_cargo("build", ["build", "--workspace", "--exclude", "xtask"]),
         Command::Test(args) => match args.suite {
             TestSuite::All => run_cargo("test", ["test", "--workspace", "--exclude", "xtask"]),
-            TestSuite::Contract => not_implemented("test --suite contract"),
+            TestSuite::Contract => {
+                run_cargo("contract test", ["test", "-p", "contracts", "--locked"])?;
+                contracts_check()
+            }
             TestSuite::Integration => not_implemented("test --suite integration"),
             TestSuite::E2e => not_implemented("test --suite e2e"),
         },
@@ -266,6 +281,7 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::Deploy(args) => deploy(&args),
         Command::Verify(args) => verify(&args),
         Command::Backup(args) => backup(&args),
+        Command::PrivateSigstore(args) => private_sigstore(&args),
         Command::Upgrade(args) => destructive_not_implemented("upgrade", args.yes),
         Command::Rollback(args) => destructive_not_implemented("rollback", args.yes),
         Command::Restore(args) => destructive_not_implemented("restore", args.yes),
@@ -346,6 +362,7 @@ fn deploy(args: &EnvironmentArgs) -> Result<(), AppError> {
     if !args.infra {
         return not_implemented(format!("deploy --env {} (product deployment)", args.env));
     }
+    validate_environment_name(&args.env)?;
     run_infrastructure(&args.env, "95-harbor.yml", "deploy --infra")
 }
 
@@ -370,12 +387,44 @@ fn backup(args: &EnvironmentArgs) -> Result<(), AppError> {
     run_infrastructure(&args.env, "85-backup.yml", "backup --infra")
 }
 
+fn private_sigstore(args: &EnvironmentArgs) -> Result<(), AppError> {
+    if !args.yes {
+        return Err(AppError::ConfirmationRequired {
+            command: "private-sigstore",
+        });
+    }
+    require_infrastructure(args, "private-sigstore --infra")?;
+    run_infrastructure(
+        &args.env,
+        "96-private-sigstore.yml",
+        "private-sigstore --infra",
+    )
+}
+
 fn require_infrastructure(args: &EnvironmentArgs, command: &'static str) -> Result<(), AppError> {
-    if args.infra {
+    if !args.infra {
+        return Err(AppError::NotImplemented {
+            command: format!("{command} (product path)"),
+        });
+    }
+    validate_environment_name(&args.env)
+}
+
+fn validate_environment_name(environment: &str) -> Result<(), AppError> {
+    let valid = !environment.is_empty()
+        && environment.len() <= 32
+        && environment
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_lowercase)
+        && environment.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        });
+    if valid {
         Ok(())
     } else {
-        Err(AppError::NotImplemented {
-            command: format!("{command} (product path)"),
+        Err(AppError::InvalidArgument {
+            role: "infrastructure environment",
         })
     }
 }
@@ -400,6 +449,10 @@ fn run_infrastructure(
         inventory_hash,
         component_lock_hash,
         harbor_data_backup_locator,
+        sigstore_backup_locator,
+        sigstore_secret_locator,
+        sigstore_tuf_root_locator,
+        deployment_manifest_hash,
     } = InfrastructureInputs::load(environment, playbook_name)?;
     let run_id = infrastructure_run_id("infra", "infrastructure run identity")?;
     let testflight_run_id =
@@ -425,6 +478,16 @@ fn run_infrastructure(
             harbor_data_backup_locator,
         )
         .add_env("LABWEAVER_TESTFLIGHT_RUN_ID", testflight_run_id)
+        .add_env("LABWEAVER_SIGSTORE_BACKUP_LOCATOR", sigstore_backup_locator)
+        .add_env("LABWEAVER_SIGSTORE_SECRET_LOCATOR", sigstore_secret_locator)
+        .add_env(
+            "LABWEAVER_SIGSTORE_TUF_ROOT_LOCATOR",
+            sigstore_tuf_root_locator,
+        )
+        .add_env(
+            "LABWEAVER_DEPLOYMENT_MANIFEST_HASH",
+            deployment_manifest_hash,
+        )
         .set_inventory(&inventory);
     // ansible-rs 1.1.0 appends configured arguments twice in `run`; all
     // controller identity and vault inputs therefore travel through the
@@ -433,7 +496,7 @@ fn run_infrastructure(
         .run(Play::from_file(playbook))
         .map(|_| ())
         .map_err(|_| AppError::ExternalCommand {
-            role: "harbor infrastructure playbook",
+            role: "allowlisted infrastructure playbook",
             code: None,
             detail: Some(
                 "ansible-rs returned a non-zero result; inspect the controller event log".into(),
@@ -454,6 +517,10 @@ struct InfrastructureInputs {
     inventory_hash: String,
     component_lock_hash: String,
     harbor_data_backup_locator: String,
+    sigstore_backup_locator: String,
+    sigstore_secret_locator: String,
+    sigstore_tuf_root_locator: String,
+    deployment_manifest_hash: String,
 }
 
 #[cfg(target_os = "linux")]
@@ -500,6 +567,14 @@ impl InfrastructureInputs {
             inventory_hash: file_sha256(&inventory)?,
             component_lock_hash: file_sha256(&root.join("deploy/versions.lock.yml"))?,
             harbor_data_backup_locator: std::env::var("LABWEAVER_HARBOR_DATA_BACKUP_LOCATOR")
+                .unwrap_or_default(),
+            sigstore_backup_locator: std::env::var("LABWEAVER_SIGSTORE_BACKUP_LOCATOR")
+                .unwrap_or_default(),
+            sigstore_secret_locator: std::env::var("LABWEAVER_SIGSTORE_SECRET_LOCATOR")
+                .unwrap_or_default(),
+            sigstore_tuf_root_locator: std::env::var("LABWEAVER_SIGSTORE_TUF_ROOT_LOCATOR")
+                .unwrap_or_default(),
+            deployment_manifest_hash: std::env::var("LABWEAVER_DEPLOYMENT_MANIFEST_HASH")
                 .unwrap_or_default(),
         })
     }
@@ -763,7 +838,7 @@ fn not_implemented(command: impl Into<String>) -> Result<(), AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{EnvironmentArgs, deploy};
+    use super::{EnvironmentArgs, deploy, private_sigstore};
 
     #[test]
     fn infrastructure_deploy_requires_explicit_confirmation() -> Result<(), String> {
@@ -824,6 +899,47 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn private_sigstore_requires_confirmation_and_infra_boundary() -> Result<(), String> {
+        let Err(unconfirmed) = private_sigstore(&EnvironmentArgs {
+            env: "dev".into(),
+            infra: true,
+            yes: false,
+        }) else {
+            return Err("Private Sigstore deployment without --yes must fail".into());
+        };
+        if unconfirmed.diagnostic_code() != "XTASK_CONFIRMATION_REQUIRED" {
+            return Err("unexpected Private Sigstore confirmation diagnostic".into());
+        }
+
+        let Err(product_path) = private_sigstore(&EnvironmentArgs {
+            env: "dev".into(),
+            infra: false,
+            yes: true,
+        }) else {
+            return Err("Private Sigstore must not run through the product path".into());
+        };
+        if product_path.diagnostic_code() != "XTASK_NOT_IMPLEMENTED" {
+            return Err("unexpected Private Sigstore product-path diagnostic".into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn private_sigstore_rejects_path_traversal_before_platform_dispatch() -> Result<(), String> {
+        let Err(error) = private_sigstore(&EnvironmentArgs {
+            env: "../../private".into(),
+            infra: true,
+            yes: true,
+        }) else {
+            return Err("an environment path traversal must fail".into());
+        };
+        if error.diagnostic_code() != "XTASK_INVALID_ARGUMENT" {
+            return Err("unexpected environment traversal diagnostic".into());
+        }
+        Ok(())
+    }
+
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn infra_deploy_has_a_stable_non_linux_diagnostic() -> Result<(), String> {
@@ -837,6 +953,22 @@ mod tests {
 
         if error.diagnostic_code() != "XTASK_INFRA_UNSUPPORTED_PLATFORM" {
             return Err("unexpected non-Linux diagnostic".into());
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn private_sigstore_has_a_stable_non_linux_diagnostic() -> Result<(), String> {
+        let Err(error) = private_sigstore(&EnvironmentArgs {
+            env: "dev".into(),
+            infra: true,
+            yes: true,
+        }) else {
+            return Err("non-Linux Private Sigstore deployment must fail".into());
+        };
+        if error.diagnostic_code() != "XTASK_INFRA_UNSUPPORTED_PLATFORM" {
+            return Err("unexpected Private Sigstore non-Linux diagnostic".into());
         }
         Ok(())
     }

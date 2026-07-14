@@ -1,0 +1,19 @@
+---
+private_sigstore_enabled: false
+private_sigstore_namespace: sigstore-system
+private_sigstore_release_name: private-sigstore
+private_sigstore_chart_version: 0.6.111
+private_sigstore_chart_archive: /var/lib/labweaver/bundle/scaffold-0.6.111.tgz
+private_sigstore_kubeconfig_path: /etc/kubernetes/admin.conf
+private_sigstore_kubectl_path: /usr/bin/kubectl
+private_sigstore_manifest_directory: /var/lib/labweaver/private-sigstore/manifests
+private_sigstore_storage_class: local-path
+private_sigstore_replicas: 2
+private_sigstore_fulcio_secret_name: private-sigstore-fulcio-ca
+private_sigstore_rekor_secret_name: private-sigstore-rekor-signer
+private_sigstore_ctlog_secret_name: private-sigstore-ctlog-signer
+private_sigstore_trillian_mysql_secret_name: private-sigstore-trillian-mysql
+private_sigstore_tls_secret_name: private-sigstore-internal-tls
+private_sigstore_resources:
+  requests: { cpu: 100m, memory: 128Mi }
+  limits: { cpu: 500m, memory: 512Mi }

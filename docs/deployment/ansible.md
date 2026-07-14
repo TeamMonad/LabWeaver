@@ -3,7 +3,10 @@
 The only deployment controller entry points are `cargo xtask preflight --infra
 --env <environment>`, `cargo xtask deploy --infra --env <environment> --yes`,
 `cargo xtask verify --infra --env <environment> --yes`, and `cargo xtask backup
---infra --env <environment> --yes`. They run only on the approved Linux router
+--infra --env <environment> --yes`. Private Sigstore additionally uses
+`cargo xtask private-sigstore --infra --env <environment> --yes`; its contract,
+private locators and unresolved E3 boundaries are documented in
+[`private-sigstore.md`](private-sigstore.md). They run only on the approved Linux router
 worktree through `ansible-rs`; Windows fails with a stable unsupported-platform
 diagnostic. The removed Python launcher is not a deployment fallback.
 The router invocation must export `LABWEAVER_SOURCE_COMMIT` with the verified

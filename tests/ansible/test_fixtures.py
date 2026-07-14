@@ -61,6 +61,54 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("chart_archive_sha256", lock)
         self.assertNotIn("busybox:1.36", lock)
 
+    def test_private_sigstore_is_private_pinned_and_backup_guarded(self) -> None:
+        playbook = (ROOT / "deploy/ansible/playbooks/96-private-sigstore.yml").read_text(
+            encoding="utf-8"
+        )
+        tasks = (ROOT / "deploy/ansible/roles/private_sigstore/tasks/main.yml").read_text(
+            encoding="utf-8"
+        )
+        values = (ROOT / "deploy/ansible/roles/private_sigstore/templates/values.yml.j2").read_text(
+            encoding="utf-8"
+        )
+        policy = (ROOT / "deploy/ansible/roles/private_sigstore/templates/policy.yml.j2").read_text(
+            encoding="utf-8"
+        )
+        gateway = (ROOT / "deploy/ansible/roles/private_sigstore/templates/gateway.yml.j2").read_text(
+            encoding="utf-8"
+        )
+        lock = (ROOT / "deploy/versions.lock.yml").read_text(encoding="utf-8")
+
+        self.assertEqual(playbook.splitlines()[1], "- import_playbook: 00-preflight.yml")
+        self.assertIn("SIGSTORE_BACKUP_REQUIRED", tasks)
+        self.assertIn("SIGSTORE_CHART_IDENTITY_MISMATCH", tasks)
+        self.assertIn("SIGSTORE_PUBLIC_ENDPOINT_FORBIDDEN", tasks)
+        self.assertIn("SIGSTORE_MUTABLE_IMAGE_FORBIDDEN", tasks)
+        self.assertIn("no_log: true", tasks)
+        self.assertIn("createcerts: {enabled: false}", values)
+        self.assertIn("createtree: {enabled: false}", values)
+        self.assertIn("signer: file:///var/run/rekor-signer/private-key.pem", values)
+        self.assertIn("existingSecret: {{ private_sigstore_trillian_mysql_secret_name }}", values)
+        self.assertNotIn("signer: memory", values)
+        self.assertLess(
+            tasks.index("Apply fail-closed isolation before workload creation"),
+            tasks.index("Reconcile the pinned Private Sigstore chart"),
+        )
+        self.assertNotIn("type: NodePort", values)
+        self.assertNotIn("type: LoadBalancer", values)
+        self.assertIn("kind: NetworkPolicy", policy)
+        self.assertIn("podSelector: {}", policy)
+        self.assertNotIn("0.0.0.0/0", policy)
+        self.assertIn("protocol: HTTPS", gateway)
+        self.assertIn("certificateRefs", gateway)
+        self.assertIn("scaffold_chart: 0.6.111", lock)
+        self.assertIn("cosign: 3.0.6", lock)
+        for line in lock.splitlines():
+            if line.lstrip().startswith(("fulcio:", "rekor:", "ctlog:", "tuf:")) and "ghcr.io" in line:
+                self.assertRegex(line, r"@sha256:[0-9a-f]{64}$")
+        self.assertNotIn(":latest", lock)
+        self.assertNotIn("oauth2.sigstore.dev", tasks + values + policy + gateway)
+
     def test_testflight_report_requires_deployment_identity_chain(self) -> None:
         schema = json.loads(
             (ROOT / "schemas/infrastructure/infrastructure-testflight-report.v1.schema.json").read_text(

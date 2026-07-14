@@ -1,0 +1,159 @@
+{
+  "$defs": {
+    "Sha256Digest": {
+      "description": "Canonical lowercase SHA-256 digest.",
+      "type": "string"
+    },
+    "TufRootIdentity": {
+      "additionalProperties": false,
+      "description": "Public TUF metadata identity; private root key material is never represented.",
+      "properties": {
+        "compatibilityWindowEndsAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "expiresAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "rootSha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "rotationState": {
+          "type": "string"
+        },
+        "snapshotVersion": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "targetsVersion": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "timestampVersion": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "rootSha256",
+        "targetsVersion",
+        "snapshotVersion",
+        "timestampVersion",
+        "expiresAt",
+        "compatibilityWindowEndsAt",
+        "rotationState"
+      ],
+      "type": "object"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Versioned identity shared by Cosign, Kyverno, and Release Gate consumers.",
+  "properties": {
+    "allowedSubjects": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "audience": {
+      "type": "string"
+    },
+    "bundleVersion": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "clusterUid": {
+      "type": "string"
+    },
+    "commitSha": {
+      "type": "string"
+    },
+    "componentLockSha256": {
+      "$ref": "#/$defs/Sha256Digest"
+    },
+    "ctLogId": {
+      "type": "string"
+    },
+    "ctPublicKeySha256": {
+      "$ref": "#/$defs/Sha256Digest"
+    },
+    "deploymentManifestSha256": {
+      "$ref": "#/$defs/Sha256Digest"
+    },
+    "expiresAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "fulcioIntermediateSha256": {
+      "$ref": "#/$defs/Sha256Digest"
+    },
+    "fulcioIssuer": {
+      "type": "string"
+    },
+    "fulcioRootSha256": {
+      "$ref": "#/$defs/Sha256Digest"
+    },
+    "generatedAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "inventorySha256": {
+      "$ref": "#/$defs/Sha256Digest"
+    },
+    "rekorLogId": {
+      "type": "string"
+    },
+    "rekorPublicKeySha256": {
+      "$ref": "#/$defs/Sha256Digest"
+    },
+    "runId": {
+      "type": "string"
+    },
+    "schemaVersion": {
+      "type": "string"
+    },
+    "trustBundleSha256": {
+      "$ref": "#/$defs/Sha256Digest"
+    },
+    "tuf": {
+      "$ref": "#/$defs/TufRootIdentity"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "bundleVersion",
+    "generatedAt",
+    "expiresAt",
+    "runId",
+    "commitSha",
+    "clusterUid",
+    "inventorySha256",
+    "deploymentManifestSha256",
+    "componentLockSha256",
+    "trustBundleSha256",
+    "fulcioRootSha256",
+    "fulcioIntermediateSha256",
+    "fulcioIssuer",
+    "audience",
+    "allowedSubjects",
+    "rekorPublicKeySha256",
+    "rekorLogId",
+    "ctPublicKeySha256",
+    "ctLogId",
+    "tuf"
+  ],
+  "title": "PrivateSigstoreTrustBundle",
+  "type": "object"
+}
