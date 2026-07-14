@@ -8,7 +8,7 @@ drill, Kyverno consumer or Release Gate consumer has been executed.
 ## Identity foundation prerequisite
 
 The adopted cluster uses a separately managed Keycloak Stage 0 before Private
-Sigstore. The router-only allowlisted entries are:
+Sigstore. The steady-state router allowlisted entries are:
 
 ```sh
 cargo xtask identity-foundation --infra --env <environment> --action deploy --yes
@@ -29,6 +29,14 @@ are disabled for the workload client. The root-managed bootstrap locator is
 supplied through `LABWEAVER_IDENTITY_SECRET_LOCATOR`, must be root-owned mode
 `0600`, and has its SHA-256 pinned in private inventory. Secret values and
 tokens never enter reports or Git.
+
+An initial interactive bootstrap may be performed from an approved WSL/Linux
+controller with separate A and D TokenRequest kubeconfigs. A may reconcile
+cluster infrastructure; D receives cluster observation plus run-scoped test
+resource permissions and cannot read Secrets or mutate cluster-scoped RBAC.
+These kubeconfigs are private, time-limited inputs and are never committed. The
+interactive result must still be replayed through the allowlisted Ansible entry
+before Issue closure.
 
 ## Controller boundary
 
