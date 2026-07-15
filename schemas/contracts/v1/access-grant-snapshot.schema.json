@@ -1,0 +1,201 @@
+{
+  "$defs": {
+    "AccessGrantId": {
+      "description": "Strongly typed UUIDv7 identifier for `AccessGrantId`.",
+      "type": "string"
+    },
+    "AccessGrantState": {
+      "description": "AccessGrant lifecycle.",
+      "enum": [
+        "requested",
+        "active",
+        "expired",
+        "revoked"
+      ],
+      "type": "string"
+    },
+    "AuthorizationDecision": {
+      "description": "Safe authorization result suitable for a console timeline.",
+      "enum": [
+        "allow",
+        "deny",
+        "terminal"
+      ],
+      "type": "string"
+    },
+    "AuthorizationDecisionSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "decision": {
+          "$ref": "#/$defs/AuthorizationDecision"
+        },
+        "evaluatedAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "reasonCode": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "decision",
+        "reasonCode",
+        "evaluatedAt"
+      ],
+      "type": "object"
+    },
+    "EndpointGrantId": {
+      "description": "Strongly typed UUIDv7 identifier for `EndpointGrantId`.",
+      "type": "string"
+    },
+    "EndpointGrantSnapshot": {
+      "additionalProperties": false,
+      "description": "EndpointGrant projection without host, port, credential, or policy internals.",
+      "properties": {
+        "alias": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "endpointId": {
+          "$ref": "#/$defs/EndpointId"
+        },
+        "endpointRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "expiresAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "id": {
+          "$ref": "#/$defs/EndpointGrantId"
+        },
+        "protocol": {
+          "$ref": "#/$defs/EndpointProtocol"
+        },
+        "state": {
+          "$ref": "#/$defs/EndpointGrantSnapshotState"
+        }
+      },
+      "required": [
+        "id",
+        "endpointId",
+        "endpointRevision",
+        "protocol",
+        "state",
+        "expiresAt"
+      ],
+      "type": "object"
+    },
+    "EndpointGrantSnapshotState": {
+      "description": "Effective endpoint grant state exposed to the current actor.",
+      "enum": [
+        "active",
+        "expired",
+        "revoked",
+        "unhealthy"
+      ],
+      "type": "string"
+    },
+    "EndpointId": {
+      "description": "Strongly typed UUIDv7 identifier for `EndpointId`.",
+      "type": "string"
+    },
+    "EndpointProtocol": {
+      "description": "Supported controlled protocols.",
+      "enum": [
+        "http",
+        "https",
+        "ssh"
+      ],
+      "type": "string"
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "StreamSequence": {
+      "description": "Monotonic cursor in a scoped public event stream.\n\nA distinct wire type prevents an aggregate-local sequence from being accepted as a\ncourse-stream resume position.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Actor-scoped AccessGrant snapshot used by Environment discovery APIs.",
+  "properties": {
+    "decision": {
+      "$ref": "#/$defs/AuthorizationDecisionSummary"
+    },
+    "endpointGrants": {
+      "items": {
+        "$ref": "#/$defs/EndpointGrantSnapshot"
+      },
+      "type": "array"
+    },
+    "environmentId": {
+      "$ref": "#/$defs/EnvironmentId"
+    },
+    "environmentRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "expiresAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "id": {
+      "$ref": "#/$defs/AccessGrantId"
+    },
+    "issuedAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "lastChangedStreamSequence": {
+      "$ref": "#/$defs/StreamSequence"
+    },
+    "reasonCode": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "revision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "revokedAt": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "state": {
+      "$ref": "#/$defs/AccessGrantState"
+    }
+  },
+  "required": [
+    "id",
+    "environmentId",
+    "environmentRevision",
+    "state",
+    "revision",
+    "endpointGrants",
+    "issuedAt",
+    "expiresAt",
+    "decision",
+    "lastChangedStreamSequence"
+  ],
+  "title": "AccessGrantSnapshot",
+  "type": "object"
+}

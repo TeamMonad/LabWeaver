@@ -110,6 +110,22 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::environment::EnvironmentInstance
     );
     document!(
+        "schemas/contracts/v1/environment-summary.schema.json",
+        crate::environment::EnvironmentSummary
+    );
+    document!(
+        "schemas/contracts/v1/environment-operation-snapshot.schema.json",
+        crate::environment::EnvironmentOperationSnapshot
+    );
+    document!(
+        "schemas/contracts/v1/http/environment-summary-page.schema.json",
+        crate::http::SnapshotPage<crate::environment::EnvironmentSummary>
+    );
+    document!(
+        "schemas/contracts/v1/http/environment-operation-page.schema.json",
+        crate::http::SnapshotPage<crate::environment::EnvironmentOperationSnapshot>
+    );
+    document!(
         "schemas/contracts/v1/environment-create-spec.schema.json",
         crate::environment::EnvironmentCreateSpec
     );
@@ -144,6 +160,14 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/access-grant.schema.json",
         crate::access::AccessGrant
+    );
+    document!(
+        "schemas/contracts/v1/access-grant-snapshot.schema.json",
+        crate::access::AccessGrantSnapshot
+    );
+    document!(
+        "schemas/contracts/v1/http/environment-access-grant-page.schema.json",
+        crate::http::SnapshotPage<crate::access::AccessGrantSnapshot>
     );
     document!(
         "schemas/contracts/v1/endpoint-grant.schema.json",
@@ -224,6 +248,26 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/http/create-environment-request.schema.json",
         crate::http::CreateEnvironmentRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/environment-operation-accepted.schema.json",
+        crate::http::EnvironmentOperationAccepted
+    );
+    document!(
+        "schemas/contracts/v1/http/environment-inventory-query.schema.json",
+        crate::http::EnvironmentInventoryQuery
+    );
+    document!(
+        "schemas/contracts/v1/http/environment-operation-list-query.schema.json",
+        crate::http::EnvironmentOperationListQuery
+    );
+    document!(
+        "schemas/contracts/v1/http/environment-access-grant-list-query.schema.json",
+        crate::http::EnvironmentAccessGrantListQuery
+    );
+    document!(
+        "schemas/contracts/v1/http/environment-management-event.schema.json",
+        crate::http::SseEvent<crate::http::EnvironmentManagementStreamEvent>
     );
     document!(
         "schemas/contracts/v1/http/freeze-submission-request.schema.json",
@@ -367,6 +411,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             parameters.push(json!({"name":"cursor","in":"query","required":false,"schema":{"type":"string","minLength":1,"maxLength":512}}));
             parameters.push(json!({"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":100,"default":50}}));
         }
+        parameters.extend(environment_management_parameters(operation.operation_id));
         if operation.operation_id == "streamCourseEvents" {
             parameters.push(json!({"name":"courseId","in":"query","required":true,"schema":{"type":"string","format":"uuid"}}));
             parameters.push(json!({"name":"after","in":"query","required":false,"schema":{"type":"integer","minimum":0}}));
@@ -379,6 +424,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             parameters.push(header_parameter("If-Match", true));
         }
         let responses = operation_responses(
+            operation.operation_id,
             operation.success_status,
             response_schema(operation.operation_id),
         );
@@ -418,6 +464,9 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             OperationScopeKind::Environment => "environment",
             OperationScopeKind::Service => "service",
         });
+        if let Some(errors) = environment_management_errors(operation.operation_id) {
+            operation_json["x-labweaver-errors"] = errors;
+        }
         if let Some(schema) = request_schema(operation.operation_id) {
             operation_json["requestBody"] =
                 json!({"required":true,"content":{"application/json":{"schema":schema}}});
@@ -517,6 +566,92 @@ fn header_parameter(name: &str, required: bool) -> Value {
     json!({"name":name,"in":"header","required":required,"schema":{"type":"string"}})
 }
 
+fn environment_management_parameters(operation_id: &str) -> Vec<Value> {
+    let cursor = || json!({"name":"cursor","in":"query","required":false,"schema":{"type":"string","minLength":1,"maxLength":512,"pattern":"^[A-Za-z0-9_.~-]+$"}});
+    let limit = || json!({"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":100,"default":50}});
+    match operation_id {
+        "listEnvironments" => vec![
+            json!({"name":"courseId","in":"query","required":true,"schema":{"type":"string","format":"uuid"}}),
+            json!({"name":"projectId","in":"query","required":false,"schema":{"type":"string","format":"uuid"}}),
+            json!({"name":"runtimeKind","in":"query","required":false,"schema":{"type":"string","enum":["container","virtual_machine"]}}),
+            json!({"name":"class","in":"query","required":false,"schema":{"type":"string","enum":["experiment","work"]}}),
+            json!({"name":"desiredState","in":"query","required":false,"schema":{"type":"string","enum":["running","stopped","deleted"]}}),
+            json!({"name":"observedState","in":"query","required":false,"schema":{"type":"string","enum":["requested","validating","building","provisioning","ready","stopping","stopped","updating","expiring","deleting","deleted","failed"]}}),
+            json!({"name":"releaseId","in":"query","required":false,"schema":{"type":"string","format":"uuid"}}),
+            cursor(),
+            limit(),
+        ],
+        "listEnvironmentOperations" => vec![
+            json!({"name":"kind","in":"query","required":false,"schema":{"type":"string","enum":["create","start","stop","restart","reset","retry","cancel","recover","expire","delete","cleanup","freeze"]}}),
+            json!({"name":"state","in":"query","required":false,"schema":{"type":"string","enum":["accepted","running","cancelling","succeeded","failed","cancelled","timed_out"]}}),
+            cursor(),
+            limit(),
+        ],
+        "listEnvironmentAccessGrants" => vec![
+            json!({"name":"state","in":"query","required":false,"schema":{"type":"string","enum":["requested","active","expired","revoked"]}}),
+            json!({"name":"endpointId","in":"query","required":false,"schema":{"type":"string","format":"uuid"}}),
+            json!({"name":"includeTerminal","in":"query","required":false,"schema":{"type":"boolean","default":false}}),
+            cursor(),
+            limit(),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn environment_management_errors(operation_id: &str) -> Option<Value> {
+    let errors = match operation_id {
+        "listEnvironments" | "listEnvironmentOperations" => vec![
+            "LW_CONTRACT_DOCUMENT_INVALID",
+            "LW_HTTP_UNAUTHENTICATED",
+            "LW_ACCESS_DENIED",
+            "LW_ENVIRONMENT_SCOPE_REQUIRED",
+            "LW_ENVIRONMENT_SCOPE_MISMATCH",
+            "LW_ENVIRONMENT_CURSOR_INVALID",
+            "LW_ENVIRONMENT_CURSOR_EXPIRED",
+            "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
+            "LW_HTTP_RATE_LIMITED",
+            "LW_HTTP_SERVICE_UNAVAILABLE",
+            "LW_HTTP_INTERNAL",
+        ],
+        "streamCourseEvents" => vec![
+            "LW_CONTRACT_DOCUMENT_INVALID",
+            "LW_HTTP_UNAUTHENTICATED",
+            "LW_ACCESS_DENIED",
+            "LW_SSE_CURSOR_CONFLICT",
+            "LW_SSE_CURSOR_EXPIRED",
+            "LW_SSE_CURSOR_GAP",
+            "LW_HTTP_RATE_LIMITED",
+            "LW_HTTP_SERVICE_UNAVAILABLE",
+            "LW_HTTP_INTERNAL",
+        ],
+        "getEnvironmentOperation" => vec![
+            "LW_CONTRACT_DOCUMENT_INVALID",
+            "LW_HTTP_UNAUTHENTICATED",
+            "LW_ACCESS_DENIED",
+            "LW_ENVIRONMENT_SCOPE_MISMATCH",
+            "LW_ENVIRONMENT_OPERATION_NOT_FOUND",
+            "LW_ENVIRONMENT_OPERATION_STATE_CONFLICT",
+            "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
+            "LW_HTTP_RATE_LIMITED",
+            "LW_HTTP_SERVICE_UNAVAILABLE",
+            "LW_HTTP_INTERNAL",
+        ],
+        "listEnvironmentAccessGrants" => vec![
+            "LW_CONTRACT_DOCUMENT_INVALID",
+            "LW_HTTP_UNAUTHENTICATED",
+            "LW_ACCESS_DENIED",
+            "LW_ACCESS_GRANT_CURSOR_INVALID",
+            "LW_ACCESS_GRANT_CURSOR_EXPIRED",
+            "LW_ACCESS_GRANT_SNAPSHOT_CONFLICT",
+            "LW_HTTP_RATE_LIMITED",
+            "LW_HTTP_SERVICE_UNAVAILABLE",
+            "LW_HTTP_INTERNAL",
+        ],
+        _ => return None,
+    };
+    Some(json!(errors))
+}
+
 fn contract_ref(name: &str) -> Value {
     json!({"$ref": format!("../contracts/v1/{name}.schema.json")})
 }
@@ -564,6 +699,11 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             json!({"type":"object","required":["items"],"properties":{"items":{"type":"array","items":contract_ref("environment-template-release")},"nextCursor":{"type":["string","null"]}}})
         }
         "getEnvironment" => contract_ref("environment-instance"),
+        "listEnvironments" => contract_ref("http/environment-summary-page"),
+        "getEnvironmentOperation" => contract_ref("environment-operation-snapshot"),
+        "listEnvironmentOperations" => contract_ref("http/environment-operation-page"),
+        "listEnvironmentAccessGrants" => contract_ref("http/environment-access-grant-page"),
+        "streamCourseEvents" => contract_ref("http/environment-management-event"),
         "listEnvironmentEndpoints" => {
             json!({"type":"object","required":["items"],"properties":{"items":{"type":"array","items":contract_ref("environment-endpoint")}}})
         }
@@ -595,21 +735,54 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         ]
         .contains(&id) =>
         {
-            json!({"$ref":"#/components/schemas/OperationAccepted"})
+            if [
+                "createEnvironment",
+                "startEnvironment",
+                "stopEnvironment",
+                "restartEnvironment",
+                "resetEnvironment",
+                "retryEnvironment",
+                "cancelEnvironmentOperation",
+                "recoverEnvironment",
+                "deleteEnvironment",
+            ]
+            .contains(&id)
+            {
+                contract_ref("http/environment-operation-accepted")
+            } else {
+                json!({"$ref":"#/components/schemas/OperationAccepted"})
+            }
         }
         _ => return None,
     };
     Some(schema)
 }
 
-fn operation_responses(success_status: u16, response_schema: Option<Value>) -> Value {
+fn operation_responses(
+    operation_id: &str,
+    success_status: u16,
+    response_schema: Option<Value>,
+) -> Value {
     let mut responses = serde_json::Map::new();
     let mut success = json!({"description":"Successful response","headers":{"ETag":{"schema":{"type":"string","pattern":"^\\\"rev-[1-9][0-9]*\\\"$"}}}});
     if let Some(schema) = response_schema {
-        success["content"] = json!({"application/json":{"schema":schema}});
+        let media_type = if operation_id == "streamCourseEvents" {
+            "text/event-stream"
+        } else {
+            "application/json"
+        };
+        success["content"] = json!({media_type:{"schema":schema}});
     }
     responses.insert(success_status.to_string(), success);
-    for code in [400_u16, 401, 403, 404, 409, 410, 412, 422, 429, 500, 503] {
+    let error_statuses: &[u16] = match operation_id {
+        "listEnvironments" | "listEnvironmentOperations" | "listEnvironmentAccessGrants" => {
+            &[400, 401, 403, 409, 410, 422, 429, 500, 503]
+        }
+        "getEnvironmentOperation" => &[400, 401, 403, 404, 409, 429, 500, 503],
+        "streamCourseEvents" => &[400, 401, 403, 409, 410, 429, 500, 503],
+        _ => &[400, 401, 403, 404, 409, 410, 412, 422, 429, 500, 503],
+    };
+    for code in error_statuses {
         responses.insert(
             code.to_string(),
             json!({"$ref":"#/components/responses/Problem"}),

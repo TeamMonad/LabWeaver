@@ -25,7 +25,7 @@ Build, artifact, scan and release semantics follow ADR 0006. Environment state e
 
 ## HTTP, SSE and Gateway
 
-Public REST is under `/api/v1`; Internal Gateway routes are under `/internal/v1` and require deployment-controlled service identity with mTLS. Every mutation requires `Idempotency-Key`; request-hash mismatch returns `LW_IDEMPOTENCY_CONFLICT`. Existing-resource mutations also require strong `If-Match`; missing/stale values return 412 `LW_REVISION_CONFLICT`. Long-running work returns 202 with operation identity. Lists use opaque cursors and bounded limits.
+Public REST is under `/api/v1`; Internal Gateway routes are under `/internal/v1` and require deployment-controlled service identity with mTLS. Every mutation requires `Idempotency-Key`; request-hash mismatch returns `LW_IDEMPOTENCY_CONFLICT`. Existing-resource mutations also require strong `If-Match`; missing/stale values return 412 `LW_REVISION_CONFLICT`. Long-running Environment work returns 202 with both Environment and operation identity. Course-scoped inventory, operation history and actor-scoped AccessGrant discovery use opaque cursors, bounded limits and snapshot stream positions; malformed cursors return 400 and expired cursors return 410. Aggregate-local `Sequence` and public `StreamSequence` are distinct wire types.
 
 SSE uses `GET /api/v1/events?courseId=...`. `Last-Event-ID` and `after` are equivalent and conflicting values are rejected. Expired cursors return 410 `LW_SSE_CURSOR_EXPIRED`; gaps return `LW_SSE_CURSOR_GAP` and require REST snapshot recovery. Events contain only sanitized identity, revision/hash and diagnostic fields.
 

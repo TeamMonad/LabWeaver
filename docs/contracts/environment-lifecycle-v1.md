@@ -236,28 +236,41 @@ explicit authorized snapshot/configuration revision.
 
 ## Lifecycle operations
 
-The following endpoints are part of the v1 interface contract; Issue #45 defines them but does not implement their runtime handlers:
+The following endpoints are part of the v1 interface contract. Issue #45 established the
+lifecycle surface and Issue #81 closes inventory, operation and AccessGrant discovery; neither
+contract delivery by itself proves runtime handlers:
 
 ```http
 POST   /api/v1/environments
+GET    /api/v1/environments?courseId={courseId}&projectId={projectId}
 GET    /api/v1/environments/{id}
-POST   /api/v1/environments/{id}:start
-POST   /api/v1/environments/{id}:stop
-POST   /api/v1/environments/{id}:reset
-POST   /api/v1/environments/{id}:retry
+POST   /api/v1/environments/{id}/start
+POST   /api/v1/environments/{id}/stop
+POST   /api/v1/environments/{id}/reset
+POST   /api/v1/environments/{id}/retry
 DELETE /api/v1/environments/{id}
 GET    /api/v1/environments/{id}/endpoints
+GET    /api/v1/environments/{id}/operations
+GET    /api/v1/environments/{id}/operations/{operationId}
+GET    /api/v1/environments/{id}/access-grants
 POST   /api/v1/environments/{id}/configuration-requests
 ```
 
 Every mutating lifecycle request requires an `Idempotency-Key` and an
 `expectedRevision`. A valid, newly accepted request returns `202 Accepted` with
-an `operationRef`, target desired state and accepted revision. Reuse of the
+an `environmentId`, `operationId`, status URL and accepted revision. Reuse of the
 same idempotency key with a different payload is rejected; a stale expected
 revision is rejected; duplicate equivalent delivery returns the original
 operation rather than creating a second provider action. `GET` returns both
 desired and observed state, current revision, current/last operation, stable
 diagnostic and sanitized audit references.
+
+Inventory requires an explicit authorized `courseId`; `projectId` only narrows that scope. Its
+owner projection is relation-safe and omits globally enumerable actor identity. Inventory,
+operation history and AccessGrant discovery use bounded opaque cursors tied to one
+`snapshotSequence`. Malformed cursors return 400 and expired cursors return 410; clients then take a
+fresh REST snapshot and resume the course event stream from its `StreamSequence`. Operation polling
+exposes timeout and cleanup deadlines rather than requiring clients to infer them from logs.
 
 `retry` is authorized only from `Failed`; it resumes the recorded failed phase
 with the same immutable bindings. `reset` is authorized only from `Ready`,
@@ -274,11 +287,14 @@ may use an implicit provider, template, Lease, endpoint or fallback target.
 | Endpoint unhealthy or absent | No new/renewed grant; Environment records diagnosis and reconciles or fails according to the lifecycle rules. |
 | `Deleted` | Endpoint metadata and grants are no longer usable; tombstone retains only sanitized cleanup/audit evidence. |
 
-The required future event family is versioned and idempotent: lifecycle command
+The event family is versioned and idempotent: lifecycle command
 acceptance and observed transitions belong to Environment; Lease state changes
 belong to Resource; grant issuance/revocation belongs to Access. Event payloads
 must carry event ID, environment ID, revision, operation ID, actor/correlation
-identifiers and stable diagnostic code without secrets or raw provider handles.
+identifiers and stable diagnostic code without secrets or raw provider handles. The Public SSE
+projection additionally carries course/project scope, event identity, effective time and a
+stream-level cursor distinct from the aggregate sequence. Runtime publication and replay evidence
+remain future E2 work.
 
 ## Failure, retry and audit requirements
 

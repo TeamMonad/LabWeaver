@@ -1,0 +1,63 @@
+{
+  "$defs": {
+    "AccessGrantState": {
+      "description": "AccessGrant lifecycle.",
+      "enum": [
+        "requested",
+        "active",
+        "expired",
+        "revoked"
+      ],
+      "type": "string"
+    },
+    "EndpointId": {
+      "description": "Strongly typed UUIDv7 identifier for `EndpointId`.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "cursor": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "endpointId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EndpointId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "includeTerminal": {
+      "default": false,
+      "type": "boolean"
+    },
+    "limit": {
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "state": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AccessGrantState"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "title": "EnvironmentAccessGrantListQuery",
+  "type": "object"
+}

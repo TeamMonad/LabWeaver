@@ -1,0 +1,242 @@
+{
+  "$defs": {
+    "AccessGrantId": {
+      "description": "Strongly typed UUIDv7 identifier for `AccessGrantId`.",
+      "type": "string"
+    },
+    "AccessGrantState": {
+      "description": "AccessGrant lifecycle.",
+      "enum": [
+        "requested",
+        "active",
+        "expired",
+        "revoked"
+      ],
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "EnvironmentManagementEvent": {
+      "description": "Environment-management subset carried by the course event stream.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "environmentId": {
+              "$ref": "#/$defs/EnvironmentId"
+            },
+            "kind": {
+              "const": "environment_changed",
+              "type": "string"
+            },
+            "observedState": {
+              "$ref": "#/$defs/ObservedEnvironmentState"
+            },
+            "operationId": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/OperationId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "revision": {
+              "$ref": "#/$defs/Revision"
+            }
+          },
+          "required": [
+            "kind",
+            "environmentId",
+            "revision",
+            "observedState"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "environmentId": {
+              "$ref": "#/$defs/EnvironmentId"
+            },
+            "kind": {
+              "const": "operation_changed",
+              "type": "string"
+            },
+            "operationId": {
+              "$ref": "#/$defs/OperationId"
+            },
+            "revision": {
+              "$ref": "#/$defs/Revision"
+            },
+            "state": {
+              "$ref": "#/$defs/EnvironmentOperationStatus"
+            }
+          },
+          "required": [
+            "kind",
+            "environmentId",
+            "operationId",
+            "revision",
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "accessGrantId": {
+              "$ref": "#/$defs/AccessGrantId"
+            },
+            "environmentId": {
+              "$ref": "#/$defs/EnvironmentId"
+            },
+            "kind": {
+              "const": "access_grant_changed",
+              "type": "string"
+            },
+            "revision": {
+              "$ref": "#/$defs/Revision"
+            },
+            "state": {
+              "$ref": "#/$defs/AccessGrantState"
+            }
+          },
+          "required": [
+            "kind",
+            "environmentId",
+            "accessGrantId",
+            "revision",
+            "state"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "EnvironmentManagementStreamEvent": {
+      "additionalProperties": false,
+      "description": "Public event envelope used for course-scoped inventory synchronization.",
+      "properties": {
+        "courseId": {
+          "$ref": "#/$defs/CourseId"
+        },
+        "data": {
+          "$ref": "#/$defs/EnvironmentManagementEvent"
+        },
+        "effectiveAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "eventId": {
+          "$ref": "#/$defs/EventId"
+        },
+        "projectId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProjectId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "streamSequence": {
+          "$ref": "#/$defs/StreamSequence"
+        }
+      },
+      "required": [
+        "eventId",
+        "streamSequence",
+        "courseId",
+        "effectiveAt",
+        "data"
+      ],
+      "type": "object"
+    },
+    "EnvironmentOperationStatus": {
+      "description": "Public operation state used by REST snapshots and SSE projections.\n\nThe runtime aggregate retains its historical `OperationState`; timeout is exposed as a\ndistinct terminal fact instead of forcing clients to infer it from a generic failure code.",
+      "enum": [
+        "accepted",
+        "running",
+        "cancelling",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "timed_out"
+      ],
+      "type": "string"
+    },
+    "EventId": {
+      "description": "Strongly typed UUIDv7 identifier for `EventId`.",
+      "type": "string"
+    },
+    "ObservedEnvironmentState": {
+      "description": "Authoritative observed lifecycle state.",
+      "enum": [
+        "requested",
+        "validating",
+        "building",
+        "provisioning",
+        "ready",
+        "stopping",
+        "stopped",
+        "updating",
+        "expiring",
+        "deleting",
+        "deleted",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "OperationId": {
+      "description": "Strongly typed UUIDv7 identifier for `OperationId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "StreamSequence": {
+      "description": "Monotonic cursor in a scoped public event stream.\n\nA distinct wire type prevents an aggregate-local sequence from being accepted as a\ncourse-stream resume position.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "cursor": {
+      "$ref": "#/$defs/StreamSequence"
+    },
+    "data": {
+      "$ref": "#/$defs/EnvironmentManagementStreamEvent"
+    },
+    "event": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "cursor",
+    "event",
+    "data"
+  ],
+  "title": "SseEvent",
+  "type": "object"
+}

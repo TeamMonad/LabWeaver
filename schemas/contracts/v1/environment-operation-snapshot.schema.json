@@ -1,0 +1,223 @@
+{
+  "$defs": {
+    "DiagnosticCode": {
+      "description": "Stable machine-readable diagnostic code.\n\nConsumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so\nadditive diagnostics do not force a wire-version change.",
+      "type": "string"
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "EnvironmentOperationKind": {
+      "description": "Explicit operation kind; restart and destructive reset are never aliases.",
+      "enum": [
+        "create",
+        "start",
+        "stop",
+        "restart",
+        "reset",
+        "retry",
+        "cancel",
+        "recover",
+        "expire",
+        "delete",
+        "cleanup",
+        "freeze"
+      ],
+      "type": "string"
+    },
+    "EnvironmentOperationStatus": {
+      "description": "Public operation state used by REST snapshots and SSE projections.\n\nThe runtime aggregate retains its historical `OperationState`; timeout is exposed as a\ndistinct terminal fact instead of forcing clients to infer it from a generic failure code.",
+      "enum": [
+        "accepted",
+        "running",
+        "cancelling",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "timed_out"
+      ],
+      "type": "string"
+    },
+    "OperationId": {
+      "description": "Strongly typed UUIDv7 identifier for `OperationId`.",
+      "type": "string"
+    },
+    "PublicEnvironmentOperationPhase": {
+      "description": "Provider-safe progress phase. Provider names, node identities, and raw payloads stay private.",
+      "enum": [
+        "validating",
+        "building",
+        "provisioning",
+        "stopping",
+        "revoking_access",
+        "cleaning_up",
+        "finalizing"
+      ],
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "StreamSequence": {
+      "description": "Monotonic cursor in a scoped public event stream.\n\nA distinct wire type prevents an aggregate-local sequence from being accepted as a\ncourse-stream resume position.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Safe operation representation for Public REST and SSE consumers.",
+  "properties": {
+    "acceptedAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "acceptedRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "attempt": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "cancelEligible": {
+      "type": "boolean"
+    },
+    "cleanupDeadlineAt": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "cleanupStartedAt": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "currentRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "deadlineAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "diagnosticCode": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DiagnosticCode"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "environmentId": {
+      "$ref": "#/$defs/EnvironmentId"
+    },
+    "kind": {
+      "$ref": "#/$defs/EnvironmentOperationKind"
+    },
+    "lastChangedStreamSequence": {
+      "$ref": "#/$defs/StreamSequence"
+    },
+    "maxAttempts": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "operationId": {
+      "$ref": "#/$defs/OperationId"
+    },
+    "providerPhase": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PublicEnvironmentOperationPhase"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "requestId": {
+      "type": "string"
+    },
+    "retryEligible": {
+      "type": "boolean"
+    },
+    "startedAt": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "state": {
+      "$ref": "#/$defs/EnvironmentOperationStatus"
+    },
+    "terminalAt": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "timedOutAt": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "traceId": {
+      "type": "string"
+    },
+    "updatedAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    }
+  },
+  "required": [
+    "environmentId",
+    "operationId",
+    "kind",
+    "state",
+    "acceptedRevision",
+    "currentRevision",
+    "acceptedAt",
+    "updatedAt",
+    "deadlineAt",
+    "attempt",
+    "maxAttempts",
+    "retryEligible",
+    "cancelEligible",
+    "requestId",
+    "traceId",
+    "lastChangedStreamSequence"
+  ],
+  "title": "EnvironmentOperationSnapshot",
+  "type": "object"
+}

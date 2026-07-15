@@ -4,7 +4,13 @@
  */
 
 export const APP_TITLE = import.meta.env.VITE_APP_TITLE || 'LabWeaver'
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1'
+// Generated OpenAPI paths already include /api/v1. This value is an origin/base only.
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/'
+const rawApiAuthMode = import.meta.env.VITE_API_AUTH_MODE || 'bff'
+if (rawApiAuthMode !== 'bff' && rawApiAuthMode !== 'bearer') {
+  throw new Error('VITE_API_AUTH_MODE must be either bff or bearer')
+}
+export const API_AUTH_MODE: 'bff' | 'bearer' = rawApiAuthMode
 
 export const OIDC_CONFIG = {
   authority: import.meta.env.VITE_OIDC_AUTHORITY || '',

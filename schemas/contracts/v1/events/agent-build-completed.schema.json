@@ -35,7 +35,7 @@
       "type": "integer"
     },
     "Sequence": {
-      "description": "Aggregate-local sequence or SSE cursor.",
+      "description": "Aggregate-local ordering sequence. This value is not an SSE resume cursor.",
       "format": "uint64",
       "minimum": 0,
       "type": "integer"

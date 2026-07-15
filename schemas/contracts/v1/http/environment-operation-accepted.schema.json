@@ -1,0 +1,43 @@
+{
+  "$defs": {
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "OperationId": {
+      "description": "Strongly typed UUIDv7 identifier for `OperationId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Environment-specific accepted response. Existing OperationAccepted fields keep their v1\nmeaning while `environmentId` removes the need to parse an undeclared status URL.",
+  "properties": {
+    "environmentId": {
+      "$ref": "#/$defs/EnvironmentId"
+    },
+    "operationId": {
+      "$ref": "#/$defs/OperationId"
+    },
+    "revision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "statusUrl": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "operationId",
+    "revision",
+    "statusUrl",
+    "environmentId"
+  ],
+  "title": "EnvironmentOperationAccepted",
+  "type": "object"
+}

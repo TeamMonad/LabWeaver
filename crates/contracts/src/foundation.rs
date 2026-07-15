@@ -120,12 +120,22 @@ impl Revision {
     }
 }
 
-/// Aggregate-local sequence or SSE cursor.
+/// Aggregate-local ordering sequence. This value is not an SSE resume cursor.
 #[derive(
     Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
 )]
 #[serde(transparent)]
 pub struct Sequence(pub u64);
+
+/// Monotonic cursor in a scoped public event stream.
+///
+/// A distinct wire type prevents an aggregate-local sequence from being accepted as a
+/// course-stream resume position.
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
+)]
+#[serde(transparent)]
+pub struct StreamSequence(pub u64);
 
 /// Canonical lowercase SHA-256 digest.
 #[derive(Clone, Copy, Debug, Eq, Hash, JsonSchema, Ord, PartialEq, PartialOrd)]

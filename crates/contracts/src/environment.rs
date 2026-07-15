@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::authoring::{EnvironmentClass, RuntimeKind};
 use crate::{
-    ActorId, CourseId, EndpointId, EnvironmentId, LeaseId, OperationId, ReleaseId, Revision,
-    UtcTimestamp,
+    ActorId, CourseId, DiagnosticCode, EndpointId, EnvironmentId, LeaseId, OperationId, ProjectId,
+    ReleaseId, Revision, StreamSequence, UtcTimestamp,
 };
 
 /// Requested steady state.
@@ -174,6 +174,204 @@ pub enum OperationState {
     Succeeded,
     Failed,
     Cancelled,
+}
+
+/// Public operation state used by REST snapshots and SSE projections.
+///
+/// The runtime aggregate retains its historical `OperationState`; timeout is exposed as a
+/// distinct terminal fact instead of forcing clients to infer it from a generic failure code.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentOperationStatus {
+    Accepted,
+    Running,
+    Cancelling,
+    Succeeded,
+    Failed,
+    Cancelled,
+    TimedOut,
+}
+
+/// Provider-safe progress phase. Provider names, node identities, and raw payloads stay private.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicEnvironmentOperationPhase {
+    Validating,
+    Building,
+    Provisioning,
+    Stopping,
+    RevokingAccess,
+    CleaningUp,
+    Finalizing,
+}
+
+impl EnvironmentOperationStatus {
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Cancelled | Self::TimedOut
+        )
+    }
+}
+
+/// Safe operation representation for Public REST and SSE consumers.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentOperationSnapshot {
+    pub environment_id: EnvironmentId,
+    pub operation_id: OperationId,
+    pub kind: EnvironmentOperationKind,
+    pub state: EnvironmentOperationStatus,
+    pub accepted_revision: Revision,
+    pub current_revision: Revision,
+    pub accepted_at: UtcTimestamp,
+    pub started_at: Option<UtcTimestamp>,
+    pub updated_at: UtcTimestamp,
+    pub terminal_at: Option<UtcTimestamp>,
+    pub deadline_at: UtcTimestamp,
+    pub timed_out_at: Option<UtcTimestamp>,
+    pub cleanup_started_at: Option<UtcTimestamp>,
+    pub cleanup_deadline_at: Option<UtcTimestamp>,
+    pub provider_phase: Option<PublicEnvironmentOperationPhase>,
+    pub attempt: u32,
+    pub max_attempts: u32,
+    pub retry_eligible: bool,
+    pub cancel_eligible: bool,
+    pub diagnostic_code: Option<DiagnosticCode>,
+    pub request_id: String,
+    pub trace_id: String,
+    pub last_changed_stream_sequence: StreamSequence,
+}
+
+impl EnvironmentOperationSnapshot {
+    pub fn validate(&self) -> Result<(), EnvironmentError> {
+        let terminal = self.state.is_terminal();
+        if self.attempt == 0
+            || self.attempt > self.max_attempts
+            || self.updated_at < self.accepted_at
+            || self.deadline_at <= self.accepted_at
+            || self
+                .started_at
+                .is_some_and(|value| value < self.accepted_at || value > self.updated_at)
+            || terminal != self.terminal_at.is_some()
+            || self
+                .terminal_at
+                .is_some_and(|value| value < self.accepted_at || value > self.updated_at)
+            || (self.state == EnvironmentOperationStatus::TimedOut) != self.timed_out_at.is_some()
+            || self.timed_out_at.is_some_and(|value| {
+                value < self.accepted_at || value > self.updated_at || value < self.deadline_at
+            })
+            || (self.state != EnvironmentOperationStatus::TimedOut
+                && self
+                    .terminal_at
+                    .is_some_and(|value| value > self.deadline_at))
+            || self.cleanup_deadline_at.is_some() != self.cleanup_started_at.is_some()
+            || self
+                .cleanup_started_at
+                .is_some_and(|value| value < self.accepted_at || value > self.updated_at)
+            || self.cleanup_deadline_at.is_some_and(|deadline| {
+                self.cleanup_started_at
+                    .is_none_or(|started| deadline <= started)
+            })
+            || (terminal && self.cancel_eligible)
+            || (self.retry_eligible
+                && !matches!(
+                    self.state,
+                    EnvironmentOperationStatus::Failed | EnvironmentOperationStatus::TimedOut
+                ))
+            || self.request_id.trim().is_empty()
+            || self.trace_id.trim().is_empty()
+            || self.last_changed_stream_sequence.0 == 0
+        {
+            return Err(EnvironmentError::InvalidOperationSnapshot);
+        }
+        Ok(())
+    }
+}
+
+/// Actor-safe relationship to the Environment owner.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentOwnerRelation {
+    SelfOwned,
+    Managed,
+}
+
+/// Actor-safe owner label. It deliberately carries no globally enumerable ActorId.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentOwnerSummary {
+    pub relation: EnvironmentOwnerRelation,
+    pub display_label: Option<String>,
+}
+
+/// Access readiness projected without endpoint routes, credentials, or policy material.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentAccessEligibilityState {
+    Eligible,
+    Ineligible,
+    ActiveGrant,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentAccessEligibilitySummary {
+    pub state: EnvironmentAccessEligibilityState,
+    pub reason_code: Option<DiagnosticCode>,
+    pub healthy_endpoint_count: u32,
+    pub active_grant_count: u32,
+}
+
+/// Minimal Environment inventory item suitable for a GCP-style resource console.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentSummary {
+    pub id: EnvironmentId,
+    pub display_label: String,
+    pub course_id: CourseId,
+    pub project_id: Option<ProjectId>,
+    pub owner: EnvironmentOwnerSummary,
+    pub class: EnvironmentClass,
+    pub runtime_kind: RuntimeKind,
+    pub release_id: ReleaseId,
+    pub release_version: u64,
+    pub desired_state: DesiredEnvironmentState,
+    pub observed_state: ObservedEnvironmentState,
+    pub revision: Revision,
+    pub eligibility_expires_at: UtcTimestamp,
+    pub created_at: UtcTimestamp,
+    pub updated_at: UtcTimestamp,
+    pub last_changed_stream_sequence: StreamSequence,
+    pub current_operation: Option<EnvironmentOperationSnapshot>,
+    pub access: EnvironmentAccessEligibilitySummary,
+}
+
+impl EnvironmentSummary {
+    pub fn validate(&self) -> Result<(), EnvironmentError> {
+        if self.display_label.trim().is_empty()
+            || self.display_label.chars().count() > 120
+            || self.display_label.chars().any(char::is_control)
+            || self.owner.display_label.as_ref().is_some_and(|value| {
+                value.trim().is_empty()
+                    || value.chars().count() > 120
+                    || value.chars().any(char::is_control)
+            })
+            || self.release_version == 0
+            || self.updated_at < self.created_at
+            || self.last_changed_stream_sequence.0 == 0
+        {
+            return Err(EnvironmentError::InvalidInventorySummary);
+        }
+        if let Some(operation) = &self.current_operation {
+            operation.validate()?;
+            if operation.environment_id != self.id || operation.current_revision != self.revision {
+                return Err(EnvironmentError::InvalidInventorySummary);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Idempotent accepted environment operation.
@@ -506,6 +704,10 @@ pub enum EnvironmentError {
     InvalidResolverConfiguration,
     #[error("environment diagnostic code is not a stable LW_* identity")]
     InvalidDiagnosticCode,
+    #[error("public environment operation snapshot is internally inconsistent")]
+    InvalidOperationSnapshot,
+    #[error("public environment inventory summary is internally inconsistent")]
+    InvalidInventorySummary,
 }
 
 fn valid_binding(value: &str) -> bool {
