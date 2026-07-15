@@ -232,6 +232,10 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("service-account-{{ identity_workload_client_id }}", tasks)
         self.assertIn("automountServiceAccountToken: false", operator_rbac)
         self.assertIn("name: labweaver-cluster-observer", operator_rbac)
+        self.assertIn("resources: [jobs, cronjobs]", operator_rbac)
+        self.assertIn("name: labweaver-private-sigstore-observer", operator_rbac)
+        self.assertIn("name: labweaver-devops-observer", operator_rbac)
+        self.assertNotIn("'harbor', 'sigstore-system'", operator_rbac)
         self.assertNotIn("resources: [secrets", operator_rbac)
         self.assertNotIn(":latest", workloads)
 

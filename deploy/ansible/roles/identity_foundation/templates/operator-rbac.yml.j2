@@ -56,7 +56,7 @@ rules:
     resources: [deployments, statefulsets, replicasets]
     verbs: [get, list, watch, create, update, patch, delete]
   - apiGroups: [batch]
-    resources: [jobs]
+    resources: [jobs, cronjobs]
     verbs: [get, list, watch, create, update, patch, delete]
   - apiGroups: [networking.k8s.io]
     resources: [networkpolicies]
@@ -88,3 +88,30 @@ subjects:
   - {kind: ServiceAccount, name: devops-verifier, namespace: labweaver-operations}
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: labweaver-testflight-operator}
 {% endfor %}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: labweaver-private-sigstore-observer, namespace: sigstore-system}
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/log, services, endpoints, configmaps, persistentvolumeclaims, events]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets, replicasets]
+    verbs: [get, list, watch]
+  - apiGroups: [batch]
+    resources: [jobs, cronjobs]
+    verbs: [get, list, watch]
+  - apiGroups: [gateway.networking.k8s.io]
+    resources: [gateways, httproutes]
+    verbs: [get, list, watch]
+  - apiGroups: [cert-manager.io, cilium.io]
+    resources: ['*']
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: labweaver-devops-observer, namespace: sigstore-system}
+subjects:
+  - {kind: ServiceAccount, name: devops-verifier, namespace: labweaver-operations}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: labweaver-private-sigstore-observer}
