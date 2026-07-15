@@ -383,6 +383,12 @@
     dest: /var/tmp/labweaver-private-sigstore-values.yml
     mode: '0600'
 
+- name: Install the reviewed Private Sigstore Helm post-renderer
+  ansible.builtin.copy:
+    src: private_sigstore_post_renderer.py
+    dest: /var/tmp/labweaver-private-sigstore-post-renderer
+    mode: '0755'
+
 - name: Reconcile the pinned Private Sigstore chart
   kubernetes.core.helm:
     name: "{{ private_sigstore_release_name }}"
@@ -392,7 +398,9 @@
     kubeconfig: "{{ private_sigstore_kubeconfig_path }}"
     create_namespace: false
     values_files: [/var/tmp/labweaver-private-sigstore-values.yml]
-    atomic: true
+    post_renderer: /var/tmp/labweaver-private-sigstore-post-renderer
+    atomic: false
+    cleanup_on_fail: false
     wait: true
     wait_timeout: 10m
   no_log: true

@@ -36,6 +36,8 @@ spec:
   endpointSelector: {matchLabels: {app.kubernetes.io/instance: {{ private_sigstore_release_name }}}}
   ingress:
     - fromEntities: [ingress]
+  egress:
+    - toEntities: [kube-apiserver]
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
