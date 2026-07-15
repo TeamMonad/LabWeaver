@@ -927,7 +927,7 @@ fn approved_controller_identity(lock_path: &std::path::Path) -> Result<String, A
             code: None,
             detail: Some(error.to_string()),
         })?,
-        "approved_controller_id",
+        "approved_controller_ids",
     )?;
     let locator = std::env::var("LABWEAVER_CONTROLLER_IDENTITY_FILE").map_err(|_| {
         AppError::ExternalCommand {
@@ -963,11 +963,14 @@ fn approved_controller_identity(lock_path: &std::path::Path) -> Result<String, A
             code: None,
             detail: Some(error.to_string()),
         })?;
-    if controller_id != approved || declared_machine_id != actual_machine_id.trim() {
+    let approved_ids = approved.split(',').map(str::trim).collect::<Vec<_>>();
+    if !approved_ids.contains(&controller_id.as_str())
+        || declared_machine_id != actual_machine_id.trim()
+    {
         return Err(AppError::ExternalCommand {
             role: "approved router controller identity",
             code: None,
-            detail: Some("controller identity does not match the approved router lock".into()),
+            detail: Some("controller identity does not match the approved controller lock".into()),
         });
     }
     Ok(controller_id)
@@ -1184,8 +1187,8 @@ mod tests {
     #[test]
     fn controller_identity_field_rejects_an_unapproved_controller() -> Result<(), String> {
         let locked = super::controller_identity_field(
-            "approved_controller_id: edge-router\n",
-            "approved_controller_id",
+            "approved_controller_ids: edge-router,wsl-a-controller\n",
+            "approved_controller_ids",
         )
         .map_err(|error| error.to_string())?;
         let presented = super::controller_identity_field(
