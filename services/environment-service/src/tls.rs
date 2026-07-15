@@ -87,7 +87,7 @@ pub async fn serve_owner_resolver_mtls<F>(
     shutdown: F,
 ) -> Result<(), MtlsServerError>
 where
-    F: Future<Output = ()> + Send,
+    F: Future<Output = Result<(), MtlsServerError>> + Send,
 {
     let acceptor = TlsAcceptor::from(config.server);
     let mut connections = JoinSet::new();
@@ -95,7 +95,10 @@ where
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
-            () = &mut shutdown => break,
+            result = &mut shutdown => {
+                result?;
+                break;
+            }
             completed = connections.join_next(), if !connections.is_empty() => {
                 if let Some(Err(error)) = completed {
                     tracing::error!(
@@ -241,6 +244,8 @@ pub enum MtlsServerError {
     TlsConfiguration(String),
     #[error("LW_ENV_OWNER_TLS_ACCEPT_FAILED")]
     Accept(#[source] std::io::Error),
+    #[error("LW_ENV_OWNER_SHUTDOWN_SIGNAL_FAILED")]
+    ShutdownSignal(#[source] std::io::Error),
     #[error("LW_ENV_OWNER_TLS_PEER_CERTIFICATE_MISSING")]
     PeerCertificateMissing,
     #[error("LW_ENV_OWNER_TLS_PEER_CERTIFICATE_INVALID")]

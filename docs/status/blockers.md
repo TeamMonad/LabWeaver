@@ -25,10 +25,11 @@
 - Exit condition: reviewed contracts and implementations provide E1/E2 dual-revision, device-scope and credential tests; E3 deployed Headscale, Router and Guacamole evidence; and E4 multi-device/multi-role replay proving direct and browser paths, 60-second Router isolation, unaffected valid grants and escalation behavior.
 ## NATS runtime implementation
 
-- Issue #18 freezes only the public Subject, CloudEvents, Outbox, ordering,
-  consumer and quarantine design. No NATS client, Stream, durable Consumer,
-  Outbox publisher, delivery manifest, quarantine path or runtime envelope
-  validation exists.
+- Issue #18 freezes the public Subject, CloudEvents, Outbox, ordering, consumer
+  and quarantine design. Issue #51 supplies the Environment-owned client,
+  durable Consumer binding, Outbox publisher, quarantine and runtime envelope
+  path at local E2; other domains, shared audit projection, deployment manifests
+  and deployed NATS identity remain unimplemented.
 - Owner: A for the contract and message boundary; B must complete the required
   high-risk messaging review before implementation.
 - Exit condition: a separately scoped implementation issue provides E2
@@ -42,16 +43,19 @@
   owner-resolver evidence from Docker PostgreSQL 17, NATS JetStream 2.11 and a
   real rustls mTLS server. It includes exhaustive matrices, Inbox ordering,
   acknowledged Outbox replay, optimistic conflict, idempotent new-worker
-  recovery after Provider side effect, timeout/cancel cleanup, SAN bounds,
-  certificate rotation and outage coverage.
+  recovery after Provider side effect with durable Provider-step identity,
+  production first-aggregate creation, exact Active Resource Lease gating,
+  failed-phase/reset-target persistence, timeout/cancel cleanup, SAN bounds,
+  strong ETag, database-clock expiry, certificate rotation, typed shutdown
+  failure and outage coverage.
 - Owner: B for Environment implementation; A for the reviewed Access/mTLS
   boundary; D for PostgreSQL, certificate-rotation, outage and deployed Verify.
 - Exit condition for Issue #51 acceptance: A approves the high-risk contract,
   Migration and mTLS boundary, D verifies the current E2 commands and build
   identity, CI passes, and the PR is merged. The Access-owned revocation
-  responder, formal Container/KubeVirt Provider and deployed mTLS NATS path
-  remain explicit adjacent/E3 dependencies and may not be replaced with
-  fallback evidence.
+  responder, Resource-owned Lease responder, formal Container/KubeVirt Provider
+  and deployed mTLS NATS path remain explicit adjacent/E3 dependencies and may
+  not be replaced with integration fixtures or fallback evidence.
 - Impact: #47 must continue rejecting Environment-scope authorization until the
   resolver and E2 identity are reviewed and verified.
 

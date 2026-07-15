@@ -13,9 +13,9 @@ use tokio::sync::watch;
 
 use crate::{
     EnvironmentStoreError, JetStreamCommandConsumer, JetStreamEventPublisher, LifecycleCommand,
-    NatsAccessRevoker, NatsEnvironmentProvider, NatsMessagingError, OutboxDispatchError,
-    OutboxDispatcher, PgEnvironmentStore, ProviderRegistry, ReconcileError, ReconcileWorker,
-    ReconcileWorkerError, Reconciler, connect_nats_mtls,
+    NatsAccessRevoker, NatsEnvironmentProvider, NatsMessagingError, NatsResourceLeaseVerifier,
+    OutboxDispatchError, OutboxDispatcher, PgEnvironmentStore, ProviderRegistry, ReconcileError,
+    ReconcileWorker, ReconcileWorkerError, Reconciler, connect_nats_mtls,
 };
 
 const DATABASE_URL: &str = "LABWEAVER_DATABASE_URL";
@@ -29,6 +29,7 @@ const COMMAND_CONSUMER: &str = "LABWEAVER_ENVIRONMENT_COMMAND_CONSUMER";
 const COMMAND_QUARANTINE_SUBJECT: &str = "LABWEAVER_ENVIRONMENT_COMMAND_QUARANTINE_SUBJECT";
 const PROVIDER_BINDINGS_PATH: &str = "LABWEAVER_ENVIRONMENT_PROVIDER_BINDINGS_PATH";
 const ACCESS_REVOCATION_SUBJECT: &str = "LABWEAVER_ACCESS_REVOCATION_SUBJECT";
+const RESOURCE_LEASE_VERIFICATION_SUBJECT: &str = "LABWEAVER_RESOURCE_LEASE_VERIFICATION_SUBJECT";
 const WORKER_ID: &str = "LABWEAVER_ENVIRONMENT_WORKER_ID";
 const SYSTEM_ACTOR_ID: &str = "LABWEAVER_ENVIRONMENT_SYSTEM_ACTOR_ID";
 
@@ -37,6 +38,7 @@ const RECONCILE_LEASE: Duration = Duration::from_secs(15);
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 const OUTBOX_TIMEOUT: Duration = Duration::from_secs(5);
 const ACCESS_REVOCATION_TIMEOUT: Duration = Duration::from_secs(5);
+const RESOURCE_LEASE_VERIFICATION_TIMEOUT: Duration = Duration::from_secs(5);
 const WORKER_INTERVAL: Duration = Duration::from_millis(100);
 const EXPIRY_INTERVAL: Duration = Duration::from_secs(1);
 const READINESS_INTERVAL: Duration = Duration::from_secs(1);
@@ -49,6 +51,7 @@ pub struct EnvironmentProcessRuntime {
     worker: ReconcileWorker,
     outbox: OutboxDispatcher<JetStreamEventPublisher>,
     access_revoker: NatsAccessRevoker,
+    lease_verifier: NatsResourceLeaseVerifier,
     nats: async_nats::Client,
     worker_id: String,
     system_actor_id: ActorId,
@@ -108,6 +111,11 @@ impl EnvironmentProcessRuntime {
             nats.clone(),
             ACCESS_REVOCATION_TIMEOUT,
         )?;
+        let lease_verifier = NatsResourceLeaseVerifier::new(
+            required(RESOURCE_LEASE_VERIFICATION_SUBJECT)?,
+            nats.clone(),
+            RESOURCE_LEASE_VERIFICATION_TIMEOUT,
+        )?;
         let worker_id = required(WORKER_ID)?;
         validate_worker_id(&worker_id)?;
         let system_actor_id = ActorId::from_str(&required(SYSTEM_ACTOR_ID)?)
@@ -118,6 +126,7 @@ impl EnvironmentProcessRuntime {
             worker,
             outbox,
             access_revoker,
+            lease_verifier,
             nats,
             worker_id,
             system_actor_id,
@@ -139,6 +148,7 @@ impl EnvironmentProcessRuntime {
             worker,
             outbox,
             access_revoker,
+            lease_verifier,
             nats,
             worker_id,
             system_actor_id,
@@ -148,7 +158,12 @@ impl EnvironmentProcessRuntime {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         tokio::try_join!(
             shutdown_task(shutdown_tx),
-            command_loop(store.clone(), &mut command_consumer, shutdown_rx.clone()),
+            command_loop(
+                store.clone(),
+                &mut command_consumer,
+                lease_verifier,
+                shutdown_rx.clone()
+            ),
             reconcile_loop(store.clone(), worker, worker_id, shutdown_rx.clone()),
             outbox_loop(outbox, shutdown_rx.clone()),
             expiry_loop(
@@ -176,6 +191,7 @@ impl EnvironmentProcessRuntime {
 async fn command_loop(
     store: PgEnvironmentStore,
     consumer: &mut JetStreamCommandConsumer,
+    lease_verifier: NatsResourceLeaseVerifier,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), EnvironmentProcessRuntimeError> {
     loop {
@@ -184,7 +200,7 @@ async fn command_loop(
                 changed.map_err(|_| EnvironmentProcessRuntimeError::ShutdownChannel)?;
                 return Ok(());
             }
-            result = consumer.process_next(&store) => {
+            result = consumer.process_next(&store, &lease_verifier) => {
                 let outcome = result?;
                 tracing::info!(event = "environment.command.consumed", ?outcome);
             }
@@ -278,6 +294,7 @@ async fn expiry_loop(
                         access_revocation_revision: Some(revocation_revision),
                         preserve_mutable_disk: false,
                         max_attempts: 3,
+                        reset_target: None,
                     };
                     let idempotency_key = format!(
                         "expire-{}-r{}",

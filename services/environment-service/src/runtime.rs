@@ -87,26 +87,22 @@ impl OwnerResolverRuntime {
     }
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal() -> Result<(), MtlsServerError> {
     #[cfg(unix)]
     {
-        let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
-        let Ok(mut terminate) = terminate else {
-            tracing::error!(event = "environment.owner_resolver.shutdown_signal_failed");
-            return;
-        };
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .map_err(MtlsServerError::ShutdownSignal)?;
         tokio::select! {
-            result = tokio::signal::ctrl_c() => {
-                if let Err(error) = result {
-                    tracing::error!(event = "environment.owner_resolver.shutdown_signal_failed", %error);
-                }
-            }
-            _ = terminate.recv() => {}
+            result = tokio::signal::ctrl_c() => result.map_err(MtlsServerError::ShutdownSignal),
+            _ = terminate.recv() => Ok(()),
         }
     }
     #[cfg(not(unix))]
-    if let Err(error) = tokio::signal::ctrl_c().await {
-        tracing::error!(event = "environment.owner_resolver.shutdown_signal_failed", %error);
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .map_err(MtlsServerError::ShutdownSignal)
     }
 }
 

@@ -1,7 +1,7 @@
 use contracts::environment::{
     DesiredEnvironmentState, EndpointHealth, EnvironmentEndpoint, EnvironmentError,
-    EnvironmentInstance, EnvironmentLifecycleCommand, EnvironmentOperation,
-    EnvironmentOperationKind, ObservedEnvironmentState, OperationState,
+    EnvironmentInstance, EnvironmentLeaseAuthorization, EnvironmentLifecycleCommand,
+    EnvironmentOperation, EnvironmentOperationKind, ObservedEnvironmentState, OperationState,
 };
 use contracts::{ArtifactRef, OperationId, Revision, UtcTimestamp};
 use serde::{Deserialize, Serialize};
@@ -28,6 +28,8 @@ pub enum LifecycleError {
     RevisionOverflow,
     #[error("LW_ENVIRONMENT_GENERATION_OVERFLOW")]
     GenerationOverflow,
+    #[error("LW_ENVIRONMENT_PROVIDER_STEP_OVERFLOW")]
+    ProviderStepOverflow,
     #[error("LW_ENVIRONMENT_COMMAND_INVALID")]
     CommandInvalid,
     #[error("LW_ENVIRONMENT_OPERATION_ACTIVE")]
@@ -42,6 +44,8 @@ pub enum LifecycleError {
     DiagnosticInvalid,
     #[error("LW_ENVIRONMENT_PROVIDER_OBSERVATION_INVALID")]
     ProviderObservationInvalid,
+    #[error("LW_ENVIRONMENT_ELIGIBILITY_EXPIRED")]
+    EligibilityExpired,
     #[error("LW_ENVIRONMENT_LIFECYCLE_INVALID: {0}")]
     Contract(#[from] EnvironmentError),
 }
@@ -51,6 +55,21 @@ pub fn plan_command(
     current: &EnvironmentInstance,
     command: &LifecycleCommand,
     operation_id: OperationId,
+) -> Result<EnvironmentInstance, LifecycleError> {
+    plan_command_authorized(current, command, operation_id, None, command.accepted_at)
+}
+
+/// Accepts a command with a Resource-authoritative Lease snapshot and database clock.
+#[allow(
+    clippy::too_many_lines,
+    reason = "command acceptance keeps all authority, concurrency, and transition guards in one auditable boundary"
+)]
+pub fn plan_command_authorized(
+    current: &EnvironmentInstance,
+    command: &LifecycleCommand,
+    operation_id: OperationId,
+    lease_authorization: Option<EnvironmentLeaseAuthorization>,
+    authority_now: UtcTimestamp,
 ) -> Result<EnvironmentInstance, LifecycleError> {
     current.validate()?;
     if current.id != command.environment_id || current.revision != command.expected_revision {
@@ -64,8 +83,19 @@ pub fn plan_command(
             .trace_id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+        || (command.kind == EnvironmentOperationKind::Reset) != command.reset_target.is_some()
     {
         return Err(LifecycleError::CommandInvalid);
+    }
+    if matches!(
+        command.kind,
+        EnvironmentOperationKind::Start
+            | EnvironmentOperationKind::Retry
+            | EnvironmentOperationKind::Recover
+            | EnvironmentOperationKind::Reset
+    ) && current.eligibility_expires_at <= authority_now
+    {
+        return Err(LifecycleError::EligibilityExpired);
     }
     let destructive = matches!(
         command.kind,
@@ -84,7 +114,10 @@ pub fn plan_command(
     if current.desired_state == DesiredEnvironmentState::Deleted
         && !matches!(
             command.kind,
-            EnvironmentOperationKind::Delete | EnvironmentOperationKind::Cleanup
+            EnvironmentOperationKind::Delete
+                | EnvironmentOperationKind::Cleanup
+                | EnvironmentOperationKind::Retry
+                | EnvironmentOperationKind::Recover
         )
     {
         return Err(LifecycleError::CommandInvalid);
@@ -102,10 +135,32 @@ pub fn plan_command(
         ));
     }
 
+    let retry_from_phase = if matches!(
+        command.kind,
+        EnvironmentOperationKind::Retry | EnvironmentOperationKind::Recover
+    ) {
+        Some(current.failed_phase.ok_or(LifecycleError::CommandInvalid)?)
+    } else {
+        None
+    };
+    if current.class == contracts::authoring::EnvironmentClass::Work
+        && matches!(
+            command.kind,
+            EnvironmentOperationKind::Start
+                | EnvironmentOperationKind::Retry
+                | EnvironmentOperationKind::Recover
+                | EnvironmentOperationKind::Reset
+        )
+    {
+        validate_lease_authorization(current, lease_authorization.as_ref(), authority_now)?;
+    } else if lease_authorization.is_some() {
+        return Err(LifecycleError::CommandInvalid);
+    }
+
     let mut planned = current.clone();
     planned.revision = next_revision(current.revision)?;
     planned.desired_state = desired_state(current, command.kind);
-    planned.observed_state = accepted_observed_state(current.observed_state, command.kind)?;
+    planned.observed_state = accepted_observed_state(current, command.kind)?;
     if increments_generation(command.kind) {
         planned.generation = current
             .generation
@@ -122,6 +177,7 @@ pub fn plan_command(
         }
     }
     planned.last_diagnostic_code = None;
+    planned.failed_phase = None;
     planned.operation = EnvironmentOperation {
         id: operation_id,
         kind: command.kind,
@@ -132,6 +188,7 @@ pub fn plan_command(
         },
         accepted_revision: planned.revision,
         attempt: 1,
+        provider_step: 1,
         max_attempts: command.max_attempts,
         next_attempt_at: command.accepted_at,
         actor_id: command.actor_id,
@@ -142,6 +199,9 @@ pub fn plan_command(
         diagnostic_code: None,
         preserve_mutable_disk: command.preserve_mutable_disk,
         access_revocation_revision: command.access_revocation_revision,
+        retry_from_phase,
+        reset_target: command.reset_target.clone(),
+        lease_authorization,
     };
     planned.validate()?;
     Ok(planned)
@@ -185,6 +245,12 @@ pub fn apply_provider_observation(
     };
     if observation.operation_complete {
         updated.observed_generation = updated.generation;
+    } else {
+        updated.operation.provider_step = updated
+            .operation
+            .provider_step
+            .checked_add(1)
+            .ok_or(LifecycleError::ProviderStepOverflow)?;
     }
     updated
         .validate()
@@ -227,6 +293,11 @@ pub fn begin_timeout_cleanup(
     updated.observed_state = ObservedEnvironmentState::Deleting;
     updated.operation.state = OperationState::Cancelling;
     updated.operation.attempt = 1;
+    updated.operation.provider_step = updated
+        .operation
+        .provider_step
+        .checked_add(1)
+        .ok_or(LifecycleError::ProviderStepOverflow)?;
     updated.operation.next_attempt_at = cleanup_started_at;
     updated.operation.deadline_at = cleanup_deadline_at;
     updated.operation.cleanup_started_at = Some(cleanup_started_at);
@@ -284,6 +355,7 @@ pub fn apply_provider_failure(
     let mut updated = current.clone();
     updated.revision = next_revision(current.revision)?;
     updated.observed_state = ObservedEnvironmentState::Failed;
+    updated.failed_phase = Some(current.observed_state);
     updated.operation.state = OperationState::Failed;
     updated.operation.diagnostic_code = Some(diagnostic_code.to_owned());
     updated.last_diagnostic_code = Some(diagnostic_code.to_owned());
@@ -331,15 +403,15 @@ fn validate_provider_observation(
         (
             Operation::Create | Operation::Retry | Operation::Recover,
             State::Requested,
-            State::Validating,
+            State::Validating
         ) | (
             Operation::Create | Operation::Retry | Operation::Recover | Operation::Reset,
             State::Validating,
-            State::Building,
+            State::Building
         ) | (
             Operation::Create | Operation::Retry | Operation::Recover | Operation::Reset,
             State::Building,
-            State::Provisioning,
+            State::Provisioning
         ) | (
             Operation::Create
                 | Operation::Retry
@@ -351,13 +423,22 @@ fn validate_provider_observation(
             State::Ready | State::Stopped,
         ) | (Operation::Start, State::Stopped, State::Provisioning)
             | (Operation::Stop, State::Stopping, State::Stopped)
-            | (Operation::Freeze, State::Updating, State::Ready)
+            | (
+                Operation::Freeze | Operation::Retry | Operation::Recover,
+                State::Updating,
+                State::Ready
+            )
             | (
                 Operation::Expire,
                 State::Expiring,
                 State::Stopped | State::Deleting
             )
             | (Operation::Expire, State::Stopped, State::Deleting)
+            | (
+                Operation::Retry | Operation::Recover,
+                State::Stopping | State::Expiring,
+                State::Stopped | State::Deleting
+            )
             | (_, State::Deleting, State::Deleted)
     );
     if !transition_matches_operation {
@@ -433,32 +514,74 @@ const fn desired_state(
 }
 
 fn accepted_observed_state(
-    current: ObservedEnvironmentState,
+    current: &EnvironmentInstance,
     kind: EnvironmentOperationKind,
 ) -> Result<ObservedEnvironmentState, LifecycleError> {
+    let current_state = current.observed_state;
     let next = match kind {
         EnvironmentOperationKind::Stop => ObservedEnvironmentState::Stopping,
-        EnvironmentOperationKind::Reset if current == ObservedEnvironmentState::Failed => {
+        EnvironmentOperationKind::Reset if current_state == ObservedEnvironmentState::Failed => {
             ObservedEnvironmentState::Validating
         }
         EnvironmentOperationKind::Restart | EnvironmentOperationKind::Reset => {
             ObservedEnvironmentState::Provisioning
         }
         EnvironmentOperationKind::Retry | EnvironmentOperationKind::Recover => {
-            ObservedEnvironmentState::Validating
+            retry_resume_state(current.failed_phase.ok_or(LifecycleError::CommandInvalid)?)?
         }
         EnvironmentOperationKind::Cancel | EnvironmentOperationKind::Delete => {
             ObservedEnvironmentState::Deleting
         }
         EnvironmentOperationKind::Expire => ObservedEnvironmentState::Expiring,
-        EnvironmentOperationKind::Cleanup if current != ObservedEnvironmentState::Deleting => {
+        EnvironmentOperationKind::Cleanup
+            if current_state != ObservedEnvironmentState::Deleting =>
+        {
             ObservedEnvironmentState::Deleting
         }
         EnvironmentOperationKind::Freeze => ObservedEnvironmentState::Updating,
-        _ => current,
+        _ => current_state,
     };
-    if next != current {
-        EnvironmentInstance::ensure_transition(current, next)?;
+    if next != current_state {
+        EnvironmentInstance::ensure_transition(current_state, next)?;
     }
     Ok(next)
+}
+
+fn retry_resume_state(
+    failed_phase: ObservedEnvironmentState,
+) -> Result<ObservedEnvironmentState, LifecycleError> {
+    use ObservedEnvironmentState as State;
+    match failed_phase {
+        State::Requested | State::Validating => Ok(State::Validating),
+        State::Building => Ok(State::Building),
+        State::Provisioning | State::Ready | State::Stopped => Ok(State::Provisioning),
+        State::Stopping => Ok(State::Stopping),
+        State::Updating => Ok(State::Updating),
+        State::Expiring => Ok(State::Expiring),
+        State::Deleting => Ok(State::Deleting),
+        State::Deleted | State::Failed => Err(LifecycleError::CommandInvalid),
+    }
+}
+
+fn validate_lease_authorization(
+    current: &EnvironmentInstance,
+    authorization: Option<&EnvironmentLeaseAuthorization>,
+    authority_now: UtcTimestamp,
+) -> Result<(), LifecycleError> {
+    let authorization = authorization.ok_or(LifecycleError::Contract(
+        EnvironmentError::LeaseAuthorizationRequired,
+    ))?;
+    if Some(authorization.lease_id) != current.lease_id
+        || authorization.environment_id != current.id
+        || authorization.course_id != current.course_id
+        || authorization.owner_actor_id != current.owner_id
+        || Some(authorization.capacity_binding.as_str()) != current.capacity_binding.as_deref()
+        || authorization.active_from > authority_now
+        || authorization.expires_at <= authority_now
+    {
+        return Err(LifecycleError::Contract(
+            EnvironmentError::LeaseAuthorizationInvalid,
+        ));
+    }
+    Ok(())
 }

@@ -2,13 +2,17 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use contracts::environment::{
-    EnvironmentInstance, EnvironmentOperationKind, ObservedEnvironmentState, OperationState,
+    DesiredEnvironmentState, EnvironmentCreateSpec, EnvironmentInstance,
+    EnvironmentLeaseAuthorization, EnvironmentOperation, EnvironmentOperationKind,
+    ObservedEnvironmentState, OperationState,
 };
 use contracts::events::{
     CloudEvent, EVENT_CONTRACTS, EnvironmentEvent, EventContract, SPEC_VERSION, subjects,
 };
 use contracts::http::{IdempotencyKey, OperationAccepted};
-use contracts::{EnvironmentId, EventId, OperationId, Sequence, Sha256Digest, UtcTimestamp};
+use contracts::{
+    CourseId, EnvironmentId, EventId, OperationId, Revision, Sequence, Sha256Digest, UtcTimestamp,
+};
 use persistence_sqlx::{
     Domain, IdempotencyDecision, IdempotencyStore, InboxDecision, InboxStore, OutboxStore,
     PersistenceError,
@@ -18,7 +22,7 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
-use crate::lifecycle::{LifecycleCommand, LifecycleError, plan_command};
+use crate::lifecycle::{LifecycleCommand, LifecycleError, plan_command_authorized};
 
 /// One operation and aggregate reserved by a reconciler worker lease.
 #[derive(Clone, Debug)]
@@ -33,9 +37,13 @@ pub struct LeasedEnvironment {
 pub struct InboundLifecycleCommand {
     pub consumer: String,
     pub event_id: EventId,
+    pub course_id: CourseId,
+    pub aggregate_revision: Revision,
     pub aggregate_sequence: Sequence,
     pub idempotency_key: String,
     pub command: LifecycleCommand,
+    pub create: Option<EnvironmentCreateSpec>,
+    pub lease_authorization: Option<EnvironmentLeaseAuthorization>,
 }
 
 /// Durable Inbox decision and, only for the next event, its atomic lifecycle result.
@@ -74,98 +82,8 @@ impl PgEnvironmentStore {
         idempotency_key: &str,
         instance: &EnvironmentInstance,
     ) -> Result<OperationAccepted, EnvironmentStoreError> {
-        IdempotencyKey::parse(idempotency_key)
-            .map_err(|_| EnvironmentStoreError::InvalidIdempotencyKey)?;
-        instance.validate()?;
-        if instance.operation.kind != EnvironmentOperationKind::Create
-            || instance.operation.state != OperationState::Accepted
-            || instance.desired_state != contracts::environment::DesiredEnvironmentState::Running
-            || instance.observed_state != ObservedEnvironmentState::Requested
-            || instance.revision.get() != 1
-            || instance.generation != 1
-            || instance.observed_generation != 0
-            || instance.operation.accepted_revision != instance.revision
-            || instance.operation.attempt != 1
-            || instance.operation.next_attempt_at != instance.operation.accepted_at
-            || instance.operation.cleanup_started_at.is_some()
-            || instance.operation.diagnostic_code.is_some()
-            || instance.operation.access_revocation_revision.is_some()
-            || instance.operation.preserve_mutable_disk
-            || !instance.endpoints.is_empty()
-            || instance.last_diagnostic_code.is_some()
-            || instance.cleanup_evidence.is_some()
-        {
-            return Err(EnvironmentStoreError::InvalidCreateAggregate);
-        }
-        let request_hash = create_request_hash(instance)?;
         let mut transaction = self.pool.begin().await?;
-        match IdempotencyStore::reserve(
-            &mut transaction,
-            Domain::Environment,
-            "create",
-            idempotency_key,
-            request_hash,
-        )
-        .await?
-        {
-            IdempotencyDecision::Replay(value) => {
-                transaction.rollback().await?;
-                return serde_json::from_value(value).map_err(EnvironmentStoreError::Serialization);
-            }
-            IdempotencyDecision::Conflict => {
-                return Err(EnvironmentStoreError::IdempotencyConflict);
-            }
-            IdempotencyDecision::InProgress => {
-                return Err(EnvironmentStoreError::IdempotencyInProgress);
-            }
-            IdempotencyDecision::Reserved => {}
-        }
-
-        let contract = serde_json::to_value(instance)?;
-        let result = sqlx::query(
-            "INSERT INTO environment.environment_instances \
-             (environment_id, release_id, generation, observed_generation, desired_state, \
-              observed_state, provider_binding, lease_id, revision, terminal_diagnostic, \
-              eligibility_expires_at, contract) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
-        )
-        .bind(instance.id.as_uuid())
-        .bind(instance.release_id.as_uuid())
-        .bind(as_i64(instance.generation, "generation")?)
-        .bind(as_i64(instance.observed_generation, "observed generation")?)
-        .bind(wire_name(instance.desired_state)?)
-        .bind(wire_name(instance.observed_state)?)
-        .bind(&instance.provider_binding)
-        .bind(instance.lease_id.map(contracts::LeaseId::as_uuid))
-        .bind(as_i64(instance.revision.get(), "revision")?)
-        .bind(&instance.last_diagnostic_code)
-        .bind(instance.eligibility_expires_at.get())
-        .bind(&contract)
-        .execute(&mut *transaction)
-        .await;
-        if let Err(error) = result {
-            if is_unique_violation(&error) {
-                return Err(EnvironmentStoreError::EnvironmentAlreadyExists);
-            }
-            return Err(error.into());
-        }
-        insert_operation(&mut transaction, instance).await?;
-        enqueue_environment_event(
-            &mut transaction,
-            instance,
-            subjects::ENVIRONMENT_OPERATION_ACCEPTED,
-        )
-        .await?;
-        let accepted = accepted_response(instance);
-        let result = serde_json::to_value(&accepted)?;
-        IdempotencyStore::complete(
-            &mut transaction,
-            Domain::Environment,
-            "create",
-            idempotency_key,
-            &result,
-        )
-        .await?;
+        let accepted = create_in_transaction(&mut transaction, idempotency_key, instance).await?;
         transaction.commit().await?;
         Ok(accepted)
     }
@@ -177,8 +95,15 @@ impl PgEnvironmentStore {
         command: &LifecycleCommand,
     ) -> Result<OperationAccepted, EnvironmentStoreError> {
         let mut transaction = self.pool.begin().await?;
-        let accepted =
-            accept_command_in_transaction(&mut transaction, idempotency_key, command).await?;
+        let accepted = accept_command_in_transaction(
+            &mut transaction,
+            idempotency_key,
+            command,
+            None,
+            None,
+            None,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(accepted)
     }
@@ -191,7 +116,11 @@ impl PgEnvironmentStore {
         let payload_hash = canonical_hash(&json!({
             "idempotencyKey": inbound.idempotency_key,
             "command": inbound.command,
+            "create": inbound.create,
         }))?;
+        if inbound.aggregate_revision != inbound.command.expected_revision {
+            return Err(EnvironmentStoreError::InboundMetadataInvalid);
+        }
         let mut transaction = self.pool.begin().await?;
         let decision = InboxStore::accept(
             &mut transaction,
@@ -209,6 +138,9 @@ impl PgEnvironmentStore {
                     &mut transaction,
                     &inbound.idempotency_key,
                     &inbound.command,
+                    inbound.create.as_ref(),
+                    inbound.lease_authorization.clone(),
+                    Some(inbound.course_id),
                 )
                 .await?,
             ),
@@ -233,6 +165,24 @@ impl PgEnvironmentStore {
         .await?
         .ok_or(EnvironmentStoreError::EnvironmentNotFound)?;
         decode_contract(row.try_get("contract")?)
+    }
+
+    /// Loads an aggregate and the `PostgreSQL` authority clock from the same statement snapshot.
+    pub async fn load_for_owner_resolution(
+        &self,
+        environment_id: EnvironmentId,
+    ) -> Result<(EnvironmentInstance, UtcTimestamp), EnvironmentStoreError> {
+        let row = sqlx::query(
+            "SELECT contract, date_trunc('milliseconds', clock_timestamp()) AS authority_now \
+             FROM environment.environment_instances WHERE environment_id=$1",
+        )
+        .bind(environment_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(EnvironmentStoreError::EnvironmentNotFound)?;
+        let instance = decode_contract(row.try_get("contract")?)?;
+        let authority_now: time::OffsetDateTime = row.try_get("authority_now")?;
+        Ok((instance, UtcTimestamp::from_utc(authority_now)?))
     }
 
     /// Claims one due operation with `FOR UPDATE SKIP LOCKED`; expired leases are recoverable.
@@ -355,8 +305,8 @@ impl PgEnvironmentStore {
         let result = sqlx::query(
             "UPDATE environment.environment_operations SET state=$4, retry_count=$5, \
              max_attempts=$6, diagnostic=$7, contract=$8, next_attempt_at=$9, \
-             deadline_at=$10, target_generation=$11, \
-             finished_at=CASE WHEN $12 THEN now() ELSE NULL END, \
+             deadline_at=$10, target_generation=$11, provider_step=$12, \
+             finished_at=CASE WHEN $13 THEN now() ELSE NULL END, \
              lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL \
              WHERE operation_id=$1 AND lease_owner=$2 AND lease_token=$3",
         )
@@ -371,6 +321,7 @@ impl PgEnvironmentStore {
         .bind(updated.operation.next_attempt_at.get())
         .bind(updated.operation.deadline_at.get())
         .bind(as_i64(updated.generation, "target generation")?)
+        .bind(i64::from(updated.operation.provider_step))
         .bind(terminal)
         .execute(&mut *transaction)
         .await?;
@@ -414,11 +365,230 @@ impl PgEnvironmentStore {
     }
 }
 
+async fn create_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    idempotency_key: &str,
+    instance: &EnvironmentInstance,
+) -> Result<OperationAccepted, EnvironmentStoreError> {
+    IdempotencyKey::parse(idempotency_key)
+        .map_err(|_| EnvironmentStoreError::InvalidIdempotencyKey)?;
+    instance.validate()?;
+    if instance.operation.kind != EnvironmentOperationKind::Create
+        || instance.operation.state != OperationState::Accepted
+        || instance.desired_state != DesiredEnvironmentState::Running
+        || instance.observed_state != ObservedEnvironmentState::Requested
+        || instance.revision.get() != 1
+        || instance.generation != 1
+        || instance.observed_generation != 0
+        || instance.operation.accepted_revision != instance.revision
+        || instance.operation.attempt != 1
+        || instance.operation.provider_step != 1
+        || instance.operation.next_attempt_at != instance.operation.accepted_at
+        || instance.operation.cleanup_started_at.is_some()
+        || instance.operation.diagnostic_code.is_some()
+        || instance.operation.access_revocation_revision.is_some()
+        || instance.operation.retry_from_phase.is_some()
+        || instance.operation.reset_target.is_some()
+        || instance.operation.preserve_mutable_disk
+        || (instance.class == contracts::authoring::EnvironmentClass::Work
+            && instance.operation.lease_authorization.is_none())
+        || !instance.endpoints.is_empty()
+        || instance.last_diagnostic_code.is_some()
+        || instance.failed_phase.is_some()
+        || instance.cleanup_evidence.is_some()
+    {
+        return Err(EnvironmentStoreError::InvalidCreateAggregate);
+    }
+    let request_hash = create_request_hash(instance)?;
+    match IdempotencyStore::reserve(
+        transaction,
+        Domain::Environment,
+        "create",
+        idempotency_key,
+        request_hash,
+    )
+    .await?
+    {
+        IdempotencyDecision::Replay(value) => {
+            return serde_json::from_value(value).map_err(EnvironmentStoreError::Serialization);
+        }
+        IdempotencyDecision::Conflict => return Err(EnvironmentStoreError::IdempotencyConflict),
+        IdempotencyDecision::InProgress => {
+            return Err(EnvironmentStoreError::IdempotencyInProgress);
+        }
+        IdempotencyDecision::Reserved => {}
+    }
+    let result = sqlx::query(
+        "INSERT INTO environment.environment_instances \
+         (environment_id, release_id, generation, observed_generation, desired_state, \
+          observed_state, provider_binding, lease_id, capacity_binding, revision, \
+          terminal_diagnostic, failed_phase, eligibility_expires_at, contract) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+    )
+    .bind(instance.id.as_uuid())
+    .bind(instance.release_id.as_uuid())
+    .bind(as_i64(instance.generation, "generation")?)
+    .bind(as_i64(instance.observed_generation, "observed generation")?)
+    .bind(wire_name(instance.desired_state)?)
+    .bind(wire_name(instance.observed_state)?)
+    .bind(&instance.provider_binding)
+    .bind(instance.lease_id.map(contracts::LeaseId::as_uuid))
+    .bind(&instance.capacity_binding)
+    .bind(as_i64(instance.revision.get(), "revision")?)
+    .bind(&instance.last_diagnostic_code)
+    .bind(instance.failed_phase.map(wire_name).transpose()?)
+    .bind(instance.eligibility_expires_at.get())
+    .bind(serde_json::to_value(instance)?)
+    .execute(&mut **transaction)
+    .await;
+    if let Err(error) = result {
+        if is_unique_violation(&error) {
+            return Err(EnvironmentStoreError::EnvironmentAlreadyExists);
+        }
+        return Err(error.into());
+    }
+    insert_operation(transaction, instance).await?;
+    enqueue_environment_event(
+        transaction,
+        instance,
+        subjects::ENVIRONMENT_OPERATION_ACCEPTED,
+    )
+    .await?;
+    let accepted = accepted_response(instance);
+    IdempotencyStore::complete(
+        transaction,
+        Domain::Environment,
+        "create",
+        idempotency_key,
+        &serde_json::to_value(&accepted)?,
+    )
+    .await?;
+    Ok(accepted)
+}
+
+fn build_create_instance(
+    command: &LifecycleCommand,
+    spec: &EnvironmentCreateSpec,
+    lease_authorization: Option<EnvironmentLeaseAuthorization>,
+    authority_now: UtcTimestamp,
+    course_id: CourseId,
+) -> Result<EnvironmentInstance, EnvironmentStoreError> {
+    if command.kind != EnvironmentOperationKind::Create
+        || command.expected_revision.get() != 1
+        || course_id != spec.course_id
+        || spec.release_version == 0
+        || spec.provider_binding.trim().is_empty()
+        || spec.eligibility_expires_at <= authority_now
+        || !(1..=100).contains(&command.max_attempts)
+        || command.deadline_at <= command.accepted_at
+        || command.deadline_at <= authority_now
+        || command.accepted_at > authority_now
+        || command.access_revocation_revision.is_some()
+        || command.preserve_mutable_disk
+        || command.reset_target.is_some()
+    {
+        return Err(EnvironmentStoreError::InvalidCreateAggregate);
+    }
+    let eligibility_expires_at = match spec.class {
+        contracts::authoring::EnvironmentClass::Experiment => {
+            if spec.lease_id.is_some()
+                || spec.capacity_binding.is_some()
+                || lease_authorization.is_some()
+            {
+                return Err(EnvironmentStoreError::InvalidCreateAggregate);
+            }
+            spec.eligibility_expires_at
+        }
+        contracts::authoring::EnvironmentClass::Work => {
+            let authorization = lease_authorization
+                .as_ref()
+                .ok_or(EnvironmentStoreError::LeaseAuthorizationRequired)?;
+            if Some(authorization.lease_id) != spec.lease_id
+                || authorization.environment_id != command.environment_id
+                || authorization.course_id != spec.course_id
+                || authorization.owner_actor_id != spec.owner_actor_id
+                || Some(authorization.capacity_binding.as_str()) != spec.capacity_binding.as_deref()
+                || authorization.active_from > authority_now
+                || authorization.expires_at <= authority_now
+            {
+                return Err(EnvironmentStoreError::LeaseAuthorizationInvalid);
+            }
+            std::cmp::min(spec.eligibility_expires_at, authorization.expires_at)
+        }
+    };
+    let instance = EnvironmentInstance {
+        id: command.environment_id,
+        course_id: spec.course_id,
+        owner_id: spec.owner_actor_id,
+        class: spec.class,
+        runtime_kind: spec.runtime_kind,
+        release_id: spec.release_id,
+        release_version: spec.release_version,
+        lease_id: spec.lease_id,
+        capacity_binding: spec.capacity_binding.clone(),
+        provider_binding: spec.provider_binding.clone(),
+        desired_state: DesiredEnvironmentState::Running,
+        observed_state: ObservedEnvironmentState::Requested,
+        revision: command.expected_revision,
+        generation: 1,
+        observed_generation: 0,
+        operation: EnvironmentOperation {
+            id: OperationId::new(),
+            kind: EnvironmentOperationKind::Create,
+            state: OperationState::Accepted,
+            accepted_revision: command.expected_revision,
+            attempt: 1,
+            provider_step: 1,
+            max_attempts: command.max_attempts,
+            next_attempt_at: command.accepted_at,
+            actor_id: command.actor_id,
+            trace_id: command.trace_id.clone(),
+            accepted_at: command.accepted_at,
+            deadline_at: command.deadline_at,
+            cleanup_started_at: None,
+            diagnostic_code: None,
+            preserve_mutable_disk: false,
+            access_revocation_revision: None,
+            retry_from_phase: None,
+            reset_target: None,
+            lease_authorization,
+        },
+        eligibility_expires_at,
+        endpoints: Vec::new(),
+        last_diagnostic_code: None,
+        failed_phase: None,
+        cleanup_evidence: None,
+    };
+    instance.validate()?;
+    Ok(instance)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the transaction keeps idempotency, row locking, lifecycle planning, persistence, and Outbox ordering auditable"
+)]
 async fn accept_command_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     idempotency_key: &str,
     command: &LifecycleCommand,
+    create: Option<&EnvironmentCreateSpec>,
+    lease_authorization: Option<EnvironmentLeaseAuthorization>,
+    course_id: Option<CourseId>,
 ) -> Result<OperationAccepted, EnvironmentStoreError> {
+    if command.kind == EnvironmentOperationKind::Create {
+        let authority_now = database_now(transaction).await?;
+        let instance = build_create_instance(
+            command,
+            create.ok_or(EnvironmentStoreError::CreateSpecRequired)?,
+            lease_authorization,
+            authority_now,
+            course_id.ok_or(EnvironmentStoreError::InboundMetadataInvalid)?,
+        )?;
+        return create_in_transaction(transaction, idempotency_key, &instance).await;
+    }
+    if create.is_some() {
+        return Err(EnvironmentStoreError::CreateSpecUnexpected);
+    }
     IdempotencyKey::parse(idempotency_key)
         .map_err(|_| EnvironmentStoreError::InvalidIdempotencyKey)?;
     let operation_name = operation_name(command.kind);
@@ -444,6 +614,10 @@ async fn accept_command_in_transaction(
         IdempotencyDecision::Reserved => {}
     }
     let current = load_locked(transaction, command.environment_id).await?;
+    if course_id.is_some_and(|value| value != current.course_id) {
+        return Err(EnvironmentStoreError::InboundMetadataInvalid);
+    }
+    let authority_now = database_now(transaction).await?;
     let destructive = matches!(
         command.kind,
         EnvironmentOperationKind::Cancel
@@ -480,7 +654,13 @@ async fn accept_command_in_transaction(
     } else {
         None
     };
-    let mut planned = plan_command(&current, command, OperationId::new())?;
+    let mut planned = plan_command_authorized(
+        &current,
+        command,
+        OperationId::new(),
+        lease_authorization,
+        authority_now,
+    )?;
     if let Some(lease_expires_at) = superseded_lease_expires_at {
         let lease_expires_at = UtcTimestamp::from_utc(lease_expires_at)?;
         if lease_expires_at > planned.operation.next_attempt_at {
@@ -538,8 +718,9 @@ async fn insert_operation(
     sqlx::query(
         "INSERT INTO environment.environment_operations \
          (operation_id, environment_id, operation_kind, expected_revision, target_generation, \
-          state, retry_count, max_attempts, next_attempt_at, deadline_at, diagnostic, contract) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+          state, retry_count, provider_step, max_attempts, next_attempt_at, deadline_at, \
+          diagnostic, contract) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
     )
     .bind(operation.id.as_uuid())
     .bind(instance.id.as_uuid())
@@ -554,6 +735,7 @@ async fn insert_operation(
         i32::try_from(operation.attempt.saturating_sub(1))
             .map_err(|_| EnvironmentStoreError::NumericOverflow("retry count"))?,
     )
+    .bind(i64::from(operation.provider_step))
     .bind(i64::from(operation.max_attempts))
     .bind(operation.next_attempt_at.get())
     .bind(operation.deadline_at.get())
@@ -572,8 +754,9 @@ async fn update_instance(
     updated.validate()?;
     let result = sqlx::query(
         "UPDATE environment.environment_instances SET generation=$3, observed_generation=$4, \
-         desired_state=$5, observed_state=$6, provider_binding=$7, lease_id=$8, revision=$9, \
-         terminal_diagnostic=$10, eligibility_expires_at=$11, contract=$12, updated_at=now() \
+         desired_state=$5, observed_state=$6, provider_binding=$7, lease_id=$8, \
+         capacity_binding=$9, revision=$10, terminal_diagnostic=$11, failed_phase=$12, \
+         eligibility_expires_at=$13, contract=$14, updated_at=now() \
          WHERE environment_id=$1 AND revision=$2",
     )
     .bind(current.id.as_uuid())
@@ -584,8 +767,10 @@ async fn update_instance(
     .bind(wire_name(updated.observed_state)?)
     .bind(&updated.provider_binding)
     .bind(updated.lease_id.map(contracts::LeaseId::as_uuid))
+    .bind(&updated.capacity_binding)
     .bind(as_i64(updated.revision.get(), "revision")?)
     .bind(&updated.last_diagnostic_code)
+    .bind(updated.failed_phase.map(wire_name).transpose()?)
     .bind(updated.eligibility_expires_at.get())
     .bind(serde_json::to_value(updated)?)
     .execute(&mut **transaction)
@@ -699,9 +884,15 @@ fn create_request_hash(
         "releaseId": instance.release_id,
         "releaseVersion": instance.release_version,
         "leaseId": instance.lease_id,
+        "capacityBinding": instance.capacity_binding,
         "actorId": instance.operation.actor_id,
         "providerBinding": instance.provider_binding,
         "eligibilityExpiresAt": instance.eligibility_expires_at,
+        "traceId": instance.operation.trace_id,
+        "acceptedAt": instance.operation.accepted_at,
+        "deadlineAt": instance.operation.deadline_at,
+        "maxAttempts": instance.operation.max_attempts,
+        "leaseAuthorization": instance.operation.lease_authorization,
     }))
 }
 
@@ -717,6 +908,7 @@ fn command_request_hash(command: &LifecycleCommand) -> Result<Sha256Digest, Envi
         "accessRevocationRevision": command.access_revocation_revision,
         "preserveMutableDisk": command.preserve_mutable_disk,
         "maxAttempts": command.max_attempts,
+        "resetTarget": command.reset_target,
     }))
 }
 
@@ -794,6 +986,16 @@ pub enum EnvironmentStoreError {
     EnvironmentAlreadyExists,
     #[error("LW_ENVIRONMENT_CREATE_AGGREGATE_INVALID")]
     InvalidCreateAggregate,
+    #[error("LW_ENVIRONMENT_CREATE_SPEC_REQUIRED")]
+    CreateSpecRequired,
+    #[error("LW_ENVIRONMENT_CREATE_SPEC_UNEXPECTED")]
+    CreateSpecUnexpected,
+    #[error("LW_ENVIRONMENT_INBOUND_METADATA_INVALID")]
+    InboundMetadataInvalid,
+    #[error("LW_ENVIRONMENT_LEASE_AUTHORIZATION_REQUIRED")]
+    LeaseAuthorizationRequired,
+    #[error("LW_ENVIRONMENT_LEASE_AUTHORIZATION_INVALID")]
+    LeaseAuthorizationInvalid,
     #[error("LW_IDEMPOTENCY_KEY_INVALID")]
     InvalidIdempotencyKey,
     #[error("LW_IDEMPOTENCY_CONFLICT")]

@@ -5,7 +5,13 @@ use async_nats::jetstream::AckKind;
 use async_nats::jetstream::consumer::PullConsumer;
 use async_nats::jetstream::message::PublishMessage;
 use async_trait::async_trait;
-use contracts::environment::{EnvironmentInstance, EnvironmentLifecycleCommandData};
+use contracts::authoring::EnvironmentClass;
+use contracts::environment::{
+    EnvironmentCreateSpec, EnvironmentInstance, EnvironmentLeaseAuthorization,
+    EnvironmentLeaseState, EnvironmentLeaseVerificationRequest,
+    EnvironmentLeaseVerificationResponse, EnvironmentLifecycleCommandData,
+    EnvironmentOperationKind,
+};
 use contracts::events::{CloudEvent, EVENT_CONTRACTS, subjects};
 use contracts::{EnvironmentId, EventId, OperationId, Revision, Sha256Digest};
 use futures_util::StreamExt;
@@ -112,6 +118,69 @@ pub struct NatsAccessRevoker {
     timeout: Duration,
 }
 
+/// Exact Resource Service adapter used to verify a Work Lease before command acceptance.
+#[derive(Clone)]
+pub struct NatsResourceLeaseVerifier {
+    subject: String,
+    client: async_nats::Client,
+    timeout: Duration,
+}
+
+impl NatsResourceLeaseVerifier {
+    pub fn new(
+        subject: String,
+        client: async_nats::Client,
+        timeout: Duration,
+    ) -> Result<Self, NatsMessagingError> {
+        if !valid_subject(&subject) || timeout.is_zero() || timeout > Duration::from_secs(30) {
+            return Err(NatsMessagingError::Configuration);
+        }
+        Ok(Self {
+            subject,
+            client,
+            timeout,
+        })
+    }
+
+    async fn verify(
+        &self,
+        request: EnvironmentLeaseVerificationRequest,
+        authority_now: contracts::UtcTimestamp,
+    ) -> Result<EnvironmentLeaseAuthorization, NatsMessagingError> {
+        let payload =
+            serde_json::to_vec(&request).map_err(|_| NatsMessagingError::Serialization)?;
+        let message = tokio::time::timeout(
+            self.timeout,
+            self.client.request(self.subject.clone(), payload.into()),
+        )
+        .await
+        .map_err(|_| NatsMessagingError::LeaseRequestTimeout)?
+        .map_err(|_| NatsMessagingError::LeaseRequestFailed)?;
+        if message.payload.len() > MAX_COMMAND_BYTES {
+            return Err(NatsMessagingError::LeaseResponseInvalid);
+        }
+        let response: EnvironmentLeaseVerificationResponse =
+            serde_json::from_slice(&message.payload)
+                .map_err(|_| NatsMessagingError::LeaseResponseInvalid)?;
+        let authorization = response
+            .authorization
+            .ok_or(NatsMessagingError::LeaseResponseInvalid)?;
+        if response.version != 1
+            || response.state != EnvironmentLeaseState::Active
+            || authorization.lease_id != request.lease_id
+            || authorization.environment_id != request.environment_id
+            || authorization.course_id != request.course_id
+            || authorization.owner_actor_id != request.owner_actor_id
+            || authorization.capacity_binding != request.capacity_binding
+            || authorization.active_from > authority_now
+            || authorization.expires_at <= authority_now
+        {
+            return Err(NatsMessagingError::LeaseResponseInvalid);
+        }
+        Ok(authorization)
+    }
+}
+
 impl NatsAccessRevoker {
     pub fn new(
         subject: String,
@@ -212,6 +281,7 @@ impl EnvironmentProvider for NatsEnvironmentProvider {
         let request = ProviderRequest {
             version: 1,
             operation_id: instance.operation.id,
+            provider_step: instance.operation.provider_step,
             action,
             instance: instance.clone(),
         };
@@ -230,13 +300,25 @@ impl EnvironmentProvider for NatsEnvironmentProvider {
             ProviderResponse::Succeeded {
                 version,
                 operation_id,
+                provider_step,
                 observation,
-            } if version == 1 && operation_id == instance.operation.id => Ok(observation),
+            } if version == 1
+                && operation_id == instance.operation.id
+                && provider_step == instance.operation.provider_step =>
+            {
+                Ok(observation)
+            }
             ProviderResponse::Failed {
                 version,
                 operation_id,
+                provider_step,
                 failure,
-            } if version == 1 && operation_id == instance.operation.id => Err(failure),
+            } if version == 1
+                && operation_id == instance.operation.id
+                && provider_step == instance.operation.provider_step =>
+            {
+                Err(failure)
+            }
             _ => Err(invalid_observation()),
         }
     }
@@ -247,6 +329,7 @@ impl EnvironmentProvider for NatsEnvironmentProvider {
 struct ProviderRequest {
     version: u8,
     operation_id: OperationId,
+    provider_step: u32,
     action: ReconcileAction,
     instance: EnvironmentInstance,
 }
@@ -262,11 +345,13 @@ enum ProviderResponse {
     Succeeded {
         version: u8,
         operation_id: OperationId,
+        provider_step: u32,
         observation: ProviderObservation,
     },
     Failed {
         version: u8,
         operation_id: OperationId,
+        provider_step: u32,
         failure: ProviderFailure,
     },
 }
@@ -314,9 +399,14 @@ impl JetStreamCommandConsumer {
     }
 
     /// Receives and transactionally applies one command before double-acknowledging it.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the consumer keeps validation, Lease gating, persistence, quarantine, and acknowledgement ordering visible together"
+    )]
     pub async fn process_next(
         &mut self,
         store: &PgEnvironmentStore,
+        lease_verifier: &NatsResourceLeaseVerifier,
     ) -> Result<CommandConsumeOutcome, NatsMessagingError> {
         let message = self
             .messages
@@ -365,12 +455,40 @@ impl JetStreamCommandConsumer {
                 .map_err(|_| NatsMessagingError::Acknowledge)?;
             return Ok(CommandConsumeOutcome::Rejected);
         }
+        let lease_authorization =
+            match resolve_lease_authorization(store, lease_verifier, &command).await {
+                Ok(authorization) => authorization,
+                Err(LeaseGateFailure::Retryable) => {
+                    message
+                        .ack_with(AckKind::Nak(Some(REDELIVERY_DELAY)))
+                        .await
+                        .map_err(|_| NatsMessagingError::Acknowledge)?;
+                    return Ok(CommandConsumeOutcome::Deferred);
+                }
+                Err(LeaseGateFailure::Rejected) => {
+                    self.quarantine(
+                        &message,
+                        Some(command.id),
+                        "LW_ENVIRONMENT_LEASE_VERIFICATION_REJECTED",
+                    )
+                    .await?;
+                    message
+                        .double_ack_with(AckKind::Term)
+                        .await
+                        .map_err(|_| NatsMessagingError::Acknowledge)?;
+                    return Ok(CommandConsumeOutcome::Rejected);
+                }
+            };
         let inbound = InboundLifecycleCommand {
             consumer: self.consumer_name.clone(),
             event_id: command.id,
+            course_id: command.course_id,
+            aggregate_revision: command.aggregate_revision,
             aggregate_sequence: command.aggregate_sequence,
             idempotency_key: command.data.idempotency_key,
             command: command.data.command,
+            create: command.data.create,
+            lease_authorization,
         };
         match store.accept_inbound_command(&inbound).await {
             Ok(InboundCommandDecision::Applied(_)) => {
@@ -452,6 +570,97 @@ impl JetStreamCommandConsumer {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LeaseGateFailure {
+    Retryable,
+    Rejected,
+}
+
+async fn resolve_lease_authorization(
+    store: &PgEnvironmentStore,
+    verifier: &NatsResourceLeaseVerifier,
+    message: &LifecycleCommandMessage,
+) -> Result<Option<EnvironmentLeaseAuthorization>, LeaseGateFailure> {
+    let command = &message.data.command;
+    let request = if command.kind == EnvironmentOperationKind::Create {
+        let spec = message
+            .data
+            .create
+            .as_ref()
+            .ok_or(LeaseGateFailure::Rejected)?;
+        lease_request_from_create(command.environment_id, spec)?
+    } else if matches!(
+        command.kind,
+        EnvironmentOperationKind::Start
+            | EnvironmentOperationKind::Retry
+            | EnvironmentOperationKind::Recover
+            | EnvironmentOperationKind::Reset
+    ) {
+        let instance = match store.load(command.environment_id).await {
+            Ok(instance) => instance,
+            Err(crate::EnvironmentStoreError::EnvironmentNotFound) => return Ok(None),
+            Err(error) if error.retryable() => return Err(LeaseGateFailure::Retryable),
+            Err(_) => return Err(LeaseGateFailure::Rejected),
+        };
+        if instance.class == EnvironmentClass::Experiment {
+            return Ok(None);
+        }
+        Some(EnvironmentLeaseVerificationRequest {
+            version: 1,
+            lease_id: instance.lease_id.ok_or(LeaseGateFailure::Rejected)?,
+            environment_id: instance.id,
+            course_id: instance.course_id,
+            owner_actor_id: instance.owner_id,
+            capacity_binding: instance
+                .capacity_binding
+                .ok_or(LeaseGateFailure::Rejected)?,
+        })
+    } else {
+        None
+    };
+    let Some(request) = request else {
+        return Ok(None);
+    };
+    let authority_now = store
+        .current_time()
+        .await
+        .map_err(|_| LeaseGateFailure::Retryable)?;
+    verifier
+        .verify(request, authority_now)
+        .await
+        .map(Some)
+        .map_err(|error| {
+            if error.lease_retryable() {
+                LeaseGateFailure::Retryable
+            } else {
+                LeaseGateFailure::Rejected
+            }
+        })
+}
+
+fn lease_request_from_create(
+    environment_id: EnvironmentId,
+    spec: &EnvironmentCreateSpec,
+) -> Result<Option<EnvironmentLeaseVerificationRequest>, LeaseGateFailure> {
+    if spec.class == EnvironmentClass::Experiment {
+        if spec.lease_id.is_some() || spec.capacity_binding.is_some() {
+            return Err(LeaseGateFailure::Rejected);
+        }
+        return Ok(None);
+    }
+    Ok(Some(EnvironmentLeaseVerificationRequest {
+        version: 1,
+        lease_id: spec.lease_id.ok_or(LeaseGateFailure::Rejected)?,
+        environment_id,
+        course_id: spec.course_id,
+        owner_actor_id: spec.owner_actor_id,
+        capacity_binding: spec
+            .capacity_binding
+            .clone()
+            .ok_or(LeaseGateFailure::Rejected)?,
+    }))
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct QuarantineRecord<'a> {
@@ -525,6 +734,18 @@ pub enum NatsMessagingError {
     RequestFailed,
     #[error("LW_ENVIRONMENT_ACCESS_REVOCATION_RESPONSE_INVALID")]
     ResponseInvalid,
+    #[error("LW_ENVIRONMENT_LEASE_VERIFICATION_TIMEOUT")]
+    LeaseRequestTimeout,
+    #[error("LW_ENVIRONMENT_LEASE_VERIFICATION_UNAVAILABLE")]
+    LeaseRequestFailed,
+    #[error("LW_ENVIRONMENT_LEASE_VERIFICATION_RESPONSE_INVALID")]
+    LeaseResponseInvalid,
     #[error("LW_ENVIRONMENT_COMMAND_QUARANTINE_FAILED")]
     Quarantine,
+}
+
+impl NatsMessagingError {
+    const fn lease_retryable(&self) -> bool {
+        matches!(self, Self::LeaseRequestTimeout | Self::LeaseRequestFailed)
+    }
 }

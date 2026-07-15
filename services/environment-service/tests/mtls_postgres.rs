@@ -13,8 +13,9 @@ use contracts::environment::{
 };
 use contracts::{ActorId, CourseId};
 use environment_service::{
-    LifecycleCommand, MtlsConfig, OwnerResolver, OwnerResolverPolicy, PgEnvironmentStore,
-    owner_resolver_router, plan_command, serve_owner_resolver_mtls,
+    LifecycleCommand, MtlsConfig, MtlsServerError, OwnerResolver, OwnerResolverPolicy,
+    PgEnvironmentStore, authorize_owner_resolution, owner_resolver_router, plan_command,
+    serve_owner_resolver_mtls,
 };
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
@@ -56,8 +57,9 @@ async fn resolver_uses_real_postgres_and_verified_rotatable_mtls_identity()
     let (unregistered_certificate, unregistered_key) =
         leaf_certificate(&ca, "unknown-service.internal", true)?;
 
+    let store = PgEnvironmentStore::new(pool.clone());
     let resolver = OwnerResolver::new(
-        PgEnvironmentStore::new(pool.clone()),
+        store.clone(),
         OwnerResolverPolicy::new([ALLOWED_CALLER_SAN])?,
     );
     let (address, shutdown, server) = start_server(
@@ -75,11 +77,14 @@ async fn resolver_uses_real_postgres_and_verified_rotatable_mtls_identity()
         .build()?;
 
     let original_request = request_for(&authoritative);
+    let original_response = resolve(&allowed, address, &original_request).await?;
+    assert_eq!(original_response.status(), StatusCode::OK);
     assert_eq!(
-        resolve(&allowed, address, &original_request)
-            .await?
-            .status(),
-        StatusCode::OK
+        original_response
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|value| value.to_str().ok()),
+        Some("\"rev-2\"")
     );
     let mut slow_handshake = tokio::net::TcpStream::connect(address).await?;
     tokio::time::sleep(std::time::Duration::from_millis(5_100)).await;
@@ -154,8 +159,13 @@ async fn resolver_uses_real_postgres_and_verified_rotatable_mtls_identity()
         StatusCode::OK
     );
 
+    let database_now = store.current_time().await?;
     let mut expired = reassigned.clone();
-    expired.eligibility_expires_at = support::timestamp("2020-01-01T00:00:00.000Z");
+    expired.eligibility_expires_at = shift_minutes(database_now, -1)?;
+    let lagged_process_clock = shift_minutes(database_now, -2)?;
+    assert!(
+        authorize_owner_resolution(&expired, &request_for(&expired), lagged_process_clock).is_ok()
+    );
     update_instance(&pool, &expired).await?;
     assert_eq!(
         resolve(&allowed, address, &request_for(&expired))
@@ -177,6 +187,7 @@ async fn resolver_uses_real_postgres_and_verified_rotatable_mtls_identity()
             access_revocation_revision: Some(support::revision(7)),
             preserve_mutable_disk: false,
             max_attempts: 3,
+            reset_target: None,
         },
         contracts::OperationId::new(),
     )?;
@@ -234,6 +245,27 @@ async fn resolver_uses_real_postgres_and_verified_rotatable_mtls_identity()
             .await
             .is_err()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn shutdown_future_failure_is_propagated_as_a_typed_server_error()
+-> Result<(), Box<dyn std::error::Error>> {
+    let ca = test_ca()?;
+    let (server_certificate, server_key) = leaf_certificate(&ca, "localhost", false)?;
+    let config = MtlsConfig::from_pem(
+        ca.pem().as_bytes(),
+        server_certificate.as_bytes(),
+        server_key.as_bytes(),
+    )?;
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await?;
+    let result = serve_owner_resolver_mtls(listener, axum::Router::new(), config, async {
+        Err(MtlsServerError::ShutdownSignal(std::io::Error::other(
+            "injected signal registration failure",
+        )))
+    })
+    .await;
+    assert!(matches!(result, Err(MtlsServerError::ShutdownSignal(_))));
     Ok(())
 }
 
@@ -319,6 +351,17 @@ fn request_for(instance: &EnvironmentInstance) -> EnvironmentOwnerResolutionRequ
     }
 }
 
+fn shift_minutes(
+    timestamp: contracts::UtcTimestamp,
+    minutes: i64,
+) -> Result<contracts::UtcTimestamp, Box<dyn std::error::Error>> {
+    let shifted = timestamp
+        .get()
+        .checked_add(time::Duration::minutes(minutes))
+        .ok_or("timestamp shift overflow")?;
+    Ok(contracts::UtcTimestamp::from_utc(shifted)?)
+}
+
 async fn resolve(
     client: &Client,
     address: SocketAddr,
@@ -374,6 +417,7 @@ async fn start_server(
         config,
         async move {
             let _ = shutdown_rx.await;
+            Ok(())
         },
     ));
     Ok((address, shutdown_tx, server))

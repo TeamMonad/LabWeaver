@@ -5,13 +5,14 @@ mod support;
 
 use contracts::authoring::EnvironmentClass;
 use contracts::environment::{
-    DesiredEnvironmentState, EndpointHealth, EnvironmentOperationKind, ObservedEnvironmentState,
-    OperationState,
+    DesiredEnvironmentState, EndpointHealth, EnvironmentLeaseAuthorization,
+    EnvironmentOperationKind, EnvironmentResetTarget, ObservedEnvironmentState, OperationState,
 };
 use contracts::{ActorId, ArtifactId, ArtifactRef, LeaseId, OperationId, Sha256Digest};
 use environment_service::{
     LifecycleCommand, LifecycleError, ProviderObservation, apply_provider_failure,
     apply_provider_observation, apply_retry, begin_timeout_cleanup, plan_command,
+    plan_command_authorized,
 };
 
 use support::{ready_instance, requested_instance, revision, timestamp};
@@ -35,6 +36,12 @@ fn command(
         .then(|| revision(9)),
         preserve_mutable_disk: kind == EnvironmentOperationKind::Restart,
         max_attempts: 3,
+        reset_target: (kind == EnvironmentOperationKind::Reset).then_some({
+            contracts::environment::EnvironmentResetTarget::ExperimentBaseline {
+                release_id: instance.release_id,
+                release_version: instance.release_version,
+            }
+        }),
     }
 }
 
@@ -70,6 +77,10 @@ fn stop_is_accepted_without_claiming_provider_convergence() -> Result<(), Box<dy
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one lifecycle scenario verifies the full start and failed-phase recovery sequence"
+)]
 fn start_and_recover_converge_through_validated_provider_states()
 -> Result<(), Box<dyn std::error::Error>> {
     let current = ready_instance();
@@ -134,6 +145,15 @@ fn start_and_recover_converge_through_validated_provider_states()
         &command(&failed, EnvironmentOperationKind::Recover),
         OperationId::new(),
     )?;
+    assert_eq!(
+        failed.failed_phase,
+        Some(ObservedEnvironmentState::Requested)
+    );
+    assert_eq!(
+        recovered_plan.operation.retry_from_phase,
+        Some(ObservedEnvironmentState::Requested)
+    );
+    assert_eq!(recovered_plan.operation.provider_step, 1);
     let building = apply_provider_observation(
         &recovered_plan,
         recovered_plan.operation.id,
@@ -144,6 +164,7 @@ fn start_and_recover_converge_through_validated_provider_states()
             operation_complete: false,
         },
     )?;
+    assert_eq!(building.operation.provider_step, 2);
     let provisioning = apply_provider_observation(
         &building,
         building.operation.id,
@@ -154,6 +175,7 @@ fn start_and_recover_converge_through_validated_provider_states()
             operation_complete: false,
         },
     )?;
+    assert_eq!(provisioning.operation.provider_step, 3);
     let mut recovered_endpoints = current.endpoints;
     for endpoint in &mut recovered_endpoints {
         endpoint.revision = revision(provisioning.revision.get() + 1);
@@ -390,6 +412,136 @@ fn work_requires_a_resource_lease_and_experiment_rejects_one() {
 }
 
 #[test]
+fn work_commands_require_active_exact_lease_and_unexpired_eligibility()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut work = ready_instance();
+    work.class = EnvironmentClass::Work;
+    work.lease_id = Some(LeaseId::new());
+    work.capacity_binding = Some("cpu-standard-v1".to_owned());
+    work.observed_state = ObservedEnvironmentState::Stopped;
+    work.desired_state = DesiredEnvironmentState::Stopped;
+    work.endpoints.clear();
+    let authority_now = timestamp("2026-07-14T02:00:00.000Z");
+    let authorization = lease_authorization(&work, "2026-07-15T00:00:00.000Z");
+    let start = command(&work, EnvironmentOperationKind::Start);
+    let started = plan_command_authorized(
+        &work,
+        &start,
+        OperationId::new(),
+        Some(authorization.clone()),
+        authority_now,
+    )?;
+    assert_eq!(
+        started.operation.lease_authorization,
+        Some(authorization.clone())
+    );
+
+    assert!(matches!(
+        plan_command_authorized(&work, &start, OperationId::new(), None, authority_now,),
+        Err(LifecycleError::Contract(
+            contracts::environment::EnvironmentError::LeaseAuthorizationRequired
+        ))
+    ));
+    let mut wrong_scope = authorization.clone();
+    wrong_scope.capacity_binding = "gpu-standard-v1".to_owned();
+    assert!(matches!(
+        plan_command_authorized(
+            &work,
+            &start,
+            OperationId::new(),
+            Some(wrong_scope),
+            authority_now,
+        ),
+        Err(LifecycleError::Contract(
+            contracts::environment::EnvironmentError::LeaseAuthorizationInvalid
+        ))
+    ));
+
+    let expired_authorization = lease_authorization(&work, "2026-07-14T01:59:59.000Z");
+    for kind in [
+        EnvironmentOperationKind::Start,
+        EnvironmentOperationKind::Retry,
+        EnvironmentOperationKind::Recover,
+        EnvironmentOperationKind::Reset,
+    ] {
+        let mut candidate = work.clone();
+        if kind != EnvironmentOperationKind::Start {
+            candidate.observed_state = ObservedEnvironmentState::Failed;
+            candidate.failed_phase = Some(ObservedEnvironmentState::Provisioning);
+            candidate.operation.state = OperationState::Failed;
+        }
+        let mut command = command(&candidate, kind);
+        if kind == EnvironmentOperationKind::Reset {
+            command.reset_target = Some(EnvironmentResetTarget::WorkConfiguration {
+                configuration_revision: revision(5),
+                authorization_revision: revision(8),
+            });
+        }
+        assert!(matches!(
+            plan_command_authorized(
+                &candidate,
+                &command,
+                OperationId::new(),
+                Some(expired_authorization.clone()),
+                authority_now,
+            ),
+            Err(LifecycleError::Contract(
+                contracts::environment::EnvironmentError::LeaseAuthorizationInvalid
+            ))
+        ));
+        candidate.eligibility_expires_at = timestamp("2026-07-14T01:59:59.000Z");
+        assert!(matches!(
+            plan_command_authorized(
+                &candidate,
+                &command,
+                OperationId::new(),
+                Some(authorization.clone()),
+                authority_now,
+            ),
+            Err(LifecycleError::EligibilityExpired)
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn reset_persists_class_specific_authorized_target() -> Result<(), Box<dyn std::error::Error>> {
+    let experiment = ready_instance();
+    let mut wrong_baseline = command(&experiment, EnvironmentOperationKind::Reset);
+    wrong_baseline.reset_target = Some(EnvironmentResetTarget::ExperimentBaseline {
+        release_id: contracts::ReleaseId::new(),
+        release_version: experiment.release_version,
+    });
+    assert!(matches!(
+        plan_command(&experiment, &wrong_baseline, OperationId::new()),
+        Err(LifecycleError::Contract(
+            contracts::environment::EnvironmentError::ResetTargetInvalid
+        ))
+    ));
+
+    let mut work = experiment;
+    work.class = EnvironmentClass::Work;
+    work.lease_id = Some(LeaseId::new());
+    work.capacity_binding = Some("cpu-standard-v1".to_owned());
+    let authorization = lease_authorization(&work, "2026-07-15T00:00:00.000Z");
+    let target = EnvironmentResetTarget::WorkConfiguration {
+        configuration_revision: revision(12),
+        authorization_revision: revision(19),
+    };
+    let mut reset = command(&work, EnvironmentOperationKind::Reset);
+    reset.reset_target = Some(target.clone());
+    let planned = plan_command_authorized(
+        &work,
+        &reset,
+        OperationId::new(),
+        Some(authorization),
+        timestamp("2026-07-14T02:00:00.000Z"),
+    )?;
+    assert_eq!(planned.operation.reset_target, Some(target));
+    Ok(())
+}
+
+#[test]
 fn delete_requires_revocation_and_immediately_removes_endpoint_eligibility() {
     let current = ready_instance();
     let mut missing_revocation = command(&current, EnvironmentOperationKind::Delete);
@@ -483,5 +635,24 @@ fn cleanup_evidence() -> ArtifactRef {
         sha256: Sha256Digest::of_bytes(b"cleanup evidence"),
         size_bytes: 16,
         media_type: "application/json".to_owned(),
+    }
+}
+
+fn lease_authorization(
+    instance: &contracts::environment::EnvironmentInstance,
+    expires_at: &str,
+) -> EnvironmentLeaseAuthorization {
+    EnvironmentLeaseAuthorization {
+        lease_id: instance.lease_id.unwrap_or_default(),
+        lease_revision: revision(3),
+        environment_id: instance.id,
+        course_id: instance.course_id,
+        owner_actor_id: instance.owner_id,
+        capacity_binding: instance
+            .capacity_binding
+            .clone()
+            .unwrap_or_else(|| "cpu-standard-v1".to_owned()),
+        active_from: timestamp("2026-07-14T00:00:00.000Z"),
+        expires_at: timestamp(expires_at),
     }
 }

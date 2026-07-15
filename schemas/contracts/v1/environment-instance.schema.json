@@ -126,6 +126,47 @@
       "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
       "type": "string"
     },
+    "EnvironmentLeaseAuthorization": {
+      "additionalProperties": false,
+      "description": "Resource-authoritative Active Lease snapshot retained with the accepted operation.",
+      "properties": {
+        "activeFrom": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "capacityBinding": {
+          "type": "string"
+        },
+        "courseId": {
+          "$ref": "#/$defs/CourseId"
+        },
+        "environmentId": {
+          "$ref": "#/$defs/EnvironmentId"
+        },
+        "expiresAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "leaseId": {
+          "$ref": "#/$defs/LeaseId"
+        },
+        "leaseRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "ownerActorId": {
+          "$ref": "#/$defs/ActorId"
+        }
+      },
+      "required": [
+        "leaseId",
+        "leaseRevision",
+        "environmentId",
+        "courseId",
+        "ownerActorId",
+        "capacityBinding",
+        "activeFrom",
+        "expiresAt"
+      ],
+      "type": "object"
+    },
     "EnvironmentOperation": {
       "additionalProperties": false,
       "description": "Idempotent accepted environment operation.",
@@ -179,6 +220,16 @@
         "kind": {
           "$ref": "#/$defs/EnvironmentOperationKind"
         },
+        "leaseAuthorization": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvironmentLeaseAuthorization"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "maxAttempts": {
           "format": "uint32",
           "minimum": 0,
@@ -189,6 +240,31 @@
         },
         "preserveMutableDisk": {
           "type": "boolean"
+        },
+        "providerStep": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "resetTarget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvironmentResetTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retryFromPhase": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObservedEnvironmentState"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "state": {
           "$ref": "#/$defs/OperationState"
@@ -203,6 +279,7 @@
         "state",
         "acceptedRevision",
         "attempt",
+        "providerStep",
         "maxAttempts",
         "nextAttemptAt",
         "actorId",
@@ -230,6 +307,76 @@
         "freeze"
       ],
       "type": "string"
+    },
+    "EnvironmentResetTarget": {
+      "description": "Explicit immutable target selected for one reset operation.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "experiment_baseline",
+              "type": "string"
+            },
+            "releaseId": {
+              "$ref": "#/$defs/ReleaseId"
+            },
+            "releaseVersion": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "releaseId",
+            "releaseVersion"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "authorizationRevision": {
+              "$ref": "#/$defs/Revision"
+            },
+            "kind": {
+              "const": "work_snapshot",
+              "type": "string"
+            },
+            "snapshot": {
+              "$ref": "#/$defs/ArtifactRef"
+            }
+          },
+          "required": [
+            "kind",
+            "snapshot",
+            "authorizationRevision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "authorizationRevision": {
+              "$ref": "#/$defs/Revision"
+            },
+            "configurationRevision": {
+              "$ref": "#/$defs/Revision"
+            },
+            "kind": {
+              "const": "work_configuration",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "configurationRevision",
+            "authorizationRevision"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "LeaseId": {
       "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
@@ -300,6 +447,12 @@
   "additionalProperties": false,
   "description": "PostgreSQL-authoritative environment view.",
   "properties": {
+    "capacityBinding": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "class": {
       "$ref": "#/$defs/EnvironmentClass"
     },
@@ -327,6 +480,16 @@
         "$ref": "#/$defs/EnvironmentEndpoint"
       },
       "type": "array"
+    },
+    "failedPhase": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ObservedEnvironmentState"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "generation": {
       "format": "uint64",

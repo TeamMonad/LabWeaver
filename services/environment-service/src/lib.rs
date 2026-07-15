@@ -17,12 +17,12 @@ mod tls;
 
 pub use lifecycle::{
     LifecycleCommand, LifecycleError, apply_provider_failure, apply_provider_observation,
-    apply_retry, begin_timeout_cleanup, plan_command,
+    apply_retry, begin_timeout_cleanup, plan_command, plan_command_authorized,
 };
 pub use messaging::{
     CommandConsumeOutcome, JetStreamCommandConsumer, JetStreamEventPublisher,
     LifecycleCommandMessage, NatsAccessRevoker, NatsEnvironmentProvider, NatsMessagingError,
-    connect_nats_mtls,
+    NatsResourceLeaseVerifier, connect_nats_mtls,
 };
 pub use outbox::{
     EnvironmentEventPublisher, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,

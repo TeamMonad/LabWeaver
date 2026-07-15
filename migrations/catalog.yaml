@@ -22,7 +22,7 @@ domains:
         sha256: 3d2dfaacfdec2fe4096e43c17d969b20369185b1ac2d82628dd8eb95584b9817
       - id: 2
         file: environment/0002_reconcile_leases.sql
-        sha256: 4274f46e59deea640ad7201b4f3cfc3434ec53f87b5c3b02a0bedc0caef13df2
+        sha256: 1333cf42a6c9706de5c090671d508e1c20d93e486570db1742b71ddaabd8fa87
   - name: agent
     migrations:
       - id: 1

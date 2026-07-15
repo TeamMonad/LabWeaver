@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use axum::extract::rejection::{JsonRejection, PathRejection};
 use axum::extract::{Extension, Path, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
@@ -10,6 +10,7 @@ use contracts::environment::{
     DesiredEnvironmentState, EndpointHealth, EnvironmentInstance, EnvironmentOwnerResolution,
     EnvironmentOwnerResolutionRequest, ObservedEnvironmentState,
 };
+use contracts::http::StrongEtag;
 use contracts::{DiagnosticCode, EnvironmentId, EventId, ProblemDetails, UtcTimestamp};
 
 use crate::{EnvironmentStoreError, PgEnvironmentStore};
@@ -81,20 +82,19 @@ impl OwnerResolver {
         &self,
         caller: &VerifiedCallerIdentity,
         request: &EnvironmentOwnerResolutionRequest,
-        now: UtcTimestamp,
     ) -> Result<EnvironmentOwnerResolution, OwnerResolverError> {
         if !self.policy.allows(caller) {
             return Err(OwnerResolverError::CallerUntrusted);
         }
-        let instance =
-            self.store
-                .load(request.environment_id)
-                .await
-                .map_err(|error| match error {
-                    EnvironmentStoreError::EnvironmentNotFound => OwnerResolverError::ScopeMismatch,
-                    other => OwnerResolverError::Unavailable(other),
-                })?;
-        authorize_owner_resolution(&instance, request, now)
+        let (instance, authority_now) = self
+            .store
+            .load_for_owner_resolution(request.environment_id)
+            .await
+            .map_err(|error| match error {
+                EnvironmentStoreError::EnvironmentNotFound => OwnerResolverError::ScopeMismatch,
+                other => OwnerResolverError::Unavailable(other),
+            })?;
+        authorize_owner_resolution(&instance, request, authority_now)
     }
 }
 
@@ -145,26 +145,21 @@ async fn resolve_owner(
     path: Result<Path<EnvironmentId>, PathRejection>,
     caller: Option<Extension<VerifiedCallerIdentity>>,
     body: Result<Json<EnvironmentOwnerResolutionRequest>, JsonRejection>,
-) -> Result<Json<EnvironmentOwnerResolution>, OwnerResolverError> {
+) -> Result<Response, OwnerResolverError> {
     let Path(environment_id) = path.map_err(|_| OwnerResolverError::RequestInvalid)?;
     let Json(request) = body.map_err(|_| OwnerResolverError::RequestInvalid)?;
     if request.environment_id != environment_id {
         return Err(OwnerResolverError::ScopeMismatch);
     }
     let Extension(caller) = caller.ok_or(OwnerResolverError::CallerUntrusted)?;
-    let now = now_utc()?;
-    resolver.resolve(&caller, &request, now).await.map(Json)
-}
-
-fn now_utc() -> Result<UtcTimestamp, OwnerResolverError> {
-    let now = time::OffsetDateTime::now_utc();
-    let milliseconds = now.unix_timestamp_nanos().div_euclid(1_000_000);
-    let nanos = milliseconds
-        .checked_mul(1_000_000)
-        .ok_or(OwnerResolverError::ClockInvalid)?;
-    let rounded = time::OffsetDateTime::from_unix_timestamp_nanos(nanos)
-        .map_err(|_| OwnerResolverError::ClockInvalid)?;
-    UtcTimestamp::from_utc(rounded).map_err(|_| OwnerResolverError::ClockInvalid)
+    let resolution = resolver.resolve(&caller, &request).await?;
+    let etag = StrongEtag::from_revision(resolution.environment_revision).header_value();
+    let mut response = Json(resolution).into_response();
+    response.headers_mut().insert(
+        header::ETAG,
+        HeaderValue::from_str(&etag).map_err(|_| OwnerResolverError::ResponseInvalid)?,
+    );
+    Ok(response)
 }
 
 fn valid_san(san: &str) -> bool {
@@ -190,8 +185,8 @@ pub enum OwnerResolverError {
     EnvironmentUnavailable,
     #[error("LW_ENV_OWNER_RESOLVER_UNAVAILABLE")]
     Unavailable(EnvironmentStoreError),
-    #[error("LW_ENV_OWNER_CLOCK_INVALID")]
-    ClockInvalid,
+    #[error("LW_ENV_OWNER_RESPONSE_INVALID")]
+    ResponseInvalid,
 }
 
 impl OwnerResolverError {
@@ -221,9 +216,9 @@ impl OwnerResolverError {
                 "LW_ENV_OWNER_RESOLVER_UNAVAILABLE",
                 true,
             ),
-            Self::ClockInvalid => (
+            Self::ResponseInvalid => (
                 StatusCode::SERVICE_UNAVAILABLE,
-                "LW_ENV_OWNER_CLOCK_INVALID",
+                "LW_ENV_OWNER_RESPONSE_INVALID",
                 false,
             ),
         }

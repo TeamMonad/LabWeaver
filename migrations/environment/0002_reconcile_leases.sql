@@ -2,6 +2,7 @@ ALTER TABLE environment_operations
     ADD COLUMN max_attempts bigint NOT NULL DEFAULT 3,
     ADD COLUMN next_attempt_at timestamptz NOT NULL DEFAULT now(),
     ADD COLUMN deadline_at timestamptz NOT NULL DEFAULT (now() + interval '15 minutes'),
+    ADD COLUMN provider_step bigint NOT NULL DEFAULT 1,
     ADD COLUMN lease_token uuid,
     ADD COLUMN lease_expires_at timestamptz;
 
@@ -43,6 +44,14 @@ UPDATE environment_operations
             true
         );
 
+UPDATE environment_operations
+    SET contract = contract || jsonb_build_object(
+        'providerStep', 1,
+        'retryFromPhase', NULL,
+        'resetTarget', NULL,
+        'leaseAuthorization', NULL
+    );
+
 ALTER TABLE environment_operations
     ADD CONSTRAINT environment_operation_max_attempts_positive
         CHECK (max_attempts > 0),
@@ -50,6 +59,8 @@ ALTER TABLE environment_operations
         CHECK (retry_count < max_attempts),
     ADD CONSTRAINT environment_operation_time_bound
         CHECK (next_attempt_at <= deadline_at),
+    ADD CONSTRAINT environment_operation_provider_step_positive
+        CHECK (provider_step > 0),
     ADD CONSTRAINT environment_operation_lease_bound
         CHECK (
             (lease_owner IS NULL) = (lease_token IS NULL)
@@ -58,7 +69,9 @@ ALTER TABLE environment_operations
         );
 
 ALTER TABLE environment_instances
-    ADD COLUMN eligibility_expires_at timestamptz;
+    ADD COLUMN eligibility_expires_at timestamptz,
+    ADD COLUMN capacity_binding text,
+    ADD COLUMN failed_phase text;
 
 -- V1 rows did not retain the authoritative eligibility horizon. Expire them at
 -- migration time so the owner resolver fails closed until a revisioned command
@@ -96,6 +109,32 @@ UPDATE environment_instances
                 updated_at AT TIME ZONE 'UTC',
                 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
             )),
+            true
+        );
+
+UPDATE environment_instances
+    SET capacity_binding = CASE
+            WHEN contract ->> 'class' = 'work' THEN 'migration-reconcile-required'
+            ELSE NULL
+        END,
+        -- V1 did not retain the phase that failed. Keep it unknown so decoding
+        -- and retry/recover fail closed instead of guessing a Provider action.
+        failed_phase = NULL,
+        contract = jsonb_set(
+            contract || jsonb_build_object(
+                'capacityBinding', CASE
+                    WHEN contract ->> 'class' = 'work' THEN 'migration-reconcile-required'
+                    ELSE NULL
+                END,
+                'failedPhase', NULL
+            ),
+            '{operation}',
+            (contract -> 'operation') || jsonb_build_object(
+                'providerStep', 1,
+                'retryFromPhase', NULL,
+                'resetTarget', NULL,
+                'leaseAuthorization', NULL
+            ),
             true
         );
 

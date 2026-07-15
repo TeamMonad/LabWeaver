@@ -54,6 +54,90 @@ pub enum EnvironmentOperationKind {
     Freeze,
 }
 
+/// Authoritative fields required to create the first Environment aggregate.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentCreateSpec {
+    pub course_id: CourseId,
+    pub owner_actor_id: ActorId,
+    pub class: EnvironmentClass,
+    pub runtime_kind: RuntimeKind,
+    pub release_id: ReleaseId,
+    pub release_version: u64,
+    pub provider_binding: String,
+    pub lease_id: Option<LeaseId>,
+    pub capacity_binding: Option<String>,
+    pub eligibility_expires_at: UtcTimestamp,
+}
+
+/// Explicit immutable target selected for one reset operation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum EnvironmentResetTarget {
+    ExperimentBaseline {
+        release_id: ReleaseId,
+        release_version: u64,
+    },
+    WorkSnapshot {
+        snapshot: crate::ArtifactRef,
+        authorization_revision: Revision,
+    },
+    WorkConfiguration {
+        configuration_revision: Revision,
+        authorization_revision: Revision,
+    },
+}
+
+/// Resource-authoritative Active Lease snapshot retained with the accepted operation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentLeaseAuthorization {
+    pub lease_id: LeaseId,
+    pub lease_revision: Revision,
+    pub environment_id: EnvironmentId,
+    pub course_id: CourseId,
+    pub owner_actor_id: ActorId,
+    pub capacity_binding: String,
+    pub active_from: UtcTimestamp,
+    pub expires_at: UtcTimestamp,
+}
+
+/// Versioned Resource request for exact Lease scope and current state.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentLeaseVerificationRequest {
+    pub version: u8,
+    pub lease_id: LeaseId,
+    pub environment_id: EnvironmentId,
+    pub course_id: CourseId,
+    pub owner_actor_id: ActorId,
+    pub capacity_binding: String,
+}
+
+/// Closed Resource Lease states understood by the Environment verifier.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentLeaseState {
+    Active,
+    Expiring,
+    Expired,
+    Revoked,
+}
+
+/// Versioned Resource response. Only `Active` with an exact authorization is accepted.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentLeaseVerificationResponse {
+    pub version: u8,
+    pub state: EnvironmentLeaseState,
+    pub authorization: Option<EnvironmentLeaseAuthorization>,
+}
+
 /// Revision-checked lifecycle intent consumed by the Environment state owner.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -68,6 +152,7 @@ pub struct EnvironmentLifecycleCommand {
     pub access_revocation_revision: Option<Revision>,
     pub preserve_mutable_disk: bool,
     pub max_attempts: u32,
+    pub reset_target: Option<EnvironmentResetTarget>,
 }
 
 /// Command-specific data carried inside the catalogued lifecycle CloudEvent.
@@ -76,6 +161,7 @@ pub struct EnvironmentLifecycleCommand {
 pub struct EnvironmentLifecycleCommandData {
     pub idempotency_key: String,
     pub command: EnvironmentLifecycleCommand,
+    pub create: Option<EnvironmentCreateSpec>,
 }
 
 /// Persistent operation state.
@@ -99,6 +185,7 @@ pub struct EnvironmentOperation {
     pub state: OperationState,
     pub accepted_revision: Revision,
     pub attempt: u32,
+    pub provider_step: u32,
     pub max_attempts: u32,
     pub next_attempt_at: UtcTimestamp,
     pub actor_id: ActorId,
@@ -109,6 +196,9 @@ pub struct EnvironmentOperation {
     pub diagnostic_code: Option<String>,
     pub preserve_mutable_disk: bool,
     pub access_revocation_revision: Option<Revision>,
+    pub retry_from_phase: Option<ObservedEnvironmentState>,
+    pub reset_target: Option<EnvironmentResetTarget>,
+    pub lease_authorization: Option<EnvironmentLeaseAuthorization>,
 }
 
 /// Sanitized Environment-owned endpoint metadata.
@@ -153,6 +243,7 @@ pub struct EnvironmentInstance {
     pub release_id: ReleaseId,
     pub release_version: u64,
     pub lease_id: Option<LeaseId>,
+    pub capacity_binding: Option<String>,
     pub provider_binding: String,
     pub desired_state: DesiredEnvironmentState,
     pub observed_state: ObservedEnvironmentState,
@@ -163,6 +254,7 @@ pub struct EnvironmentInstance {
     pub eligibility_expires_at: UtcTimestamp,
     pub endpoints: Vec<EnvironmentEndpoint>,
     pub last_diagnostic_code: Option<String>,
+    pub failed_phase: Option<ObservedEnvironmentState>,
     pub cleanup_evidence: Option<crate::ArtifactRef>,
 }
 
@@ -174,6 +266,7 @@ impl EnvironmentInstance {
             || self.generation == 0
             || self.observed_generation > self.generation
             || self.operation.attempt == 0
+            || self.operation.provider_step == 0
             || self.operation.max_attempts < self.operation.attempt
             || self.operation.deadline_at <= self.operation.accepted_at
             || self.operation.next_attempt_at < self.operation.accepted_at
@@ -204,13 +297,52 @@ impl EnvironmentInstance {
                 .map_err(|_| EnvironmentError::InvalidDiagnosticCode)?;
         }
         match self.class {
-            EnvironmentClass::Experiment if self.lease_id.is_some() => {
+            EnvironmentClass::Experiment
+                if self.lease_id.is_some() || self.capacity_binding.is_some() =>
+            {
                 return Err(EnvironmentError::InvalidAggregate);
             }
-            EnvironmentClass::Work if self.lease_id.is_none() => {
+            EnvironmentClass::Work
+                if self.lease_id.is_none()
+                    || self
+                        .capacity_binding
+                        .as_deref()
+                        .is_none_or(|binding| !valid_binding(binding)) =>
+            {
                 return Err(EnvironmentError::LeaseRequired);
             }
             _ => {}
+        }
+        if (self.observed_state == ObservedEnvironmentState::Failed) != self.failed_phase.is_some()
+        {
+            return Err(EnvironmentError::FailedPhaseRequired);
+        }
+        let retry_operation = matches!(
+            self.operation.kind,
+            EnvironmentOperationKind::Retry | EnvironmentOperationKind::Recover
+        );
+        if retry_operation != self.operation.retry_from_phase.is_some() {
+            return Err(EnvironmentError::FailedPhaseRequired);
+        }
+        if (self.operation.kind == EnvironmentOperationKind::Reset)
+            != self.operation.reset_target.is_some()
+        {
+            return Err(EnvironmentError::ResetTargetRequired);
+        }
+        if let Some(target) = &self.operation.reset_target {
+            validate_reset_target(self, target)?;
+        }
+        if let Some(authorization) = &self.operation.lease_authorization {
+            if self.class != EnvironmentClass::Work
+                || Some(authorization.lease_id) != self.lease_id
+                || authorization.environment_id != self.id
+                || authorization.course_id != self.course_id
+                || authorization.owner_actor_id != self.owner_id
+                || Some(authorization.capacity_binding.as_str()) != self.capacity_binding.as_deref()
+                || authorization.active_from >= authorization.expires_at
+            {
+                return Err(EnvironmentError::LeaseAuthorizationInvalid);
+            }
         }
         match self.operation.kind {
             EnvironmentOperationKind::Restart if !self.operation.preserve_mutable_disk => {
@@ -289,7 +421,13 @@ impl EnvironmentInstance {
                 State::Ready | State::Failed | State::Deleting
             ) | (
                 State::Failed,
-                State::Validating | State::Provisioning | State::Expiring | State::Deleting
+                State::Validating
+                    | State::Building
+                    | State::Provisioning
+                    | State::Stopping
+                    | State::Updating
+                    | State::Expiring
+                    | State::Deleting
             ) | (State::Deleting, State::Deleted | State::Failed)
         );
         if allowed {
@@ -344,6 +482,16 @@ pub enum EnvironmentError {
     GrantRevocationRequired,
     #[error("Work environments require a Resource-owned Lease reference")]
     LeaseRequired,
+    #[error("Failed state and retry/recover require a persisted failed phase")]
+    FailedPhaseRequired,
+    #[error("reset requires an explicit class-specific immutable target")]
+    ResetTargetRequired,
+    #[error("reset target does not match the Environment class or immutable binding")]
+    ResetTargetInvalid,
+    #[error("Work create/start/retry/recover/reset requires an Active Lease authorization")]
+    LeaseAuthorizationRequired,
+    #[error("Resource Lease authorization does not match the Environment scope")]
+    LeaseAuthorizationInvalid,
     #[error("illegal environment transition: {from:?} -> {to:?}")]
     InvalidTransition {
         from: ObservedEnvironmentState,
@@ -358,6 +506,42 @@ pub enum EnvironmentError {
     InvalidResolverConfiguration,
     #[error("environment diagnostic code is not a stable LW_* identity")]
     InvalidDiagnosticCode,
+}
+
+fn valid_binding(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+}
+
+fn validate_reset_target(
+    instance: &EnvironmentInstance,
+    target: &EnvironmentResetTarget,
+) -> Result<(), EnvironmentError> {
+    let valid = match (instance.class, target) {
+        (
+            EnvironmentClass::Experiment,
+            EnvironmentResetTarget::ExperimentBaseline {
+                release_id,
+                release_version,
+            },
+        ) => *release_id == instance.release_id && *release_version == instance.release_version,
+        (EnvironmentClass::Work, EnvironmentResetTarget::WorkSnapshot { snapshot, .. }) => {
+            !snapshot.store_binding.trim().is_empty()
+                && !snapshot.object_version.trim().is_empty()
+                && snapshot.size_bytes > 0
+                && !snapshot.media_type.trim().is_empty()
+        }
+        (EnvironmentClass::Work, EnvironmentResetTarget::WorkConfiguration { .. }) => true,
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(EnvironmentError::ResetTargetInvalid)
+    }
 }
 
 /// Fail-closed internal request used by Access Service to verify Environment ownership.
@@ -506,7 +690,13 @@ mod tests {
                         State::Ready | State::Failed | State::Deleting
                     ) | (
                         State::Failed,
-                        State::Validating | State::Provisioning | State::Expiring | State::Deleting
+                        State::Validating
+                            | State::Building
+                            | State::Provisioning
+                            | State::Stopping
+                            | State::Updating
+                            | State::Expiring
+                            | State::Deleting
                     ) | (State::Deleting, State::Deleted | State::Failed)
                 );
                 assert_eq!(

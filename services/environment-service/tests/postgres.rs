@@ -21,8 +21,8 @@ use contracts::environment::{
 };
 use contracts::events::CloudEvent;
 use contracts::{
-    ActorId, ArtifactId, ArtifactRef, EndpointId, EventId, OperationId, Sequence, Sha256Digest,
-    UtcTimestamp,
+    ActorId, ArtifactId, ArtifactRef, EndpointId, EnvironmentId, EventId, OperationId, Sequence,
+    Sha256Digest, UtcTimestamp,
 };
 use environment_service::{
     EnvironmentEventPublisher, EnvironmentProvider, EnvironmentStoreError, InboundCommandDecision,
@@ -62,6 +62,14 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
         .as_object_mut()
         .ok_or("legacy instance must be an object")?
         .remove("eligibilityExpiresAt");
+    legacy_contract
+        .as_object_mut()
+        .ok_or("legacy instance must be an object")?
+        .remove("capacityBinding");
+    legacy_contract
+        .as_object_mut()
+        .ok_or("legacy instance must be an object")?
+        .remove("failedPhase");
     let legacy_operation = legacy_contract
         .get_mut("operation")
         .and_then(serde_json::Value::as_object_mut)
@@ -70,6 +78,10 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
     legacy_operation.remove("nextAttemptAt");
     legacy_operation.remove("traceId");
     legacy_operation.remove("cleanupStartedAt");
+    legacy_operation.remove("providerStep");
+    legacy_operation.remove("retryFromPhase");
+    legacy_operation.remove("resetTarget");
+    legacy_operation.remove("leaseAuthorization");
     let legacy_operation_contract = serde_json::Value::Object(legacy_operation.clone());
     sqlx::query(
         "INSERT INTO environment.environment_instances \
@@ -95,6 +107,65 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
     .execute(&pool)
     .await?;
 
+    let legacy_failed_id = EnvironmentId::new();
+    let legacy_failed_operation_id = OperationId::new();
+    let mut legacy_failed_contract = legacy_contract.clone();
+    let failed_object = legacy_failed_contract
+        .as_object_mut()
+        .ok_or("legacy failed instance must be an object")?;
+    failed_object.insert("id".to_owned(), serde_json::to_value(legacy_failed_id)?);
+    failed_object.insert(
+        "observedState".to_owned(),
+        serde_json::Value::String("failed".to_owned()),
+    );
+    failed_object.insert("endpoints".to_owned(), serde_json::json!([]));
+    failed_object.insert(
+        "lastDiagnosticCode".to_owned(),
+        serde_json::Value::String("LW_ENVIRONMENT_PROVIDER_UNAVAILABLE".to_owned()),
+    );
+    let failed_operation = failed_object
+        .get_mut("operation")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or("legacy failed operation must be an object")?;
+    failed_operation.insert(
+        "id".to_owned(),
+        serde_json::to_value(legacy_failed_operation_id)?,
+    );
+    failed_operation.insert(
+        "state".to_owned(),
+        serde_json::Value::String("failed".to_owned()),
+    );
+    failed_operation.insert(
+        "diagnosticCode".to_owned(),
+        serde_json::Value::String("LW_ENVIRONMENT_PROVIDER_UNAVAILABLE".to_owned()),
+    );
+    let legacy_failed_operation_contract = serde_json::Value::Object(failed_operation.clone());
+    sqlx::query(
+        "INSERT INTO environment.environment_instances \
+         (environment_id, release_id, generation, observed_generation, desired_state, \
+          observed_state, provider_binding, lease_id, revision, terminal_diagnostic, contract) \
+         VALUES ($1,$2,1,1,'running','failed',$3,NULL,2,$4,$5)",
+    )
+    .bind(legacy_failed_id.as_uuid())
+    .bind(legacy.release_id.as_uuid())
+    .bind(&legacy.provider_binding)
+    .bind("LW_ENVIRONMENT_PROVIDER_UNAVAILABLE")
+    .bind(&legacy_failed_contract)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO environment.environment_operations \
+         (operation_id, environment_id, operation_kind, expected_revision, target_generation, \
+          state, retry_count, diagnostic, contract) \
+         VALUES ($1,$2,'create',1,1,'failed',5,$3,$4)",
+    )
+    .bind(legacy_failed_operation_id.as_uuid())
+    .bind(legacy_failed_id.as_uuid())
+    .bind("LW_ENVIRONMENT_PROVIDER_UNAVAILABLE")
+    .bind(&legacy_failed_operation_contract)
+    .execute(&pool)
+    .await?;
+
     let reconcile_migration = format!(
         "SET search_path TO environment;\n{}",
         include_str!("../../../migrations/environment/0002_reconcile_leases.sql")
@@ -106,6 +177,7 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
     assert_eq!(upgraded.operation.attempt, 6);
     assert_eq!(upgraded.operation.max_attempts, 6);
     assert!(upgraded.operation.trace_id.starts_with("migration-v1-"));
+    assert_eq!(upgraded.operation.provider_step, 1);
     let migrated_max_attempts: i64 = sqlx::query_scalar(
         "SELECT max_attempts FROM environment.environment_operations WHERE operation_id=$1",
     )
@@ -113,6 +185,27 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
     .fetch_one(&pool)
     .await?;
     assert_eq!(migrated_max_attempts, 6);
+    assert!(matches!(
+        store.load(legacy_failed_id).await,
+        Err(EnvironmentStoreError::Contract(
+            contracts::environment::EnvironmentError::FailedPhaseRequired
+        ))
+    ));
+    let migrated_failed_phase: Option<String> = sqlx::query_scalar(
+        "SELECT failed_phase FROM environment.environment_instances WHERE environment_id=$1",
+    )
+    .bind(legacy_failed_id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(migrated_failed_phase.is_none());
+    sqlx::query("DELETE FROM environment.environment_operations WHERE operation_id=$1")
+        .bind(legacy_failed_operation_id.as_uuid())
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM environment.environment_instances WHERE environment_id=$1")
+        .bind(legacy_failed_id.as_uuid())
+        .execute(&pool)
+        .await?;
     sqlx::query("DELETE FROM environment.environment_operations WHERE operation_id=$1")
         .bind(legacy.operation.id.as_uuid())
         .execute(&pool)
@@ -276,6 +369,7 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
         access_revocation_revision: Some(support::revision(9)),
         preserve_mutable_disk: false,
         max_attempts: 3,
+        reset_target: None,
     };
     let cleanup = store
         .accept_command("delete-key-superseded", &destructive)
@@ -312,6 +406,8 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
     let inbound = InboundLifecycleCommand {
         consumer: "environment-lifecycle-v1".to_owned(),
         event_id: EventId::new(),
+        course_id: inbox_target.course_id,
+        aggregate_revision: inbox_target.revision,
         aggregate_sequence: Sequence(1),
         idempotency_key: "delete-key-inbox".to_owned(),
         command: LifecycleCommand {
@@ -325,7 +421,10 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
             access_revocation_revision: Some(support::revision(10)),
             preserve_mutable_disk: false,
             max_attempts: 3,
+            reset_target: None,
         },
+        create: None,
+        lease_authorization: None,
     };
     assert!(matches!(
         store.accept_inbound_command(&inbound).await?,
@@ -384,6 +483,7 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
         access_revocation_revision: Some(support::revision(12)),
         preserve_mutable_disk: false,
         max_attempts: 3,
+        reset_target: None,
     };
     store
         .accept_command("delete-key-command-identity", &identity_command)
@@ -440,6 +540,17 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
         cleanup_failed.last_diagnostic_code.as_deref(),
         Some("LW_ENVIRONMENT_PROVIDER_CLEANUP_FAILED")
     );
+    assert_eq!(
+        cleanup_failed.failed_phase,
+        Some(ObservedEnvironmentState::Deleting)
+    );
+    let persisted_failed_phase: Option<String> = sqlx::query_scalar(
+        "SELECT failed_phase FROM environment.environment_instances WHERE environment_id=$1",
+    )
+    .bind(cleanup_failed.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(persisted_failed_phase.as_deref(), Some("deleting"));
     assert!(matches!(
         worker
             .run_once("environment-worker-command-identity-cleanup", accepted_at)
@@ -453,7 +564,8 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
         ObservedEnvironmentState::Failed
     );
 
-    let crash_target = requested_instance();
+    let mut crash_target = requested_instance();
+    crash_target.eligibility_expires_at = timestamp("2027-07-15T00:00:00.000Z");
     store
         .create("create-key-crash-recovery", &crash_target)
         .await?;
@@ -508,6 +620,62 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
         store.heartbeat(&abandoned, Duration::from_secs(30)).await,
         Err(EnvironmentStoreError::LeaseLost)
     ));
+    for expected_state in [
+        ObservedEnvironmentState::Building,
+        ObservedEnvironmentState::Provisioning,
+        ObservedEnvironmentState::Ready,
+    ] {
+        assert!(matches!(
+            restarted_worker
+                .run_once(
+                    "environment-worker-restarted",
+                    timestamp("2026-07-14T00:01:00.000Z"),
+                )
+                .await?,
+            ReconcileWorkerOutcome::Advanced { state, .. } if state == expected_state
+        ));
+    }
+    let completed_create = store.load(crash_target.id).await?;
+    assert_eq!(completed_create.operation.provider_step, 4);
+    assert_eq!(crash_provider.calls.load(Ordering::SeqCst), 5);
+    assert_eq!(crash_provider.side_effects.load(Ordering::SeqCst), 4);
+    let persisted_provider_step: i64 = sqlx::query_scalar(
+        "SELECT provider_step FROM environment.environment_operations WHERE operation_id=$1",
+    )
+    .bind(completed_create.operation.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(persisted_provider_step, 4);
+    let reset_target = contracts::environment::EnvironmentResetTarget::ExperimentBaseline {
+        release_id: completed_create.release_id,
+        release_version: completed_create.release_version,
+    };
+    store
+        .accept_command(
+            "reset-key-persisted-target",
+            &LifecycleCommand {
+                environment_id: completed_create.id,
+                kind: EnvironmentOperationKind::Reset,
+                expected_revision: completed_create.revision,
+                actor_id: ActorId::new(),
+                trace_id: "trace-reset-persisted-target".to_owned(),
+                accepted_at,
+                deadline_at,
+                access_revocation_revision: Some(support::revision(22)),
+                preserve_mutable_disk: false,
+                max_attempts: 3,
+                reset_target: Some(reset_target.clone()),
+            },
+        )
+        .await?;
+    assert_eq!(
+        store
+            .load(completed_create.id)
+            .await?
+            .operation
+            .reset_target,
+        Some(reset_target)
+    );
 
     let race_target = requested_instance();
     store
@@ -524,6 +692,7 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
         access_revocation_revision: Some(support::revision(11)),
         preserve_mutable_disk: false,
         max_attempts: 3,
+        reset_target: None,
     };
     let mut cancel_command = delete_command.clone();
     cancel_command.kind = EnvironmentOperationKind::Cancel;
@@ -647,6 +816,7 @@ async fn persistent_timeout_and_ready_cancel_cleanup_are_bounded()
                 access_revocation_revision: Some(support::revision(20)),
                 preserve_mutable_disk: false,
                 max_attempts: 3,
+                reset_target: None,
             },
         )
         .await?;
@@ -733,7 +903,7 @@ struct LifecycleSuccessProvider;
 struct IdempotentCrashProvider {
     calls: AtomicUsize,
     side_effects: AtomicUsize,
-    completed: Mutex<HashSet<(OperationId, ReconcileAction)>>,
+    completed: Mutex<HashSet<(OperationId, u32, ReconcileAction)>>,
 }
 
 #[async_trait]
@@ -755,7 +925,11 @@ impl EnvironmentProvider for IdempotentCrashProvider {
                 code: ProviderFailureCode::Transient,
                 retryable: true,
             })?
-            .insert((instance.operation.id, action))
+            .insert((
+                instance.operation.id,
+                instance.operation.provider_step,
+                action,
+            ))
         {
             self.side_effects.fetch_add(1, Ordering::SeqCst);
         }

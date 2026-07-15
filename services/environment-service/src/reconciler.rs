@@ -29,6 +29,7 @@ pub enum ReconcileAction {
     Stop,
     Restart,
     Reset,
+    Configure,
     Cleanup,
 }
 
@@ -335,11 +336,13 @@ pub fn next_action(
             Ok(ReconcileAction::Provision)
         }
         (Operation::Start, State::Stopped) => Ok(ReconcileAction::Start),
-        (Operation::Stop, State::Stopping) | (Operation::Expire, State::Expiring) => {
+        (Operation::Stop | Operation::Retry | Operation::Recover, State::Stopping)
+        | (Operation::Expire | Operation::Retry | Operation::Recover, State::Expiring) => {
             Ok(ReconcileAction::Stop)
         }
         (Operation::Restart, State::Provisioning) => Ok(ReconcileAction::Restart),
         (Operation::Reset, State::Provisioning) => Ok(ReconcileAction::Reset),
+        (Operation::Retry | Operation::Recover, State::Updating) => Ok(ReconcileAction::Configure),
         (Operation::Expire, State::Stopped) | (_, State::Deleting) => Ok(ReconcileAction::Cleanup),
         (_, State::Provisioning | State::Updating) => Ok(ReconcileAction::Observe),
         _ => Err(ReconcileError::NoAction),

@@ -8,13 +8,17 @@ mod support;
 
 use std::time::Duration;
 
-use contracts::environment::{EnvironmentLifecycleCommandData, EnvironmentOperationKind};
+use contracts::environment::{
+    EnvironmentCreateSpec, EnvironmentLeaseAuthorization, EnvironmentLeaseState,
+    EnvironmentLeaseVerificationRequest, EnvironmentLeaseVerificationResponse,
+    EnvironmentLifecycleCommandData, EnvironmentOperationKind,
+};
 use contracts::events::{DATA_SCHEMA_BASE, SPEC_VERSION, subjects};
 use contracts::{ActorId, EventId, Sequence};
 use environment_service::{
     EnvironmentProvider, JetStreamCommandConsumer, JetStreamEventPublisher, LifecycleCommand,
-    LifecycleCommandMessage, NatsAccessRevoker, NatsEnvironmentProvider, OutboxDispatchOutcome,
-    OutboxDispatcher, PgEnvironmentStore, ReconcileAction,
+    LifecycleCommandMessage, NatsAccessRevoker, NatsEnvironmentProvider, NatsResourceLeaseVerifier,
+    OutboxDispatchOutcome, OutboxDispatcher, PgEnvironmentStore, ReconcileAction,
 };
 use futures_util::StreamExt;
 use sqlx::postgres::PgPoolOptions;
@@ -83,7 +87,81 @@ async fn jetstream_command_outbox_and_provider_rpc_use_durable_identities()
 
     let store = PgEnvironmentStore::new(pool.clone());
     let instance = requested_instance();
-    store.create("create-key-jetstream", &instance).await?;
+    let mut consumer = JetStreamCommandConsumer::bind(
+        client.clone(),
+        "ENV_COMMANDS",
+        "environment-lifecycle-v1",
+        "private.environment.command.quarantine.v1",
+    )
+    .await?;
+    let lease_subject = "labweaver.resource.lease.verify.v1";
+    let lease_verifier = NatsResourceLeaseVerifier::new(
+        lease_subject.to_owned(),
+        client.clone(),
+        Duration::from_secs(2),
+    )?;
+    let create_command = LifecycleCommandMessage {
+        specversion: SPEC_VERSION.to_owned(),
+        id: EventId::new(),
+        source: "urn:labweaver:environment-service".to_owned(),
+        event_type: subjects::ENVIRONMENT_LIFECYCLE_REQUESTED.to_owned(),
+        subject: subjects::ENVIRONMENT_LIFECYCLE_REQUESTED.to_owned(),
+        time: timestamp("2026-07-14T00:00:00.000Z"),
+        datacontenttype: "application/json".to_owned(),
+        dataschema: format!("{DATA_SCHEMA_BASE}/environment-lifecycle-requested.schema.json"),
+        course_id: instance.course_id,
+        aggregate_revision: revision(1),
+        aggregate_sequence: Sequence(1),
+        trace_id: "trace-create-jetstream".to_owned(),
+        data: EnvironmentLifecycleCommandData {
+            idempotency_key: "create-key-jetstream".to_owned(),
+            command: LifecycleCommand {
+                environment_id: instance.id,
+                kind: EnvironmentOperationKind::Create,
+                expected_revision: revision(1),
+                actor_id: ActorId::new(),
+                trace_id: "trace-create-jetstream".to_owned(),
+                accepted_at: timestamp("2026-07-14T00:00:00.000Z"),
+                deadline_at: timestamp("2027-07-14T00:10:00.000Z"),
+                access_revocation_revision: None,
+                preserve_mutable_disk: false,
+                max_attempts: 3,
+                reset_target: None,
+            },
+            create: Some(EnvironmentCreateSpec {
+                course_id: instance.course_id,
+                owner_actor_id: instance.owner_id,
+                class: instance.class,
+                runtime_kind: instance.runtime_kind,
+                release_id: instance.release_id,
+                release_version: instance.release_version,
+                provider_binding: instance.provider_binding.clone(),
+                lease_id: None,
+                capacity_binding: None,
+                eligibility_expires_at: timestamp("2027-07-15T00:00:00.000Z"),
+            }),
+        },
+    };
+    context
+        .publish(
+            subjects::ENVIRONMENT_LIFECYCLE_REQUESTED,
+            serde_json::to_vec(&create_command)?.into(),
+        )
+        .await?
+        .await?;
+    assert_eq!(
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            consumer.process_next(&store, &lease_verifier),
+        )
+        .await
+        .map_err(|_| "create command consumer timed out")??,
+        environment_service::CommandConsumeOutcome::Applied
+    );
+    assert_eq!(
+        store.load(instance.id).await?.observed_state,
+        instance.observed_state
+    );
     let outbox = OutboxDispatcher::new(
         pool,
         JetStreamEventPublisher::new(client.clone()),
@@ -106,7 +184,7 @@ async fn jetstream_command_outbox_and_provider_rpc_use_durable_identities()
         dataschema: format!("{DATA_SCHEMA_BASE}/environment-lifecycle-requested.schema.json"),
         course_id: instance.course_id,
         aggregate_revision: instance.revision,
-        aggregate_sequence: Sequence(1),
+        aggregate_sequence: Sequence(2),
         trace_id: "trace-delete-jetstream".to_owned(),
         data: EnvironmentLifecycleCommandData {
             idempotency_key: "delete-key-jetstream".to_owned(),
@@ -121,7 +199,9 @@ async fn jetstream_command_outbox_and_provider_rpc_use_durable_identities()
                 access_revocation_revision: Some(revision(7)),
                 preserve_mutable_disk: false,
                 max_attempts: 3,
+                reset_target: None,
             },
+            create: None,
         },
     };
     context
@@ -131,20 +211,134 @@ async fn jetstream_command_outbox_and_provider_rpc_use_durable_identities()
         )
         .await?
         .await?;
-    let mut consumer = JetStreamCommandConsumer::bind(
-        client.clone(),
-        "ENV_COMMANDS",
-        "environment-lifecycle-v1",
-        "private.environment.command.quarantine.v1",
-    )
-    .await?;
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), consumer.process_next(&store))
-            .await
-            .map_err(|_| "command consumer timed out")??,
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            consumer.process_next(&store, &lease_verifier),
+        )
+        .await
+        .map_err(|_| "command consumer timed out")??,
         environment_service::CommandConsumeOutcome::Applied
     );
     assert_eq!(store.load(instance.id).await?.revision, revision(2));
+
+    let mut lease_requests = client.subscribe(lease_subject).await?;
+    let lease_responder = client.clone();
+    let lease_task = tokio::spawn(async move {
+        for response_index in 0..2 {
+            let message = lease_requests.next().await.ok_or("lease request missing")?;
+            let request: EnvironmentLeaseVerificationRequest =
+                serde_json::from_slice(&message.payload)?;
+            let reply = message.reply.ok_or("lease reply subject missing")?;
+            let expires_at = if response_index == 0 {
+                timestamp("2027-07-15T00:00:00.000Z")
+            } else {
+                timestamp("2020-07-15T00:00:00.000Z")
+            };
+            let response = EnvironmentLeaseVerificationResponse {
+                version: 1,
+                state: EnvironmentLeaseState::Active,
+                authorization: Some(EnvironmentLeaseAuthorization {
+                    lease_id: request.lease_id,
+                    lease_revision: revision(4),
+                    environment_id: request.environment_id,
+                    course_id: request.course_id,
+                    owner_actor_id: request.owner_actor_id,
+                    capacity_binding: request.capacity_binding,
+                    active_from: timestamp("2026-01-01T00:00:00.000Z"),
+                    expires_at,
+                }),
+            };
+            lease_responder
+                .publish(reply, serde_json::to_vec(&response)?.into())
+                .await?;
+        }
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+    });
+
+    let work_environment_id = contracts::EnvironmentId::new();
+    let work_course_id = contracts::CourseId::new();
+    let work_owner_id = contracts::ActorId::new();
+    let work_lease_id = contracts::LeaseId::new();
+    let mut work_create = create_command.clone();
+    work_create.id = EventId::new();
+    work_create.course_id = work_course_id;
+    work_create.trace_id = "trace-work-create-jetstream".to_owned();
+    work_create.data.idempotency_key = "create-work-key-jetstream".to_owned();
+    work_create.data.command.environment_id = work_environment_id;
+    work_create.data.command.actor_id = work_owner_id;
+    work_create.data.command.trace_id = work_create.trace_id.clone();
+    work_create.data.create = Some(EnvironmentCreateSpec {
+        course_id: work_course_id,
+        owner_actor_id: work_owner_id,
+        class: contracts::authoring::EnvironmentClass::Work,
+        runtime_kind: instance.runtime_kind,
+        release_id: contracts::ReleaseId::new(),
+        release_version: 1,
+        provider_binding: "container-primary-v1".to_owned(),
+        lease_id: Some(work_lease_id),
+        capacity_binding: Some("cpu-standard-v1".to_owned()),
+        eligibility_expires_at: timestamp("2027-07-15T00:00:00.000Z"),
+    });
+    context
+        .publish(
+            subjects::ENVIRONMENT_LIFECYCLE_REQUESTED,
+            serde_json::to_vec(&work_create)?.into(),
+        )
+        .await?
+        .await?;
+    assert_eq!(
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            consumer.process_next(&store, &lease_verifier),
+        )
+        .await
+        .map_err(|_| "Work create command consumer timed out")??,
+        environment_service::CommandConsumeOutcome::Applied
+    );
+    assert!(
+        store
+            .load(work_environment_id)
+            .await?
+            .operation
+            .lease_authorization
+            .is_some()
+    );
+
+    let rejected_environment_id = contracts::EnvironmentId::new();
+    let mut expired_work_create = work_create.clone();
+    expired_work_create.id = EventId::new();
+    expired_work_create.trace_id = "trace-expired-work-create".to_owned();
+    expired_work_create.data.idempotency_key = "create-expired-work-key".to_owned();
+    expired_work_create.data.command.environment_id = rejected_environment_id;
+    expired_work_create.data.command.trace_id = expired_work_create.trace_id.clone();
+    if let Some(spec) = &mut expired_work_create.data.create {
+        spec.lease_id = Some(contracts::LeaseId::new());
+    }
+    context
+        .publish(
+            subjects::ENVIRONMENT_LIFECYCLE_REQUESTED,
+            serde_json::to_vec(&expired_work_create)?.into(),
+        )
+        .await?
+        .await?;
+    assert_eq!(
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            consumer.process_next(&store, &lease_verifier),
+        )
+        .await
+        .map_err(|_| "expired Work create command consumer timed out")??,
+        environment_service::CommandConsumeOutcome::Rejected
+    );
+    assert!(matches!(
+        store.load(rejected_environment_id).await,
+        Err(environment_service::EnvironmentStoreError::EnvironmentNotFound)
+    ));
+    lease_task
+        .await?
+        .map_err(|_| "lease response task failed")?;
+
     context
         .publish(
             subjects::ENVIRONMENT_LIFECYCLE_REQUESTED,
@@ -153,12 +347,15 @@ async fn jetstream_command_outbox_and_provider_rpc_use_durable_identities()
         .await?
         .await?;
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), consumer.process_next(&store))
-            .await
-            .map_err(|_| "invalid command consumer timed out")??,
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            consumer.process_next(&store, &lease_verifier),
+        )
+        .await
+        .map_err(|_| "invalid command consumer timed out")??,
         environment_service::CommandConsumeOutcome::Rejected
     );
-    assert_eq!(quarantine_stream.info().await?.state.messages, 1);
+    assert_eq!(quarantine_stream.info().await?.state.messages, 2);
 
     let provider_subject = "labweaver.provider.container-primary-v1.command.v1";
     let mut requests = client.subscribe(provider_subject).await?;
@@ -171,6 +368,7 @@ async fn jetstream_command_outbox_and_provider_rpc_use_durable_identities()
             "status": "succeeded",
             "version": 1,
             "operationId": request["operationId"],
+            "providerStep": request["providerStep"],
             "observation": {
                 "nextState": "validating",
                 "endpoints": [],

@@ -88,6 +88,22 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::environment::EnvironmentInstance
     );
     document!(
+        "schemas/contracts/v1/environment-create-spec.schema.json",
+        crate::environment::EnvironmentCreateSpec
+    );
+    document!(
+        "schemas/contracts/v1/environment-reset-target.schema.json",
+        crate::environment::EnvironmentResetTarget
+    );
+    document!(
+        "schemas/contracts/v1/environment-lease-verification-request.schema.json",
+        crate::environment::EnvironmentLeaseVerificationRequest
+    );
+    document!(
+        "schemas/contracts/v1/environment-lease-verification-response.schema.json",
+        crate::environment::EnvironmentLeaseVerificationResponse
+    );
+    document!(
         "schemas/contracts/v1/environment-endpoint.schema.json",
         crate::environment::EnvironmentEndpoint
     );

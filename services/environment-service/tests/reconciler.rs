@@ -12,10 +12,10 @@ use contracts::environment::{
 use contracts::{ActorId, OperationId};
 use environment_service::{
     EnvironmentProvider, LifecycleCommand, ProviderFailure, ProviderObservation, ProviderRegistry,
-    ReconcileAction, ReconcileError, Reconciler, next_action, plan_command,
+    ReconcileAction, ReconcileError, Reconciler, apply_provider_failure, next_action, plan_command,
 };
 
-use support::{ready_instance, revision, timestamp};
+use support::{ready_instance, requested_instance, revision, timestamp};
 
 struct FakeProvider {
     binding: &'static str,
@@ -58,6 +58,7 @@ fn planned_restart() -> Result<EnvironmentInstance, Box<dyn std::error::Error>> 
             access_revocation_revision: Some(revision(8)),
             preserve_mutable_disk: true,
             max_attempts: 3,
+            reset_target: None,
         },
         OperationId::new(),
     )?)
@@ -135,6 +136,12 @@ fn reset_build_and_expire_cleanup_have_durable_next_actions()
             access_revocation_revision: Some(revision(8)),
             preserve_mutable_disk: false,
             max_attempts: 3,
+            reset_target: Some(
+                contracts::environment::EnvironmentResetTarget::ExperimentBaseline {
+                    release_id: current.release_id,
+                    release_version: current.release_version,
+                },
+            ),
         },
         OperationId::new(),
     )?;
@@ -157,6 +164,7 @@ fn reset_build_and_expire_cleanup_have_durable_next_actions()
             access_revocation_revision: Some(revision(8)),
             preserve_mutable_disk: false,
             max_attempts: 3,
+            reset_target: None,
         },
         OperationId::new(),
     )?;
@@ -165,5 +173,91 @@ fn reset_build_and_expire_cleanup_have_durable_next_actions()
         next_action(&expire, timestamp("2026-07-14T01:00:01.000Z"))?,
         ReconcileAction::Cleanup
     );
+    Ok(())
+}
+
+#[test]
+fn retry_and_recover_resume_the_persisted_failed_phase() -> Result<(), Box<dyn std::error::Error>> {
+    use contracts::environment::DesiredEnvironmentState;
+
+    for (failed_phase, resumed_phase, action) in [
+        (
+            ObservedEnvironmentState::Validating,
+            ObservedEnvironmentState::Validating,
+            ReconcileAction::Validate,
+        ),
+        (
+            ObservedEnvironmentState::Building,
+            ObservedEnvironmentState::Building,
+            ReconcileAction::Build,
+        ),
+        (
+            ObservedEnvironmentState::Provisioning,
+            ObservedEnvironmentState::Provisioning,
+            ReconcileAction::Provision,
+        ),
+        (
+            ObservedEnvironmentState::Stopping,
+            ObservedEnvironmentState::Stopping,
+            ReconcileAction::Stop,
+        ),
+        (
+            ObservedEnvironmentState::Updating,
+            ObservedEnvironmentState::Updating,
+            ReconcileAction::Configure,
+        ),
+        (
+            ObservedEnvironmentState::Expiring,
+            ObservedEnvironmentState::Expiring,
+            ReconcileAction::Stop,
+        ),
+        (
+            ObservedEnvironmentState::Deleting,
+            ObservedEnvironmentState::Deleting,
+            ReconcileAction::Cleanup,
+        ),
+    ] {
+        let mut active = requested_instance();
+        active.observed_state = failed_phase;
+        if matches!(
+            failed_phase,
+            ObservedEnvironmentState::Expiring | ObservedEnvironmentState::Deleting
+        ) {
+            active.desired_state = DesiredEnvironmentState::Deleted;
+        }
+        let failed = apply_provider_failure(
+            &active,
+            active.operation.id,
+            "LW_ENVIRONMENT_PROVIDER_REJECTED",
+        )?;
+        for kind in [
+            EnvironmentOperationKind::Retry,
+            EnvironmentOperationKind::Recover,
+        ] {
+            let planned = plan_command(
+                &failed,
+                &LifecycleCommand {
+                    environment_id: failed.id,
+                    kind,
+                    expected_revision: failed.revision,
+                    actor_id: ActorId::new(),
+                    trace_id: format!("trace-resume-{failed_phase:?}-{kind:?}"),
+                    accepted_at: timestamp("2026-07-14T01:00:00.000Z"),
+                    deadline_at: timestamp("2026-07-14T01:10:00.000Z"),
+                    access_revocation_revision: None,
+                    preserve_mutable_disk: false,
+                    max_attempts: 3,
+                    reset_target: None,
+                },
+                OperationId::new(),
+            )?;
+            assert_eq!(planned.operation.retry_from_phase, Some(failed_phase));
+            assert_eq!(planned.observed_state, resumed_phase);
+            assert_eq!(
+                next_action(&planned, timestamp("2026-07-14T01:00:01.000Z"))?,
+                action
+            );
+        }
+    }
     Ok(())
 }
