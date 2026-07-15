@@ -133,6 +133,8 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("private-sigstore-keycloak-ca", post_renderer)
         self.assertIn("SSL_CERT_FILE", post_renderer)
         self.assertIn("SIGSTORE_POST_RENDERER_FULCIO_DEPLOYMENT_INVALID", post_renderer)
+        self.assertIn("labweaver.io/post-renderer-contract", post_renderer)
+        self.assertIn("Migrate an adopted release to the reviewed post-renderer contract", tasks)
         self.assertIn("atomic: false", tasks)
         self.assertIn("createdb:\n    enabled: false", values)
         self.assertIn("fsGroupChangePolicy: OnRootMismatch", values)

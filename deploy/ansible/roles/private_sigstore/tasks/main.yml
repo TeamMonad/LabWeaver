@@ -426,6 +426,44 @@
     dest: /var/tmp/labweaver-private-sigstore-post-renderer
     mode: '0755'
 
+- name: Read the deployed post-renderer contract before Helm reconciliation
+  ansible.builtin.command:
+    argv:
+      - "{{ private_sigstore_kubectl_path }}"
+      - --kubeconfig
+      - "{{ private_sigstore_kubeconfig_path }}"
+      - --namespace
+      - "{{ private_sigstore_namespace }}"
+      - get
+      - deployment/fulcio-server
+      - --output
+      - "jsonpath={.spec.template.metadata.annotations.labweaver\\.io/post-renderer-contract}"
+  register: sigstore_deployed_post_renderer_contract
+  changed_when: false
+  failed_when: false
+
+- name: Migrate an adopted release to the reviewed post-renderer contract
+  ansible.builtin.command:
+    argv:
+      - "{{ private_sigstore_helm_path }}"
+      - upgrade
+      - "{{ private_sigstore_release_name }}"
+      - "{{ private_sigstore_chart_archive }}"
+      - --namespace
+      - "{{ private_sigstore_namespace }}"
+      - --version
+      - "{{ private_sigstore_chart_version }}"
+      - --values
+      - /var/tmp/labweaver-private-sigstore-values.yml
+      - --post-renderer
+      - /var/tmp/labweaver-private-sigstore-post-renderer
+      - --wait
+      - --timeout
+      - 10m
+  when:
+    - sigstore_deployed_post_renderer_contract.rc == 0
+    - sigstore_deployed_post_renderer_contract.stdout != private_sigstore_post_renderer_contract
+
 - name: Reconcile the pinned Private Sigstore chart
   kubernetes.core.helm:
     name: "{{ private_sigstore_release_name }}"

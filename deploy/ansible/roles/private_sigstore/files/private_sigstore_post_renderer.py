@@ -18,6 +18,10 @@ for document in documents:
     if document.get("kind") != "Deployment":
         continue
     if metadata.get("name") == "fulcio-server":
+        template_metadata = document["spec"]["template"].setdefault("metadata", {})
+        template_metadata.setdefault("annotations", {})[
+            "labweaver.io/post-renderer-contract"
+        ] = "identity-ca-v1"
         pod_spec = document["spec"]["template"]["spec"]
         containers = pod_spec.get("containers", [])
         fulcio = next((item for item in containers if item.get("name") == "fulcio-server"), None)
