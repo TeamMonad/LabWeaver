@@ -33,6 +33,16 @@ The approved Gateway mTLS identity is SAN URI `spiffe://labweaver/gateway`. The 
 
 Operation role and scope policy is generated from the contracts catalog into both OpenAPI surfaces (`x-labweaver-allowed-roles` and `x-labweaver-scope`). Course and project scopes are evaluated only against Access-owned memberships. After #51 merged, Environment scope calls its owner resolver over configured rustls mTLS and binds the environment, course, actor and exact Environment revision to the strong-ETag response. Resolver denial returns 403; transport, store, expiry, identity, revision or response mismatch fails closed. The recommended deployment defaults are a 2-second timeout, one retry after a 100-millisecond backoff and a 5-second decision cache horizon; all remain explicit startup-validated configuration.
 
+`transport_security: strict` is mandatory for deployments. OIDC Discovery and
+all consumed authorization, token, JWKS and logout endpoints must use HTTPS.
+When an OIDC private CA is configured it replaces, rather than extends, the
+system trust roots; the Owner Resolver always uses only its configured CA.
+Disposable tests may explicitly select `insecure-test-only`, but startup also
+requires `LABWEAVER_ENABLE_INSECURE_AUTH_TEST_MODE=1` and rejects every
+non-loopback issuer, resolver, browser/internal bind and HTTP origin. This mode
+may accept an invalid loopback server certificate and is never a deployment
+fallback.
+
 ## P0 access paths
 
 ```mermaid

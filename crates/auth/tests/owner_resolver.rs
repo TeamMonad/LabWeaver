@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use auth::{EnvironmentOwnerResolverClient, OwnerResolverClientError};
+use auth::{EnvironmentOwnerResolverClient, OwnerResolverClientError, TransportSecurityMode};
 use axum::{
     Json, Router,
     extract::State,
@@ -67,6 +67,7 @@ async fn client_enforces_mtls_identity_response_binding_and_bounded_outage()
         client_certificate.as_bytes(),
         client_key.as_bytes(),
         Duration::from_millis(5),
+        TransportSecurityMode::Strict,
     )?;
     let request = EnvironmentOwnerResolutionRequest {
         environment_id: EnvironmentId::new(),
@@ -92,6 +93,19 @@ async fn client_enforces_mtls_identity_response_binding_and_bounded_outage()
         Err(OwnerResolverClientError::ResponseInvalid)
     );
 
+    mode.store(0, Ordering::SeqCst);
+    let unrelated_ca = test_ca()?;
+    let insecure_client = EnvironmentOwnerResolverClient::new(
+        &config,
+        unrelated_ca.pem().as_bytes(),
+        client_certificate.as_bytes(),
+        client_key.as_bytes(),
+        Duration::from_millis(5),
+        TransportSecurityMode::InsecureTestOnly,
+    )?;
+    let insecure_resolution = insecure_client.resolve(&request, now).await?;
+    assert_eq!(insecure_resolution.environment_id, request.environment_id);
+
     shutdown
         .send(())
         .map_err(|()| "owner resolver shutdown receiver disappeared")?;
@@ -110,6 +124,7 @@ async fn client_enforces_mtls_identity_response_binding_and_bounded_outage()
             client_certificate.as_bytes(),
             client_key.as_bytes(),
             Duration::from_millis(5),
+            TransportSecurityMode::Strict,
         ),
         Err(OwnerResolverClientError::Configuration)
     ));

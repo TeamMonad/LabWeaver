@@ -28,7 +28,7 @@ pub mod repository;
 pub mod roles;
 
 pub use authorization::{AuthorizationContext, AuthorizationError, authorize};
-pub use config::{AccessAuthFile, AuthConfig, AuthConfigError};
+pub use config::{AccessAuthFile, AuthConfig, AuthConfigError, TransportSecurityMode};
 pub use crypto::{CryptoError, EncryptedValue, KeyRing};
 pub use csrf::{CsrfError, CsrfToken, verify_csrf_token};
 pub use jwt::{

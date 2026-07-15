@@ -1,6 +1,10 @@
 # Non-secret Access Service authentication contract. Deployment values must be
 # supplied by the environment-specific configuration manager; secret locators
 # reference mounted files and never embed credentials here.
+# Production must remain `strict`. Disposable loopback tests may use
+# `insecure-test-only` only together with
+# LABWEAVER_ENABLE_INSECURE_AUTH_TEST_MODE=1; non-loopback URLs/binds are rejected.
+transport_security: strict
 oidc:
   issuer: "https://keycloak.example.invalid/realms/labweaver"
   client_id: "labweaver-web"

@@ -4,7 +4,7 @@ use std::{collections::BTreeSet, net::SocketAddr, str::FromStr, sync::Arc};
 
 use auth::{
     AccessAuthFile, AuthConfig, AuthorizationContext, BffSession, EnvironmentOwnerResolverClient,
-    KeyRing, OidcProvider, OidcTransaction, RoleMappings, authorize,
+    KeyRing, OidcProvider, OidcTransaction, RoleMappings, TransportSecurityMode, authorize,
     build_backchannel_logout_authorizer, build_bearer_authorizer, cleanup_expired_auth_state,
     consume_backchannel_logout, consume_oidc_transaction, create_bff_session,
     extract_mtls_principal, extract_platform_roles, load_bff_session, load_logout_hint,
@@ -90,7 +90,12 @@ async fn build_app_state(
     deployment: AccessAuthFile,
     metrics: telemetry::PrometheusHandle,
 ) -> Result<Arc<AppState>, StartupError> {
-    let config = AuthConfig::new(
+    if deployment.transport_security == TransportSecurityMode::InsecureTestOnly
+        && std::env::var("LABWEAVER_ENABLE_INSECURE_AUTH_TEST_MODE").as_deref() != Ok("1")
+    {
+        return Err(StartupError::Config);
+    }
+    let config = AuthConfig::new_with_transport_security(
         &deployment.oidc.issuer,
         deployment.oidc.client_id.clone(),
         &deployment.oidc.redirect_uri,
@@ -98,6 +103,7 @@ async fn build_app_state(
         deployment.oidc.audience.clone(),
         deployment.browser.allowed_origins.clone(),
         deployment.browser.session_ttl_seconds,
+        deployment.transport_security,
     )?;
     let trusted_ca = optional_file(&deployment.oidc.trusted_ca_file)?;
     let client_secret = optional_file(&deployment.secrets.oidc_client_secret_file)?
@@ -126,7 +132,7 @@ async fn build_app_state(
         auth::RepositoryError::Database(error) => StartupError::Database(error),
         _ => StartupError::Config,
     })?;
-    let oidc_http = no_redirect_http_client(trusted_ca.as_deref())?;
+    let oidc_http = no_redirect_http_client(trusted_ca.as_deref(), deployment.transport_security)?;
     let provider = OidcProvider::discover(&config, client_secret, trusted_ca.as_deref()).await?;
     let bearer_authorizer = Arc::new(
         build_bearer_authorizer(&config, &deployment.oidc, oidc_http.clone())
@@ -154,6 +160,7 @@ async fn build_app_state(
                 .environment_owner_resolver
                 .retry_backoff_milliseconds,
         ),
+        deployment.transport_security,
     )?;
     Ok(Arc::new(AppState {
         config,

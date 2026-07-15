@@ -69,6 +69,12 @@ cargo test -p auth --test keycloak_discovery -- --ignored --nocapture
 The test mutates and removes signing-key providers, so the Keycloak instance
 must be disposable and must be destroyed after the run.
 
+Tests that cannot provision TLS may set `transport_security:
+insecure-test-only` and `LABWEAVER_ENABLE_INSECURE_AUTH_TEST_MODE=1`. The mode
+is deliberately restricted to loopback addresses and does not relax token,
+claim, PKCE, state, nonce, CSRF, role or scope validation. Production and shared
+test deployments must use `strict` with a controlled CA instead.
+
 The controlled PostgreSQL integration entry point also applies the immutable
 migration catalog, verifies the runtime cannot perform schema DDL, and covers
 encrypted BFF-session restoration, CSRF verification, direct/SID revocation,

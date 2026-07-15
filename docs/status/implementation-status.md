@@ -92,6 +92,15 @@ login, code exchange, nonce/issuer/audience/`azp`/role checks, provider logout,
 two RSA signing-key rotations, custom-CA unknown-`kid` refresh and empty-JWKS
 fail-closed behavior.
 
+The PR review TLS findings are addressed: strict Discovery rejects non-HTTPS
+authorization/token/JWKS/logout endpoints, an OIDC private CA replaces system
+roots, and the Owner Resolver always uses an exclusive configured CA. A
+double-opt-in `insecure-test-only` mode exists only for disposable loopback
+tests; configuration plus `LABWEAVER_ENABLE_INSECURE_AUTH_TEST_MODE=1` are both
+required. Unit/integration coverage proves remote HTTP rejection, loopback HTTP
+Discovery, invalid loopback test certificates, and the unchanged strict
+private-CA Keycloak path.
+
 Human A+B review, D same-build Verify, controlled client-certificate rotation,
 deployed metrics validation and real Gateway/internal-DNS/TLS verification
 remain incomplete. Back-channel token validation and SID revocation are covered

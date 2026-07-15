@@ -12,6 +12,8 @@ use contracts::{
 };
 use reqwest::{Certificate, Client, Identity, StatusCode, Url, header};
 
+use crate::TransportSecurityMode;
+
 /// Configured Environment owner resolver client.
 #[derive(Clone)]
 pub struct EnvironmentOwnerResolverClient {
@@ -29,6 +31,7 @@ impl EnvironmentOwnerResolverClient {
         client_certificate_pem: &[u8],
         client_private_key_pem: &[u8],
         retry_backoff: Duration,
+        transport_security: TransportSecurityMode,
     ) -> Result<Self, OwnerResolverClientError> {
         config
             .validate()
@@ -48,6 +51,14 @@ impl EnvironmentOwnerResolverClient {
         {
             return Err(OwnerResolverClientError::Configuration);
         }
+        if transport_security == TransportSecurityMode::InsecureTestOnly
+            && !server_name.eq_ignore_ascii_case("localhost")
+            && !server_name
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+        {
+            return Err(OwnerResolverClientError::Configuration);
+        }
 
         let roots = Certificate::from_pem_bundle(ca_certificate_pem)
             .map_err(|_| OwnerResolverClientError::CertificateMaterial)?;
@@ -64,9 +75,13 @@ impl EnvironmentOwnerResolverClient {
 
         let mut builder = Client::builder()
             .https_only(true)
+            .tls_built_in_root_certs(false)
             .redirect(reqwest::redirect::Policy::none())
             .identity(identity)
             .timeout(Duration::from_millis(config.timeout_milliseconds));
+        if transport_security == TransportSecurityMode::InsecureTestOnly {
+            builder = builder.danger_accept_invalid_certs(true);
+        }
         for root in roots {
             builder = builder.add_root_certificate(root);
         }

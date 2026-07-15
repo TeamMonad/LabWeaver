@@ -12,7 +12,7 @@ use serde::Deserialize;
 use time::OffsetDateTime;
 use url::Url;
 
-use crate::{AuthConfig, OidcTransaction};
+use crate::{AuthConfig, OidcTransaction, TransportSecurityMode};
 
 /// Discovered Keycloak relying-party client.
 #[derive(Clone)]
@@ -30,7 +30,7 @@ impl OidcProvider {
         client_secret: Option<String>,
         trusted_ca_pem: Option<&[u8]>,
     ) -> Result<Self, OidcProviderError> {
-        let http = no_redirect_http_client(trusted_ca_pem)?;
+        let http = no_redirect_http_client(trusted_ca_pem, config.transport_security)?;
         Self::discover_with_http_client(config, http)
             .await
             .map(|mut provider| {
@@ -58,6 +58,7 @@ impl OidcProvider {
         {
             return Err(OidcProviderError::EndSessionEndpoint);
         }
+        validate_discovered_endpoints(&metadata, config.transport_security)?;
         Ok(Self {
             metadata,
             client_id: config.client_id.clone(),
@@ -181,18 +182,71 @@ impl OidcProvider {
 }
 
 /// Builds the controlled OIDC HTTP client. Redirects are disabled and a
-/// deployment may supply the only additional trust anchor accepted for an
-/// internal Keycloak endpoint.
+/// configured private CA replaces the system roots in strict mode.
 pub fn no_redirect_http_client(
     trusted_ca_pem: Option<&[u8]>,
+    transport_security: TransportSecurityMode,
 ) -> Result<reqwest::Client, OidcProviderError> {
     let mut builder = reqwest::Client::builder().redirect(Policy::none());
+    if transport_security == TransportSecurityMode::Strict {
+        builder = builder.https_only(true);
+    } else {
+        builder = builder.danger_accept_invalid_certs(true);
+    }
     if let Some(pem) = trusted_ca_pem {
-        let certificate =
-            reqwest::Certificate::from_pem(pem).map_err(|_| OidcProviderError::TrustedCa)?;
-        builder = builder.add_root_certificate(certificate);
+        let certificates =
+            reqwest::Certificate::from_pem_bundle(pem).map_err(|_| OidcProviderError::TrustedCa)?;
+        if certificates.is_empty() {
+            return Err(OidcProviderError::TrustedCa);
+        }
+        if transport_security == TransportSecurityMode::Strict {
+            builder = builder.tls_built_in_root_certs(false);
+        }
+        for certificate in certificates {
+            builder = builder.add_root_certificate(certificate);
+        }
     }
     builder.build().map_err(|_| OidcProviderError::HttpClient)
+}
+
+fn validate_discovered_endpoints(
+    metadata: &ProviderMetadataWithLogout,
+    transport_security: TransportSecurityMode,
+) -> Result<(), OidcProviderError> {
+    let token_endpoint = metadata
+        .token_endpoint()
+        .ok_or(OidcProviderError::TokenEndpoint)?;
+    let logout_endpoint = metadata
+        .additional_metadata()
+        .end_session_endpoint
+        .as_ref()
+        .ok_or(OidcProviderError::EndSessionEndpoint)?;
+    let endpoints = [
+        metadata.authorization_endpoint().url(),
+        token_endpoint.url(),
+        metadata.jwks_uri().url(),
+        logout_endpoint.url(),
+    ];
+    if endpoints
+        .iter()
+        .any(|url| !endpoint_transport_allowed(url, transport_security))
+    {
+        return Err(OidcProviderError::EndpointTransport);
+    }
+    Ok(())
+}
+
+fn endpoint_transport_allowed(url: &Url, mode: TransportSecurityMode) -> bool {
+    if mode == TransportSecurityMode::Strict {
+        return url.scheme() == "https";
+    }
+    matches!(url.scheme(), "http" | "https")
+        && url.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        })
 }
 
 /// Verified identity attributes safe to hand to the local actor mapper.
@@ -244,6 +298,9 @@ pub enum OidcProviderError {
     /// Discovery metadata omitted a usable token endpoint.
     #[error("LW_AUTH_OIDC_TOKEN_EXCHANGE_FAILED")]
     TokenEndpoint,
+    /// A discovered endpoint violated the configured transport policy.
+    #[error("LW_AUTH_CONFIG_URL_INVALID")]
+    EndpointTransport,
     /// The authorization server did not complete the code exchange.
     #[error("LW_AUTH_OIDC_TOKEN_EXCHANGE_FAILED")]
     TokenExchange,
@@ -256,4 +313,34 @@ pub enum OidcProviderError {
     /// The token did not bind its authorized party to this client.
     #[error("LW_AUTH_OIDC_TOKEN_INVALID")]
     AuthorizedPartyRejected,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TransportSecurityMode, Url, endpoint_transport_allowed};
+
+    #[test]
+    fn discovered_endpoint_transport_is_strict_or_loopback_only()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let secure = Url::parse("https://keycloak.example.test/token")?;
+        let local_http = Url::parse("http://127.0.0.1:18080/token")?;
+        let remote_http = Url::parse("http://keycloak.example.test/token")?;
+        assert!(endpoint_transport_allowed(
+            &secure,
+            TransportSecurityMode::Strict
+        ));
+        assert!(!endpoint_transport_allowed(
+            &local_http,
+            TransportSecurityMode::Strict
+        ));
+        assert!(endpoint_transport_allowed(
+            &local_http,
+            TransportSecurityMode::InsecureTestOnly
+        ));
+        assert!(!endpoint_transport_allowed(
+            &remote_http,
+            TransportSecurityMode::InsecureTestOnly
+        ));
+        Ok(())
+    }
 }

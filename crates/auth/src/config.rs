@@ -8,6 +8,17 @@ use url::Url;
 
 use contracts::environment::EnvironmentOwnerResolverClientConfig;
 
+/// TLS policy for auth authority clients.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum TransportSecurityMode {
+    /// Require HTTPS and use either the system roots or an exclusive configured CA bundle.
+    #[default]
+    Strict,
+    /// Permit loopback-only HTTP and invalid server certificates for disposable tests.
+    InsecureTestOnly,
+}
+
 /// Explicit runtime configuration for the Keycloak relying party.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthConfig {
@@ -25,12 +36,17 @@ pub struct AuthConfig {
     pub allowed_origins: BTreeSet<String>,
     /// Absolute BFF session lifetime in seconds.
     pub session_ttl_seconds: u64,
+    /// Transport policy applied to Discovery and every discovered endpoint.
+    pub transport_security: TransportSecurityMode,
 }
 
 /// Non-secret deployment configuration loaded from the reviewed YAML contract.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AccessAuthFile {
+    /// TLS policy. `insecure-test-only` also requires an explicit process-level acknowledgement.
+    #[serde(default)]
+    pub transport_security: TransportSecurityMode,
     /// OIDC provider configuration.
     pub oidc: OidcFileConfig,
     /// Browser BFF configuration.
@@ -156,7 +172,7 @@ impl AccessAuthFile {
     pub fn parse_yaml(input: &str) -> Result<Self, AuthConfigError> {
         let parsed: Self =
             serde_yaml::from_str(input).map_err(|_| AuthConfigError::InvalidDeploymentFile)?;
-        let _ = AuthConfig::new(
+        let _ = AuthConfig::new_with_transport_security(
             &parsed.oidc.issuer,
             parsed.oidc.client_id.clone(),
             &parsed.oidc.redirect_uri,
@@ -164,11 +180,17 @@ impl AccessAuthFile {
             parsed.oidc.audience.clone(),
             parsed.browser.allowed_origins.clone(),
             parsed.browser.session_ttl_seconds,
+            parsed.transport_security,
         )?;
         let resolver = parsed.environment_owner_resolver.contract();
         resolver
             .validate()
             .map_err(|_| AuthConfigError::InvalidDeploymentFile)?;
+        if parsed.transport_security == TransportSecurityMode::InsecureTestOnly
+            && !parsed.insecure_mode_is_loopback_only()
+        {
+            return Err(AuthConfigError::InvalidDeploymentFile);
+        }
         let required_resolver_locators = [
             resolver.ca_certificate_locator.as_str(),
             resolver.client_certificate_locator.as_str(),
@@ -238,6 +260,15 @@ impl AccessAuthFile {
         }
         Ok(parsed)
     }
+
+    fn insecure_mode_is_loopback_only(&self) -> bool {
+        let browser_bind = self.browser.bind_addr.parse::<std::net::SocketAddr>();
+        let internal_bind = self.internal_mtls.bind_addr.parse::<std::net::SocketAddr>();
+        let resolver = Url::parse(&self.environment_owner_resolver.resolver_uri);
+        browser_bind.is_ok_and(|address| address.ip().is_loopback())
+            && internal_bind.is_ok_and(|address| address.ip().is_loopback())
+            && resolver.is_ok_and(|url| url_host_is_loopback(&url))
+    }
 }
 
 fn invalid_secret_file_path(path: &str) -> bool {
@@ -258,10 +289,37 @@ impl AuthConfig {
         allowed_origins: BTreeSet<String>,
         session_ttl_seconds: u64,
     ) -> Result<Self, AuthConfigError> {
-        let issuer = https_url("issuer", issuer)?;
-        let redirect_uri = https_or_loopback_url("redirect URI", redirect_uri)?;
-        let post_logout_redirect_uri =
-            https_or_loopback_url("post-logout redirect URI", post_logout_redirect_uri)?;
+        Self::new_with_transport_security(
+            issuer,
+            client_id,
+            redirect_uri,
+            post_logout_redirect_uri,
+            audience,
+            allowed_origins,
+            session_ttl_seconds,
+            TransportSecurityMode::Strict,
+        )
+    }
+
+    /// Validates auth configuration against an explicit transport policy.
+    #[allow(clippy::too_many_arguments, reason = "mirrors the deployment contract")]
+    pub fn new_with_transport_security(
+        issuer: &str,
+        client_id: String,
+        redirect_uri: &str,
+        post_logout_redirect_uri: &str,
+        audience: String,
+        allowed_origins: BTreeSet<String>,
+        session_ttl_seconds: u64,
+        transport_security: TransportSecurityMode,
+    ) -> Result<Self, AuthConfigError> {
+        let issuer = transport_url("issuer", issuer, transport_security)?;
+        let redirect_uri = browser_url("redirect URI", redirect_uri, transport_security)?;
+        let post_logout_redirect_uri = browser_url(
+            "post-logout redirect URI",
+            post_logout_redirect_uri,
+            transport_security,
+        )?;
         if client_id.trim().is_empty() || audience.trim().is_empty() {
             return Err(AuthConfigError::MissingIdentityBinding);
         }
@@ -271,7 +329,7 @@ impl AuthConfig {
         if allowed_origins.is_empty()
             || allowed_origins
                 .iter()
-                .any(|origin| !is_exact_https_origin(origin))
+                .any(|origin| !is_exact_allowed_origin(origin, transport_security))
         {
             return Err(AuthConfigError::InvalidAllowedOrigins);
         }
@@ -283,21 +341,37 @@ impl AuthConfig {
             audience,
             allowed_origins,
             session_ttl_seconds,
+            transport_security,
         })
     }
 }
 
-fn is_exact_https_origin(value: &str) -> bool {
+fn is_exact_allowed_origin(value: &str, mode: TransportSecurityMode) -> bool {
     let Ok(url) = Url::from_str(value) else {
         return false;
     };
-    url.scheme() == "https"
+    let transport_allowed = match mode {
+        TransportSecurityMode::Strict => url.scheme() == "https",
+        TransportSecurityMode::InsecureTestOnly => {
+            matches!(url.scheme(), "http" | "https") && url_host_is_loopback(&url)
+        }
+    };
+    transport_allowed
         && url.host_str().is_some()
         && value == url.origin().ascii_serialization()
         && url.query().is_none()
         && url.fragment().is_none()
         && url.username().is_empty()
         && url.password().is_none()
+}
+
+fn url_host_is_loopback(url: &Url) -> bool {
+    url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    })
 }
 
 fn valid_spiffe_uri(value: &str) -> bool {
@@ -321,6 +395,25 @@ fn https_url(role: &'static str, value: &str) -> Result<Url, AuthConfigError> {
     Ok(url)
 }
 
+fn transport_url(
+    role: &'static str,
+    value: &str,
+    mode: TransportSecurityMode,
+) -> Result<Url, AuthConfigError> {
+    if mode == TransportSecurityMode::Strict {
+        return https_url(role, value);
+    }
+    let url = Url::parse(value).map_err(|_| AuthConfigError::InvalidUrl(role))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url_host_is_loopback(&url)
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(AuthConfigError::InvalidUrl(role));
+    }
+    Ok(url)
+}
+
 fn https_or_loopback_url(role: &'static str, value: &str) -> Result<Url, AuthConfigError> {
     let url = Url::parse(value).map_err(|_| AuthConfigError::InvalidUrl(role))?;
     let loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
@@ -330,6 +423,18 @@ fn https_or_loopback_url(role: &'static str, value: &str) -> Result<Url, AuthCon
         return Err(AuthConfigError::InvalidUrl(role));
     }
     Ok(url)
+}
+
+fn browser_url(
+    role: &'static str,
+    value: &str,
+    mode: TransportSecurityMode,
+) -> Result<Url, AuthConfigError> {
+    if mode == TransportSecurityMode::InsecureTestOnly {
+        transport_url(role, value, mode)
+    } else {
+        https_or_loopback_url(role, value)
+    }
 }
 
 /// Configuration failures that must stop startup.
@@ -356,7 +461,7 @@ pub enum AuthConfigError {
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{AccessAuthFile, AuthConfig};
+    use super::{AccessAuthFile, AuthConfig, TransportSecurityMode};
 
     #[test]
     fn configuration_rejects_insecure_issuer_and_unbounded_session() {
@@ -385,6 +490,32 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn insecure_transport_is_explicit_and_loopback_only() {
+        let local = AuthConfig::new_with_transport_security(
+            "http://127.0.0.1:8081/realms/labweaver",
+            "web".into(),
+            "http://127.0.0.1:8080/auth/callback",
+            "http://127.0.0.1:8080/",
+            "api".into(),
+            BTreeSet::from(["http://127.0.0.1:8080".to_owned()]),
+            900,
+            TransportSecurityMode::InsecureTestOnly,
+        );
+        assert!(local.is_ok());
+        let remote = AuthConfig::new_with_transport_security(
+            "http://keycloak.example.test/realms/labweaver",
+            "web".into(),
+            "http://127.0.0.1:8080/auth/callback",
+            "http://127.0.0.1:8080/",
+            "api".into(),
+            BTreeSet::from(["http://127.0.0.1:8080".to_owned()]),
+            900,
+            TransportSecurityMode::InsecureTestOnly,
+        );
+        assert!(remote.is_err());
     }
 
     #[test]
