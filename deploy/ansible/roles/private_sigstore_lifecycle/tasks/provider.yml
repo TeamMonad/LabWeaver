@@ -102,19 +102,23 @@
       spec: "{{ sigstore_provider_job_spec }}"
   when: sigstore_provider_existing_job.resources | length == 0
 
-- name: Wait for provider Job completion
-  ansible.builtin.command:
-    argv:
-      - "{{ private_sigstore_lifecycle_kubectl_path }}"
-      - --kubeconfig
-      - "{{ private_sigstore_lifecycle_kubeconfig_path }}"
-      - --namespace
-      - "{{ private_sigstore_lifecycle_namespace }}"
-      - wait
-      - --for=condition=complete
-      - job/{{ sigstore_provider_job }}
-      - --timeout=20m
-  changed_when: false
+- name: Wait for provider Job success or fail immediately on terminal failure
+  kubernetes.core.k8s_info:
+    api_version: batch/v1
+    kind: Job
+    name: "{{ sigstore_provider_job }}"
+    namespace: "{{ private_sigstore_lifecycle_namespace }}"
+    kubeconfig: "{{ private_sigstore_lifecycle_kubeconfig_path }}"
+  register: sigstore_provider_job_state
+  until: >-
+    (sigstore_provider_job_state.resources[0].status.succeeded | default(0) | int) > 0 or
+    (sigstore_provider_job_state.resources[0].status.failed | default(0) | int) > 0
+  retries: 120
+  delay: 10
+  failed_when: >-
+    (sigstore_provider_job_state.resources | length != 1) or
+    (sigstore_provider_job_state.resources[0].status.failed | default(0) | int) > 0 or
+    (sigstore_provider_job_state.resources[0].status.succeeded | default(0) | int) == 0
 
 - name: Read sanitized provider output
   ansible.builtin.command:

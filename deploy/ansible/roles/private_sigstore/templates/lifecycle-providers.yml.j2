@@ -90,7 +90,7 @@ spec:
             - name: runtime
               emptyDir: {sizeLimit: 256Mi}
             - name: script
-              configMap: {name: private-sigstore-lifecycle-script-v1, defaultMode: 365}
+              configMap: {name: private-sigstore-lifecycle-script-v2, defaultMode: 365}
             - name: tuf
               configMap: {name: {{ private_sigstore_tuf_metadata_configmap_name }}}
             - name: trees
@@ -100,7 +100,7 @@ spec:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: private-sigstore-lifecycle-script-v1
+  name: private-sigstore-lifecycle-script-v2
   namespace: {{ private_sigstore_namespace }}
   labels:
     app.kubernetes.io/name: private-sigstore-lifecycle
@@ -147,12 +147,12 @@ data:
         test -s "$run_dir/trillian.sql"
         suffix="$(printf '%s' "$LABWEAVER_RUN_ID-$LABWEAVER_ACTION" | sha256sum | cut -c1-12)"
         drill_db="labweaver_drill_$suffix"
-        trap 'MYSQL_PWD="$MYSQL_PASSWORD" mysql --host="$MYSQL_HOST" --user="$MYSQL_USER" -e "DROP DATABASE IF EXISTS \\`$drill_db\\`" >/dev/null 2>&1 || true' EXIT
-        MYSQL_PWD="$MYSQL_PASSWORD" mysql --host="$MYSQL_HOST" --user="$MYSQL_USER" -e "CREATE DATABASE \\`$drill_db\\`"
+        trap 'MYSQL_PWD="$MYSQL_PASSWORD" mysql --host="$MYSQL_HOST" --user="$MYSQL_USER" -e "DROP DATABASE IF EXISTS $drill_db" >/dev/null 2>&1 || true' EXIT
+        MYSQL_PWD="$MYSQL_PASSWORD" mysql --host="$MYSQL_HOST" --user="$MYSQL_USER" -e "CREATE DATABASE $drill_db"
         MYSQL_PWD="$MYSQL_PASSWORD" mysql --host="$MYSQL_HOST" --user="$MYSQL_USER" "$drill_db" < "$run_dir/trillian.sql"
         tables="$(MYSQL_PWD="$MYSQL_PASSWORD" mysql --batch --skip-column-names --host="$MYSQL_HOST" --user="$MYSQL_USER" -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$drill_db'")"
         [ "$tables" -gt 0 ]
-        MYSQL_PWD="$MYSQL_PASSWORD" mysql --host="$MYSQL_HOST" --user="$MYSQL_USER" -e "DROP DATABASE \\`$drill_db\\`"
+        MYSQL_PWD="$MYSQL_PASSWORD" mysql --host="$MYSQL_HOST" --user="$MYSQL_USER" -e "DROP DATABASE $drill_db"
         trap - EXIT
         ;;
       rotate)
