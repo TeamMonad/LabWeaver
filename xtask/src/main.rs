@@ -633,63 +633,17 @@ impl InfrastructureInputs {
             "roles",
         )?;
 
-        let private_sigstore = matches!(
-            playbook_name,
-            "96-private-sigstore.yml"
-                | "97-private-sigstore-backup.yml"
-                | "98-private-sigstore-restore.yml"
-                | "99-private-sigstore-rotate.yml"
-                | "100-private-sigstore-verify.yml"
-                | "101-private-sigstore-cleanup.yml"
-                | "102-private-sigstore-disaster-recovery.yml"
-        );
+        let private_sigstore = is_private_sigstore_playbook(playbook_name);
         let identity_foundation = matches!(
             playbook_name,
             "91-identity-foundation.yml" | "92-identity-foundation-verify.yml"
         );
-        let sigstore_backup_locator = if private_sigstore {
-            required_environment_value(
-                "LABWEAVER_SIGSTORE_BACKUP_LOCATOR",
-                "Private Sigstore backup locator",
-            )?
-        } else {
-            std::env::var("LABWEAVER_SIGSTORE_BACKUP_LOCATOR").unwrap_or_default()
-        };
-        let sigstore_secret_locator = if private_sigstore {
-            required_environment_value(
-                "LABWEAVER_SIGSTORE_SECRET_LOCATOR",
-                "Private Sigstore secret locator",
-            )?
-        } else {
-            std::env::var("LABWEAVER_SIGSTORE_SECRET_LOCATOR").unwrap_or_default()
-        };
-        let sigstore_tuf_root_locator = if private_sigstore {
-            required_environment_value(
-                "LABWEAVER_SIGSTORE_TUF_ROOT_LOCATOR",
-                "Private Sigstore TUF root locator",
-            )?
-        } else {
-            std::env::var("LABWEAVER_SIGSTORE_TUF_ROOT_LOCATOR").unwrap_or_default()
-        };
-        let deployment_manifest_hash = if private_sigstore {
-            let value = required_environment_value(
-                "LABWEAVER_DEPLOYMENT_MANIFEST_HASH",
-                "deployment manifest identity",
-            )?;
-            if !is_sha256_identity(&value) {
-                return Err(AppError::ExternalCommand {
-                    role: "deployment manifest identity",
-                    code: None,
-                    detail: Some(
-                        "LABWEAVER_DEPLOYMENT_MANIFEST_HASH must be sha256:<64 lowercase hex>"
-                            .into(),
-                    ),
-                });
-            }
-            value
-        } else {
-            std::env::var("LABWEAVER_DEPLOYMENT_MANIFEST_HASH").unwrap_or_default()
-        };
+        let (
+            sigstore_backup_locator,
+            sigstore_secret_locator,
+            sigstore_tuf_root_locator,
+            deployment_manifest_hash,
+        ) = private_sigstore_inputs(private_sigstore)?;
         let identity_secret_locator = if identity_foundation {
             required_environment_value(
                 "LABWEAVER_IDENTITY_SECRET_LOCATOR",
@@ -719,6 +673,57 @@ impl InfrastructureInputs {
             identity_secret_locator,
         })
     }
+}
+
+#[cfg(target_os = "linux")]
+fn is_private_sigstore_playbook(playbook_name: &str) -> bool {
+    matches!(
+        playbook_name,
+        "96-private-sigstore.yml"
+            | "97-private-sigstore-backup.yml"
+            | "98-private-sigstore-restore.yml"
+            | "99-private-sigstore-rotate.yml"
+            | "100-private-sigstore-verify.yml"
+            | "101-private-sigstore-cleanup.yml"
+            | "102-private-sigstore-disaster-recovery.yml"
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn private_sigstore_inputs(required: bool) -> Result<(String, String, String, String), AppError> {
+    let load = |variable, role| {
+        if required {
+            required_environment_value(variable, role)
+        } else {
+            Ok(std::env::var(variable).unwrap_or_default())
+        }
+    };
+    let backup = load(
+        "LABWEAVER_SIGSTORE_BACKUP_LOCATOR",
+        "Private Sigstore backup locator",
+    )?;
+    let secret = load(
+        "LABWEAVER_SIGSTORE_SECRET_LOCATOR",
+        "Private Sigstore secret locator",
+    )?;
+    let tuf_root = load(
+        "LABWEAVER_SIGSTORE_TUF_ROOT_LOCATOR",
+        "Private Sigstore TUF root locator",
+    )?;
+    let manifest = load(
+        "LABWEAVER_DEPLOYMENT_MANIFEST_HASH",
+        "deployment manifest identity",
+    )?;
+    if required && !is_sha256_identity(&manifest) {
+        return Err(AppError::ExternalCommand {
+            role: "deployment manifest identity",
+            code: None,
+            detail: Some(
+                "LABWEAVER_DEPLOYMENT_MANIFEST_HASH must be sha256:<64 lowercase hex>".into(),
+            ),
+        });
+    }
+    Ok((backup, secret, tuf_root, manifest))
 }
 
 #[cfg(target_os = "linux")]
@@ -887,7 +892,7 @@ fn inventory_identity_hash(root: &std::path::Path) -> Result<String, AppError> {
         hasher.update((data.len() as u64).to_be_bytes());
         hasher.update(data);
     }
-    Ok(format!("sha256:{hasher:x}"))
+    Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
 #[cfg(target_os = "linux")]
