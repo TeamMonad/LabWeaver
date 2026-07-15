@@ -1,0 +1,27 @@
+{
+  "$defs": {
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Synchronizer token returned only to an authenticated browser session.",
+  "properties": {
+    "csrfToken": {
+      "description": "Opaque token to send in the `X-CSRF-Token` request header.",
+      "type": "string"
+    },
+    "expiresAt": {
+      "$ref": "#/$defs/UtcTimestamp",
+      "description": "Session expiry bound to this token."
+    }
+  },
+  "required": [
+    "csrfToken",
+    "expiresAt"
+  ],
+  "title": "CsrfTokenResponse",
+  "type": "object"
+}

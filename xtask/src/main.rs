@@ -311,10 +311,7 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::Build => run_cargo("build", ["build", "--workspace", "--exclude", "xtask"]),
         Command::Test(args) => match args.suite {
             TestSuite::All => run_cargo("test", ["test", "--workspace", "--exclude", "xtask"]),
-            TestSuite::Contract => {
-                run_cargo("contract test", ["test", "-p", "contracts", "--locked"])?;
-                contracts_check()
-            }
+            TestSuite::Contract => contract_test_suite(),
             TestSuite::Integration => not_implemented("test --suite integration"),
             TestSuite::E2e => not_implemented("test --suite e2e"),
         },
@@ -390,6 +387,32 @@ fn contracts_check() -> Result<(), AppError> {
         }
     }
     Ok(())
+}
+
+fn contract_test_suite() -> Result<(), AppError> {
+    contracts_check()?;
+    run_cargo(
+        "contract tests",
+        ["test", "-p", "contracts", "--all-targets", "--all-features"],
+    )?;
+    let status = ProcessCommand::new("pnpm")
+        .arg("contracts:check")
+        .current_dir(repository_root().join("web"))
+        .status()
+        .map_err(|error| AppError::ExternalCommand {
+            role: "web contract drift check",
+            code: None,
+            detail: Some(error.to_string()),
+        })?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(AppError::ExternalCommand {
+            role: "web contract drift check",
+            code: status.code(),
+            detail: None,
+        })
+    }
 }
 
 fn write_contract_artifacts(root: &Path) -> Result<(), AppError> {

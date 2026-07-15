@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AccessGrantId, ApprovalId, CandidateId, CourseId, DiagnosticCode, EndpointId, EnvironmentId,
-    OperationId, ProblemPackageId, ReleaseId, Revision, Sequence, Sha256Digest, UploadSessionId,
-    UtcTimestamp,
+    OperationId, PlatformRole, ProblemPackageId, ReleaseId, Revision, Sequence, Sha256Digest,
+    UploadSessionId, UtcTimestamp,
 };
 
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -240,6 +240,262 @@ pub enum MutationContract {
 pub enum Security {
     Oidc,
     ServiceMtls,
+}
+
+/// Scope input that an operation requires from the authorization boundary.
+/// Resource ownership for environment scopes is resolved by the owning service
+/// before it asks Access for a decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperationScopeKind {
+    /// Platform-global actor scope.
+    Global,
+    /// Course membership scope.
+    Course,
+    /// Project membership scope.
+    Project,
+    /// Environment scope supplied by its owning service.
+    Environment,
+    /// Registered internal service identity scope.
+    Service,
+}
+
+/// Explicit authorization policy for a catalog operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OperationAuthorization {
+    /// Stable operation identifier.
+    pub operation_id: &'static str,
+    /// Base OIDC roles permitted to request the operation.
+    pub allowed_roles: &'static [PlatformRole],
+    /// Required resource scope kind.
+    pub scope: OperationScopeKind,
+}
+
+const TEACHER: &[PlatformRole] = &[PlatformRole::Teacher];
+const TEACHER_OR_STUDENT: &[PlatformRole] = &[PlatformRole::Teacher, PlatformRole::Student];
+const PLATFORM_ADMIN: &[PlatformRole] = &[PlatformRole::PlatformAdmin];
+
+/// Authorization policy for every public and gateway operation. This table is
+/// intentionally separate from route implementations so generated contracts,
+/// Gateway requests, and service middleware share one semantic source.
+pub const OPERATION_AUTHORIZATIONS: &[OperationAuthorization] = &[
+    OperationAuthorization {
+        operation_id: "createProblemPackageUpload",
+        allowed_roles: TEACHER,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "completeProblemPackageUpload",
+        allowed_roles: TEACHER,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "getProblemPackage",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "createCourseLlmPolicy",
+        allowed_roles: TEACHER,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "getActiveCourseLlmPolicy",
+        allowed_roles: TEACHER,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "createAgentRun",
+        allowed_roles: TEACHER,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "getAgentRun",
+        allowed_roles: TEACHER,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "cancelAgentRun",
+        allowed_roles: TEACHER,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "retryAgentRunTrack",
+        allowed_roles: TEACHER,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "getEnvironmentCandidate",
+        allowed_roles: TEACHER,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "appendEnvironmentCandidateDecision",
+        allowed_roles: TEACHER,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "getEvaluationCandidate",
+        allowed_roles: TEACHER,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "appendEvaluationCandidateDecision",
+        allowed_roles: TEACHER,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "createEnvironmentTemplateRelease",
+        allowed_roles: TEACHER,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "listEnvironmentTemplateReleases",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "getEnvironmentTemplateRelease",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "withdrawEnvironmentTemplateRelease",
+        allowed_roles: TEACHER,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "createEnvironment",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "getEnvironment",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Environment,
+    },
+    OperationAuthorization {
+        operation_id: "startEnvironment",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Environment,
+    },
+    OperationAuthorization {
+        operation_id: "stopEnvironment",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Environment,
+    },
+    OperationAuthorization {
+        operation_id: "restartEnvironment",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Environment,
+    },
+    OperationAuthorization {
+        operation_id: "resetEnvironment",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Environment,
+    },
+    OperationAuthorization {
+        operation_id: "retryEnvironment",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Environment,
+    },
+    OperationAuthorization {
+        operation_id: "cancelEnvironmentOperation",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Environment,
+    },
+    OperationAuthorization {
+        operation_id: "recoverEnvironment",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Environment,
+    },
+    OperationAuthorization {
+        operation_id: "deleteEnvironment",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Environment,
+    },
+    OperationAuthorization {
+        operation_id: "listEnvironmentEndpoints",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Environment,
+    },
+    OperationAuthorization {
+        operation_id: "freezeSubmission",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Environment,
+    },
+    OperationAuthorization {
+        operation_id: "getFrozenSubmission",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Environment,
+    },
+    OperationAuthorization {
+        operation_id: "createSshPublicKey",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Global,
+    },
+    OperationAuthorization {
+        operation_id: "listSshPublicKeys",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Global,
+    },
+    OperationAuthorization {
+        operation_id: "deleteSshPublicKey",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Global,
+    },
+    OperationAuthorization {
+        operation_id: "createAccessGrant",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Environment,
+    },
+    OperationAuthorization {
+        operation_id: "getAccessGrant",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Environment,
+    },
+    OperationAuthorization {
+        operation_id: "revokeAccessGrant",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Environment,
+    },
+    OperationAuthorization {
+        operation_id: "streamCourseEvents",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "authorizeSsh",
+        allowed_roles: PLATFORM_ADMIN,
+        scope: OperationScopeKind::Service,
+    },
+    OperationAuthorization {
+        operation_id: "createGatewaySession",
+        allowed_roles: PLATFORM_ADMIN,
+        scope: OperationScopeKind::Service,
+    },
+    OperationAuthorization {
+        operation_id: "heartbeatGatewaySession",
+        allowed_roles: PLATFORM_ADMIN,
+        scope: OperationScopeKind::Service,
+    },
+    OperationAuthorization {
+        operation_id: "closeGatewaySession",
+        allowed_roles: PLATFORM_ADMIN,
+        scope: OperationScopeKind::Service,
+    },
+    OperationAuthorization {
+        operation_id: "resolveEnvironmentOwner",
+        allowed_roles: PLATFORM_ADMIN,
+        scope: OperationScopeKind::Service,
+    },
+];
+
+/// Looks up mandatory role and scope metadata for a stable operation id.
+#[must_use]
+pub fn operation_authorization(operation_id: &str) -> Option<&'static OperationAuthorization> {
+    OPERATION_AUTHORIZATIONS
+        .iter()
+        .find(|authorization| authorization.operation_id == operation_id)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -799,6 +1055,17 @@ pub fn validate_operation_catalog() -> Result<(), HttpContractError> {
         if operation.mutation != MutationContract::None && operation.method == Method::Get {
             return Err(HttpContractError::InvalidOperationCatalog);
         }
+        let authorization = operation_authorization(operation.operation_id)
+            .ok_or(HttpContractError::InvalidOperationCatalog)?;
+        if authorization.allowed_roles.is_empty()
+            || (operation.security == Security::ServiceMtls
+                && authorization.scope != OperationScopeKind::Service)
+        {
+            return Err(HttpContractError::InvalidOperationCatalog);
+        }
+    }
+    if OPERATION_AUTHORIZATIONS.len() != OPERATIONS.len() {
+        return Err(HttpContractError::InvalidOperationCatalog);
     }
     Ok(())
 }

@@ -4,6 +4,14 @@ export type ClientOptions = {
     baseURL: `${string}://${string}` | (string & {});
 };
 
+export type AuthSession = AuthSessionSchema;
+
+export type AuthorizationDecision = AuthorizationDecisionSchema;
+
+export type AuthorizationDecisionRequest = AuthorizationDecisionRequestSchema;
+
+export type CsrfTokenResponse = CsrfTokenResponseSchema;
+
 export type OperationAccepted = {
     operationId: string;
     revision: number;
@@ -266,6 +274,318 @@ export type RuntimeKind = 'container' | 'virtual_machine';
 export type Sha256Digest = string;
 
 /**
+ * AuthSession
+ *
+ * Safe browser-session representation. OIDC subjects, tokens, and provider
+ * session identifiers are intentionally excluded from this public DTO.
+ */
+export type AuthSessionSchema = {
+    /**
+     * Authenticated durable actor.
+     */
+    actor: AuthenticatedActor;
+    /**
+     * Current authorization revision for the returned effective scopes.
+     */
+    authorizationRevision: AuthSessionSchemaRevision;
+    /**
+     * Earliest expiry that invalidates this session representation.
+     */
+    expiresAt: AuthSessionSchemaUtcTimestamp;
+    /**
+     * Effective scopes known by the Access authority at response time.
+     */
+    scopes: Array<AuthorizationScope>;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type AuthSessionSchemaActorId = string;
+
+/**
+ * Safe actor identity derived from a verified OIDC token.
+ */
+export type AuthenticatedActor = {
+    /**
+     * Local durable actor identity.
+     */
+    actorId: AuthSessionSchemaActorId;
+    /**
+     * Verified identity expiration.
+     */
+    expiresAt: AuthSessionSchemaUtcTimestamp;
+    /**
+     * Verified base roles.
+     */
+    roles: Array<PlatformRole>;
+};
+
+/**
+ * Resource scope evaluated by the authorization boundary.
+ */
+export type AuthorizationScope = {
+    kind: 'global';
+} | {
+    course_id: AuthSessionSchemaCourseId;
+    kind: 'course';
+} | {
+    course_id: AuthSessionSchemaCourseId;
+    kind: 'project';
+    project_id: ProjectId;
+} | {
+    course_id: AuthSessionSchemaCourseId;
+    environment_id: AuthSessionSchemaEnvironmentId;
+    /**
+     * Exact Environment-authoritative revision resolved for this request.
+     */
+    environment_revision: AuthSessionSchemaRevision;
+    kind: 'environment';
+} | {
+    kind: 'service';
+    service_id: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type AuthSessionSchemaCourseId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `EnvironmentId`.
+ */
+export type AuthSessionSchemaEnvironmentId = string;
+
+/**
+ * Base role asserted by the configured OIDC issuer.
+ */
+export type PlatformRole = 'teacher' | 'student' | 'platform_admin';
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type ProjectId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type AuthSessionSchemaRevision = number;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type AuthSessionSchemaUtcTimestamp = string;
+
+/**
+ * AuthorizationDecisionRequest
+ *
+ * Trusted-Gateway authorization request. The caller identity is taken from
+ * mTLS and is never accepted from a browser-controlled header.
+ */
+export type AuthorizationDecisionRequestSchema = {
+    /**
+     * Actor whose session or bearer token was already authenticated.
+     */
+    actorId: AuthorizationDecisionRequestSchemaActorId;
+    /**
+     * Revision observed by the caller, if it holds a prior decision.
+     */
+    authorizationRevision?: AuthorizationDecisionRequestSchemaRevision | null;
+    /**
+     * Stable operation catalog identifier.
+     */
+    operationId: string;
+    /**
+     * Scope requiring evaluation.
+     */
+    scope: AuthorizationDecisionRequestSchemaAuthorizationScope;
+    /**
+     * Scope revision observed by the caller, if it holds a prior decision.
+     */
+    scopeRevision?: AuthorizationDecisionRequestSchemaRevision | null;
+    /**
+     * Opaque BFF session identifier presented only by the trusted Gateway.
+     * Access verifies that the live session belongs to `actor_id`; it is never
+     * accepted from a browser header.
+     */
+    sessionId: BffSessionId;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type AuthorizationDecisionRequestSchemaActorId = string;
+
+/**
+ * Resource scope evaluated by the authorization boundary.
+ */
+export type AuthorizationDecisionRequestSchemaAuthorizationScope = {
+    kind: 'global';
+} | {
+    course_id: AuthorizationDecisionRequestSchemaCourseId;
+    kind: 'course';
+} | {
+    course_id: AuthorizationDecisionRequestSchemaCourseId;
+    kind: 'project';
+    project_id: AuthorizationDecisionRequestSchemaProjectId;
+} | {
+    course_id: AuthorizationDecisionRequestSchemaCourseId;
+    environment_id: AuthorizationDecisionRequestSchemaEnvironmentId;
+    /**
+     * Exact Environment-authoritative revision resolved for this request.
+     */
+    environment_revision: AuthorizationDecisionRequestSchemaRevision;
+    kind: 'environment';
+} | {
+    kind: 'service';
+    service_id: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `BffSessionId`.
+ */
+export type BffSessionId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type AuthorizationDecisionRequestSchemaCourseId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `EnvironmentId`.
+ */
+export type AuthorizationDecisionRequestSchemaEnvironmentId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type AuthorizationDecisionRequestSchemaProjectId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type AuthorizationDecisionRequestSchemaRevision = number;
+
+/**
+ * AuthorizationDecision
+ *
+ * Safe result returned to a trusted internal caller after scope evaluation.
+ */
+export type AuthorizationDecisionSchema = {
+    /**
+     * Authenticated actor.
+     */
+    actor: AuthorizationDecisionSchemaAuthenticatedActor;
+    /**
+     * Authorization revision which invalidates derived Gateway decisions.
+     */
+    authorizationRevision: AuthorizationDecisionSchemaRevision;
+    /**
+     * Stable denial diagnostic, absent for permits.
+     */
+    diagnosticCode?: DiagnosticCode | null;
+    /**
+     * Requested resource scope.
+     */
+    scope: AuthorizationDecisionSchemaAuthorizationScope;
+    /**
+     * Scope-owner revision. For Environment scope this is the exact
+     * Environment revision returned by the owner resolver.
+     */
+    scopeRevision: AuthorizationDecisionSchemaRevision;
+    /**
+     * Earliest identity or membership expiry; callers must not cache past this point.
+     */
+    validUntil: AuthorizationDecisionSchemaUtcTimestamp;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type AuthorizationDecisionSchemaActorId = string;
+
+/**
+ * Safe actor identity derived from a verified OIDC token.
+ */
+export type AuthorizationDecisionSchemaAuthenticatedActor = {
+    /**
+     * Local durable actor identity.
+     */
+    actorId: AuthorizationDecisionSchemaActorId;
+    /**
+     * Verified identity expiration.
+     */
+    expiresAt: AuthorizationDecisionSchemaUtcTimestamp;
+    /**
+     * Verified base roles.
+     */
+    roles: Array<AuthorizationDecisionSchemaPlatformRole>;
+};
+
+/**
+ * Resource scope evaluated by the authorization boundary.
+ */
+export type AuthorizationDecisionSchemaAuthorizationScope = {
+    kind: 'global';
+} | {
+    course_id: AuthorizationDecisionSchemaCourseId;
+    kind: 'course';
+} | {
+    course_id: AuthorizationDecisionSchemaCourseId;
+    kind: 'project';
+    project_id: AuthorizationDecisionSchemaProjectId;
+} | {
+    course_id: AuthorizationDecisionSchemaCourseId;
+    environment_id: AuthorizationDecisionSchemaEnvironmentId;
+    /**
+     * Exact Environment-authoritative revision resolved for this request.
+     */
+    environment_revision: AuthorizationDecisionSchemaRevision;
+    kind: 'environment';
+} | {
+    kind: 'service';
+    service_id: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type AuthorizationDecisionSchemaCourseId = string;
+
+/**
+ * Stable machine-readable diagnostic code.
+ *
+ * Consumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so
+ * additive diagnostics do not force a wire-version change.
+ */
+export type DiagnosticCode = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `EnvironmentId`.
+ */
+export type AuthorizationDecisionSchemaEnvironmentId = string;
+
+/**
+ * Base role asserted by the configured OIDC issuer.
+ */
+export type AuthorizationDecisionSchemaPlatformRole = 'teacher' | 'student' | 'platform_admin';
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type AuthorizationDecisionSchemaProjectId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type AuthorizationDecisionSchemaRevision = number;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type AuthorizationDecisionSchemaUtcTimestamp = string;
+
+/**
  * CandidateApproval
  *
  * Human decision bound to an exact candidate and dependency identity.
@@ -416,6 +736,27 @@ export type StudentContentMode = 'manifest_allowlist_only';
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
  */
 export type CourseLlmEgressPolicySchemaUtcTimestamp = string;
+
+/**
+ * CsrfTokenResponse
+ *
+ * Synchronizer token returned only to an authenticated browser session.
+ */
+export type CsrfTokenResponseSchema = {
+    /**
+     * Opaque token to send in the `X-CSRF-Token` request header.
+     */
+    csrfToken: string;
+    /**
+     * Session expiry bound to this token.
+     */
+    expiresAt: CsrfTokenResponseSchemaUtcTimestamp;
+};
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type CsrfTokenResponseSchemaUtcTimestamp = string;
 
 /**
  * EnvironmentCandidate
@@ -2373,6 +2714,64 @@ export type RevokeAccessGrantResponses = {
 };
 
 export type RevokeAccessGrantResponse = RevokeAccessGrantResponses[keyof RevokeAccessGrantResponses];
+
+export type IssueCsrfTokenData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/auth/csrf';
+};
+
+export type IssueCsrfTokenErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type IssueCsrfTokenError = IssueCsrfTokenErrors[keyof IssueCsrfTokenErrors];
+
+export type IssueCsrfTokenResponses = {
+    /**
+     * Short-lived synchronizer token
+     */
+    200: CsrfTokenResponseSchema;
+};
+
+export type IssueCsrfTokenResponse = IssueCsrfTokenResponses[keyof IssueCsrfTokenResponses];
+
+export type GetAuthSessionData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/auth/session';
+};
+
+export type GetAuthSessionErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetAuthSessionError = GetAuthSessionErrors[keyof GetAuthSessionErrors];
+
+export type GetAuthSessionResponses = {
+    /**
+     * Current authentication session
+     */
+    200: AuthSessionSchema;
+};
+
+export type GetAuthSessionResponse = GetAuthSessionResponses[keyof GetAuthSessionResponses];
 
 export type CreateAgentRunData = {
     body: CreateAgentRunRequestSchema;
@@ -4823,3 +5222,99 @@ export type DeleteSshPublicKeyResponses = {
 };
 
 export type DeleteSshPublicKeyResponse = DeleteSshPublicKeyResponses[keyof DeleteSshPublicKeyResponses];
+
+export type ConsumeOidcBackchannelLogoutData = {
+    body: {
+        logout_token: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/auth/backchannel-logout';
+};
+
+export type ConsumeOidcBackchannelLogoutErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ConsumeOidcBackchannelLogoutError = ConsumeOidcBackchannelLogoutErrors[keyof ConsumeOidcBackchannelLogoutErrors];
+
+export type ConsumeOidcBackchannelLogoutResponses = {
+    /**
+     * Matching sessions revoked
+     */
+    204: void;
+};
+
+export type ConsumeOidcBackchannelLogoutResponse = ConsumeOidcBackchannelLogoutResponses[keyof ConsumeOidcBackchannelLogoutResponses];
+
+export type CompleteOidcLoginData = {
+    body?: never;
+    path?: never;
+    query: {
+        code: string;
+        state: string;
+    };
+    url: '/auth/callback';
+};
+
+export type CompleteOidcLoginErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type CompleteOidcLoginError = CompleteOidcLoginErrors[keyof CompleteOidcLoginErrors];
+
+export type BeginOidcLoginData = {
+    body?: never;
+    path?: never;
+    query?: {
+        return_to?: string;
+    };
+    url: '/auth/login';
+};
+
+export type BeginOidcLoginErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type BeginOidcLoginError = BeginOidcLoginErrors[keyof BeginOidcLoginErrors];
+
+export type LogoutBrowserSessionData = {
+    body?: never;
+    headers: {
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path?: never;
+    query?: never;
+    url: '/auth/logout';
+};
+
+export type LogoutBrowserSessionErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type LogoutBrowserSessionError = LogoutBrowserSessionErrors[keyof LogoutBrowserSessionErrors];

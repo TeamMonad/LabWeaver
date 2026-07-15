@@ -6,7 +6,9 @@ use schemars::{Schema, schema_for};
 use serde_json::{Value, json};
 
 use crate::events::{self, CloudEvent};
-use crate::http::{ApiSurface, Method, MutationContract, OPERATIONS};
+use crate::http::{
+    ApiSurface, Method, MutationContract, OPERATIONS, OperationScopeKind, operation_authorization,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GeneratedArtifact {
@@ -162,6 +164,34 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/gateway-session.schema.json",
         crate::access::GatewaySession
+    );
+    document!(
+        "schemas/contracts/v1/authenticated-actor.schema.json",
+        crate::auth::AuthenticatedActor
+    );
+    document!(
+        "schemas/contracts/v1/auth-session.schema.json",
+        crate::auth::AuthSession
+    );
+    document!(
+        "schemas/contracts/v1/csrf-token-response.schema.json",
+        crate::auth::CsrfTokenResponse
+    );
+    document!(
+        "schemas/contracts/v1/course-membership.schema.json",
+        crate::auth::CourseMembership
+    );
+    document!(
+        "schemas/contracts/v1/project-membership.schema.json",
+        crate::auth::ProjectMembership
+    );
+    document!(
+        "schemas/contracts/v1/authorization-decision.schema.json",
+        crate::auth::AuthorizationDecision
+    );
+    document!(
+        "schemas/contracts/v1/authorization-decision-request.schema.json",
+        crate::auth::AuthorizationDecisionRequest
     );
     document!(
         "schemas/contracts/v1/problem-details.schema.json",
@@ -377,6 +407,17 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 "LW_ENV_OWNER_CLOCK_INVALID"
             ]);
         }
+        let authorization = operation_authorization(operation.operation_id).ok_or_else(|| {
+            GenerationError::Contract("operation authorization metadata is missing".to_owned())
+        })?;
+        operation_json["x-labweaver-allowed-roles"] = json!(authorization.allowed_roles);
+        operation_json["x-labweaver-scope"] = json!(match authorization.scope {
+            OperationScopeKind::Global => "global",
+            OperationScopeKind::Course => "course",
+            OperationScopeKind::Project => "project",
+            OperationScopeKind::Environment => "environment",
+            OperationScopeKind::Service => "service",
+        });
         if let Some(schema) = request_schema(operation.operation_id) {
             operation_json["requestBody"] =
                 json!({"required":true,"content":{"application/json":{"schema":schema}}});
@@ -386,8 +427,13 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             .or_insert_with(|| json!({}));
         entry[method] = operation_json;
     }
+    add_auth_paths(surface, &mut paths);
     let security_schemes = if surface == ApiSurface::Public {
-        json!({"oidc": {"type":"oauth2","flows":{"authorizationCode":{"authorizationUrl":"/oidc/authorize","tokenUrl":"/oidc/token","scopes":{}}}}})
+        json!({
+            "oidc": {"type":"oauth2","flows":{"authorizationCode":{"authorizationUrl":"/auth/login","tokenUrl":"/auth/callback","scopes":{}}}},
+            "bffSession": {"type":"apiKey","in":"cookie","name":"__Host-labweaver_session"},
+            "bearerJwt": {"type":"http","scheme":"bearer","bearerFormat":"JWT"}
+        })
     } else {
         json!({"serviceMtls": {"type":"mutualTLS","description":"Deployment-controlled service identity; never exposed to browser clients."}})
     };
@@ -407,12 +453,53 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                     }
                 },
                 "OperationAccepted": {"type":"object","additionalProperties":false,"required":["operationId","revision","statusUrl"],"properties":{"operationId":{"type":"string","format":"uuid"},"revision":{"type":"integer","minimum":1},"statusUrl":{"type":"string","format":"uri-reference"}}}
+                ,"AuthSession": contract_ref("auth-session")
+                ,"CsrfTokenResponse": contract_ref("csrf-token-response")
+                ,"AuthorizationDecisionRequest": contract_ref("authorization-decision-request")
+                ,"AuthorizationDecision": contract_ref("authorization-decision")
             },
             "responses": {"Problem": {"description":"RFC 9457 problem detail","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}}}
         }
     });
     let document: utoipa::openapi::OpenApi = serde_json::from_value(value)?;
     Ok(serde_json::to_value(document)?)
+}
+
+fn add_auth_paths(surface: ApiSurface, paths: &mut BTreeMap<String, Value>) {
+    match surface {
+        ApiSurface::Public => {
+            paths.insert(
+                "/auth/login".to_owned(),
+                json!({"get":{"operationId":"beginOidcLogin","summary":"Begin OIDC Authorization Code + PKCE login","security":[],"parameters":[{"name":"return_to","in":"query","required":false,"schema":{"type":"string"}}],"responses":{"302":{"description":"Redirect to the configured OIDC provider"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+            );
+            paths.insert(
+                "/auth/callback".to_owned(),
+                json!({"get":{"operationId":"completeOidcLogin","summary":"Complete the one-time OIDC callback","security":[],"parameters":[{"name":"code","in":"query","required":true,"schema":{"type":"string","minLength":1}},{"name":"state","in":"query","required":true,"schema":{"type":"string","minLength":1}}],"responses":{"302":{"description":"Session established and redirected to the allowlisted return URL"},"401":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+            );
+            paths.insert(
+                "/auth/backchannel-logout".to_owned(),
+                json!({"post":{"operationId":"consumeOidcBackchannelLogout","summary":"Consume a signed, replay-protected OIDC back-channel logout token","security":[],"requestBody":{"required":true,"content":{"application/x-www-form-urlencoded":{"schema":{"type":"object","additionalProperties":false,"required":["logout_token"],"properties":{"logout_token":{"type":"string","minLength":1}}}}}},"responses":{"204":{"description":"Matching sessions revoked"},"403":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+            );
+            paths.insert(
+                "/auth/logout".to_owned(),
+                json!({"post":{"operationId":"logoutBrowserSession","summary":"Revoke the BFF session and begin provider logout","security":[{"bffSession":[]}],"parameters":[{"name":"Origin","in":"header","required":true,"schema":{"type":"string","format":"uri"}},{"name":"X-CSRF-Token","in":"header","required":true,"schema":{"type":"string","minLength":43,"maxLength":43}}],"responses":{"302":{"description":"Session revoked and redirected to provider logout"},"403":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+            );
+            paths.insert(
+                "/api/v1/auth/session".to_owned(),
+                json!({"get":{"operationId":"getAuthSession","summary":"Return the safe actor and current authoritative scopes","security":[{"bffSession":[]},{"bearerJwt":[]}],"responses":{"200":{"description":"Current authentication session","content":{"application/json":{"schema":{"$ref":"#/components/schemas/AuthSession"}}}},"401":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+            );
+            paths.insert(
+                "/api/v1/auth/csrf".to_owned(),
+                json!({"get":{"operationId":"issueCsrfToken","summary":"Issue a synchronizer token for the current BFF session","security":[{"bffSession":[]}],"responses":{"200":{"description":"Short-lived synchronizer token","content":{"application/json":{"schema":{"$ref":"#/components/schemas/CsrfTokenResponse"}}}},"401":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+            );
+        }
+        ApiSurface::GatewayInternal => {
+            paths.insert(
+                "/internal/v1/auth/decision".to_owned(),
+                json!({"post":{"operationId":"decideAuthorization","summary":"Evaluate an actor session and exact resource scope for an mTLS caller","security":[{"serviceMtls":[]}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/AuthorizationDecisionRequest"}}}},"responses":{"200":{"description":"Expiry-bounded authorization decision","content":{"application/json":{"schema":{"$ref":"#/components/schemas/AuthorizationDecision"}}}},"403":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+            );
+        }
+    }
 }
 
 fn path_parameters(path: &str) -> Vec<Value> {
@@ -559,6 +646,12 @@ mod tests {
         let internal = String::from_utf8_lossy(&internal.bytes);
         assert!(!public.contains("/internal/v1"));
         assert!(!internal.contains("/api/v1"));
+        assert!(public.contains("/auth/login"));
+        assert!(public.contains("/auth/backchannel-logout"));
+        assert!(public.contains("#/components/schemas/AuthSession"));
+        assert!(public.contains("__Host-labweaver_session"));
+        assert!(internal.contains("/internal/v1/auth/decision"));
+        assert!(internal.contains("AuthorizationDecisionRequest"));
         assert!(internal.contains("mutualTLS"));
         Ok(())
     }

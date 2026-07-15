@@ -3,6 +3,8 @@
 use thiserror::Error;
 use tracing_subscriber::EnvFilter;
 
+pub use metrics_exporter_prometheus::PrometheusHandle;
+
 /// Telemetry initialization failure.
 #[derive(Debug, Error)]
 pub enum TelemetryError {
@@ -12,6 +14,9 @@ pub enum TelemetryError {
     /// A global subscriber was already installed.
     #[error("LW_TELEMETRY_ALREADY_INITIALIZED: {0}")]
     AlreadyInitialized(String),
+    /// A process-global metrics recorder was already installed or invalid.
+    #[error("LW_TELEMETRY_METRICS_INITIALIZATION_FAILED: {0}")]
+    Metrics(String),
 }
 
 /// Installs a JSON subscriber without logging request bodies or secrets.
@@ -33,4 +38,21 @@ pub fn init(service: &'static str) -> Result<(), TelemetryError> {
         .with_writer(std::io::stderr)
         .try_init()
         .map_err(|error| TelemetryError::AlreadyInitialized(format!("{service}: {error}")))
+}
+
+/// Installs the process-global Prometheus recorder and returns its safe render
+/// handle. Services expose this handle only on an authenticated internal
+/// listener.
+/// Installs the process-wide Prometheus recorder for a service.
+///
+/// # Errors
+///
+/// Returns [`TelemetryError`] when another recorder is already installed or
+/// the exporter cannot be initialized.
+pub fn init_metrics(service: &'static str) -> Result<PrometheusHandle, TelemetryError> {
+    metrics_exporter_prometheus::PrometheusBuilder::new()
+        .with_recommended_naming(true)
+        .add_global_label("service", service)
+        .install_recorder()
+        .map_err(|error| TelemetryError::Metrics(error.to_string()))
 }
