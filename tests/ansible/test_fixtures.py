@@ -257,6 +257,9 @@ class AnsibleFixtureTests(unittest.TestCase):
         sigstore_values = (
             ROOT / "deploy/ansible/roles/private_sigstore/templates/values.yml.j2"
         ).read_text(encoding="utf-8")
+        sigstore_tasks = (
+            ROOT / "deploy/ansible/roles/private_sigstore/tasks/main.yml"
+        ).read_text(encoding="utf-8")
 
         self.assertEqual(deploy.splitlines()[1], "- import_playbook: 00-preflight.yml")
         self.assertIn("labweaver_preflight_scope: identity-foundation", deploy)
@@ -275,6 +278,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("python_kubernetes_rpm: python3-kubernetes-34.1.0-2.el10_2", lock)
         self.assertIn("identity_lock.python_kubernetes_rpm", tasks)
         self.assertIn("ChallengeClaim: preferred_username", sigstore_values)
+        self.assertIn("private_sigstore_oidc_subject", sigstore_tasks)
         self.assertIn("runAsUser: 70, runAsGroup: 70", workloads)
         self.assertIn("runAsUser: 1000", workloads)
         self.assertIn("oidc-audience-mapper", provision_job)

@@ -38,10 +38,11 @@
       - private_sigstore_oidc_client_id | length > 0
       - private_sigstore_oidc_audience == private_sigstore_oidc_client_id
       - private_sigstore_oidc_subject_domain is match('^[a-z0-9.-]+\\.internal$')
+      - private_sigstore_oidc_subject is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
       - private_sigstore_keycloak_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
       - private_sigstore_build_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
       - private_sigstore_allowed_subjects | length == 1
-      - private_sigstore_allowed_subjects[0] == ('service-account-' ~ private_sigstore_oidc_client_id ~ '!' ~ private_sigstore_oidc_subject_domain)
+      - private_sigstore_allowed_subjects[0] == (private_sigstore_oidc_subject ~ '!' ~ private_sigstore_oidc_subject_domain)
       - private_sigstore_allowed_subjects | select('search', '\\*') | list | length == 0
       - sigstore_secret_locator | length > 0
       - private_sigstore_secret_locator_sha256 is match('^sha256:[0-9a-f]{64}$')
@@ -60,6 +61,7 @@
       - private_sigstore_oidc_audience is not search('REPLACE_')
       - private_sigstore_oidc_client_id is not search('REPLACE_')
       - private_sigstore_oidc_subject_domain is not search('REPLACE_')
+      - private_sigstore_oidc_subject is not search('REPLACE_')
       - private_sigstore_rekor_tree_id | string is not search('REPLACE_')
       - private_sigstore_ctlog_tree_id | string is not search('REPLACE_')
       - sigstore_secret_locator is not search('REPLACE_')
@@ -460,6 +462,7 @@
       - --wait
       - --timeout
       - 10m
+  changed_when: true
   when:
     - sigstore_deployed_post_renderer_contract.rc == 0
     - sigstore_deployed_post_renderer_contract.stdout != private_sigstore_post_renderer_contract

@@ -75,10 +75,11 @@ private_sigstore_oidc_gateway_vip: REPLACE_KEYCLOAK_RFC1918_GATEWAY_VIP
 private_sigstore_oidc_audience: labweaver-buildkit
 private_sigstore_oidc_client_id: labweaver-buildkit
 private_sigstore_oidc_subject_domain: workloads.labweaver.internal
+private_sigstore_oidc_subject: REPLACE_KEYCLOAK_WORKLOAD_SUBJECT
 private_sigstore_keycloak_namespace: keycloak-system
 private_sigstore_build_namespace: labweaver-build
 private_sigstore_allowed_subjects:
-  - service-account-labweaver-buildkit!workloads.labweaver.internal
+  - REPLACE_KEYCLOAK_WORKLOAD_SUBJECT!workloads.labweaver.internal
 private_sigstore_expected_tuf_root_sha256: sha256:REPLACE_TUF_PUBLIC_ROOT_SHA256
 private_sigstore_secret_locator_sha256: sha256:REPLACE_SECRET_LOCATOR_IDENTITY_SHA256
 private_sigstore_tls_secret_name: private-sigstore-internal-tls

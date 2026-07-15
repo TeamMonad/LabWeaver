@@ -23,6 +23,12 @@ private CA; a separate namespace-scoped CA Issuer signs the Gateway
 certificate. This is a private-lab bootstrap trust root, not a public PKI or an
 offline Sigstore root.
 
+Fulcio certificate identity is bound to Keycloak's immutable workload-client
+`sub` UUID plus `workloads.labweaver.internal`. The human-readable
+`preferred_username` is verified as a token claim but is not the certificate
+SAN authority. Rotating the Keycloak client UUID requires an explicit inventory
+and workload-policy hash rotation.
+
 Keycloak and PostgreSQL images are digest-pinned. PostgreSQL uses persistent
 RWO storage, Keycloak runs two replicas, and interactive/direct-access grants
 are disabled for the workload client. The root-managed bootstrap locator is

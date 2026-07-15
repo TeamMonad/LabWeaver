@@ -22,6 +22,7 @@ private_sigstore_fulcio_secret_name: private-sigstore-fulcio-ca
 private_sigstore_rekor_secret_name: private-sigstore-rekor-signer
 private_sigstore_ctlog_secret_name: private-sigstore-ctlog-signer
 private_sigstore_ctlog_key_password_secret_name: private-sigstore-ctlog-key-password
+private_sigstore_oidc_subject: REPLACE_KEYCLOAK_WORKLOAD_SUBJECT
 private_sigstore_trillian_mysql_secret_name: private-sigstore-trillian-mysql
 private_sigstore_trillian_mysql_username: trillian
 private_sigstore_tls_secret_name: private-sigstore-internal-tls
