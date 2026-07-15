@@ -43,6 +43,10 @@ The deployment controller needs Ansible and the collections in
 `deploy/ansible/requirements.yml`; it also needs the pinned Helm and Cilium CLI
 already available on the control-plane host. Their absence is a deliberate
 preflight failure, never an implicit version selection.
+The approved Ansible Python runtime must also contain exactly
+`kubernetes==34.1.0`. `xtask` resolves the Python interpreter beside the
+canonical `ansible-playbook` binary and verifies this package version before
+starting any playbook; it never installs Python dependencies automatically.
 Harbor also requires the verified local `harbor-1.19.1.tgz` archive declared by
 `harbor_chart_archive`; its SHA-256 and every Harbor/TestFlight image digest
 are locked in `deploy/versions.lock.yml`. A tag-only image, archive mismatch,

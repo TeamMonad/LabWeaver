@@ -52,9 +52,11 @@ spec:
           automountServiceAccountToken: false
           securityContext:
             runAsNonRoot: true
-            runAsUser: 65532
-            runAsGroup: 65532
-            fsGroup: 65532
+            # The NFS export uses root-squash; dynamic subdirectories are
+            # authoritatively owned by the anonymous uid/gid.
+            runAsUser: 65534
+            runAsGroup: 65534
+            fsGroup: 65534
             seccompProfile: {type: RuntimeDefault}
           containers:
             - name: lifecycle
