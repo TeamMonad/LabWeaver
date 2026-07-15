@@ -1,0 +1,26 @@
+{
+  "schemaVersion": "private-sigstore-testflight-report.v1",
+  "scope": "issue-61-private-sigstore-t0",
+  "status": "passed",
+  "runId": {{ sigstore_testflight_run_id | to_json }},
+  "commitSha": {{ sigstore_lifecycle_commit_sha | to_json }},
+  "clusterUid": {{ sigstore_lifecycle_cluster_uid.stdout | to_json }},
+  "inventorySha256": {{ sigstore_lifecycle_inventory_hash | to_json }},
+  "deploymentManifestSha256": {{ sigstore_lifecycle_manifest_hash | to_json }},
+  "componentLockSha256": {{ sigstore_lifecycle_component_lock_hash | to_json }},
+  "trustBundleSha256": {{ private_sigstore_lifecycle_trust_bundle_sha256 | to_json }},
+  "workloadIdentityPolicySha256": {{ private_sigstore_lifecycle_workload_identity_policy_sha256 | to_json }},
+  "checks": [
+    {"name": "lifecycle-provider", "status": "passed", "diagnosticCode": null},
+    {"name": "oidc-client-credentials", "status": "passed", "diagnosticCode": null},
+    {"name": "fulcio-certificate", "status": "passed", "diagnosticCode": null},
+    {"name": "ct-sct", "status": "passed", "diagnosticCode": null},
+    {"name": "rekor-inclusion", "status": "passed", "diagnosticCode": null},
+    {"name": "bundle-verification", "status": "passed", "diagnosticCode": null}
+  ],
+  "cleanupStatus": "not_run",
+  "blockedItems": [],
+  "unblockOwner": null,
+  "exitCondition": null,
+  "generatedAt": {{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%S.000Z') | to_json }}
+}

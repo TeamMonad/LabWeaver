@@ -108,6 +108,10 @@
     sigstore_provider_cronjob: "{{ private_sigstore_lifecycle_verify_provider }}"
   when: private_sigstore_lifecycle_action == 'verify'
 
+- name: Execute identity-bound keyless signing TestFlight
+  ansible.builtin.include_tasks: keyless_verify.yml
+  when: private_sigstore_lifecycle_action == 'verify'
+
 - name: Create mandatory pre-change backup
   ansible.builtin.include_tasks: provider.yml
   vars:

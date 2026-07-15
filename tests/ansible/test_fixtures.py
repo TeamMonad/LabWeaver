@@ -179,6 +179,18 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertLess(main.index("Create mandatory pre-change backup"), main.index("Execute disaster-recovery provider"))
         self.assertIn("SIGSTORE_LIFECYCLE_REPORT_IDENTITY_INVALID", provider)
         self.assertIn("labweaver.io/testflight-run", provider)
+        keyless = (
+            ROOT / "deploy/ansible/roles/private_sigstore_lifecycle/files/keyless_verify.sh"
+        ).read_text(encoding="utf-8")
+        keyless_tasks = (
+            ROOT / "deploy/ansible/roles/private_sigstore_lifecycle/tasks/keyless_verify.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("--trusted-root", keyless)
+        self.assertIn("--certificate-identity", keyless)
+        self.assertIn("--certificate-oidc-issuer", keyless)
+        self.assertIn("timeout --foreground --kill-after=5s 90s", keyless)
+        self.assertIn("SIGSTORE_COSIGN_IDENTITY_INVALID", keyless_tasks)
+        self.assertIn("PrivateSigstoreTestFlightReport-", keyless_tasks)
         self.assertIn("LABWEAVER_REPORT_B64", provider)
         self.assertIn("automountServiceAccountToken == false", provider)
         self.assertIn("concurrencyPolicy: Forbid", providers)

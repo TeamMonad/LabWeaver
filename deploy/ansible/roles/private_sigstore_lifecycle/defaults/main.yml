@@ -12,3 +12,13 @@ private_sigstore_lifecycle_trust_bundle_sha256: "{{ private_sigstore_trust_bundl
 private_sigstore_lifecycle_workload_identity_policy_sha256: "{{ private_sigstore_workload_identity_policy_sha256 }}"
 private_sigstore_lifecycle_tuf_root_version: "{{ private_sigstore_tuf_root_version }}"
 private_sigstore_lifecycle_expected_tuf_root_sha256: "{{ private_sigstore_expected_tuf_root_sha256 }}"
+private_sigstore_lifecycle_cosign_path: /opt/labweaver/bin/cosign
+private_sigstore_lifecycle_identity_namespace: "{{ private_sigstore_keycloak_namespace | default('keycloak-system') }}"
+private_sigstore_lifecycle_identity_ca_secret: labweaver-identity-root-ca
+private_sigstore_lifecycle_identity_client_secret: labweaver-buildkit-client
+private_sigstore_lifecycle_identity_client_id: "{{ private_sigstore_oidc_client_id }}"
+private_sigstore_lifecycle_oidc_issuer: "{{ private_sigstore_oidc_issuer }}"
+private_sigstore_lifecycle_oidc_vip: "{{ private_sigstore_oidc_gateway_vip }}"
+private_sigstore_lifecycle_sigstore_host: "{{ private_sigstore_internal_dns }}"
+private_sigstore_lifecycle_sigstore_vip: "{{ private_sigstore_gateway_vip }}"
+private_sigstore_lifecycle_expected_subject: "{{ private_sigstore_allowed_subjects[0] }}"
