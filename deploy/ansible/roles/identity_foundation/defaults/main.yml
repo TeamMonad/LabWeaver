@@ -18,6 +18,7 @@ identity_kubeconfig_path: /etc/kubernetes/admin.conf # noqa: var-naming[no-role-
 identity_kubectl_path: /usr/bin/kubectl # noqa: var-naming[no-role-prefix]
 identity_dns_fragment_path: /etc/dnsmasq.d/30-keycloak.conf # noqa: var-naming[no-role-prefix]
 identity_ca_secret_name: labweaver-identity-root-ca # noqa: var-naming[no-role-prefix]
+identity_ca_bundle_configmap_name: labweaver-identity-ca-bundle # noqa: var-naming[no-role-prefix]
 identity_tls_secret_name: labweaver-keycloak-tls # noqa: var-naming[no-role-prefix]
 identity_database_secret_name: labweaver-keycloak-database # noqa: var-naming[no-role-prefix]
 identity_bootstrap_secret_name: labweaver-keycloak-bootstrap # noqa: var-naming[no-role-prefix]

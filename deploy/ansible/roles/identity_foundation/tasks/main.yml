@@ -165,6 +165,41 @@
       changed_when: false
       loop: [identity-root-ca, keycloak-internal]
 
+    - name: Read the public identity CA certificate
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ identity_kubeconfig_path }}"
+        api_version: v1
+        kind: Secret
+        namespace: "{{ identity_namespace }}"
+        name: "{{ identity_ca_secret_name }}"
+      register: identity_ca_secret
+      no_log: true
+
+    - name: Reject an incomplete identity CA authority
+      ansible.builtin.assert:
+        that:
+          - identity_ca_secret.resources | length == 1
+          - identity_ca_secret.resources[0].data['tls.crt'] | default('') | length > 0
+        fail_msg: IDENTITY_CA_AUTHORITY_INVALID
+      no_log: true
+
+    - name: Publish the public identity CA bundle for infrastructure consumers
+      kubernetes.core.k8s:
+        kubeconfig: "{{ identity_kubeconfig_path }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: "{{ identity_ca_bundle_configmap_name }}"
+            namespace: "{{ identity_namespace }}"
+            labels:
+              app.kubernetes.io/part-of: labweaver-infrastructure
+              labweaver.io/authority: identity-ca
+          data:
+            ca.crt: "{{ identity_ca_secret.resources[0].data['tls.crt'] | b64decode }}"
+      no_log: true
+
     - name: Install identity credentials from the root-only locator
       kubernetes.core.k8s:
         kubeconfig: "{{ identity_kubeconfig_path }}"

@@ -361,6 +361,41 @@
   register: sigstore_namespace_labels
   changed_when: "'not labeled' not in sigstore_namespace_labels.stdout"
 
+- name: Read the authoritative public Keycloak CA bundle
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ private_sigstore_kubeconfig_path }}"
+    api_version: v1
+    kind: ConfigMap
+    namespace: "{{ private_sigstore_identity_namespace }}"
+    name: "{{ private_sigstore_identity_ca_configmap_name }}"
+  register: sigstore_identity_ca
+  no_log: true
+
+- name: Reject a missing or incomplete Keycloak CA authority
+  ansible.builtin.assert:
+    that:
+      - sigstore_identity_ca.resources | length == 1
+      - sigstore_identity_ca.resources[0].data['ca.crt'] | default('') | length > 0
+    fail_msg: SIGSTORE_IDENTITY_CA_AUTHORITY_INVALID
+  no_log: true
+
+- name: Mirror the public Keycloak CA into the Private Sigstore namespace
+  kubernetes.core.k8s:
+    kubeconfig: "{{ private_sigstore_kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: "{{ private_sigstore_keycloak_ca_configmap_name }}"
+        namespace: "{{ private_sigstore_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver-infrastructure
+          labweaver.io/authority: identity-ca
+      data:
+        ca.crt: "{{ sigstore_identity_ca.resources[0].data['ca.crt'] }}"
+  no_log: true
+
 - name: Render isolation and availability policy before workload creation
   ansible.builtin.template:
     src: policy.yml.j2

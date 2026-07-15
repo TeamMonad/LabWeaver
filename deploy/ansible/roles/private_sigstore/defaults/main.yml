@@ -24,6 +24,9 @@ private_sigstore_ctlog_key_password_secret_name: private-sigstore-ctlog-key-pass
 private_sigstore_trillian_mysql_secret_name: private-sigstore-trillian-mysql
 private_sigstore_trillian_mysql_username: trillian
 private_sigstore_tls_secret_name: private-sigstore-internal-tls
+private_sigstore_identity_namespace: keycloak-system
+private_sigstore_identity_ca_configmap_name: labweaver-identity-ca-bundle
+private_sigstore_keycloak_ca_configmap_name: private-sigstore-keycloak-ca
 private_sigstore_tuf_metadata_configmap_name: private-sigstore-tuf-metadata-v1
 private_sigstore_tree_authority_configmap_name: private-sigstore-tree-ids-v1
 private_sigstore_resources:

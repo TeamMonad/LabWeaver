@@ -9,12 +9,48 @@ import yaml
 
 
 documents = list(yaml.safe_load_all(sys.stdin))
-patched = 0
+rekor_patched = 0
+fulcio_patched = 0
 for document in documents:
     if not isinstance(document, dict):
         continue
     metadata = document.get("metadata", {})
-    if document.get("kind") != "Deployment" or metadata.get("name") != "rekor-server":
+    if document.get("kind") != "Deployment":
+        continue
+    if metadata.get("name") == "fulcio-server":
+        pod_spec = document["spec"]["template"]["spec"]
+        containers = pod_spec.get("containers", [])
+        fulcio = next((item for item in containers if item.get("name") == "fulcio-server"), None)
+        if fulcio is None:
+            raise SystemExit("SIGSTORE_POST_RENDERER_FULCIO_CONTAINER_INVALID")
+        volume_name = "labweaver-identity-ca"
+        if any(item.get("name") == volume_name for item in pod_spec.get("volumes", [])):
+            raise SystemExit("SIGSTORE_POST_RENDERER_IDENTITY_CA_VOLUME_CONFLICT")
+        pod_spec.setdefault("volumes", []).append(
+            {
+                "name": volume_name,
+                "configMap": {
+                    "name": "private-sigstore-keycloak-ca",
+                    "items": [{"key": "ca.crt", "path": "ca.crt"}],
+                },
+            }
+        )
+        fulcio.setdefault("volumeMounts", []).append(
+            {
+                "name": volume_name,
+                "mountPath": "/var/run/labweaver-identity-ca",
+                "readOnly": True,
+            }
+        )
+        fulcio.setdefault("env", []).append(
+            {
+                "name": "SSL_CERT_FILE",
+                "value": "/var/run/labweaver-identity-ca/ca.crt",
+            }
+        )
+        fulcio_patched += 1
+        continue
+    if metadata.get("name") != "rekor-server":
         continue
     pod_spec = document["spec"]["template"]["spec"]
     signer_volume = None
@@ -69,9 +105,11 @@ for document in documents:
         ],
     }
     pod_spec.setdefault("initContainers", []).append(materializer)
-    patched += 1
+    rekor_patched += 1
 
-if patched != 1:
+if rekor_patched != 1:
     raise SystemExit("SIGSTORE_POST_RENDERER_SIGNER_VOLUME_INVALID")
+if fulcio_patched != 1:
+    raise SystemExit("SIGSTORE_POST_RENDERER_FULCIO_DEPLOYMENT_INVALID")
 
 yaml.safe_dump_all(documents, sys.stdout, explicit_start=True, sort_keys=False)
