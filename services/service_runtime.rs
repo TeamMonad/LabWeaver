@@ -1,5 +1,7 @@
 //! Shared process lifecycle for the six independently deployable service shells.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{net::SocketAddr, str::FromStr};
 
 use axum::http::{HeaderName, HeaderValue, StatusCode};
@@ -35,19 +37,31 @@ pub enum StartupError {
 ///
 /// Returns a stable startup error when required configuration, telemetry initialization, or the
 /// network listener cannot be established.
+#[allow(
+    dead_code,
+    reason = "the Environment binary supplies dependency-aware readiness"
+)]
 pub async fn run(service: &'static str) -> Result<(), StartupError> {
+    run_with_readiness(service, Arc::new(AtomicBool::new(true))).await
+}
+
+/// Starts a service with readiness supplied by its authoritative dependencies.
+pub async fn run_with_readiness(
+    service: &'static str,
+    readiness: Arc<AtomicBool>,
+) -> Result<(), StartupError> {
     telemetry::init(service)?;
     let address = required_bind_address()?;
     let listener = tokio::net::TcpListener::bind(address).await?;
     tracing::info!(event = "service.started", service, %address);
-    axum::serve(listener, health_router(service))
+    axum::serve(listener, health_router(service, readiness))
         .with_graceful_shutdown(shutdown_signal(service))
         .await?;
     tracing::info!(event = "service.stopped", service);
     Ok(())
 }
 
-fn health_router(service: &'static str) -> Router {
+fn health_router(service: &'static str, readiness: Arc<AtomicBool>) -> Router {
     Router::new()
         .route(
             "/health/live",
@@ -55,10 +69,27 @@ fn health_router(service: &'static str) -> Router {
         )
         .route(
             "/health/ready",
-            get(move || async move { health(service, "ready") }),
+            get(move || {
+                let readiness = Arc::clone(&readiness);
+                async move { ready(service, &readiness) }
+            }),
         )
         .fallback(not_found)
         .layer(axum::middleware::from_fn(request_id))
+}
+
+fn ready(
+    service: &'static str,
+    readiness: &AtomicBool,
+) -> (StatusCode, Json<contracts::HealthResponse>) {
+    if readiness.load(Ordering::Acquire) {
+        (StatusCode::OK, health(service, "ready"))
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            health(service, "not_ready"),
+        )
+    }
 }
 
 fn health(service: &'static str, status: &'static str) -> Json<contracts::HealthResponse> {
@@ -153,8 +184,50 @@ fn required_bind_address() -> Result<SocketAddr, StartupError> {
 }
 
 async fn shutdown_signal(service: &'static str) {
+    #[cfg(unix)]
+    {
+        let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
+        let Ok(mut terminate) = terminate else {
+            tracing::error!(event = "service.shutdown_signal_failed", service);
+            return;
+        };
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                if let Err(error) = result {
+                    tracing::error!(event = "service.shutdown_signal_failed", service, %error);
+                }
+            }
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
     if let Err(error) = tokio::signal::ctrl_c().await {
         tracing::error!(event = "service.shutdown_signal_failed", service, %error);
+    }
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use std::sync::atomic::AtomicBool;
+
+    use axum::http::StatusCode;
+
+    use super::ready;
+
+    #[test]
+    fn readiness_fails_closed_when_authoritative_dependencies_are_unavailable() {
+        let readiness = AtomicBool::new(false);
+        let (status, response) = ready("environment-service", &readiness);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.0.status, "not_ready");
+    }
+
+    #[test]
+    fn readiness_is_ok_only_after_dependencies_are_ready() {
+        let readiness = AtomicBool::new(true);
+        let (status, response) = ready("environment-service", &readiness);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response.0.status, "ready");
     }
 }
 

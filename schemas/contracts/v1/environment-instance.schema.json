@@ -154,6 +154,16 @@
           "minimum": 0,
           "type": "integer"
         },
+        "cleanupStartedAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "deadlineAt": {
           "$ref": "#/$defs/UtcTimestamp"
         },
@@ -169,11 +179,22 @@
         "kind": {
           "$ref": "#/$defs/EnvironmentOperationKind"
         },
+        "maxAttempts": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "nextAttemptAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
         "preserveMutableDisk": {
           "type": "boolean"
         },
         "state": {
           "$ref": "#/$defs/OperationState"
+        },
+        "traceId": {
+          "type": "string"
         }
       },
       "required": [
@@ -182,7 +203,10 @@
         "state",
         "acceptedRevision",
         "attempt",
+        "maxAttempts",
+        "nextAttemptAt",
         "actorId",
+        "traceId",
         "acceptedAt",
         "deadlineAt",
         "preserveMutableDisk"
@@ -202,8 +226,13 @@
         "recover",
         "expire",
         "delete",
+        "cleanup",
         "freeze"
       ],
+      "type": "string"
+    },
+    "LeaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
       "type": "string"
     },
     "ObservedEnvironmentState": {
@@ -214,6 +243,7 @@
         "building",
         "provisioning",
         "ready",
+        "stopping",
         "stopped",
         "updating",
         "expiring",
@@ -289,6 +319,9 @@
     "desiredState": {
       "$ref": "#/$defs/DesiredEnvironmentState"
     },
+    "eligibilityExpiresAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
     "endpoints": {
       "items": {
         "$ref": "#/$defs/EnvironmentEndpoint"
@@ -307,6 +340,16 @@
       "type": [
         "string",
         "null"
+      ]
+    },
+    "leaseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LeaseId"
+        },
+        {
+          "type": "null"
+        }
       ]
     },
     "observedGeneration": {
@@ -356,6 +399,7 @@
     "generation",
     "observedGeneration",
     "operation",
+    "eligibilityExpiresAt",
     "endpoints"
   ],
   "title": "EnvironmentInstance",

@@ -1,0 +1,861 @@
+//! Real `PostgreSQL` coverage for idempotency, Outbox atomicity, and reconciler leases.
+#![allow(
+    clippy::too_many_lines,
+    reason = "one container lifecycle keeps migration and lease-race evidence in a shared database"
+)]
+
+mod support;
+
+use std::collections::HashSet;
+use std::time::Duration;
+use std::{
+    sync::Arc,
+    sync::Mutex,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
+
+use async_trait::async_trait;
+use contracts::environment::{
+    EndpointHealth, EndpointProtocol, EnvironmentEndpoint, EnvironmentOperationKind,
+    ObservedEnvironmentState, OperationState,
+};
+use contracts::events::CloudEvent;
+use contracts::{
+    ActorId, ArtifactId, ArtifactRef, EndpointId, EventId, OperationId, Sequence, Sha256Digest,
+    UtcTimestamp,
+};
+use environment_service::{
+    EnvironmentEventPublisher, EnvironmentProvider, EnvironmentStoreError, InboundCommandDecision,
+    InboundLifecycleCommand, LifecycleCommand, LifecycleError, OutboxDispatchError,
+    OutboxDispatchOutcome, OutboxDispatcher, PgEnvironmentStore, ProviderFailure,
+    ProviderFailureCode, ProviderObservation, ProviderRegistry, PublishFailure, ReconcileAction,
+    ReconcileWorker, ReconcileWorkerOutcome, Reconciler, apply_provider_observation,
+};
+use sqlx::postgres::PgPoolOptions;
+use testcontainers::{ImageExt, runners::AsyncRunner};
+use testcontainers_modules::postgres::Postgres;
+
+use support::{requested_instance, timestamp};
+
+#[tokio::test]
+async fn durable_command_and_lease_path_is_atomic_and_recoverable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        container.get_host_port_ipv4(5432).await?
+    );
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
+        .await?;
+    let initial = format!(
+        "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
+        include_str!("../../../migrations/environment/0001_initial.sql")
+    );
+    sqlx::raw_sql(&initial).execute(&pool).await?;
+
+    let mut legacy = support::ready_instance();
+    legacy.operation.attempt = 6;
+    let mut legacy_contract = serde_json::to_value(&legacy)?;
+    legacy_contract
+        .as_object_mut()
+        .ok_or("legacy instance must be an object")?
+        .remove("eligibilityExpiresAt");
+    let legacy_operation = legacy_contract
+        .get_mut("operation")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or("legacy operation must be an object")?;
+    legacy_operation.remove("maxAttempts");
+    legacy_operation.remove("nextAttemptAt");
+    legacy_operation.remove("traceId");
+    legacy_operation.remove("cleanupStartedAt");
+    let legacy_operation_contract = serde_json::Value::Object(legacy_operation.clone());
+    sqlx::query(
+        "INSERT INTO environment.environment_instances \
+         (environment_id, release_id, generation, observed_generation, desired_state, \
+          observed_state, provider_binding, lease_id, revision, terminal_diagnostic, contract) \
+         VALUES ($1,$2,1,1,'running','ready',$3,NULL,2,NULL,$4)",
+    )
+    .bind(legacy.id.as_uuid())
+    .bind(legacy.release_id.as_uuid())
+    .bind(&legacy.provider_binding)
+    .bind(&legacy_contract)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO environment.environment_operations \
+         (operation_id, environment_id, operation_kind, expected_revision, target_generation, \
+          state, retry_count, diagnostic, contract) \
+         VALUES ($1,$2,'create',1,1,'succeeded',5,NULL,$3)",
+    )
+    .bind(legacy.operation.id.as_uuid())
+    .bind(legacy.id.as_uuid())
+    .bind(&legacy_operation_contract)
+    .execute(&pool)
+    .await?;
+
+    let reconcile_migration = format!(
+        "SET search_path TO environment;\n{}",
+        include_str!("../../../migrations/environment/0002_reconcile_leases.sql")
+    );
+    sqlx::raw_sql(&reconcile_migration).execute(&pool).await?;
+
+    let store = PgEnvironmentStore::new(pool.clone());
+    let upgraded = store.load(legacy.id).await?;
+    assert_eq!(upgraded.operation.attempt, 6);
+    assert_eq!(upgraded.operation.max_attempts, 6);
+    assert!(upgraded.operation.trace_id.starts_with("migration-v1-"));
+    let migrated_max_attempts: i64 = sqlx::query_scalar(
+        "SELECT max_attempts FROM environment.environment_operations WHERE operation_id=$1",
+    )
+    .bind(legacy.operation.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(migrated_max_attempts, 6);
+    sqlx::query("DELETE FROM environment.environment_operations WHERE operation_id=$1")
+        .bind(legacy.operation.id.as_uuid())
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM environment.environment_instances WHERE environment_id=$1")
+        .bind(legacy.id.as_uuid())
+        .execute(&pool)
+        .await?;
+
+    let mut invalid_ready_create = support::ready_instance();
+    invalid_ready_create.operation.state = OperationState::Accepted;
+    assert!(invalid_ready_create.validate().is_ok());
+    assert!(matches!(
+        store
+            .create("create-key-invalid-ready", &invalid_ready_create)
+            .await,
+        Err(EnvironmentStoreError::InvalidCreateAggregate)
+    ));
+    let invalid_ready_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM environment.environment_instances WHERE environment_id=$1",
+    )
+    .bind(invalid_ready_create.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(invalid_ready_count, 0);
+
+    let instance = requested_instance();
+    let accepted = store.create("create-key-0001", &instance).await?;
+    let replay = store.create("create-key-0001", &instance).await?;
+    assert_eq!(accepted, replay);
+
+    let mut conflicting = instance.clone();
+    conflicting.release_version += 1;
+    assert!(matches!(
+        store.create("create-key-0001", &conflicting).await,
+        Err(EnvironmentStoreError::IdempotencyConflict)
+    ));
+    let outbox_count: i64 =
+        sqlx::query_scalar("SELECT count(*)::bigint FROM environment.outbox_events")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(outbox_count, 1);
+    let envelope: serde_json::Value =
+        sqlx::query_scalar("SELECT payload FROM environment.outbox_events WHERE aggregate_id=$1")
+            .bind(instance.id.as_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(envelope["specversion"], "1.0");
+    assert_eq!(envelope["courseId"], instance.course_id.to_string());
+    assert_eq!(envelope["traceId"], instance.operation.trace_id);
+    assert_eq!(envelope["data"]["environmentId"], instance.id.to_string());
+
+    let publisher = RecordingPublisher::fail_first();
+    let dispatcher =
+        OutboxDispatcher::new(pool.clone(), publisher.clone(), Duration::from_secs(2))?;
+    assert!(matches!(
+        dispatcher.dispatch_once().await,
+        Err(OutboxDispatchError::Publish(PublishFailure::Unavailable))
+    ));
+    let published_at: Option<time::OffsetDateTime> = sqlx::query_scalar(
+        "SELECT published_at FROM environment.outbox_events WHERE aggregate_id=$1",
+    )
+    .bind(instance.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(published_at.is_none());
+    let dispatch_outcome = dispatcher.dispatch_once().await?;
+    assert!(matches!(
+        dispatch_outcome,
+        OutboxDispatchOutcome::Published { .. }
+    ));
+    let deliveries = publisher.deliveries()?;
+    assert_eq!(deliveries.len(), 2);
+    assert_eq!(deliveries[0], deliveries[1]);
+    let published_at: Option<time::OffsetDateTime> = sqlx::query_scalar(
+        "SELECT published_at FROM environment.outbox_events WHERE aggregate_id=$1",
+    )
+    .bind(instance.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(published_at.is_some());
+
+    let lease = store
+        .claim_due("environment-worker-a", Duration::from_secs(30))
+        .await?
+        .ok_or("expected a due create operation")?;
+    assert!(
+        store
+            .claim_due("environment-worker-b", Duration::from_secs(30))
+            .await?
+            .is_none()
+    );
+    assert!(
+        store
+            .claim_due("environment-worker-a", Duration::from_secs(30))
+            .await?
+            .is_none()
+    );
+    store.heartbeat(&lease, Duration::from_secs(30)).await?;
+
+    let validating = apply_provider_observation(
+        &lease.instance,
+        lease.instance.operation.id,
+        ProviderObservation {
+            next_state: ObservedEnvironmentState::Validating,
+            endpoints: Vec::new(),
+            cleanup_evidence: None,
+            operation_complete: false,
+        },
+    )?;
+    store.save_reconciled(&lease, &validating).await?;
+    let renewed = store
+        .claim_due("environment-worker-a", Duration::from_secs(30))
+        .await?
+        .ok_or("expected the next reconcile step")?;
+    assert!(matches!(
+        store.heartbeat(&lease, Duration::from_secs(30)).await,
+        Err(EnvironmentStoreError::LeaseLost)
+    ));
+    store
+        .heartbeat(&renewed, Duration::from_millis(1_500))
+        .await?;
+    let loaded = store.load(instance.id).await?;
+    assert_eq!(loaded.revision, validating.revision);
+    assert_eq!(loaded.observed_state, ObservedEnvironmentState::Validating);
+
+    let outbox_count: i64 =
+        sqlx::query_scalar("SELECT count(*)::bigint FROM environment.outbox_events")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(outbox_count, 2);
+    let expired = store
+        .find_expired(timestamp("2026-07-16T00:00:00.000Z"), 10)
+        .await?;
+    assert_eq!(expired.len(), 1);
+
+    let superseded = requested_instance();
+    store.create("create-key-superseded", &superseded).await?;
+    let old_lease = store
+        .claim_due("environment-worker-old", Duration::from_secs(30))
+        .await?
+        .ok_or("expected the operation that will be superseded")?;
+    let accepted_at_value: time::OffsetDateTime =
+        sqlx::query_scalar("SELECT date_trunc('milliseconds', clock_timestamp())")
+            .fetch_one(&pool)
+            .await?;
+    let accepted_at = UtcTimestamp::from_utc(accepted_at_value)?;
+    let deadline_at = UtcTimestamp::from_utc(
+        accepted_at_value
+            .checked_add(time::Duration::minutes(10))
+            .ok_or("deadline overflow")?,
+    )?;
+    let destructive = LifecycleCommand {
+        environment_id: superseded.id,
+        kind: EnvironmentOperationKind::Delete,
+        expected_revision: superseded.revision,
+        actor_id: ActorId::new(),
+        trace_id: "trace-delete-superseded".to_owned(),
+        accepted_at,
+        deadline_at,
+        access_revocation_revision: Some(support::revision(9)),
+        preserve_mutable_disk: false,
+        max_attempts: 3,
+    };
+    let cleanup = store
+        .accept_command("delete-key-superseded", &destructive)
+        .await?;
+    let (old_state, old_lease_expires_at, old_token_present): (
+        String,
+        Option<time::OffsetDateTime>,
+        bool,
+    ) = sqlx::query_as(
+        "SELECT state, lease_expires_at, lease_token IS NOT NULL \
+         FROM environment.environment_operations WHERE operation_id=$1",
+    )
+    .bind(old_lease.instance.operation.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let cleanup_next_attempt_at: time::OffsetDateTime = sqlx::query_scalar(
+        "SELECT next_attempt_at FROM environment.environment_operations WHERE operation_id=$1",
+    )
+    .bind(cleanup.operation_id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(old_state, "cancelled");
+    assert!(old_token_present);
+    assert!(cleanup_next_attempt_at >= old_lease_expires_at.ok_or("old lease disappeared")?);
+    assert!(
+        store
+            .claim_due("environment-worker-cleanup", Duration::from_secs(30))
+            .await?
+            .is_none()
+    );
+
+    let inbox_target = requested_instance();
+    store.create("create-key-inbox", &inbox_target).await?;
+    let inbound = InboundLifecycleCommand {
+        consumer: "environment-lifecycle-v1".to_owned(),
+        event_id: EventId::new(),
+        aggregate_sequence: Sequence(1),
+        idempotency_key: "delete-key-inbox".to_owned(),
+        command: LifecycleCommand {
+            environment_id: inbox_target.id,
+            kind: EnvironmentOperationKind::Delete,
+            expected_revision: inbox_target.revision,
+            actor_id: ActorId::new(),
+            trace_id: "trace-delete-inbox".to_owned(),
+            accepted_at,
+            deadline_at,
+            access_revocation_revision: Some(support::revision(10)),
+            preserve_mutable_disk: false,
+            max_attempts: 3,
+        },
+    };
+    assert!(matches!(
+        store.accept_inbound_command(&inbound).await?,
+        InboundCommandDecision::Applied(_)
+    ));
+    let applied = store.load(inbox_target.id).await?;
+    assert_eq!(applied.revision, support::revision(2));
+    assert_eq!(
+        store.accept_inbound_command(&inbound).await?,
+        InboundCommandDecision::Duplicate
+    );
+
+    let mut conflicting_event = inbound.clone();
+    conflicting_event.command.trace_id = "trace-delete-inbox-conflict".to_owned();
+    assert!(matches!(
+        store.accept_inbound_command(&conflicting_event).await,
+        Err(EnvironmentStoreError::Persistence(_))
+    ));
+    let mut stale_event = inbound.clone();
+    stale_event.event_id = EventId::new();
+    assert_eq!(
+        store.accept_inbound_command(&stale_event).await?,
+        InboundCommandDecision::Stale
+    );
+    let mut gap_event = inbound;
+    gap_event.event_id = EventId::new();
+    gap_event.aggregate_sequence = Sequence(3);
+    assert_eq!(
+        store.accept_inbound_command(&gap_event).await?,
+        InboundCommandDecision::Gap
+    );
+    assert_eq!(
+        store.load(inbox_target.id).await?.revision,
+        applied.revision
+    );
+    let inbox_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM environment.inbox_events \
+         WHERE consumer='environment-lifecycle-v1'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(inbox_count, 1);
+
+    let idempotency_target = requested_instance();
+    store
+        .create("create-key-command-identity", &idempotency_target)
+        .await?;
+    let identity_command = LifecycleCommand {
+        environment_id: idempotency_target.id,
+        kind: EnvironmentOperationKind::Delete,
+        expected_revision: idempotency_target.revision,
+        actor_id: ActorId::new(),
+        trace_id: "trace-delete-command-identity".to_owned(),
+        accepted_at,
+        deadline_at,
+        access_revocation_revision: Some(support::revision(12)),
+        preserve_mutable_disk: false,
+        max_attempts: 3,
+    };
+    store
+        .accept_command("delete-key-command-identity", &identity_command)
+        .await?;
+    let mut changed_deadline = identity_command.clone();
+    changed_deadline.deadline_at = UtcTimestamp::from_utc(
+        deadline_at
+            .get()
+            .checked_add(time::Duration::minutes(1))
+            .ok_or("deadline overflow")?,
+    )?;
+    assert!(matches!(
+        store
+            .accept_command("delete-key-command-identity", &changed_deadline)
+            .await,
+        Err(EnvironmentStoreError::IdempotencyConflict)
+    ));
+    let mut changed_retry_limit = identity_command;
+    changed_retry_limit.max_attempts = 4;
+    assert!(matches!(
+        store
+            .accept_command("delete-key-command-identity", &changed_retry_limit)
+            .await,
+        Err(EnvironmentStoreError::IdempotencyConflict)
+    ));
+    assert_eq!(
+        store.load(idempotency_target.id).await?.revision,
+        support::revision(2)
+    );
+
+    let mut registry = ProviderRegistry::default();
+    registry.register(Arc::new(CleanupFailureProvider))?;
+    let worker = ReconcileWorker::new(
+        store.clone(),
+        Reconciler::new(registry, Duration::from_secs(1))?,
+        Duration::from_secs(2),
+        Duration::from_secs(1),
+    )?;
+    assert!(matches!(
+        worker
+            .run_once("environment-worker-cleanup-failure", accepted_at)
+            .await?,
+        ReconcileWorkerOutcome::Failed {
+            diagnostic_code: "LW_ENVIRONMENT_PROVIDER_CLEANUP_FAILED"
+        }
+    ));
+    let cleanup_failed = store.load(inbox_target.id).await?;
+    assert_eq!(
+        cleanup_failed.observed_state,
+        ObservedEnvironmentState::Failed
+    );
+    assert!(cleanup_failed.endpoints.is_empty());
+    assert_eq!(
+        cleanup_failed.last_diagnostic_code.as_deref(),
+        Some("LW_ENVIRONMENT_PROVIDER_CLEANUP_FAILED")
+    );
+    assert!(matches!(
+        worker
+            .run_once("environment-worker-command-identity-cleanup", accepted_at)
+            .await?,
+        ReconcileWorkerOutcome::Failed {
+            diagnostic_code: "LW_ENVIRONMENT_PROVIDER_CLEANUP_FAILED"
+        }
+    ));
+    assert_eq!(
+        store.load(idempotency_target.id).await?.observed_state,
+        ObservedEnvironmentState::Failed
+    );
+
+    let crash_target = requested_instance();
+    store
+        .create("create-key-crash-recovery", &crash_target)
+        .await?;
+    let abandoned = store
+        .claim_due("environment-worker-crashed", Duration::from_millis(20))
+        .await?
+        .ok_or("expected an operation for crash recovery")?;
+    assert_eq!(abandoned.instance.id, crash_target.id);
+    let crash_provider = Arc::new(IdempotentCrashProvider::default());
+    crash_provider
+        .execute(ReconcileAction::Validate, &abandoned.instance)
+        .await
+        .map_err(|_| "provider side effect simulation failed")?;
+    let mut crash_registry = ProviderRegistry::default();
+    crash_registry.register(crash_provider.clone())?;
+    let restarted_worker = ReconcileWorker::new(
+        store.clone(),
+        Reconciler::new(crash_registry, Duration::from_millis(100))?,
+        Duration::from_millis(1_100),
+        Duration::from_millis(100),
+    )?;
+    let recovered_outcome = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let outcome = restarted_worker
+                .run_once(
+                    "environment-worker-restarted",
+                    timestamp("2026-07-14T00:01:00.000Z"),
+                )
+                .await?;
+            if outcome == ReconcileWorkerOutcome::Idle {
+                tokio::task::yield_now().await;
+            } else {
+                break Ok::<_, environment_service::ReconcileWorkerError>(outcome);
+            }
+        }
+    })
+    .await??;
+    assert!(matches!(
+        recovered_outcome,
+        ReconcileWorkerOutcome::Advanced {
+            state: ObservedEnvironmentState::Validating,
+            ..
+        }
+    ));
+    assert_eq!(crash_provider.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(crash_provider.side_effects.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        store.load(crash_target.id).await?.observed_state,
+        ObservedEnvironmentState::Validating
+    );
+    assert!(matches!(
+        store.heartbeat(&abandoned, Duration::from_secs(30)).await,
+        Err(EnvironmentStoreError::LeaseLost)
+    ));
+
+    let race_target = requested_instance();
+    store
+        .create("create-key-optimistic-race", &race_target)
+        .await?;
+    let delete_command = LifecycleCommand {
+        environment_id: race_target.id,
+        kind: EnvironmentOperationKind::Delete,
+        expected_revision: race_target.revision,
+        actor_id: ActorId::new(),
+        trace_id: "trace-delete-race".to_owned(),
+        accepted_at,
+        deadline_at,
+        access_revocation_revision: Some(support::revision(11)),
+        preserve_mutable_disk: false,
+        max_attempts: 3,
+    };
+    let mut cancel_command = delete_command.clone();
+    cancel_command.kind = EnvironmentOperationKind::Cancel;
+    cancel_command.trace_id = "trace-cancel-race".to_owned();
+    let (delete_result, cancel_result) = tokio::join!(
+        store.accept_command("delete-key-race", &delete_command),
+        store.accept_command("cancel-key-race", &cancel_command)
+    );
+    let results = [delete_result, cancel_result];
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(
+                result,
+                Err(EnvironmentStoreError::Lifecycle(
+                    LifecycleError::RevisionConflict
+                ))
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        store.load(race_target.id).await?.revision,
+        support::revision(2)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn persistent_timeout_and_ready_cancel_cleanup_are_bounded()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        container.get_host_port_ipv4(5432).await?
+    );
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
+        .await?;
+    let migrations = format!(
+        "CREATE SCHEMA environment; SET search_path TO environment;\n{}\n{}",
+        include_str!("../../../migrations/environment/0001_initial.sql"),
+        include_str!("../../../migrations/environment/0002_reconcile_leases.sql")
+    );
+    sqlx::raw_sql(&migrations).execute(&pool).await?;
+    let store = PgEnvironmentStore::new(pool);
+
+    let timed_out = requested_instance();
+    store
+        .create("create-key-timeout-worker", &timed_out)
+        .await?;
+    let timeout_now = timestamp("2026-07-14T00:10:01.000Z");
+    let worker = success_worker(store.clone())?;
+    assert!(matches!(
+        worker
+            .run_once("environment-worker-timeout", timeout_now)
+            .await?,
+        ReconcileWorkerOutcome::Advanced {
+            state: ObservedEnvironmentState::Deleting,
+            terminal: false
+        }
+    ));
+    assert!(matches!(
+        worker
+            .run_once(
+                "environment-worker-timeout-cleanup",
+                timestamp("2026-07-14T00:10:02.000Z")
+            )
+            .await?,
+        ReconcileWorkerOutcome::Advanced {
+            state: ObservedEnvironmentState::Deleted,
+            terminal: true
+        }
+    ));
+    let timeout_deleted = store.load(timed_out.id).await?;
+    assert_eq!(timeout_deleted.operation.state, OperationState::Failed);
+    assert_eq!(
+        timeout_deleted.last_diagnostic_code.as_deref(),
+        Some("LW_ENVIRONMENT_PROVIDER_TIMEOUT")
+    );
+    assert!(timeout_deleted.endpoints.is_empty());
+    assert!(timeout_deleted.cleanup_evidence.is_some());
+
+    let ready_target = requested_instance();
+    store
+        .create("create-key-ready-cancel", &ready_target)
+        .await?;
+    for index in 0..4 {
+        assert!(matches!(
+            worker
+                .run_once(
+                    &format!("environment-worker-converge-{index}"),
+                    timestamp("2026-07-14T00:01:00.000Z")
+                )
+                .await?,
+            ReconcileWorkerOutcome::Advanced { .. }
+        ));
+    }
+    let ready = store.load(ready_target.id).await?;
+    assert_eq!(ready.observed_state, ObservedEnvironmentState::Ready);
+    assert!(
+        ready
+            .endpoints
+            .iter()
+            .all(|endpoint| endpoint.health == EndpointHealth::Healthy)
+    );
+    let accepted_at = timestamp("2026-07-14T00:02:00.000Z");
+    store
+        .accept_command(
+            "cancel-key-ready-environment",
+            &LifecycleCommand {
+                environment_id: ready.id,
+                kind: EnvironmentOperationKind::Cancel,
+                expected_revision: ready.revision,
+                actor_id: ActorId::new(),
+                trace_id: "trace-cancel-ready-environment".to_owned(),
+                accepted_at,
+                deadline_at: timestamp("2026-07-14T00:07:00.000Z"),
+                access_revocation_revision: Some(support::revision(20)),
+                preserve_mutable_disk: false,
+                max_attempts: 3,
+            },
+        )
+        .await?;
+    assert!(matches!(
+        worker
+            .run_once("environment-worker-cancel-cleanup", accepted_at)
+            .await?,
+        ReconcileWorkerOutcome::Advanced {
+            state: ObservedEnvironmentState::Deleted,
+            terminal: true
+        }
+    ));
+    let cancelled = store.load(ready.id).await?;
+    assert_eq!(cancelled.operation.state, OperationState::Cancelled);
+    assert_eq!(cancelled.observed_state, ObservedEnvironmentState::Deleted);
+    assert!(
+        cancelled
+            .endpoints
+            .iter()
+            .all(|endpoint| endpoint.health != EndpointHealth::Healthy)
+    );
+    assert!(cancelled.cleanup_evidence.is_some());
+    Ok(())
+}
+
+fn success_worker(
+    store: PgEnvironmentStore,
+) -> Result<ReconcileWorker, Box<dyn std::error::Error>> {
+    let mut registry = ProviderRegistry::default();
+    registry.register(Arc::new(LifecycleSuccessProvider))?;
+    Ok(ReconcileWorker::new(
+        store,
+        Reconciler::new(registry, Duration::from_millis(100))?,
+        Duration::from_millis(1_100),
+        Duration::from_millis(100),
+    )?)
+}
+
+#[derive(Clone)]
+struct RecordingPublisher {
+    fail_next: Arc<AtomicBool>,
+    deliveries: Arc<Mutex<Vec<EventId>>>,
+}
+
+impl RecordingPublisher {
+    fn fail_first() -> Self {
+        Self {
+            fail_next: Arc::new(AtomicBool::new(true)),
+            deliveries: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn deliveries(&self) -> Result<Vec<EventId>, Box<dyn std::error::Error>> {
+        self.deliveries
+            .lock()
+            .map(|deliveries| deliveries.clone())
+            .map_err(|_| "recording publisher mutex was poisoned".into())
+    }
+}
+
+#[async_trait]
+impl EnvironmentEventPublisher for RecordingPublisher {
+    async fn publish(
+        &self,
+        _subject: &str,
+        event: &CloudEvent<serde_json::Value>,
+    ) -> Result<(), PublishFailure> {
+        self.deliveries
+            .lock()
+            .map_err(|_| PublishFailure::Rejected)?
+            .push(event.id);
+        if self.fail_next.swap(false, Ordering::SeqCst) {
+            return Err(PublishFailure::Unavailable);
+        }
+        Ok(())
+    }
+}
+
+struct CleanupFailureProvider;
+
+struct LifecycleSuccessProvider;
+
+#[derive(Default)]
+struct IdempotentCrashProvider {
+    calls: AtomicUsize,
+    side_effects: AtomicUsize,
+    completed: Mutex<HashSet<(OperationId, ReconcileAction)>>,
+}
+
+#[async_trait]
+impl EnvironmentProvider for IdempotentCrashProvider {
+    fn binding(&self) -> &'static str {
+        "container-primary-v1"
+    }
+
+    async fn execute(
+        &self,
+        action: ReconcileAction,
+        instance: &contracts::environment::EnvironmentInstance,
+    ) -> Result<ProviderObservation, ProviderFailure> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self
+            .completed
+            .lock()
+            .map_err(|_| ProviderFailure {
+                code: ProviderFailureCode::Transient,
+                retryable: true,
+            })?
+            .insert((instance.operation.id, action))
+        {
+            self.side_effects.fetch_add(1, Ordering::SeqCst);
+        }
+        LifecycleSuccessProvider.execute(action, instance).await
+    }
+}
+
+#[async_trait]
+impl EnvironmentProvider for LifecycleSuccessProvider {
+    fn binding(&self) -> &'static str {
+        "container-primary-v1"
+    }
+
+    async fn execute(
+        &self,
+        action: ReconcileAction,
+        instance: &contracts::environment::EnvironmentInstance,
+    ) -> Result<ProviderObservation, ProviderFailure> {
+        let next_revision = support::revision(instance.revision.get() + 1);
+        let observation = match (action, instance.observed_state) {
+            (ReconcileAction::Validate, ObservedEnvironmentState::Requested) => {
+                ProviderObservation {
+                    next_state: ObservedEnvironmentState::Validating,
+                    endpoints: Vec::new(),
+                    cleanup_evidence: None,
+                    operation_complete: false,
+                }
+            }
+            (ReconcileAction::Validate, ObservedEnvironmentState::Validating) => {
+                ProviderObservation {
+                    next_state: ObservedEnvironmentState::Building,
+                    endpoints: Vec::new(),
+                    cleanup_evidence: None,
+                    operation_complete: false,
+                }
+            }
+            (ReconcileAction::Build, ObservedEnvironmentState::Building) => ProviderObservation {
+                next_state: ObservedEnvironmentState::Provisioning,
+                endpoints: Vec::new(),
+                cleanup_evidence: None,
+                operation_complete: false,
+            },
+            (ReconcileAction::Provision, ObservedEnvironmentState::Provisioning) => {
+                ProviderObservation {
+                    next_state: ObservedEnvironmentState::Ready,
+                    endpoints: vec![EnvironmentEndpoint {
+                        id: EndpointId::new(),
+                        protocol: EndpointProtocol::Https,
+                        revision: next_revision,
+                        health: EndpointHealth::Healthy,
+                        observed_at: timestamp("2026-07-14T00:01:00.000Z"),
+                    }],
+                    cleanup_evidence: None,
+                    operation_complete: true,
+                }
+            }
+            (ReconcileAction::Cleanup, ObservedEnvironmentState::Deleting) => ProviderObservation {
+                next_state: ObservedEnvironmentState::Deleted,
+                endpoints: Vec::new(),
+                cleanup_evidence: Some(ArtifactRef {
+                    artifact_id: ArtifactId::new(),
+                    store_binding: "environment-cleanup-evidence-v1".to_owned(),
+                    object_version: instance.operation.id.to_string(),
+                    sha256: Sha256Digest::of_bytes(instance.operation.id.to_string().as_bytes()),
+                    size_bytes: 1,
+                    media_type: "application/json".to_owned(),
+                }),
+                operation_complete: true,
+            },
+            _ => {
+                return Err(ProviderFailure {
+                    code: ProviderFailureCode::Rejected,
+                    retryable: false,
+                });
+            }
+        };
+        Ok(observation)
+    }
+}
+
+#[async_trait]
+impl EnvironmentProvider for CleanupFailureProvider {
+    fn binding(&self) -> &'static str {
+        "container-primary-v1"
+    }
+
+    async fn execute(
+        &self,
+        action: ReconcileAction,
+        _instance: &contracts::environment::EnvironmentInstance,
+    ) -> Result<ProviderObservation, ProviderFailure> {
+        if action != ReconcileAction::Cleanup {
+            return Err(ProviderFailure {
+                code: ProviderFailureCode::Rejected,
+                retryable: false,
+            });
+        }
+        Err(ProviderFailure {
+            code: ProviderFailureCode::CleanupFailed,
+            retryable: false,
+        })
+    }
+}

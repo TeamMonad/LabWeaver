@@ -1,6 +1,6 @@
 # EnvironmentLifecycle v1 Contract
 
-Status: proposed design contract; no API, event, persistence or provider implementation exists.
+Status: local E2 implementation in the current worktree; pending A review, D Verify, CI and merge.
 
 `EnvironmentLifecycle v1` defines the authoritative vocabulary and
 cross-service rules for an environment instance. It applies to the Cartesian
@@ -17,7 +17,7 @@ back to another runtime.
 
 ## Instance record and authority
 
-The future Environment Service record must contain, at minimum:
+The Environment Service record contains, at minimum:
 
 | Field | Semantics |
 | --- | --- |
@@ -27,15 +27,94 @@ The future Environment Service record must contain, at minimum:
 | `desiredState` / `observedState` | Requested lifecycle intent and reconciled platform state. |
 | `revision` | Monotonic optimistic-concurrency revision. |
 | `leaseRef` | Required only for Work; a controlled reference to the Resource-owned Lease. |
+| `eligibilityExpiresAt` | Earliest authoritative time after which owner resolution and new access fail closed. |
 | `endpointRefs` | Environment-owned endpoint metadata; never access credentials. |
 | `lastDiagnostic` / `failedPhase` | Stable failure code and the phase eligible for explicit retry. |
-| `operationRef` | Accepted operation identity, idempotency binding and terminal result. |
+| `operationRef` | Accepted operation identity, bounded retry/deadline, idempotency binding and terminal result. |
 | `cleanupEvidence` | Sanitized provider cleanup result, retention decision and audit correlation. |
 
 Environment Service alone writes this record. Resource Service owns Lease state;
 Access Service owns grants and revocation; Provider APIs only supply observed
 facts. Cross-service references are versioned and may not be replaced by direct
 table writes.
+
+## Current implementation boundary
+
+`services/environment-service` now implements revision-checked command planning,
+transactional SQLx persistence, idempotency replay/conflict handling, full
+CloudEvent Outbox insertion and bounded replay dispatch, transactional Inbox
+ordering with the lifecycle mutation, recoverable `FOR UPDATE SKIP LOCKED`
+reconciler leases, unique per-claim fencing tokens, bounded retry/timeout,
+explicit Provider binding with no fallback, expiry selection, cleanup
+operations and payload-free stable diagnostics. The production process binds
+an existing durable JetStream command consumer, runs reconcile/expiry/Outbox
+loops, and invokes exact provider bindings through versioned NATS request/reply.
+The command is a catalogued CloudEvent and the same Inbox transaction owns its
+aggregate sequence and lifecycle mutation. Outbox publication waits for a
+JetStream persistence acknowledgement and supplies the event ID as the NATS
+deduplication identity.
+
+A timed-out operation enters a separately bounded cleanup phase, retains the
+original timeout diagnostic, and finishes as failed even after cleanup evidence
+is durably recorded. Existing endpoints require an Access revocation revision
+before destructive or timeout cleanup. A superseding destructive command cannot
+begin Provider cleanup until the older Provider call's fenced lease has
+expired. Migration
+`environment/0002_reconcile_leases.sql` adds the durable retry/deadline/lease
+columns, upgrades populated v1 JSON contracts fail-closed and adds the
+due-operation index.
+
+The internal mTLS owner-resolver contract returns only `environmentId`,
+`courseId`, `ownerActorId`, authoritative revision and earliest expiry. Its
+policy rejects an unregistered caller SAN, missing/deleting/expired/non-Ready
+environment, unhealthy or missing endpoint, and course/owner/revision mismatch
+with 403. Database or resolver outage is retryable 503. The production TLS
+acceptor requires a CA-verified client certificate, extracts DNS SANs from its
+leaf certificate and injects the verified identity; it never trusts an HTTP
+header for caller identity. Process startup loads only absolute certificate/key
+locators, an explicit SAN allowlist and the Environment database, and fails
+before binding the internal route when any prerequisite is absent or invalid.
+The acceptor bounds pre-authentication concurrency, handshake duration and HTTP
+connection duration, continuously reaps tasks, drains on shutdown, and handles
+both SIGINT and SIGTERM. Dependency-aware readiness returns 503 when the
+database, NATS connection or required expiry-revocation path is unavailable.
+
+This slice supplies the production transport adapters but not a concrete
+Container/KubeVirt Provider or the Access-owned revocation responder. Those
+remain explicit adjacent/E3 dependencies rather than implicit fallback paths.
+
+### Required production configuration
+
+Startup is fail-fast. Paths below must be absolute Secret mounts; values and
+credential contents are never logged.
+
+| Variable | Meaning |
+| --- | --- |
+| `LABWEAVER_DATABASE_URL` | Environment-owned PostgreSQL connection. |
+| `LABWEAVER_NATS_SERVER` | TLS-enabled NATS server authority. |
+| `LABWEAVER_NATS_CA_PATH` | Private NATS CA bundle. |
+| `LABWEAVER_NATS_CLIENT_CERT_PATH` / `LABWEAVER_NATS_CLIENT_KEY_PATH` | Environment Service NATS mTLS identity. |
+| `LABWEAVER_NATS_CREDENTIALS_PATH` | NATS credentials file mounted from a Secret. |
+| `LABWEAVER_ENVIRONMENT_COMMAND_STREAM` / `LABWEAVER_ENVIRONMENT_COMMAND_CONSUMER` | Existing deployment-owned COMMANDS stream and durable consumer. |
+| `LABWEAVER_ENVIRONMENT_COMMAND_QUARANTINE_SUBJECT` | Private controlled quarantine subject; terminal invalid deliveries are acknowledged only after sanitized identity/hash evidence is persisted there. |
+| `LABWEAVER_ENVIRONMENT_PROVIDER_BINDINGS_PATH` | Reviewed JSON array of exact `{ "binding", "subject" }` provider mappings; empty, duplicate or wildcard mappings fail startup. |
+| `LABWEAVER_ACCESS_REVOCATION_SUBJECT` | Exact Access revocation request/reply subject used before automatic expiry cleanup. |
+| `LABWEAVER_ENVIRONMENT_WORKER_ID` / `LABWEAVER_ENVIRONMENT_SYSTEM_ACTOR_ID` | Portable worker identity and audited UUIDv7 system actor. |
+| `LABWEAVER_OWNER_RESOLVER_BIND_ADDR` | Internal owner-resolver listener. |
+| `LABWEAVER_OWNER_RESOLVER_CLIENT_CA_PATH` | CA bundle for caller certificate verification. |
+| `LABWEAVER_OWNER_RESOLVER_SERVER_CERT_PATH` / `LABWEAVER_OWNER_RESOLVER_SERVER_KEY_PATH` | Resolver server identity. |
+| `LABWEAVER_OWNER_RESOLVER_ALLOWED_CALLER_SANS` | Comma-separated exact DNS SAN allowlist; wildcards are rejected. |
+
+The provider binding file contains identities only, for example:
+
+```json
+[
+  {
+    "binding": "container-primary-v1",
+    "subject": "labweaver.provider.container-primary-v1.command.v1"
+  }
+]
+```
 
 ## Desired and observed state
 
@@ -68,7 +147,7 @@ The normative transitions are:
 | `Validating` | `Building`, `Failed`, `Deleting` | validated immutable input; blocking diagnostic; cancellation. |
 | `Building` | `Provisioning`, `Failed`, `Deleting` | bound asset produced and verified; failure; cancellation. |
 | `Provisioning` | `Ready`, `Stopped`, `Failed`, `Deleting` | health observed; desired stop; bounded retries exhausted; cancellation. |
-| `Ready` | `Provisioning`, `Stopped`, `Updating`, `Expiring`, `Deleting`, `Failed` | authorized reset after grant revocation and workload quiescence; explicit stop; approved Work configuration; Lease/course expiry; delete; unhealthy provider. |
+| `Ready` | `Provisioning`, `Stopping`, `Updating`, `Expiring`, `Deleting`, `Failed` | authorized reset after grant revocation and workload quiescence; explicit stop; approved Work configuration; Lease/course expiry; delete; unhealthy provider. |
 | `Stopped` | `Provisioning`, `Expiring`, `Deleting`, `Failed` | authorized start or reset; expiry; delete; provider inconsistency. |
 | `Updating` | `Ready`, `Failed`, `Deleting` | verified configuration run; any configuration failure; delete after cancellation is recorded. |
 | `Failed` | `Validating`, `Provisioning`, `Expiring`, `Deleting` | explicit retry from recorded failed phase; authorized reset; expiry; delete. |
@@ -185,11 +264,27 @@ class/runtime, template version, reason, timestamps, authorization references,
 revocation disposition and cleanup evidence. It omits secrets, user content,
 credentials and raw provider payloads.
 
-## Planned verification
+## Verification
 
-This contract has E1 Rust schema and transition evidence only. A future runtime implementation must add
-contract and integration coverage for normal transitions, duplicate commands,
-idempotency-key payload conflicts, revision conflicts, illegal transitions,
-provider failure and retry exhaustion, class invariants, Lease expiry,
-revocation ordering, unhealthy endpoints, all legal/illegal reset sources and
-targets, configuration failure, deletion idempotency and tombstone evidence.
+The current local E2 suite uses Docker PostgreSQL 17, NATS JetStream 2.11 and a
+real rustls mTLS server. It exhaustively checks all 144 observed-state pairs and
+all 144 state/operation pairs. Integration coverage includes populated-v1
+migration; strict initial-create invariants; complete command payload identity;
+atomic create/idempotency/CloudEvent Outbox; real JetStream publish acknowledgement
+and durable command consumption; transactional Inbox duplicate/stale/gap
+blocking; optimistic conflicts; lease fencing; and recovery by a new worker
+after a provider side effect but before state save, with the same operation/action
+identity preventing a duplicate side effect.
+
+Persistent worker tests cover timeout through successful cleanup while retaining
+the root diagnostic, Ready cancellation through a non-Ready Deleted tombstone,
+cleanup failure, expiry selection and the normal `Expiring → Stopped → Deleting`
+path. Resolver coverage includes owner/course/revision decisions,
+deletion/expiry, CA-verified SAN allowlisting, client/server certificate
+rotation, bounded slow handshakes, database outage as retryable 503 and resolver
+network outage.
+
+Human A review and D Verify remain required before Issue #51 is accepted. E3
+and adjacent cross-service verification must still cover the Access-owned
+revocation responder, formal Container/KubeVirt Providers, deployed mTLS NATS,
+cleanup/tombstone evidence and the Access consumer under the same build identity.

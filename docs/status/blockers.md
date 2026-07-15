@@ -36,6 +36,25 @@
   and replay idempotency, stale/gap sequence blocking, durable-consumer
   recovery, acknowledgement behaviour and terminal quarantine diagnostics.
 
+## ENV-02a E2 and deployment boundary
+
+- Issue #51 now has local E2 lifecycle/repository/messaging/reconciler and
+  owner-resolver evidence from Docker PostgreSQL 17, NATS JetStream 2.11 and a
+  real rustls mTLS server. It includes exhaustive matrices, Inbox ordering,
+  acknowledged Outbox replay, optimistic conflict, idempotent new-worker
+  recovery after Provider side effect, timeout/cancel cleanup, SAN bounds,
+  certificate rotation and outage coverage.
+- Owner: B for Environment implementation; A for the reviewed Access/mTLS
+  boundary; D for PostgreSQL, certificate-rotation, outage and deployed Verify.
+- Exit condition for Issue #51 acceptance: A approves the high-risk contract,
+  Migration and mTLS boundary, D verifies the current E2 commands and build
+  identity, CI passes, and the PR is merged. The Access-owned revocation
+  responder, formal Container/KubeVirt Provider and deployed mTLS NATS path
+  remain explicit adjacent/E3 dependencies and may not be replaced with
+  fallback evidence.
+- Impact: #47 must continue rejecting Environment-scope authorization until the
+  resolver and E2 identity are reviewed and verified.
+
 ## Agent Tool permission and approval contract
 
 - Tool bindings do not yet model or enforce filesystem, network or runtime permissions.

@@ -12,9 +12,12 @@ concurrency contract, or terminal deletion evidence. Without those decisions,
 the Environment, Resource and Access services can make incompatible lifecycle
 decisions and leave an expired or failed environment reachable.
 
-This ADR resolves GitHub Issue #16 at the design level only. It neither creates
-providers nor authorizes a service, database schema, CRD, REST handler, event
-publisher or access path.
+This ADR originally resolved GitHub Issue #16 at the design level. Issue #51
+now supplies a local E2 runtime core with Docker PostgreSQL, NATS JetStream and
+real mTLS integration. It includes production command/reconcile/expiry/Outbox
+wiring and exact remote Provider and Access-revocation adapters, but does not
+provide a concrete Container/KubeVirt Provider, Access-owned responder, CRD or
+deployed access path.
 
 ## Decision
 
@@ -88,6 +91,10 @@ its documentation references; no runtime state exists to migrate.
 
 ## Evidence
 
-Current evidence level: E1 for Rust types, validation and state-transition tests. This ADR and its companion contract are contract
-artifacts pending human review. They do not prove a real provider, KubeVirt VM,
-Lease, AccessGrant, endpoint or cleanup path.
+Current evidence level: local E2 for Rust types, validation, state transitions,
+idempotent transactional repository code, real JetStream command/Outbox
+delivery, new-worker reconciliation recovery, persistent timeout/cancel cleanup
+and fail-closed owner resolution over a real rustls mTLS server backed by Docker
+PostgreSQL 17. The artifacts remain pending A review and D Verify and do not
+prove a formal Provider, KubeVirt VM, Resource Lease, Access responder or
+deployed E3 cleanup path.

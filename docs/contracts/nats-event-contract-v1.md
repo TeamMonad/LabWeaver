@@ -5,8 +5,10 @@
 This is the human-readable, normative v1 catalog for cross-service NATS
 messages. It implements the design decision in
 [ADR 0003](../adr/0003-nats-subject-and-delivery-contract.md) and resolves
-Issue #18 at E0 and is now backed by Issue #45 Rust payloads and generated schemas at E1. It does not prove a running
-JetStream path.
+Issue #18 at E0 and is now backed by Issue #45 Rust payloads and generated
+schemas at E1. Issue #51 adds local E2 evidence for the Environment lifecycle
+command and Outbox subjects using real NATS JetStream 2.11; it does not upgrade
+the rest of the catalog or prove a deployed NATS identity.
 
 All public Subjects use `labweaver.<owner>.<aggregate>.<event>.v1`. The Owner
 is an existing business service, never a worker process or a Provider. A
@@ -91,6 +93,9 @@ needed by the handling Owner; they never carry untrusted executable text.
 | `labweaver.environment.instance.ready.v1` | Event / EVENTS + AUDIT | Environment → Access, Evaluation | `environment_instance`; observed generation, endpoint IDs and immutable runtime identity. |
 | `labweaver.environment.instance.failed.v1` | Event / EVENTS + AUDIT | Environment → Control, Access cleanup | `environment_instance`; stable diagnostic, observed generation and safe report reference. |
 | `labweaver.environment.instance.delete_requested.v1` | Command / COMMANDS | Environment → Environment reconciler | `environment_instance`; deletion revision, cleanup policy and idempotency key. |
+| `labweaver.environment.instance.operation_accepted.v1` | Event / EVENTS + AUDIT | Environment → lifecycle observers | `environment_instance`; accepted operation ID, revision, generation and state without Provider payload. |
+| `labweaver.environment.instance.state_changed.v1` | Event / EVENTS + AUDIT | Environment → Access and lifecycle observers | `environment_instance`; resulting state, revision/generation and stable diagnostic without endpoint credentials. |
+| `labweaver.environment.instance.lifecycle_requested.v1` | Command / COMMANDS | Environment command boundary → Environment lifecycle reconciler | `environment_instance`; revision-checked lifecycle command, bounded deadline/retry, revocation revision and idempotency key without Provider handles. |
 | `labweaver.evaluation.submission.freeze_requested.v1` | Command / COMMANDS | Evaluation → Evaluation Collector | `submission`; approved SubmissionManifest reference, source identity and idempotency key. |
 | `labweaver.evaluation.submission.frozen.v1` | Event / EVENTS + AUDIT | Evaluation → Evaluation scheduler | `submission`; immutable object/version references, SHA-256, manifest/version and collection facts. |
 | `labweaver.evaluation.run.requested.v1` | Command / COMMANDS | Evaluation → Evaluation scheduler | `evaluation_run`; immutable submission/spec/bundle identities, approved execution binding and idempotency key. |
