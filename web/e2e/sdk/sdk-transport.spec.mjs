@@ -171,13 +171,13 @@ test('BFF mode sends session credentials and synchronizer token only on mutation
 
 test('fails closed without a bearer and distinguishes cancellation', async ({ page }) => {
   let networkRequests = 0
+  const pendingRoutes = []
   await page.route('**/api/v1/environments**', async (route) => {
     networkRequests += 1
-    await new Promise((resolve) => setTimeout(resolve, 1_000))
-    await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    await new Promise((resolve) => pendingRoutes.push({ route, resolve }))
   })
 
-  const result = await page.evaluate(async ({ courseId }) => {
+  const authCode = await page.evaluate(async ({ courseId }) => {
     const api = await import('/src/api/client.ts')
     const sdk = await import('/src/generated/contracts/index.ts')
     const unauthenticated = api.createLabWeaverApiClient({
@@ -190,7 +190,6 @@ test('fails closed without a bearer and distinguishes cancellation', async ({ pa
     } catch (error) {
       authCode = error.diagnosticCode
     }
-
     const authenticated = api.createLabWeaverApiClient({
       baseUrl: window.location.origin,
       authentication: { mode: 'bearer', accessToken: async () => 'browser-conformance-token' },
@@ -202,15 +201,20 @@ test('fails closed without a bearer and distinguishes cancellation', async ({ pa
       signal: controller.signal,
       throwOnError: true,
     })
-    await new Promise((resolve) => setTimeout(resolve, 50))
-    controller.abort()
-    let cancelCode
-    try {
-      await request
-    } catch (error) {
-      cancelCode = error.diagnosticCode
+    window.__sdkCancellation = {
+      abort: () => controller.abort(),
+      result: request.then(() => undefined, (error) => error.diagnosticCode),
     }
+    return authCode
+  }, { courseId })
 
+  await expect.poll(() => networkRequests).toBe(1)
+  await page.evaluate(() => window.__sdkCancellation.abort())
+  const cancelCode = await page.evaluate(() => window.__sdkCancellation.result)
+
+  const timeoutCode = await page.evaluate(async ({ courseId }) => {
+    const api = await import('/src/api/client.ts')
+    const sdk = await import('/src/generated/contracts/index.ts')
     const shortTimeout = api.createLabWeaverApiClient({
       baseUrl: window.location.origin,
       authentication: { mode: 'bearer', accessToken: async () => 'browser-conformance-token' },
@@ -222,13 +226,18 @@ test('fails closed without a bearer and distinguishes cancellation', async ({ pa
     } catch (error) {
       timeoutCode = error.diagnosticCode
     }
-    return { authCode, cancelCode, timeoutCode }
+    return timeoutCode
   }, { courseId })
 
-  expect(result).toEqual({
-    authCode: 'LW_SDK_AUTH_TOKEN_UNAVAILABLE',
-    cancelCode: 'LW_SDK_REQUEST_CANCELLED',
-    timeoutCode: 'LW_SDK_REQUEST_TIMEOUT',
-  })
+  for (const pending of pendingRoutes) {
+    await pending.route.abort().catch(() => undefined)
+    pending.resolve()
+  }
+
+  expect({ authCode, cancelCode, timeoutCode }).toEqual({
+      authCode: 'LW_SDK_AUTH_TOKEN_UNAVAILABLE',
+      cancelCode: 'LW_SDK_REQUEST_CANCELLED',
+      timeoutCode: 'LW_SDK_REQUEST_TIMEOUT',
+    })
   expect(networkRequests).toBe(2)
 })
