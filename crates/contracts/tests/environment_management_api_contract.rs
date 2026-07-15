@@ -8,12 +8,60 @@ use contracts::environment::{
 };
 use contracts::http::{
     CreateEnvironmentRequest, EnvironmentInventoryQuery, EnvironmentOperationListQuery,
-    MAX_PAGE_LIMIT,
+    EventStreamQuery, MAX_PAGE_LIMIT,
 };
 use contracts::{
     CourseId, EnvironmentId, OperationId, ReleaseId, Revision, StreamSequence, UtcTimestamp,
 };
 use serde_json::Value;
+
+#[test]
+fn stream_sequence_is_lossless_and_canonical_on_every_public_resume_surface()
+-> Result<(), Box<dyn std::error::Error>> {
+    let course_id = CourseId::from_str("01900000-0000-7000-8000-000000000001")?;
+    let cursor = StreamSequence(u64::MAX);
+
+    assert_eq!(serde_json::to_string(&cursor)?, format!("\"{}\"", u64::MAX));
+    assert_eq!(
+        serde_json::from_str::<StreamSequence>(&format!("\"{}\"", u64::MAX))?,
+        cursor
+    );
+    for invalid in ["18446744073709551616", "01", "+1", " 1", "1 "] {
+        assert!(
+            StreamSequence::from_str(invalid).is_err(),
+            "accepted {invalid}"
+        );
+    }
+    assert!(serde_json::from_str::<StreamSequence>("9007199254740993").is_err());
+
+    let cursor_schema = serde_json::to_value(schemars::schema_for!(StreamSequence))?;
+    let cursor_validator = jsonschema::validator_for(&cursor_schema)?;
+    assert!(cursor_validator.is_valid(&serde_json::json!(u64::MAX.to_string())));
+    for invalid in [
+        serde_json::json!("18446744073709551616"),
+        serde_json::json!("01"),
+        serde_json::json!(9_007_199_254_740_993_u64),
+    ] {
+        assert!(
+            !cursor_validator.is_valid(&invalid),
+            "schema accepted {invalid}"
+        );
+    }
+
+    let query: EventStreamQuery = serde_json::from_value(serde_json::json!({
+        "courseId": course_id,
+        "after": "9007199254740993"
+    }))?;
+    assert_eq!(query.after, Some(StreamSequence(9_007_199_254_740_993)));
+    assert!(
+        serde_json::from_value::<EventStreamQuery>(serde_json::json!({
+            "courseId": course_id,
+            "after": 9_007_199_254_740_993_u64
+        }))
+        .is_err()
+    );
+    Ok(())
+}
 
 #[test]
 fn inventory_and_operation_queries_enforce_bounded_opaque_pagination()
@@ -167,5 +215,16 @@ fn generated_openapi_closes_inventory_operation_and_grant_discovery_gaps()
             .as_array()
             .is_some_and(|codes| codes.iter().any(|code| code == "LW_SSE_CURSOR_CONFLICT"))
     );
+    for parameter_name in ["after", "Last-Event-ID"] {
+        let parameter = stream["parameters"]
+            .as_array()
+            .and_then(|parameters| {
+                parameters
+                    .iter()
+                    .find(|parameter| parameter["name"] == parameter_name)
+            })
+            .ok_or("SSE cursor parameter missing")?;
+        assert_eq!(parameter["schema"]["type"], "string");
+    }
     Ok(())
 }

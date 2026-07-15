@@ -29,7 +29,10 @@ and REST-to-SSE resynchronization ambiguous.
   resource. Operation history and actor-scoped AccessGrant history are cursor-paged subresources.
 - Public pages bind an opaque cursor to a `snapshotSequence` and `snapshotAt`. Expired cursors return
   410; malformed cursors return 400. A client must restart from a fresh snapshot after 410.
-- `StreamSequence` is distinct from aggregate-local `Sequence`. The course SSE envelope contains an
+- `StreamSequence` is distinct from aggregate-local `Sequence` and uses a canonical unsigned decimal
+  string on every public wire surface. This keeps the full `u64` range lossless in JavaScript. The
+  same type binds REST `snapshotSequence`, event envelopes, SSE `id`, `Last-Event-ID`, and `after`;
+  numeric JSON cursors and non-canonical strings are rejected. The course SSE envelope contains an
   event identity, course/project scope, effective time, and monotonic stream sequence. REST snapshot
   plus SSE resume is the console synchronization path.
 - The Web SDK is created through one factory. It explicitly selects either the portal BFF session

@@ -3,6 +3,7 @@ import { expect, test } from '@playwright/test'
 const courseId = '01900000-0000-7000-8000-000000000001'
 const environmentId = '01900000-0000-7000-8000-000000000002'
 const operationId = '01900000-0000-7000-8000-000000000003'
+const largeStreamSequence = '9007199254740993'
 
 test.beforeEach(async ({ page }) => {
   await page.goto('/e2e/sdk/harness.html')
@@ -37,7 +38,7 @@ test('generated client performs authenticated GET and POST without duplicating /
       body: JSON.stringify({
         items: [],
         nextCursor: null,
-        snapshotSequence: 4,
+        snapshotSequence: largeStreamSequence,
         snapshotAt: '2026-07-15T12:00:00.000Z',
       }),
     })
@@ -60,7 +61,7 @@ test('generated client performs authenticated GET and POST without duplicating /
     return { snapshotSequence: listed.data.snapshotSequence, environmentId: created.data.environmentId }
   }, { courseId })
 
-  expect(result).toEqual({ snapshotSequence: 4, environmentId })
+  expect(result).toEqual({ snapshotSequence: largeStreamSequence, environmentId })
   expect(requests).toHaveLength(2)
   for (const request of requests) {
     expect(request.authorization).toBe('Bearer browser-conformance-token')
@@ -138,7 +139,7 @@ test('BFF mode sends session credentials and synchronizer token only on mutation
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ items: [], nextCursor: null, snapshotSequence: 1, snapshotAt: '2026-07-15T12:00:00.000Z' }),
+        body: JSON.stringify({ items: [], nextCursor: null, snapshotSequence: '1', snapshotAt: '2026-07-15T12:00:00.000Z' }),
       })
     }
   })
@@ -167,6 +168,40 @@ test('BFF mode sends session credentials and synchronizer token only on mutation
   expect(requests[1].headers.cookie).toContain('labweaver_test_session=opaque-session')
   expect(requests[1].headers.authorization).toBeUndefined()
   expect(requests[1].headers['x-csrf-token']).toBe('synchronizer-token')
+})
+
+test('preserves a stream cursor above Number.MAX_SAFE_INTEGER in SSE resume and events', async ({ page }) => {
+  const requests = []
+  await page.route('**/api/v1/events**', async (route) => {
+    const request = route.request()
+    requests.push({ url: request.url(), lastEventId: request.headers()['last-event-id'] })
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/event-stream',
+      body: `id: ${largeStreamSequence}\nevent: environment_changed\ndata: {"streamSequence":"${largeStreamSequence}"}\n\n`,
+    })
+  })
+
+  const result = await page.evaluate(async ({ courseId, largeStreamSequence }) => {
+    const api = await import('/src/api/client.ts')
+    const sdk = await import('/src/generated/contracts/index.ts')
+    const client = api.createLabWeaverApiClient({
+      baseUrl: window.location.origin,
+      authentication: { mode: 'bearer', accessToken: async () => 'browser-conformance-token' },
+    })
+    const events = await sdk.streamCourseEvents({
+      client,
+      headers: { 'Last-Event-ID': largeStreamSequence },
+      query: { courseId, after: largeStreamSequence },
+    })
+    const first = await events.stream.next()
+    return first.value.streamSequence
+  }, { courseId, largeStreamSequence })
+
+  expect(result).toBe(largeStreamSequence)
+  expect(requests).toHaveLength(1)
+  expect(requests[0].lastEventId).toBe(largeStreamSequence)
+  expect(new URL(requests[0].url).searchParams.get('after')).toBe(largeStreamSequence)
 })
 
 test('fails closed without a bearer and distinguishes cancellation', async ({ page }) => {

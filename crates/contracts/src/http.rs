@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AccessGrantId, ApprovalId, CandidateId, CourseId, DiagnosticCode, EndpointId, EnvironmentId,
-    EventId, OperationId, PlatformRole, ProblemPackageId, ProjectId, ReleaseId, Revision, Sequence,
+    EventId, OperationId, PlatformRole, ProblemPackageId, ProjectId, ReleaseId, Revision,
     Sha256Digest, StreamSequence, UploadSessionId, UtcTimestamp,
 };
 
@@ -1291,7 +1291,7 @@ pub fn validate_operation_catalog() -> Result<(), HttpContractError> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EventStreamQuery {
     pub course_id: CourseId,
-    pub after: Option<Sequence>,
+    pub after: Option<StreamSequence>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1339,12 +1339,17 @@ mod tests {
     }
     #[test]
     fn sse_cursor_sources_must_agree() {
+        let above_javascript_safe_integer = StreamSequence(9_007_199_254_740_992);
+        let adjacent_cursor = StreamSequence(9_007_199_254_740_993);
         assert!(matches!(
-            resolve_sse_resume(Some(StreamSequence(7)), Some(StreamSequence(7))),
-            Ok(SseResume::After(StreamSequence(7)))
+            resolve_sse_resume(
+                Some(above_javascript_safe_integer),
+                Some(above_javascript_safe_integer)
+            ),
+            Ok(SseResume::After(value)) if value == above_javascript_safe_integer
         ));
         assert!(matches!(
-            resolve_sse_resume(Some(StreamSequence(7)), Some(StreamSequence(8))),
+            resolve_sse_resume(Some(above_javascript_safe_integer), Some(adjacent_cursor)),
             Err(HttpContractError::ConflictingSseCursor)
         ));
     }

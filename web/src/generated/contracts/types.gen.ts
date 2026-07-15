@@ -1301,13 +1301,7 @@ export type PublicEnvironmentOperationPhase = 'validating' | 'building' | 'provi
  */
 export type EnvironmentOperationSnapshotSchemaRevision = number;
 
-/**
- * Monotonic cursor in a scoped public event stream.
- *
- * A distinct wire type prevents an aggregate-local sequence from being accepted as a
- * course-stream resume position.
- */
-export type StreamSequence = number;
+export type StreamSequence = string;
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
@@ -2474,13 +2468,7 @@ export type EnvironmentAccessGrantPageSchemaEnvironmentId = string;
  */
 export type EnvironmentAccessGrantPageSchemaRevision = number;
 
-/**
- * Monotonic cursor in a scoped public event stream.
- *
- * A distinct wire type prevents an aggregate-local sequence from being accepted as a
- * course-stream resume position.
- */
-export type EnvironmentAccessGrantPageSchemaStreamSequence = number;
+export type EnvironmentAccessGrantPageSchemaStreamSequence = string;
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
@@ -2584,13 +2572,7 @@ export type EnvironmentManagementEventSchemaProjectId = string;
  */
 export type EnvironmentManagementEventSchemaRevision = number;
 
-/**
- * Monotonic cursor in a scoped public event stream.
- *
- * A distinct wire type prevents an aggregate-local sequence from being accepted as a
- * course-stream resume position.
- */
-export type EnvironmentManagementEventSchemaStreamSequence = number;
+export type EnvironmentManagementEventSchemaStreamSequence = string;
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
@@ -2707,13 +2689,7 @@ export type EnvironmentOperationPageSchemaPublicEnvironmentOperationPhase = 'val
  */
 export type EnvironmentOperationPageSchemaRevision = number;
 
-/**
- * Monotonic cursor in a scoped public event stream.
- *
- * A distinct wire type prevents an aggregate-local sequence from being accepted as a
- * course-stream resume position.
- */
-export type EnvironmentOperationPageSchemaStreamSequence = number;
+export type EnvironmentOperationPageSchemaStreamSequence = string;
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
@@ -2886,13 +2862,7 @@ export type EnvironmentSummaryPageSchemaRevision = number;
  */
 export type EnvironmentSummaryPageSchemaRuntimeKind = 'container' | 'virtual_machine';
 
-/**
- * Monotonic cursor in a scoped public event stream.
- *
- * A distinct wire type prevents an aggregate-local sequence from being accepted as a
- * course-stream resume position.
- */
-export type EnvironmentSummaryPageSchemaStreamSequence = number;
+export type EnvironmentSummaryPageSchemaStreamSequence = string;
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
@@ -5737,12 +5707,12 @@ export type StopEnvironmentResponse = StopEnvironmentResponses[keyof StopEnviron
 export type StreamCourseEventsData = {
     body?: never;
     headers?: {
-        'Last-Event-ID'?: number;
+        'Last-Event-ID'?: string;
     };
     path?: never;
     query: {
         courseId: string;
-        after?: number;
+        after?: string;
     };
     url: '/api/v1/events';
 };

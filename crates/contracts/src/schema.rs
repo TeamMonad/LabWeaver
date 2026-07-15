@@ -414,8 +414,14 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         parameters.extend(environment_management_parameters(operation.operation_id));
         if operation.operation_id == "streamCourseEvents" {
             parameters.push(json!({"name":"courseId","in":"query","required":true,"schema":{"type":"string","format":"uuid"}}));
-            parameters.push(json!({"name":"after","in":"query","required":false,"schema":{"type":"integer","minimum":0}}));
-            parameters.push(json!({"name":"Last-Event-ID","in":"header","required":false,"schema":{"type":"integer","minimum":0}}));
+            let stream_cursor_schema = json!({
+                "type":"string",
+                "format":"uint64-decimal",
+                "pattern":crate::STREAM_SEQUENCE_PATTERN,
+                "maxLength":crate::STREAM_SEQUENCE_MAX_LENGTH
+            });
+            parameters.push(json!({"name":"after","in":"query","required":false,"schema":stream_cursor_schema.clone()}));
+            parameters.push(json!({"name":"Last-Event-ID","in":"header","required":false,"schema":stream_cursor_schema}));
         }
         if operation.mutation != MutationContract::None {
             parameters.push(header_parameter("Idempotency-Key", true));
