@@ -29,8 +29,10 @@ ctlog:
   createtree: {enabled: false}
   createctconfig:
     enabled: true
+    fulcioURL: http://fulcio-server.{{ private_sigstore_namespace }}.svc
     privateSecret: {{ private_sigstore_ctlog_secret_name }}
     pubkeysecret: {{ private_sigstore_ctlog_secret_name }}
+    privateKeyPasswordSecretName: {{ private_sigstore_ctlog_key_password_secret_name }}
     initContainerSecurityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, runAsNonRoot: true, runAsUser: 65533, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
     containerSecurityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, runAsNonRoot: true, runAsUser: 65533, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
     securityContext: {runAsNonRoot: true, runAsUser: 65533, fsGroup: 65533, fsGroupChangePolicy: OnRootMismatch, seccompProfile: {type: RuntimeDefault}}
@@ -57,7 +59,7 @@ rekor:
     replicaCount: {{ private_sigstore_replicas }}
     initContainerSecurityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, runAsNonRoot: true, runAsUser: 65533, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
     config: {key: treeID, treeID: {{ private_sigstore_rekor_tree_id | to_json }}}
-    signer: file:///var/run/rekor-signer/private-key.pem
+    signer: /var/run/rekor-signer/private-key.pem
     signerFileSecretOptions:
       secretName: {{ private_sigstore_rekor_secret_name }}
       privateKeySecretKey: private

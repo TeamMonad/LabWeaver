@@ -247,6 +247,7 @@
       - "{{ private_sigstore_fulcio_secret_name }}"
       - "{{ private_sigstore_rekor_secret_name }}"
       - "{{ private_sigstore_ctlog_secret_name }}"
+      - "{{ private_sigstore_ctlog_key_password_secret_name }}"
       - "{{ private_sigstore_trillian_mysql_secret_name }}"
       - "{{ private_sigstore_tls_secret_name }}"
       - --output
@@ -275,6 +276,7 @@
     - {name: "{{ private_sigstore_rekor_secret_name }}", key: private}
     - {name: "{{ private_sigstore_ctlog_secret_name }}", key: public}
     - {name: "{{ private_sigstore_ctlog_secret_name }}", key: private}
+    - {name: "{{ private_sigstore_ctlog_key_password_secret_name }}", key: password}
     - {name: "{{ private_sigstore_trillian_mysql_secret_name }}", key: mysql-root-password}
     - {name: "{{ private_sigstore_trillian_mysql_secret_name }}", key: mysql-user}
     - {name: "{{ private_sigstore_trillian_mysql_secret_name }}", key: mysql-password}

@@ -83,6 +83,9 @@ class AnsibleFixtureTests(unittest.TestCase):
         tuf_static = (
             ROOT / "deploy/ansible/roles/private_sigstore/templates/tuf-static.yml.j2"
         ).read_text(encoding="utf-8")
+        post_renderer = (
+            ROOT / "deploy/ansible/roles/private_sigstore/files/private_sigstore_post_renderer.py"
+        ).read_text(encoding="utf-8")
         lock = (ROOT / "deploy/versions.lock.yml").read_text(encoding="utf-8")
 
         self.assertEqual(playbook.splitlines()[1], "- import_playbook: 00-preflight.yml")
@@ -95,7 +98,9 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("createcerts: {enabled: false}", values)
         self.assertIn("createtree: {enabled: false}", values)
         self.assertIn("force: false", values)
-        self.assertIn("signer: file:///var/run/rekor-signer/private-key.pem", values)
+        self.assertIn("signer: /var/run/rekor-signer/private-key.pem", values)
+        self.assertIn("privateKeyPasswordSecretName", values)
+        self.assertIn("fulcioURL: http://fulcio-server.", values)
         self.assertIn("existingSecret: {{ private_sigstore_trillian_mysql_secret_name }}", values)
         self.assertIn("username: {{ private_sigstore_trillian_mysql_username }}", values)
         self.assertIn("tuf:\n  enabled: false", values)
@@ -117,10 +122,15 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("SIGSTORE_KUBERNETES_API_IDENTITY_INVALID", tasks)
         self.assertIn("Delete only replaceable chart bootstrap Jobs", tasks)
         self.assertIn("post_renderer: /var/tmp/labweaver-private-sigstore-post-renderer", tasks)
+        self.assertIn("materialize-rekor-signer", post_renderer)
+        self.assertIn('"emptyDir": {"medium": "Memory"}', post_renderer)
+        self.assertIn("chmod 0600", post_renderer)
+        self.assertIn("SIGSTORE_POST_RENDERER_SIGNER_ITEM_INVALID", post_renderer)
+        self.assertIn("SIGSTORE_POST_RENDERER_INIT_IMAGE_INVALID", post_renderer)
         self.assertIn("atomic: false", tasks)
         self.assertIn("createdb:\n    enabled: false", values)
         self.assertIn("fsGroupChangePolicy: OnRootMismatch", values)
-        self.assertIn("toEntities: [kube-apiserver]", policy)
+        self.assertIn("toEntities: [cluster, kube-apiserver]", policy)
         self.assertIn("podSelector: {}", policy)
         self.assertNotIn("0.0.0.0/0", policy)
         self.assertIn("protocol: HTTPS", gateway)
