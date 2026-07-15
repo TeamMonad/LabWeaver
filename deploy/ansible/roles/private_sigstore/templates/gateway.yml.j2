@@ -27,7 +27,10 @@ spec:
   parentRefs: [{name: private-sigstore}]
   hostnames: [{{ private_sigstore_internal_dns }}]
   rules:
-    - matches: [{path: {type: PathPrefix, value: /api/v1/signingCert}}]
+    - matches:
+        - {path: {type: PathPrefix, value: /api/v1/signingCert}}
+        - {path: {type: PathPrefix, value: /api/v2/signingCert}}
+        - {path: {type: PathPrefix, value: /api/v2/trustBundle}}
       backendRefs: [{name: fulcio-server, port: 80}]
 ---
 apiVersion: gateway.networking.k8s.io/v1

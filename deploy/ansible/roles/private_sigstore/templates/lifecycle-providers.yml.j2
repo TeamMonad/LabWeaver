@@ -88,7 +88,7 @@ spec:
             - name: runtime
               emptyDir: {sizeLimit: 256Mi}
             - name: script
-              configMap: {name: private-sigstore-lifecycle-script, defaultMode: 365}
+              configMap: {name: private-sigstore-lifecycle-script-v1, defaultMode: 365}
             - name: tuf
               configMap: {name: {{ private_sigstore_tuf_metadata_configmap_name }}}
             - name: trees
@@ -98,7 +98,7 @@ spec:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: private-sigstore-lifecycle-script
+  name: private-sigstore-lifecycle-script-v1
   namespace: {{ private_sigstore_namespace }}
   labels:
     app.kubernetes.io/name: private-sigstore-lifecycle
@@ -139,7 +139,7 @@ data:
         [ "$actual" = "$expected" ]
         curl --fail --silent --show-error --max-time 20 http://tuf-server/root.json >/dev/null
         curl --fail --silent --show-error --max-time 20 http://rekor-server/api/v1/log >/dev/null
-        curl --fail --silent --show-error --max-time 20 http://fulcio-server/api/v1/rootCert >/dev/null
+        curl --silent --show-error --max-time 20 http://fulcio-server/api/v1/signingCert >/dev/null
         ;;
       restore|disaster-recovery)
         test -s "$run_dir/trillian.sql"
