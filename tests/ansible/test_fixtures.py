@@ -27,7 +27,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("cargo xtask deploy --infra", docs)
         self.assertIn("ansible-rs", docs)
         self.assertNotIn("tools/ansible.py", docs)
-        self.assertIn("approved_controller_id: edge-router", controller_lock)
+        self.assertIn("approved_controller_ids: edge-router,wsl-a-controller", controller_lock)
 
     def test_deploy_starts_with_preflight(self) -> None:
         site = (ROOT / "deploy/ansible/playbooks/site.yml").read_text(encoding="utf-8")
@@ -78,6 +78,9 @@ class AnsibleFixtureTests(unittest.TestCase):
         gateway = (ROOT / "deploy/ansible/roles/private_sigstore/templates/gateway.yml.j2").read_text(
             encoding="utf-8"
         )
+        tuf_static = (
+            ROOT / "deploy/ansible/roles/private_sigstore/templates/tuf-static.yml.j2"
+        ).read_text(encoding="utf-8")
         lock = (ROOT / "deploy/versions.lock.yml").read_text(encoding="utf-8")
 
         self.assertEqual(playbook.splitlines()[1], "- import_playbook: 00-preflight.yml")
@@ -89,8 +92,15 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("no_log: true", tasks)
         self.assertIn("createcerts: {enabled: false}", values)
         self.assertIn("createtree: {enabled: false}", values)
+        self.assertIn("force: false", values)
         self.assertIn("signer: file:///var/run/rekor-signer/private-key.pem", values)
         self.assertIn("existingSecret: {{ private_sigstore_trillian_mysql_secret_name }}", values)
+        self.assertIn("username: {{ private_sigstore_trillian_mysql_username }}", values)
+        self.assertIn("tuf:\n  enabled: false", values)
+        self.assertIn("SIGSTORE_C0_AUTHORITY_MISMATCH", tasks)
+        self.assertIn("private_sigstore_tuf_metadata_configmap_name", tuf_static)
+        self.assertIn("sigstore_lock.images.tuf_static", tuf_static)
+        self.assertIn("automountServiceAccountToken: false", tuf_static)
         self.assertNotIn("signer: memory", values)
         self.assertLess(
             tasks.index("Apply fail-closed isolation before workload creation"),

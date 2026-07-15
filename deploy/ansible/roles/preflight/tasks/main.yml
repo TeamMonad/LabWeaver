@@ -84,7 +84,35 @@
       - ansible_facts.os_family == 'RedHat'
       - ansible_facts.distribution_major_version | int >= 10
     fail_msg: "only Rocky/RHEL 10+ nodes are supported by this playbook"
-  when: inventory_hostname != 'localhost'
+  when:
+    - inventory_hostname != 'localhost'
+    - not (labweaver_direct_kubernetes_controller | default(false) | bool)
+
+- name: Require local-only hosts for direct Kubernetes controller mode
+  ansible.builtin.assert:
+    that:
+      - (labweaver_preflight_scope | default('cluster')) in ['private-sigstore', 'identity-foundation']
+      - ansible_connection == 'local'
+    fail_msg: DIRECT_KUBERNETES_CONTROLLER_SCOPE_INVALID
+  when:
+    - labweaver_direct_kubernetes_controller | default(false) | bool
+    - inventory_hostname != 'localhost'
+
+- name: Verify the adopted cluster API from the direct controller
+  ansible.builtin.command:
+    argv:
+      - "{{ private_sigstore_kubectl_path | default('/usr/bin/kubectl') }}"
+      - --kubeconfig
+      - "{{ private_sigstore_kubeconfig_path | default('/etc/kubernetes/admin.conf') }}"
+      - get
+      - namespace
+      - kube-system
+      - --output
+      - name
+  changed_when: false
+  run_once: true
+  delegate_to: localhost
+  when: labweaver_direct_kubernetes_controller | default(false) | bool
 
 - name: Assert required interfaces are already present
   ansible.builtin.command: "/usr/sbin/ip link show {{ item }}"
@@ -93,7 +121,9 @@
   loop:
     - "{{ router_wan_interface }}"
     - "{{ router_lan_interface }}"
-  when: inventory_hostname in groups['routers']
+  when:
+    - inventory_hostname in groups['routers']
+    - not (labweaver_direct_kubernetes_controller | default(false) | bool)
 
 - name: Assert Kubernetes node SELinux is enforcing
   ansible.builtin.command: /usr/sbin/getenforce
@@ -101,7 +131,9 @@
   changed_when: false
   register: preflight_selinux_mode
   failed_when: preflight_selinux_mode.stdout != 'Enforcing'
-  when: inventory_hostname in groups['k8s_cluster']
+  when:
+    - inventory_hostname in groups['k8s_cluster']
+    - not (labweaver_direct_kubernetes_controller | default(false) | bool)
 
 - name: Assert workers expose the KVM device
   ansible.builtin.stat:

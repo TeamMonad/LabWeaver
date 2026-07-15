@@ -19,7 +19,10 @@ private_sigstore_fulcio_secret_name: private-sigstore-fulcio-ca
 private_sigstore_rekor_secret_name: private-sigstore-rekor-signer
 private_sigstore_ctlog_secret_name: private-sigstore-ctlog-signer
 private_sigstore_trillian_mysql_secret_name: private-sigstore-trillian-mysql
+private_sigstore_trillian_mysql_username: trillian
 private_sigstore_tls_secret_name: private-sigstore-internal-tls
+private_sigstore_tuf_metadata_configmap_name: private-sigstore-tuf-metadata-v1
+private_sigstore_tree_authority_configmap_name: private-sigstore-tree-ids-v1
 private_sigstore_resources:
   requests: { cpu: 100m, memory: 128Mi }
   limits: { cpu: 500m, memory: 512Mi }

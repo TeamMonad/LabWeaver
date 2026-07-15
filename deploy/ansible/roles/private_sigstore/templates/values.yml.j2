@@ -12,6 +12,8 @@ fulcio:
           SubjectDomain: {{ private_sigstore_oidc_subject_domain | to_json }}
           ChallengeClaim: preferred_username
   createcerts: {enabled: false}
+  init:
+    containerSecurityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, runAsNonRoot: true, runAsUser: 65533, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
   server:
     replicaCount: {{ private_sigstore_replicas }}
     secret: {{ private_sigstore_fulcio_secret_name }}
@@ -19,7 +21,8 @@ fulcio:
     service: {type: ClusterIP}
     logging: {production: true}
     resources: {{ private_sigstore_resources | to_json }}
-    securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, runAsNonRoot: true, runAsUser: 65533, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
+    containerSecurityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, runAsNonRoot: true, runAsUser: 65533, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
+    securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
 ctlog:
   forceNamespace: {{ private_sigstore_namespace }}
   namespace: {create: false, name: {{ private_sigstore_namespace }}}
@@ -28,6 +31,9 @@ ctlog:
     enabled: true
     privateSecret: {{ private_sigstore_ctlog_secret_name }}
     pubkeysecret: {{ private_sigstore_ctlog_secret_name }}
+    initContainerSecurityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, runAsNonRoot: true, runAsUser: 65533, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
+    containerSecurityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, runAsNonRoot: true, runAsUser: 65533, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
+    securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
   trillian:
     namespace: {{ private_sigstore_namespace }}
     logServer: {name: trillian-logserver, portRPC: 8091}
@@ -37,13 +43,19 @@ ctlog:
     ingress: {enabled: false}
     service: {type: ClusterIP}
     resources: {{ private_sigstore_resources | to_json }}
-    securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, runAsNonRoot: true, runAsUser: 65533, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
+    containerSecurityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, runAsNonRoot: true, runAsUser: 65533, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
+    securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
 rekor:
   forceNamespace: {{ private_sigstore_namespace }}
   namespace: {create: false, name: {{ private_sigstore_namespace }}}
-  createtree: {enabled: false}
+  createtree:
+    force: false
+    resources: {{ private_sigstore_resources | to_json }}
+    containerSecurityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, runAsNonRoot: true, runAsUser: 65533, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
+    securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
   server:
     replicaCount: {{ private_sigstore_replicas }}
+    initContainerSecurityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, runAsNonRoot: true, runAsUser: 65533, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
     config: {key: treeID, treeID: {{ private_sigstore_rekor_tree_id | to_json }}}
     signer: file:///var/run/rekor-signer/private-key.pem
     signerFileSecretOptions:
@@ -54,10 +66,13 @@ rekor:
     ingress: {enabled: false}
     service: {type: ClusterIP}
     resources: {{ private_sigstore_resources | to_json }}
-    securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, runAsNonRoot: true, runAsUser: 65533, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
+    containerSecurityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, runAsNonRoot: true, runAsUser: 65533, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
+    securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
   redis:
     persistence: {enabled: true, storageClass: {{ private_sigstore_storage_class }}, size: 5Gi}
     resources: {{ private_sigstore_resources | to_json }}
+    containerSecurityContext: {allowPrivilegeEscalation: false, runAsNonRoot: true, runAsUser: 999, runAsGroup: 999, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
+    securityContext: {runAsNonRoot: true, runAsUser: 999, runAsGroup: 999, fsGroup: 999, seccompProfile: {type: RuntimeDefault}}
   trillian:
     enabled: false
     forceNamespace: {{ private_sigstore_namespace }}
@@ -65,11 +80,29 @@ rekor:
 trillian:
   forceNamespace: {{ private_sigstore_namespace }}
   namespace: {create: false, name: {{ private_sigstore_namespace }}}
+  initContainerSecurityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, runAsNonRoot: true, runAsUser: 65533, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
+  logServer:
+    replicaCount: {{ private_sigstore_replicas }}
+    resources: {{ private_sigstore_resources | to_json }}
+    containerSecurityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, runAsNonRoot: true, runAsUser: 65533, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
+    securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+  logSigner:
+    replicaCount: {{ private_sigstore_replicas }}
+    resources: {{ private_sigstore_resources | to_json }}
+    containerSecurityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, runAsNonRoot: true, runAsUser: 65533, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
+    securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
   mysql:
-    auth: {existingSecret: {{ private_sigstore_trillian_mysql_secret_name }}}
+    auth: {existingSecret: {{ private_sigstore_trillian_mysql_secret_name }}, username: {{ private_sigstore_trillian_mysql_username }}}
     persistence: {enabled: true, storageClass: {{ private_sigstore_storage_class }}, size: 20Gi}
+    resources: {{ private_sigstore_resources | to_json }}
+    containerSecurityContext: {allowPrivilegeEscalation: false, runAsNonRoot: true, runAsUser: 999, runAsGroup: 999, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
+    securityContext: {runAsNonRoot: true, runAsUser: 999, runAsGroup: 999, fsGroup: 999, seccompProfile: {type: RuntimeDefault}}
+  createdb:
+    resources: {{ private_sigstore_resources | to_json }}
+    containerSecurityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, runAsNonRoot: true, runAsUser: 65533, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
+    securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
 tuf:
-  enabled: true
+  enabled: false
   forceNamespace: {{ private_sigstore_namespace }}
   namespace: {create: false, name: {{ private_sigstore_namespace }}}
   ingress: {create: false}

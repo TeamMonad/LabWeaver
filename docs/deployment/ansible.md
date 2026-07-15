@@ -58,7 +58,7 @@ blocks reconciliation. TestFlight temporary resources in `labweaver-demo` are
 named and selected by its run ID, so cleanup cannot target another run.
 
 `ansible-lint`, syntax checks, encrypted fictional-Vault loading, and storage
-safety fixtures run on Linux CI. The approved router worktree additionally
+safety fixtures run on Linux CI. The approved router or A-owned WSL controller worktree additionally
 provides the real deploy, backup, isolated VM/storage/Gateway/Cilium probes,
 schema-validated TestFlight report, and second idempotent replay. The report
 remains blocked until OIDC, Harbor policy/recovery, and Release Gate evidence

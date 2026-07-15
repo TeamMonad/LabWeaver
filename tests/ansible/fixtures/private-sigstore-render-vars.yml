@@ -8,6 +8,7 @@ private_sigstore_fulcio_secret_name: fixture-fulcio
 private_sigstore_ctlog_secret_name: fixture-ctlog
 private_sigstore_rekor_secret_name: fixture-rekor
 private_sigstore_trillian_mysql_secret_name: fixture-trillian-mysql
+private_sigstore_trillian_mysql_username: trillian
 private_sigstore_ctlog_tree_id: "10001"
 private_sigstore_rekor_tree_id: "10002"
 private_sigstore_storage_class: fixture-rwo

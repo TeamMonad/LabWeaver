@@ -1,9 +1,9 @@
 # Private Sigstore trust plane
 
 Issue #61 adds a repository-side, fail-closed deployment contract for a private
-Fulcio, Rekor, CT log, Trillian and TUF trust plane. It does not claim that the
-production Keycloak client, offline root ceremony, cluster deployment, restore
-drill, Kyverno consumer or Release Gate consumer has been executed.
+Fulcio, Rekor, CT log, Trillian and TUF trust plane. The private-lab C0 ceremony,
+Keycloak workload client and Trillian foundation have been executed; complete
+keyless signing, restore drill, Kyverno and Release Gate evidence remain open.
 
 ## Identity foundation prerequisite
 
@@ -52,7 +52,8 @@ cargo xtask private-sigstore --infra --env <environment> --action cleanup --yes
 cargo xtask private-sigstore --infra --env <environment> --action disaster-recovery --yes
 ```
 
-It uses the same Linux-router identity, private inventory, Vault password file,
+It uses an explicitly allowlisted Linux-router or A-owned WSL controller identity,
+private inventory, Vault password file,
 explicit run IDs, commit, inventory hash and component-lock hash as the adopted-cluster
 Ansible controller. Windows returns `XTASK_INFRA_UNSUPPORTED_PLATFORM`.
 Each action maps to one playbook compiled into `xtask`; callers cannot supply an
@@ -93,16 +94,25 @@ Cosign Linux AMD64 checksum comes from the official `sigstore/cosign` v3.0.6
 release asset metadata. Deployment uses the local verified archive and cannot
 fall back to a chart repository.
 
-The chart's automatic certificate/key and tree creation jobs are disabled.
+The chart's automatic certificate/key creation jobs and CT tree creation are disabled.
 Signing keys and TUF root private keys must be created by reviewed C0 procedures
-outside Git and injected through approved Secret locators. Rekor and CT tree IDs
-are explicit pre-provisioned inputs; the CT config job consumes the external key
-and tree identity but does not generate either one. Trillian consumes an external
+outside Git and injected through approved Secret locators. The upstream Rekor chart
+always renders its create-tree Job; it is fixed to `force=false` and consumes the
+pre-provisioned ConfigMap Tree ID, so a mismatch fails instead of replacing C0
+authority. Rekor and CT tree IDs are explicit pre-provisioned inputs; the CT config
+job consumes the external key and tree identity but does not generate either one.
+Trillian consumes an external
 MySQL Secret and never uses the chart's generated credential path. A default-deny
 NetworkPolicy, internal-only allowlist, restricted namespace, ClusterIP
 services, RFC1918 Gateway address, TLS Secret reference, digest verification,
 resources and PodDisruptionBudget are applied. No public Fulcio/Rekor endpoint,
 public Sigstore service or unsigned fallback is configured.
+
+The scaffold runtime TUF generator is disabled because it does not consume the
+C0 offline root. An immutable ConfigMap holds the signed root, targets, snapshot
+and timestamp metadata; a digest-pinned, read-only static server publishes those
+exact bytes. Preflight compares its `1.root.json` to the external locator and
+requires both the TUF and Tree authority ConfigMaps to be immutable.
 
 ## Trust and recovery contracts
 
@@ -127,7 +137,7 @@ closed. Restore must verify the backup identity and both old and current-root
 verification windows before traffic resumes. Cleanup may target only Job, Pod and
 ConfigMap resources carrying the current TestFlight identity and must never delete
 retained PVCs, signing Secrets, TUF metadata, workloads or namespaces. These
-workflows remain unproved until the same router E3 run closes each report.
+workflows remain unproved until the same approved-controller E3 run closes each report.
 
 ## Evidence status
 

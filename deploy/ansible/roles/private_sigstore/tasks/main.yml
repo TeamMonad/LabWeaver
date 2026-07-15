@@ -90,7 +90,49 @@
       - (sigstore_tuf_root_raw.content | b64decode | hash('sha256')) == private_sigstore_expected_tuf_root_sha256 | regex_replace('^sha256:', '')
       - (sigstore_tuf_root_raw.content | b64decode | from_json).signed.version | int >= 1
       - (sigstore_tuf_root_raw.content | b64decode | from_json).signed.expires | length > 0
+      - (sigstore_tuf_root_raw.content | b64decode | from_json).signed._type == 'root'
+      - (sigstore_tuf_root_raw.content | b64decode | from_json).signed.roles.root.threshold | int >= 2
+      - >-
+        (sigstore_tuf_root_raw.content | b64decode | from_json).signatures | length
+        >= (sigstore_tuf_root_raw.content | b64decode | from_json).signed.roles.root.threshold | int
+      - >-
+        (sigstore_tuf_root_raw.content | b64decode | from_json).signed.roles.root.keyids | length
+        >= (sigstore_tuf_root_raw.content | b64decode | from_json).signed.roles.root.threshold | int
     fail_msg: SIGSTORE_TUF_ROOT_IDENTITY_INVALID
+  no_log: true
+
+- name: Read C0 authority ConfigMaps without exposing trust material
+  ansible.builtin.command:
+    argv:
+      - "{{ private_sigstore_kubectl_path }}"
+      - --kubeconfig
+      - "{{ private_sigstore_kubeconfig_path }}"
+      - --namespace
+      - "{{ private_sigstore_namespace }}"
+      - get
+      - configmap
+      - "{{ item }}"
+      - --output
+      - json
+  loop:
+    - "{{ private_sigstore_tuf_metadata_configmap_name }}"
+    - "{{ private_sigstore_tree_authority_configmap_name }}"
+  changed_when: false
+  no_log: true
+  register: sigstore_authority_configmaps
+
+- name: Bind deployed TUF metadata and Tree IDs to C0 authority
+  ansible.builtin.assert:
+    that:
+      - (sigstore_authority_configmaps.results[0].stdout | from_json).immutable | bool
+      - >-
+        ((sigstore_authority_configmaps.results[0].stdout | from_json).data['1.root.json'] | hash('sha256'))
+        == private_sigstore_expected_tuf_root_sha256 | regex_replace('^sha256:', '')
+      - (sigstore_authority_configmaps.results[1].stdout | from_json).immutable | bool
+      - (sigstore_authority_configmaps.results[1].stdout | from_json).data.rekorTreeId == private_sigstore_rekor_tree_id | string
+      - (sigstore_authority_configmaps.results[1].stdout | from_json).data.ctTreeId == private_sigstore_ctlog_tree_id | string
+      - (sigstore_authority_configmaps.results[1].stdout | from_json).data.ceremonyReceiptSha256 is match('^sha256:[0-9a-f]{64}$')
+    fail_msg: SIGSTORE_C0_AUTHORITY_MISMATCH
   no_log: true
 
 - name: Detect existing Private Sigstore state before any mutation
@@ -227,6 +269,7 @@
   loop:
     - {name: "{{ private_sigstore_fulcio_secret_name }}", key: cert}
     - {name: "{{ private_sigstore_fulcio_secret_name }}", key: private}
+    - {name: "{{ private_sigstore_fulcio_secret_name }}", key: password}
     - {name: "{{ private_sigstore_rekor_secret_name }}", key: public}
     - {name: "{{ private_sigstore_rekor_secret_name }}", key: private}
     - {name: "{{ private_sigstore_ctlog_secret_name }}", key: public}
@@ -306,6 +349,24 @@
     wait: true
     wait_timeout: 10m
   no_log: true
+
+- name: Render the C0-authoritative static TUF repository
+  ansible.builtin.template:
+    src: tuf-static.yml.j2
+    dest: /var/tmp/labweaver-private-sigstore-tuf.yml
+    mode: '0600'
+
+- name: Publish the C0-authoritative static TUF repository
+  ansible.builtin.command:
+    argv:
+      - "{{ private_sigstore_kubectl_path }}"
+      - --kubeconfig
+      - "{{ private_sigstore_kubeconfig_path }}"
+      - apply
+      - --filename
+      - /var/tmp/labweaver-private-sigstore-tuf.yml
+  register: sigstore_tuf_apply
+  changed_when: "'unchanged' not in sigstore_tuf_apply.stdout"
 
 - name: Render the internal TLS Gateway
   ansible.builtin.template:
