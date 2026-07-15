@@ -708,7 +708,7 @@ impl InfrastructureInputs {
             roles_path: infrastructure_path(&roles_path),
             commit_sha: infrastructure_commit_sha()?,
             controller_id: approved_controller_identity(&controller_lock)?,
-            inventory_hash: file_sha256(&inventory)?,
+            inventory_hash: inventory_identity_hash(&inventory_root)?,
             component_lock_hash: file_sha256(&root.join("deploy/versions.lock.yml"))?,
             harbor_data_backup_locator: std::env::var("LABWEAVER_HARBOR_DATA_BACKUP_LOCATOR")
                 .unwrap_or_default(),
@@ -841,6 +841,53 @@ fn file_sha256(path: &std::path::Path) -> Result<String, AppError> {
         detail: Some(error.to_string()),
     })?;
     Ok(format!("sha256:{:x}", Sha256::digest(data)))
+}
+
+#[cfg(target_os = "linux")]
+fn inventory_identity_hash(root: &std::path::Path) -> Result<String, AppError> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).map_err(|error| AppError::ExternalCommand {
+            role: "infrastructure inventory identity",
+            code: None,
+            detail: Some(error.to_string()),
+        })? {
+            let path = entry
+                .map_err(|error| AppError::ExternalCommand {
+                    role: "infrastructure inventory identity",
+                    code: None,
+                    detail: Some(error.to_string()),
+                })?
+                .path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.file_name().and_then(|name| name.to_str()) != Some(".vault-password") {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    let mut hasher = Sha256::new();
+    for path in files {
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|error| AppError::ExternalCommand {
+                role: "infrastructure inventory identity",
+                code: None,
+                detail: Some(error.to_string()),
+            })?;
+        let data = std::fs::read(&path).map_err(|error| AppError::ExternalCommand {
+            role: "infrastructure inventory identity",
+            code: None,
+            detail: Some(error.to_string()),
+        })?;
+        hasher.update(relative.to_string_lossy().as_bytes());
+        hasher.update([0]);
+        hasher.update((data.len() as u64).to_be_bytes());
+        hasher.update(data);
+    }
+    Ok(format!("sha256:{hasher:x}"))
 }
 
 #[cfg(target_os = "linux")]

@@ -24,10 +24,12 @@ class AnsibleFixtureTests(unittest.TestCase):
     def test_controller_execution_is_router_owned(self) -> None:
         docs = (ROOT / "docs/deployment/ansible.md").read_text(encoding="utf-8")
         controller_lock = (ROOT / "deploy/ansible/controller.lock.yml").read_text(encoding="utf-8")
+        xtask = (ROOT / "xtask/src/main.rs").read_text(encoding="utf-8")
         self.assertIn("cargo xtask deploy --infra", docs)
         self.assertIn("ansible-rs", docs)
         self.assertNotIn("tools/ansible.py", docs)
         self.assertIn("approved_controller_ids: edge-router,wsl-a-controller", controller_lock)
+        self.assertIn("inventory_identity_hash(&inventory_root)", xtask)
 
     def test_deploy_starts_with_preflight(self) -> None:
         site = (ROOT / "deploy/ansible/playbooks/site.yml").read_text(encoding="utf-8")
