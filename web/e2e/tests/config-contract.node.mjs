@@ -7,13 +7,18 @@ import { buildReport, validateConfiguration } from '../../scripts/verify-config.
 test('role projects are uniquely derived from the authoritative definition', () => {
   const config = createPlaywrightConfig({ ci: true })
   assert.deepEqual(config.projects.map((project) => project.name), PROJECT_NAMES)
-  assert.equal(new Set(PROJECT_NAMES).size, 4)
+  assert.equal(new Set(PROJECT_NAMES).size, 6)
   assert.equal(PROJECT_NAMES.includes('researcher'), false)
   for (const name of ['teacher', 'student', 'platform-admin']) {
     const project = config.projects.find((candidate) => candidate.name === name)
     assert.deepEqual(project.dependencies, ['setup'])
     assert.equal(project.use.storageState, ROLE_PROJECTS_BY_NAME[name].storageState)
     assert.match(project.use.storageState, /^\.auth\/[a-z-]+\.json$/)
+  }
+  for (const name of ['visual-regression', 'a11y']) {
+    const project = config.projects.find((candidate) => candidate.name === name)
+    assert.equal(project.dependencies, undefined)
+    assert.equal(project.use?.storageState, undefined)
   }
   assert.equal(ROLE_PROJECTS_BY_NAME.student.aliases.includes('researcher'), false)
   assert.equal(ROLE_PROJECTS_BY_NAME.student.testMatch.test('researcher/example.spec.mjs'), false)

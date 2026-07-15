@@ -34,6 +34,20 @@ export const ROLE_PROJECTS = Object.freeze([
     testMatch: /platform-admin\/.*\.spec\.mjs$/,
     storageState: '.auth/platform-admin.json',
   }),
+  Object.freeze({
+    name: 'visual-regression',
+    actor: 'Visual regression evidence',
+    aliases: [],
+    testMatch: /tests\/.*\.visual\.spec\.mjs$/,
+    storageState: null,
+  }),
+  Object.freeze({
+    name: 'a11y',
+    actor: 'Accessibility scan evidence',
+    aliases: [],
+    testMatch: /tests\/.*\.a11y\.spec\.mjs$/,
+    storageState: null,
+  }),
 ])
 
 export const PROJECT_NAMES = Object.freeze(ROLE_PROJECTS.map((project) => project.name))

@@ -2,7 +2,9 @@
   <div class="role-layout">
     <header class="role-header">
       <div class="role-title-row">
-        <span class="role-emoji" aria-hidden="true">{{ icon }}</span>
+        <span class="role-icon" aria-hidden="true">
+          <SvgIcon :name="icon" size="lg" />
+        </span>
         <div>
           <h1 class="role-title">{{ title }}</h1>
           <p class="role-subtitle">{{ subtitle }}</p>
@@ -30,6 +32,7 @@
 
 <script setup lang="ts">
 import { RouterLink } from 'vue-router'
+import SvgIcon from '@/components/common/SvgIcon.vue'
 
 interface Tab {
   path: string
@@ -63,7 +66,7 @@ defineProps<Props>()
   gap: 16px;
 }
 
-.role-emoji {
+.role-icon {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -71,7 +74,7 @@ defineProps<Props>()
   height: 56px;
   border-radius: var(--md-sys-shape-large);
   background: var(--md-sys-color-primary-container);
-  font-size: 28px;
+  color: var(--md-sys-color-on-primary-container);
 }
 
 .role-title {
@@ -90,6 +93,12 @@ defineProps<Props>()
   align-items: center;
   gap: 8px;
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.role-tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .role-tab {

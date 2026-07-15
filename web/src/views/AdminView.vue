@@ -1,6 +1,6 @@
 <template>
   <RoleLayout
-    icon="⚙️"
+    icon="admin_panel_settings"
     title="管理员工作台"
     subtitle="资源审批、平台策略与审计日志"
     :tabs="tabs"
