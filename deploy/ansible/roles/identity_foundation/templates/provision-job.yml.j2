@@ -1,0 +1,55 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: identity-provision-{{ identity_run_suffix }}
+  namespace: {{ identity_namespace }}
+  labels: {labweaver.io/run-id: {{ identity_run_id }}, app.kubernetes.io/part-of: labweaver-identity}
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata: {labels: {labweaver.io/run-id: {{ identity_run_id }}, app.kubernetes.io/part-of: labweaver-identity}}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 1000, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: provision
+          image: {{ identity_lock.images.keycloak }}
+          command: [/bin/bash, -ec]
+          args:
+            - |
+              /opt/keycloak/bin/kcadm.sh config credentials --server "http://{{ identity_name }}-http:8080" --realm master --user "$ADMIN_USERNAME" --password "$ADMIN_PASSWORD"
+              client_id=$(/opt/keycloak/bin/kcadm.sh get clients -r "{{ identity_realm }}" -q clientId="{{ identity_workload_client_id }}" --fields id --format csv --noquotes)
+              if [ -z "$client_id" ]; then
+                /opt/keycloak/bin/kcadm.sh create clients -r "{{ identity_realm }}" -s clientId="{{ identity_workload_client_id }}" -s enabled=true -s publicClient=false -s serviceAccountsEnabled=true -s standardFlowEnabled=false -s directAccessGrantsEnabled=false -s fullScopeAllowed=false
+                client_id=$(/opt/keycloak/bin/kcadm.sh get clients -r "{{ identity_realm }}" -q clientId="{{ identity_workload_client_id }}" --fields id --format csv --noquotes)
+              fi
+              test -n "$client_id"
+              /opt/keycloak/bin/kcadm.sh update "clients/$client_id" -r "{{ identity_realm }}" \
+                -s enabled=true -s publicClient=false -s serviceAccountsEnabled=true \
+                -s standardFlowEnabled=false -s directAccessGrantsEnabled=false \
+                -s fullScopeAllowed=false -s secret="$CLIENT_SECRET"
+              mapper_id=""
+              while IFS=, read -r candidate_id candidate_name; do
+                if [ "$candidate_name" = "labweaver-workload-audience" ]; then
+                  mapper_id="$candidate_id"
+                fi
+              done < <(/opt/keycloak/bin/kcadm.sh get "clients/$client_id/protocol-mappers/models" -r "{{ identity_realm }}" --fields id,name --format csv --noquotes)
+              if [ -z "$mapper_id" ]; then
+                /opt/keycloak/bin/kcadm.sh create "clients/$client_id/protocol-mappers/models" -r "{{ identity_realm }}" \
+                  -s name=labweaver-workload-audience -s protocol=openid-connect \
+                  -s protocolMapper=oidc-audience-mapper \
+                  -s 'config."included.client.audience"="{{ identity_workload_audience }}"' \
+                  -s 'config."access.token.claim"=true'
+              fi
+          env:
+            - name: ADMIN_USERNAME
+              valueFrom: {secretKeyRef: {name: {{ identity_bootstrap_secret_name }}, key: username}}
+            - name: ADMIN_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ identity_bootstrap_secret_name }}, key: password}}
+            - name: CLIENT_SECRET
+              valueFrom: {secretKeyRef: {name: {{ identity_workload_secret_name }}, key: client-secret}}
+          resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {cpu: 500m, memory: 512Mi}}
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}

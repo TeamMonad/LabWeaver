@@ -3,10 +3,15 @@
 The only deployment controller entry points are `cargo xtask preflight --infra
 --env <environment>`, `cargo xtask deploy --infra --env <environment> --yes`,
 `cargo xtask verify --infra --env <environment> --yes`, and `cargo xtask backup
---infra --env <environment> --yes`. They run only on the approved Linux router
+--infra --env <environment> --yes`. Private Sigstore additionally uses
+`cargo xtask private-sigstore --infra --env <environment> --action <allowlisted-action> --yes`; its contract,
+private locators and unresolved E3 boundaries are documented in
+[`private-sigstore.md`](private-sigstore.md). They run only on the approved Linux router
 worktree through `ansible-rs`; Windows fails with a stable unsupported-platform
 diagnostic. The removed Python launcher is not a deployment fallback.
-The router invocation must export `LABWEAVER_SOURCE_COMMIT` with the verified
+The router invocation must export explicit lowercase `LABWEAVER_RUN_ID` and
+`LABWEAVER_TESTFLIGHT_RUN_ID` bindings; the controller never invents them.
+It must also export `LABWEAVER_SOURCE_COMMIT` with the verified
 bundle commit, `LABWEAVER_ANSIBLE_DEPENDENCY_ROOT` with the router controller
 directory containing the locked collections, and a root-owned
 `LABWEAVER_CONTROLLER_IDENTITY_FILE`. The locator must bind the current
@@ -38,6 +43,10 @@ The deployment controller needs Ansible and the collections in
 `deploy/ansible/requirements.yml`; it also needs the pinned Helm and Cilium CLI
 already available on the control-plane host. Their absence is a deliberate
 preflight failure, never an implicit version selection.
+The approved Ansible Python runtime must also contain exactly
+`kubernetes==34.1.0`. `xtask` resolves the Python interpreter beside the
+canonical `ansible-playbook` binary and verifies this package version before
+starting any playbook; it never installs Python dependencies automatically.
 Harbor also requires the verified local `harbor-1.19.1.tgz` archive declared by
 `harbor_chart_archive`; its SHA-256 and every Harbor/TestFlight image digest
 are locked in `deploy/versions.lock.yml`. A tag-only image, archive mismatch,
@@ -53,7 +62,7 @@ blocks reconciliation. TestFlight temporary resources in `labweaver-demo` are
 named and selected by its run ID, so cleanup cannot target another run.
 
 `ansible-lint`, syntax checks, encrypted fictional-Vault loading, and storage
-safety fixtures run on Linux CI. The approved router worktree additionally
+safety fixtures run on Linux CI. The approved router or A-owned WSL controller worktree additionally
 provides the real deploy, backup, isolated VM/storage/Gateway/Cilium probes,
 schema-validated TestFlight report, and second idempotent replay. The report
 remains blocked until OIDC, Harbor policy/recovery, and Release Gate evidence

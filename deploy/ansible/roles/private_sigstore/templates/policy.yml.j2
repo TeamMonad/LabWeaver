@@ -1,0 +1,56 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny, namespace: {{ private_sigstore_namespace }}}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: sigstore-internal-only, namespace: {{ private_sigstore_namespace }}}
+spec:
+  # Bootstrap Jobs from the upstream chart do not carry the release label.
+  # The namespace is dedicated, so apply the same restricted allowlist to all
+  # Pods; default-deny remains the enclosing policy.
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ private_sigstore_namespace }}}}
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ private_sigstore_build_namespace }}}}
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+  egress:
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ private_sigstore_namespace }}}}
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    - to:
+        - ipBlock: {cidr: {{ private_sigstore_oidc_gateway_vip }}/32}
+      ports: [{protocol: TCP, port: 443}]
+    - to:
+        - ipBlock: {cidr: {{ private_sigstore_kubernetes_api_cluster_ip }}/32}
+      ports: [{protocol: TCP, port: 443}]
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: sigstore-gateway-ingress, namespace: {{ private_sigstore_namespace }}}
+spec:
+  endpointSelector: {}
+  ingress:
+    - fromEntities: [ingress]
+  egress:
+    # Kubernetes NetworkPolicy above remains the least-privilege L3/L4 authority.
+    # Cilium must also admit cluster endpoints because a Cilium egress section is
+    # independently enforcing and would otherwise shadow the DNS/internal rules.
+    - toEntities: [cluster, kube-apiserver]
+    - toCIDR: [{{ private_sigstore_oidc_gateway_vip }}/32]
+      toPorts:
+        - ports: [{port: '443', protocol: TCP}]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: private-sigstore, namespace: {{ private_sigstore_namespace }}}
+spec:
+  minAvailable: 1
+  selector: {matchLabels: {app.kubernetes.io/instance: {{ private_sigstore_release_name }}}}

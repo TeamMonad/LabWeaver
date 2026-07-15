@@ -1,0 +1,54 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: private-sigstore
+  namespace: {{ private_sigstore_namespace }}
+spec:
+  gatewayClassName: cilium
+  infrastructure:
+    annotations:
+      metallb.io/loadBalancerIPs: {{ private_sigstore_gateway_vip }}
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: {{ private_sigstore_internal_dns }}
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: {{ private_sigstore_tls_secret_name }}
+      allowedRoutes: {namespaces: {from: Same}}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: fulcio, namespace: {{ private_sigstore_namespace }}}
+spec:
+  parentRefs: [{name: private-sigstore}]
+  hostnames: [{{ private_sigstore_internal_dns }}]
+  rules:
+    - matches:
+        - {path: {type: PathPrefix, value: /api/v1/signingCert}}
+        - {path: {type: PathPrefix, value: /api/v2/signingCert}}
+        - {path: {type: PathPrefix, value: /api/v2/trustBundle}}
+      backendRefs: [{name: fulcio-server, port: 80}]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: rekor, namespace: {{ private_sigstore_namespace }}}
+spec:
+  parentRefs: [{name: private-sigstore}]
+  hostnames: [{{ private_sigstore_internal_dns }}]
+  rules:
+    - matches: [{path: {type: PathPrefix, value: /api/v1/log}}]
+      backendRefs: [{name: rekor-server, port: 80}]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: tuf, namespace: {{ private_sigstore_namespace }}}
+spec:
+  parentRefs: [{name: private-sigstore}]
+  hostnames: [{{ private_sigstore_internal_dns }}]
+  rules:
+    - matches: [{path: {type: PathPrefix, value: /root.json}}]
+      backendRefs: [{name: tuf-server, port: 80}]

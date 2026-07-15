@@ -1,0 +1,28 @@
+{
+  "schema_version": "private-sigstore-lifecycle-report.v1",
+  "action": "cleanup",
+  "status": "passed",
+  "run_id": {{ sigstore_testflight_run_id | to_json }},
+  "commit_sha": {{ sigstore_lifecycle_commit_sha | to_json }},
+  "controller_id": {{ sigstore_lifecycle_controller_id | to_json }},
+  "cluster_uid": {{ sigstore_lifecycle_cluster_uid.stdout | to_json }},
+  "inventory_sha256": {{ sigstore_lifecycle_inventory_hash | to_json }},
+  "deployment_manifest_sha256": {{ sigstore_lifecycle_manifest_hash | to_json }},
+  "component_lock_sha256": {{ sigstore_lifecycle_component_lock_hash | to_json }},
+  "chart_archive_sha256": {{ sigstore_lifecycle_lock.scaffold_chart_archive_sha256 | to_json }},
+  "image_digests": {
+{% for name, image in sigstore_lifecycle_lock.images.items() %}
+    {{ name | to_json }}: {{ (image.split('@') | last) | to_json }}{{ ',' if not loop.last else '' }}
+{% endfor %}
+  },
+  "trust_bundle_sha256": {{ private_sigstore_lifecycle_trust_bundle_sha256 | to_json }},
+  "tuf_root_version": {{ private_sigstore_lifecycle_tuf_root_version | int }},
+  "tuf_root_sha256": {{ private_sigstore_lifecycle_expected_tuf_root_sha256 | to_json }},
+  "workload_identity_policy_sha256": {{ private_sigstore_lifecycle_workload_identity_policy_sha256 | to_json }},
+  "backup": null,
+  "checks": [{"name": "cleanup", "status": "passed", "diagnosticCode": null}],
+  "blocked_items": [],
+  "unblock_owner": null,
+  "exit_condition": null,
+  "generated_at": {{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%S.000Z') | to_json }}
+}

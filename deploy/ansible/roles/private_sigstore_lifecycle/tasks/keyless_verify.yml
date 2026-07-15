@@ -1,0 +1,59 @@
+---
+- name: Verify the locked Cosign binary identity
+  ansible.builtin.stat:
+    path: "{{ private_sigstore_lifecycle_cosign_path }}"
+    checksum_algorithm: sha256
+  register: sigstore_cosign_binary
+
+- name: Reject a missing or changed Cosign binary
+  ansible.builtin.assert:
+    that:
+      - sigstore_cosign_binary.stat.exists
+      - ('sha256:' ~ sigstore_cosign_binary.stat.checksum) == sigstore_lifecycle_lock.cosign_linux_amd64_sha256
+    fail_msg: SIGSTORE_COSIGN_IDENTITY_INVALID
+
+- name: Install the reviewed keyless TestFlight probe
+  ansible.builtin.copy:
+    src: keyless_verify.sh
+    dest: /var/tmp/labweaver-private-sigstore-keyless-verify
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Execute the Keycloak Fulcio CT and Rekor identity chain
+  ansible.builtin.command:
+    argv: [/var/tmp/labweaver-private-sigstore-keyless-verify]
+  environment:
+    KUBECONFIG: "{{ private_sigstore_lifecycle_kubeconfig_path }}"
+    KUBECTL: "{{ private_sigstore_lifecycle_kubectl_path }}"
+    COSIGN: "{{ private_sigstore_lifecycle_cosign_path }}"
+    SIGSTORE_NAMESPACE: "{{ private_sigstore_lifecycle_namespace }}"
+    IDENTITY_NAMESPACE: "{{ private_sigstore_lifecycle_identity_namespace }}"
+    IDENTITY_CA_SECRET: "{{ private_sigstore_lifecycle_identity_ca_secret }}"
+    IDENTITY_CLIENT_SECRET: "{{ private_sigstore_lifecycle_identity_client_secret }}"
+    IDENTITY_CLIENT_ID: "{{ private_sigstore_lifecycle_identity_client_id }}"
+    OIDC_ISSUER: "{{ private_sigstore_lifecycle_oidc_issuer }}"
+    OIDC_VIP: "{{ private_sigstore_lifecycle_oidc_vip }}"
+    SIGSTORE_HOST: "{{ private_sigstore_lifecycle_sigstore_host }}"
+    SIGSTORE_VIP: "{{ private_sigstore_lifecycle_sigstore_vip }}"
+    EXPECTED_SUBJECT: "{{ private_sigstore_lifecycle_expected_subject }}"
+  register: sigstore_keyless_probe
+  changed_when: false
+  no_log: true
+
+- name: Reject incomplete keyless TestFlight evidence
+  ansible.builtin.assert:
+    that:
+      - (sigstore_keyless_probe.stdout | from_json).schema_version == 'private-sigstore-keyless-check.v1'
+      - (sigstore_keyless_probe.stdout | from_json).status == 'passed'
+      - (sigstore_keyless_probe.stdout | from_json).checks == ['oidc', 'fulcio', 'ct-sct', 'rekor-inclusion', 'bundle-verification']
+    fail_msg: SIGSTORE_KEYLESS_TESTFLIGHT_FAILED
+
+- name: Publish identity-bound Private Sigstore TestFlight report
+  ansible.builtin.template:
+    src: testflight-report.json.j2
+    dest: "{{ private_sigstore_lifecycle_report_directory }}/PrivateSigstoreTestFlightReport-{{ sigstore_testflight_run_id }}.json"
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true

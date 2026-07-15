@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Exact workload identity accepted by the private Fulcio deployment.",
+  "properties": {
+    "allowedSubjects": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "audience": {
+      "type": "string"
+    },
+    "certificateIdentityTemplate": {
+      "type": "string"
+    },
+    "clientId": {
+      "type": "string"
+    },
+    "clockSkewMilliseconds": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "issuer": {
+      "type": "string"
+    },
+    "replayCacheTtlMilliseconds": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "requiredClaims": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "schemaVersion": {
+      "type": "string"
+    },
+    "tokenLifetimeMilliseconds": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "issuer",
+    "audience",
+    "clientId",
+    "allowedSubjects",
+    "requiredClaims",
+    "certificateIdentityTemplate",
+    "tokenLifetimeMilliseconds",
+    "clockSkewMilliseconds",
+    "replayCacheTtlMilliseconds"
+  ],
+  "title": "WorkloadIdentityPolicy",
+  "type": "object"
+}

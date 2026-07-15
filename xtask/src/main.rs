@@ -32,6 +32,10 @@ enum Command {
     Deploy(EnvironmentArgs),
     Verify(EnvironmentArgs),
     Backup(EnvironmentArgs),
+    /// Run an allowlisted Private Sigstore lifecycle action.
+    PrivateSigstore(PrivateSigstoreArgs),
+    /// Reconcile or verify the private Keycloak identity foundation.
+    IdentityFoundation(IdentityFoundationArgs),
     Upgrade(UpgradeArgs),
     Rollback(RollbackArgs),
     Restore(RestoreArgs),
@@ -75,6 +79,62 @@ struct EnvironmentArgs {
     infra: bool,
     #[arg(long)]
     yes: bool,
+}
+
+#[derive(Debug, Args)]
+struct PrivateSigstoreArgs {
+    #[command(flatten)]
+    environment: EnvironmentArgs,
+    #[arg(long, value_enum)]
+    action: PrivateSigstoreAction,
+}
+
+#[derive(Debug, Args)]
+struct IdentityFoundationArgs {
+    #[command(flatten)]
+    environment: EnvironmentArgs,
+    #[arg(long, value_enum)]
+    action: IdentityFoundationAction,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum IdentityFoundationAction {
+    Deploy,
+    Verify,
+}
+
+impl IdentityFoundationAction {
+    const fn playbook(self) -> &'static str {
+        match self {
+            Self::Deploy => "91-identity-foundation.yml",
+            Self::Verify => "92-identity-foundation-verify.yml",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum PrivateSigstoreAction {
+    Deploy,
+    Backup,
+    Restore,
+    Rotate,
+    Verify,
+    Cleanup,
+    DisasterRecovery,
+}
+
+impl PrivateSigstoreAction {
+    const fn playbook(self) -> &'static str {
+        match self {
+            Self::Deploy => "96-private-sigstore.yml",
+            Self::Backup => "97-private-sigstore-backup.yml",
+            Self::Restore => "98-private-sigstore-restore.yml",
+            Self::Rotate => "99-private-sigstore-rotate.yml",
+            Self::Verify => "100-private-sigstore-verify.yml",
+            Self::Cleanup => "101-private-sigstore-cleanup.yml",
+            Self::DisasterRecovery => "102-private-sigstore-disaster-recovery.yml",
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -156,6 +216,9 @@ enum AppError {
     ContractDrift {
         path: String,
     },
+    InvalidArgument {
+        role: &'static str,
+    },
     #[cfg(not(target_os = "linux"))]
     UnsupportedPlatform {
         command: &'static str,
@@ -170,6 +233,7 @@ impl AppError {
             Self::ConfirmationRequired { .. } => "XTASK_CONFIRMATION_REQUIRED",
             Self::Io { .. } => "XTASK_IO_FAILED",
             Self::ContractDrift { .. } => "LW_CONTRACT_DRIFT",
+            Self::InvalidArgument { .. } => "XTASK_INVALID_ARGUMENT",
             #[cfg(not(target_os = "linux"))]
             Self::UnsupportedPlatform { .. } => "XTASK_INFRA_UNSUPPORTED_PLATFORM",
         }
@@ -201,6 +265,12 @@ impl Display for AppError {
             Self::Io { role, detail } => write!(formatter, "{role} failed: {detail}"),
             Self::ContractDrift { path } => {
                 write!(formatter, "generated contract differs from {path}")
+            }
+            Self::InvalidArgument { role } => {
+                write!(
+                    formatter,
+                    "{role} must use a lowercase allowlisted identifier"
+                )
             }
             #[cfg(not(target_os = "linux"))]
             Self::UnsupportedPlatform { command } => write!(
@@ -266,6 +336,8 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::Deploy(args) => deploy(&args),
         Command::Verify(args) => verify(&args),
         Command::Backup(args) => backup(&args),
+        Command::PrivateSigstore(args) => private_sigstore(&args),
+        Command::IdentityFoundation(args) => identity_foundation(&args),
         Command::Upgrade(args) => destructive_not_implemented("upgrade", args.yes),
         Command::Rollback(args) => destructive_not_implemented("rollback", args.yes),
         Command::Restore(args) => destructive_not_implemented("restore", args.yes),
@@ -372,6 +444,7 @@ fn deploy(args: &EnvironmentArgs) -> Result<(), AppError> {
     if !args.infra {
         return not_implemented(format!("deploy --env {} (product deployment)", args.env));
     }
+    validate_environment_name(&args.env)?;
     run_infrastructure(&args.env, "95-harbor.yml", "deploy --infra")
 }
 
@@ -396,12 +469,58 @@ fn backup(args: &EnvironmentArgs) -> Result<(), AppError> {
     run_infrastructure(&args.env, "85-backup.yml", "backup --infra")
 }
 
+fn private_sigstore(args: &PrivateSigstoreArgs) -> Result<(), AppError> {
+    if !args.environment.yes {
+        return Err(AppError::ConfirmationRequired {
+            command: "private-sigstore",
+        });
+    }
+    require_infrastructure(&args.environment, "private-sigstore --infra")?;
+    run_infrastructure(
+        &args.environment.env,
+        args.action.playbook(),
+        "private-sigstore --infra",
+    )
+}
+
+fn identity_foundation(args: &IdentityFoundationArgs) -> Result<(), AppError> {
+    if !args.environment.yes {
+        return Err(AppError::ConfirmationRequired {
+            command: "identity-foundation",
+        });
+    }
+    require_infrastructure(&args.environment, "identity-foundation --infra")?;
+    run_infrastructure(
+        &args.environment.env,
+        args.action.playbook(),
+        "identity-foundation --infra",
+    )
+}
+
 fn require_infrastructure(args: &EnvironmentArgs, command: &'static str) -> Result<(), AppError> {
-    if args.infra {
+    if !args.infra {
+        return Err(AppError::NotImplemented {
+            command: format!("{command} (product path)"),
+        });
+    }
+    validate_environment_name(&args.env)
+}
+
+fn validate_environment_name(environment: &str) -> Result<(), AppError> {
+    let valid = !environment.is_empty()
+        && environment.len() <= 32
+        && environment
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_lowercase)
+        && environment.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        });
+    if valid {
         Ok(())
     } else {
-        Err(AppError::NotImplemented {
-            command: format!("{command} (product path)"),
+        Err(AppError::InvalidArgument {
+            role: "infrastructure environment",
         })
     }
 }
@@ -426,10 +545,17 @@ fn run_infrastructure(
         inventory_hash,
         component_lock_hash,
         harbor_data_backup_locator,
+        sigstore_backup_locator,
+        sigstore_secret_locator,
+        sigstore_tuf_root_locator,
+        deployment_manifest_hash,
+        identity_secret_locator,
     } = InfrastructureInputs::load(environment, playbook_name)?;
-    let run_id = infrastructure_run_id("infra", "infrastructure run identity")?;
-    let testflight_run_id =
-        infrastructure_run_id("testflight", "infrastructure TestFlight identity")?;
+    let run_id = required_run_id("LABWEAVER_RUN_ID", "infrastructure run identity")?;
+    let testflight_run_id = required_run_id(
+        "LABWEAVER_TESTFLIGHT_RUN_ID",
+        "infrastructure TestFlight identity",
+    )?;
     let mut runner = Playbook::default();
     runner
         .set_system_envs()
@@ -451,6 +577,17 @@ fn run_infrastructure(
             harbor_data_backup_locator,
         )
         .add_env("LABWEAVER_TESTFLIGHT_RUN_ID", testflight_run_id)
+        .add_env("LABWEAVER_SIGSTORE_BACKUP_LOCATOR", sigstore_backup_locator)
+        .add_env("LABWEAVER_SIGSTORE_SECRET_LOCATOR", sigstore_secret_locator)
+        .add_env(
+            "LABWEAVER_SIGSTORE_TUF_ROOT_LOCATOR",
+            sigstore_tuf_root_locator,
+        )
+        .add_env(
+            "LABWEAVER_DEPLOYMENT_MANIFEST_HASH",
+            deployment_manifest_hash,
+        )
+        .add_env("LABWEAVER_IDENTITY_SECRET_LOCATOR", identity_secret_locator)
         .set_inventory(&inventory);
     // ansible-rs 1.1.0 appends configured arguments twice in `run`; all
     // controller identity and vault inputs therefore travel through the
@@ -459,7 +596,7 @@ fn run_infrastructure(
         .run(Play::from_file(playbook))
         .map(|_| ())
         .map_err(|_| AppError::ExternalCommand {
-            role: "harbor infrastructure playbook",
+            role: "allowlisted infrastructure playbook",
             code: None,
             detail: Some(
                 "ansible-rs returned a non-zero result; inspect the controller event log".into(),
@@ -480,6 +617,11 @@ struct InfrastructureInputs {
     inventory_hash: String,
     component_lock_hash: String,
     harbor_data_backup_locator: String,
+    sigstore_backup_locator: String,
+    sigstore_secret_locator: String,
+    sigstore_tuf_root_locator: String,
+    deployment_manifest_hash: String,
+    identity_secret_locator: String,
 }
 
 #[cfg(target_os = "linux")]
@@ -501,6 +643,12 @@ impl InfrastructureInputs {
         let controller_lock = controller_root.join("controller.lock.yml");
         require_infrastructure_file("approved infrastructure controller lock", &controller_lock)?;
         require_ansible_version(&controller_lock, ansible_binary)?;
+        require_python_module_version(
+            &controller_lock,
+            ansible_binary,
+            "kubernetes",
+            "python_kubernetes_version",
+        )?;
 
         let shared_controller_root = infrastructure_dependency_root()?;
         let collections_path = resolve_infrastructure_directory(
@@ -514,6 +662,14 @@ impl InfrastructureInputs {
             "roles",
         )?;
 
+        let PlaybookLocators {
+            sigstore_backup_locator,
+            sigstore_secret_locator,
+            sigstore_tuf_root_locator,
+            deployment_manifest_hash,
+            identity_secret_locator,
+        } = PlaybookLocators::load(playbook_name)?;
+
         Ok(Self {
             inventory: infrastructure_path(&inventory),
             vault_password: infrastructure_path(&vault_password),
@@ -523,12 +679,118 @@ impl InfrastructureInputs {
             roles_path: infrastructure_path(&roles_path),
             commit_sha: infrastructure_commit_sha()?,
             controller_id: approved_controller_identity(&controller_lock)?,
-            inventory_hash: file_sha256(&inventory)?,
+            inventory_hash: inventory_identity_hash(&inventory_root)?,
             component_lock_hash: file_sha256(&root.join("deploy/versions.lock.yml"))?,
             harbor_data_backup_locator: std::env::var("LABWEAVER_HARBOR_DATA_BACKUP_LOCATOR")
                 .unwrap_or_default(),
+            sigstore_backup_locator,
+            sigstore_secret_locator,
+            sigstore_tuf_root_locator,
+            deployment_manifest_hash,
+            identity_secret_locator,
         })
     }
+}
+
+#[cfg(target_os = "linux")]
+struct PlaybookLocators {
+    sigstore_backup_locator: String,
+    sigstore_secret_locator: String,
+    sigstore_tuf_root_locator: String,
+    deployment_manifest_hash: String,
+    identity_secret_locator: String,
+}
+
+#[cfg(target_os = "linux")]
+impl PlaybookLocators {
+    fn load(playbook_name: &str) -> Result<Self, AppError> {
+        let private_sigstore = matches!(
+            playbook_name,
+            "96-private-sigstore.yml"
+                | "97-private-sigstore-backup.yml"
+                | "98-private-sigstore-restore.yml"
+                | "99-private-sigstore-rotate.yml"
+                | "100-private-sigstore-verify.yml"
+                | "101-private-sigstore-cleanup.yml"
+                | "102-private-sigstore-disaster-recovery.yml"
+        );
+        let identity_foundation = matches!(
+            playbook_name,
+            "91-identity-foundation.yml" | "92-identity-foundation-verify.yml"
+        );
+        let deployment_manifest_hash = deployment_manifest_hash(private_sigstore)?;
+        Ok(Self {
+            sigstore_backup_locator: locator(
+                "LABWEAVER_SIGSTORE_BACKUP_LOCATOR",
+                "Private Sigstore backup locator",
+                private_sigstore,
+            )?,
+            sigstore_secret_locator: locator(
+                "LABWEAVER_SIGSTORE_SECRET_LOCATOR",
+                "Private Sigstore secret locator",
+                private_sigstore,
+            )?,
+            sigstore_tuf_root_locator: locator(
+                "LABWEAVER_SIGSTORE_TUF_ROOT_LOCATOR",
+                "Private Sigstore TUF root locator",
+                private_sigstore,
+            )?,
+            deployment_manifest_hash,
+            identity_secret_locator: locator(
+                "LABWEAVER_IDENTITY_SECRET_LOCATOR",
+                "identity-foundation secret locator",
+                identity_foundation,
+            )?,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn locator(variable: &str, role: &'static str, required: bool) -> Result<String, AppError> {
+    if required {
+        required_environment_value(variable, role)
+    } else {
+        Ok(std::env::var(variable).unwrap_or_default())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn deployment_manifest_hash(required: bool) -> Result<String, AppError> {
+    let value = locator(
+        "LABWEAVER_DEPLOYMENT_MANIFEST_HASH",
+        "deployment manifest identity",
+        required,
+    )?;
+    if !required || is_sha256_identity(&value) {
+        return Ok(value);
+    }
+    Err(AppError::ExternalCommand {
+        role: "deployment manifest identity",
+        code: None,
+        detail: Some("LABWEAVER_DEPLOYMENT_MANIFEST_HASH must be sha256:<64 lowercase hex>".into()),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn required_environment_value(variable: &str, role: &'static str) -> Result<String, AppError> {
+    std::env::var(variable)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| AppError::ExternalCommand {
+            role,
+            code: None,
+            detail: Some(format!("{variable} is required")),
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn is_sha256_identity(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -632,6 +894,53 @@ fn file_sha256(path: &std::path::Path) -> Result<String, AppError> {
 }
 
 #[cfg(target_os = "linux")]
+fn inventory_identity_hash(root: &std::path::Path) -> Result<String, AppError> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).map_err(|error| AppError::ExternalCommand {
+            role: "infrastructure inventory identity",
+            code: None,
+            detail: Some(error.to_string()),
+        })? {
+            let path = entry
+                .map_err(|error| AppError::ExternalCommand {
+                    role: "infrastructure inventory identity",
+                    code: None,
+                    detail: Some(error.to_string()),
+                })?
+                .path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.file_name().and_then(|name| name.to_str()) != Some(".vault-password") {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    let mut hasher = Sha256::new();
+    for path in files {
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|error| AppError::ExternalCommand {
+                role: "infrastructure inventory identity",
+                code: None,
+                detail: Some(error.to_string()),
+            })?;
+        let data = std::fs::read(&path).map_err(|error| AppError::ExternalCommand {
+            role: "infrastructure inventory identity",
+            code: None,
+            detail: Some(error.to_string()),
+        })?;
+        hasher.update(relative.to_string_lossy().as_bytes());
+        hasher.update([0]);
+        hasher.update((data.len() as u64).to_be_bytes());
+        hasher.update(data);
+    }
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+#[cfg(target_os = "linux")]
 fn approved_controller_identity(lock_path: &std::path::Path) -> Result<String, AppError> {
     use std::os::unix::fs::MetadataExt;
 
@@ -641,7 +950,7 @@ fn approved_controller_identity(lock_path: &std::path::Path) -> Result<String, A
             code: None,
             detail: Some(error.to_string()),
         })?,
-        "approved_controller_id",
+        "approved_controller_ids",
     )?;
     let locator = std::env::var("LABWEAVER_CONTROLLER_IDENTITY_FILE").map_err(|_| {
         AppError::ExternalCommand {
@@ -677,11 +986,14 @@ fn approved_controller_identity(lock_path: &std::path::Path) -> Result<String, A
             code: None,
             detail: Some(error.to_string()),
         })?;
-    if controller_id != approved || declared_machine_id != actual_machine_id.trim() {
+    let approved_ids = approved.split(',').map(str::trim).collect::<Vec<_>>();
+    if !approved_ids.contains(&controller_id.as_str())
+        || declared_machine_id != actual_machine_id.trim()
+    {
         return Err(AppError::ExternalCommand {
             role: "approved router controller identity",
             code: None,
-            detail: Some("controller identity does not match the approved router lock".into()),
+            detail: Some("controller identity does not match the approved controller lock".into()),
         });
     }
     Ok(controller_id)
@@ -718,6 +1030,53 @@ fn require_ansible_version(
 }
 
 #[cfg(target_os = "linux")]
+fn require_python_module_version(
+    lock_path: &std::path::Path,
+    ansible_binary: &std::path::Path,
+    module: &'static str,
+    lock_field: &str,
+) -> Result<(), AppError> {
+    let lock = std::fs::read_to_string(lock_path).map_err(|error| AppError::ExternalCommand {
+        role: "approved infrastructure controller lock",
+        code: None,
+        detail: Some(error.to_string()),
+    })?;
+    let expected = controller_identity_field(&lock, lock_field)?;
+    let canonical_ansible =
+        std::fs::canonicalize(ansible_binary).map_err(|error| AppError::ExternalCommand {
+            role: "approved Ansible Python runtime",
+            code: None,
+            detail: Some(error.to_string()),
+        })?;
+    let python = canonical_ansible
+        .parent()
+        .ok_or_else(|| AppError::ExternalCommand {
+            role: "approved Ansible Python runtime",
+            code: None,
+            detail: Some("ansible-playbook has no parent runtime directory".into()),
+        })?
+        .join("python");
+    require_infrastructure_file("approved Ansible Python runtime", &python)?;
+    let code = format!("import importlib.metadata; print(importlib.metadata.version({module:?}))");
+    let output = ProcessCommand::new(python)
+        .args(["-c", &code])
+        .output()
+        .map_err(|error| AppError::ExternalCommand {
+            role: "approved Ansible Python dependency",
+            code: None,
+            detail: Some(error.to_string()),
+        })?;
+    if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == expected {
+        return Ok(());
+    }
+    Err(AppError::ExternalCommand {
+        role: "approved Ansible Python dependency",
+        code: output.status.code(),
+        detail: Some(format!("expected Python module {module} {expected}")),
+    })
+}
+
+#[cfg(target_os = "linux")]
 fn controller_identity_field(content: &str, key: &str) -> Result<String, AppError> {
     content
         .lines()
@@ -733,16 +1092,28 @@ fn controller_identity_field(content: &str, key: &str) -> Result<String, AppErro
 }
 
 #[cfg(target_os = "linux")]
-fn infrastructure_run_id(prefix: &str, role: &'static str) -> Result<String, AppError> {
-    let seconds = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| AppError::ExternalCommand {
+fn required_run_id(variable: &str, role: &'static str) -> Result<String, AppError> {
+    let value = std::env::var(variable).map_err(|_| AppError::ExternalCommand {
+        role,
+        code: None,
+        detail: Some(format!("{variable} is required")),
+    })?;
+    let valid = (8..=96).contains(&value.len())
+        && value.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    if valid {
+        Ok(value)
+    } else {
+        Err(AppError::ExternalCommand {
             role,
             code: None,
-            detail: Some(error.to_string()),
-        })?
-        .as_secs();
-    Ok(format!("{prefix}-{seconds}-{}", std::process::id()))
+            detail: Some(format!(
+                "{variable} must be an explicit lowercase run identifier"
+            )),
+        })
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -789,7 +1160,32 @@ fn not_implemented(command: impl Into<String>) -> Result<(), AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{EnvironmentArgs, deploy};
+    use super::{
+        EnvironmentArgs, IdentityFoundationAction, IdentityFoundationArgs, PrivateSigstoreAction,
+        PrivateSigstoreArgs, deploy, identity_foundation, private_sigstore,
+    };
+
+    fn sigstore_args(env: &str, infra: bool, yes: bool) -> PrivateSigstoreArgs {
+        PrivateSigstoreArgs {
+            environment: EnvironmentArgs {
+                env: env.into(),
+                infra,
+                yes,
+            },
+            action: PrivateSigstoreAction::Deploy,
+        }
+    }
+
+    fn identity_args(env: &str, infra: bool, yes: bool) -> IdentityFoundationArgs {
+        IdentityFoundationArgs {
+            environment: EnvironmentArgs {
+                env: env.into(),
+                infra,
+                yes,
+            },
+            action: IdentityFoundationAction::Deploy,
+        }
+    }
 
     #[test]
     fn infrastructure_deploy_requires_explicit_confirmation() -> Result<(), String> {
@@ -814,8 +1210,8 @@ mod tests {
     #[test]
     fn controller_identity_field_rejects_an_unapproved_controller() -> Result<(), String> {
         let locked = super::controller_identity_field(
-            "approved_controller_id: edge-router\n",
-            "approved_controller_id",
+            "approved_controller_ids: edge-router,wsl-a-controller\n",
+            "approved_controller_ids",
         )
         .map_err(|error| error.to_string())?;
         let presented = super::controller_identity_field(
@@ -850,6 +1246,35 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn private_sigstore_requires_confirmation_and_infra_boundary() -> Result<(), String> {
+        let Err(unconfirmed) = private_sigstore(&sigstore_args("dev", true, false)) else {
+            return Err("Private Sigstore deployment without --yes must fail".into());
+        };
+        if unconfirmed.diagnostic_code() != "XTASK_CONFIRMATION_REQUIRED" {
+            return Err("unexpected Private Sigstore confirmation diagnostic".into());
+        }
+
+        let Err(product_path) = private_sigstore(&sigstore_args("dev", false, true)) else {
+            return Err("Private Sigstore must not run through the product path".into());
+        };
+        if product_path.diagnostic_code() != "XTASK_NOT_IMPLEMENTED" {
+            return Err("unexpected Private Sigstore product-path diagnostic".into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn private_sigstore_rejects_path_traversal_before_platform_dispatch() -> Result<(), String> {
+        let Err(error) = private_sigstore(&sigstore_args("../../private", true, true)) else {
+            return Err("an environment path traversal must fail".into());
+        };
+        if error.diagnostic_code() != "XTASK_INVALID_ARGUMENT" {
+            return Err("unexpected environment traversal diagnostic".into());
+        }
+        Ok(())
+    }
+
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn infra_deploy_has_a_stable_non_linux_diagnostic() -> Result<(), String> {
@@ -864,6 +1289,69 @@ mod tests {
         if error.diagnostic_code() != "XTASK_INFRA_UNSUPPORTED_PLATFORM" {
             return Err("unexpected non-Linux diagnostic".into());
         }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn private_sigstore_has_a_stable_non_linux_diagnostic() -> Result<(), String> {
+        let Err(error) = private_sigstore(&sigstore_args("dev", true, true)) else {
+            return Err("non-Linux Private Sigstore deployment must fail".into());
+        };
+        if error.diagnostic_code() != "XTASK_INFRA_UNSUPPORTED_PLATFORM" {
+            return Err("unexpected Private Sigstore non-Linux diagnostic".into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn private_sigstore_actions_are_fixed_playbooks() {
+        let mappings = [
+            (PrivateSigstoreAction::Deploy, "96-private-sigstore.yml"),
+            (
+                PrivateSigstoreAction::Backup,
+                "97-private-sigstore-backup.yml",
+            ),
+            (
+                PrivateSigstoreAction::Restore,
+                "98-private-sigstore-restore.yml",
+            ),
+            (
+                PrivateSigstoreAction::Rotate,
+                "99-private-sigstore-rotate.yml",
+            ),
+            (
+                PrivateSigstoreAction::Verify,
+                "100-private-sigstore-verify.yml",
+            ),
+            (
+                PrivateSigstoreAction::Cleanup,
+                "101-private-sigstore-cleanup.yml",
+            ),
+            (
+                PrivateSigstoreAction::DisasterRecovery,
+                "102-private-sigstore-disaster-recovery.yml",
+            ),
+        ];
+        for (action, expected) in mappings {
+            assert_eq!(action.playbook(), expected);
+        }
+    }
+
+    #[test]
+    fn identity_foundation_requires_confirmation_and_fixed_playbooks() -> Result<(), String> {
+        let Err(error) = identity_foundation(&identity_args("dev", true, false)) else {
+            return Err("identity-foundation without --yes must fail".into());
+        };
+        assert_eq!(error.diagnostic_code(), "XTASK_CONFIRMATION_REQUIRED");
+        assert_eq!(
+            IdentityFoundationAction::Deploy.playbook(),
+            "91-identity-foundation.yml"
+        );
+        assert_eq!(
+            IdentityFoundationAction::Verify.playbook(),
+            "92-identity-foundation-verify.yml"
+        );
         Ok(())
     }
 }
