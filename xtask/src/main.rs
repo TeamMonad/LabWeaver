@@ -620,12 +620,6 @@ impl InfrastructureInputs {
         let controller_lock = controller_root.join("controller.lock.yml");
         require_infrastructure_file("approved infrastructure controller lock", &controller_lock)?;
         require_ansible_version(&controller_lock, ansible_binary)?;
-        require_python_module_version(
-            &controller_lock,
-            ansible_binary,
-            "kubernetes",
-            "python_kubernetes_version",
-        )?;
 
         let shared_controller_root = infrastructure_dependency_root()?;
         let collections_path = resolve_infrastructure_directory(
@@ -639,25 +633,13 @@ impl InfrastructureInputs {
             "roles",
         )?;
 
-        let private_sigstore = is_private_sigstore_playbook(playbook_name);
-        let identity_foundation = matches!(
-            playbook_name,
-            "91-identity-foundation.yml" | "92-identity-foundation-verify.yml"
-        );
-        let (
+        let PlaybookLocators {
             sigstore_backup_locator,
             sigstore_secret_locator,
             sigstore_tuf_root_locator,
             deployment_manifest_hash,
-        ) = private_sigstore_inputs(private_sigstore)?;
-        let identity_secret_locator = if identity_foundation {
-            required_environment_value(
-                "LABWEAVER_IDENTITY_SECRET_LOCATOR",
-                "identity-foundation secret locator",
-            )?
-        } else {
-            std::env::var("LABWEAVER_IDENTITY_SECRET_LOCATOR").unwrap_or_default()
-        };
+            identity_secret_locator,
+        } = PlaybookLocators::load(playbook_name)?;
 
         Ok(Self {
             inventory: infrastructure_path(&inventory),
@@ -682,54 +664,82 @@ impl InfrastructureInputs {
 }
 
 #[cfg(target_os = "linux")]
-fn is_private_sigstore_playbook(playbook_name: &str) -> bool {
-    matches!(
-        playbook_name,
-        "96-private-sigstore.yml"
-            | "97-private-sigstore-backup.yml"
-            | "98-private-sigstore-restore.yml"
-            | "99-private-sigstore-rotate.yml"
-            | "100-private-sigstore-verify.yml"
-            | "101-private-sigstore-cleanup.yml"
-            | "102-private-sigstore-disaster-recovery.yml"
-    )
+struct PlaybookLocators {
+    sigstore_backup_locator: String,
+    sigstore_secret_locator: String,
+    sigstore_tuf_root_locator: String,
+    deployment_manifest_hash: String,
+    identity_secret_locator: String,
 }
 
 #[cfg(target_os = "linux")]
-fn private_sigstore_inputs(required: bool) -> Result<(String, String, String, String), AppError> {
-    let load = |variable, role| {
-        if required {
-            required_environment_value(variable, role)
-        } else {
-            Ok(std::env::var(variable).unwrap_or_default())
-        }
-    };
-    let backup = load(
-        "LABWEAVER_SIGSTORE_BACKUP_LOCATOR",
-        "Private Sigstore backup locator",
-    )?;
-    let secret = load(
-        "LABWEAVER_SIGSTORE_SECRET_LOCATOR",
-        "Private Sigstore secret locator",
-    )?;
-    let tuf_root = load(
-        "LABWEAVER_SIGSTORE_TUF_ROOT_LOCATOR",
-        "Private Sigstore TUF root locator",
-    )?;
-    let manifest = load(
+impl PlaybookLocators {
+    fn load(playbook_name: &str) -> Result<Self, AppError> {
+        let private_sigstore = matches!(
+            playbook_name,
+            "96-private-sigstore.yml"
+                | "97-private-sigstore-backup.yml"
+                | "98-private-sigstore-restore.yml"
+                | "99-private-sigstore-rotate.yml"
+                | "100-private-sigstore-verify.yml"
+                | "101-private-sigstore-cleanup.yml"
+                | "102-private-sigstore-disaster-recovery.yml"
+        );
+        let identity_foundation = matches!(
+            playbook_name,
+            "91-identity-foundation.yml" | "92-identity-foundation-verify.yml"
+        );
+        let deployment_manifest_hash = deployment_manifest_hash(private_sigstore)?;
+        Ok(Self {
+            sigstore_backup_locator: locator(
+                "LABWEAVER_SIGSTORE_BACKUP_LOCATOR",
+                "Private Sigstore backup locator",
+                private_sigstore,
+            )?,
+            sigstore_secret_locator: locator(
+                "LABWEAVER_SIGSTORE_SECRET_LOCATOR",
+                "Private Sigstore secret locator",
+                private_sigstore,
+            )?,
+            sigstore_tuf_root_locator: locator(
+                "LABWEAVER_SIGSTORE_TUF_ROOT_LOCATOR",
+                "Private Sigstore TUF root locator",
+                private_sigstore,
+            )?,
+            deployment_manifest_hash,
+            identity_secret_locator: locator(
+                "LABWEAVER_IDENTITY_SECRET_LOCATOR",
+                "identity-foundation secret locator",
+                identity_foundation,
+            )?,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn locator(variable: &str, role: &'static str, required: bool) -> Result<String, AppError> {
+    if required {
+        required_environment_value(variable, role)
+    } else {
+        Ok(std::env::var(variable).unwrap_or_default())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn deployment_manifest_hash(required: bool) -> Result<String, AppError> {
+    let value = locator(
         "LABWEAVER_DEPLOYMENT_MANIFEST_HASH",
         "deployment manifest identity",
+        required,
     )?;
-    if required && !is_sha256_identity(&manifest) {
-        return Err(AppError::ExternalCommand {
-            role: "deployment manifest identity",
-            code: None,
-            detail: Some(
-                "LABWEAVER_DEPLOYMENT_MANIFEST_HASH must be sha256:<64 lowercase hex>".into(),
-            ),
-        });
+    if !required || is_sha256_identity(&value) {
+        return Ok(value);
     }
-    Ok((backup, secret, tuf_root, manifest))
+    Err(AppError::ExternalCommand {
+        role: "deployment manifest identity",
+        code: None,
+        detail: Some("LABWEAVER_DEPLOYMENT_MANIFEST_HASH must be sha256:<64 lowercase hex>".into()),
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -911,31 +921,31 @@ fn approved_controller_identity(lock_path: &std::path::Path) -> Result<String, A
             code: None,
             detail: Some(error.to_string()),
         })?,
-        "approved_controller_ids",
+        "approved_controller_id",
     )?;
     let locator = std::env::var("LABWEAVER_CONTROLLER_IDENTITY_FILE").map_err(|_| {
         AppError::ExternalCommand {
-            role: "approved infrastructure controller identity",
+            role: "approved router controller identity",
             code: None,
             detail: Some("LABWEAVER_CONTROLLER_IDENTITY_FILE is required".into()),
         }
     })?;
     let locator_path = std::path::PathBuf::from(locator);
     let metadata = std::fs::metadata(&locator_path).map_err(|error| AppError::ExternalCommand {
-        role: "approved infrastructure controller identity",
+        role: "approved router controller identity",
         code: None,
         detail: Some(error.to_string()),
     })?;
     if metadata.uid() != 0 || metadata.mode() & 0o077 != 0 {
         return Err(AppError::ExternalCommand {
-            role: "approved infrastructure controller identity",
+            role: "approved router controller identity",
             code: None,
             detail: Some("identity locator must be root-owned and mode 0600 or stricter".into()),
         });
     }
     let identity =
         std::fs::read_to_string(locator_path).map_err(|error| AppError::ExternalCommand {
-            role: "approved infrastructure controller identity",
+            role: "approved router controller identity",
             code: None,
             detail: Some(error.to_string()),
         })?;
@@ -943,18 +953,15 @@ fn approved_controller_identity(lock_path: &std::path::Path) -> Result<String, A
     let declared_machine_id = controller_identity_field(&identity, "machine_id")?;
     let actual_machine_id =
         std::fs::read_to_string("/etc/machine-id").map_err(|error| AppError::ExternalCommand {
-            role: "approved infrastructure controller identity",
+            role: "approved router controller identity",
             code: None,
             detail: Some(error.to_string()),
         })?;
-    let approved_ids = approved.split(',').map(str::trim).collect::<Vec<_>>();
-    if !approved_ids.contains(&controller_id.as_str())
-        || declared_machine_id != actual_machine_id.trim()
-    {
+    if controller_id != approved || declared_machine_id != actual_machine_id.trim() {
         return Err(AppError::ExternalCommand {
-            role: "approved infrastructure controller identity",
+            role: "approved router controller identity",
             code: None,
-            detail: Some("controller identity does not match the approved controller lock".into()),
+            detail: Some("controller identity does not match the approved router lock".into()),
         });
     }
     Ok(controller_id)
@@ -987,53 +994,6 @@ fn require_ansible_version(
         role: "approved Ansible version",
         code: output.status.code(),
         detail: Some(format!("expected ansible-core {expected}")),
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn require_python_module_version(
-    lock_path: &std::path::Path,
-    ansible_binary: &std::path::Path,
-    module: &'static str,
-    lock_field: &str,
-) -> Result<(), AppError> {
-    let lock = std::fs::read_to_string(lock_path).map_err(|error| AppError::ExternalCommand {
-        role: "approved infrastructure controller lock",
-        code: None,
-        detail: Some(error.to_string()),
-    })?;
-    let expected = controller_identity_field(&lock, lock_field)?;
-    let canonical_ansible =
-        std::fs::canonicalize(ansible_binary).map_err(|error| AppError::ExternalCommand {
-            role: "approved Ansible Python runtime",
-            code: None,
-            detail: Some(error.to_string()),
-        })?;
-    let python = canonical_ansible
-        .parent()
-        .ok_or_else(|| AppError::ExternalCommand {
-            role: "approved Ansible Python runtime",
-            code: None,
-            detail: Some("ansible-playbook has no parent runtime directory".into()),
-        })?
-        .join("python");
-    require_infrastructure_file("approved Ansible Python runtime", &python)?;
-    let code = format!("import importlib.metadata; print(importlib.metadata.version({module:?}))");
-    let output = ProcessCommand::new(python)
-        .args(["-c", &code])
-        .output()
-        .map_err(|error| AppError::ExternalCommand {
-            role: "approved Ansible Python dependency",
-            code: None,
-            detail: Some(error.to_string()),
-        })?;
-    if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == expected {
-        return Ok(());
-    }
-    Err(AppError::ExternalCommand {
-        role: "approved Ansible Python dependency",
-        code: output.status.code(),
-        detail: Some(format!("expected Python module {module} {expected}")),
     })
 }
 
@@ -1171,8 +1131,8 @@ mod tests {
     #[test]
     fn controller_identity_field_rejects_an_unapproved_controller() -> Result<(), String> {
         let locked = super::controller_identity_field(
-            "approved_controller_ids: edge-router,wsl-a-controller\n",
-            "approved_controller_ids",
+            "approved_controller_id: edge-router\n",
+            "approved_controller_id",
         )
         .map_err(|error| error.to_string())?;
         let presented = super::controller_identity_field(
