@@ -1,8 +1,10 @@
-import axios, { AxiosError, type AxiosRequestConfig } from 'axios'
+import axios, { AxiosError, type AxiosInstance, type AxiosRequestConfig } from 'axios'
 import { API_AUTH_MODE, API_BASE_URL } from '@/config'
 import { getOidcAccessToken } from '@/composables/useAuth'
+import { IS_FIXTURE } from '@/config/dataMode'
 import type { ProblemDetails } from '@/generated/contracts'
 import { createClient, type Client } from '@/generated/contracts/client'
+import { client as defaultSdkClient } from '@/generated/contracts/client.gen'
 
 export type AccessTokenProvider = () => Promise<string | undefined>
 export type CsrfTokenProvider = () => Promise<string | undefined>
@@ -108,33 +110,28 @@ export function decodeProblemDetails(error: unknown): ProblemDetails | undefined
   return isProblemDetails(error.response?.data) ? error.response.data : undefined
 }
 
-/** The only supported Public SDK initialization path for browser consumers. */
-export function createLabWeaverApiClient(options: LabWeaverApiClientOptions): Client {
-  const timeout = options.timeoutMilliseconds ?? 30_000
-  if (!Number.isSafeInteger(timeout) || timeout <= 0 || timeout > 120_000) {
-    throw new LabWeaverApiError('LW_SDK_CONFIGURATION_INVALID', 'API timeout must be between 1 and 120000 ms.')
-  }
-
-  const baseUrl = normalizedBaseUrl(options.baseUrl)
-  const authentication = options.authentication
+function attachAuthInterceptor(instance: AxiosInstance, authentication: LabWeaverApiAuthentication): void {
   const csrfToken =
     authentication.mode === 'bff'
-      ? (authentication.csrfToken ?? createBffCsrfTokenProvider(baseUrl, timeout))
+      ? (authentication.csrfToken ?? createBffCsrfTokenProvider(instance.defaults.baseURL ?? '', instance.defaults.timeout as number))
       : undefined
-  const instance = axios.create({
-    baseURL: baseUrl,
-    timeout,
-    withCredentials: authentication.mode === 'bff',
-    headers: { Accept: 'application/json, application/problem+json' },
-  })
 
   instance.interceptors.request.use(async (config) => {
     if (authentication.mode === 'bearer') {
-      const token = await authentication.accessToken()
-      if (!token) {
-        throw new LabWeaverApiError('LW_SDK_AUTH_TOKEN_UNAVAILABLE', 'A current OIDC bearer token is required.')
+      let token = await authentication.accessToken()
+      // Fixture/dev fallback: allow plain localStorage test tokens when OIDC is not configured.
+      if (!token && IS_FIXTURE) {
+        token = localStorage.getItem('access_token') ?? undefined
       }
-      config.headers.Authorization = `Bearer ${token}`
+      if (!token) {
+        // In fixture mode the local handler is responsible for producing 401;
+        // in live mode we fail closed immediately.
+        if (!IS_FIXTURE) {
+          throw new LabWeaverApiError('LW_SDK_AUTH_TOKEN_UNAVAILABLE', 'A current OIDC bearer token is required.')
+        }
+      } else {
+        config.headers.Authorization = `Bearer ${token}`
+      }
     } else if (isUnsafeMethod(config.method)) {
       const token = await csrfToken?.()
       if (!token) {
@@ -144,7 +141,9 @@ export function createLabWeaverApiClient(options: LabWeaverApiClientOptions): Cl
     }
     return config
   })
+}
 
+function attachResponseInterceptor(instance: AxiosInstance): void {
   instance.interceptors.response.use(
     (response) => response,
     (error: unknown) => {
@@ -158,19 +157,30 @@ export function createLabWeaverApiClient(options: LabWeaverApiClientOptions): Cl
       if (error.code === AxiosError.ECONNABORTED) {
         return Promise.reject(new LabWeaverApiError('LW_SDK_REQUEST_TIMEOUT', 'The API request timed out.'))
       }
-      const contentType = String(error.response?.headers?.['content-type'] ?? '')
-      if (isProblemDetails(error.response?.data)) {
-        const problem = error.response.data
-        return Promise.reject(new LabWeaverApiError(problem.diagnosticCode, problem.detail, problem))
-      }
-      if (contentType.includes('application/problem+json')) {
-        return Promise.reject(
-          new LabWeaverApiError('LW_SDK_PROBLEM_INVALID', 'The server returned malformed RFC 9457 Problem Details.'),
-        )
-      }
-      return Promise.reject(new LabWeaverApiError('LW_SDK_TRANSPORT_FAILED', 'The API transport failed.'))
+      // Preserve AxiosError (including fixture responses and ProblemDetails) so the
+      // generated SDK can expose response.data through its result.error field.
+      return Promise.reject(error)
     },
   )
+}
+
+/** The only supported Public SDK initialization path for browser consumers. */
+export function createLabWeaverApiClient(options: LabWeaverApiClientOptions): Client {
+  const timeout = options.timeoutMilliseconds ?? 30_000
+  if (!Number.isSafeInteger(timeout) || timeout <= 0 || timeout > 120_000) {
+    throw new LabWeaverApiError('LW_SDK_CONFIGURATION_INVALID', 'API timeout must be between 1 and 120000 ms.')
+  }
+
+  const baseUrl = normalizedBaseUrl(options.baseUrl)
+  const instance = axios.create({
+    baseURL: baseUrl,
+    timeout,
+    withCredentials: options.authentication.mode === 'bff',
+    headers: { Accept: 'application/json, application/problem+json' },
+  })
+
+  attachAuthInterceptor(instance, options.authentication)
+  attachResponseInterceptor(instance)
 
   return createClient({
     axios: instance,
@@ -187,7 +197,33 @@ export const apiClient = createLabWeaverApiClient({
       : { mode: 'bearer', accessToken: getOidcAccessToken },
 })
 
+// The generated SDK functions include the full /api/v1 path, so the SDK transport
+// uses an empty baseURL. It shares auth/response handling with apiClient but stays
+// a separate instance so that direct Public API calls and SDK calls do not collide
+// on baseURL normalization.
+const sdkTransport: AxiosInstance = axios.create({
+  baseURL: '',
+  timeout: 30_000,
+  headers: { Accept: 'application/json, application/problem+json' },
+})
+
+attachAuthInterceptor(sdkTransport, { mode: 'bearer', accessToken: getOidcAccessToken })
+attachResponseInterceptor(sdkTransport)
+
+// Fixture adapter is loaded dynamically so that fixture modules are not part
+// of the production bundle.
+if (IS_FIXTURE) {
+  const { installFixtureAdapter } = await import('@/fixture/install')
+  installFixtureAdapter(sdkTransport)
+}
+
+// Make the generated SDK functions use the configured SDK transport.
+defaultSdkClient.setConfig({
+  axios: sdkTransport,
+  baseURL: '',
+})
+
 /** Health checks are intentionally outside the authenticated Public API contract. */
 export async function healthCheck(config?: AxiosRequestConfig) {
-  return axios.get('/health/live', config)
+  return apiClient.instance.get('/health/live', config)
 }
