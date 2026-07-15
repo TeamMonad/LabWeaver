@@ -135,6 +135,8 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertNotIn("0.0.0.0/0", policy)
         self.assertIn("protocol: HTTPS", gateway)
         self.assertIn("certificateRefs", gateway)
+        self.assertIn("metallb.io/loadBalancerIPs", gateway)
+        self.assertNotIn("  addresses:\n", gateway)
         self.assertIn("scaffold_chart: 0.6.111", lock)
         self.assertIn("cosign: 3.0.6", lock)
         for line in lock.splitlines():
@@ -148,6 +150,10 @@ class AnsibleFixtureTests(unittest.TestCase):
         main = (lifecycle / "main.yml").read_text(encoding="utf-8")
         provider = (lifecycle / "provider.yml").read_text(encoding="utf-8")
         cleanup = (lifecycle / "cleanup.yml").read_text(encoding="utf-8")
+        providers = (
+            ROOT
+            / "deploy/ansible/roles/private_sigstore/templates/lifecycle-providers.yml.j2"
+        ).read_text(encoding="utf-8")
         for number, action in (
             (97, "backup"), (98, "restore"), (99, "rotate"),
             (100, "verify"), (101, "cleanup"), (102, "disaster-recovery"),
@@ -164,6 +170,17 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertLess(main.index("Create mandatory pre-change backup"), main.index("Execute disaster-recovery provider"))
         self.assertIn("SIGSTORE_LIFECYCLE_REPORT_IDENTITY_INVALID", provider)
         self.assertIn("labweaver.io/testflight-run", provider)
+        self.assertIn("LABWEAVER_REPORT_B64", provider)
+        self.assertIn("automountServiceAccountToken == false", provider)
+        self.assertIn("concurrencyPolicy: Forbid", providers)
+        self.assertIn("suspend: true", providers)
+        self.assertIn("automountServiceAccountToken: false", providers)
+        self.assertIn("readOnlyRootFilesystem: true", providers)
+        self.assertIn("mysqldump --host=", providers)
+        self.assertIn("rotation-plan-only", providers)
+        self.assertIn("DROP DATABASE IF EXISTS", providers)
+        self.assertNotIn("hostPath:", providers)
+        self.assertNotIn(":latest", providers)
         self.assertIn("jobs,pods,configmaps", cleanup)
         cleanup_report = (lifecycle.parent / "templates/lifecycle-report.json.j2").read_text(encoding="utf-8")
         self.assertIn('"action": "cleanup"', cleanup_report)

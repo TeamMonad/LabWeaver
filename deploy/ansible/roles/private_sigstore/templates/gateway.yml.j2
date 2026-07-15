@@ -5,9 +5,9 @@ metadata:
   namespace: {{ private_sigstore_namespace }}
 spec:
   gatewayClassName: cilium
-  addresses:
-    - type: IPAddress
-      value: {{ private_sigstore_gateway_vip }}
+  infrastructure:
+    annotations:
+      metallb.io/loadBalancerIPs: {{ private_sigstore_gateway_vip }}
   listeners:
     - name: https
       protocol: HTTPS

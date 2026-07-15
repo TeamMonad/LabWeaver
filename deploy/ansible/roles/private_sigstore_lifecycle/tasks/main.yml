@@ -13,6 +13,17 @@
     sigstore_lifecycle_tuf_locator: "{{ lookup('env', 'LABWEAVER_SIGSTORE_TUF_ROOT_LOCATOR') }}"
     sigstore_lifecycle_lock: "{{ (lookup('file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml).private_sigstore }}"
 
+- name: Initialize lifecycle image digest identity
+  ansible.builtin.set_fact:
+    sigstore_lifecycle_image_digests: {}
+
+- name: Bind lifecycle image digests without mutable repository names
+  ansible.builtin.set_fact:
+    sigstore_lifecycle_image_digests: >-
+      {{ sigstore_lifecycle_image_digests
+         | combine({item.key: (item.value.split('@') | last)}) }}
+  loop: "{{ sigstore_lifecycle_lock.images | dict2items }}"
+
 - name: Reject missing or unbound lifecycle inputs
   ansible.builtin.assert:
     that:

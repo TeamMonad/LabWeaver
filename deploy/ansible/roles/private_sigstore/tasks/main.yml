@@ -423,6 +423,24 @@
   register: sigstore_tuf_apply
   changed_when: "'unchanged' not in sigstore_tuf_apply.stdout"
 
+- name: Render the fixed Private Sigstore lifecycle providers
+  ansible.builtin.template:
+    src: lifecycle-providers.yml.j2
+    dest: /var/tmp/labweaver-private-sigstore-lifecycle.yml
+    mode: '0600'
+
+- name: Install the suspended, action-scoped lifecycle provider templates
+  ansible.builtin.command:
+    argv:
+      - "{{ private_sigstore_kubectl_path }}"
+      - --kubeconfig
+      - "{{ private_sigstore_kubeconfig_path }}"
+      - apply
+      - --filename
+      - /var/tmp/labweaver-private-sigstore-lifecycle.yml
+  register: sigstore_lifecycle_apply
+  changed_when: "'unchanged' not in sigstore_lifecycle_apply.stdout"
+
 - name: Render the internal TLS Gateway
   ansible.builtin.template:
     src: gateway.yml.j2

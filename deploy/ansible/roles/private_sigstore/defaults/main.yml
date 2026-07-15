@@ -14,6 +14,8 @@ private_sigstore_rotation_provider: private-sigstore-rotate
 private_sigstore_verify_provider: private-sigstore-verify
 private_sigstore_dr_provider: private-sigstore-disaster-recovery
 private_sigstore_storage_class: local-path
+private_sigstore_lifecycle_storage_class: nfs-rwx
+private_sigstore_lifecycle_storage_size: 20Gi
 private_sigstore_replicas: 2
 private_sigstore_fulcio_secret_name: private-sigstore-fulcio-ca
 private_sigstore_rekor_secret_name: private-sigstore-rekor-signer
