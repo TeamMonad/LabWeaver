@@ -620,6 +620,12 @@ impl InfrastructureInputs {
         let controller_lock = controller_root.join("controller.lock.yml");
         require_infrastructure_file("approved infrastructure controller lock", &controller_lock)?;
         require_ansible_version(&controller_lock, ansible_binary)?;
+        require_python_module_version(
+            &controller_lock,
+            ansible_binary,
+            "kubernetes",
+            "python_kubernetes_version",
+        )?;
 
         let shared_controller_root = infrastructure_dependency_root()?;
         let collections_path = resolve_infrastructure_directory(
@@ -994,6 +1000,53 @@ fn require_ansible_version(
         role: "approved Ansible version",
         code: output.status.code(),
         detail: Some(format!("expected ansible-core {expected}")),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn require_python_module_version(
+    lock_path: &std::path::Path,
+    ansible_binary: &std::path::Path,
+    module: &'static str,
+    lock_field: &str,
+) -> Result<(), AppError> {
+    let lock = std::fs::read_to_string(lock_path).map_err(|error| AppError::ExternalCommand {
+        role: "approved infrastructure controller lock",
+        code: None,
+        detail: Some(error.to_string()),
+    })?;
+    let expected = controller_identity_field(&lock, lock_field)?;
+    let canonical_ansible =
+        std::fs::canonicalize(ansible_binary).map_err(|error| AppError::ExternalCommand {
+            role: "approved Ansible Python runtime",
+            code: None,
+            detail: Some(error.to_string()),
+        })?;
+    let python = canonical_ansible
+        .parent()
+        .ok_or_else(|| AppError::ExternalCommand {
+            role: "approved Ansible Python runtime",
+            code: None,
+            detail: Some("ansible-playbook has no parent runtime directory".into()),
+        })?
+        .join("python");
+    require_infrastructure_file("approved Ansible Python runtime", &python)?;
+    let code = format!("import importlib.metadata; print(importlib.metadata.version({module:?}))");
+    let output = ProcessCommand::new(python)
+        .args(["-c", &code])
+        .output()
+        .map_err(|error| AppError::ExternalCommand {
+            role: "approved Ansible Python dependency",
+            code: None,
+            detail: Some(error.to_string()),
+        })?;
+    if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == expected {
+        return Ok(());
+    }
+    Err(AppError::ExternalCommand {
+        role: "approved Ansible Python dependency",
+        code: output.status.code(),
+        detail: Some(format!("expected Python module {module} {expected}")),
     })
 }
 
