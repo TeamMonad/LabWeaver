@@ -1,0 +1,55 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Minimal Environment-authoritative ownership result; it never contains endpoints or credentials.",
+  "properties": {
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    },
+    "eligibilityExpiresAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "environmentId": {
+      "$ref": "#/$defs/EnvironmentId"
+    },
+    "environmentRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "ownerActorId": {
+      "$ref": "#/$defs/ActorId"
+    }
+  },
+  "required": [
+    "environmentId",
+    "courseId",
+    "ownerActorId",
+    "environmentRevision",
+    "eligibilityExpiresAt"
+  ],
+  "title": "EnvironmentOwnerResolution",
+  "type": "object"
+}

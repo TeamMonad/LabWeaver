@@ -110,6 +110,8 @@ pub struct CreateEnvironmentRequest {
     pub release_version: u64,
 }
 
+pub use crate::environment::{EnvironmentOwnerResolution, EnvironmentOwnerResolutionRequest};
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FreezeSubmissionRequest {
@@ -713,6 +715,18 @@ pub const OPERATIONS: &[OperationContract] = &[
         "streamCourseEvents",
         "events:read",
         Oidc,
+        None,
+        200,
+        false,
+        true
+    ),
+    op!(
+        GatewayInternal,
+        Post,
+        "/internal/v1/environments/{environmentId}/owner:resolve",
+        "resolveEnvironmentOwner",
+        "environment:resolve_owner",
+        ServiceMtls,
         None,
         200,
         false,

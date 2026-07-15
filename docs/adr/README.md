@@ -20,3 +20,5 @@ No ADR is accepted in ARC-01a; this directory establishes the review process wit
   makes the Rust `contracts` crate the sole public semantic authority.
 - [ADR 0006: Trusted Runtime Artifact Supply Chain](0006-trusted-runtime-artifact-supply-chain.md)
   freezes immutable Container/VM artifact, scan, signature and release evidence bindings.
+- [ADR 0007: Claude Code-only Agent Runtime](0007-claude-code-agent-runtime.md)
+  proposes one pinned, shell-free Claude Code worker boundary with provider-opaque configuration.

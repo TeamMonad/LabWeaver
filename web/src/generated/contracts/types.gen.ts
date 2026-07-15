@@ -150,6 +150,10 @@ export type AgentAttempt = {
     outputSha256?: Sha256Digest | null;
     state: AgentAttemptState;
     usage: LlmUsage;
+    /**
+     * Whether a terminal provider envelope made this usage observable.
+     */
+    usageObserved: boolean;
 };
 
 /**
@@ -322,13 +326,47 @@ export type CandidateApprovalSchemaUtcTimestamp = string;
  */
 export type CourseLlmEgressPolicySchema = {
     activatedAt: CourseLlmEgressPolicySchemaUtcTimestamp;
-    binding: OpenAiResponsesBindingV1;
+    binding: ClaudeCodeBindingV1;
     budget: LlmBudget;
     courseId: CourseLlmEgressPolicySchemaCourseId;
     deniedDataClasses: Array<DeniedDataClass>;
     id: CourseLlmEgressPolicySchemaPolicyId;
     revision: CourseLlmEgressPolicySchemaRevision;
     studentContentMode: StudentContentMode;
+};
+
+/**
+ * Immutable Claude Code worker binding.
+ *
+ * Provider-specific transport and authentication remain deployment-owned Claude Code
+ * configuration. The contract binds only a sanitized profile identity, exact model, CLI version,
+ * worker image, effective non-secret runtime configuration hash, and per-worker admission limit.
+ */
+export type ClaudeCodeBindingV1 = {
+    /**
+     * Exact Claude Code CLI version baked into the worker image.
+     */
+    claudeCodeVersion: string;
+    /**
+     * Maximum concurrent Claude Code child processes admitted by one worker instance.
+     */
+    maxInFlightPerWorker: number;
+    /**
+     * Exact model identifier passed to Claude Code; moving aliases are rejected.
+     */
+    model: string;
+    /**
+     * Deployment-owned opaque runtime profile; never a credential or endpoint URL.
+     */
+    runtimeBinding: string;
+    /**
+     * Hash of the effective sanitized Claude Code runtime configuration.
+     */
+    runtimeConfigSha256: CourseLlmEgressPolicySchemaSha256Digest;
+    /**
+     * Immutable SHA-256 identity of the worker container image.
+     */
+    workerImageSha256: CourseLlmEgressPolicySchemaSha256Digest;
 };
 
 /**
@@ -355,24 +393,6 @@ export type LlmBudget = {
 };
 
 /**
- * OpenAI Responses API is the only v1 LLM provider binding.
- */
-export type OpenAiResponsesBindingV1 = {
-    /**
-     * Explicit model identifier.
-     */
-    model: string;
-    /**
-     * Deployment-owned provider binding; never an API key or arbitrary URL.
-     */
-    providerBinding: string;
-    /**
-     * Strict Structured Outputs schema mode.
-     */
-    strictStructuredOutputs: boolean;
-};
-
-/**
  * Strongly typed UUIDv7 identifier for `PolicyId`.
  */
 export type CourseLlmEgressPolicySchemaPolicyId = string;
@@ -381,6 +401,11 @@ export type CourseLlmEgressPolicySchemaPolicyId = string;
  * Monotonic aggregate revision. Zero is never a persisted revision.
  */
 export type CourseLlmEgressPolicySchemaRevision = number;
+
+/**
+ * Canonical lowercase SHA-256 digest.
+ */
+export type CourseLlmEgressPolicySchemaSha256Digest = string;
 
 /**
  * Only explicit SubmissionManifest paths may disclose student content.
@@ -648,14 +673,18 @@ export type EnvironmentEndpointSchemaUtcTimestamp = string;
  * PostgreSQL-authoritative environment view.
  */
 export type EnvironmentInstanceSchema = {
+    capacityBinding?: string | null;
     class: EnvironmentInstanceSchemaEnvironmentClass;
     cleanupEvidence?: EnvironmentInstanceSchemaArtifactRef | null;
     courseId: EnvironmentInstanceSchemaCourseId;
     desiredState: DesiredEnvironmentState;
+    eligibilityExpiresAt: EnvironmentInstanceSchemaUtcTimestamp;
     endpoints: Array<EnvironmentEndpoint>;
+    failedPhase?: ObservedEnvironmentState | null;
     generation: number;
     id: EnvironmentInstanceSchemaEnvironmentId;
     lastDiagnosticCode?: string | null;
+    leaseId?: LeaseId | null;
     observedGeneration: number;
     observedState: ObservedEnvironmentState;
     operation: EnvironmentOperation;
@@ -754,6 +783,20 @@ export type EnvironmentEndpoint = {
 export type EnvironmentInstanceSchemaEnvironmentId = string;
 
 /**
+ * Resource-authoritative Active Lease snapshot retained with the accepted operation.
+ */
+export type EnvironmentLeaseAuthorization = {
+    activeFrom: EnvironmentInstanceSchemaUtcTimestamp;
+    capacityBinding: string;
+    courseId: EnvironmentInstanceSchemaCourseId;
+    environmentId: EnvironmentInstanceSchemaEnvironmentId;
+    expiresAt: EnvironmentInstanceSchemaUtcTimestamp;
+    leaseId: LeaseId;
+    leaseRevision: EnvironmentInstanceSchemaRevision;
+    ownerActorId: EnvironmentInstanceSchemaActorId;
+};
+
+/**
  * Idempotent accepted environment operation.
  */
 export type EnvironmentOperation = {
@@ -762,23 +805,53 @@ export type EnvironmentOperation = {
     accessRevocationRevision?: EnvironmentInstanceSchemaRevision | null;
     actorId: EnvironmentInstanceSchemaActorId;
     attempt: number;
+    cleanupStartedAt?: EnvironmentInstanceSchemaUtcTimestamp | null;
     deadlineAt: EnvironmentInstanceSchemaUtcTimestamp;
     diagnosticCode?: string | null;
     id: OperationId;
     kind: EnvironmentOperationKind;
+    leaseAuthorization?: EnvironmentLeaseAuthorization | null;
+    maxAttempts: number;
+    nextAttemptAt: EnvironmentInstanceSchemaUtcTimestamp;
     preserveMutableDisk: boolean;
+    providerStep: number;
+    resetTarget?: EnvironmentResetTarget | null;
+    retryFromPhase?: ObservedEnvironmentState | null;
     state: OperationState;
+    traceId: string;
 };
 
 /**
  * Explicit operation kind; restart and destructive reset are never aliases.
  */
-export type EnvironmentOperationKind = 'create' | 'start' | 'stop' | 'restart' | 'reset' | 'retry' | 'cancel' | 'recover' | 'expire' | 'delete' | 'freeze';
+export type EnvironmentOperationKind = 'create' | 'start' | 'stop' | 'restart' | 'reset' | 'retry' | 'cancel' | 'recover' | 'expire' | 'delete' | 'cleanup' | 'freeze';
+
+/**
+ * Explicit immutable target selected for one reset operation.
+ */
+export type EnvironmentResetTarget = {
+    kind: 'experiment_baseline';
+    releaseId: ReleaseId;
+    releaseVersion: number;
+} | {
+    authorizationRevision: EnvironmentInstanceSchemaRevision;
+    kind: 'work_snapshot';
+    snapshot: EnvironmentInstanceSchemaArtifactRef;
+} | {
+    authorizationRevision: EnvironmentInstanceSchemaRevision;
+    configurationRevision: EnvironmentInstanceSchemaRevision;
+    kind: 'work_configuration';
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `LeaseId`.
+ */
+export type LeaseId = string;
 
 /**
  * Authoritative observed lifecycle state.
  */
-export type ObservedEnvironmentState = 'requested' | 'validating' | 'building' | 'provisioning' | 'ready' | 'stopped' | 'updating' | 'expiring' | 'deleting' | 'deleted' | 'failed';
+export type ObservedEnvironmentState = 'requested' | 'validating' | 'building' | 'provisioning' | 'ready' | 'stopping' | 'stopped' | 'updating' | 'expiring' | 'deleting' | 'deleted' | 'failed';
 
 /**
  * Strongly typed UUIDv7 identifier for `OperationId`.

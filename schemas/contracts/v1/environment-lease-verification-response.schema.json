@@ -1,0 +1,111 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "EnvironmentLeaseAuthorization": {
+      "additionalProperties": false,
+      "description": "Resource-authoritative Active Lease snapshot retained with the accepted operation.",
+      "properties": {
+        "activeFrom": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "capacityBinding": {
+          "type": "string"
+        },
+        "courseId": {
+          "$ref": "#/$defs/CourseId"
+        },
+        "environmentId": {
+          "$ref": "#/$defs/EnvironmentId"
+        },
+        "expiresAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "leaseId": {
+          "$ref": "#/$defs/LeaseId"
+        },
+        "leaseRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "ownerActorId": {
+          "$ref": "#/$defs/ActorId"
+        }
+      },
+      "required": [
+        "leaseId",
+        "leaseRevision",
+        "environmentId",
+        "courseId",
+        "ownerActorId",
+        "capacityBinding",
+        "activeFrom",
+        "expiresAt"
+      ],
+      "type": "object"
+    },
+    "EnvironmentLeaseState": {
+      "description": "Closed Resource Lease states understood by the Environment verifier.",
+      "enum": [
+        "active",
+        "expiring",
+        "expired",
+        "revoked"
+      ],
+      "type": "string"
+    },
+    "LeaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Versioned Resource response. Only `Active` with an exact authorization is accepted.",
+  "properties": {
+    "authorization": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EnvironmentLeaseAuthorization"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "state": {
+      "$ref": "#/$defs/EnvironmentLeaseState"
+    },
+    "version": {
+      "format": "uint8",
+      "maximum": 255,
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "state"
+  ],
+  "title": "EnvironmentLeaseVerificationResponse",
+  "type": "object"
+}

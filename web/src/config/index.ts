@@ -16,5 +16,3 @@ export const OIDC_CONFIG = {
 }
 
 export const OIDC_ENABLED = Boolean(OIDC_CONFIG.authority && OIDC_CONFIG.client_id)
-
-export const FIXTURE_MODE_ENABLED = import.meta.env.VITE_FIXTURE_MODE === 'true'

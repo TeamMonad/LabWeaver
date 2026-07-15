@@ -34,11 +34,15 @@ export async function validateConfiguration({ requirementsBaselineHead } = {}) {
   for (const name of PROJECT_NAMES.filter((name) => name !== 'setup')) {
     const project = config.projects.find((candidate) => candidate.name === name)
     diagnostic(Boolean(project), 'PW_ROLE_PROJECT_MISSING', diagnostics)
-    diagnostic(project?.dependencies?.length === 1 && project.dependencies[0] === 'setup', 'PW_ROLE_PROJECT_MISSING', diagnostics)
-    diagnostic(project?.use?.storageState === ROLE_PROJECTS_BY_NAME[name].storageState, 'PW_STORAGE_STATE_MISSING', diagnostics)
+
+    const expectedStorageState = ROLE_PROJECTS_BY_NAME[name].storageState
+    if (expectedStorageState) {
+      diagnostic(project?.dependencies?.length === 1 && project.dependencies[0] === 'setup', 'PW_ROLE_PROJECT_MISSING', diagnostics)
+      diagnostic(project?.use?.storageState === expectedStorageState, 'PW_STORAGE_STATE_MISSING', diagnostics)
+    }
   }
   const storageStates = config.projects
-    .filter((project) => project.name !== 'setup')
+    .filter((project) => project.name !== 'setup' && ROLE_PROJECTS_BY_NAME[project.name]?.storageState)
     .map((project) => project.use?.storageState)
   diagnostic(storageStates.every((state) => typeof state === 'string' && state.startsWith('.auth/')), 'PW_STORAGE_STATE_MISSING', diagnostics)
   diagnostic(new Set(storageStates).size === storageStates.length, 'PW_STORAGE_STATE_MISSING', diagnostics)

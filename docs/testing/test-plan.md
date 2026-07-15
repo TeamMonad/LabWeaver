@@ -86,6 +86,80 @@ permissions, approved dispatch and durable idempotency reservation/replay are no
 Fixture Backend belongs to AG-01b. No Agent Service, database, NATS, LLM, build, Environment or
 production execution path is exercised.
 
+## Claude Code Agent runtime gates
+
+```sh
+cargo test --locked -p contracts --test authoring_contract
+cargo test --locked -p agent-service
+cargo clippy -p agent-service --all-targets --all-features -- -D warnings
+cargo xtask contracts check
+pnpm --dir web contracts:check
+
+# Requires a disposable PostgreSQL server with CREATEDB, supplied by
+# LABWEAVER_TEST_DATABASE_URL, or a Docker-backed PostgreSQL container.
+cargo test --locked -p agent-service --test claude_code_runtime \
+  postgres_run_is_atomic_and_exact_replay_is_not_billed_twice -- --ignored --exact
+
+# Billable: provider environment must already be exported by the caller.
+# The test and production worker never source ~/.zshrc or another startup file.
+LABWEAVER_LIVE_CLAUDE_MODEL='<exact-model-id>' \
+  cargo test --locked -p agent-service --test claude_code_runtime \
+  live_claude_code_generates_environment_candidate -- --ignored --exact --nocapture
+```
+
+Contract tests prove that the only accepted binding is a provider-opaque
+`ClaudeCodeBindingV1` with an explicit runtime profile, exact non-alias model,
+CLI version, worker-image hash, runtime-configuration hash and a bounded
+per-worker in-flight limit; the retired
+OpenAI-shaped binding is rejected. Package-gate tests cover manifest/object
+identity, revision-bound classifier identity, hard-denied data and prompt
+injection retained only as untrusted structured content. Worker tests prove CLI
+version matching, direct process invocation without a shell, immutable stdin
+identity, bounded timeout/request/token/cost configuration, no session
+persistence, no Chrome, no built-in subagents, no MCP discovery and an empty
+Tool set. Process tests additionally prove inherited-environment clearing,
+explicit deployment environment injection, unique HOME/XDG/tmp/workdir and
+semaphore backpressure.
+
+Result tests cover supported `stream-json` envelopes, progress-event handling,
+terminal-result completion without waiting for process EOF, usage accounting,
+exact typed EnvironmentSpec validation, protected authority fields, budget overflow,
+provider failure classification, payload-free stderr handling and independent
+dual-track partial success. The explicit PostgreSQL integration test additionally
+checks migration `agent/0002`, atomic idempotency reservation, requested/terminal
+Outbox rows, immediate one-track checkpoint retention, live double-claim
+rejection, expired-lease attempt-2 recovery, durable cancellation observed by a
+different worker, ten concurrent identical requests across four worker
+identities with exactly two process invocations, and twenty distinct runs across
+the same four workers. It passed on 2026-07-15 against
+an ephemeral PostgreSQL 17 instance, using an isolated per-run database, and
+supplies E2 persistence/recovery evidence. It does not
+prove the deployment credential path, real provider compatibility, container
+isolation, HTTP/worker handoff, Kubernetes Job execution, Control candidate
+projection, object-store checkpoint references or JetStream delivery; those
+runtime paths remain at E1 or unimplemented as listed in the status matrix.
+On 2026-07-14, the provider's internal StructuredOutput path failed for the
+complete Schema, so the worker protocol was reduced to the intended single
+operation: reproduce the complete authoritative Schema in the prompt, require
+one bare JSON object, and validate it locally without a weaker Schema or model
+fallback. With Claude Code `2.1.209`, the current explicit-environment and
+isolated-directory Environment candidate test passed on 2026-07-15 in 11.83
+seconds and audited 35,321 microusd. The caller received provider variables
+exported by login zsh before injecting them explicitly into the cleared child
+environment; this does not prove Secret/Config injection in the worker
+container. Evaluation, the real dual-track call and the
+container/Kubernetes path remain explicit E3 blockers. Timeout tests also
+require `usageObserved=false`: absence of a terminal result envelope must not
+be reported as confirmed zero provider usage.
+
+The live debug session isolated the Schema feature boundary: a nested `$ref`
+dispatched Claude Code's internal `StructuredOutput` Tool, while a nested
+`oneOf` did not. Deployment Verify therefore targets the actual v1 protocol:
+the complete official Schema in the prompt, one JSON candidate, terminal
+`stream-json` result, and successful local typed/semantic validation. The
+worker remains NotReady if any of those checks fail; replacing the official
+Schema with a weaker provider Schema is not an accepted fallback.
+
 ## Governance verification
 
 Read back Milestones, Labels, branch protection, Sprint parents, sub-issues and Project fields through GitHub APIs. The verified governance result is 20 Project items and 15 P0 items with `Workflow Status=Ready`, plus Owner, Review Role, Sprint, Area, Codex Mode, Risk, SP and Evidence metadata.
@@ -124,18 +198,42 @@ idempotent replay/backfill plus dual-write watermark comparison supports a
 future approved handoff to the audit-projection worker.
 ## Environment lifecycle v1 runtime gates
 
-`EnvironmentLifecycle v1` has E1 state-transition and schema evidence only. Before runtime implementation can be marked complete, integration
-suites must prove the unified state transition matrix, invalid
-transition rejection, revision conflicts, idempotency-key replay and payload
-conflicts, bounded provider retry exhaustion, and explicit retry/reset paths.
+`EnvironmentLifecycle v1` now has local E2 state-transition, repository,
+messaging, reconciler and owner-resolution evidence. Deterministic tests
+exhaust all 144 observed-state pairs and all 144 state/operation pairs. Docker
+PostgreSQL 17 tests cover populated-v1 migration, strict initial-create
+invariants, production first-aggregate creation, complete idempotency request
+identity, atomic Inbox/create/operation/full-CloudEvent Outbox insertion/replay,
+transactional Inbox duplicate/stale/gap blocking, concurrent optimistic
+locking, lease exclusion/token fencing, failed-phase and reset-target
+persistence, recovery by a new worker after Provider side effect and before
+save across distinct durable Provider steps, persistent timeout/cancel cleanup,
+expiry selection and cleanup failure.
+
+A Docker NATS JetStream 2.11 test proves acknowledged Outbox publication,
+catalogued lifecycle CloudEvent consumption, sanitized terminal quarantine for
+invalid payloads, exact-scope Active Resource Lease verification, expired-Lease
+rejection without aggregate or Provider mutation, and
+`(operationId, providerStep, action)`-bound Provider RPC.
+A real rustls mTLS server test covers SAN allowlisting, bounded slow handshake,
+client/server certificate rotation, owner/course/revision changes,
+deletion/expiry, strong revision ETag, database-authoritative expiry under
+simulated host-clock skew, retryable database/network outage and typed shutdown
+failure propagation. Production wiring runs command, reconcile, expiry, Outbox
+and readiness loops and handles SIGINT/SIGTERM. The exact commands and source
+identity must be recorded in the PR; A review and D Verify are still mandatory.
 
 They must also prove Experiment baseline-reset isolation, Work Active-Lease
 requirements, reset acceptance only from `Ready`, `Stopped` and `Failed`, reset
 target convergence, serialized Work configuration, configuration-failure
 transition to `Failed`, access denial for any non-Ready or unhealthy endpoint,
 grant revocation before reset/expiry/failure/delete cleanup, deletion
-idempotency and sanitized `Deleted` tombstone evidence. Provider, Access,
-Resource and KubeVirt runtime evidence remains planned; the current contract evidence remains E1 only.
+idempotency and sanitized `Deleted` tombstone evidence. The current slice proves
+the transport and state-owner boundaries; concrete Container/KubeVirt Provider,
+Access-owned revocation responder, Resource-owned Lease responder and E3
+deployment evidence remain planned. #47 must not consume the resolver result until the
+current PostgreSQL+JetStream+mTLS evidence and build identity receive the
+required A review and D Verify.
 ## Infrastructure automation
 
 | Layer | Required evidence | Failure condition |

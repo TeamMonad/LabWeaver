@@ -1,5 +1,5 @@
 <template>
-  <PlaceholderPane icon="📋" title="审计日志" description="平台操作审计、AccessGrant 生命周期和资源清理记录。"  show-mock />
+  <PlaceholderPane icon="audit" title="审计日志" description="平台操作审计、AccessGrant 生命周期和资源清理记录。" show-hint />
 </template>
 
 <script setup lang="ts">

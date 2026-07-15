@@ -35,8 +35,9 @@ sha2 = "0.10.9"
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "postgres", "json", "uuid", "time"] }
 ssh-key = { version = "0.6.7", default-features = false, features = ["std"] }
 thiserror = "2.0.12"
+tempfile = "3.20.0"
 time = { version = "=0.3.41", features = ["formatting", "parsing", "serde"] }
-tokio = { version = "1.45.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1.45.1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tower = { version = "0.5.2", features = ["util"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt", "json"] }
