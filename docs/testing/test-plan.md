@@ -124,18 +124,42 @@ idempotent replay/backfill plus dual-write watermark comparison supports a
 future approved handoff to the audit-projection worker.
 ## Environment lifecycle v1 runtime gates
 
-`EnvironmentLifecycle v1` has E1 state-transition and schema evidence only. Before runtime implementation can be marked complete, integration
-suites must prove the unified state transition matrix, invalid
-transition rejection, revision conflicts, idempotency-key replay and payload
-conflicts, bounded provider retry exhaustion, and explicit retry/reset paths.
+`EnvironmentLifecycle v1` now has local E2 state-transition, repository,
+messaging, reconciler and owner-resolution evidence. Deterministic tests
+exhaust all 144 observed-state pairs and all 144 state/operation pairs. Docker
+PostgreSQL 17 tests cover populated-v1 migration, strict initial-create
+invariants, production first-aggregate creation, complete idempotency request
+identity, atomic Inbox/create/operation/full-CloudEvent Outbox insertion/replay,
+transactional Inbox duplicate/stale/gap blocking, concurrent optimistic
+locking, lease exclusion/token fencing, failed-phase and reset-target
+persistence, recovery by a new worker after Provider side effect and before
+save across distinct durable Provider steps, persistent timeout/cancel cleanup,
+expiry selection and cleanup failure.
+
+A Docker NATS JetStream 2.11 test proves acknowledged Outbox publication,
+catalogued lifecycle CloudEvent consumption, sanitized terminal quarantine for
+invalid payloads, exact-scope Active Resource Lease verification, expired-Lease
+rejection without aggregate or Provider mutation, and
+`(operationId, providerStep, action)`-bound Provider RPC.
+A real rustls mTLS server test covers SAN allowlisting, bounded slow handshake,
+client/server certificate rotation, owner/course/revision changes,
+deletion/expiry, strong revision ETag, database-authoritative expiry under
+simulated host-clock skew, retryable database/network outage and typed shutdown
+failure propagation. Production wiring runs command, reconcile, expiry, Outbox
+and readiness loops and handles SIGINT/SIGTERM. The exact commands and source
+identity must be recorded in the PR; A review and D Verify are still mandatory.
 
 They must also prove Experiment baseline-reset isolation, Work Active-Lease
 requirements, reset acceptance only from `Ready`, `Stopped` and `Failed`, reset
 target convergence, serialized Work configuration, configuration-failure
 transition to `Failed`, access denial for any non-Ready or unhealthy endpoint,
 grant revocation before reset/expiry/failure/delete cleanup, deletion
-idempotency and sanitized `Deleted` tombstone evidence. Provider, Access,
-Resource and KubeVirt runtime evidence remains planned; the current contract evidence remains E1 only.
+idempotency and sanitized `Deleted` tombstone evidence. The current slice proves
+the transport and state-owner boundaries; concrete Container/KubeVirt Provider,
+Access-owned revocation responder, Resource-owned Lease responder and E3
+deployment evidence remain planned. #47 must not consume the resolver result until the
+current PostgreSQL+JetStream+mTLS evidence and build identity receive the
+required A review and D Verify.
 ## Infrastructure automation
 
 | Layer | Required evidence | Failure condition |

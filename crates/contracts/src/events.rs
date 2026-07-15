@@ -26,6 +26,11 @@ pub mod subjects {
     pub const ENVIRONMENT_FAILED: &str = "labweaver.environment.instance.failed.v1";
     pub const ENVIRONMENT_DELETE_REQUESTED: &str =
         "labweaver.environment.instance.delete_requested.v1";
+    pub const ENVIRONMENT_OPERATION_ACCEPTED: &str =
+        "labweaver.environment.instance.operation_accepted.v1";
+    pub const ENVIRONMENT_STATE_CHANGED: &str = "labweaver.environment.instance.state_changed.v1";
+    pub const ENVIRONMENT_LIFECYCLE_REQUESTED: &str =
+        "labweaver.environment.instance.lifecycle_requested.v1";
     pub const ACCESS_GRANT_CREATED: &str = "labweaver.access.grant.created.v1";
     pub const ACCESS_GRANT_REVOKED: &str = "labweaver.access.grant.revoked.v1";
     pub const SUBMISSION_FREEZE_REQUESTED: &str =
@@ -156,6 +161,21 @@ pub const EVENT_CONTRACTS: &[EventContract] = &[
         subject: subjects::ENVIRONMENT_DELETE_REQUESTED,
         event_type: subjects::ENVIRONMENT_DELETE_REQUESTED,
         schema_name: "environment-delete-requested",
+    },
+    EventContract {
+        subject: subjects::ENVIRONMENT_OPERATION_ACCEPTED,
+        event_type: subjects::ENVIRONMENT_OPERATION_ACCEPTED,
+        schema_name: "environment-operation-accepted",
+    },
+    EventContract {
+        subject: subjects::ENVIRONMENT_STATE_CHANGED,
+        event_type: subjects::ENVIRONMENT_STATE_CHANGED,
+        schema_name: "environment-state-changed",
+    },
+    EventContract {
+        subject: subjects::ENVIRONMENT_LIFECYCLE_REQUESTED,
+        event_type: subjects::ENVIRONMENT_LIFECYCLE_REQUESTED,
+        schema_name: "environment-lifecycle-requested",
     },
     EventContract {
         subject: subjects::ACCESS_GRANT_CREATED,
