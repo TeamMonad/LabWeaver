@@ -172,4 +172,6 @@
     host: "{{ nfs_server }}"
     port: 2049
     timeout: 5
-  when: inventory_hostname in groups['k8s_cluster']
+  when:
+    - (labweaver_preflight_scope | default('cluster')) == 'cluster'
+    - inventory_hostname in groups['k8s_cluster']
