@@ -1,0 +1,422 @@
+{
+  "$defs": {
+    "ArtifactId": {
+      "description": "Strongly typed UUIDv7 identifier for `ArtifactId`.",
+      "type": "string"
+    },
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "description": "Immutable object-store identity without a machine-local path or credential.",
+      "properties": {
+        "artifactId": {
+          "$ref": "#/$defs/ArtifactId",
+          "description": "Stable metadata identity resolved by the owning service."
+        },
+        "mediaType": {
+          "description": "Registered media type.",
+          "type": "string"
+        },
+        "objectVersion": {
+          "description": "Immutable backend object version.",
+          "type": "string"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Exact content digest."
+        },
+        "sizeBytes": {
+          "description": "Raw object length.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "storeBinding": {
+          "description": "Explicit object-store binding from deployment configuration.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifactId",
+        "storeBinding",
+        "objectVersion",
+        "sha256",
+        "sizeBytes",
+        "mediaType"
+      ],
+      "type": "object"
+    },
+    "ClaudeCodeBindingV1": {
+      "additionalProperties": false,
+      "description": "Immutable Claude Code worker binding.\n\nProvider-specific transport and authentication remain deployment-owned Claude Code\nconfiguration. The contract binds only a sanitized profile identity, exact model, CLI version,\nworker image, effective non-secret runtime configuration hash, and per-worker admission limit.",
+      "properties": {
+        "claudeCodeVersion": {
+          "description": "Exact Claude Code CLI version baked into the worker image.",
+          "type": "string"
+        },
+        "maxInFlightPerWorker": {
+          "description": "Maximum concurrent Claude Code child processes admitted by one worker instance.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "model": {
+          "description": "Exact model identifier passed to Claude Code; moving aliases are rejected.",
+          "type": "string"
+        },
+        "runtimeBinding": {
+          "description": "Deployment-owned opaque runtime profile; never a credential or endpoint URL.",
+          "type": "string"
+        },
+        "runtimeConfigSha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Hash of the effective sanitized Claude Code runtime configuration."
+        },
+        "workerImageSha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Immutable SHA-256 identity of the worker container image."
+        }
+      },
+      "required": [
+        "runtimeBinding",
+        "model",
+        "claudeCodeVersion",
+        "workerImageSha256",
+        "runtimeConfigSha256",
+        "maxInFlightPerWorker"
+      ],
+      "type": "object"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "CourseLlmEgressPolicy": {
+      "additionalProperties": false,
+      "description": "Versioned course policy governing all LLM egress.",
+      "properties": {
+        "activatedAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "binding": {
+          "$ref": "#/$defs/ClaudeCodeBindingV1"
+        },
+        "budget": {
+          "$ref": "#/$defs/LlmBudget"
+        },
+        "courseId": {
+          "$ref": "#/$defs/CourseId"
+        },
+        "deniedDataClasses": {
+          "items": {
+            "$ref": "#/$defs/DeniedDataClass"
+          },
+          "type": "array"
+        },
+        "id": {
+          "$ref": "#/$defs/PolicyId"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "studentContentMode": {
+          "$ref": "#/$defs/StudentContentMode"
+        }
+      },
+      "required": [
+        "id",
+        "courseId",
+        "revision",
+        "binding",
+        "budget",
+        "deniedDataClasses",
+        "studentContentMode",
+        "activatedAt"
+      ],
+      "type": "object"
+    },
+    "CreateAgentRunRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "packageId": {
+          "$ref": "#/$defs/ProblemPackageId"
+        },
+        "packageRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "packageSha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "policyId": {
+          "$ref": "#/$defs/PolicyId"
+        },
+        "policyRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "requestedRuntime": {
+          "$ref": "#/$defs/RuntimeKind"
+        }
+      },
+      "required": [
+        "packageId",
+        "packageRevision",
+        "packageSha256",
+        "policyId",
+        "policyRevision",
+        "requestedRuntime"
+      ],
+      "type": "object"
+    },
+    "DeniedDataClass": {
+      "description": "Non-overridable content classifications at the LLM boundary.",
+      "enum": [
+        "secret",
+        "token",
+        "private_key",
+        "personally_identifiable_information",
+        "unallowlisted_student_submission"
+      ],
+      "type": "string"
+    },
+    "LlmBudget": {
+      "additionalProperties": false,
+      "description": "Per-attempt bounded LLM budget.",
+      "properties": {
+        "maxCostMicrousd": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxInputTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxOutputTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxRequests": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxSchemaRepairs": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxTransientRetries": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "timeoutMilliseconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "maxInputTokens",
+        "maxOutputTokens",
+        "maxRequests",
+        "maxCostMicrousd",
+        "timeoutMilliseconds",
+        "maxTransientRetries",
+        "maxSchemaRepairs"
+      ],
+      "type": "object"
+    },
+    "PackageFile": {
+      "additionalProperties": false,
+      "description": "One immutable file in a teacher ProblemPackage.",
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/ArtifactRef",
+          "description": "Immutable object reference."
+        },
+        "path": {
+          "description": "Normalized package-relative file path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "object"
+      ],
+      "type": "object"
+    },
+    "PolicyId": {
+      "description": "Strongly typed UUIDv7 identifier for `PolicyId`.",
+      "type": "string"
+    },
+    "ProblemPackage": {
+      "additionalProperties": false,
+      "description": "Immutable, atomically completed teacher material package.",
+      "properties": {
+        "completedAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "courseId": {
+          "$ref": "#/$defs/CourseId"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/PackageFile"
+          },
+          "type": "array"
+        },
+        "id": {
+          "$ref": "#/$defs/ProblemPackageId"
+        },
+        "manifestSha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "retention": {
+          "$ref": "#/$defs/RetentionSnapshot"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        }
+      },
+      "required": [
+        "id",
+        "courseId",
+        "revision",
+        "files",
+        "manifestSha256",
+        "retention",
+        "completedAt"
+      ],
+      "type": "object"
+    },
+    "ProblemPackageId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProblemPackageId`.",
+      "type": "string"
+    },
+    "RetentionClass": {
+      "description": "Retention classes with distinct privacy and recovery requirements.",
+      "enum": [
+        "course_material",
+        "build_evidence",
+        "run_evidence",
+        "student_submission",
+        "security_audit"
+      ],
+      "type": "string"
+    },
+    "RetentionDisposition": {
+      "description": "Required action after retention expires.",
+      "enum": [
+        "delete",
+        "purge_after_export",
+        "retain_sanitized_receipt"
+      ],
+      "type": "string"
+    },
+    "RetentionSnapshot": {
+      "additionalProperties": false,
+      "description": "Frozen data-retention decision for an immutable resource.",
+      "properties": {
+        "class": {
+          "$ref": "#/$defs/RetentionClass",
+          "description": "Stable retention class."
+        },
+        "disposition": {
+          "$ref": "#/$defs/RetentionDisposition",
+          "description": "Required terminal disposition."
+        },
+        "policyId": {
+          "$ref": "#/$defs/PolicyId",
+          "description": "Policy identity."
+        },
+        "policyRevision": {
+          "$ref": "#/$defs/Revision",
+          "description": "Exact policy revision used at creation."
+        },
+        "retainUntil": {
+          "$ref": "#/$defs/UtcTimestamp",
+          "description": "Absolute retention boundary."
+        }
+      },
+      "required": [
+        "policyId",
+        "policyRevision",
+        "class",
+        "retainUntil",
+        "disposition"
+      ],
+      "type": "object"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "RuntimeKind": {
+      "description": "Runtime kind shared by candidates, releases, and instances.",
+      "enum": [
+        "container",
+        "virtual_machine"
+      ],
+      "type": "string"
+    },
+    "Sha256Digest": {
+      "description": "Canonical lowercase SHA-256 digest.",
+      "type": "string"
+    },
+    "StudentContentMode": {
+      "description": "Only explicit SubmissionManifest paths may disclose student content.",
+      "enum": [
+        "manifest_allowlist_only"
+      ],
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Control-to-Agent command carried only over an allowlisted mTLS service identity.",
+  "properties": {
+    "courseId": {
+      "$ref": "#/$defs/CourseId",
+      "description": "Authoritative route course."
+    },
+    "objectLocators": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Internal artifact ID to opaque object-key mapping; keys never contain original paths.",
+      "type": "object"
+    },
+    "package": {
+      "$ref": "#/$defs/ProblemPackage",
+      "description": "Completed Control-owned package; Agent re-reads and re-hashes every object."
+    },
+    "policy": {
+      "$ref": "#/$defs/CourseLlmEgressPolicy",
+      "description": "Active immutable course policy."
+    },
+    "request": {
+      "$ref": "#/$defs/CreateAgentRunRequest",
+      "description": "Public immutable request whose idempotency key remains an HTTP header."
+    }
+  },
+  "required": [
+    "courseId",
+    "request",
+    "package",
+    "objectLocators",
+    "policy"
+  ],
+  "title": "InternalCreateAgentRunRequest",
+  "type": "object"
+}

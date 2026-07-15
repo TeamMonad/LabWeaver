@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AccessGrantId, ApprovalId, CandidateId, CourseId, DiagnosticCode, EndpointId, EnvironmentId,
-    EventId, OperationId, PlatformRole, ProblemPackageId, ProjectId, ReleaseId, Revision,
-    Sha256Digest, StreamSequence, UploadSessionId, UtcTimestamp,
+    EventId, ImageArtifactId, OperationId, PlatformRole, ProblemPackageId, ProjectId, ReleaseId,
+    Revision, Sha256Digest, StreamSequence, UploadSessionId, UtcTimestamp,
 };
 
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -111,6 +111,108 @@ pub struct CreateEnvironmentTemplateReleaseRequest {
     pub approval_id: ApprovalId,
     pub artifact: crate::supply_chain::ImageArtifact,
     pub image_policy_evaluation: crate::supply_chain::ImagePolicyEvaluation,
+}
+
+/// Append-only reason supplied when withdrawing an immutable release.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WithdrawEnvironmentTemplateReleaseRequest {
+    /// Stable reviewed reason code; free-form sensitive text is not accepted.
+    pub reason_code: String,
+}
+
+/// Control-to-Agent command carried only over an allowlisted mTLS service identity.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InternalCreateAgentRunRequest {
+    /// Authoritative route course.
+    pub course_id: CourseId,
+    /// Public immutable request whose idempotency key remains an HTTP header.
+    pub request: CreateAgentRunRequest,
+    /// Completed Control-owned package; Agent re-reads and re-hashes every object.
+    pub package: crate::authoring::ProblemPackage,
+    /// Internal artifact ID to opaque object-key mapping; keys never contain original paths.
+    pub object_locators: BTreeMap<crate::ArtifactId, String>,
+    /// Active immutable course policy.
+    pub policy: crate::authoring::CourseLlmEgressPolicy,
+}
+
+/// Revision precondition for Control-to-Agent cancellation and retry mutations.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InternalAgentRunMutationRequest {
+    /// Exact Agent-owned run revision observed by Control.
+    pub expected_revision: Revision,
+}
+
+/// Terminal or in-progress Agent result used to rebuild Control projections after replay.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InternalAgentRunOutcome {
+    /// Authoritative aggregate.
+    pub run: crate::authoring::AgentRun,
+    /// Validated Environment candidate, if that track succeeded.
+    pub environment_candidate: Option<crate::authoring::EnvironmentCandidate>,
+    /// Validated Evaluation candidate, if that track succeeded.
+    pub evaluation_candidate: Option<crate::authoring::EvaluationCandidate>,
+    /// Canonical hash over this response, excluding this field.
+    pub outcome_sha256: Sha256Digest,
+}
+
+impl InternalAgentRunOutcome {
+    /// Validates parent identities and canonical response identity.
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        if self
+            .environment_candidate
+            .as_ref()
+            .is_some_and(|candidate| candidate.run_id != self.run.id)
+            || self
+                .evaluation_candidate
+                .as_ref()
+                .is_some_and(|candidate| candidate.run_id != self.run.id)
+        {
+            return Err(HttpContractError::InvalidInternalIdentity);
+        }
+        let canonical = Sha256Digest::of_canonical(&serde_json::json!({
+            "run": self.run,
+            "environmentCandidate": self.environment_candidate,
+            "evaluationCandidate": self.evaluation_candidate,
+        }))
+        .map_err(|_| HttpContractError::InvalidInternalIdentity)?;
+        if canonical != self.outcome_sha256 {
+            return Err(HttpContractError::InvalidInternalIdentity);
+        }
+        Ok(())
+    }
+}
+
+/// Agent-owned artifact and policy evaluation resolved for Control publication.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InternalImageArtifactResolution {
+    pub artifact_id: ImageArtifactId,
+    pub artifact: crate::supply_chain::ImageArtifact,
+    pub policy_evaluation: crate::supply_chain::ImagePolicyEvaluation,
+    pub resolution_sha256: Sha256Digest,
+}
+
+impl InternalImageArtifactResolution {
+    /// Verifies exact artifact ID and canonical response identity.
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        if self.policy_evaluation.artifact_id != self.artifact_id {
+            return Err(HttpContractError::InvalidInternalIdentity);
+        }
+        let canonical = Sha256Digest::of_canonical(&serde_json::json!({
+            "artifactId": self.artifact_id,
+            "artifact": self.artifact,
+            "policyEvaluation": self.policy_evaluation,
+        }))
+        .map_err(|_| HttpContractError::InvalidInternalIdentity)?;
+        if canonical != self.resolution_sha256 {
+            return Err(HttpContractError::InvalidInternalIdentity);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -325,6 +427,11 @@ impl StrongEtag {
     #[must_use]
     pub fn header_value(&self) -> String {
         format!("\"rev-{}\"", self.0.get())
+    }
+    /// Returns the exact revision carried by this strong validator.
+    #[must_use]
+    pub const fn revision(&self) -> Revision {
+        self.0
     }
     pub fn parse(value: &str) -> Result<Self, HttpContractError> {
         if value.starts_with("W/") {
@@ -1312,6 +1419,8 @@ pub enum HttpContractError {
     InvalidCursorPage,
     #[error("environment request or query is invalid")]
     InvalidEnvironmentQuery,
+    #[error("internal service identity or canonical response is invalid")]
+    InvalidInternalIdentity,
 }
 
 #[must_use]

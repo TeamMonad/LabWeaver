@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "crates/agent-core",
+  "crates/artifact-store",
   "crates/auth",
   "crates/contracts",
   "crates/persistence-sqlx",
@@ -24,6 +25,9 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 async-trait = "0.1.88"
+aws-config = { version = "=1.5.16", default-features = false, features = ["behavior-version-latest", "rt-tokio", "rustls"] }
+aws-credential-types = "=1.2.1"
+aws-sdk-s3 = { version = "=1.70.0", default-features = false, features = ["behavior-version-latest", "rt-tokio", "rustls"] }
 axum = "0.8.4"
 base64 = "0.22.1"
 chacha20poly1305 = "0.10.1"
@@ -61,7 +65,7 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt", "json"] }
 utoipa = { version = "=5.5.0", features = ["time", "uuid"] }
 uuid = { version = "1.16.0", features = ["serde", "v4", "v7"] }
-url = "2.5.4"
+url = { version = "2.5.4", features = ["serde"] }
 x509-parser = "0.16.0"
 
 [workspace.lints.rust]

@@ -25,6 +25,18 @@
       "CsrfTokenResponse": {
         "$ref": "../contracts/v1/csrf-token-response.schema.json"
       },
+      "InternalAgentRunMutationRequest": {
+        "$ref": "../contracts/v1/http/internal-agent-run-mutation-request.schema.json"
+      },
+      "InternalAgentRunOutcome": {
+        "$ref": "../contracts/v1/http/internal-agent-run-outcome.schema.json"
+      },
+      "InternalCreateAgentRunRequest": {
+        "$ref": "../contracts/v1/http/internal-create-agent-run-request.schema.json"
+      },
+      "InternalImageArtifactResolution": {
+        "$ref": "../contracts/v1/http/internal-image-artifact-resolution.schema.json"
+      },
       "OperationAccepted": {
         "additionalProperties": false,
         "properties": {
@@ -1507,6 +1519,16 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/withdraw-environment-template-release-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "201": {
             "description": "Successful response",

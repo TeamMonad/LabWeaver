@@ -1,0 +1,39 @@
+# Non-secret Agent authority and durable worker configuration for Issue #48.
+database_url_file: "secrets/agent-runtime-url"
+database_max_connections: 20
+control_mtls:
+  bind_addr: "127.0.0.1:9445"
+  server_certificate_file: "secrets/agent-server-cert.pem"
+  server_key_file: "secrets/agent-server-key.pem"
+  client_ca_file: "secrets/internal-client-ca.pem"
+  allowed_san_uris: ["spiffe://labweaver/control-service"]
+  required_eku: "clientAuth"
+object_store:
+  binding: "problem-package-minio-v1"
+  endpoint: "https://minio.internal:9000/"
+  bucket: "labweaver-problem-packages"
+  region: "labweaver-internal-1"
+  objectPrefix: "problem-packages"
+  uploadTtlSeconds: 900
+  maxObjectBytes: 67108864
+  forcePathStyle: true
+object_store_access_key_file: "secrets/minio-access-key"
+object_store_secret_key_file: "secrets/minio-secret-key"
+object_store_session_token_file: null
+classifier_binding: "labweaver-dlp-v1"
+classifier_revision: 1
+worker_id: "agent-worker-01"
+dispatch_lease_seconds: 120
+track_lease_seconds: 120
+poll_interval_milliseconds: 500
+# Values are read from mounted files and passed into an env-cleared Claude Code process.
+worker_environment_files:
+  ANTHROPIC_API_KEY: "secrets/anthropic-api-key"
+nats:
+  server: "tls://nats.internal:4222"
+  ca_file: "secrets/nats-ca.pem"
+  client_certificate_file: "secrets/agent-nats-client-cert.pem"
+  client_private_key_file: "secrets/agent-nats-client-key.pem"
+  credentials_file: "secrets/agent-nats.creds"
+  publish_timeout_milliseconds: 5000
+  outbox_poll_milliseconds: 250

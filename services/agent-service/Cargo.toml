@@ -8,16 +8,25 @@ rust-version.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+artifact-store = { path = "../../crates/artifact-store" }
+async-nats = { version = "=0.45.0", default-features = false, features = ["ring", "server_2_10", "server_2_11"] }
+auth = { path = "../../crates/auth" }
 axum.workspace = true
 contracts = { path = "../../crates/contracts" }
+futures-util = "0.3.31"
 persistence-sqlx = { path = "../../crates/persistence-sqlx" }
+hyper-util.workspace = true
+regex = "1.12.2"
+serde_yaml.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 telemetry = { path = "../../crates/telemetry" }
 thiserror.workspace = true
 tempfile.workspace = true
+time.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 

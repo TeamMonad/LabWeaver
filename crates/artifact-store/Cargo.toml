@@ -1,0 +1,28 @@
+[package]
+name = "artifact-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+aws-config.workspace = true
+aws-credential-types.workspace = true
+aws-sdk-s3.workspace = true
+base64.workspace = true
+contracts = { path = "../contracts" }
+serde.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+time.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true
+testcontainers = { version = "0.25.0", features = ["blocking"] }
+tokio.workspace = true
+
+[lints]
+workspace = true
