@@ -32,6 +32,7 @@
       - (private_sigstore_rekor_tree_id | string) != (private_sigstore_ctlog_tree_id | string)
       - private_sigstore_internal_dns is match('^[a-z0-9.-]+\\.internal$')
       - private_sigstore_oidc_issuer is match('^https://[a-z0-9.-]+/realms/[a-z0-9-]+$')
+      - private_sigstore_oidc_gateway_vip is match('^(?:10\\.|172\\.(?:1[6-9]|2[0-9]|3[01])\\.|192\\.168\\.)')
       - '"sigstore.dev" not in private_sigstore_oidc_issuer'
       - private_sigstore_oidc_audience | length > 0
       - private_sigstore_oidc_client_id | length > 0

@@ -23,8 +23,16 @@ spec:
         - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
       ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
     - to:
-        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ private_sigstore_keycloak_namespace }}}}
+        - ipBlock: {cidr: {{ private_sigstore_oidc_gateway_vip }}/32}
       ports: [{protocol: TCP, port: 443}]
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: sigstore-gateway-ingress, namespace: {{ private_sigstore_namespace }}}
+spec:
+  endpointSelector: {matchLabels: {app.kubernetes.io/instance: {{ private_sigstore_release_name }}}}
+  ingress:
+    - fromEntities: [ingress]
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget

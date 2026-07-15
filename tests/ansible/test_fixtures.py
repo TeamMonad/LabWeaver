@@ -109,6 +109,8 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertNotIn("type: NodePort", values)
         self.assertNotIn("type: LoadBalancer", values)
         self.assertIn("kind: NetworkPolicy", policy)
+        self.assertIn("kind: CiliumNetworkPolicy", policy)
+        self.assertIn("fromEntities: [ingress]", policy)
         self.assertIn("podSelector: {}", policy)
         self.assertNotIn("0.0.0.0/0", policy)
         self.assertIn("protocol: HTTPS", gateway)
