@@ -88,8 +88,36 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::environment::EnvironmentInstance
     );
     document!(
+        "schemas/contracts/v1/environment-create-spec.schema.json",
+        crate::environment::EnvironmentCreateSpec
+    );
+    document!(
+        "schemas/contracts/v1/environment-reset-target.schema.json",
+        crate::environment::EnvironmentResetTarget
+    );
+    document!(
+        "schemas/contracts/v1/environment-lease-verification-request.schema.json",
+        crate::environment::EnvironmentLeaseVerificationRequest
+    );
+    document!(
+        "schemas/contracts/v1/environment-lease-verification-response.schema.json",
+        crate::environment::EnvironmentLeaseVerificationResponse
+    );
+    document!(
         "schemas/contracts/v1/environment-endpoint.schema.json",
         crate::environment::EnvironmentEndpoint
+    );
+    document!(
+        "schemas/contracts/v1/http/environment-owner-resolution-request.schema.json",
+        crate::environment::EnvironmentOwnerResolutionRequest
+    );
+    document!(
+        "schemas/contracts/v1/environment-owner-resolution.schema.json",
+        crate::environment::EnvironmentOwnerResolution
+    );
+    document!(
+        "schemas/contracts/v1/environment-owner-resolver-client-config.schema.json",
+        crate::environment::EnvironmentOwnerResolverClientConfig
     );
     document!(
         "schemas/contracts/v1/access-grant.schema.json",
@@ -205,6 +233,18 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         CloudEvent<events::EnvironmentEvent>
     );
     document!(
+        "schemas/contracts/v1/events/environment-operation-accepted.schema.json",
+        CloudEvent<events::EnvironmentEvent>
+    );
+    document!(
+        "schemas/contracts/v1/events/environment-state-changed.schema.json",
+        CloudEvent<events::EnvironmentEvent>
+    );
+    document!(
+        "schemas/contracts/v1/events/environment-lifecycle-requested.schema.json",
+        CloudEvent<crate::environment::EnvironmentLifecycleCommandData>
+    );
+    document!(
         "schemas/contracts/v1/events/access-grant-created.schema.json",
         CloudEvent<events::AccessGrantChanged>
     );
@@ -307,6 +347,16 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             ,"x-labweaver-problem-content-type":"application/problem+json"
             ,"x-labweaver-errors":["LW_CONTRACT_DOCUMENT_INVALID","LW_ACCESS_DENIED","LW_IDEMPOTENCY_CONFLICT","LW_REVISION_CONFLICT"]
         });
+        if operation.operation_id == "resolveEnvironmentOwner" {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_CONTRACT_DOCUMENT_INVALID",
+                "LW_ENV_OWNER_CALLER_UNTRUSTED",
+                "LW_ENV_OWNER_SCOPE_MISMATCH",
+                "LW_ENV_OWNER_UNAVAILABLE",
+                "LW_ENV_OWNER_RESOLVER_UNAVAILABLE",
+                "LW_ENV_OWNER_CLOCK_INVALID"
+            ]);
+        }
         if let Some(schema) = request_schema(operation.operation_id) {
             operation_json["requestBody"] =
                 json!({"required":true,"content":{"application/json":{"schema":schema}}});
@@ -380,6 +430,7 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "createAccessGrant" => "http/create-access-grant-request",
         "revokeAccessGrant" => "http/revoke-access-grant-request",
         "authorizeSsh" => "ssh-authorization-request",
+        "resolveEnvironmentOwner" => "http/environment-owner-resolution-request",
         "createGatewaySession" | "heartbeatGatewaySession" | "closeGatewaySession" => {
             "gateway-session"
         }
@@ -416,6 +467,7 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "createSshPublicKey" => contract_ref("ssh-public-key"),
         "createAccessGrant" | "getAccessGrant" => contract_ref("access-grant"),
         "authorizeSsh" => contract_ref("ssh-authorization"),
+        "resolveEnvironmentOwner" => contract_ref("environment-owner-resolution"),
         "createGatewaySession" => contract_ref("gateway-session"),
         id if [
             "createAgentRun",

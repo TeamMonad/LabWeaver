@@ -53,38 +53,6 @@
       "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
       "type": "string"
     },
-    "DesiredEnvironmentState": {
-      "description": "Requested steady state.",
-      "enum": [
-        "running",
-        "stopped",
-        "deleted"
-      ],
-      "type": "string"
-    },
-    "EndpointHealth": {
-      "description": "Endpoint health gates new AccessGrants.",
-      "enum": [
-        "pending",
-        "healthy",
-        "unhealthy",
-        "removed"
-      ],
-      "type": "string"
-    },
-    "EndpointId": {
-      "description": "Strongly typed UUIDv7 identifier for `EndpointId`.",
-      "type": "string"
-    },
-    "EndpointProtocol": {
-      "description": "Supported controlled protocols.",
-      "enum": [
-        "http",
-        "https",
-        "ssh"
-      ],
-      "type": "string"
-    },
     "EnvironmentClass": {
       "description": "Environment business class retained from the v2.1 architecture.",
       "enum": [
@@ -93,32 +61,62 @@
       ],
       "type": "string"
     },
-    "EnvironmentEndpoint": {
+    "EnvironmentCreateSpec": {
       "additionalProperties": false,
-      "description": "Sanitized Environment-owned endpoint metadata.",
+      "description": "Authoritative fields required to create the first Environment aggregate.",
       "properties": {
-        "health": {
-          "$ref": "#/$defs/EndpointHealth"
+        "capacityBinding": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
-        "id": {
-          "$ref": "#/$defs/EndpointId"
+        "class": {
+          "$ref": "#/$defs/EnvironmentClass"
         },
-        "observedAt": {
+        "courseId": {
+          "$ref": "#/$defs/CourseId"
+        },
+        "eligibilityExpiresAt": {
           "$ref": "#/$defs/UtcTimestamp"
         },
-        "protocol": {
-          "$ref": "#/$defs/EndpointProtocol"
+        "leaseId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LeaseId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
-        "revision": {
-          "$ref": "#/$defs/Revision"
+        "ownerActorId": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "providerBinding": {
+          "type": "string"
+        },
+        "releaseId": {
+          "$ref": "#/$defs/ReleaseId"
+        },
+        "releaseVersion": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runtimeKind": {
+          "$ref": "#/$defs/RuntimeKind"
         }
       },
       "required": [
-        "id",
-        "protocol",
-        "revision",
-        "health",
-        "observedAt"
+        "courseId",
+        "ownerActorId",
+        "class",
+        "runtimeKind",
+        "releaseId",
+        "releaseVersion",
+        "providerBinding",
+        "eligibilityExpiresAt"
       ],
       "type": "object"
     },
@@ -126,56 +124,12 @@
       "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
       "type": "string"
     },
-    "EnvironmentLeaseAuthorization": {
+    "EnvironmentLifecycleCommand": {
       "additionalProperties": false,
-      "description": "Resource-authoritative Active Lease snapshot retained with the accepted operation.",
-      "properties": {
-        "activeFrom": {
-          "$ref": "#/$defs/UtcTimestamp"
-        },
-        "capacityBinding": {
-          "type": "string"
-        },
-        "courseId": {
-          "$ref": "#/$defs/CourseId"
-        },
-        "environmentId": {
-          "$ref": "#/$defs/EnvironmentId"
-        },
-        "expiresAt": {
-          "$ref": "#/$defs/UtcTimestamp"
-        },
-        "leaseId": {
-          "$ref": "#/$defs/LeaseId"
-        },
-        "leaseRevision": {
-          "$ref": "#/$defs/Revision"
-        },
-        "ownerActorId": {
-          "$ref": "#/$defs/ActorId"
-        }
-      },
-      "required": [
-        "leaseId",
-        "leaseRevision",
-        "environmentId",
-        "courseId",
-        "ownerActorId",
-        "capacityBinding",
-        "activeFrom",
-        "expiresAt"
-      ],
-      "type": "object"
-    },
-    "EnvironmentOperation": {
-      "additionalProperties": false,
-      "description": "Idempotent accepted environment operation.",
+      "description": "Revision-checked lifecycle intent consumed by the Environment state owner.",
       "properties": {
         "acceptedAt": {
           "$ref": "#/$defs/UtcTimestamp"
-        },
-        "acceptedRevision": {
-          "$ref": "#/$defs/Revision"
         },
         "accessRevocationRevision": {
           "anyOf": [
@@ -190,61 +144,25 @@
         "actorId": {
           "$ref": "#/$defs/ActorId"
         },
-        "attempt": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "cleanupStartedAt": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/UtcTimestamp"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "deadlineAt": {
           "$ref": "#/$defs/UtcTimestamp"
         },
-        "diagnosticCode": {
-          "type": [
-            "string",
-            "null"
-          ]
+        "environmentId": {
+          "$ref": "#/$defs/EnvironmentId"
         },
-        "id": {
-          "$ref": "#/$defs/OperationId"
+        "expectedRevision": {
+          "$ref": "#/$defs/Revision"
         },
         "kind": {
           "$ref": "#/$defs/EnvironmentOperationKind"
-        },
-        "leaseAuthorization": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/EnvironmentLeaseAuthorization"
-            },
-            {
-              "type": "null"
-            }
-          ]
         },
         "maxAttempts": {
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
         },
-        "nextAttemptAt": {
-          "$ref": "#/$defs/UtcTimestamp"
-        },
         "preserveMutableDisk": {
           "type": "boolean"
-        },
-        "providerStep": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
         },
         "resetTarget": {
           "anyOf": [
@@ -256,37 +174,47 @@
             }
           ]
         },
-        "retryFromPhase": {
+        "traceId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "environmentId",
+        "kind",
+        "expectedRevision",
+        "actorId",
+        "traceId",
+        "acceptedAt",
+        "deadlineAt",
+        "preserveMutableDisk",
+        "maxAttempts"
+      ],
+      "type": "object"
+    },
+    "EnvironmentLifecycleCommandData": {
+      "additionalProperties": false,
+      "description": "Command-specific data carried inside the catalogued lifecycle CloudEvent.",
+      "properties": {
+        "command": {
+          "$ref": "#/$defs/EnvironmentLifecycleCommand"
+        },
+        "create": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ObservedEnvironmentState"
+              "$ref": "#/$defs/EnvironmentCreateSpec"
             },
             {
               "type": "null"
             }
           ]
         },
-        "state": {
-          "$ref": "#/$defs/OperationState"
-        },
-        "traceId": {
+        "idempotencyKey": {
           "type": "string"
         }
       },
       "required": [
-        "id",
-        "kind",
-        "state",
-        "acceptedRevision",
-        "attempt",
-        "providerStep",
-        "maxAttempts",
-        "nextAttemptAt",
-        "actorId",
-        "traceId",
-        "acceptedAt",
-        "deadlineAt",
-        "preserveMutableDisk"
+        "idempotencyKey",
+        "command"
       ],
       "type": "object"
     },
@@ -378,42 +306,12 @@
         }
       ]
     },
+    "EventId": {
+      "description": "Strongly typed UUIDv7 identifier for `EventId`.",
+      "type": "string"
+    },
     "LeaseId": {
       "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
-      "type": "string"
-    },
-    "ObservedEnvironmentState": {
-      "description": "Authoritative observed lifecycle state.",
-      "enum": [
-        "requested",
-        "validating",
-        "building",
-        "provisioning",
-        "ready",
-        "stopping",
-        "stopped",
-        "updating",
-        "expiring",
-        "deleting",
-        "deleted",
-        "failed"
-      ],
-      "type": "string"
-    },
-    "OperationId": {
-      "description": "Strongly typed UUIDv7 identifier for `OperationId`.",
-      "type": "string"
-    },
-    "OperationState": {
-      "description": "Persistent operation state.",
-      "enum": [
-        "accepted",
-        "running",
-        "cancelling",
-        "succeeded",
-        "failed",
-        "cancelled"
-      ],
       "type": "string"
     },
     "ReleaseId": {
@@ -434,6 +332,12 @@
       ],
       "type": "string"
     },
+    "Sequence": {
+      "description": "Aggregate-local sequence or SSE cursor.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
     "Sha256Digest": {
       "description": "Canonical lowercase SHA-256 digest.",
       "type": "string"
@@ -445,126 +349,63 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "PostgreSQL-authoritative environment view.",
+  "description": "Strict CloudEvents 1.0 envelope carried as structured JSON.",
   "properties": {
-    "capacityBinding": {
-      "type": [
-        "string",
-        "null"
-      ]
+    "aggregateRevision": {
+      "$ref": "#/$defs/Revision"
     },
-    "class": {
-      "$ref": "#/$defs/EnvironmentClass"
-    },
-    "cleanupEvidence": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/ArtifactRef"
-        },
-        {
-          "type": "null"
-        }
-      ]
+    "aggregateSequence": {
+      "$ref": "#/$defs/Sequence"
     },
     "courseId": {
       "$ref": "#/$defs/CourseId"
     },
-    "desiredState": {
-      "$ref": "#/$defs/DesiredEnvironmentState"
+    "data": {
+      "$ref": "#/$defs/EnvironmentLifecycleCommandData"
     },
-    "eligibilityExpiresAt": {
-      "$ref": "#/$defs/UtcTimestamp"
-    },
-    "endpoints": {
-      "items": {
-        "$ref": "#/$defs/EnvironmentEndpoint"
-      },
-      "type": "array"
-    },
-    "failedPhase": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/ObservedEnvironmentState"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "generation": {
-      "format": "uint64",
-      "minimum": 0,
-      "type": "integer"
-    },
-    "id": {
-      "$ref": "#/$defs/EnvironmentId"
-    },
-    "lastDiagnosticCode": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "leaseId": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/LeaseId"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "observedGeneration": {
-      "format": "uint64",
-      "minimum": 0,
-      "type": "integer"
-    },
-    "observedState": {
-      "$ref": "#/$defs/ObservedEnvironmentState"
-    },
-    "operation": {
-      "$ref": "#/$defs/EnvironmentOperation"
-    },
-    "ownerId": {
-      "$ref": "#/$defs/ActorId"
-    },
-    "providerBinding": {
+    "datacontenttype": {
       "type": "string"
     },
-    "releaseId": {
-      "$ref": "#/$defs/ReleaseId"
+    "dataschema": {
+      "type": "string"
     },
-    "releaseVersion": {
-      "format": "uint64",
-      "minimum": 0,
-      "type": "integer"
+    "id": {
+      "$ref": "#/$defs/EventId"
     },
-    "revision": {
-      "$ref": "#/$defs/Revision"
+    "source": {
+      "type": "string"
     },
-    "runtimeKind": {
-      "$ref": "#/$defs/RuntimeKind"
+    "specversion": {
+      "type": "string"
+    },
+    "subject": {
+      "type": "string"
+    },
+    "time": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "traceId": {
+      "type": "string"
+    },
+    "type": {
+      "type": "string"
     }
   },
   "required": [
+    "specversion",
     "id",
+    "source",
+    "type",
+    "subject",
+    "time",
+    "datacontenttype",
+    "dataschema",
     "courseId",
-    "ownerId",
-    "class",
-    "runtimeKind",
-    "releaseId",
-    "releaseVersion",
-    "providerBinding",
-    "desiredState",
-    "observedState",
-    "revision",
-    "generation",
-    "observedGeneration",
-    "operation",
-    "eligibilityExpiresAt",
-    "endpoints"
+    "aggregateRevision",
+    "aggregateSequence",
+    "traceId",
+    "data"
   ],
-  "title": "EnvironmentInstance",
+  "title": "CloudEvent",
   "type": "object"
 }

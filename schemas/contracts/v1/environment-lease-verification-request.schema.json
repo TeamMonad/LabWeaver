@@ -1,0 +1,56 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "LeaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Versioned Resource request for exact Lease scope and current state.",
+  "properties": {
+    "capacityBinding": {
+      "type": "string"
+    },
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    },
+    "environmentId": {
+      "$ref": "#/$defs/EnvironmentId"
+    },
+    "leaseId": {
+      "$ref": "#/$defs/LeaseId"
+    },
+    "ownerActorId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "version": {
+      "format": "uint8",
+      "maximum": 255,
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "leaseId",
+    "environmentId",
+    "courseId",
+    "ownerActorId",
+    "capacityBinding"
+  ],
+  "title": "EnvironmentLeaseVerificationRequest",
+  "type": "object"
+}

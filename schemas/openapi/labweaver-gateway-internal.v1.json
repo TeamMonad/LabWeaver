@@ -122,6 +122,106 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/internal/v1/environments/{environmentId}/owner:resolve": {
+      "post": {
+        "description": "Permission: environment:resolve_owner. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "resolveEnvironmentOwner",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "environmentId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/environment-owner-resolution-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/environment-owner-resolution.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceMtls": []
+          }
+        ],
+        "summary": "resolveEnvironmentOwner",
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ENV_OWNER_CALLER_UNTRUSTED",
+          "LW_ENV_OWNER_SCOPE_MISMATCH",
+          "LW_ENV_OWNER_UNAVAILABLE",
+          "LW_ENV_OWNER_RESOLVER_UNAVAILABLE",
+          "LW_ENV_OWNER_CLOCK_INVALID"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "environment:resolve_owner",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
     "/internal/v1/sessions": {
       "post": {
         "description": "Permission: gateway:session_write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",

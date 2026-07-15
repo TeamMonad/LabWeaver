@@ -4,7 +4,7 @@ use std::str::FromStr;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
-use time::OffsetDateTime;
+use time::{OffsetDateTime, UtcOffset};
 use uuid::Uuid;
 
 macro_rules! typed_id {
@@ -87,6 +87,7 @@ typed_id!(EventId);
 typed_id!(FrozenSubmissionId);
 typed_id!(GatewaySessionId);
 typed_id!(ImageArtifactId);
+typed_id!(LeaseId);
 typed_id!(OperationId);
 typed_id!(PolicyId);
 typed_id!(ProblemPackageId);
@@ -200,6 +201,14 @@ impl<'de> Deserialize<'de> for Sha256Digest {
 pub struct UtcTimestamp(OffsetDateTime);
 
 impl UtcTimestamp {
+    /// Creates an exact UTC millisecond timestamp without a string round trip.
+    pub fn from_utc(value: OffsetDateTime) -> Result<Self, FoundationError> {
+        if value.offset() != UtcOffset::UTC || value.nanosecond() % 1_000_000 != 0 {
+            return Err(FoundationError::InvalidTimestamp);
+        }
+        Ok(Self(value))
+    }
+
     /// Returns the timestamp value.
     #[must_use]
     pub const fn get(self) -> OffsetDateTime {

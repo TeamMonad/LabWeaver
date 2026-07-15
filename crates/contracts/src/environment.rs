@@ -4,7 +4,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::authoring::{EnvironmentClass, RuntimeKind};
-use crate::{ActorId, EndpointId, EnvironmentId, OperationId, ReleaseId, Revision, UtcTimestamp};
+use crate::{
+    ActorId, CourseId, EndpointId, EnvironmentId, LeaseId, OperationId, ReleaseId, Revision,
+    UtcTimestamp,
+};
 
 /// Requested steady state.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -24,6 +27,7 @@ pub enum ObservedEnvironmentState {
     Building,
     Provisioning,
     Ready,
+    Stopping,
     Stopped,
     Updating,
     Expiring,
@@ -46,7 +50,118 @@ pub enum EnvironmentOperationKind {
     Recover,
     Expire,
     Delete,
+    Cleanup,
     Freeze,
+}
+
+/// Authoritative fields required to create the first Environment aggregate.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentCreateSpec {
+    pub course_id: CourseId,
+    pub owner_actor_id: ActorId,
+    pub class: EnvironmentClass,
+    pub runtime_kind: RuntimeKind,
+    pub release_id: ReleaseId,
+    pub release_version: u64,
+    pub provider_binding: String,
+    pub lease_id: Option<LeaseId>,
+    pub capacity_binding: Option<String>,
+    pub eligibility_expires_at: UtcTimestamp,
+}
+
+/// Explicit immutable target selected for one reset operation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum EnvironmentResetTarget {
+    ExperimentBaseline {
+        release_id: ReleaseId,
+        release_version: u64,
+    },
+    WorkSnapshot {
+        snapshot: crate::ArtifactRef,
+        authorization_revision: Revision,
+    },
+    WorkConfiguration {
+        configuration_revision: Revision,
+        authorization_revision: Revision,
+    },
+}
+
+/// Resource-authoritative Active Lease snapshot retained with the accepted operation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentLeaseAuthorization {
+    pub lease_id: LeaseId,
+    pub lease_revision: Revision,
+    pub environment_id: EnvironmentId,
+    pub course_id: CourseId,
+    pub owner_actor_id: ActorId,
+    pub capacity_binding: String,
+    pub active_from: UtcTimestamp,
+    pub expires_at: UtcTimestamp,
+}
+
+/// Versioned Resource request for exact Lease scope and current state.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentLeaseVerificationRequest {
+    pub version: u8,
+    pub lease_id: LeaseId,
+    pub environment_id: EnvironmentId,
+    pub course_id: CourseId,
+    pub owner_actor_id: ActorId,
+    pub capacity_binding: String,
+}
+
+/// Closed Resource Lease states understood by the Environment verifier.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentLeaseState {
+    Active,
+    Expiring,
+    Expired,
+    Revoked,
+}
+
+/// Versioned Resource response. Only `Active` with an exact authorization is accepted.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentLeaseVerificationResponse {
+    pub version: u8,
+    pub state: EnvironmentLeaseState,
+    pub authorization: Option<EnvironmentLeaseAuthorization>,
+}
+
+/// Revision-checked lifecycle intent consumed by the Environment state owner.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentLifecycleCommand {
+    pub environment_id: EnvironmentId,
+    pub kind: EnvironmentOperationKind,
+    pub expected_revision: Revision,
+    pub actor_id: ActorId,
+    pub trace_id: String,
+    pub accepted_at: UtcTimestamp,
+    pub deadline_at: UtcTimestamp,
+    pub access_revocation_revision: Option<Revision>,
+    pub preserve_mutable_disk: bool,
+    pub max_attempts: u32,
+    pub reset_target: Option<EnvironmentResetTarget>,
+}
+
+/// Command-specific data carried inside the catalogued lifecycle CloudEvent.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentLifecycleCommandData {
+    pub idempotency_key: String,
+    pub command: EnvironmentLifecycleCommand,
+    pub create: Option<EnvironmentCreateSpec>,
 }
 
 /// Persistent operation state.
@@ -70,12 +185,20 @@ pub struct EnvironmentOperation {
     pub state: OperationState,
     pub accepted_revision: Revision,
     pub attempt: u32,
+    pub provider_step: u32,
+    pub max_attempts: u32,
+    pub next_attempt_at: UtcTimestamp,
     pub actor_id: ActorId,
+    pub trace_id: String,
     pub accepted_at: UtcTimestamp,
     pub deadline_at: UtcTimestamp,
+    pub cleanup_started_at: Option<UtcTimestamp>,
     pub diagnostic_code: Option<String>,
     pub preserve_mutable_disk: bool,
     pub access_revocation_revision: Option<Revision>,
+    pub retry_from_phase: Option<ObservedEnvironmentState>,
+    pub reset_target: Option<EnvironmentResetTarget>,
+    pub lease_authorization: Option<EnvironmentLeaseAuthorization>,
 }
 
 /// Sanitized Environment-owned endpoint metadata.
@@ -119,6 +242,8 @@ pub struct EnvironmentInstance {
     pub runtime_kind: RuntimeKind,
     pub release_id: ReleaseId,
     pub release_version: u64,
+    pub lease_id: Option<LeaseId>,
+    pub capacity_binding: Option<String>,
     pub provider_binding: String,
     pub desired_state: DesiredEnvironmentState,
     pub observed_state: ObservedEnvironmentState,
@@ -126,8 +251,10 @@ pub struct EnvironmentInstance {
     pub generation: u64,
     pub observed_generation: u64,
     pub operation: EnvironmentOperation,
+    pub eligibility_expires_at: UtcTimestamp,
     pub endpoints: Vec<EnvironmentEndpoint>,
     pub last_diagnostic_code: Option<String>,
+    pub failed_phase: Option<ObservedEnvironmentState>,
     pub cleanup_evidence: Option<crate::ArtifactRef>,
 }
 
@@ -139,9 +266,83 @@ impl EnvironmentInstance {
             || self.generation == 0
             || self.observed_generation > self.generation
             || self.operation.attempt == 0
+            || self.operation.provider_step == 0
+            || self.operation.max_attempts < self.operation.attempt
             || self.operation.deadline_at <= self.operation.accepted_at
+            || self.operation.next_attempt_at < self.operation.accepted_at
+            || self.operation.next_attempt_at > self.operation.deadline_at
+            || self.operation.cleanup_started_at.is_some_and(|started_at| {
+                self.desired_state != DesiredEnvironmentState::Deleted
+                    || started_at < self.operation.accepted_at
+                    || started_at > self.operation.deadline_at
+            })
+            || self.operation.trace_id.is_empty()
+            || self.operation.trace_id.len() > 128
+            || !self
+                .operation
+                .trace_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
         {
             return Err(EnvironmentError::InvalidAggregate);
+        }
+        for code in [
+            self.last_diagnostic_code.as_deref(),
+            self.operation.diagnostic_code.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            crate::DiagnosticCode::parse(code)
+                .map_err(|_| EnvironmentError::InvalidDiagnosticCode)?;
+        }
+        match self.class {
+            EnvironmentClass::Experiment
+                if self.lease_id.is_some() || self.capacity_binding.is_some() =>
+            {
+                return Err(EnvironmentError::InvalidAggregate);
+            }
+            EnvironmentClass::Work
+                if self.lease_id.is_none()
+                    || self
+                        .capacity_binding
+                        .as_deref()
+                        .is_none_or(|binding| !valid_binding(binding)) =>
+            {
+                return Err(EnvironmentError::LeaseRequired);
+            }
+            _ => {}
+        }
+        if (self.observed_state == ObservedEnvironmentState::Failed) != self.failed_phase.is_some()
+        {
+            return Err(EnvironmentError::FailedPhaseRequired);
+        }
+        let retry_operation = matches!(
+            self.operation.kind,
+            EnvironmentOperationKind::Retry | EnvironmentOperationKind::Recover
+        );
+        if retry_operation != self.operation.retry_from_phase.is_some() {
+            return Err(EnvironmentError::FailedPhaseRequired);
+        }
+        if (self.operation.kind == EnvironmentOperationKind::Reset)
+            != self.operation.reset_target.is_some()
+        {
+            return Err(EnvironmentError::ResetTargetRequired);
+        }
+        if let Some(target) = &self.operation.reset_target {
+            validate_reset_target(self, target)?;
+        }
+        if let Some(authorization) = &self.operation.lease_authorization {
+            if self.class != EnvironmentClass::Work
+                || Some(authorization.lease_id) != self.lease_id
+                || authorization.environment_id != self.id
+                || authorization.course_id != self.course_id
+                || authorization.owner_actor_id != self.owner_id
+                || Some(authorization.capacity_binding.as_str()) != self.capacity_binding.as_deref()
+                || authorization.active_from >= authorization.expires_at
+            {
+                return Err(EnvironmentError::LeaseAuthorizationInvalid);
+            }
         }
         match self.operation.kind {
             EnvironmentOperationKind::Restart if !self.operation.preserve_mutable_disk => {
@@ -153,7 +354,11 @@ impl EnvironmentInstance {
             {
                 return Err(EnvironmentError::GrantRevocationRequired);
             }
-            EnvironmentOperationKind::Delete
+            EnvironmentOperationKind::Stop
+            | EnvironmentOperationKind::Cancel
+            | EnvironmentOperationKind::Expire
+            | EnvironmentOperationKind::Delete
+            | EnvironmentOperationKind::Cleanup
                 if self.operation.access_revocation_revision.is_none() =>
             {
                 return Err(EnvironmentError::GrantRevocationRequired);
@@ -163,10 +368,9 @@ impl EnvironmentInstance {
         if self.observed_state == ObservedEnvironmentState::Ready
             && (self.observed_generation != self.generation
                 || self.endpoints.is_empty()
-                || self
-                    .endpoints
-                    .iter()
-                    .any(|endpoint| endpoint.health != EndpointHealth::Healthy))
+                || self.endpoints.iter().any(|endpoint| {
+                    endpoint.health != EndpointHealth::Healthy || endpoint.revision != self.revision
+                }))
         {
             return Err(EnvironmentError::ReadyWithoutHealthyEndpoint);
         }
@@ -201,11 +405,14 @@ impl EnvironmentInstance {
             ) | (
                 State::Ready,
                 State::Provisioning
-                    | State::Stopped
+                    | State::Stopping
                     | State::Updating
                     | State::Expiring
                     | State::Deleting
                     | State::Failed
+            ) | (
+                State::Stopping | State::Expiring,
+                State::Stopped | State::Failed | State::Deleting
             ) | (
                 State::Stopped,
                 State::Provisioning | State::Expiring | State::Deleting | State::Failed
@@ -214,10 +421,13 @@ impl EnvironmentInstance {
                 State::Ready | State::Failed | State::Deleting
             ) | (
                 State::Failed,
-                State::Validating | State::Provisioning | State::Expiring | State::Deleting
-            ) | (
-                State::Expiring,
-                State::Stopped | State::Deleting | State::Failed
+                State::Validating
+                    | State::Building
+                    | State::Provisioning
+                    | State::Stopping
+                    | State::Updating
+                    | State::Expiring
+                    | State::Deleting
             ) | (State::Deleting, State::Deleted | State::Failed)
         );
         if allowed {
@@ -245,6 +455,9 @@ impl EnvironmentInstance {
             Operation::Cancel => !matches!(state, State::Deleted | State::Deleting),
             Operation::Expire => matches!(state, State::Ready | State::Stopped | State::Failed),
             Operation::Delete => state != State::Deleted,
+            Operation::Cleanup => {
+                matches!(state, State::Expiring | State::Deleting | State::Failed)
+            }
         };
         if allowed {
             Ok(())
@@ -263,8 +476,22 @@ pub enum EnvironmentError {
     ReadyWithoutHealthyEndpoint,
     #[error("Deleted requires immutable cleanup evidence")]
     CleanupEvidenceRequired,
-    #[error("reset and delete require recorded AccessGrant revocation before provider mutation")]
+    #[error(
+        "stop, reset, expiry, cancellation and cleanup require recorded AccessGrant revocation before provider mutation"
+    )]
     GrantRevocationRequired,
+    #[error("Work environments require a Resource-owned Lease reference")]
+    LeaseRequired,
+    #[error("Failed state and retry/recover require a persisted failed phase")]
+    FailedPhaseRequired,
+    #[error("reset requires an explicit class-specific immutable target")]
+    ResetTargetRequired,
+    #[error("reset target does not match the Environment class or immutable binding")]
+    ResetTargetInvalid,
+    #[error("Work create/start/retry/recover/reset requires an Active Lease authorization")]
+    LeaseAuthorizationRequired,
+    #[error("Resource Lease authorization does not match the Environment scope")]
+    LeaseAuthorizationInvalid,
     #[error("illegal environment transition: {from:?} -> {to:?}")]
     InvalidTransition {
         from: ObservedEnvironmentState,
@@ -275,11 +502,243 @@ pub enum EnvironmentError {
         state: ObservedEnvironmentState,
         operation: EnvironmentOperationKind,
     },
+    #[error("owner resolver configuration is unsafe or incomplete")]
+    InvalidResolverConfiguration,
+    #[error("environment diagnostic code is not a stable LW_* identity")]
+    InvalidDiagnosticCode,
+}
+
+fn valid_binding(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+}
+
+fn validate_reset_target(
+    instance: &EnvironmentInstance,
+    target: &EnvironmentResetTarget,
+) -> Result<(), EnvironmentError> {
+    let valid = match (instance.class, target) {
+        (
+            EnvironmentClass::Experiment,
+            EnvironmentResetTarget::ExperimentBaseline {
+                release_id,
+                release_version,
+            },
+        ) => *release_id == instance.release_id && *release_version == instance.release_version,
+        (EnvironmentClass::Work, EnvironmentResetTarget::WorkSnapshot { snapshot, .. }) => {
+            !snapshot.store_binding.trim().is_empty()
+                && !snapshot.object_version.trim().is_empty()
+                && snapshot.size_bytes > 0
+                && !snapshot.media_type.trim().is_empty()
+        }
+        (EnvironmentClass::Work, EnvironmentResetTarget::WorkConfiguration { .. }) => true,
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(EnvironmentError::ResetTargetInvalid)
+    }
+}
+
+/// Fail-closed internal request used by Access Service to verify Environment ownership.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentOwnerResolutionRequest {
+    pub environment_id: EnvironmentId,
+    pub course_id: CourseId,
+    pub owner_actor_id: ActorId,
+    pub expected_revision: Revision,
+}
+
+/// Minimal Environment-authoritative ownership result; it never contains endpoints or credentials.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentOwnerResolution {
+    pub environment_id: EnvironmentId,
+    pub course_id: CourseId,
+    pub owner_actor_id: ActorId,
+    pub environment_revision: Revision,
+    pub eligibility_expires_at: UtcTimestamp,
+}
+
+/// Deployment-supplied client settings for the controlled mTLS owner-resolver call.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentOwnerResolverClientConfig {
+    pub resolver_uri: String,
+    pub ca_certificate_locator: String,
+    pub client_certificate_locator: String,
+    pub client_private_key_locator: String,
+    pub allowed_server_sans: Vec<String>,
+    pub timeout_milliseconds: u64,
+    pub max_retries: u8,
+}
+
+impl EnvironmentOwnerResolverClientConfig {
+    /// Rejects implicit endpoints, inline key material, unbounded calls, and empty SAN policy.
+    pub fn validate(&self) -> Result<(), EnvironmentError> {
+        let locators = [
+            self.ca_certificate_locator.as_str(),
+            self.client_certificate_locator.as_str(),
+            self.client_private_key_locator.as_str(),
+        ];
+        let resolver_authority = self.resolver_uri.strip_prefix("https://");
+        if resolver_authority.is_none_or(|authority| {
+            authority.is_empty()
+                || authority.contains('@')
+                || authority.contains('/')
+                || authority.contains('?')
+                || authority.contains('#')
+                || authority.chars().any(char::is_whitespace)
+        }) || locators.iter().any(|locator| {
+            !locator.starts_with("secret://")
+                || locator.len() <= "secret://".len()
+                || locator.contains("-----BEGIN")
+                || locator.contains('\n')
+        }) || self.allowed_server_sans.is_empty()
+            || self.allowed_server_sans.iter().any(|san| {
+                san.trim().is_empty()
+                    || san.contains('*')
+                    || san.contains('@')
+                    || san.contains('/')
+                    || san.chars().any(char::is_whitespace)
+            })
+            || !(1..=30_000).contains(&self.timeout_milliseconds)
+            || self.max_retries > 3
+        {
+            return Err(EnvironmentError::InvalidResolverConfiguration);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{EnvironmentInstance, EnvironmentOperationKind, ObservedEnvironmentState};
+    use super::{
+        EnvironmentInstance, EnvironmentOperationKind, EnvironmentOwnerResolverClientConfig,
+        ObservedEnvironmentState,
+    };
+
+    const STATES: [ObservedEnvironmentState; 12] = [
+        ObservedEnvironmentState::Requested,
+        ObservedEnvironmentState::Validating,
+        ObservedEnvironmentState::Building,
+        ObservedEnvironmentState::Provisioning,
+        ObservedEnvironmentState::Ready,
+        ObservedEnvironmentState::Stopping,
+        ObservedEnvironmentState::Stopped,
+        ObservedEnvironmentState::Updating,
+        ObservedEnvironmentState::Expiring,
+        ObservedEnvironmentState::Deleting,
+        ObservedEnvironmentState::Deleted,
+        ObservedEnvironmentState::Failed,
+    ];
+    const OPERATIONS: [EnvironmentOperationKind; 12] = [
+        EnvironmentOperationKind::Create,
+        EnvironmentOperationKind::Start,
+        EnvironmentOperationKind::Stop,
+        EnvironmentOperationKind::Restart,
+        EnvironmentOperationKind::Reset,
+        EnvironmentOperationKind::Retry,
+        EnvironmentOperationKind::Cancel,
+        EnvironmentOperationKind::Recover,
+        EnvironmentOperationKind::Expire,
+        EnvironmentOperationKind::Delete,
+        EnvironmentOperationKind::Cleanup,
+        EnvironmentOperationKind::Freeze,
+    ];
+
+    #[test]
+    fn transition_matrix_is_exhaustive_for_every_state_pair() {
+        use ObservedEnvironmentState as State;
+        for from in STATES {
+            for to in STATES {
+                let expected = matches!(
+                    (from, to),
+                    (
+                        State::Requested,
+                        State::Validating | State::Failed | State::Deleting
+                    ) | (
+                        State::Validating,
+                        State::Building | State::Failed | State::Deleting
+                    ) | (
+                        State::Building,
+                        State::Provisioning | State::Failed | State::Deleting
+                    ) | (
+                        State::Provisioning,
+                        State::Ready | State::Stopped | State::Failed | State::Deleting
+                    ) | (
+                        State::Ready,
+                        State::Provisioning
+                            | State::Stopping
+                            | State::Updating
+                            | State::Expiring
+                            | State::Deleting
+                            | State::Failed
+                    ) | (
+                        State::Stopping | State::Expiring,
+                        State::Stopped | State::Failed | State::Deleting
+                    ) | (
+                        State::Stopped,
+                        State::Provisioning | State::Expiring | State::Deleting | State::Failed
+                    ) | (
+                        State::Updating,
+                        State::Ready | State::Failed | State::Deleting
+                    ) | (
+                        State::Failed,
+                        State::Validating
+                            | State::Building
+                            | State::Provisioning
+                            | State::Stopping
+                            | State::Updating
+                            | State::Expiring
+                            | State::Deleting
+                    ) | (State::Deleting, State::Deleted | State::Failed)
+                );
+                assert_eq!(
+                    EnvironmentInstance::ensure_transition(from, to).is_ok(),
+                    expected,
+                    "unexpected transition result for {from:?} -> {to:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn operation_matrix_is_exhaustive_for_every_state_and_operation() {
+        use EnvironmentOperationKind as Operation;
+        use ObservedEnvironmentState as State;
+        for state in STATES {
+            for operation in OPERATIONS {
+                let expected = match operation {
+                    Operation::Create => state == State::Requested,
+                    Operation::Start => state == State::Stopped,
+                    Operation::Stop | Operation::Freeze => state == State::Ready,
+                    Operation::Restart | Operation::Reset => {
+                        matches!(state, State::Ready | State::Stopped | State::Failed)
+                    }
+                    Operation::Retry | Operation::Recover => state == State::Failed,
+                    Operation::Cancel => !matches!(state, State::Deleted | State::Deleting),
+                    Operation::Expire => {
+                        matches!(state, State::Ready | State::Stopped | State::Failed)
+                    }
+                    Operation::Delete => state != State::Deleted,
+                    Operation::Cleanup => {
+                        matches!(state, State::Expiring | State::Deleting | State::Failed)
+                    }
+                };
+                assert_eq!(
+                    EnvironmentInstance::ensure_operation_allowed(state, operation).is_ok(),
+                    expected,
+                    "unexpected operation result for {operation:?} from {state:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn deleted_is_terminal() {
@@ -316,5 +775,27 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn resolver_client_requires_https_locators_sans_and_bounded_retry() {
+        let mut config = EnvironmentOwnerResolverClientConfig {
+            resolver_uri: "https://environment-service.internal".to_owned(),
+            ca_certificate_locator: "secret://environment-resolver/ca".to_owned(),
+            client_certificate_locator: "secret://access-service/tls-cert".to_owned(),
+            client_private_key_locator: "secret://access-service/tls-key".to_owned(),
+            allowed_server_sans: vec!["environment-service.internal".to_owned()],
+            timeout_milliseconds: 2_000,
+            max_retries: 2,
+        };
+        assert!(config.validate().is_ok());
+        config.client_private_key_locator = "-----BEGIN PRIVATE KEY-----".to_owned();
+        assert!(config.validate().is_err());
+        config.client_private_key_locator = "secret://access-service/tls-key".to_owned();
+        config.resolver_uri = "https://user@environment-service.internal".to_owned();
+        assert!(config.validate().is_err());
+        config.resolver_uri = "https://environment-service.internal".to_owned();
+        config.allowed_server_sans = vec!["*.internal".to_owned()];
+        assert!(config.validate().is_err());
     }
 }
