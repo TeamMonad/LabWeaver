@@ -1,6 +1,6 @@
 <template>
   <RoleLayout
-    icon="🎓"
+    icon="person"
     title="学生工作台"
     subtitle="加入实验、启动环境、提交结果并查看反馈"
     :tabs="tabs"

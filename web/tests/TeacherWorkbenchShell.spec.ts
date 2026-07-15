@@ -3,7 +3,7 @@ import { mount } from '@vue/test-utils'
 import TeacherWorkbenchShell from '@/components/teacher/TeacherWorkbenchShell.vue'
 
 describe('TeacherWorkbenchShell', () => {
-  it('provides the four workbench modules and an explicit read-only diagnostic', () => {
+  it('provides the five workbench modules and an explicit API-not-bound diagnostic', () => {
     const wrapper = mount(TeacherWorkbenchShell, {
       global: {
         stubs: {
@@ -14,7 +14,6 @@ describe('TeacherWorkbenchShell', () => {
     })
 
     expect(wrapper.findAll('.module-nav a')).toHaveLength(5)
-    expect(wrapper.text()).toContain('未认证只读演示')
     expect(wrapper.text()).toContain('课程与实验 API 尚未绑定')
   })
 

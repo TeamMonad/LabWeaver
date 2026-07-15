@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc --noEmit && vite build",
+    "build": "vue-tsc --noEmit && vite build && pnpm verify:production-bundle",
+    "verify:production-bundle": "node scripts/verify-production-bundle.mjs",
     "preview": "vite preview",
     "lint": "eslint . --max-warnings=0",
     "test": "vitest run",
@@ -21,14 +22,19 @@
     "test:e2e": "node scripts/run-e2e.mjs"
   },
   "dependencies": {
+    "@fontsource-variable/noto-sans-sc": "^5.2.10",
+    "@fontsource-variable/roboto-flex": "^5.2.8",
+    "@fontsource/roboto": "^5.2.10",
     "@hey-api/client-axios": "0.9.1",
     "axios": "^1.18.1",
+    "material-symbols": "^0.45.7",
     "oidc-client-ts": "^3.5.0",
     "pinia": "^2.1.7",
     "vue": "^3.4.31",
     "vue-router": "^4.4.0"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.12.1",
     "@hey-api/openapi-ts": "0.99.0",
     "@playwright/test": "^1.61.1",
     "@typescript-eslint/eslint-plugin": "^7.16.0",
@@ -38,7 +44,6 @@
     "eslint": "^8.57.0",
     "eslint-plugin-vue": "^9.27.0",
     "jsdom": "^24.1.0",
-    "msw": "^2.15.0",
     "tsx": "^4.23.0",
     "typescript": "^5.5.3",
     "vite": "^5.3.3",

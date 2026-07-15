@@ -1,6 +1,6 @@
 <template>
   <RoleLayout
-    icon="🔬"
+    icon="science"
     title="科研工作台"
     subtitle="长期工作环境、算力申请与软件配置"
     :tabs="tabs"
