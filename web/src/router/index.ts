@@ -116,13 +116,16 @@ router.beforeEach(async (to) => {
     await auth.loadUser()
 
     if (!auth.isAuthenticated.value) {
+      // Remember the originally requested path so the callback view can
+      // redirect back after a successful OIDC login.
+      window.sessionStorage.setItem('auth-return-to', to.fullPath)
       await auth.login()
       return false
     }
 
     const userRoles = getUserRoles(auth.user.value)
     if (!requiredRoles.some((r) => userRoles.includes(r))) {
-      return { name: 'home', query: { reason: 'unauthorized' } }
+      return { name: 'auth-error', query: { reason: 'role_denied' } }
     }
   }
 
