@@ -34,6 +34,19 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/HomeView.vue'),
     meta: { title: 'LabWeaver' },
   },
+  {
+    path: '/auth/callback',
+    name: 'auth-callback',
+    component: () => import('@/views/AuthCallbackView.vue'),
+    meta: { title: '登录回调' },
+  },
+  {
+    path: '/auth/error',
+    name: 'auth-error',
+    component: () => import('@/views/AuthErrorView.vue'),
+    props: (route) => ({ reason: route.query.reason }),
+    meta: { title: '认证失败' },
+  },
   roleRoute('teacher', '/teacher', '教师工作台', () => import('@/views/TeacherView.vue'), [
     { path: 'overview', component: () => import('@/views/teacher/TeacherOverviewView.vue'), meta: { title: '实验总览' } },
     { path: 'labs', component: () => import('@/views/teacher/LabListView.vue'), meta: { title: '实验' } },
@@ -58,12 +71,6 @@ const routes: RouteRecordRaw[] = [
     { path: 'policies', component: () => import('@/views/admin/PolicyListView.vue'), meta: { title: '策略' } },
     { path: 'audit', component: () => import('@/views/admin/AuditLogView.vue'), meta: { title: '审计' } },
   ]),
-  {
-    path: '/auth/callback',
-    name: 'auth-callback',
-    component: () => import('@/views/AuthCallbackView.vue'),
-    meta: { title: '登录回调' },
-  },
   {
     path: '/:pathMatch(.*)*',
     name: 'not-found',
@@ -109,13 +116,16 @@ router.beforeEach(async (to) => {
     await auth.loadUser()
 
     if (!auth.isAuthenticated.value) {
+      // Remember the originally requested path so the callback view can
+      // redirect back after a successful OIDC login.
+      window.sessionStorage.setItem('auth-return-to', to.fullPath)
       await auth.login()
       return false
     }
 
     const userRoles = getUserRoles(auth.user.value)
     if (!requiredRoles.some((r) => userRoles.includes(r))) {
-      return { name: 'home', query: { reason: 'unauthorized' } }
+      return { name: 'auth-error', query: { reason: 'role_denied' } }
     }
   }
 

@@ -59,13 +59,15 @@ describe('route guard', () => {
   it('triggers OIDC login for unauthenticated users accessing role routes', async () => {
     await router.push('/teacher')
     expect(loginMock).toHaveBeenCalled()
+    // roleRoute redirects to the first child, so the remembered return path is /teacher/overview.
+    expect(window.sessionStorage.getItem('auth-return-to')).toBe('/teacher/overview')
   })
 
   it('blocks users without required role', async () => {
     mockUser = makeUser(['student'])
     await router.push('/teacher')
-    expect(router.currentRoute.value.name).toBe('home')
-    expect(router.currentRoute.value.query.reason).toBe('unauthorized')
+    expect(router.currentRoute.value.name).toBe('auth-error')
+    expect(router.currentRoute.value.query.reason).toBe('role_denied')
   })
 
   it('allows users with matching role', async () => {
