@@ -78,6 +78,7 @@ typed_id!(AgentRunId);
 typed_id!(ApprovalId);
 typed_id!(ArtifactId);
 typed_id!(BuildRequestId);
+typed_id!(BffSessionId);
 typed_id!(CandidateId);
 typed_id!(CourseId);
 typed_id!(EndpointGrantId);

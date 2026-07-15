@@ -1,0 +1,59 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "PlatformRole": {
+      "description": "Base role asserted by the configured OIDC issuer.",
+      "oneOf": [
+        {
+          "const": "teacher",
+          "description": "Course teacher with an active course membership.",
+          "type": "string"
+        },
+        {
+          "const": "student",
+          "description": "Course student with an active course membership.",
+          "type": "string"
+        },
+        {
+          "const": "platform_admin",
+          "description": "Platform operator; course scope is still required for course data.",
+          "type": "string"
+        }
+      ]
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Safe actor identity derived from a verified OIDC token.",
+  "properties": {
+    "actorId": {
+      "$ref": "#/$defs/ActorId",
+      "description": "Local durable actor identity."
+    },
+    "expiresAt": {
+      "$ref": "#/$defs/UtcTimestamp",
+      "description": "Verified identity expiration."
+    },
+    "roles": {
+      "description": "Verified base roles.",
+      "items": {
+        "$ref": "#/$defs/PlatformRole"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "actorId",
+    "roles",
+    "expiresAt"
+  ],
+  "title": "AuthenticatedActor",
+  "type": "object"
+}

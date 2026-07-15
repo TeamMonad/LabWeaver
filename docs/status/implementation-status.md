@@ -65,3 +65,54 @@ policy replay, immutable-tag and retention enforcement, recovery drills, a
 reviewed Cilium policy for host-network Gateway traffic, and Release Gate
 evidence remain Sprint 2/#2 work. They do not make #23 or the baseline #15
 release-ready, but are not blockers for their bounded close conditions.
+
+Issue #47 has a complete local E2 implementation on its dedicated feature
+branch: the Access Service has configuration-validated OIDC Discovery,
+Authorization Code + PKCE state/nonce handling, AEAD-protected PostgreSQL BFF
+transaction/session/logout-hint records, synchronizer-CSRF logout with
+RP-Initiated Logout, bearer/back-channel JWKS validation, and a separate Rustls
+mTLS listener. The listener requires a client-authenticated CA chain,
+an allowlisted URI SAN, and a live registered `service_identities` row before
+it accepts `/internal/v1/auth/decision`. The decision route binds the requested
+actor to a live BFF session, reloads course/project memberships for every
+decision, checks the generated operation role/scope catalog, and returns an
+expiry-bounded decision. Environment scope additionally calls the merged #51
+owner resolver over configured mTLS and binds actor, course, environment,
+Environment revision, strong ETag and eligibility expiry. Generated OpenAPI now
+includes the allowed roles and scope kind for every catalog operation.
+
+Current E2 evidence includes the controlled SQLx PostgreSQL container path
+(session rotation, encrypted CSRF/logout-hint restoration, SID/direct
+revocation, authoritative membership reload and service identity), a real
+ephemeral-CA Access-to-Environment mTLS handshake with denial/tamper/outage,
+and a digest-pinned HTTPS Keycloak 26.3 run
+(`sha256:08a31919cfcd814bf1b465142b1a716c4d1a8830f772bb5c9dffcbd96de3fba6`).
+The Keycloak run completed HTML
+login, code exchange, nonce/issuer/audience/`azp`/role checks, provider logout,
+two RSA signing-key rotations, custom-CA unknown-`kid` refresh and empty-JWKS
+fail-closed behavior.
+
+The PR review TLS findings are addressed: strict Discovery rejects non-HTTPS
+authorization/token/JWKS/logout endpoints, an OIDC private CA replaces system
+roots, and the Owner Resolver always uses an exclusive configured CA. A
+double-opt-in `insecure-test-only` mode exists only for disposable loopback
+tests; configuration plus `LABWEAVER_ENABLE_INSECURE_AUTH_TEST_MODE=1` are both
+required. Unit/integration coverage proves remote HTTP rejection, loopback HTTP
+Discovery, invalid loopback test certificates, and the unchanged strict
+private-CA Keycloak path.
+
+Human A+B review, D same-build Verify, controlled client-certificate rotation,
+deployed metrics validation and real Gateway/internal-DNS/TLS verification
+remain incomplete. Back-channel token validation and SID revocation are covered
+below the HTTP boundary, but real Keycloak back-channel HTTP delivery is still
+an E3 dependency. No E3, E4, production deployment, or Issue closure claim is
+made.
+
+The Issue #47 design preference for `tower-sessions` SQLx storage is not
+currently usable with this workspace: the available `tower-sessions` 0.15
+store is compiled against Axum 0.7, while the services are on Axum 0.8. It
+cannot satisfy the required `SessionStore` trait or provide a valid Axum 0.8
+extractor. The service therefore keeps the controlled `access.bff_sessions`
+store and its catalog migration for now; replacing it requires an approved
+compatible upstream release or a reviewed framework migration, not an unsafe
+dual-Axum workaround.

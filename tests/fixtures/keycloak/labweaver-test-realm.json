@@ -1,0 +1,51 @@
+{
+  "realm": "labweaver-test",
+  "enabled": true,
+  "roles": { "realm": [{ "name": "teacher" }, { "name": "student" }, { "name": "platform-admin" }] },
+  "clients": [{
+    "clientId": "labweaver-web",
+    "publicClient": true,
+    "standardFlowEnabled": true,
+    "directAccessGrantsEnabled": false,
+    "redirectUris": ["http://127.0.0.1:38080/auth/callback"],
+    "webOrigins": ["http://127.0.0.1:38080"],
+    "protocol": "openid-connect",
+    "attributes": {
+      "post.logout.redirect.uris": "http://127.0.0.1:38080/*"
+    },
+    "protocolMappers": [{
+      "name": "realm roles",
+      "protocol": "openid-connect",
+      "protocolMapper": "oidc-usermodel-realm-role-mapper",
+      "consentRequired": false,
+      "config": {
+        "multivalued": "true",
+        "userinfo.token.claim": "true",
+        "id.token.claim": "true",
+        "access.token.claim": "true",
+        "claim.name": "realm_access.roles",
+        "jsonType.label": "String"
+      }
+    }, {
+      "name": "labweaver api audience",
+      "protocol": "openid-connect",
+      "protocolMapper": "oidc-audience-mapper",
+      "consentRequired": false,
+      "config": {
+        "included.custom.audience": "labweaver-api",
+        "id.token.claim": "false",
+        "access.token.claim": "true"
+      }
+    }]
+  }],
+  "users": [{
+    "username": "teacher",
+    "firstName": "Test",
+    "lastName": "Teacher",
+    "email": "teacher@example.invalid",
+    "enabled": true,
+    "emailVerified": true,
+    "credentials": [{ "type": "password", "value": "test-only-password", "temporary": false }],
+    "realmRoles": ["teacher"]
+  }]
+}

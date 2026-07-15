@@ -1,0 +1,63 @@
+# Non-secret Access Service authentication contract. Deployment values must be
+# supplied by the environment-specific configuration manager; secret locators
+# reference mounted files and never embed credentials here.
+# Production must remain `strict`. Disposable loopback tests may use
+# `insecure-test-only` only together with
+# LABWEAVER_ENABLE_INSECURE_AUTH_TEST_MODE=1; non-loopback URLs/binds are rejected.
+transport_security: strict
+oidc:
+  issuer: "https://keycloak.example.invalid/realms/labweaver"
+  client_id: "labweaver-web"
+  audience: "labweaver-api"
+  redirect_uri: "https://portal.example.invalid/auth/callback"
+  post_logout_redirect_uri: "https://portal.example.invalid/"
+  trusted_ca_file: ""
+  role_claim_path: ["realm_access", "roles"]
+  role_mappings:
+    teacher: teacher
+    student: student
+    platform-admin: platform_admin
+  jwt_algorithms: ["RS256"]
+  jwks_refresh_seconds: 600
+  jwks_retry_seconds: 10
+browser:
+  bind_addr: "127.0.0.1:8080"
+  allowed_origins: ["https://portal.example.invalid"]
+  session_ttl_seconds: 900
+  session_idle_ttl_seconds: 300
+  oidc_transaction_ttl_seconds: 300
+  runtime_pool_max_connections: 10
+  cleanup_interval_seconds: 60
+  session_retention_seconds: 86400
+  session_cookie_name: "__Host-labweaver_session"
+  csrf_header_name: "X-CSRF-Token"
+secrets:
+  oidc_client_secret_file: ""
+  session_keyring_file: ""
+  active_session_key_id: ""
+  access_runtime_url_file: ""
+  file_bindings:
+    "secret://environment-owner-resolver/ca": "secrets/environment-owner-resolver-ca.pem"
+    "secret://access-service/owner-resolver-client-cert": "secrets/access-owner-resolver-client-cert.pem"
+    "secret://access-service/owner-resolver-client-key": "secrets/access-owner-resolver-client-key.pem"
+internal_mtls:
+  bind_addr: "127.0.0.1:9443"
+  server_certificate_file: ""
+  server_key_file: ""
+  client_ca_file: ""
+  allowed_san_uris: ["spiffe://labweaver/gateway"]
+  required_eku: "clientAuth"
+environment_owner_resolver:
+  # Recommended production starting point: a 2 s call timeout, one bounded
+  # retry after 100 ms, and a 5 s maximum Gateway decision cache horizon.
+  # Deployments may tune these explicit values only within startup-validated
+  # limits; no compiled fallback is used.
+  resolver_uri: "https://environment-owner-resolver.example.invalid:9444"
+  ca_certificate_locator: "secret://environment-owner-resolver/ca"
+  client_certificate_locator: "secret://access-service/owner-resolver-client-cert"
+  client_private_key_locator: "secret://access-service/owner-resolver-client-key"
+  allowed_server_sans: ["environment-owner-resolver.example.invalid"]
+  timeout_milliseconds: 2000
+  max_retries: 1
+  retry_backoff_milliseconds: 100
+  decision_ttl_seconds: 5

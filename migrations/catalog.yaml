@@ -15,6 +15,9 @@ domains:
       - id: 1
         file: access/0001_initial.sql
         sha256: c9d2fa11daeb3af15c185cbc3f5aaa21aeef93f3a221873ae420e36740d2910c
+      - id: 2
+        file: access/0002_auth.sql
+        sha256: c00400f6c4ffd7a867dec42581737a9442573eb42b2f10267f695dd0fefbe26f
   - name: environment
     migrations:
       - id: 1

@@ -13,6 +13,18 @@
       }
     },
     "schemas": {
+      "AuthSession": {
+        "$ref": "../contracts/v1/auth-session.schema.json"
+      },
+      "AuthorizationDecision": {
+        "$ref": "../contracts/v1/authorization-decision.schema.json"
+      },
+      "AuthorizationDecisionRequest": {
+        "$ref": "../contracts/v1/authorization-decision-request.schema.json"
+      },
+      "CsrfTokenResponse": {
+        "$ref": "../contracts/v1/csrf-token-response.schema.json"
+      },
       "OperationAccepted": {
         "additionalProperties": false,
         "properties": {
@@ -122,6 +134,45 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/internal/v1/auth/decision": {
+      "post": {
+        "operationId": "decideAuthorization",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthorizationDecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationDecision"
+                }
+              }
+            },
+            "description": "Expiry-bounded authorization decision"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceMtls": []
+          }
+        ],
+        "summary": "Evaluate an actor session and exact resource scope for an mTLS caller"
+      }
+    },
     "/internal/v1/environments/{environmentId}/owner:resolve": {
       "post": {
         "description": "Permission: environment:resolve_owner. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
@@ -206,6 +257,9 @@
           }
         ],
         "summary": "resolveEnvironmentOwner",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -219,6 +273,7 @@
         "x-labweaver-permission": "environment:resolve_owner",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "service",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -305,6 +360,9 @@
           }
         ],
         "summary": "createGatewaySession",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -316,6 +374,7 @@
         "x-labweaver-permission": "gateway:session_write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "service",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -412,6 +471,9 @@
           }
         ],
         "summary": "closeGatewaySession",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -423,6 +485,7 @@
         "x-labweaver-permission": "gateway:session_write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "service",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -519,6 +582,9 @@
           }
         ],
         "summary": "heartbeatGatewaySession",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -530,6 +596,7 @@
         "x-labweaver-permission": "gateway:session_write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "service",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -607,6 +674,9 @@
           }
         ],
         "summary": "authorizeSsh",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
@@ -618,6 +688,7 @@
         "x-labweaver-permission": "gateway:ssh_authorize",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": false,
+        "x-labweaver-scope": "service",
         "x-labweaver-timeout-ms": 30000
       }
     }

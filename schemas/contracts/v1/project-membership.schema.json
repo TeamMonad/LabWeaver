@@ -1,0 +1,116 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "MembershipState": {
+      "description": "Authoritative membership state owned by Access Service.",
+      "oneOf": [
+        {
+          "const": "active",
+          "description": "Membership may authorize matching operations.",
+          "type": "string"
+        },
+        {
+          "const": "suspended",
+          "description": "Membership is temporarily disabled and must deny access.",
+          "type": "string"
+        },
+        {
+          "const": "revoked",
+          "description": "Membership was permanently revoked and must deny access.",
+          "type": "string"
+        }
+      ]
+    },
+    "PlatformRole": {
+      "description": "Base role asserted by the configured OIDC issuer.",
+      "oneOf": [
+        {
+          "const": "teacher",
+          "description": "Course teacher with an active course membership.",
+          "type": "string"
+        },
+        {
+          "const": "student",
+          "description": "Course student with an active course membership.",
+          "type": "string"
+        },
+        {
+          "const": "platform_admin",
+          "description": "Platform operator; course scope is still required for course data.",
+          "type": "string"
+        }
+      ]
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Project-local scope nested under a course membership.",
+  "properties": {
+    "actorId": {
+      "$ref": "#/$defs/ActorId",
+      "description": "Actor scope."
+    },
+    "courseId": {
+      "$ref": "#/$defs/CourseId",
+      "description": "Owning course."
+    },
+    "expiresAt": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Optional hard expiry."
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId",
+      "description": "Project scope."
+    },
+    "revision": {
+      "$ref": "#/$defs/Revision",
+      "description": "Monotonic authorization revision."
+    },
+    "role": {
+      "$ref": "#/$defs/PlatformRole",
+      "description": "Role permitted by this project."
+    },
+    "state": {
+      "$ref": "#/$defs/MembershipState",
+      "description": "Current lifecycle state."
+    }
+  },
+  "required": [
+    "courseId",
+    "projectId",
+    "actorId",
+    "role",
+    "state",
+    "revision"
+  ],
+  "title": "ProjectMembership",
+  "type": "object"
+}
