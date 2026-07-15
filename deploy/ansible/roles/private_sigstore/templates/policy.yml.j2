@@ -25,6 +25,9 @@ spec:
     - to:
         - ipBlock: {cidr: {{ private_sigstore_oidc_gateway_vip }}/32}
       ports: [{protocol: TCP, port: 443}]
+    - to:
+        - ipBlock: {cidr: {{ private_sigstore_kubernetes_api_cluster_ip }}/32}
+      ports: [{protocol: TCP, port: 443}]
 ---
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy

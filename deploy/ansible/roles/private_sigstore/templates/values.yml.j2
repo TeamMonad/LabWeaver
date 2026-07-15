@@ -33,7 +33,7 @@ ctlog:
     pubkeysecret: {{ private_sigstore_ctlog_secret_name }}
     initContainerSecurityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, runAsNonRoot: true, runAsUser: 65533, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
     containerSecurityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, runAsNonRoot: true, runAsUser: 65533, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
-    securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+    securityContext: {runAsNonRoot: true, runAsUser: 65533, fsGroup: 65533, fsGroupChangePolicy: OnRootMismatch, seccompProfile: {type: RuntimeDefault}}
   trillian:
     namespace: {{ private_sigstore_namespace }}
     logServer: {name: trillian-logserver, portRPC: 8091}
@@ -67,7 +67,7 @@ rekor:
     service: {type: ClusterIP}
     resources: {{ private_sigstore_resources | to_json }}
     containerSecurityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, runAsNonRoot: true, runAsUser: 65533, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
-    securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+    securityContext: {runAsNonRoot: true, runAsUser: 65533, fsGroup: 65533, fsGroupChangePolicy: OnRootMismatch, seccompProfile: {type: RuntimeDefault}}
   redis:
     persistence: {enabled: true, storageClass: {{ private_sigstore_storage_class }}, size: 5Gi}
     resources: {{ private_sigstore_resources | to_json }}
@@ -98,6 +98,7 @@ trillian:
     containerSecurityContext: {allowPrivilegeEscalation: false, runAsNonRoot: true, runAsUser: 999, runAsGroup: 999, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
     securityContext: {runAsNonRoot: true, runAsUser: 999, runAsGroup: 999, fsGroup: 999, seccompProfile: {type: RuntimeDefault}}
   createdb:
+    enabled: false
     resources: {{ private_sigstore_resources | to_json }}
     containerSecurityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, runAsNonRoot: true, runAsUser: 65533, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
     securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
