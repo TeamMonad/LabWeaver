@@ -1,5 +1,47 @@
 {
   "$defs": {
+    "ClaudeCodeBindingV1": {
+      "additionalProperties": false,
+      "description": "Immutable Claude Code worker binding.\n\nProvider-specific transport and authentication remain deployment-owned Claude Code\nconfiguration. The contract binds only a sanitized profile identity, exact model, CLI version,\nworker image, effective non-secret runtime configuration hash, and per-worker admission limit.",
+      "properties": {
+        "claudeCodeVersion": {
+          "description": "Exact Claude Code CLI version baked into the worker image.",
+          "type": "string"
+        },
+        "maxInFlightPerWorker": {
+          "description": "Maximum concurrent Claude Code child processes admitted by one worker instance.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "model": {
+          "description": "Exact model identifier passed to Claude Code; moving aliases are rejected.",
+          "type": "string"
+        },
+        "runtimeBinding": {
+          "description": "Deployment-owned opaque runtime profile; never a credential or endpoint URL.",
+          "type": "string"
+        },
+        "runtimeConfigSha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Hash of the effective sanitized Claude Code runtime configuration."
+        },
+        "workerImageSha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Immutable SHA-256 identity of the worker container image."
+        }
+      },
+      "required": [
+        "runtimeBinding",
+        "model",
+        "claudeCodeVersion",
+        "workerImageSha256",
+        "runtimeConfigSha256",
+        "maxInFlightPerWorker"
+      ],
+      "type": "object"
+    },
     "CourseId": {
       "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
       "type": "string"
@@ -68,30 +110,6 @@
       ],
       "type": "object"
     },
-    "OpenAiResponsesBindingV1": {
-      "additionalProperties": false,
-      "description": "OpenAI Responses API is the only v1 LLM provider binding.",
-      "properties": {
-        "model": {
-          "description": "Explicit model identifier.",
-          "type": "string"
-        },
-        "providerBinding": {
-          "description": "Deployment-owned provider binding; never an API key or arbitrary URL.",
-          "type": "string"
-        },
-        "strictStructuredOutputs": {
-          "description": "Strict Structured Outputs schema mode.",
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "providerBinding",
-        "model",
-        "strictStructuredOutputs"
-      ],
-      "type": "object"
-    },
     "PolicyId": {
       "description": "Strongly typed UUIDv7 identifier for `PolicyId`.",
       "type": "string"
@@ -101,6 +119,10 @@
       "format": "uint64",
       "minimum": 0,
       "type": "integer"
+    },
+    "Sha256Digest": {
+      "description": "Canonical lowercase SHA-256 digest.",
+      "type": "string"
     },
     "StudentContentMode": {
       "description": "Only explicit SubmissionManifest paths may disclose student content.",
@@ -122,7 +144,7 @@
       "$ref": "#/$defs/UtcTimestamp"
     },
     "binding": {
-      "$ref": "#/$defs/OpenAiResponsesBindingV1"
+      "$ref": "#/$defs/ClaudeCodeBindingV1"
     },
     "budget": {
       "$ref": "#/$defs/LlmBudget"

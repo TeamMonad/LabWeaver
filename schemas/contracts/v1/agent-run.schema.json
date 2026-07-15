@@ -43,13 +43,18 @@
         },
         "usage": {
           "$ref": "#/$defs/LlmUsage"
+        },
+        "usageObserved": {
+          "description": "Whether a terminal provider envelope made this usage observable.",
+          "type": "boolean"
         }
       },
       "required": [
         "number",
         "state",
         "inputSha256",
-        "usage"
+        "usage",
+        "usageObserved"
       ],
       "type": "object"
     },

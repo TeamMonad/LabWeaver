@@ -71,16 +71,26 @@ impl ProblemPackage {
     }
 }
 
-/// OpenAI Responses API is the only v1 LLM provider binding.
+/// Immutable Claude Code worker binding.
+///
+/// Provider-specific transport and authentication remain deployment-owned Claude Code
+/// configuration. The contract binds only a sanitized profile identity, exact model, CLI version,
+/// worker image, effective non-secret runtime configuration hash, and per-worker admission limit.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct OpenAiResponsesBindingV1 {
-    /// Deployment-owned provider binding; never an API key or arbitrary URL.
-    pub provider_binding: String,
-    /// Explicit model identifier.
+pub struct ClaudeCodeBindingV1 {
+    /// Deployment-owned opaque runtime profile; never a credential or endpoint URL.
+    pub runtime_binding: String,
+    /// Exact model identifier passed to Claude Code; moving aliases are rejected.
     pub model: String,
-    /// Strict Structured Outputs schema mode.
-    pub strict_structured_outputs: bool,
+    /// Exact Claude Code CLI version baked into the worker image.
+    pub claude_code_version: String,
+    /// Immutable SHA-256 identity of the worker container image.
+    pub worker_image_sha256: Sha256Digest,
+    /// Hash of the effective sanitized Claude Code runtime configuration.
+    pub runtime_config_sha256: Sha256Digest,
+    /// Maximum concurrent Claude Code child processes admitted by one worker instance.
+    pub max_in_flight_per_worker: u16,
 }
 
 /// Per-attempt bounded LLM budget.
@@ -116,7 +126,7 @@ pub struct CourseLlmEgressPolicy {
     pub id: PolicyId,
     pub course_id: CourseId,
     pub revision: Revision,
-    pub binding: OpenAiResponsesBindingV1,
+    pub binding: ClaudeCodeBindingV1,
     pub budget: LlmBudget,
     pub denied_data_classes: Vec<DeniedDataClass>,
     pub student_content_mode: StudentContentMode,
@@ -124,22 +134,34 @@ pub struct CourseLlmEgressPolicy {
 }
 
 impl CourseLlmEgressPolicy {
-    /// Validates explicit provider, model, budgets, and hard-deny classifications.
+    /// Validates explicit Claude Code identity, budgets, and hard-deny classifications.
     pub fn validate(&self) -> Result<(), AuthoringError> {
-        if self.binding.provider_binding.trim().is_empty() {
-            return Err(AuthoringError::ProviderBindingRequired);
+        if !valid_runtime_identity(&self.binding.runtime_binding, 256)
+            || self.binding.runtime_binding.contains("://")
+        {
+            return Err(AuthoringError::RuntimeBindingRequired);
         }
-        if self.binding.model.trim().is_empty() {
+        let normalized_model = self.binding.model.to_ascii_lowercase();
+        if !valid_runtime_identity(&self.binding.model, 256)
+            || matches!(
+                normalized_model.as_str(),
+                "default" | "sonnet" | "opus" | "haiku" | "opusplan"
+            )
+        {
             return Err(AuthoringError::ModelRequired);
         }
-        if !self.binding.strict_structured_outputs {
-            return Err(AuthoringError::StrictOutputsRequired);
+        if !valid_claude_code_version(&self.binding.claude_code_version) {
+            return Err(AuthoringError::RuntimeIdentityInvalid);
+        }
+        if !(1..=64).contains(&self.binding.max_in_flight_per_worker) {
+            return Err(AuthoringError::RuntimeIdentityInvalid);
         }
         if self.budget.max_input_tokens == 0
             || self.budget.max_output_tokens == 0
             || self.budget.max_requests == 0
             || self.budget.max_cost_microusd == 0
             || self.budget.timeout_milliseconds == 0
+            || self.budget.max_transient_retries > 2
             || self.budget.max_schema_repairs > 2
         {
             return Err(AuthoringError::InvalidBudget);
@@ -163,6 +185,28 @@ impl CourseLlmEgressPolicy {
         }
         Ok(())
     }
+}
+
+fn valid_claude_code_version(value: &str) -> bool {
+    let mut parts = value.split('.');
+    let valid_part = |part: &str| {
+        !part.is_empty()
+            && part.bytes().all(|byte| byte.is_ascii_digit())
+            && (part == "0" || !part.starts_with('0'))
+    };
+    matches!(
+        (parts.next(), parts.next(), parts.next(), parts.next()),
+        (Some(major), Some(minor), Some(patch), None)
+            if valid_part(major) && valid_part(minor) && valid_part(patch)
+    )
+}
+
+fn valid_runtime_identity(value: &str, max_len: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_len
+        && value.trim() == value
+        && !value.bytes().any(|byte| byte.is_ascii_control())
+        && !value.bytes().any(|byte| byte.is_ascii_whitespace())
 }
 
 /// Only explicit SubmissionManifest paths may disclose student content.
@@ -419,6 +463,15 @@ impl EnvironmentSpec {
     }
 }
 
+/// Returns the generated JSON Schema for `EnvironmentSpec` v1.
+///
+/// # Errors
+///
+/// Returns an error only if the generated Schema cannot be represented as JSON.
+pub fn environment_spec_schema() -> Result<serde_json::Value, serde_json::Error> {
+    serde_json::to_value(schemars::schema_for!(EnvironmentSpec))
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 enum EnvironmentApiVersion {
     #[serde(rename = "environment.labweaver.io/v1")]
@@ -472,6 +525,8 @@ pub struct AgentAttempt {
     pub output_sha256: Option<Sha256Digest>,
     pub checkpoint: Option<ArtifactRef>,
     pub usage: LlmUsage,
+    /// Whether a terminal provider envelope made this usage observable.
+    pub usage_observed: bool,
     pub diagnostic_code: Option<String>,
 }
 
@@ -544,6 +599,20 @@ impl AgentRun {
                     AgentAttemptState::Succeeded if attempt.output_sha256.is_none() => {
                         return Err(AuthoringError::InvalidAgentRun(
                             "successful attempt requires immutable output hash".to_owned(),
+                        ));
+                    }
+                    AgentAttemptState::Succeeded if !attempt.usage_observed => {
+                        return Err(AuthoringError::InvalidAgentRun(
+                            "successful attempt requires observed usage".to_owned(),
+                        ));
+                    }
+                    AgentAttemptState::Pending
+                    | AgentAttemptState::Running
+                    | AgentAttemptState::Repairing
+                        if attempt.usage_observed =>
+                    {
+                        return Err(AuthoringError::InvalidAgentRun(
+                            "non-terminal attempt cannot claim observed usage".to_owned(),
                         ));
                     }
                     AgentAttemptState::Failed | AgentAttemptState::Cancelled
@@ -748,12 +817,12 @@ pub enum AuthoringError {
     InvalidPackage(String),
     #[error("ProblemPackage manifest SHA-256 does not match canonical files")]
     PackageHashMismatch,
-    #[error("OpenAI provider binding is required")]
-    ProviderBindingRequired,
-    #[error("OpenAI model is required")]
+    #[error("Claude Code runtime binding is required")]
+    RuntimeBindingRequired,
+    #[error("an immutable Claude Code model identifier is required")]
     ModelRequired,
-    #[error("strict Structured Outputs must be enabled")]
-    StrictOutputsRequired,
+    #[error("Claude Code runtime identity is invalid")]
+    RuntimeIdentityInvalid,
     #[error("LLM token, request, cost, timeout, and repair budgets are invalid")]
     InvalidBudget,
     #[error("hard-denied LLM data classes are not configurable")]
@@ -771,11 +840,10 @@ impl AuthoringError {
     #[must_use]
     pub const fn diagnostic_code(&self) -> &'static str {
         match self {
-            Self::ProviderBindingRequired => diagnostic::LLM_PROVIDER_BINDING_REQUIRED,
+            Self::RuntimeBindingRequired => diagnostic::AGENT_RUNTIME_BINDING_REQUIRED,
             Self::ModelRequired => diagnostic::LLM_MODEL_REQUIRED,
-            Self::StrictOutputsRequired | Self::InvalidBudget | Self::HardDenyClassesModified => {
-                diagnostic::LLM_EGRESS_DENIED
-            }
+            Self::RuntimeIdentityInvalid => diagnostic::AGENT_RUNTIME_IDENTITY_INVALID,
+            Self::InvalidBudget | Self::HardDenyClassesModified => diagnostic::LLM_EGRESS_DENIED,
             Self::PackageHashMismatch => diagnostic::SUBMISSION_HASH_MISMATCH,
             Self::InvalidEnvironmentSpec(_) => diagnostic::ENV_PROVIDER_BINDING_REQUIRED,
             Self::InvalidPackage(_) | Self::InvalidArtifactReference | Self::InvalidAgentRun(_) => {
