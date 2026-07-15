@@ -402,10 +402,8 @@
     values_files: [/var/tmp/labweaver-private-sigstore-values.yml]
     post_renderer: /var/tmp/labweaver-private-sigstore-post-renderer
     atomic: false
-    cleanup_on_fail: false
     wait: true
     wait_timeout: 10m
-  no_log: true
 
 - name: Render the C0-authoritative static TUF repository
   ansible.builtin.template:
