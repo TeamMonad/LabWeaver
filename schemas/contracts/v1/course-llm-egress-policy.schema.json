@@ -2,11 +2,18 @@
   "$defs": {
     "ClaudeCodeBindingV1": {
       "additionalProperties": false,
-      "description": "Immutable Claude Code worker binding.\n\nProvider-specific transport and authentication remain deployment-owned Claude Code\nconfiguration. The contract binds only a sanitized profile identity, exact model, CLI version,\nworker image, and effective non-secret runtime configuration hash.",
+      "description": "Immutable Claude Code worker binding.\n\nProvider-specific transport and authentication remain deployment-owned Claude Code\nconfiguration. The contract binds only a sanitized profile identity, exact model, CLI version,\nworker image, effective non-secret runtime configuration hash, and per-worker admission limit.",
       "properties": {
         "claudeCodeVersion": {
           "description": "Exact Claude Code CLI version baked into the worker image.",
           "type": "string"
+        },
+        "maxInFlightPerWorker": {
+          "description": "Maximum concurrent Claude Code child processes admitted by one worker instance.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
         },
         "model": {
           "description": "Exact model identifier passed to Claude Code; moving aliases are rejected.",
@@ -30,7 +37,8 @@
         "model",
         "claudeCodeVersion",
         "workerImageSha256",
-        "runtimeConfigSha256"
+        "runtimeConfigSha256",
+        "maxInFlightPerWorker"
       ],
       "type": "object"
     },

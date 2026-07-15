@@ -19,7 +19,7 @@ use serde_json::{Number, Value, json};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::{OnceCell, watch};
+use tokio::sync::{OnceCell, Semaphore, watch};
 use tokio::time::timeout;
 use uuid::Uuid;
 
@@ -609,8 +609,32 @@ pub trait ClaudeCodeProcess: Send + Sync {
 }
 
 /// Production process adapter intended to run inside one isolated worker container.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct TokioClaudeCodeProcess;
+///
+/// The caller supplies the exact deployment-owned environment. It is copied into a process whose
+/// inherited environment is cleared; values are never exposed through `Debug`.
+#[derive(Clone)]
+pub struct TokioClaudeCodeProcess {
+    environment: Arc<BTreeMap<String, String>>,
+}
+
+impl TokioClaudeCodeProcess {
+    /// Creates an adapter from the explicit environment injected into this worker binding.
+    #[must_use]
+    pub fn new(environment: BTreeMap<String, String>) -> Self {
+        Self {
+            environment: Arc::new(environment),
+        }
+    }
+}
+
+impl Debug for TokioClaudeCodeProcess {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TokioClaudeCodeProcess")
+            .field("environment_count", &self.environment.len())
+            .finish()
+    }
+}
 
 #[async_trait]
 impl ClaudeCodeProcess for TokioClaudeCodeProcess {
@@ -623,9 +647,12 @@ impl ClaudeCodeProcess for TokioClaudeCodeProcess {
             stdin_sha256: Sha256Digest::of_bytes(&[]),
             timeout: Duration::from_secs(10),
         };
-        let output = timeout(command.timeout, execute_process(command))
-            .await
-            .map_err(|_| ClaudeCodeProcessError::TimedOut)??;
+        let output = timeout(
+            command.timeout,
+            execute_process(command, Arc::clone(&self.environment)),
+        )
+        .await
+        .map_err(|_| ClaudeCodeProcessError::TimedOut)??;
         if !output.is_success() {
             return Err(ClaudeCodeProcessError::Unavailable);
         }
@@ -653,7 +680,7 @@ impl ClaudeCodeProcess for TokioClaudeCodeProcess {
         tokio::select! {
             biased;
             () = cancellation.cancelled() => Err(ClaudeCodeProcessError::Cancelled),
-            result = timeout(duration, execute_process(command)) => {
+            result = timeout(duration, execute_process(command, Arc::clone(&self.environment))) => {
                 result.map_err(|_| ClaudeCodeProcessError::TimedOut)?
             }
         }
@@ -662,11 +689,30 @@ impl ClaudeCodeProcess for TokioClaudeCodeProcess {
 
 async fn execute_process(
     command: ClaudeCodeCommand,
+    environment: Arc<BTreeMap<String, String>>,
 ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
+    let workspace = tempfile::Builder::new()
+        .prefix("labweaver-claude-")
+        .tempdir()
+        .map_err(|_| ClaudeCodeProcessError::Io)?;
+    let home = workspace.path().join("home");
+    let config = workspace.path().join("config");
+    let cache = workspace.path().join("cache");
+    let temporary = workspace.path().join("tmp");
+    for directory in [&home, &config, &cache, &temporary] {
+        std::fs::create_dir(directory).map_err(|_| ClaudeCodeProcessError::Io)?;
+    }
     let mut process = Command::new(command.program);
     process
         .args(&command.args)
+        .env_clear()
+        .envs(environment.iter())
         .envs(&command.env)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &config)
+        .env("XDG_CACHE_HOME", &cache)
+        .env("TMPDIR", &temporary)
+        .current_dir(workspace.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -906,6 +952,7 @@ pub struct ClaudeCodeRuntime {
     policy: CourseLlmEgressPolicy,
     process: Arc<dyn ClaudeCodeProcess>,
     version_check: Arc<OnceCell<Result<(), ClaudeCodeRuntimeError>>>,
+    in_flight: Arc<Semaphore>,
 }
 
 struct AuditContext<'a> {
@@ -927,6 +974,10 @@ impl Debug for ClaudeCodeRuntime {
             .field("policy_revision", &self.policy.revision)
             .field("runtime_binding", &self.policy.binding.runtime_binding)
             .field("model", &self.policy.binding.model)
+            .field(
+                "max_in_flight_per_worker",
+                &self.policy.binding.max_in_flight_per_worker,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -944,10 +995,12 @@ impl ClaudeCodeRuntime {
         policy
             .validate()
             .map_err(|_| ClaudeCodeRuntimeError::ConfigurationInvalid)?;
+        let max_in_flight = usize::from(policy.binding.max_in_flight_per_worker);
         Ok(Self {
             policy,
             process,
             version_check: Arc::new(OnceCell::new()),
+            in_flight: Arc::new(Semaphore::new(max_in_flight)),
         })
     }
 
@@ -1007,6 +1060,40 @@ impl ClaudeCodeRuntime {
             )
         })?;
         let prompt = candidate_json_prompt(prompt, &schema_text);
+        let _permit = if cancellation.is_cancelled() {
+            return Err(self.failure(
+                track,
+                &input,
+                &schema,
+                &prompt,
+                ClaudeCodeRuntimeError::Cancelled,
+                None,
+            ));
+        } else {
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => {
+                    return Err(self.failure(
+                        track,
+                        &input,
+                        &schema,
+                        &prompt,
+                        ClaudeCodeRuntimeError::Cancelled,
+                        None,
+                    ));
+                }
+                permit = Arc::clone(&self.in_flight).acquire_owned() => {
+                    permit.map_err(|_| self.failure(
+                        track,
+                        &input,
+                        &schema,
+                        &prompt,
+                        ClaudeCodeRuntimeError::RuntimeUnavailable,
+                        None,
+                    ))?
+                }
+            }
+        };
         self.verify_runtime_identity()
             .await
             .map_err(|error| self.failure(track, &input, &schema, &prompt, error, None))?;

@@ -1,8 +1,10 @@
 //! Black-box regression coverage for the Claude Code worker boundary.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use agent_service::claude_code::{
     CandidateDocument, ClaudeCodeCommand, ClaudeCodeFailure, ClaudeCodeProcess,
@@ -12,7 +14,8 @@ use agent_service::claude_code::{
     TokioClaudeCodeProcess,
 };
 use agent_service::run_store::{
-    AgentRunDispatch, AgentRunService, ExecuteAgentRun, PostgresAgentRunStore,
+    AgentRunDispatch, AgentRunReservation, AgentRunService, AgentRunStoreError, ExecuteAgentRun,
+    PostgresAgentRunStore, ReserveAgentRun,
 };
 use async_trait::async_trait;
 use contracts::authoring::{
@@ -35,6 +38,8 @@ use uuid::Uuid;
 #[derive(Clone, Copy)]
 enum FakeMode {
     Success,
+    SlowSuccess,
+    SlowFullSuccess,
     FullSuccess,
     InvalidSession,
     InvalidResultType,
@@ -55,6 +60,8 @@ enum FakeMode {
 struct FakeProcess {
     mode: FakeMode,
     commands: Mutex<Vec<ClaudeCodeCommand>>,
+    active: AtomicUsize,
+    max_active: AtomicUsize,
 }
 
 struct StaticPackageReader {
@@ -101,6 +108,8 @@ impl FakeProcess {
         Self {
             mode,
             commands: Mutex::new(Vec::new()),
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
         }
     }
 
@@ -109,6 +118,10 @@ impl FakeProcess {
             Ok(commands) => commands,
             Err(poisoned) => poisoned.into_inner(),
         }
+    }
+
+    fn max_active(&self) -> usize {
+        self.max_active.load(Ordering::SeqCst)
     }
 }
 
@@ -132,6 +145,13 @@ impl ClaudeCodeProcess for FakeProcess {
             .last()
             .is_some_and(|prompt| prompt.contains("EvaluationSpec"));
         self.commands().push(command);
+
+        let slow = matches!(self.mode, FakeMode::SlowSuccess | FakeMode::SlowFullSuccess);
+        if slow {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
 
         if matches!(self.mode, FakeMode::Cancelled) {
             return Err(ClaudeCodeProcessError::Cancelled);
@@ -169,7 +189,9 @@ impl ClaudeCodeProcess for FakeProcess {
             ));
         }
 
-        let mut output = if matches!(self.mode, FakeMode::FullSuccess) && evaluation_track {
+        let mut output = if matches!(self.mode, FakeMode::FullSuccess | FakeMode::SlowFullSuccess)
+            && evaluation_track
+        {
             evaluation_candidate()?
         } else {
             environment_candidate()
@@ -205,11 +227,12 @@ impl ClaudeCodeProcess for FakeProcess {
             }},
             "permission_denials": []
         });
-        Ok(ClaudeCodeProcessOutput::from_raw(
-            Some(0),
-            stream_output(Some(result), envelope)?,
-            &[],
-        ))
+        let output =
+            ClaudeCodeProcessOutput::from_raw(Some(0), stream_output(Some(result), envelope)?, &[]);
+        if slow {
+            self.active.fetch_sub(1, Ordering::SeqCst);
+        }
+        Ok(output)
     }
 }
 
@@ -223,7 +246,8 @@ fn valid_policy() -> Result<CourseLlmEgressPolicy, serde_json::Error> {
             "model": "claude-sonnet-4-6-20260601",
             "claudeCodeVersion": "2.1.207",
             "workerImageSha256": "11".repeat(32),
-            "runtimeConfigSha256": "22".repeat(32)
+            "runtimeConfigSha256": "22".repeat(32),
+            "maxInFlightPerWorker": 2
         },
         "budget": {
             "maxInputTokens": 100_000,
@@ -402,6 +426,20 @@ async fn input(policy: &CourseLlmEgressPolicy) -> Result<ImmutableEgressInput, B
     prepare_input(policy, BTreeSet::new()).await
 }
 
+fn run_request(
+    input: &ImmutableEgressInput,
+    policy: &CourseLlmEgressPolicy,
+) -> CreateAgentRunRequest {
+    CreateAgentRunRequest {
+        package_id: input.package_id(),
+        package_revision: input.package_revision(),
+        package_sha256: input.package_manifest_sha256(),
+        policy_id: policy.id,
+        policy_revision: policy.revision,
+        requested_runtime: RuntimeKind::VirtualMachine,
+    }
+}
+
 async fn prepare_input(
     policy: &CourseLlmEgressPolicy,
     denied: BTreeSet<DeniedDataClass>,
@@ -434,7 +472,7 @@ async fn prepare_input_bytes(
 #[ignore = "makes a real billable Claude Code/provider request"]
 async fn live_claude_code_generates_environment_candidate() -> Result<(), Box<dyn Error>> {
     let model = std::env::var("LABWEAVER_LIVE_CLAUDE_MODEL")?;
-    let process = Arc::new(TokioClaudeCodeProcess);
+    let process = Arc::new(TokioClaudeCodeProcess::new(std::env::vars().collect()));
     let version = process.version().await?;
     let mut policy_value = serde_json::to_value(valid_policy()?)?;
     policy_value["binding"]["model"] = json!(model);
@@ -609,28 +647,41 @@ async fn postgres_run_is_atomic_and_exact_replay_is_not_billed_twice() -> Result
     };
     let (admin_pool, pool, database_name) = isolated_agent_database(&database_url).await?;
 
-    let (runtime, process, policy) = runtime(FakeMode::FullSuccess)?;
-    let input = input(&policy).await?;
-    let replay_input = input.clone();
-    let request = CreateAgentRunRequest {
-        package_id: input.package_id(),
-        package_revision: input.package_revision(),
-        package_sha256: input.package_manifest_sha256(),
-        policy_id: policy.id,
-        policy_revision: policy.revision,
-        requested_runtime: RuntimeKind::VirtualMachine,
-    };
-    let idempotency_key = IdempotencyKey::parse("agent-run-replay-0001")?;
     let now = "2026-07-14T08:00:00.000Z".parse::<UtcTimestamp>()?;
     let store = PostgresAgentRunStore::new(pool.clone());
-    let service = AgentRunService::new(store.clone(), runtime);
+    assert_exact_replay(&store, &pool, now).await?;
+    assert_track_recovery(&store, now).await?;
+    assert_durable_cancellation(&store, now).await?;
+    assert_concurrent_idempotency(&store, now).await?;
 
+    drop(store);
+    remove_isolated_database(admin_pool, pool, &database_name).await?;
+    drop(container);
+    Ok(())
+}
+
+async fn assert_exact_replay(
+    store: &PostgresAgentRunStore,
+    pool: &PgPool,
+    now: UtcTimestamp,
+) -> Result<(), Box<dyn Error>> {
+    let (runtime, process, policy) = runtime(FakeMode::FullSuccess)?;
+    let initial_input = input(&policy).await?;
+    let replay_input = initial_input.clone();
+    let request = run_request(&initial_input, &policy);
+    let idempotency_key = IdempotencyKey::parse("agent-run-replay-0001")?;
+    let service = AgentRunService::new(
+        store.clone(),
+        runtime,
+        "agent-test-worker-1".to_owned(),
+        Duration::from_secs(30),
+    )?;
     let first = service
         .execute(ExecuteAgentRun {
             course_id: policy.course_id,
             request: &request,
             idempotency_key: &idempotency_key,
-            input,
+            input: initial_input,
             cancellation: RunCancellation::new(),
             now,
             trace_id: "trace-agent-run-1",
@@ -640,7 +691,7 @@ async fn postgres_run_is_atomic_and_exact_replay_is_not_billed_twice() -> Result
         return Err("first request did not own execution".into());
     };
     assert_eq!(stored.run.state, AgentRunState::Succeeded);
-    assert_eq!(stored.run.revision.get(), 3);
+    assert_eq!(stored.run.revision.get(), 5);
     let run_id = stored.run.id;
     let candidate_ids = stored
         .run
@@ -648,8 +699,6 @@ async fn postgres_run_is_atomic_and_exact_replay_is_not_billed_twice() -> Result
         .iter()
         .map(|track| track.candidate_id)
         .collect::<Vec<_>>();
-    assert_eq!(process.commands().len(), 2);
-
     let second = service
         .execute(ExecuteAgentRun {
             course_id: policy.course_id,
@@ -676,12 +725,300 @@ async fn postgres_run_is_atomic_and_exact_replay_is_not_billed_twice() -> Result
     );
     assert_eq!(process.commands().len(), 2);
     assert_eq!(store.load_checkpoints(run_id).await?.len(), 2);
-    assert_persistence_counts(&pool, &run_id.as_uuid()).await?;
-    drop(service);
-    drop(store);
-    remove_isolated_database(admin_pool, pool, &database_name).await?;
-    drop(container);
+    assert_persistence_counts(pool, &run_id.as_uuid()).await?;
     Ok(())
+}
+
+async fn assert_track_recovery(
+    store: &PostgresAgentRunStore,
+    now: UtcTimestamp,
+) -> Result<(), Box<dyn Error>> {
+    let (runtime, process, policy) = runtime(FakeMode::FullSuccess)?;
+    let prepared = input(&policy).await?;
+    let request = run_request(&prepared, &policy);
+    let key = IdempotencyKey::parse("agent-run-recovery-0001")?;
+    let reservation = store
+        .reserve(ReserveAgentRun {
+            course_id: policy.course_id,
+            request: &request,
+            idempotency_key: &key,
+            input: &prepared,
+            policy: &policy,
+            now,
+            trace_id: "trace-agent-recovery-reserve",
+        })
+        .await?;
+    let AgentRunReservation::Created(run) = reservation else {
+        return Err("recovery run was not newly reserved".into());
+    };
+    let short_lease = Duration::from_millis(60);
+    let environment_lease = store
+        .claim_track(
+            run.id,
+            AgentTrackKind::Environment,
+            prepared.sha256(),
+            "recovery-worker-a",
+            short_lease,
+        )
+        .await?
+        .ok_or("environment track was not claimable")?;
+    let evaluation_lease = store
+        .claim_track(
+            run.id,
+            AgentTrackKind::Evaluation,
+            prepared.sha256(),
+            "recovery-worker-a",
+            short_lease,
+        )
+        .await?
+        .ok_or("evaluation track was not claimable")?;
+    let environment = runtime
+        .generate(
+            AgentTrackKind::Environment,
+            prepared.clone(),
+            RunCancellation::new(),
+        )
+        .await;
+    store
+        .complete_track(
+            &environment_lease,
+            environment,
+            now,
+            "trace-agent-recovery-environment",
+        )
+        .await?;
+    assert_eq!(store.load_checkpoints(run.id).await?.len(), 1);
+    assert_eq!(store.load(run.id).await?.state, AgentRunState::Running);
+    tokio::time::sleep(Duration::from_millis(90)).await;
+    assert_eq!(
+        store.heartbeat_track(&evaluation_lease, short_lease).await,
+        Err(AgentRunStoreError::LeaseLost)
+    );
+    let reclaimed = store
+        .claim_track(
+            run.id,
+            AgentTrackKind::Evaluation,
+            prepared.sha256(),
+            "recovery-worker-b",
+            Duration::from_secs(1),
+        )
+        .await?
+        .ok_or("expired evaluation lease was not reclaimed")?;
+    assert_eq!(reclaimed.attempt, 2);
+    let evaluation = runtime
+        .generate(AgentTrackKind::Evaluation, prepared, RunCancellation::new())
+        .await;
+    let recovered = store
+        .complete_track(
+            &reclaimed,
+            evaluation,
+            now,
+            "trace-agent-recovery-evaluation",
+        )
+        .await?;
+    let process_calls = process.commands().len();
+    assert_recovered_run(store, &recovered.run, process_calls).await
+}
+
+async fn assert_recovered_run(
+    store: &PostgresAgentRunStore,
+    run: &contracts::authoring::AgentRun,
+    process_calls: usize,
+) -> Result<(), Box<dyn Error>> {
+    assert_eq!(run.state, AgentRunState::Succeeded);
+    assert_eq!(store.load_checkpoints(run.id).await?.len(), 2);
+    let evaluation = run
+        .tracks
+        .iter()
+        .find(|track| track.kind == AgentTrackKind::Evaluation)
+        .ok_or("evaluation track missing after recovery")?;
+    assert_eq!(evaluation.attempts.len(), 2);
+    assert_eq!(
+        evaluation.attempts[0].state,
+        contracts::authoring::AgentAttemptState::Failed
+    );
+    assert!(!evaluation.attempts[0].usage_observed);
+    assert_eq!(
+        evaluation.attempts[1].state,
+        contracts::authoring::AgentAttemptState::Succeeded
+    );
+    assert_eq!(process_calls, 2);
+    Ok(())
+}
+
+async fn assert_durable_cancellation(
+    store: &PostgresAgentRunStore,
+    now: UtcTimestamp,
+) -> Result<(), Box<dyn Error>> {
+    let (runtime, process, policy) = runtime(FakeMode::FullSuccess)?;
+    let prepared = input(&policy).await?;
+    let request = run_request(&prepared, &policy);
+    let key = IdempotencyKey::parse("agent-run-cancel-0001")?;
+    let reservation = store
+        .reserve(ReserveAgentRun {
+            course_id: policy.course_id,
+            request: &request,
+            idempotency_key: &key,
+            input: &prepared,
+            policy: &policy,
+            now,
+            trace_id: "trace-agent-cancel-reserve",
+        })
+        .await?;
+    let AgentRunReservation::Created(run) = reservation else {
+        return Err("cancellation run was not newly reserved".into());
+    };
+    let environment = store
+        .claim_track(
+            run.id,
+            AgentTrackKind::Environment,
+            prepared.sha256(),
+            "cancel-worker-a",
+            Duration::from_secs(1),
+        )
+        .await?
+        .ok_or("cancel environment track was not claimable")?;
+    let evaluation = store
+        .claim_track(
+            run.id,
+            AgentTrackKind::Evaluation,
+            prepared.sha256(),
+            "cancel-worker-b",
+            Duration::from_secs(1),
+        )
+        .await?
+        .ok_or("cancel evaluation track was not claimable")?;
+    store.request_cancellation(run.id, now).await?;
+    for lease in [&environment, &evaluation] {
+        let cancellation = RunCancellation::new();
+        if store.heartbeat_track(lease, Duration::from_secs(1)).await? {
+            cancellation.cancel();
+        }
+        let outcome = runtime
+            .generate(lease.track, prepared.clone(), cancellation)
+            .await;
+        store
+            .complete_track(lease, outcome, now, "trace-agent-cross-worker-cancel")
+            .await?;
+    }
+    assert_eq!(store.load(run.id).await?.state, AgentRunState::Cancelled);
+    assert!(process.commands().is_empty());
+    Ok(())
+}
+
+async fn assert_concurrent_idempotency(
+    store: &PostgresAgentRunStore,
+    now: UtcTimestamp,
+) -> Result<(), Box<dyn Error>> {
+    let policy = valid_policy()?;
+    let process = Arc::new(FakeProcess::new(FakeMode::SlowFullSuccess));
+    let prepared = input(&policy).await?;
+    let request = run_request(&prepared, &policy);
+    let key = IdempotencyKey::parse("agent-run-concurrent-0001")?;
+    let mut workers = Vec::new();
+    for worker in 0..4 {
+        workers.push(AgentRunService::new(
+            store.clone(),
+            ClaudeCodeRuntime::new(policy.clone(), process.clone())?,
+            format!("concurrent-worker-{worker}"),
+            Duration::from_secs(1),
+        )?);
+    }
+    let mut tasks = tokio::task::JoinSet::new();
+    for request_number in 0..10 {
+        let service = workers[request_number % workers.len()].clone();
+        let request = request.clone();
+        let key = key.clone();
+        let input = prepared.clone();
+        let course_id = policy.course_id;
+        tasks.spawn(async move {
+            let trace_id = format!("trace-agent-concurrent-{request_number}");
+            service
+                .execute(ExecuteAgentRun {
+                    course_id,
+                    request: &request,
+                    idempotency_key: &key,
+                    input,
+                    cancellation: RunCancellation::new(),
+                    now,
+                    trace_id: &trace_id,
+                })
+                .await
+        });
+    }
+    let run_id = collect_concurrent_run_id(&mut tasks).await?;
+    assert_eq!(process.commands().len(), 2);
+    assert_eq!(store.load(run_id).await?.state, AgentRunState::Succeeded);
+    assert_distinct_runs(store, &workers, &process, &policy, &prepared, &request, now).await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn assert_distinct_runs(
+    store: &PostgresAgentRunStore,
+    workers: &[AgentRunService],
+    process: &FakeProcess,
+    policy: &CourseLlmEgressPolicy,
+    input: &ImmutableEgressInput,
+    request: &CreateAgentRunRequest,
+    now: UtcTimestamp,
+) -> Result<(), Box<dyn Error>> {
+    let mut tasks = tokio::task::JoinSet::new();
+    for request_number in 0..20 {
+        let service = workers[request_number % workers.len()].clone();
+        let request = request.clone();
+        let key = IdempotencyKey::parse(&format!("agent-run-distinct-{request_number:04}"))?;
+        let input = input.clone();
+        let course_id = policy.course_id;
+        tasks.spawn(async move {
+            let trace_id = format!("trace-agent-distinct-{request_number}");
+            service
+                .execute(ExecuteAgentRun {
+                    course_id,
+                    request: &request,
+                    idempotency_key: &key,
+                    input,
+                    cancellation: RunCancellation::new(),
+                    now,
+                    trace_id: &trace_id,
+                })
+                .await
+        });
+    }
+    let mut run_ids = Vec::new();
+    while let Some(result) = tasks.join_next().await {
+        let dispatch = result??;
+        let AgentRunDispatch::Executed(outcome) = dispatch else {
+            return Err("distinct run did not complete in its owning request".into());
+        };
+        assert!(!run_ids.contains(&outcome.run.id));
+        run_ids.push(outcome.run.id);
+    }
+    assert_eq!(run_ids.len(), 20);
+    assert_eq!(process.commands().len(), 42);
+    for run_id in run_ids {
+        assert_eq!(store.load(run_id).await?.state, AgentRunState::Succeeded);
+    }
+    Ok(())
+}
+
+async fn collect_concurrent_run_id(
+    tasks: &mut tokio::task::JoinSet<Result<AgentRunDispatch, AgentRunStoreError>>,
+) -> Result<contracts::AgentRunId, Box<dyn Error>> {
+    let mut run_id = None;
+    while let Some(result) = tasks.join_next().await {
+        let dispatch = result??;
+        let observed = match dispatch {
+            AgentRunDispatch::Executed(outcome) => outcome.run.id,
+            AgentRunDispatch::Replayed(run) | AgentRunDispatch::Progressed(run) => run.id,
+        };
+        if let Some(expected) = run_id {
+            assert_eq!(observed, expected);
+        } else {
+            run_id = Some(observed);
+        }
+    }
+    run_id.ok_or_else(|| "concurrent run did not execute".into())
 }
 
 async fn isolated_agent_database(
@@ -710,6 +1047,11 @@ async fn isolated_agent_database(
     sqlx::raw_sql(include_str!("../../../migrations/agent/0001_initial.sql"))
         .execute(&mut *migration_connection)
         .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/agent/0002_track_leases.sql"
+    ))
+    .execute(&mut *migration_connection)
+    .await?;
     drop(migration_connection);
     Ok((admin_pool, pool, database_name))
 }
@@ -824,6 +1166,126 @@ async fn successful_invocation_is_shell_free_hardened_and_hash_audited()
     let debug = format!("{command:?}");
     assert!(!debug.contains("ignore all previous instructions"));
     assert!(!debug.contains("Generate exactly one"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn worker_admission_limit_queues_excess_processes() -> Result<(), Box<dyn Error>> {
+    let (runtime, process, policy) = runtime(FakeMode::SlowSuccess)?;
+    let prepared = input(&policy).await?;
+    let first = runtime.generate(
+        AgentTrackKind::Environment,
+        prepared.clone(),
+        RunCancellation::new(),
+    );
+    let second = runtime.generate(
+        AgentTrackKind::Environment,
+        prepared.clone(),
+        RunCancellation::new(),
+    );
+    let third = runtime.generate(
+        AgentTrackKind::Environment,
+        prepared.clone(),
+        RunCancellation::new(),
+    );
+    let fourth = runtime.generate(
+        AgentTrackKind::Environment,
+        prepared,
+        RunCancellation::new(),
+    );
+    let (first, second, third, fourth) = tokio::join!(first, second, third, fourth);
+    first?;
+    second?;
+    third?;
+    fourth?;
+    assert_eq!(process.commands().len(), 4);
+    assert_eq!(process.max_active(), 2);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn tokio_process_clears_inheritance_and_isolates_invocation_directories()
+-> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = tempfile::tempdir()?;
+    let binary = fixture.path().join("claude");
+    let output = fixture.path().join("stream.jsonl");
+    let evidence = fixture.path().join("isolation.tsv");
+    let candidate = serde_json::to_string(&environment_candidate())?;
+    let envelope = json!({
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "session_id": Uuid::new_v4(),
+        "num_turns": 1,
+        "total_cost_usd": 0.001,
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+        "modelUsage": {"provider-model": {"inputTokens": 1, "outputTokens": 1}},
+        "permission_denials": []
+    });
+    std::fs::write(&output, stream_output(Some(candidate), envelope)?)?;
+    std::fs::write(
+        &binary,
+        "#!/bin/sh\nif [ \"$2\" = \"--version\" ]; then printf '2.1.207\\n'; exit 0; fi\nprintf '%s\\t%s\\t%s\\t%s\\t%s\\n' \"$HOME\" \"$XDG_CONFIG_HOME\" \"$TMPDIR\" \"$PWD\" \"$USER\" >> \"$LABWEAVER_ISOLATION_EVIDENCE\"\n/bin/cat \"$LABWEAVER_FAKE_OUTPUT\"\n",
+    )?;
+    let mut permissions = std::fs::metadata(&binary)?.permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&binary, permissions)?;
+
+    let environment = BTreeMap::from([
+        (
+            "PATH".to_owned(),
+            fixture.path().to_string_lossy().into_owned(),
+        ),
+        (
+            "LABWEAVER_FAKE_OUTPUT".to_owned(),
+            output.to_string_lossy().into_owned(),
+        ),
+        (
+            "LABWEAVER_ISOLATION_EVIDENCE".to_owned(),
+            evidence.to_string_lossy().into_owned(),
+        ),
+    ]);
+    let process = Arc::new(TokioClaudeCodeProcess::new(environment));
+    let policy = valid_policy()?;
+    let runtime = ClaudeCodeRuntime::new(policy.clone(), process)?;
+    let prepared = input(&policy).await?;
+    let first = runtime.generate(
+        AgentTrackKind::Environment,
+        prepared.clone(),
+        RunCancellation::new(),
+    );
+    let second = runtime.generate(
+        AgentTrackKind::Environment,
+        prepared,
+        RunCancellation::new(),
+    );
+    let (first, second) = tokio::join!(first, second);
+    first?;
+    second?;
+
+    let lines = std::fs::read_to_string(evidence)?
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2);
+    assert_ne!(lines[0], lines[1]);
+    for line in &lines {
+        let fields = line.split('\t').collect::<Vec<_>>();
+        assert_eq!(fields.len(), 5);
+        assert!(fields[0].ends_with("/home"));
+        assert!(fields[1].ends_with("/config"));
+        assert!(fields[2].ends_with("/tmp"));
+        assert_eq!(
+            std::path::Path::new(fields[0])
+                .parent()
+                .and_then(std::path::Path::file_name),
+            std::path::Path::new(fields[3]).file_name()
+        );
+        assert!(fields[4].is_empty());
+    }
     Ok(())
 }
 

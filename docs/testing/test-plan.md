@@ -109,24 +109,31 @@ LABWEAVER_LIVE_CLAUDE_MODEL='<exact-model-id>' \
 
 Contract tests prove that the only accepted binding is a provider-opaque
 `ClaudeCodeBindingV1` with an explicit runtime profile, exact non-alias model,
-CLI version, worker-image hash and runtime-configuration hash; the retired
+CLI version, worker-image hash, runtime-configuration hash and a bounded
+per-worker in-flight limit; the retired
 OpenAI-shaped binding is rejected. Package-gate tests cover manifest/object
 identity, revision-bound classifier identity, hard-denied data and prompt
 injection retained only as untrusted structured content. Worker tests prove CLI
 version matching, direct process invocation without a shell, immutable stdin
 identity, bounded timeout/request/token/cost configuration, no session
 persistence, no Chrome, no built-in subagents, no MCP discovery and an empty
-Tool set.
+Tool set. Process tests additionally prove inherited-environment clearing,
+explicit deployment environment injection, unique HOME/XDG/tmp/workdir and
+semaphore backpressure.
 
 Result tests cover supported `stream-json` envelopes, progress-event handling,
 terminal-result completion without waiting for process EOF, usage accounting,
 exact typed EnvironmentSpec validation, protected authority fields, budget overflow,
 provider failure classification, payload-free stderr handling and independent
 dual-track partial success. The explicit PostgreSQL integration test additionally
-checks atomic idempotency reservation, requested/terminal Outbox rows, two
-candidate checkpoints and an exact replay with no second process invocation.
-It passed on 2026-07-14 against an ephemeral PostgreSQL 17 instance, using an
-isolated per-run database, and supplies E2 persistence evidence. It does not
+checks migration `agent/0002`, atomic idempotency reservation, requested/terminal
+Outbox rows, immediate one-track checkpoint retention, live double-claim
+rejection, expired-lease attempt-2 recovery, durable cancellation observed by a
+different worker, ten concurrent identical requests across four worker
+identities with exactly two process invocations, and twenty distinct runs across
+the same four workers. It passed on 2026-07-15 against
+an ephemeral PostgreSQL 17 instance, using an isolated per-run database, and
+supplies E2 persistence/recovery evidence. It does not
 prove the deployment credential path, real provider compatibility, container
 isolation, HTTP/worker handoff, Kubernetes Job execution, Control candidate
 projection, object-store checkpoint references or JetStream delivery; those
@@ -135,10 +142,12 @@ On 2026-07-14, the provider's internal StructuredOutput path failed for the
 complete Schema, so the worker protocol was reduced to the intended single
 operation: reproduce the complete authoritative Schema in the prompt, require
 one bare JSON object, and validate it locally without a weaker Schema or model
-fallback. With Claude Code `2.1.209`, the complete Environment candidate test
-passed in 9.31 seconds and audited 34,755 microusd. The local probe inherited
-provider variables exported by login zsh; it does not prove Secret/Config
-injection in the worker container. Evaluation, the real dual-track call and the
+fallback. With Claude Code `2.1.209`, the current explicit-environment and
+isolated-directory Environment candidate test passed on 2026-07-15 in 11.83
+seconds and audited 35,321 microusd. The caller received provider variables
+exported by login zsh before injecting them explicitly into the cleared child
+environment; this does not prove Secret/Config injection in the worker
+container. Evaluation, the real dual-track call and the
 container/Kubernetes path remain explicit E3 blockers. Timeout tests also
 require `usageObserved=false`: absence of a terminal result envelope must not
 be reported as confirmed zero provider usage.

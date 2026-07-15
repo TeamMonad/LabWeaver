@@ -21,8 +21,9 @@ advisory and cannot approve, publish, release, execute or score a submission.
 
 LabWeaver supports exactly one v1 LLM runtime: a pinned Claude Code CLI in an
 immutable worker container. `ClaudeCodeBindingV1` contains an opaque deployment
-profile name, exact model identifier, exact CLI version, worker image SHA-256
-and sanitized effective runtime-configuration SHA-256. Provider endpoint,
+profile name, exact model identifier, exact CLI version, worker image SHA-256,
+sanitized effective runtime-configuration SHA-256 and a non-zero per-worker
+in-flight limit. Provider endpoint,
 transport and authentication fields are deliberately absent from the public
 contract and remain deployment-owned Claude Code configuration.
 
@@ -44,8 +45,13 @@ persistence, Chrome, built-in subagents, MCP discovery and all Tools are
 disabled. There is no alternate SDK, provider implementation, model fallback
 or second Agent runtime.
 
-Environment and Evaluation tracks execute independently. A failure in one
-track does not discard a validated result from the other. Each attempt retains
+Environment and Evaluation tracks execute independently. Each track is claimed
+with a PostgreSQL worker/lease token, renews that lease while Claude Code is
+running, and writes its checkpoint as soon as it terminates. An expired lease
+can be reclaimed as a new monotonic attempt, while a stale worker cannot commit
+through its old token. A durable cancellation timestamp is observed during
+heartbeat and translated to the process-local cancellation handle. A failure in
+one track does not discard a validated result from the other. Each attempt retains
 hash-only package, classifier, policy, input, prompt, Schema, Tool policy,
 runtime, output and stderr identities together with bounded usage, session
 identity, outcome and one stable diagnostic. Raw teacher material, model output
@@ -76,7 +82,12 @@ permissions and must run under a restricted container security context and
 network policy. Provider credentials must come from deployment-owned secret
 injection and must not appear in contracts, arguments, audit, logs or reports.
 
-The runtime hashes stderr before discarding it and uses payload-free stable
+The process adapter clears inherited environment state, receives only an
+explicit deployment-owned environment map, and creates a unique HOME, XDG,
+working and temporary directory for every invocation. This is process
+isolation and does not claim container, network or resource isolation. The
+runtime also admits at most the binding's `maxInFlightPerWorker` child
+processes. It hashes stderr before discarding it and uses payload-free stable
 diagnostics for unavailable binaries, protocol errors, upstream exhaustion,
 budget violations, timeout, cancellation and protected fields. E1 process
 tests do not prove container isolation, network policy, credential handling or
@@ -92,25 +103,34 @@ OpenAI-shaped binding must migrate before review completion.
 
 The current increment supplies the contract, egress gate, shell-free worker
 adapter and an Agent-owned PostgreSQL path over the existing Sprint 2 schema.
-Creation reserves the idempotency ledger, requested run and requested Outbox
-event in one transaction. A new owner records both running attempts; terminal
-processing writes the two independent checkpoints, derived run state and one
-terminal Outbox event atomically. An exact replay reloads the authoritative run
-and cannot invoke Claude Code or create new candidate identities.
+Creation reserves the idempotency ledger, requested run, two requested track
+work items and requested Outbox event in one transaction. A caller that owns or
+replays the exact request may atomically claim each due track; concurrent
+callers cannot acquire the same live lease. Each terminal track transaction
+writes one independent checkpoint immediately and derives the aggregate state;
+the second terminal track also writes the terminal Outbox event. Exact replay
+of a terminal run cannot invoke Claude Code or create new candidate identities.
+Replay of a non-terminal run can recover a missing or expired track lease.
 
-The current Control-owned candidate projection, JetStream publisher,
+The current Control-owned candidate projection, JetStream publisher/consumer,
 object-store checkpoint reference, HTTP handler, isolated Kubernetes worker Job
 and real credentialed Claude Code execution remain separate integration work.
+This ADR therefore establishes a crash-safe process-level worker foundation; it
+does not claim a deployed multi-container worker pool.
 
 ## Evidence and rollback
 
 E1 runtime-boundary evidence consists of contract regression tests, generated-schema drift
 checks, package/hash/classification gates, CLI identity and command-policy
 tests, strict envelope/Schema validation, budget and protected-field failures,
-payload-free stderr handling, and dual-track partial-success behavior. On
-2026-07-14, the real PostgreSQL 17 integration test passed against an ephemeral
-local instance and covered isolated schema migration, transaction, checkpoint,
-Outbox and exact replay behavior at E2. This does not raise the Claude Code
+payload-free stderr handling, bounded process admission, explicit environment
+and unique invocation directories, and dual-track partial-success behavior. On
+2026-07-15, the real PostgreSQL 17 integration test passed against an ephemeral
+local instance and covered the Agent track-lease migration, transaction,
+immediate per-track checkpoint, Outbox, exact replay, ten-identical-request and
+twenty-distinct-run contention across four workers, expired-lease recovery and
+durable cross-worker cancellation at E2.
+This does not raise the Claude Code
 worker or provider path above E1.
 
 A billable local probe on 2026-07-14 used Claude Code `2.1.159` with an exact
@@ -134,13 +154,15 @@ response, and then applies protected-field, strict typed and semantic
 validation locally; it does not substitute a weaker provider Schema or accept
 unvalidated text.
 
-The final local live Environment test used pinned Claude Code `2.1.209` and the
+The final local live Environment test on 2026-07-15 used pinned Claude Code `2.1.209` and the
 same exact deployment-provided model binding. Claude Code emitted documented
 `stream-json` events, including `system/thinking_tokens` progress, one assistant
 JSON candidate and a terminal success result. The worker stopped at that
-terminal result rather than waiting for CLI EOF, accepted the candidate in 9.31
-seconds, and audited a cost of 34,755 microusd. This proves a real local
-Environment candidate path. It does not prove Evaluation generation, the
+terminal result rather than waiting for CLI EOF. With the caller environment
+explicitly injected into a cleared environment and an isolated per-invocation
+HOME/XDG/tmp/workdir, it accepted the candidate in 11.83 seconds and audited a
+cost of 35,321 microusd. This proves the current real local Environment
+candidate path. It does not prove Evaluation generation, the
 worker-container credential/config path, Kubernetes isolation or E3 deployment.
 
 Before any runtime publication, rollback is whole-PR reversion together with

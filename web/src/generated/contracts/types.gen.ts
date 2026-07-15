@@ -150,6 +150,10 @@ export type AgentAttempt = {
     outputSha256?: Sha256Digest | null;
     state: AgentAttemptState;
     usage: LlmUsage;
+    /**
+     * Whether a terminal provider envelope made this usage observable.
+     */
+    usageObserved: boolean;
 };
 
 /**
@@ -336,13 +340,17 @@ export type CourseLlmEgressPolicySchema = {
  *
  * Provider-specific transport and authentication remain deployment-owned Claude Code
  * configuration. The contract binds only a sanitized profile identity, exact model, CLI version,
- * worker image, and effective non-secret runtime configuration hash.
+ * worker image, effective non-secret runtime configuration hash, and per-worker admission limit.
  */
 export type ClaudeCodeBindingV1 = {
     /**
      * Exact Claude Code CLI version baked into the worker image.
      */
     claudeCodeVersion: string;
+    /**
+     * Maximum concurrent Claude Code child processes admitted by one worker instance.
+     */
+    maxInFlightPerWorker: number;
     /**
      * Exact model identifier passed to Claude Code; moving aliases are rejected.
      */

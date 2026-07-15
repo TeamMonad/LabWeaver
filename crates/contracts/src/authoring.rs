@@ -75,7 +75,7 @@ impl ProblemPackage {
 ///
 /// Provider-specific transport and authentication remain deployment-owned Claude Code
 /// configuration. The contract binds only a sanitized profile identity, exact model, CLI version,
-/// worker image, and effective non-secret runtime configuration hash.
+/// worker image, effective non-secret runtime configuration hash, and per-worker admission limit.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ClaudeCodeBindingV1 {
@@ -89,6 +89,8 @@ pub struct ClaudeCodeBindingV1 {
     pub worker_image_sha256: Sha256Digest,
     /// Hash of the effective sanitized Claude Code runtime configuration.
     pub runtime_config_sha256: Sha256Digest,
+    /// Maximum concurrent Claude Code child processes admitted by one worker instance.
+    pub max_in_flight_per_worker: u16,
 }
 
 /// Per-attempt bounded LLM budget.
@@ -149,6 +151,9 @@ impl CourseLlmEgressPolicy {
             return Err(AuthoringError::ModelRequired);
         }
         if !valid_claude_code_version(&self.binding.claude_code_version) {
+            return Err(AuthoringError::RuntimeIdentityInvalid);
+        }
+        if !(1..=64).contains(&self.binding.max_in_flight_per_worker) {
             return Err(AuthoringError::RuntimeIdentityInvalid);
         }
         if self.budget.max_input_tokens == 0
@@ -520,6 +525,8 @@ pub struct AgentAttempt {
     pub output_sha256: Option<Sha256Digest>,
     pub checkpoint: Option<ArtifactRef>,
     pub usage: LlmUsage,
+    /// Whether a terminal provider envelope made this usage observable.
+    pub usage_observed: bool,
     pub diagnostic_code: Option<String>,
 }
 
@@ -592,6 +599,20 @@ impl AgentRun {
                     AgentAttemptState::Succeeded if attempt.output_sha256.is_none() => {
                         return Err(AuthoringError::InvalidAgentRun(
                             "successful attempt requires immutable output hash".to_owned(),
+                        ));
+                    }
+                    AgentAttemptState::Succeeded if !attempt.usage_observed => {
+                        return Err(AuthoringError::InvalidAgentRun(
+                            "successful attempt requires observed usage".to_owned(),
+                        ));
+                    }
+                    AgentAttemptState::Pending
+                    | AgentAttemptState::Running
+                    | AgentAttemptState::Repairing
+                        if attempt.usage_observed =>
+                    {
+                        return Err(AuthoringError::InvalidAgentRun(
+                            "non-terminal attempt cannot claim observed usage".to_owned(),
                         ));
                     }
                     AgentAttemptState::Failed | AgentAttemptState::Cancelled

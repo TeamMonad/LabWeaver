@@ -28,6 +28,9 @@ domains:
       - id: 1
         file: agent/0001_initial.sql
         sha256: 4d55737b46f7bac6abbafb9dc388ce1d9712ee6819695347e677f84a527777d1
+      - id: 2
+        file: agent/0002_track_leases.sql
+        sha256: 096c1bbae2329db2b3ba1a42100967c04c6de0a42217019549ad15ed61e36b60
   - name: evaluation
     migrations:
       - id: 1

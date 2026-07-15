@@ -14,7 +14,8 @@ fn valid_policy_json() -> Value {
             "model": "claude-sonnet-4-6-20260601",
             "claudeCodeVersion": "2.1.207",
             "workerImageSha256": "11".repeat(32),
-            "runtimeConfigSha256": "22".repeat(32)
+            "runtimeConfigSha256": "22".repeat(32),
+            "maxInFlightPerWorker": 2
         },
         "budget": {
             "maxInputTokens": 100_000,
@@ -80,6 +81,16 @@ fn runtime_binding_and_immutable_worker_identity_are_required()
         let mut value = valid_policy_json();
         value["binding"][field] = json!("");
         assert!(serde_json::from_value::<CourseLlmEgressPolicy>(value).is_err());
+    }
+
+    for value in [0, 65] {
+        let mut invalid = valid_policy_json();
+        invalid["binding"]["maxInFlightPerWorker"] = json!(value);
+        assert!(
+            serde_json::from_value::<CourseLlmEgressPolicy>(invalid)?
+                .validate()
+                .is_err()
+        );
     }
     Ok(())
 }
