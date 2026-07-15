@@ -17,6 +17,8 @@ fulcio:
   server:
     replicaCount: {{ private_sigstore_replicas }}
     secret: {{ private_sigstore_fulcio_secret_name }}
+    args:
+      ct_log_url: http://ctlog.{{ private_sigstore_namespace }}.svc/sigstorescaffolding
     ingress: {http: {enabled: false}, grpc: {enabled: false}}
     service: {type: ClusterIP}
     logging: {production: true}

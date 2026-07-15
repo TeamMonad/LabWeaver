@@ -103,6 +103,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("signer: /var/run/rekor-signer/private-key.pem", values)
         self.assertIn("privateKeyPasswordSecretName", values)
         self.assertIn("fulcioURL: http://fulcio-server.", values)
+        self.assertIn("ct_log_url: http://ctlog.{{ private_sigstore_namespace }}.svc/sigstorescaffolding", values)
         self.assertIn("existingSecret: {{ private_sigstore_trillian_mysql_secret_name }}", values)
         self.assertIn("username: {{ private_sigstore_trillian_mysql_username }}", values)
         self.assertIn("tuf:\n  enabled: false", values)
