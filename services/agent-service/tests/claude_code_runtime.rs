@@ -1228,7 +1228,7 @@ async fn tokio_process_clears_inheritance_and_isolates_invocation_directories()
     std::fs::write(&output, stream_output(Some(candidate), envelope)?)?;
     std::fs::write(
         &binary,
-        "#!/bin/sh\nif [ \"$2\" = \"--version\" ]; then printf '2.1.207\\n'; exit 0; fi\nprintf '%s\\t%s\\t%s\\t%s\\t%s\\n' \"$HOME\" \"$XDG_CONFIG_HOME\" \"$TMPDIR\" \"$PWD\" \"$USER\" >> \"$LABWEAVER_ISOLATION_EVIDENCE\"\n/bin/cat \"$LABWEAVER_FAKE_OUTPUT\"\n",
+        "#!/bin/sh\nif [ \"$2\" = \"--version\" ]; then printf '2.1.207\\n'; exit 0; fi\n/bin/cat >/dev/null\nprintf '%s\\t%s\\t%s\\t%s\\t%s\\n' \"$HOME\" \"$XDG_CONFIG_HOME\" \"$TMPDIR\" \"$PWD\" \"$USER\" >> \"$LABWEAVER_ISOLATION_EVIDENCE\"\n/bin/cat \"$LABWEAVER_FAKE_OUTPUT\"\n",
     )?;
     let mut permissions = std::fs::metadata(&binary)?.permissions();
     permissions.set_mode(0o755);
