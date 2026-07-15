@@ -279,8 +279,8 @@
     - {name: "{{ private_sigstore_trillian_mysql_secret_name }}", key: mysql-user}
     - {name: "{{ private_sigstore_trillian_mysql_secret_name }}", key: mysql-password}
     - {name: "{{ private_sigstore_trillian_mysql_secret_name }}", key: mysql-database}
-    - {name: "{{ private_sigstore_tls_secret_name }}", key: 'tls\\.crt'}
-    - {name: "{{ private_sigstore_tls_secret_name }}", key: 'tls\\.key'}
+    - {name: "{{ private_sigstore_tls_secret_name }}", key: 'tls\.crt'}
+    - {name: "{{ private_sigstore_tls_secret_name }}", key: 'tls\.key'}
   loop_control:
     label: "{{ item.name }}:{{ item.key }}"
   changed_when: false
