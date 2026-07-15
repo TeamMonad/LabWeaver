@@ -57,8 +57,10 @@ const routes: RouteRecordRaw[] = [
     { path: 'approvals', component: () => import('@/views/teacher/ApprovalListView.vue'), meta: { title: '审批' } },
   ]),
   roleRoute('student', '/student', '学生工作台', () => import('@/views/StudentView.vue'), [
+    { path: '', name: 'student-labs', component: () => import('@/views/student/MyLabsView.vue'), meta: { title: '我的实验' } },
     { path: 'labs', component: () => import('@/views/student/MyLabsView.vue'), meta: { title: '我的实验' } },
-    { path: 'environments', component: () => import('@/views/student/EnvironmentEntryView.vue'), meta: { title: '环境' } },
+    { path: 'environments', component: () => import('@/views/student/EnvironmentEntryView.vue'), meta: { title: '环境控制台' } },
+    { path: 'ssh-keys', component: () => import('@/views/student/SshKeysView.vue'), meta: { title: 'SSH 公钥' } },
     { path: 'results', component: () => import('@/views/student/ResultListView.vue'), meta: { title: '结果' } },
   ]),
   roleRoute('researcher', '/researcher', '科研工作台', () => import('@/views/ResearcherView.vue'), [
