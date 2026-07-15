@@ -11,6 +11,7 @@
     <div class="drawer-header">
       <span class="drawer-title">LabWeaver</span>
       <button
+        ref="closeButton"
         type="button"
         class="icon-button"
         aria-label="关闭导航"
@@ -57,7 +58,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch, nextTick } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 
@@ -74,6 +75,16 @@ const emit = defineEmits<{
 const route = useRoute()
 const isModal = computed(() => window.innerWidth < 840)
 const isRail = computed(() => !isModal.value && props.rail)
+const closeButton = ref<HTMLButtonElement | null>(null)
+
+watch(
+  () => props.open,
+  (open) => {
+    if (open && isModal.value) {
+      void nextTick(() => closeButton.value?.focus())
+    }
+  }
+)
 
 const roleItems = [
   { name: 'teacher', role: 'teacher', path: '/teacher', label: '教师工作台', icon: 'school' as const },

@@ -34,6 +34,7 @@
           type="button"
           class="filled-button"
           :class="`filled-button--${confirmSeverity}`"
+          autofocus
           @click="$emit('confirm')"
         >
           {{ confirmText }}

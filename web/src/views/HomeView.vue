@@ -5,6 +5,15 @@
       <p class="hero-subtitle">面向教学实验与科研工作的 Agent 驱动云原生实验平台</p>
     </section>
 
+    <DiagnosticBanner
+      v-if="routeReason"
+      class="route-reason"
+      :code="routeReason.code"
+      :message="routeReason.message"
+      :retryable="false"
+      severity="warning"
+    />
+
     <section v-if="!auth.isLoading.value" class="dashboard" aria-labelledby="role-heading">
       <h2 id="role-heading" class="section-title">{{ sectionTitle }}</h2>
 
@@ -65,13 +74,15 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { RouterLink } from 'vue-router'
+import { RouterLink, useRoute } from 'vue-router'
 import SvgIcon from '@/components/common/SvgIcon.vue'
+import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import { useAuth } from '@/composables/useAuth'
 import { OIDC_ENABLED } from '@/config'
 import type { AppRole } from '@/router'
 
 const auth = useAuth()
+const route = useRoute()
 const oidcEnabled = OIDC_ENABLED
 
 interface RoleCard {
@@ -141,6 +152,21 @@ const visibleCards = computed(() => {
 const sectionTitle = computed(() => {
   if (!auth.isAuthenticated.value) return '登录 LabWeaver'
   return '选择角色入口'
+})
+
+const routeReason = computed(() => {
+  const reason = route.query.reason
+  if (!reason || Array.isArray(reason)) return null
+  switch (reason) {
+    case 'unauthorized':
+      return { code: 'unauthorized', message: '当前账号没有该页面的访问权限。' }
+    case 'auth-not-configured':
+      return { code: 'auth-not-configured', message: '当前部署未配置身份验证服务，无法访问受保护页面。' }
+    case 'callback-failed':
+      return { code: 'callback-failed', message: '登录回调处理失败，请重试。' }
+    default:
+      return { code: 'access-denied', message: '无法访问该页面。' }
+  }
 })
 </script>
 
@@ -286,6 +312,22 @@ const sectionTitle = computed(() => {
   width: 1px;
   height: 24px;
   background: var(--md-sys-color-outline-variant);
+}
+
+.dashboard {
+  width: 100%;
+}
+
+.route-reason {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  border-radius: var(--md-sys-shape-medium);
+  background: var(--md-sys-color-error-container);
+  color: var(--md-sys-color-on-error-container);
+  font: var(--md-sys-body-medium);
 }
 
 @media (max-width: 599px) {

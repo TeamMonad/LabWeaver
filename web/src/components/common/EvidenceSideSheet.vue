@@ -16,6 +16,7 @@
         <h2 class="evidence-sheet__title">{{ title }}</h2>
         <button
           v-if="dismissible"
+          ref="closeButton"
           type="button"
           class="icon-button"
           aria-label="关闭证据侧栏"
@@ -32,6 +33,7 @@
 </template>
 
 <script setup lang="ts">
+import { watch, nextTick, ref } from 'vue'
 import SvgIcon from './SvgIcon.vue'
 
 interface Props {
@@ -40,13 +42,24 @@ interface Props {
   dismissible?: boolean
 }
 
-withDefaults(defineProps<Props>(), {
+const props = withDefaults(defineProps<Props>(), {
   dismissible: true,
 })
 
 defineEmits<{
   close: []
 }>()
+
+const closeButton = ref<HTMLButtonElement | null>(null)
+
+watch(
+  () => props.open,
+  (open) => {
+    if (open) {
+      void nextTick(() => closeButton.value?.focus())
+    }
+  }
+)
 </script>
 
 <style scoped>
