@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AccessGrantId, ActorId, AgentRunId, BuildRequestId, CourseId, EnvironmentId, EventId,
-    FrozenSubmissionId, ReleaseId, Revision, Sequence, Sha256Digest, UtcTimestamp,
+    FrozenSubmissionId, GatewaySessionId, ReleaseId, Revision, Sequence, Sha256Digest,
+    SshPublicKeyId, UtcTimestamp,
 };
 
 pub const SPEC_VERSION: &str = "1.0";
@@ -32,7 +33,16 @@ pub mod subjects {
     pub const ENVIRONMENT_LIFECYCLE_REQUESTED: &str =
         "labweaver.environment.instance.lifecycle_requested.v1";
     pub const ACCESS_GRANT_CREATED: &str = "labweaver.access.grant.created.v1";
+    pub const ACCESS_GRANT_ACTIVATED: &str = "labweaver.access.grant.activated.v1";
+    pub const ACCESS_GRANT_DENIED: &str = "labweaver.access.grant.denied.v1";
+    pub const ACCESS_GRANT_EXPIRED: &str = "labweaver.access.grant.expired.v1";
     pub const ACCESS_GRANT_REVOKED: &str = "labweaver.access.grant.revoked.v1";
+    pub const ACCESS_SSH_KEY_REVOKED: &str = "labweaver.access.ssh_key.revoked.v1";
+    pub const ACCESS_SESSION_TERMINATION_REQUESTED: &str =
+        "labweaver.access.session.termination_requested.v1";
+    pub const ACCESS_SESSION_CLOSED: &str = "labweaver.access.session.closed.v1";
+    pub const ACCESS_SESSION_TERMINATION_OVERDUE: &str =
+        "labweaver.access.session.termination_overdue.v1";
     pub const SUBMISSION_FREEZE_REQUESTED: &str =
         "labweaver.evaluation.submission.freeze_requested.v1";
     pub const SUBMISSION_FROZEN: &str = "labweaver.evaluation.submission.frozen.v1";
@@ -185,9 +195,44 @@ pub const EVENT_CONTRACTS: &[EventContract] = &[
         schema_name: "access-grant-created",
     },
     EventContract {
+        subject: subjects::ACCESS_GRANT_ACTIVATED,
+        event_type: subjects::ACCESS_GRANT_ACTIVATED,
+        schema_name: "access-grant-activated",
+    },
+    EventContract {
+        subject: subjects::ACCESS_GRANT_DENIED,
+        event_type: subjects::ACCESS_GRANT_DENIED,
+        schema_name: "access-grant-denied",
+    },
+    EventContract {
+        subject: subjects::ACCESS_GRANT_EXPIRED,
+        event_type: subjects::ACCESS_GRANT_EXPIRED,
+        schema_name: "access-grant-expired",
+    },
+    EventContract {
         subject: subjects::ACCESS_GRANT_REVOKED,
         event_type: subjects::ACCESS_GRANT_REVOKED,
         schema_name: "access-grant-revoked",
+    },
+    EventContract {
+        subject: subjects::ACCESS_SSH_KEY_REVOKED,
+        event_type: subjects::ACCESS_SSH_KEY_REVOKED,
+        schema_name: "access-ssh-key-revoked",
+    },
+    EventContract {
+        subject: subjects::ACCESS_SESSION_TERMINATION_REQUESTED,
+        event_type: subjects::ACCESS_SESSION_TERMINATION_REQUESTED,
+        schema_name: "access-session-termination-requested",
+    },
+    EventContract {
+        subject: subjects::ACCESS_SESSION_CLOSED,
+        event_type: subjects::ACCESS_SESSION_CLOSED,
+        schema_name: "access-session-closed",
+    },
+    EventContract {
+        subject: subjects::ACCESS_SESSION_TERMINATION_OVERDUE,
+        event_type: subjects::ACCESS_SESSION_TERMINATION_OVERDUE,
+        schema_name: "access-session-termination-overdue",
     },
     EventContract {
         subject: subjects::SUBMISSION_FREEZE_REQUESTED,
@@ -262,6 +307,26 @@ pub struct AccessGrantChanged {
     pub state: String,
     pub effective_at: UtcTimestamp,
 }
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SshPublicKeyRevoked {
+    pub ssh_public_key_id: SshPublicKeyId,
+    pub actor_id: ActorId,
+    pub effective_at: UtcTimestamp,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GatewaySessionChanged {
+    pub gateway_session_id: GatewaySessionId,
+    pub access_grant_id: AccessGrantId,
+    pub access_grant_revision: Revision,
+    pub state: String,
+    pub effective_at: UtcTimestamp,
+    pub terminate_by: Option<UtcTimestamp>,
+    pub reason_code: String,
+}
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SubmissionFrozen {
@@ -290,29 +355,10 @@ pub struct ReleaseWithdrawn {
 }
 
 fn reject_protected_payload(value: &serde_json::Value) -> Result<(), EventError> {
-    const PROTECTED: &[&str] = &[
-        "secret",
-        "token",
-        "privateKey",
-        "apiKey",
-        "authorization",
-        "password",
-        "credential",
-        "privateEndpoint",
-        "targetHost",
-        "targetPort",
-        "submissionContent",
-        "materialContent",
-        "score",
-        "pointsAwarded",
-    ];
     match value {
         serde_json::Value::Object(object) => {
             for (key, nested) in object {
-                if PROTECTED
-                    .iter()
-                    .any(|protected| key.eq_ignore_ascii_case(protected))
-                {
+                if protected_event_key(key) {
                     return Err(EventError::ProtectedPayload);
                 }
                 reject_protected_payload(nested)?;
@@ -326,6 +372,32 @@ fn reject_protected_payload(value: &serde_json::Value) -> Result<(), EventError>
         _ => {}
     }
     Ok(())
+}
+
+fn protected_event_key(key: &str) -> bool {
+    let normalized = key
+        .bytes()
+        .filter(u8::is_ascii_alphanumeric)
+        .map(|byte| byte.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let normalized = String::from_utf8_lossy(&normalized);
+    normalized.contains("secret")
+        || normalized.contains("token")
+        || normalized.contains("privatekey")
+        || normalized.contains("apikey")
+        || normalized.contains("password")
+        || normalized.contains("credential")
+        || normalized.contains("privateendpoint")
+        || normalized.contains("targethost")
+        || normalized.contains("targetport")
+        || normalized.contains("submissioncontent")
+        || normalized.contains("materialcontent")
+        || normalized.contains("normalizedauthorizedkey")
+        || normalized.contains("publickeyopenssh")
+        || matches!(
+            normalized.as_ref(),
+            "authorization" | "score" | "pointsawarded"
+        )
 }
 
 pub fn validate_delivery(previous: Option<Sequence>, current: Sequence) -> Result<(), EventError> {
@@ -384,6 +456,17 @@ mod tests {
             reject_protected_payload(&payload),
             Err(EventError::ProtectedPayload)
         ));
+        for key in [
+            "forceCommandToken",
+            "normalizedAuthorizedKey",
+            "token_sha256",
+        ] {
+            let payload = serde_json::json!({key: "redacted"});
+            assert!(matches!(
+                reject_protected_payload(&payload),
+                Err(EventError::ProtectedPayload)
+            ));
+        }
     }
 
     #[test]

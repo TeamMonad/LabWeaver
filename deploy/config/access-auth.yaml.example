@@ -61,3 +61,19 @@ environment_owner_resolver:
   max_retries: 1
   retry_backoff_milliseconds: 100
   decision_ttl_seconds: 5
+grants:
+  default_ttl_seconds: 1800
+  max_ttl_seconds: 3600
+  authorization_token_ttl_seconds: 30
+  activation_poll_seconds: 2
+  activation_retry_seconds: 10
+  expiry_poll_seconds: 5
+  worker_lease_seconds: 30
+  max_keys_per_actor: 10
+  max_endpoints_per_grant: 16
+nats:
+  server: "tls://nats.example.invalid:4222"
+  ca_certificate_file: "secrets/nats-ca.pem"
+  client_certificate_file: "secrets/access-nats-client-cert.pem"
+  client_private_key_file: "secrets/access-nats-client-key.pem"
+  credentials_file: "secrets/access-nats.creds"

@@ -1,11 +1,22 @@
 {
   "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
     "CourseId": {
       "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
       "type": "string"
     },
     "EndpointId": {
       "description": "Strongly typed UUIDv7 identifier for `EndpointId`.",
+      "type": "string"
+    },
+    "EnvironmentAccessSubjectKind": {
+      "enum": [
+        "owner",
+        "course_teacher"
+      ],
       "type": "string"
     },
     "EnvironmentId": {
@@ -17,15 +28,15 @@
       "format": "uint64",
       "minimum": 0,
       "type": "integer"
-    },
-    "UtcTimestamp": {
-      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
-      "type": "string"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
+  "description": "Fail-closed Access Service request for exact endpoint eligibility.",
   "properties": {
+    "actorId": {
+      "$ref": "#/$defs/ActorId"
+    },
     "courseId": {
       "$ref": "#/$defs/CourseId"
     },
@@ -38,26 +49,21 @@
     "environmentId": {
       "$ref": "#/$defs/EnvironmentId"
     },
-    "environmentRevision": {
+    "expectedRevision": {
       "$ref": "#/$defs/Revision"
     },
-    "expiresAt": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/UtcTimestamp"
-        },
-        {
-          "type": "null"
-        }
-      ]
+    "subjectKind": {
+      "$ref": "#/$defs/EnvironmentAccessSubjectKind"
     }
   },
   "required": [
-    "courseId",
     "environmentId",
-    "environmentRevision",
+    "courseId",
+    "actorId",
+    "subjectKind",
+    "expectedRevision",
     "endpointIds"
   ],
-  "title": "CreateAccessGrantRequest",
+  "title": "EnvironmentEndpointEligibilityRequest",
   "type": "object"
 }

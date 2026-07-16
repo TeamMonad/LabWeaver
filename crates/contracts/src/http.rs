@@ -259,10 +259,11 @@ pub struct CreateSshPublicKeyRequest {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateAccessGrantRequest {
+    pub course_id: CourseId,
     pub environment_id: EnvironmentId,
     pub environment_revision: Revision,
     pub endpoint_ids: Vec<EndpointId>,
-    pub expires_at: UtcTimestamp,
+    pub expires_at: Option<UtcTimestamp>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -270,6 +271,13 @@ pub struct CreateAccessGrantRequest {
 pub struct RevokeAccessGrantRequest {
     pub grant_id: AccessGrantId,
     pub reason_code: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RenewAccessGrantRequest {
+    pub grant_id: AccessGrantId,
+    pub expires_at: UtcTimestamp,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -737,6 +745,11 @@ pub const OPERATION_AUTHORIZATIONS: &[OperationAuthorization] = &[
         scope: OperationScopeKind::Environment,
     },
     OperationAuthorization {
+        operation_id: "renewAccessGrant",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Environment,
+    },
+    OperationAuthorization {
         operation_id: "streamCourseEvents",
         allowed_roles: TEACHER_OR_STUDENT,
         scope: OperationScopeKind::Course,
@@ -763,6 +776,11 @@ pub const OPERATION_AUTHORIZATIONS: &[OperationAuthorization] = &[
     },
     OperationAuthorization {
         operation_id: "resolveEnvironmentOwner",
+        allowed_roles: PLATFORM_ADMIN,
+        scope: OperationScopeKind::Service,
+    },
+    OperationAuthorization {
+        operation_id: "resolveEndpointEligibility",
         allowed_roles: PLATFORM_ADMIN,
         scope: OperationScopeKind::Service,
     },
@@ -1292,6 +1310,18 @@ pub const OPERATIONS: &[OperationContract] = &[
     ),
     op!(
         Public,
+        Post,
+        "/api/v1/access-grants/{grantId}/renew",
+        "renewAccessGrant",
+        "access_grant:write",
+        Oidc,
+        IdempotentRevisioned,
+        200,
+        false,
+        true
+    ),
+    op!(
+        Public,
         Get,
         "/api/v1/events",
         "streamCourseEvents",
@@ -1308,6 +1338,18 @@ pub const OPERATIONS: &[OperationContract] = &[
         "/internal/v1/environments/{environmentId}/owner:resolve",
         "resolveEnvironmentOwner",
         "environment:resolve_owner",
+        ServiceMtls,
+        None,
+        200,
+        false,
+        true
+    ),
+    op!(
+        GatewayInternal,
+        Post,
+        "/internal/v1/environments/{environmentId}/endpoint-eligibility:resolve",
+        "resolveEndpointEligibility",
+        "environment:resolve_endpoint_eligibility",
         ServiceMtls,
         None,
         200,

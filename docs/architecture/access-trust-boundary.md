@@ -1,12 +1,12 @@
 # Access Trust Boundary
 
-Status: ACCESS-01a remains an E0 design baseline, while the Issue #47 OIDC/BFF and Access-to-Environment owner-resolution slice has local E2 evidence pending A+B review and D Verify. This document does not prove Headscale, Subnet Router firewall enforcement, Guacamole, KubeVirt, or a deployed production network path.
+Status: the current P0 is `ssh alias@gateway`. Issue #49 owns Access authorization and session facts, #53 owns real VM endpoints, and #63 owns the OpenSSH Gateway/ForceCommand process. `DirectAccessGrant`, Headscale/Router direct access and Guacamole are deferred proposals. Current local evidence does not prove native SSH-to-VM or a deployed production path.
 
 ## Purpose and non-goals
 
 This document defines the P0 trust boundary for external access to LabWeaver environments. It separates authentication, device reachability, business authorization, direct VM transport, browser mediation, and environment-local credentials so that Tailnet reachability never becomes a substitute for Access Service authorization.
 
-It does not define a NATS subject, database schema, Headscale instance, Router firewall implementation, Guacamole extension, RBAC policy, or deployment configuration. Issue #81 adds only the actor-safe Public REST discovery projection described below; enforcement and runtime ownership remain planned until their owning implementation issues provide reviewed contracts and current-commit evidence.
+The versioned contracts and forward-only Access Migration define the #49 data/API boundary. This document does not define the #63 Gateway image/`sshd`/ForceCommand helper, #53 endpoint route resolution, Headscale, Router, Guacamole, frontend or deployment credentials.
 
 ## Public discovery projection
 
@@ -23,6 +23,7 @@ without becoming an authorization authority. Missing or unavailable ownership fa
 | Keycloak/OIDC | authenticated subject, issuer, audience, token validity, base role | course, project, environment, lease, or endpoint entitlement |
 | Headscale/Tailscale | enrolled device identity, Tailnet membership, route distribution, coarse Grants enforcement | business entitlement or VM lifecycle |
 | Access Service | AccessGrant, DirectAccessGrant, EndpointGrant, device eligibility, revisions, lifecycle and revocation | identity-provider login or workload scheduling |
+| OpenSSH Gateway (#63) | present a key fingerprint, redeem a one-time token, report session heartbeat/close and execute termination commands | authorization truth, VM endpoint ownership or independent `authorized_keys` policy |
 | Router enforcement | exact device-to-endpoint packet filtering, connection-state removal and enforcement receipt | whether a subject deserves access |
 | Guacamole extension | browser-session mediation after a one-time Access handoff | independent OIDC login, business authorization truth or connection inventory |
 | Environment Service | endpoint metadata and short-lived SSH/VNC credentials | caller identity, course membership or external network policy |
@@ -67,7 +68,9 @@ flowchart LR
     A --> R
 ```
 
-Native SSH and native VNC use the direct VM path only after Access Service activates a `DirectAccessGrant`. It is limited to the subject's Active registered devices, one VM private address and the granted SSH/VNC port. It must not permit public ingress, CIDR-wide access, wildcard ports, direct access to containers, or a route to another endpoint.
+The current P0 uses `ssh alias@gateway`. The alias is a strict database lookup key and never contains or derives host/port. Access authorizes exactly the fingerprint presented by OpenSSH, issues a short-lived one-time token bound to Gateway/connection/key/grant revision/endpoint, and owns the session lifecycle. Environment eligibility returns only endpoint identity, protocol, health, revision and deadline; route resolution stays in #53/#63.
+
+The following `DirectAccessGrant` and Guacamole sections are retained only as a deferred future proposal and are not requirements or completion evidence for #49/#53/#63.
 
 Browser SSH and VNC use Guacamole. The portal completes Authorization Code plus PKCE with Keycloak, then receives a one-time, short-lived handoff token from Access Service. The custom Guacamole extension validates that token over an internal mutually authenticated channel, loads only the current authorized connection, and does not expose the token or endpoint credential to the browser. Code-server, Jupyter and other HTTP endpoints remain Access Gateway paths.
 

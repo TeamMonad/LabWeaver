@@ -158,6 +158,14 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::environment::EnvironmentOwnerResolution
     );
     document!(
+        "schemas/contracts/v1/http/environment-endpoint-eligibility-request.schema.json",
+        crate::environment::EnvironmentEndpointEligibilityRequest
+    );
+    document!(
+        "schemas/contracts/v1/environment-endpoint-eligibility.schema.json",
+        crate::environment::EnvironmentEndpointEligibility
+    );
+    document!(
         "schemas/contracts/v1/environment-owner-resolver-client-config.schema.json",
         crate::environment::EnvironmentOwnerResolverClientConfig
     );
@@ -192,6 +200,18 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/gateway-session.schema.json",
         crate::access::GatewaySession
+    );
+    document!(
+        "schemas/contracts/v1/create-gateway-session-request.schema.json",
+        crate::access::CreateGatewaySessionRequest
+    );
+    document!(
+        "schemas/contracts/v1/heartbeat-gateway-session-request.schema.json",
+        crate::access::HeartbeatGatewaySessionRequest
+    );
+    document!(
+        "schemas/contracts/v1/close-gateway-session-request.schema.json",
+        crate::access::CloseGatewaySessionRequest
     );
     document!(
         "schemas/contracts/v1/authenticated-actor.schema.json",
@@ -309,6 +329,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         "schemas/contracts/v1/http/revoke-access-grant-request.schema.json",
         crate::http::RevokeAccessGrantRequest
     );
+    document!(
+        "schemas/contracts/v1/http/renew-access-grant-request.schema.json",
+        crate::http::RenewAccessGrantRequest
+    );
 
     document!(
         "schemas/contracts/v1/events/agent-run-requested.schema.json",
@@ -367,8 +391,36 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         CloudEvent<events::AccessGrantChanged>
     );
     document!(
+        "schemas/contracts/v1/events/access-grant-activated.schema.json",
+        CloudEvent<events::AccessGrantChanged>
+    );
+    document!(
+        "schemas/contracts/v1/events/access-grant-denied.schema.json",
+        CloudEvent<events::AccessGrantChanged>
+    );
+    document!(
+        "schemas/contracts/v1/events/access-grant-expired.schema.json",
+        CloudEvent<events::AccessGrantChanged>
+    );
+    document!(
         "schemas/contracts/v1/events/access-grant-revoked.schema.json",
         CloudEvent<events::AccessGrantChanged>
+    );
+    document!(
+        "schemas/contracts/v1/events/access-ssh-key-revoked.schema.json",
+        CloudEvent<events::SshPublicKeyRevoked>
+    );
+    document!(
+        "schemas/contracts/v1/events/access-session-termination-requested.schema.json",
+        CloudEvent<events::GatewaySessionChanged>
+    );
+    document!(
+        "schemas/contracts/v1/events/access-session-closed.schema.json",
+        CloudEvent<events::GatewaySessionChanged>
+    );
+    document!(
+        "schemas/contracts/v1/events/access-session-termination-overdue.schema.json",
+        CloudEvent<events::GatewaySessionChanged>
     );
     document!(
         "schemas/contracts/v1/events/submission-freeze-requested.schema.json",
@@ -662,7 +714,7 @@ fn environment_management_parameters(operation_id: &str) -> Vec<Value> {
             limit(),
         ],
         "listEnvironmentAccessGrants" => vec![
-            json!({"name":"state","in":"query","required":false,"schema":{"type":"string","enum":["requested","active","expired","revoked"]}}),
+            json!({"name":"state","in":"query","required":false,"schema":{"type":"string","enum":["requested","active","denied","expired","revoked"]}}),
             json!({"name":"endpointId","in":"query","required":false,"schema":{"type":"string","format":"uuid"}}),
             json!({"name":"includeTerminal","in":"query","required":false,"schema":{"type":"boolean","default":false}}),
             cursor(),
@@ -748,11 +800,13 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "createSshPublicKey" => "http/create-ssh-public-key-request",
         "createAccessGrant" => "http/create-access-grant-request",
         "revokeAccessGrant" => "http/revoke-access-grant-request",
+        "renewAccessGrant" => "http/renew-access-grant-request",
         "authorizeSsh" => "ssh-authorization-request",
         "resolveEnvironmentOwner" => "http/environment-owner-resolution-request",
-        "createGatewaySession" | "heartbeatGatewaySession" | "closeGatewaySession" => {
-            "gateway-session"
-        }
+        "resolveEndpointEligibility" => "http/environment-endpoint-eligibility-request",
+        "createGatewaySession" => "create-gateway-session-request",
+        "heartbeatGatewaySession" => "heartbeat-gateway-session-request",
+        "closeGatewaySession" => "close-gateway-session-request",
         _ => return None,
     };
     Some(contract_ref(name))
@@ -789,10 +843,13 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             json!({"type":"object","required":["items"],"properties":{"items":{"type":"array","items":contract_ref("ssh-public-key")},"nextCursor":{"type":["string","null"]}}})
         }
         "createSshPublicKey" => contract_ref("ssh-public-key"),
-        "createAccessGrant" | "getAccessGrant" => contract_ref("access-grant"),
+        "createAccessGrant" | "getAccessGrant" | "renewAccessGrant" => contract_ref("access-grant"),
         "authorizeSsh" => contract_ref("ssh-authorization"),
         "resolveEnvironmentOwner" => contract_ref("environment-owner-resolution"),
-        "createGatewaySession" => contract_ref("gateway-session"),
+        "resolveEndpointEligibility" => contract_ref("environment-endpoint-eligibility"),
+        "createGatewaySession" | "heartbeatGatewaySession" | "closeGatewaySession" => {
+            contract_ref("gateway-session")
+        }
         id if [
             "createAgentRun",
             "cancelAgentRun",
@@ -809,6 +866,7 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             "deleteEnvironment",
             "freezeSubmission",
             "revokeAccessGrant",
+            "renewAccessGrant",
         ]
         .contains(&id) =>
         {

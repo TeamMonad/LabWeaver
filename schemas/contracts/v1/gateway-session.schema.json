@@ -17,6 +17,7 @@
       "enum": [
         "active",
         "terminating",
+        "termination_overdue",
         "closed"
       ],
       "type": "string"
@@ -26,6 +27,10 @@
       "format": "uint64",
       "minimum": 0,
       "type": "integer"
+    },
+    "SshPublicKeyId": {
+      "description": "Strongly typed UUIDv7 identifier for `SshPublicKeyId`.",
+      "type": "string"
     },
     "UtcTimestamp": {
       "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
@@ -76,10 +81,26 @@
     "openedAt": {
       "$ref": "#/$defs/UtcTimestamp"
     },
+    "revision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "sshPublicKeyId": {
+      "$ref": "#/$defs/SshPublicKeyId"
+    },
     "state": {
       "$ref": "#/$defs/GatewaySessionState"
     },
     "terminateBy": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "terminationRequestedAt": {
       "anyOf": [
         {
           "$ref": "#/$defs/UtcTimestamp"
@@ -95,8 +116,10 @@
     "accessGrantId",
     "accessGrantRevision",
     "endpointGrantId",
+    "sshPublicKeyId",
     "gatewayIdentity",
     "connectionId",
+    "revision",
     "state",
     "openedAt",
     "lastHeartbeatAt"

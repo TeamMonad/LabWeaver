@@ -1,6 +1,6 @@
 //! SSH public key, AccessGrant, EndpointGrant, and Gateway session contracts.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -108,6 +108,7 @@ pub fn validate_ssh_key_registry(keys: &[SshPublicKey]) -> Result<(), AccessErro
 pub enum AccessGrantState {
     Requested,
     Active,
+    Denied,
     Expired,
     Revoked,
 }
@@ -173,7 +174,10 @@ pub struct AccessGrantSnapshot {
 impl AccessGrantSnapshot {
     pub fn validate(&self) -> Result<(), AccessError> {
         if self.expires_at <= self.issued_at
-            || self.endpoint_grants.is_empty()
+            || (matches!(
+                self.state,
+                AccessGrantState::Active | AccessGrantState::Expired
+            ) && self.endpoint_grants.is_empty())
             || self.last_changed_stream_sequence.0 == 0
             || self.decision.reason_code.trim().is_empty()
             || self
@@ -185,10 +189,14 @@ impl AccessGrantSnapshot {
         }
         let terminal = matches!(
             self.state,
-            AccessGrantState::Expired | AccessGrantState::Revoked
+            AccessGrantState::Denied | AccessGrantState::Expired | AccessGrantState::Revoked
         );
         if terminal != matches!(self.decision.decision, AuthorizationDecision::Terminal)
             || (self.state == AccessGrantState::Revoked) != self.revoked_at.is_some()
+            || (matches!(
+                self.state,
+                AccessGrantState::Denied | AccessGrantState::Revoked
+            ) && self.reason_code.as_deref().is_none_or(str::is_empty))
             || (self.state == AccessGrantState::Expired
                 && self.reason_code.as_deref() != Some("expired"))
         {
@@ -269,7 +277,12 @@ pub struct AccessGrant {
 impl AccessGrant {
     /// Validates child scope, time bounds, and terminal-state facts.
     pub fn validate(&self) -> Result<(), AccessError> {
-        if self.expires_at <= self.issued_at || self.endpoint_grants.is_empty() {
+        if self.expires_at <= self.issued_at
+            || (matches!(
+                self.state,
+                AccessGrantState::Active | AccessGrantState::Expired
+            ) && self.endpoint_grants.is_empty())
+        {
             return Err(AccessError::InvalidGrant);
         }
         let mut endpoint_ids = BTreeSet::new();
@@ -285,7 +298,7 @@ impl AccessGrant {
             endpoint.validate()?;
         }
         match self.state {
-            AccessGrantState::Revoked => {
+            AccessGrantState::Denied | AccessGrantState::Revoked => {
                 if self.revoked_at.is_none()
                     || self.reason_code.as_deref().is_none_or(str::is_empty)
                 {
@@ -315,7 +328,7 @@ impl AccessGrant {
             (from, to),
             (
                 AccessGrantState::Requested,
-                AccessGrantState::Active | AccessGrantState::Revoked
+                AccessGrantState::Active | AccessGrantState::Denied | AccessGrantState::Revoked
             ) | (
                 AccessGrantState::Active,
                 AccessGrantState::Expired | AccessGrantState::Revoked
@@ -334,6 +347,7 @@ impl AccessGrant {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SshAuthorizationRequest {
     pub alias: String,
+    pub presented_key_fingerprint_sha256: String,
     pub gateway_identity: String,
     pub connection_id: String,
     pub source_address_hash: String,
@@ -341,7 +355,7 @@ pub struct SshAuthorizationRequest {
 }
 
 /// Fail-closed SSH authorization result.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SshAuthorization {
     pub authorization_id: String,
@@ -349,9 +363,72 @@ pub struct SshAuthorization {
     pub access_grant_revision: Revision,
     pub endpoint_grant_id: EndpointGrantId,
     pub endpoint_id: EndpointId,
+    pub ssh_public_key_id: SshPublicKeyId,
     pub normalized_authorized_key: String,
     pub force_command_token: String,
     pub valid_until: UtcTimestamp,
+}
+
+impl fmt::Debug for SshAuthorization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SshAuthorization")
+            .field("authorization_id", &self.authorization_id)
+            .field("access_grant_id", &self.access_grant_id)
+            .field("access_grant_revision", &self.access_grant_revision)
+            .field("endpoint_grant_id", &self.endpoint_grant_id)
+            .field("endpoint_id", &self.endpoint_id)
+            .field("ssh_public_key_id", &self.ssh_public_key_id)
+            .field("normalized_authorized_key", &"[REDACTED]")
+            .field("force_command_token", &"[REDACTED]")
+            .field("valid_until", &self.valid_until)
+            .finish()
+    }
+}
+
+/// Redeems exactly one SSH authorization into a tracked Gateway session.
+#[derive(Clone, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateGatewaySessionRequest {
+    pub authorization_id: String,
+    pub force_command_token: String,
+    pub gateway_identity: String,
+    pub connection_id: String,
+    pub opened_at: UtcTimestamp,
+}
+
+impl fmt::Debug for CreateGatewaySessionRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CreateGatewaySessionRequest")
+            .field("authorization_id", &self.authorization_id)
+            .field("force_command_token", &"[REDACTED]")
+            .field("gateway_identity", &self.gateway_identity)
+            .field("connection_id", &self.connection_id)
+            .field("opened_at", &self.opened_at)
+            .finish()
+    }
+}
+
+/// Revision-checked heartbeat emitted only by the owning Gateway connection.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HeartbeatGatewaySessionRequest {
+    pub gateway_identity: String,
+    pub connection_id: String,
+    pub expected_revision: Revision,
+    pub observed_at: UtcTimestamp,
+}
+
+/// Terminal receipt from the Gateway. Terminal content is never accepted.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CloseGatewaySessionRequest {
+    pub gateway_identity: String,
+    pub connection_id: String,
+    pub expected_revision: Revision,
+    pub closed_at: UtcTimestamp,
+    pub reason_code: String,
 }
 
 /// Gateway session lifecycle.
@@ -360,6 +437,7 @@ pub struct SshAuthorization {
 pub enum GatewaySessionState {
     Active,
     Terminating,
+    TerminationOverdue,
     Closed,
 }
 
@@ -371,11 +449,14 @@ pub struct GatewaySession {
     pub access_grant_id: AccessGrantId,
     pub access_grant_revision: Revision,
     pub endpoint_grant_id: EndpointGrantId,
+    pub ssh_public_key_id: SshPublicKeyId,
     pub gateway_identity: String,
     pub connection_id: String,
+    pub revision: Revision,
     pub state: GatewaySessionState,
     pub opened_at: UtcTimestamp,
     pub last_heartbeat_at: UtcTimestamp,
+    pub termination_requested_at: Option<UtcTimestamp>,
     pub terminate_by: Option<UtcTimestamp>,
     pub closed_at: Option<UtcTimestamp>,
     pub close_reason_code: Option<String>,
@@ -392,18 +473,31 @@ impl GatewaySession {
         }
         match self.state {
             GatewaySessionState::Active
-                if self.terminate_by.is_some() || self.closed_at.is_some() =>
+                if self.termination_requested_at.is_some()
+                    || self.terminate_by.is_some()
+                    || self.closed_at.is_some() =>
             {
                 Err(AccessError::InvalidSession)
             }
             GatewaySessionState::Terminating => {
+                let requested = self
+                    .termination_requested_at
+                    .ok_or(AccessError::InvalidSession)?;
                 let deadline = self.terminate_by.ok_or(AccessError::InvalidSession)?;
-                let seconds = (deadline.get() - self.last_heartbeat_at.get()).whole_seconds();
+                let seconds = (deadline.get() - requested.get()).whole_seconds();
                 if (0..=60).contains(&seconds) {
                     Ok(())
                 } else {
                     Err(AccessError::TerminationDeadlineExceeded)
                 }
+            }
+            GatewaySessionState::TerminationOverdue
+                if self.termination_requested_at.is_none()
+                    || self.terminate_by.is_none()
+                    || self.closed_at.is_some()
+                    || self.close_reason_code.as_deref() != Some("termination_overdue") =>
+            {
+                Err(AccessError::InvalidSession)
             }
             GatewaySessionState::Closed
                 if self.closed_at.is_none()
@@ -411,7 +505,9 @@ impl GatewaySession {
             {
                 Err(AccessError::InvalidSession)
             }
-            GatewaySessionState::Closed | GatewaySessionState::Active => Ok(()),
+            GatewaySessionState::TerminationOverdue
+            | GatewaySessionState::Closed
+            | GatewaySessionState::Active => Ok(()),
         }
     }
 }
@@ -444,4 +540,118 @@ pub enum AccessError {
     TerminationDeadlineExceeded,
     #[error("public AccessGrant snapshot is internally inconsistent")]
     InvalidGrantSnapshot,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{CourseId, EnvironmentId};
+
+    fn timestamp(value: &str) -> UtcTimestamp {
+        serde_json::from_str(&format!("\"{value}\""))
+            .unwrap_or_else(|error| unreachable!("static timestamp must parse: {error}"))
+    }
+
+    fn revision(value: u64) -> Revision {
+        Revision::new(value).unwrap_or_else(|error| unreachable!("valid revision: {error}"))
+    }
+
+    #[test]
+    fn ed25519_key_is_normalized_and_multiline_input_is_rejected() {
+        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA user@example";
+        let validated = validate_ssh_public_key(key)
+            .unwrap_or_else(|error| unreachable!("static Ed25519 key must parse: {error}"));
+        assert_eq!(validated.algorithm, SshKeyAlgorithm::Ed25519);
+        assert!(!validated.normalized_openssh.contains("user@example"));
+        assert!(validate_ssh_public_key(&format!("{key}\n{key}")).is_err());
+    }
+
+    #[test]
+    fn grant_state_machine_is_closed_and_requested_may_have_no_materialized_endpoints() {
+        assert!(
+            AccessGrant::ensure_transition(AccessGrantState::Requested, AccessGrantState::Active)
+                .is_ok()
+        );
+        assert!(
+            AccessGrant::ensure_transition(AccessGrantState::Requested, AccessGrantState::Denied)
+                .is_ok()
+        );
+        assert!(
+            AccessGrant::ensure_transition(AccessGrantState::Active, AccessGrantState::Expired)
+                .is_ok()
+        );
+        assert!(
+            AccessGrant::ensure_transition(AccessGrantState::Denied, AccessGrantState::Active)
+                .is_err()
+        );
+        let requested = AccessGrant {
+            id: AccessGrantId::new(),
+            actor_id: ActorId::new(),
+            course_id: CourseId::new(),
+            environment_id: EnvironmentId::new(),
+            environment_revision: revision(1),
+            state: AccessGrantState::Requested,
+            revision: revision(1),
+            endpoint_grants: Vec::new(),
+            issued_at: timestamp("2026-07-16T00:00:00.000Z"),
+            expires_at: timestamp("2026-07-16T00:30:00.000Z"),
+            revoked_at: None,
+            reason_code: None,
+        };
+        assert!(requested.validate().is_ok());
+        let mut active = requested;
+        active.state = AccessGrantState::Active;
+        assert!(active.validate().is_err());
+    }
+
+    #[test]
+    fn termination_deadline_and_overdue_state_are_explicit() {
+        let opened = timestamp("2026-07-16T00:00:00.000Z");
+        let heartbeat = timestamp("2026-07-16T00:01:00.000Z");
+        let mut session = GatewaySession {
+            id: GatewaySessionId::new(),
+            access_grant_id: AccessGrantId::new(),
+            access_grant_revision: revision(2),
+            endpoint_grant_id: EndpointGrantId::new(),
+            ssh_public_key_id: SshPublicKeyId::new(),
+            gateway_identity: "spiffe://labweaver/gateway".to_owned(),
+            connection_id: "connection-1".to_owned(),
+            revision: revision(3),
+            state: GatewaySessionState::Terminating,
+            opened_at: opened,
+            last_heartbeat_at: heartbeat,
+            termination_requested_at: Some(heartbeat),
+            terminate_by: Some(timestamp("2026-07-16T00:02:00.000Z")),
+            closed_at: None,
+            close_reason_code: None,
+        };
+        assert!(session.validate().is_ok());
+        session.terminate_by = Some(timestamp("2026-07-16T00:02:01.000Z"));
+        assert!(matches!(
+            session.validate(),
+            Err(AccessError::TerminationDeadlineExceeded)
+        ));
+        session.state = GatewaySessionState::TerminationOverdue;
+        session.close_reason_code = Some("termination_overdue".to_owned());
+        assert!(session.validate().is_ok());
+    }
+
+    #[test]
+    fn authorization_debug_output_redacts_key_and_one_time_token() {
+        let authorization = SshAuthorization {
+            authorization_id: "authorization-1".to_owned(),
+            access_grant_id: AccessGrantId::new(),
+            access_grant_revision: revision(1),
+            endpoint_grant_id: EndpointGrantId::new(),
+            endpoint_id: crate::EndpointId::new(),
+            ssh_public_key_id: SshPublicKeyId::new(),
+            normalized_authorized_key: "ssh-ed25519 SECRET_KEY_BODY".to_owned(),
+            force_command_token: "secret-token".to_owned(),
+            valid_until: timestamp("2026-07-16T00:00:30.000Z"),
+        };
+        let rendered = format!("{authorization:?}");
+        assert!(!rendered.contains("SECRET_KEY_BODY"));
+        assert!(!rendered.contains("secret-token"));
+        assert_eq!(rendered.matches("[REDACTED]").count(), 2);
+    }
 }

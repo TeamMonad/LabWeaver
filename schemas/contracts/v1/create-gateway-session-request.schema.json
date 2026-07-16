@@ -7,35 +7,31 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Request from AuthorizedKeysCommand over mTLS. It deliberately has no target field.",
+  "description": "Redeems exactly one SSH authorization into a tracked Gateway session.",
   "properties": {
-    "alias": {
+    "authorizationId": {
       "type": "string"
     },
     "connectionId": {
       "type": "string"
     },
+    "forceCommandToken": {
+      "type": "string"
+    },
     "gatewayIdentity": {
       "type": "string"
     },
-    "presentedKeyFingerprintSha256": {
-      "type": "string"
-    },
-    "requestedAt": {
+    "openedAt": {
       "$ref": "#/$defs/UtcTimestamp"
-    },
-    "sourceAddressHash": {
-      "type": "string"
     }
   },
   "required": [
-    "alias",
-    "presentedKeyFingerprintSha256",
+    "authorizationId",
+    "forceCommandToken",
     "gatewayIdentity",
     "connectionId",
-    "sourceAddressHash",
-    "requestedAt"
+    "openedAt"
   ],
-  "title": "SshAuthorizationRequest",
+  "title": "CreateGatewaySessionRequest",
   "type": "object"
 }

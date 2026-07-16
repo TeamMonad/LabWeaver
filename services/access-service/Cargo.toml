@@ -7,6 +7,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+async-nats = { version = "=0.45.0", default-features = false, features = ["ring", "server_2_10", "server_2_11"] }
 axum.workspace = true
 auth = { path = "../../crates/auth" }
 contracts = { path = "../../crates/contracts" }
@@ -15,8 +16,12 @@ hyper.workspace = true
 jsonwebtoken.workspace = true
 jwt-authorizer.workspace = true
 metrics.workspace = true
+persistence-sqlx = { path = "../../crates/persistence-sqlx" }
+rand.workspace = true
 serde.workspace = true
+serde_jcs.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 sqlx.workspace = true
@@ -31,3 +36,7 @@ uuid.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+testcontainers = { version = "0.25.0", features = ["blocking", "properties-config"] }
+testcontainers-modules = { version = "0.13.0", features = ["postgres"] }
