@@ -71,8 +71,10 @@ Aggregate E2 is recorded only when the same worktree passes real MinIO versioned
 JetStream publish-ACK/duplicate/gap/restart tests, and ephemeral-CA Gateway-to-Control,
 Control-to-Access and Control-to-Agent SAN/rotation/outage tests. Issue #48's local suite now
 supplies that composition; it remains distinct from deployed owner-service or Kubernetes evidence.
-Until #52/#53 provide the authoritative artifact/evaluation projection, the positive production
-Release path is expected to return a stable blocking diagnostic.
+Issue #52 now provides the local authoritative Container artifact/evaluation projection; #53 is
+still required for VM artifacts. The positive Container Release path is expected to return a
+stable blocking diagnostic until the v2 build completion has been durably projected. Connected E3
+requires the deployment-owned BuildKit/Harbor/Trivy/Private Sigstore and Kubernetes executors.
 
 The current worktree records real versioned MinIO presign/freeze/overwrite/exact-version/cleanup
 coverage and real JetStream Agent Outbox missing-stream failure, retry and persisted-ACK ordering.

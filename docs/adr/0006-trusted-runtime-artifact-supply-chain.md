@@ -1,6 +1,7 @@
 # ADR 0006: Trusted Runtime Artifact Supply Chain
 
-Status: proposed; Issue #45 requires A+B human approval and D Verify.
+Status: proposed Issue #52 extension; requires A+B human approval, D Verify and
+connected E3 evidence.
 
 ## Context
 
@@ -16,6 +17,6 @@ Critical findings block publication. High findings remain explicit warnings for 
 
 ## Consequences and rollback
 
-Runtime implementations must revalidate expired evidence and trust revisions before use and must not reconstruct identity from tags or filenames. This ADR defines only E1 wire and validation semantics; Harbor, BuildKit, Sigstore, scanner and KubeVirt execution remain future runtime work.
+Runtime implementations must revalidate expired evidence and trust revisions before use and must not reconstruct identity from tags or filenames. Issue #52 adds the v2 Control-to-Agent build command, Agent-owned durable build pipeline, authoritative artifact projection and Environment Container Provider described in `docs/contracts/container-supply-chain-v2.md`. The provider seams are wired into production service processes, but the deployment-owned BuildKit/Harbor/Trivy/Private Sigstore and Kubernetes executors still require connected E3 replay.
 
 Before any runtime publication, rollback is whole-PR reversion. After a v1 release exists, records are immutable; remediation is withdrawal plus a new release, never mutation or subject reinterpretation.

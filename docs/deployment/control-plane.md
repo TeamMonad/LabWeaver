@@ -53,8 +53,8 @@ Startup never repairs an unknown schema.
 2. Stop new Agent dispatch claims, then allow bounded work to finish or request cancellation.
 3. Confirm committed Outbox rows and immutable packages, decisions, releases and withdrawals
    remain present; do not delete or rewrite them.
-4. Roll back the application images while retaining additive Control Migration `0002` and Agent
-   Migration `0003`.
+4. Roll back the application images while retaining all applied forward Migrations, including
+   Control `0003`, Agent `0004` and Environment `0003` from Issue #52.
 5. If a schema correction is required, ship a reviewed forward Migration. Do not edit a released
    Migration or its catalog hash.
 
@@ -64,7 +64,9 @@ still-valid verified candidate and authoritative artifact evidence.
 
 ## Current production blocker
 
-Issue #48 deliberately does not build or verify images. Until #52/#53 expose the authoritative
-`ImageArtifact` and `ImagePolicyEvaluation` through Agent, Release creation fails closed. Fixture
-artifacts and static reports are not production publication evidence and do not raise this path
-to E3.
+Issue #48 deliberately does not build or verify images. Issue #52 now supplies the local v2
+command, Agent-owned authoritative `ImageArtifact`/`ImagePolicyEvaluation` projection and
+Container release path. Release creation still fails closed until that artifact is durably
+projected, and the deployment-owned BuildKit/Harbor/Trivy/Private Sigstore executor requires a
+connected same-build replay before the Container path can claim E3. Issue #53 remains required for
+the VM artifact path. Fixtures and static reports are not production publication evidence.

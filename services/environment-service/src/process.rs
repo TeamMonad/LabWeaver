@@ -12,10 +12,11 @@ use sqlx::postgres::PgPoolOptions;
 use tokio::sync::watch;
 
 use crate::{
-    EnvironmentStoreError, JetStreamCommandConsumer, JetStreamEventPublisher, LifecycleCommand,
-    NatsAccessRevoker, NatsEnvironmentProvider, NatsMessagingError, NatsResourceLeaseVerifier,
-    OutboxDispatchError, OutboxDispatcher, PgEnvironmentStore, ProviderRegistry, ReconcileError,
-    ReconcileWorker, ReconcileWorkerError, Reconciler, connect_nats_mtls,
+    ContainerProvider, EnvironmentStoreError, JetStreamCommandConsumer, JetStreamEventPublisher,
+    JetStreamReleaseConsumer, LifecycleCommand, NatsAccessRevoker, NatsContainerProviderBackend,
+    NatsEnvironmentProvider, NatsMessagingError, NatsResourceLeaseVerifier, OutboxDispatchError,
+    OutboxDispatcher, PgEnvironmentStore, PgReleaseProjectionStore, ProviderRegistry,
+    ReconcileError, ReconcileWorker, ReconcileWorkerError, Reconciler, connect_nats_mtls,
 };
 
 const DATABASE_URL: &str = "LABWEAVER_DATABASE_URL";
@@ -27,6 +28,9 @@ const NATS_CREDENTIALS_PATH: &str = "LABWEAVER_NATS_CREDENTIALS_PATH";
 const COMMAND_STREAM: &str = "LABWEAVER_ENVIRONMENT_COMMAND_STREAM";
 const COMMAND_CONSUMER: &str = "LABWEAVER_ENVIRONMENT_COMMAND_CONSUMER";
 const COMMAND_QUARANTINE_SUBJECT: &str = "LABWEAVER_ENVIRONMENT_COMMAND_QUARANTINE_SUBJECT";
+const RELEASE_STREAM: &str = "LABWEAVER_ENVIRONMENT_RELEASE_STREAM";
+const RELEASE_CONSUMER: &str = "LABWEAVER_ENVIRONMENT_RELEASE_CONSUMER";
+const RELEASE_QUARANTINE_SUBJECT: &str = "LABWEAVER_ENVIRONMENT_RELEASE_QUARANTINE_SUBJECT";
 const PROVIDER_BINDINGS_PATH: &str = "LABWEAVER_ENVIRONMENT_PROVIDER_BINDINGS_PATH";
 const ACCESS_REVOCATION_SUBJECT: &str = "LABWEAVER_ACCESS_REVOCATION_SUBJECT";
 const RESOURCE_LEASE_VERIFICATION_SUBJECT: &str = "LABWEAVER_RESOURCE_LEASE_VERIFICATION_SUBJECT";
@@ -48,6 +52,8 @@ const EXPIRY_OPERATION_BUDGET: time::Duration = time::Duration::minutes(5);
 pub struct EnvironmentProcessRuntime {
     store: PgEnvironmentStore,
     command_consumer: JetStreamCommandConsumer,
+    release_store: PgReleaseProjectionStore,
+    release_consumer: JetStreamReleaseConsumer,
     worker: ReconcileWorker,
     outbox: OutboxDispatcher<JetStreamEventPublisher>,
     access_revoker: NatsAccessRevoker,
@@ -61,6 +67,10 @@ pub struct EnvironmentProcessRuntime {
 
 impl EnvironmentProcessRuntime {
     /// Loads explicit `PostgreSQL`, mTLS NATS, consumer, provider, and worker configuration.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "startup keeps all fail-closed dependency bindings visible in one initialization boundary"
+    )]
     pub async fn from_env() -> Result<Self, EnvironmentProcessRuntimeError> {
         let database_url = required(DATABASE_URL)?;
         let pool = PgPoolOptions::new()
@@ -85,15 +95,59 @@ impl EnvironmentProcessRuntime {
             &required(COMMAND_QUARANTINE_SUBJECT)?,
         )
         .await?;
+        let release_store = PgReleaseProjectionStore::new(pool.clone());
+        let release_consumer = JetStreamReleaseConsumer::bind(
+            nats.clone(),
+            &required(RELEASE_STREAM)?,
+            &required(RELEASE_CONSUMER)?,
+            &required(RELEASE_QUARANTINE_SUBJECT)?,
+        )
+        .await?;
 
         let provider_bindings = load_provider_bindings(&required_path(PROVIDER_BINDINGS_PATH)?)?;
         let mut registry = ProviderRegistry::default();
-        for binding in provider_bindings {
-            registry.register(Arc::new(NatsEnvironmentProvider::new(
-                binding.binding,
-                binding.subject,
-                nats.clone(),
-            )?))?;
+        for configuration in provider_bindings {
+            match configuration.provider_kind.as_deref().unwrap_or("remote") {
+                "remote" => {
+                    if configuration.gateway_namespace.is_some()
+                        || configuration.gateway_name.is_some()
+                        || configuration.gateway_section.is_some()
+                        || configuration.image_pull_secret_name.is_some()
+                    {
+                        return Err(EnvironmentProcessRuntimeError::ConfigParse);
+                    }
+                    registry.register(Arc::new(NatsEnvironmentProvider::new(
+                        configuration.binding,
+                        configuration.subject,
+                        nats.clone(),
+                    )?))?;
+                }
+                "container" => {
+                    let backend = Arc::new(NatsContainerProviderBackend::new(
+                        nats.clone(),
+                        configuration.subject,
+                    )?);
+                    let provider = ContainerProvider::new(
+                        configuration.binding,
+                        backend,
+                        Arc::new(release_store.clone()),
+                        configuration
+                            .gateway_namespace
+                            .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                        configuration
+                            .gateway_name
+                            .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                        configuration
+                            .gateway_section
+                            .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                        configuration
+                            .image_pull_secret_name
+                            .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                    )?;
+                    registry.register(Arc::new(provider))?;
+                }
+                _ => return Err(EnvironmentProcessRuntimeError::ConfigParse),
+            }
         }
         let worker = ReconcileWorker::new(
             store.clone(),
@@ -123,6 +177,8 @@ impl EnvironmentProcessRuntime {
         Ok(Self {
             store,
             command_consumer,
+            release_store,
+            release_consumer,
             worker,
             outbox,
             access_revoker,
@@ -145,6 +201,8 @@ impl EnvironmentProcessRuntime {
         let Self {
             store,
             mut command_consumer,
+            release_store,
+            mut release_consumer,
             worker,
             outbox,
             access_revoker,
@@ -164,6 +222,7 @@ impl EnvironmentProcessRuntime {
                 lease_verifier,
                 shutdown_rx.clone()
             ),
+            release_loop(release_store, &mut release_consumer, shutdown_rx.clone()),
             reconcile_loop(store.clone(), worker, worker_id, shutdown_rx.clone()),
             outbox_loop(outbox, shutdown_rx.clone()),
             expiry_loop(
@@ -185,6 +244,25 @@ impl EnvironmentProcessRuntime {
             .await
             .map_err(|_| EnvironmentProcessRuntimeError::NatsDrain)?;
         Ok(())
+    }
+}
+
+async fn release_loop(
+    store: PgReleaseProjectionStore,
+    consumer: &mut JetStreamReleaseConsumer,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<(), EnvironmentProcessRuntimeError> {
+    loop {
+        tokio::select! {
+            changed = shutdown.changed() => {
+                changed.map_err(|_| EnvironmentProcessRuntimeError::ShutdownChannel)?;
+                return Ok(());
+            }
+            result = consumer.process_next(&store) => {
+                let outcome = result?;
+                tracing::info!(event = "environment.release.consumed", ?outcome);
+            }
+        }
     }
 }
 
@@ -381,7 +459,8 @@ async fn require_schema(pool: &sqlx::PgPool) -> Result<(), EnvironmentProcessRun
         "SELECT to_regclass('environment.environment_instances') IS NOT NULL \
          AND to_regclass('environment.environment_operations') IS NOT NULL \
          AND to_regclass('environment.outbox_events') IS NOT NULL \
-         AND to_regclass('environment.inbox_events') IS NOT NULL",
+         AND to_regclass('environment.inbox_events') IS NOT NULL \
+         AND to_regclass('environment.release_projections') IS NOT NULL",
     )
     .fetch_one(pool)
     .await?;
@@ -424,6 +503,11 @@ fn validate_worker_id(value: &str) -> Result<(), EnvironmentProcessRuntimeError>
 struct ProviderBindingConfiguration {
     binding: String,
     subject: String,
+    provider_kind: Option<String>,
+    gateway_namespace: Option<String>,
+    gateway_name: Option<String>,
+    gateway_section: Option<String>,
+    image_pull_secret_name: Option<String>,
 }
 
 fn load_provider_bindings(
@@ -480,4 +564,6 @@ pub enum EnvironmentProcessRuntimeError {
     Worker(#[from] ReconcileWorkerError),
     #[error(transparent)]
     Outbox(#[from] OutboxDispatchError),
+    #[error(transparent)]
+    ReleaseProjection(#[from] crate::ReleaseProjectionError),
 }

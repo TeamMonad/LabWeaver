@@ -126,6 +126,8 @@ credential contents are never logged.
 | `LABWEAVER_NATS_CREDENTIALS_PATH` | NATS credentials file mounted from a Secret. |
 | `LABWEAVER_ENVIRONMENT_COMMAND_STREAM` / `LABWEAVER_ENVIRONMENT_COMMAND_CONSUMER` | Existing deployment-owned COMMANDS stream and durable consumer. |
 | `LABWEAVER_ENVIRONMENT_COMMAND_QUARANTINE_SUBJECT` | Private controlled quarantine subject; terminal invalid deliveries are acknowledged only after sanitized identity/hash evidence is persisted there. |
+| `LABWEAVER_ENVIRONMENT_RELEASE_STREAM` / `LABWEAVER_ENVIRONMENT_RELEASE_CONSUMER` | Existing deployment-owned stream and durable consumer for `labweaver.control.environment_template_release.published.v2`. |
+| `LABWEAVER_ENVIRONMENT_RELEASE_QUARANTINE_SUBJECT` | Private controlled quarantine subject for invalid v2 release projections. |
 | `LABWEAVER_RESOURCE_LEASE_VERIFICATION_SUBJECT` | Exact Resource-owned versioned request/reply subject used to verify Work Lease state and scope before command acceptance. |
 | `LABWEAVER_ENVIRONMENT_PROVIDER_BINDINGS_PATH` | Reviewed JSON array of exact `{ "binding", "subject" }` provider mappings; empty, duplicate or wildcard mappings fail startup. |
 | `LABWEAVER_ACCESS_REVOCATION_SUBJECT` | Exact Access revocation request/reply subject used before automatic expiry cleanup. |
@@ -135,16 +137,29 @@ credential contents are never logged.
 | `LABWEAVER_OWNER_RESOLVER_SERVER_CERT_PATH` / `LABWEAVER_OWNER_RESOLVER_SERVER_KEY_PATH` | Resolver server identity. |
 | `LABWEAVER_OWNER_RESOLVER_ALLOWED_CALLER_SANS` | Comma-separated exact DNS SAN allowlist; wildcards are rejected. |
 
-The provider binding file contains identities only, for example:
+The provider binding file contains exact identities and provider-specific
+non-secret routing configuration. The formal Container Provider uses:
 
 ```json
 [
   {
     "binding": "container-primary-v1",
-    "subject": "labweaver.provider.container-primary-v1.command.v1"
+    "subject": "labweaver.provider.kubernetes.container.v2",
+    "providerKind": "container",
+    "gatewayNamespace": "access-system",
+    "gatewayName": "protected-gateway",
+    "gatewaySection": "protected-https",
+    "imagePullSecretName": "harbor-course-pull"
   }
 ]
 ```
+
+The complete example is `deploy/config/environment-providers.json.example`.
+Omitting `providerKind` selects the existing remote provider; remote entries
+must not contain Gateway or image-pull fields. Container entries require every
+Gateway field and the exact same-namespace Harbor pull Secret name, and use the
+immutable release projection described in
+`docs/contracts/container-supply-chain-v2.md`.
 
 ## Desired and observed state
 
@@ -334,8 +349,9 @@ rotation, bounded slow handshakes, strong ETag emission, database-clock expiry
 under simulated host-clock skew, typed shutdown-failure propagation, database
 outage as retryable 503 and resolver network outage.
 
-Human A review and D Verify remain required before Issue #51 is accepted. E3
-and adjacent cross-service verification must still cover the Resource- and
-Access-owned responders, formal Container/KubeVirt Providers, deployed mTLS
-NATS, cleanup/tombstone evidence and the Access consumer under the same build
-identity.
+Human A review and D Verify remain required before Issue #51 is accepted. Issue
+#52 now supplies a formal local Container Provider with deterministic protected
+Gateway resources and cleanup evidence, but connected E3 verification must
+still cover its Kubernetes executor, the KubeVirt Provider, Resource- and
+Access-owned responders, deployed mTLS NATS and the Access consumer under the
+same build identity.

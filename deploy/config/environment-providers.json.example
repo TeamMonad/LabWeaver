@@ -1,0 +1,11 @@
+[
+  {
+    "binding": "container-primary-v1",
+    "subject": "labweaver.provider.kubernetes.container.v2",
+    "providerKind": "container",
+    "gatewayNamespace": "access-system",
+    "gatewayName": "protected-gateway",
+    "gatewaySection": "protected-https",
+    "imagePullSecretName": "harbor-course-pull"
+  }
+]

@@ -19,8 +19,8 @@ use contracts::authoring::{
     EnvironmentCandidate, EvaluationCandidate, PackageFile, ProblemPackage, RuntimeKind,
 };
 use contracts::events::{
-    AgentRunEvent, CloudEvent, EVENT_CONTRACTS, ReleasePublished, ReleaseWithdrawn, SPEC_VERSION,
-    subjects,
+    AgentBuildFailedV2, AgentBuildRequestedV2, AgentRunEvent, CloudEvent, EVENT_CONTRACTS,
+    ReleasePublishedV2, ReleaseWithdrawn, SPEC_VERSION, subjects,
 };
 use contracts::http::{
     CandidateDecisionRequest, CreateEnvironmentTemplateReleaseRequest,
@@ -28,10 +28,11 @@ use contracts::http::{
     ProblemPackageUploadSession, ProblemPackageUploadTarget,
 };
 use contracts::supply_chain::{
-    EnvironmentTemplateRelease, EnvironmentTemplateReleaseView, ImageArtifact, ReleaseWithdrawal,
+    BuildNetworkPolicy, BuildRequest, EnvironmentTemplateRelease, EnvironmentTemplateReleaseView,
+    ImageArtifact, ReleaseWithdrawal,
 };
 use contracts::{
-    ActorId, ApprovalId, CandidateId, CourseId, EventId, ImageArtifactId, PolicyId,
+    ActorId, ApprovalId, BuildRequestId, CandidateId, CourseId, EventId, ImageArtifactId, PolicyId,
     ProblemPackageId, ReleaseId, RetentionClass, RetentionDisposition, RetentionSnapshot, Revision,
     Sequence, Sha256Digest, UploadSessionId, UtcTimestamp,
 };
@@ -51,7 +52,8 @@ const CREATE_POLICY: &str = "control_create_llm_policy_v1";
 const DECIDE_CANDIDATE: &str = "control_decide_candidate_v1";
 const CREATE_RELEASE: &str = "control_create_environment_template_release_v1";
 const WITHDRAW_RELEASE: &str = "control_withdraw_environment_template_release_v1";
-const RELEASE_SUBJECT: &str = subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED;
+const BUILD_REQUEST_SUBJECT: &str = subjects::AGENT_BUILD_REQUESTED_V2;
+const RELEASE_SUBJECT: &str = subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED_V2;
 const WITHDRAWAL_SUBJECT: &str = subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN;
 
 /// Non-secret Control behavior configuration.
@@ -90,6 +92,28 @@ pub struct ControlConfig {
     pub environment_schema_sha256: Sha256Digest,
     /// Frozen Evaluation candidate schema identity.
     pub evaluation_schema_sha256: Sha256Digest,
+    /// Exact build execution policy used to turn an approved Container candidate into a command.
+    pub container_build: ContainerBuildPolicy,
+}
+
+/// Deployment-owned, non-secret limits and bindings for approved Container builds.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContainerBuildPolicy {
+    /// Exact registered `BuildKit` provider binding.
+    pub builder_binding: String,
+    /// Harbor registry authority; Control appends one `course-<uuid>` Project and repository.
+    pub output_repository_prefix: String,
+    /// Candidate-context-relative Dockerfile path.
+    pub dockerfile_path: String,
+    /// Explicit build-time network posture.
+    pub network: BuildNetworkPolicy,
+    /// Hard end-to-end build deadline.
+    pub max_duration_milliseconds: u64,
+    /// `BuildKit` CPU ceiling in millicores.
+    pub max_cpu_millicores: u32,
+    /// `BuildKit` memory ceiling in bytes.
+    pub max_memory_bytes: u64,
 }
 
 impl ControlConfig {
@@ -107,10 +131,42 @@ impl ControlConfig {
             || self.sse_retention_seconds == 0
             || self.fulcio_issuer.trim().is_empty()
             || self.certificate_subject.trim().is_empty()
+            || !self.container_build.validate()
         {
             return Err(ControlError::ConfigurationInvalid);
         }
         Ok(())
+    }
+}
+
+impl ContainerBuildPolicy {
+    fn validate(&self) -> bool {
+        let prefix = self.output_repository_prefix.trim_end_matches('/');
+        !self.builder_binding.trim().is_empty()
+            && !self
+                .builder_binding
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace())
+            && !prefix.is_empty()
+            && !prefix.contains("://")
+            && !prefix.contains('@')
+            && !prefix.contains("..")
+            && !prefix.contains('/')
+            && !self.dockerfile_path.trim().is_empty()
+            && self.max_duration_milliseconds > 0
+            && self.max_cpu_millicores > 0
+            && self.max_memory_bytes > 0
+            && match &self.network {
+                BuildNetworkPolicy::DenyAll => true,
+                BuildNetworkPolicy::Restricted { allowed_registries } => {
+                    !allowed_registries.is_empty()
+                        && allowed_registries.iter().all(|registry| {
+                            !registry.trim().is_empty()
+                                && !registry.contains("://")
+                                && !registry.contains('*')
+                        })
+                }
+            }
     }
 }
 
@@ -945,6 +1001,7 @@ impl ControlService {
     pub async fn project_artifact(
         &self,
         event_id: EventId,
+        course_id: CourseId,
         artifact: &ImageArtifact,
         evaluation: &contracts::supply_chain::ImagePolicyEvaluation,
     ) -> Result<(), ControlError> {
@@ -955,6 +1012,8 @@ impl ControlService {
             .validate()
             .map_err(|_| ControlError::ReleaseEvidenceInvalid)?;
         let artifact_id = image_artifact_id(artifact);
+        let build_request_id =
+            image_build_request_id(artifact).ok_or(ControlError::ArtifactMismatch)?;
         if evaluation.artifact_id != artifact_id
             || evaluation.artifact_sha256
                 != artifact
@@ -971,6 +1030,27 @@ impl ControlService {
             serde_json::to_value(artifact).map_err(|_| ControlError::ContractInvalid)?;
         let evaluation_json =
             serde_json::to_value(evaluation).map_err(|_| ControlError::ContractInvalid)?;
+        let mut transaction = self.pool.begin().await.map_err(db)?;
+        let build = sqlx::query(
+            "SELECT course_id,state,image_artifact_id FROM control.container_build_projections \
+             WHERE build_request_id=$1 FOR UPDATE",
+        )
+        .bind(build_request_id.as_uuid())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(db)?
+        .ok_or(ControlError::ArtifactNotAuthoritative)?;
+        if build.try_get::<Uuid, _>("course_id").map_err(db)? != course_id.as_uuid() {
+            return Err(ControlError::CourseMismatch);
+        }
+        let state: String = build.try_get("state").map_err(db)?;
+        let existing_build_artifact: Option<Uuid> =
+            build.try_get("image_artifact_id").map_err(db)?;
+        if state != "requested"
+            && !(state == "succeeded" && existing_build_artifact == Some(artifact_id.as_uuid()))
+        {
+            return Err(ControlError::ProjectionConflict);
+        }
         let inserted = sqlx::query(
             "INSERT INTO control.image_artifact_projections \
              (image_artifact_id,runtime_kind,artifact_sha256,artifact,policy_evaluation,projected_event_id) \
@@ -983,7 +1063,7 @@ impl ControlService {
         .bind(&artifact_json)
         .bind(&evaluation_json)
         .bind(event_id.as_uuid())
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(db)?;
         if inserted.rows_affected() == 0 {
@@ -992,7 +1072,7 @@ impl ControlService {
                  FROM control.image_artifact_projections WHERE image_artifact_id=$1",
             )
             .bind(artifact_id.as_uuid())
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *transaction)
             .await
             .map_err(db)?;
             let existing_artifact: Value = existing.try_get("artifact").map_err(db)?;
@@ -1001,7 +1081,91 @@ impl ControlService {
                 return Err(ControlError::ProjectionConflict);
             }
         }
-        Ok(())
+        if state == "requested" {
+            let updated = sqlx::query(
+                "UPDATE control.container_build_projections \
+                 SET state='succeeded',image_artifact_id=$2,terminal_event_id=$3, \
+                     completed_at=clock_timestamp(),updated_at=clock_timestamp() \
+                 WHERE build_request_id=$1 AND state='requested'",
+            )
+            .bind(build_request_id.as_uuid())
+            .bind(artifact_id.as_uuid())
+            .bind(event_id.as_uuid())
+            .execute(&mut *transaction)
+            .await
+            .map_err(db)?;
+            if updated.rows_affected() != 1 {
+                return Err(ControlError::ProjectionConflict);
+            }
+        }
+        transaction.commit().await.map_err(db)
+    }
+
+    /// Persists one terminal Agent build failure without creating artifact authority.
+    pub async fn project_build_failure(
+        &self,
+        event_id: EventId,
+        course_id: CourseId,
+        failure: &AgentBuildFailedV2,
+    ) -> Result<(), ControlError> {
+        failure
+            .validate()
+            .map_err(|_| ControlError::ContractInvalid)?;
+        let terminal_state = if failure.diagnostic_code == "LW_AGENT_BUILD_CANCELLED" {
+            "cancelled"
+        } else {
+            "failed"
+        };
+        let mut transaction = self.pool.begin().await.map_err(db)?;
+        let row = sqlx::query(
+            "SELECT course_id,command_sha256,state,terminal_diagnostic,cleanup_verified \
+             FROM control.container_build_projections WHERE build_request_id=$1 FOR UPDATE",
+        )
+        .bind(failure.build_request_id.as_uuid())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(db)?
+        .ok_or(ControlError::ArtifactNotAuthoritative)?;
+        let observed_course: Uuid = row.try_get("course_id").map_err(db)?;
+        let observed_command: String = row.try_get("command_sha256").map_err(db)?;
+        let observed_state: String = row.try_get("state").map_err(db)?;
+        if observed_course != course_id.as_uuid()
+            || observed_command != failure.command_sha256.to_string()
+        {
+            return Err(ControlError::CourseMismatch);
+        }
+        if observed_state == terminal_state {
+            let diagnostic: Option<String> = row.try_get("terminal_diagnostic").map_err(db)?;
+            let cleanup_verified: Option<bool> = row.try_get("cleanup_verified").map_err(db)?;
+            if diagnostic.as_deref() != Some(&failure.diagnostic_code)
+                || cleanup_verified != Some(failure.cleanup_verified)
+            {
+                return Err(ControlError::ProjectionConflict);
+            }
+            transaction.rollback().await.map_err(db)?;
+            return Ok(());
+        }
+        if observed_state != "requested" {
+            return Err(ControlError::ProjectionConflict);
+        }
+        let updated = sqlx::query(
+            "UPDATE control.container_build_projections \
+             SET state=$2,terminal_diagnostic=$3,cleanup_verified=$4,terminal_event_id=$5, \
+                 completed_at=clock_timestamp(),updated_at=clock_timestamp() \
+             WHERE build_request_id=$1 AND state='requested'",
+        )
+        .bind(failure.build_request_id.as_uuid())
+        .bind(terminal_state)
+        .bind(&failure.diagnostic_code)
+        .bind(failure.cleanup_verified)
+        .bind(event_id.as_uuid())
+        .execute(&mut *transaction)
+        .await
+        .map_err(db)?;
+        if updated.rows_affected() != 1 {
+            return Err(ControlError::ProjectionConflict);
+        }
+        transaction.commit().await.map_err(db)
     }
 
     /// Appends the only decision allowed for an exact candidate revision.
@@ -1045,7 +1209,7 @@ impl ControlService {
             IdempotencyDecision::Reserved => {}
         }
         let row = sqlx::query(
-            "SELECT candidate_kind,revision,content_sha256,policy_revision,schema_sha256 \
+            "SELECT candidate_kind,revision,content_sha256,policy_revision,schema_sha256,contract \
              FROM control.candidates WHERE candidate_id=$1 AND course_id=$2 FOR UPDATE",
         )
         .bind(candidate_id.as_uuid())
@@ -1066,6 +1230,7 @@ impl ControlService {
             .map_err(db)?
             .parse()
             .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+        let candidate_contract: Value = row.try_get("contract").map_err(db)?;
         let kind: String = row.try_get("candidate_kind").map_err(db)?;
         let expected_kind_name = match expected_kind {
             AgentTrackKind::Environment => "environment",
@@ -1134,6 +1299,124 @@ impl ControlService {
                 db(error)
             }
         })?;
+        if approval.decision == CandidateDecision::Approved
+            && expected_kind == AgentTrackKind::Environment
+        {
+            let candidate: EnvironmentCandidate = serde_json::from_value(candidate_contract)
+                .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+            candidate
+                .validate()
+                .map_err(|_| ControlError::ContractInvalid)?;
+            if let contracts::authoring::EnvironmentRuntimeSpec::Container {
+                build_context,
+                base_image_digest,
+                ..
+            } = &candidate.spec.runtime
+            {
+                let build_request = BuildRequest {
+                    id: BuildRequestId::new(),
+                    course_id,
+                    candidate_id,
+                    candidate_revision: candidate.revision,
+                    candidate_sha256: candidate.spec_sha256,
+                    approval_id: approval.id,
+                    builder_binding: self.config.container_build.builder_binding.clone(),
+                    context: build_context.clone(),
+                    dockerfile_path: self.config.container_build.dockerfile_path.clone(),
+                    base_image_digest: base_image_digest.clone(),
+                    output_repository: format!(
+                        "{}/course-{course_id}/{candidate_id}",
+                        self.config
+                            .container_build
+                            .output_repository_prefix
+                            .trim_end_matches('/')
+                    ),
+                    network: self.config.container_build.network.clone(),
+                    max_duration_milliseconds: self
+                        .config
+                        .container_build
+                        .max_duration_milliseconds,
+                    max_cpu_millicores: self.config.container_build.max_cpu_millicores,
+                    max_memory_bytes: self.config.container_build.max_memory_bytes,
+                    created_at: now,
+                };
+                build_request
+                    .validate()
+                    .map_err(|_| ControlError::ContractInvalid)?;
+                let build_idempotency_key = format!("approval:{}", approval.id);
+                let command_sha256 = canonical_hash(&json!({
+                    "request": build_request,
+                    "approval": approval,
+                    "idempotencyKey": build_idempotency_key,
+                }))?;
+                let command = AgentBuildRequestedV2 {
+                    request: build_request,
+                    approval: approval.clone(),
+                    idempotency_key: build_idempotency_key,
+                    command_sha256,
+                };
+                command
+                    .validate()
+                    .map_err(|_| ControlError::ContractInvalid)?;
+                sqlx::query(
+                    "INSERT INTO control.container_build_projections \
+                     (build_request_id,course_id,candidate_id,candidate_revision,candidate_sha256, \
+                      approval_id,command_sha256,state,contract,created_at) \
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,'requested',$8,$9)",
+                )
+                .bind(command.request.id.as_uuid())
+                .bind(course_id.as_uuid())
+                .bind(candidate_id.as_uuid())
+                .bind(
+                    i64::try_from(command.request.candidate_revision.get())
+                        .map_err(|_| ControlError::ContractInvalid)?,
+                )
+                .bind(command.request.candidate_sha256.to_string())
+                .bind(approval.id.as_uuid())
+                .bind(command.command_sha256.to_string())
+                .bind(serde_json::to_value(&command).map_err(|_| ControlError::ContractInvalid)?)
+                .bind(now.get())
+                .execute(&mut *transaction)
+                .await
+                .map_err(db)?;
+                let event_id = EventId::new();
+                let contract = event_contract(BUILD_REQUEST_SUBJECT)?;
+                let event = CloudEvent {
+                    specversion: SPEC_VERSION.to_owned(),
+                    id: event_id,
+                    source: contract.source().to_owned(),
+                    event_type: BUILD_REQUEST_SUBJECT.to_owned(),
+                    subject: BUILD_REQUEST_SUBJECT.to_owned(),
+                    time: now,
+                    datacontenttype: "application/json".to_owned(),
+                    dataschema: contract.data_schema(),
+                    course_id,
+                    aggregate_revision: Revision::new(1)
+                        .map_err(|_| ControlError::ContractInvalid)?,
+                    aggregate_sequence: Sequence(1),
+                    trace_id: format!("build:{}", command.request.id),
+                    data: command,
+                };
+                event
+                    .validate(contract)
+                    .map_err(|_| ControlError::ContractInvalid)?;
+                let payload =
+                    serde_json::to_value(&event).map_err(|_| ControlError::ContractInvalid)?;
+                OutboxStore::enqueue(
+                    &mut transaction,
+                    Domain::Control,
+                    event_id.as_uuid(),
+                    BUILD_REQUEST_SUBJECT,
+                    BUILD_REQUEST_SUBJECT,
+                    event.data.request.id.as_uuid(),
+                    1,
+                    &payload,
+                    canonical_hash(&payload)?,
+                )
+                .await
+                .map_err(|_| ControlError::PersistenceFailed)?;
+            }
+        }
         append_sse(
             &mut transaction,
             course_id,
@@ -1219,7 +1502,7 @@ impl ControlService {
             IdempotencyDecision::Reserved => {}
         }
         let candidate = sqlx::query(
-            "SELECT candidate_kind,revision,content_sha256,policy_revision,schema_sha256 FROM control.candidates \
+            "SELECT candidate_kind,revision,content_sha256,policy_revision,schema_sha256,contract FROM control.candidates \
              WHERE candidate_id=$1 AND course_id=$2 FOR SHARE",
         )
         .bind(request.candidate_id.as_uuid())
@@ -1241,6 +1524,12 @@ impl ControlService {
         {
             return Err(ControlError::ReleaseCandidateMismatch);
         }
+        let environment_candidate: EnvironmentCandidate =
+            serde_json::from_value(candidate.try_get::<Value, _>("contract").map_err(db)?)
+                .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+        environment_candidate
+            .validate()
+            .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
         let approval: CandidateApproval = load_contract_tx(
             &mut transaction,
             "SELECT contract FROM control.candidate_approvals WHERE approval_id=$1 AND candidate_id=$2",
@@ -1292,6 +1581,30 @@ impl ControlService {
         {
             return Err(ControlError::ArtifactMismatch);
         }
+        if let Some(build_request_id) = image_build_request_id(&request.artifact) {
+            let build_is_authoritative = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM control.container_build_projections \
+                 WHERE build_request_id=$1 AND course_id=$2 AND candidate_id=$3 \
+                   AND candidate_revision=$4 AND candidate_sha256=$5 AND approval_id=$6 \
+                   AND state='succeeded' AND image_artifact_id=$7)",
+            )
+            .bind(build_request_id.as_uuid())
+            .bind(course_id.as_uuid())
+            .bind(request.candidate_id.as_uuid())
+            .bind(
+                i64::try_from(request.candidate_revision.get())
+                    .map_err(|_| ControlError::ReleaseCandidateMismatch)?,
+            )
+            .bind(request.environment_spec_sha256.to_string())
+            .bind(approval.id.as_uuid())
+            .bind(artifact_id.as_uuid())
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(db)?;
+            if !build_is_authoritative {
+                return Err(ControlError::ArtifactMismatch);
+            }
+        }
         let next_version = sqlx::query_scalar::<_, i64>(
             "SELECT COALESCE(MAX(version),0)+1 FROM control.environment_template_releases WHERE course_id=$1",
         )
@@ -1337,6 +1650,10 @@ impl ControlService {
         .await
         .map_err(db)?;
         let event_id = EventId::new();
+        let projection_sha256 = canonical_hash(&json!({
+            "release": release,
+            "environmentSpec": environment_candidate.spec,
+        }))?;
         let event = CloudEvent {
             specversion: SPEC_VERSION.to_owned(),
             id: event_id,
@@ -1351,14 +1668,10 @@ impl ControlService {
                 .map_err(|_| ControlError::ContractInvalid)?,
             aggregate_sequence: Sequence(1),
             trace_id: trace_id.to_owned(),
-            data: ReleasePublished {
-                release_id: release.id,
-                version: release.version,
-                environment_spec_sha256: release.environment_spec_sha256,
-                artifact_sha256: release
-                    .artifact
-                    .content_sha256()
-                    .map_err(|_| ControlError::ReleaseEvidenceInvalid)?,
+            data: ReleasePublishedV2 {
+                release: release.clone(),
+                environment_spec: environment_candidate.spec,
+                projection_sha256,
             },
         };
         event
@@ -2428,6 +2741,15 @@ fn image_artifact_id(artifact: &ImageArtifact) -> ImageArtifactId {
     }
 }
 
+fn image_build_request_id(artifact: &ImageArtifact) -> Option<BuildRequestId> {
+    match artifact {
+        ImageArtifact::Container {
+            build_request_id, ..
+        } => Some(*build_request_id),
+        ImageArtifact::VirtualMachine { .. } => None,
+    }
+}
+
 fn is_unique_violation(error: &sqlx::Error) -> bool {
     error
         .as_database_error()
@@ -2524,7 +2846,12 @@ mod tests {
     use contracts::http::{CreateProblemPackageUploadRequest, ProblemPackageUploadFile};
     use contracts::{PolicyId, Revision, Sha256Digest};
 
-    use super::{ControlConfig, ControlError, reject_sensitive_payload, validate_upload_request};
+    use contracts::supply_chain::BuildNetworkPolicy;
+
+    use super::{
+        ContainerBuildPolicy, ControlConfig, ControlError, reject_sensitive_payload,
+        validate_upload_request,
+    };
 
     fn config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
         Ok(ControlConfig {
@@ -2544,6 +2871,15 @@ mod tests {
             certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
             environment_schema_sha256: Sha256Digest::of_bytes(b"environment-schema"),
             evaluation_schema_sha256: Sha256Digest::of_bytes(b"evaluation-schema"),
+            container_build: ContainerBuildPolicy {
+                builder_binding: "buildkit-primary-v1".to_owned(),
+                output_repository_prefix: "harbor.internal".to_owned(),
+                dockerfile_path: "Dockerfile".to_owned(),
+                network: BuildNetworkPolicy::DenyAll,
+                max_duration_milliseconds: 600_000,
+                max_cpu_millicores: 2_000,
+                max_memory_bytes: 2_147_483_648,
+            },
         })
     }
 

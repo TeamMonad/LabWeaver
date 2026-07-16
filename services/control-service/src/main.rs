@@ -9,7 +9,9 @@ use artifact_store::{S3Credential, S3ImmutableObjectStore, S3StoreConfig};
 use auth::{MtlsFileConfig, load_mtls_server_config};
 use control_service::api::{ApiState, router, serve_mtls};
 use control_service::clients::{AccessClient, AgentClient, MtlsClientFileConfig};
-use control_service::messaging::{AgentRunConsumer, ControlOutboxDispatcher, connect_nats_mtls};
+use control_service::messaging::{
+    AgentBuildConsumer, AgentRunConsumer, ControlOutboxDispatcher, connect_nats_mtls,
+};
 use control_service::{ControlConfig, ControlService};
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
@@ -43,6 +45,8 @@ struct NatsFileConfig {
     stream_name: String,
     consumer_name: String,
     quarantine_subject: String,
+    build_consumer_name: String,
+    build_quarantine_subject: String,
     publish_timeout_milliseconds: u64,
     outbox_poll_milliseconds: u64,
 }
@@ -99,22 +103,42 @@ async fn main() -> Result<(), StartupError> {
         Duration::from_millis(deployment.nats.publish_timeout_milliseconds),
     )?;
     let consumer = AgentRunConsumer::bind(
-        nats,
+        nats.clone(),
         &deployment.nats.stream_name,
         &deployment.nats.consumer_name,
         &deployment.nats.quarantine_subject,
     )
     .await?;
+    let build_consumer = AgentBuildConsumer::bind(
+        nats,
+        &deployment.nats.stream_name,
+        &deployment.nats.build_consumer_name,
+        &deployment.nats.build_quarantine_subject,
+    )
+    .await?;
     let consumer_control = state.control.clone();
+    let build_consumer_control = state.control.clone();
+    let build_consumer_agent = agent.clone();
     let interval = std::time::Duration::from_secs(deployment.cleanup_interval_seconds);
     let outbox_interval = Duration::from_millis(deployment.nats.outbox_poll_milliseconds);
     tokio::select! {
         result = serve_mtls(listener, router(state), mtls) => result?,
         result = cleanup_loop(service, interval) => result?,
         result = consumer_loop(consumer, consumer_control, agent) => result?,
+        result = build_consumer_loop(build_consumer, build_consumer_control, build_consumer_agent) => result?,
         result = outbox_loop(outbox, outbox_interval) => result?,
     }
     Ok(())
+}
+
+async fn build_consumer_loop(
+    mut consumer: AgentBuildConsumer,
+    control: ControlService,
+    agent: AgentClient,
+) -> Result<(), StartupError> {
+    loop {
+        consumer.process_next(&control, &agent).await?;
+    }
 }
 
 async fn consumer_loop(
@@ -193,7 +217,8 @@ async fn verify_schema(pool: &sqlx::PgPool) -> Result<(), StartupError> {
     let ready: bool = sqlx::query_scalar(
         "SELECT to_regclass('control.problem_packages') IS NOT NULL \
          AND to_regclass('control.sse_course_cursors') IS NOT NULL \
-         AND to_regclass('control.image_artifact_projections') IS NOT NULL",
+         AND to_regclass('control.image_artifact_projections') IS NOT NULL \
+         AND to_regclass('control.container_build_projections') IS NOT NULL",
     )
     .fetch_one(pool)
     .await?;

@@ -351,12 +351,24 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         CloudEvent<events::AgentBuildRequested>
     );
     document!(
+        "schemas/contracts/v2/events/agent-build-requested.schema.json",
+        CloudEvent<events::AgentBuildRequestedV2>
+    );
+    document!(
         "schemas/contracts/v1/events/agent-build-completed.schema.json",
         CloudEvent<events::AgentBuildRequested>
     );
     document!(
+        "schemas/contracts/v2/events/agent-build-completed.schema.json",
+        CloudEvent<events::AgentBuildCompletedV2>
+    );
+    document!(
         "schemas/contracts/v1/events/agent-build-failed.schema.json",
         CloudEvent<events::AgentBuildRequested>
+    );
+    document!(
+        "schemas/contracts/v2/events/agent-build-failed.schema.json",
+        CloudEvent<events::AgentBuildFailedV2>
     );
     document!(
         "schemas/contracts/v1/events/environment-provision-requested.schema.json",
@@ -437,6 +449,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/events/environment-template-release-published.schema.json",
         CloudEvent<events::ReleasePublished>
+    );
+    document!(
+        "schemas/contracts/v2/events/environment-template-release-published.schema.json",
+        CloudEvent<events::ReleasePublishedV2>
     );
     document!(
         "schemas/contracts/v1/events/environment-template-release-withdrawn.schema.json",

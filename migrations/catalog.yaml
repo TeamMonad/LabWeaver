@@ -13,6 +13,9 @@ domains:
       - id: 2
         file: control/0002_control_plane.sql
         sha256: cde8fab6337c4dcc9711243e3d93ba1090268fafb53a0214b3b5e23330711892
+      - id: 3
+        file: control/0003_container_build_projections.sql
+        sha256: e3ad469e525cece4458597ef816dea3b72e3438306cabd631b929ab07be5f38a
   - name: access
     migrations:
       - id: 1
@@ -32,6 +35,9 @@ domains:
       - id: 2
         file: environment/0002_reconcile_leases.sql
         sha256: 1333cf42a6c9706de5c090671d508e1c20d93e486570db1742b71ddaabd8fa87
+      - id: 3
+        file: environment/0003_release_projections.sql
+        sha256: f9f13e77777b5c081e4a2176c877ea0f6a1a94f0c5576f7d4415d0edbf3c0110
   - name: agent
     migrations:
       - id: 1
@@ -43,6 +49,9 @@ domains:
       - id: 3
         file: agent/0003_control_dispatch.sql
         sha256: fd40241a73cc7a10dad043100a0576b0974188785692460bb3e8e06a5d10a8f2
+      - id: 4
+        file: agent/0004_build_pipeline.sql
+        sha256: cccfbbb81d143a5eff1919ca0bedd5a26fb763054ab939524d66214e0b55df83
   - name: evaluation
     migrations:
       - id: 1

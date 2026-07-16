@@ -9,12 +9,21 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
+use async_nats::jetstream::AckKind;
+use async_nats::jetstream::consumer::PullConsumer;
 use async_nats::jetstream::message::PublishMessage;
-use contracts::events::{CloudEvent, EVENT_CONTRACTS};
+use contracts::events::{AgentBuildRequestedV2, CloudEvent, EVENT_CONTRACTS, subjects};
 use contracts::{EventId, Sha256Digest};
+use futures_util::StreamExt;
+use serde::Serialize;
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
+
+use crate::build_store::{BuildCommandDecision, PgBuildStore};
+
+const MAX_BUILD_COMMAND_BYTES: usize = 512 * 1024;
+const BUILD_REDELIVERY_DELAY: Duration = Duration::from_secs(2);
 
 pub async fn connect_nats_mtls(
     server: &str,
@@ -120,6 +129,191 @@ impl AgentOutboxDispatcher {
     }
 }
 
+/// Durable `JetStream` consumer for approved v2 build commands.
+pub struct AgentBuildCommandConsumer {
+    consumer_name: String,
+    quarantine_subject: String,
+    context: async_nats::jetstream::Context,
+    messages: async_nats::jetstream::consumer::pull::Stream,
+}
+
+impl AgentBuildCommandConsumer {
+    pub async fn bind(
+        client: async_nats::Client,
+        stream_name: &str,
+        consumer_name: &str,
+        quarantine_subject: &str,
+    ) -> Result<Self, AgentMessagingError> {
+        if !valid_token(stream_name)
+            || !valid_token(consumer_name)
+            || !valid_subject(quarantine_subject)
+        {
+            return Err(AgentMessagingError::Configuration);
+        }
+        let context = async_nats::jetstream::new(client);
+        let stream = context
+            .get_stream(stream_name)
+            .await
+            .map_err(|_| AgentMessagingError::StreamUnavailable)?;
+        let consumer: PullConsumer = stream
+            .get_consumer(consumer_name)
+            .await
+            .map_err(|_| AgentMessagingError::ConsumerUnavailable)?;
+        if consumer.cached_info().config.filter_subject != subjects::AGENT_BUILD_REQUESTED_V2
+            || !consumer.cached_info().config.filter_subjects.is_empty()
+        {
+            return Err(AgentMessagingError::Configuration);
+        }
+        let messages = consumer
+            .messages()
+            .await
+            .map_err(|_| AgentMessagingError::ConsumerUnavailable)?;
+        Ok(Self {
+            consumer_name: consumer_name.to_owned(),
+            quarantine_subject: quarantine_subject.to_owned(),
+            context,
+            messages,
+        })
+    }
+
+    pub async fn process_next(
+        &mut self,
+        store: &PgBuildStore,
+    ) -> Result<BuildConsumeOutcome, AgentMessagingError> {
+        let message = self
+            .messages
+            .next()
+            .await
+            .ok_or(AgentMessagingError::ConsumerClosed)?
+            .map_err(|_| AgentMessagingError::Receive)?;
+        if message.payload.len() > MAX_BUILD_COMMAND_BYTES {
+            self.quarantine(&message, None, "LW_AGENT_BUILD_COMMAND_PAYLOAD_TOO_LARGE")
+                .await?;
+            message
+                .double_ack_with(AckKind::Term)
+                .await
+                .map_err(|_| AgentMessagingError::Acknowledge)?;
+            return Ok(BuildConsumeOutcome::Rejected);
+        }
+        let Ok(event): Result<CloudEvent<AgentBuildRequestedV2>, _> =
+            serde_json::from_slice(&message.payload)
+        else {
+            self.quarantine(&message, None, "LW_AGENT_BUILD_COMMAND_PAYLOAD_INVALID")
+                .await?;
+            message
+                .double_ack_with(AckKind::Term)
+                .await
+                .map_err(|_| AgentMessagingError::Acknowledge)?;
+            return Ok(BuildConsumeOutcome::Rejected);
+        };
+        match store.accept_command(&self.consumer_name, &event).await {
+            Ok(BuildCommandDecision::Accepted) => {
+                message
+                    .double_ack()
+                    .await
+                    .map_err(|_| AgentMessagingError::Acknowledge)?;
+                Ok(BuildConsumeOutcome::Applied)
+            }
+            Ok(BuildCommandDecision::Duplicate | BuildCommandDecision::Stale) => {
+                message
+                    .double_ack()
+                    .await
+                    .map_err(|_| AgentMessagingError::Acknowledge)?;
+                Ok(BuildConsumeOutcome::Ignored)
+            }
+            Ok(BuildCommandDecision::Gap) => {
+                message
+                    .ack_with(AckKind::Nak(Some(BUILD_REDELIVERY_DELAY)))
+                    .await
+                    .map_err(|_| AgentMessagingError::Acknowledge)?;
+                Ok(BuildConsumeOutcome::Deferred)
+            }
+            Err(error) if error.retryable() => {
+                message
+                    .ack_with(AckKind::Nak(Some(BUILD_REDELIVERY_DELAY)))
+                    .await
+                    .map_err(|_| AgentMessagingError::Acknowledge)?;
+                Ok(BuildConsumeOutcome::Deferred)
+            }
+            Err(_) => {
+                self.quarantine(&message, Some(event.id), "LW_AGENT_BUILD_COMMAND_REJECTED")
+                    .await?;
+                message
+                    .double_ack_with(AckKind::Term)
+                    .await
+                    .map_err(|_| AgentMessagingError::Acknowledge)?;
+                Ok(BuildConsumeOutcome::Rejected)
+            }
+        }
+    }
+
+    async fn quarantine(
+        &self,
+        message: &async_nats::jetstream::Message,
+        event_id: Option<EventId>,
+        diagnostic_code: &'static str,
+    ) -> Result<(), AgentMessagingError> {
+        let payload_sha256 = Sha256Digest::of_bytes(&message.payload);
+        let record = BuildQuarantineRecord {
+            version: 1,
+            consumer: &self.consumer_name,
+            source_subject: message.subject.as_str(),
+            event_id,
+            payload_sha256,
+            size_bytes: u64::try_from(message.payload.len())
+                .map_err(|_| AgentMessagingError::Quarantine)?,
+            diagnostic_code,
+        };
+        let payload = serde_json::to_vec(&record).map_err(|_| AgentMessagingError::Quarantine)?;
+        let acknowledgement = self
+            .context
+            .send_publish(
+                self.quarantine_subject.clone(),
+                PublishMessage::build()
+                    .payload(payload.into())
+                    .message_id(format!("{payload_sha256}:{diagnostic_code}")),
+            )
+            .await
+            .map_err(|_| AgentMessagingError::Quarantine)?;
+        acknowledgement
+            .await
+            .map_err(|_| AgentMessagingError::Quarantine)?;
+        Ok(())
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BuildQuarantineRecord<'a> {
+    version: u8,
+    consumer: &'a str,
+    source_subject: &'a str,
+    event_id: Option<EventId>,
+    payload_sha256: Sha256Digest,
+    size_bytes: u64,
+    diagnostic_code: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BuildConsumeOutcome {
+    Applied,
+    Ignored,
+    Deferred,
+    Rejected,
+}
+
+fn valid_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+}
+
+fn valid_subject(value: &str) -> bool {
+    valid_token(value) && !value.contains('*') && !value.contains('>')
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum AgentMessagingError {
     #[error("LW_NATS_CONFIG_INVALID")]
@@ -128,6 +322,18 @@ pub enum AgentMessagingError {
     Credentials,
     #[error("LW_NATS_UNAVAILABLE")]
     Connect,
+    #[error("LW_AGENT_BUILD_STREAM_UNAVAILABLE")]
+    StreamUnavailable,
+    #[error("LW_AGENT_BUILD_CONSUMER_UNAVAILABLE")]
+    ConsumerUnavailable,
+    #[error("LW_AGENT_BUILD_CONSUMER_CLOSED")]
+    ConsumerClosed,
+    #[error("LW_AGENT_BUILD_RECEIVE_FAILED")]
+    Receive,
+    #[error("LW_AGENT_BUILD_ACKNOWLEDGE_FAILED")]
+    Acknowledge,
+    #[error("LW_AGENT_BUILD_QUARANTINE_FAILED")]
+    Quarantine,
     #[error("LW_AGENT_OUTBOX_IDENTITY_INVALID")]
     Identity,
     #[error("LW_AGENT_OUTBOX_CONTRACT_INVALID")]
