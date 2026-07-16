@@ -36,7 +36,7 @@ pub use reconciler::{
 };
 pub use resolver::{
     OwnerResolver, OwnerResolverError, OwnerResolverPolicy, VerifiedCallerIdentity,
-    authorize_owner_resolution, owner_resolver_router,
+    authorize_endpoint_eligibility, authorize_owner_resolution, owner_resolver_router,
 };
 pub use runtime::{OwnerResolverRuntime, OwnerResolverRuntimeError};
 pub use store::{

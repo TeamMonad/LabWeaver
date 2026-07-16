@@ -88,7 +88,14 @@ needed by the handling Owner; they never carry untrusted executable text.
 | `labweaver.agent.build.completed.v1` | Event / EVENTS + AUDIT | Agent → Control approval | `agent_build`; image digest, attestation/reference hashes and validation summary. |
 | `labweaver.agent.build.failed.v1` | Event / EVENTS + AUDIT | Agent → Control review | `agent_build`; terminal diagnostic and bounded safe report reference. |
 | `labweaver.access.grant.created.v1` | Event / EVENTS + AUDIT | Access → Access Gateway policy application | `access_grant`; grant revision, scoped endpoint IDs, expiry and policy reference. |
+| `labweaver.access.grant.activated.v1` | Event / EVENTS + AUDIT | Access → Gateway observers | `access_grant`; activated revision, endpoint IDs and expiry. |
+| `labweaver.access.grant.denied.v1` | Event / EVENTS + AUDIT | Access → audit observers | `access_grant`; terminal revision and stable diagnostic. |
+| `labweaver.access.grant.expired.v1` | Event / EVENTS + AUDIT | Access → Gateway observers | `access_grant`; terminal revision, effective time and stable diagnostic. |
 | `labweaver.access.grant.revoked.v1` | Event / EVENTS + AUDIT | Access → Access Gateway revocation | `access_grant`; revoked revision, reason code and effective time. |
+| `labweaver.access.ssh_key.revoked.v1` | Event / EVENTS + AUDIT | Access → Gateway observers | `ssh_public_key`; key ID, actor ID, revision and effective time; no public-key body. |
+| `labweaver.access.session.termination_requested.v1` | Event / EVENTS + AUDIT | Access → OpenSSH Gateway | `gateway_session`; session/key/grant/endpoint revisions and termination deadline. |
+| `labweaver.access.session.closed.v1` | Event / EVENTS + AUDIT | Access → audit observers | `gateway_session`; close receipt revision, effective time and reason. |
+| `labweaver.access.session.termination_overdue.v1` | Event / EVENTS + AUDIT | Access → release/audit observers | `gateway_session`; overdue revision, deadline and blocking diagnostic. |
 | `labweaver.access.policy.publish.requested.v1` | Command / COMMANDS | Access → Access policy compiler | `policy_revision`; validated policy input reference, prior revision and approval context. |
 | `labweaver.access.device.expired.v1` | Event / EVENTS + AUDIT | Access → Access cleanup | `device`; device ID, expiry revision and cleanup scope. |
 | `labweaver.environment.instance.provision_requested.v1` | Command / COMMANDS | Environment → Environment reconciler | `environment_instance`; approved template/version, runtime binding and idempotency key. |

@@ -5,6 +5,7 @@ use std::time::Duration;
 use contracts::{
     UtcTimestamp,
     environment::{
+        EnvironmentEndpointEligibility, EnvironmentEndpointEligibilityRequest,
         EnvironmentOwnerResolution, EnvironmentOwnerResolutionRequest,
         EnvironmentOwnerResolverClientConfig,
     },
@@ -119,6 +120,52 @@ impl EnvironmentOwnerResolverClient {
         result
     }
 
+    /// Resolves the exact endpoint set required to activate one `AccessGrant`.
+    pub async fn resolve_endpoint_eligibility(
+        &self,
+        request: &EnvironmentEndpointEligibilityRequest,
+        now: UtcTimestamp,
+    ) -> Result<EnvironmentEndpointEligibility, OwnerResolverClientError> {
+        let mut endpoint = self.base_uri.clone();
+        endpoint.set_path(&format!(
+            "/internal/v1/environments/{}/endpoint-eligibility:resolve",
+            request.environment_id
+        ));
+        for attempt in 0..=self.max_retries {
+            match self
+                .client
+                .post(endpoint.clone())
+                .json(request)
+                .send()
+                .await
+            {
+                Ok(response) if response.status().is_success() => {
+                    return validate_endpoint_response(response, request, now).await;
+                }
+                Ok(response) if response.status() == StatusCode::FORBIDDEN => {
+                    return Err(OwnerResolverClientError::ScopeDenied);
+                }
+                Ok(response) if response.status() == StatusCode::SERVICE_UNAVAILABLE => {
+                    if attempt == self.max_retries {
+                        return Err(OwnerResolverClientError::Unavailable);
+                    }
+                }
+                Ok(_) => return Err(OwnerResolverClientError::ResponseInvalid),
+                Err(_) if attempt == self.max_retries => {
+                    return Err(OwnerResolverClientError::Unavailable);
+                }
+                Err(_) => {}
+            }
+            let multiplier = 1_u32 << u32::from(attempt);
+            let delay = self
+                .retry_backoff
+                .checked_mul(multiplier)
+                .ok_or(OwnerResolverClientError::Configuration)?;
+            tokio::time::sleep(delay).await;
+        }
+        Err(OwnerResolverClientError::Unavailable)
+    }
+
     async fn resolve_inner(
         &self,
         request: &EnvironmentOwnerResolutionRequest,
@@ -163,6 +210,31 @@ impl EnvironmentOwnerResolverClient {
         }
         Err(OwnerResolverClientError::Unavailable)
     }
+}
+
+async fn validate_endpoint_response(
+    response: reqwest::Response,
+    request: &EnvironmentEndpointEligibilityRequest,
+    now: UtcTimestamp,
+) -> Result<EnvironmentEndpointEligibility, OwnerResolverClientError> {
+    let etag = response
+        .headers()
+        .get(header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(OwnerResolverClientError::ResponseInvalid)?
+        .to_owned();
+    let resolution = response
+        .json::<EnvironmentEndpointEligibility>()
+        .await
+        .map_err(|_| OwnerResolverClientError::ResponseInvalid)?;
+    let expected_etag = StrongEtag::from_revision(resolution.environment_revision).header_value();
+    resolution
+        .validate_for(request, now)
+        .map_err(|_| OwnerResolverClientError::ResponseInvalid)?;
+    if etag != expected_etag {
+        return Err(OwnerResolverClientError::ResponseInvalid);
+    }
+    Ok(resolution)
 }
 
 async fn validate_response(

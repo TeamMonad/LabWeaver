@@ -1,5 +1,7 @@
 //! Environment instance lifecycle and operation semantics.
 
+use std::collections::BTreeSet;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -702,6 +704,8 @@ pub enum EnvironmentError {
     },
     #[error("owner resolver configuration is unsafe or incomplete")]
     InvalidResolverConfiguration,
+    #[error("endpoint eligibility response is incomplete, stale, unhealthy, or scope-mismatched")]
+    EndpointEligibilityInvalid,
     #[error("environment diagnostic code is not a stable LW_* identity")]
     InvalidDiagnosticCode,
     #[error("public environment operation snapshot is internally inconsistent")]
@@ -765,6 +769,75 @@ pub struct EnvironmentOwnerResolution {
     pub owner_actor_id: ActorId,
     pub environment_revision: Revision,
     pub eligibility_expires_at: UtcTimestamp,
+}
+
+/// Fail-closed Access Service request for exact endpoint eligibility.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentEndpointEligibilityRequest {
+    pub environment_id: EnvironmentId,
+    pub course_id: CourseId,
+    pub actor_id: ActorId,
+    pub subject_kind: EnvironmentAccessSubjectKind,
+    pub expected_revision: Revision,
+    pub endpoint_ids: Vec<EndpointId>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentAccessSubjectKind {
+    Owner,
+    CourseTeacher,
+}
+
+/// Environment-authoritative endpoint facts safe for Access Service.
+///
+/// Host, port, credential, provider and network-policy data are deliberately absent.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentEndpointEligibility {
+    pub environment_id: EnvironmentId,
+    pub course_id: CourseId,
+    pub owner_actor_id: ActorId,
+    pub environment_revision: Revision,
+    pub eligibility_expires_at: UtcTimestamp,
+    pub endpoints: Vec<EnvironmentEndpoint>,
+}
+
+impl EnvironmentEndpointEligibility {
+    pub fn validate_for(
+        &self,
+        request: &EnvironmentEndpointEligibilityRequest,
+        now: UtcTimestamp,
+    ) -> Result<(), EnvironmentError> {
+        let requested = request
+            .endpoint_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let returned = self
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.id)
+            .collect::<BTreeSet<_>>();
+        if request.endpoint_ids.is_empty()
+            || requested.len() != request.endpoint_ids.len()
+            || self.environment_id != request.environment_id
+            || self.course_id != request.course_id
+            || (request.subject_kind == EnvironmentAccessSubjectKind::Owner
+                && self.owner_actor_id != request.actor_id)
+            || self.environment_revision != request.expected_revision
+            || self.eligibility_expires_at <= now
+            || requested != returned
+            || self
+                .endpoints
+                .iter()
+                .any(|endpoint| endpoint.health != EndpointHealth::Healthy)
+        {
+            return Err(EnvironmentError::EndpointEligibilityInvalid);
+        }
+        Ok(())
+    }
 }
 
 /// Deployment-supplied client settings for the controlled mTLS owner-resolver call.

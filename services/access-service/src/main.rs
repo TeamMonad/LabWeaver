@@ -1,5 +1,7 @@
 //! Access Service browser BFF entry points.
 
+mod grants;
+
 use std::{collections::BTreeSet, net::SocketAddr, str::FromStr, sync::Arc};
 
 use auth::{
@@ -16,7 +18,7 @@ use axum::{
     extract::{Extension, Form, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use contracts::{
     AuthSession, AuthenticatedActor, AuthorizationDecision, AuthorizationDecisionRequest,
@@ -46,6 +48,7 @@ struct AppState {
     key_ring: KeyRing,
     owner_resolver: EnvironmentOwnerResolverClient,
     metrics: telemetry::PrometheusHandle,
+    nats: async_nats::Client,
 }
 
 #[derive(Clone)]
@@ -70,10 +73,47 @@ async fn main() -> Result<(), StartupError> {
         .route("/auth/logout", post(logout))
         .route("/api/v1/auth/session", get(session))
         .route("/api/v1/auth/csrf", get(csrf))
+        .route(
+            "/api/v1/me/ssh-public-keys",
+            post(grants::create_ssh_key).get(grants::list_ssh_keys),
+        )
+        .route(
+            "/api/v1/me/ssh-public-keys/{key_id}",
+            delete(grants::delete_ssh_key),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/access-grants",
+            post(grants::create_access_grant).get(grants::list_access_grants),
+        )
+        .route(
+            "/api/v1/access-grants/{grant_id}",
+            get(grants::get_access_grant),
+        )
+        .route(
+            "/api/v1/access-grants/{grant_id}/renew",
+            post(grants::renew_access_grant),
+        )
+        .route(
+            "/api/v1/access-grants/{grant_id}/revoke",
+            post(grants::revoke_access_grant),
+        )
         .with_state(Arc::clone(&state));
     let internal_router = Router::new()
         .route("/internal/v1/auth/decision", post(authorization_decision))
         .route("/internal/v1/metrics", get(metrics_endpoint))
+        .route("/internal/v1/ssh/authorize", post(grants::authorize_ssh))
+        .route(
+            "/internal/v1/sessions",
+            post(grants::create_gateway_session),
+        )
+        .route(
+            "/internal/v1/sessions/{session_id}/heartbeat",
+            post(grants::heartbeat_gateway_session),
+        )
+        .route(
+            "/internal/v1/sessions/{session_id}/close",
+            post(grants::close_gateway_session),
+        )
         .with_state(Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let internal_listener = tokio::net::TcpListener::bind(internal_bind).await?;
@@ -82,6 +122,9 @@ async fn main() -> Result<(), StartupError> {
         result = axum::serve(listener, router) => result.map_err(StartupError::from)?,
         result = serve_internal_mtls(internal_listener, internal_router, mtls) => result?,
         result = auth_cleanup_loop(Arc::clone(&state)) => result?,
+        result = grants::activation_loop(Arc::clone(&state)) => result?,
+        result = grants::maintenance_loop(Arc::clone(&state)) => result?,
+        result = grants::outbox_loop(Arc::clone(&state)) => result?,
     }
     Ok(())
 }
@@ -162,6 +205,7 @@ async fn build_app_state(
         ),
         deployment.transport_security,
     )?;
+    let nats = grants::connect_nats(&deployment.nats).await?;
     Ok(Arc::new(AppState {
         config,
         deployment,
@@ -174,6 +218,7 @@ async fn build_app_state(
         key_ring,
         owner_resolver,
         metrics,
+        nats,
     }))
 }
 
@@ -892,6 +937,12 @@ struct ApiError {
 }
 
 impl ApiError {
+    fn bad_request(diagnostic: &'static str) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            diagnostic,
+        }
+    }
     fn unauthorized(diagnostic: &'static str) -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
@@ -913,6 +964,30 @@ impl ApiError {
     fn internal(diagnostic: &'static str) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
+            diagnostic,
+        }
+    }
+    fn conflict(diagnostic: &'static str) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            diagnostic,
+        }
+    }
+    fn precondition(diagnostic: &'static str) -> Self {
+        Self {
+            status: StatusCode::PRECONDITION_FAILED,
+            diagnostic,
+        }
+    }
+    fn unprocessable(diagnostic: &'static str) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            diagnostic,
+        }
+    }
+    fn not_found(diagnostic: &'static str) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
             diagnostic,
         }
     }
@@ -1024,6 +1099,8 @@ enum StartupError {
     Mtls(#[from] auth::MtlsError),
     #[error("LW_AUTH_STARTUP_FAILED")]
     OwnerResolver(#[from] auth::OwnerResolverClientError),
+    #[error("LW_AUTH_STARTUP_FAILED")]
+    GrantRuntime(#[from] grants::GrantRuntimeError),
     #[error("LW_AUTH_STARTUP_FAILED")]
     Role(#[from] auth::RoleClaimError),
     #[error("LW_AUTH_STARTUP_FAILED")]

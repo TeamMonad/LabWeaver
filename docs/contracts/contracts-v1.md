@@ -21,7 +21,7 @@ Agent runs contain independent Environment and Evaluation tracks. Each due track
 
 EnvironmentSpec separates business class from a closed Container/VM union. EvaluationSpec and GoalReview use v1; deterministic points are integers and LLM output has no scoring or release authority. SubmissionManifest supports only `exactFile` and `directoryTree`, rejects path escape, symlink, duplicate and overlap, and produces an immutable FrozenSubmission identity.
 
-Build, artifact, scan and release semantics follow ADR 0006. Environment state exposes desired/observed state, generation and operation identity. Restart preserves mutable disk through stop/start; reset revokes Grants before restoring the published baseline. Access uses accepted Ed25519, FIDO2 Ed25519 or RSA >=3072 keys, server aliases, healthy one-to-one EndpointGrants and a 60-second session termination bound after revoke/expiry.
+Build, artifact, scan and release semantics follow ADR 0006. Environment state exposes desired/observed state, generation and operation identity. Restart preserves mutable disk through stop/start; reset revokes Grants before restoring the published baseline. Access uses accepted Ed25519, FIDO2 Ed25519 or RSA >=3072 keys, exact OpenSSH SHA-256 fingerprint matching, server aliases, healthy one-to-one `EndpointGrant`s and a 60-second session termination bound after revoke, expiry or key deletion. `AccessGrant` follows `requested -> active|denied|revoked` and `active -> expired|revoked`; renew uses `Idempotency-Key` plus strong `If-Match`, extends time only and creates a new revision.
 
 ## HTTP, SSE and Gateway
 
@@ -30,6 +30,10 @@ Public REST is under `/api/v1`; Internal Gateway routes are under `/internal/v1`
 SSE uses `GET /api/v1/events?courseId=...`. `Last-Event-ID` and `after` are equivalent and conflicting values are rejected. Expired cursors return 410 `LW_SSE_CURSOR_EXPIRED`; gaps return `LW_SSE_CURSOR_GAP` and require REST snapshot recovery. Events contain only sanitized identity, revision/hash and diagnostic fields.
 
 SSH authorization accepts server alias and Gateway identity, never target host/port. The response is scoped to one key, ForceCommand token, endpoint identity and shortest validity. It grants no generic shell, forwarding, SCP or SFTP semantics.
+
+The Gateway creates, heartbeats and closes sessions through dedicated request types. A one-time opaque token is bound to Gateway identity, connection, key, grant revision and endpoint; only its SHA-256 digest is stored and consumption is atomic. A session records the key and grant revision. Revocation creates an explicit `terminating` deadline, and a missing close receipt becomes `terminationOverdue` rather than a successful close.
+
+Environment exposes a read-only mTLS endpoint-eligibility decision bound to environment/course/subject/revision, eligibility/Lease expiry and the exact requested endpoint protocol, health and revision. The response never contains host, port, credentials or Provider internals, and Access never reads the Environment schema directly.
 
 ## Generation and compatibility
 

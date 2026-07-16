@@ -6,6 +6,7 @@ version = 4
 name = "access-service"
 version = "0.1.0"
 dependencies = [
+ "async-nats",
  "auth",
  "axum 0.8.9",
  "contracts",
@@ -14,12 +15,18 @@ dependencies = [
  "jsonwebtoken",
  "jwt-authorizer",
  "metrics",
+ "persistence-sqlx",
+ "rand 0.9.5",
  "reqwest",
  "rustls 0.23.42",
  "serde",
+ "serde_jcs",
  "serde_json",
+ "sha2",
  "sqlx",
  "telemetry",
+ "testcontainers",
+ "testcontainers-modules",
  "thiserror 2.0.18",
  "time",
  "tokio",

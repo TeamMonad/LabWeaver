@@ -1,14 +1,16 @@
 use std::collections::BTreeSet;
 
-use axum::extract::rejection::{JsonRejection, PathRejection};
+use axum::body::Bytes;
+use axum::extract::rejection::PathRejection;
 use axum::extract::{Extension, Path, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use contracts::environment::{
-    DesiredEnvironmentState, EndpointHealth, EnvironmentInstance, EnvironmentOwnerResolution,
-    EnvironmentOwnerResolutionRequest, ObservedEnvironmentState,
+    DesiredEnvironmentState, EndpointHealth, EnvironmentAccessSubjectKind,
+    EnvironmentEndpointEligibility, EnvironmentEndpointEligibilityRequest, EnvironmentInstance,
+    EnvironmentOwnerResolution, EnvironmentOwnerResolutionRequest, ObservedEnvironmentState,
 };
 use contracts::http::StrongEtag;
 use contracts::{DiagnosticCode, EnvironmentId, EventId, ProblemDetails, UtcTimestamp};
@@ -96,6 +98,25 @@ impl OwnerResolver {
             })?;
         authorize_owner_resolution(&instance, request, authority_now)
     }
+
+    pub async fn resolve_endpoint_eligibility(
+        &self,
+        caller: &VerifiedCallerIdentity,
+        request: &EnvironmentEndpointEligibilityRequest,
+    ) -> Result<EnvironmentEndpointEligibility, OwnerResolverError> {
+        if !self.policy.allows(caller) {
+            return Err(OwnerResolverError::CallerUntrusted);
+        }
+        let (instance, authority_now) = self
+            .store
+            .load_for_owner_resolution(request.environment_id)
+            .await
+            .map_err(|error| match error {
+                EnvironmentStoreError::EnvironmentNotFound => OwnerResolverError::ScopeMismatch,
+                other => OwnerResolverError::Unavailable(other),
+            })?;
+        authorize_endpoint_eligibility(&instance, request, authority_now)
+    }
 }
 
 /// Performs the fail-closed ownership decision against one authoritative aggregate.
@@ -130,6 +151,57 @@ pub fn authorize_owner_resolution(
     })
 }
 
+/// Returns only the requested healthy endpoint facts after exact scope validation.
+pub fn authorize_endpoint_eligibility(
+    instance: &EnvironmentInstance,
+    request: &EnvironmentEndpointEligibilityRequest,
+    now: UtcTimestamp,
+) -> Result<EnvironmentEndpointEligibility, OwnerResolverError> {
+    if instance.id != request.environment_id
+        || instance.course_id != request.course_id
+        || (request.subject_kind == EnvironmentAccessSubjectKind::Owner
+            && instance.owner_id != request.actor_id)
+        || instance.revision != request.expected_revision
+    {
+        return Err(OwnerResolverError::ScopeMismatch);
+    }
+    let requested = request
+        .endpoint_ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if requested.is_empty() || requested.len() != request.endpoint_ids.len() {
+        return Err(OwnerResolverError::RequestInvalid);
+    }
+    if instance.desired_state != DesiredEnvironmentState::Running
+        || instance.observed_state != ObservedEnvironmentState::Ready
+        || instance.eligibility_expires_at <= now
+    {
+        return Err(OwnerResolverError::EnvironmentUnavailable);
+    }
+    let endpoints = instance
+        .endpoints
+        .iter()
+        .filter(|endpoint| requested.contains(&endpoint.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    if endpoints.len() != requested.len()
+        || endpoints.iter().any(|endpoint| {
+            endpoint.health != EndpointHealth::Healthy || endpoint.revision != instance.revision
+        })
+    {
+        return Err(OwnerResolverError::EndpointUnavailable);
+    }
+    Ok(EnvironmentEndpointEligibility {
+        environment_id: instance.id,
+        course_id: instance.course_id,
+        owner_actor_id: instance.owner_id,
+        environment_revision: instance.revision,
+        eligibility_expires_at: instance.eligibility_expires_at,
+        endpoints,
+    })
+}
+
 /// Builds the internal route. A TLS acceptor must inject `VerifiedCallerIdentity`.
 pub fn owner_resolver_router(resolver: OwnerResolver) -> Router {
     Router::new()
@@ -137,17 +209,50 @@ pub fn owner_resolver_router(resolver: OwnerResolver) -> Router {
             "/internal/v1/environments/{environment_id}/owner:resolve",
             post(resolve_owner),
         )
+        .route(
+            "/internal/v1/environments/{environment_id}/endpoint-eligibility:resolve",
+            post(resolve_endpoint_eligibility),
+        )
         .with_state(resolver)
+}
+
+async fn resolve_endpoint_eligibility(
+    State(resolver): State<OwnerResolver>,
+    path: Result<Path<EnvironmentId>, PathRejection>,
+    caller: Option<Extension<VerifiedCallerIdentity>>,
+    body: Bytes,
+) -> Result<Response, OwnerResolverError> {
+    let Path(environment_id) = path.map_err(|_| OwnerResolverError::RequestInvalid)?;
+    let request = contracts::parse_strict_json::<EnvironmentEndpointEligibilityRequest>(&body)
+        .map_err(|_| OwnerResolverError::RequestInvalid)?;
+    if request.environment_id != environment_id {
+        return Err(OwnerResolverError::ScopeMismatch);
+    }
+    let Extension(caller) = caller.ok_or(OwnerResolverError::CallerUntrusted)?;
+    let resolution = resolver
+        .resolve_endpoint_eligibility(&caller, &request)
+        .await?;
+    let etag = StrongEtag::from_revision(resolution.environment_revision).header_value();
+    let mut response = Json(resolution).into_response();
+    response.headers_mut().insert(
+        header::ETAG,
+        HeaderValue::from_str(&etag).map_err(|_| OwnerResolverError::ResponseInvalid)?,
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
 }
 
 async fn resolve_owner(
     State(resolver): State<OwnerResolver>,
     path: Result<Path<EnvironmentId>, PathRejection>,
     caller: Option<Extension<VerifiedCallerIdentity>>,
-    body: Result<Json<EnvironmentOwnerResolutionRequest>, JsonRejection>,
+    body: Bytes,
 ) -> Result<Response, OwnerResolverError> {
     let Path(environment_id) = path.map_err(|_| OwnerResolverError::RequestInvalid)?;
-    let Json(request) = body.map_err(|_| OwnerResolverError::RequestInvalid)?;
+    let request = contracts::parse_strict_json::<EnvironmentOwnerResolutionRequest>(&body)
+        .map_err(|_| OwnerResolverError::RequestInvalid)?;
     if request.environment_id != environment_id {
         return Err(OwnerResolverError::ScopeMismatch);
     }
@@ -159,6 +264,9 @@ async fn resolve_owner(
         header::ETAG,
         HeaderValue::from_str(&etag).map_err(|_| OwnerResolverError::ResponseInvalid)?,
     );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     Ok(response)
 }
 
@@ -183,6 +291,8 @@ pub enum OwnerResolverError {
     ScopeMismatch,
     #[error("LW_ENV_OWNER_UNAVAILABLE")]
     EnvironmentUnavailable,
+    #[error("LW_ENV_ENDPOINT_UNAVAILABLE")]
+    EndpointUnavailable,
     #[error("LW_ENV_OWNER_RESOLVER_UNAVAILABLE")]
     Unavailable(EnvironmentStoreError),
     #[error("LW_ENV_OWNER_RESPONSE_INVALID")]
@@ -210,6 +320,9 @@ impl OwnerResolverError {
             Self::ScopeMismatch => (StatusCode::FORBIDDEN, "LW_ENV_OWNER_SCOPE_MISMATCH", false),
             Self::EnvironmentUnavailable => {
                 (StatusCode::FORBIDDEN, "LW_ENV_OWNER_UNAVAILABLE", false)
+            }
+            Self::EndpointUnavailable => {
+                (StatusCode::FORBIDDEN, "LW_ENV_ENDPOINT_UNAVAILABLE", false)
             }
             Self::Unavailable(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,

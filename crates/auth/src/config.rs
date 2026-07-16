@@ -55,8 +55,46 @@ pub struct AccessAuthFile {
     pub internal_mtls: MtlsFileConfig,
     /// Environment-authoritative owner resolver client configuration.
     pub environment_owner_resolver: OwnerResolverFileConfig,
+    /// `AccessGrant`, worker, and one-time authorization limits.
+    pub grants: GrantRuntimeFileConfig,
+    /// Mandatory mTLS `JetStream` connection.
+    pub nats: NatsFileConfig,
     /// Secret-file locators for the Access runtime.
     pub secrets: SecretFileConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[allow(
+    missing_docs,
+    reason = "YAML keys are documented by deploy/config/access-auth.yaml.example"
+)]
+#[serde(deny_unknown_fields)]
+pub struct GrantRuntimeFileConfig {
+    pub gateway_san_uris: Vec<String>,
+    pub default_ttl_seconds: u64,
+    pub max_ttl_seconds: u64,
+    pub authorization_token_ttl_seconds: u64,
+    pub activation_poll_seconds: u64,
+    pub activation_retry_seconds: u64,
+    pub activation_max_attempts: u16,
+    pub expiry_poll_seconds: u64,
+    pub worker_lease_seconds: u64,
+    pub max_keys_per_actor: u16,
+    pub max_endpoints_per_grant: u16,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[allow(
+    missing_docs,
+    reason = "YAML keys are documented by deploy/config/access-auth.yaml.example"
+)]
+#[serde(deny_unknown_fields)]
+pub struct NatsFileConfig {
+    pub server: String,
+    pub ca_certificate_file: String,
+    pub client_certificate_file: String,
+    pub client_private_key_file: String,
+    pub credentials_file: String,
 }
 
 /// OIDC fields that vary by deployment.
@@ -248,6 +286,7 @@ impl AccessAuthFile {
             || parsed.internal_mtls.required_eku != "clientAuth"
             || !(1..=5_000).contains(&parsed.environment_owner_resolver.retry_backoff_milliseconds)
             || !(1..=60).contains(&parsed.environment_owner_resolver.decision_ttl_seconds)
+            || !parsed.access_runtime_is_valid()
             || required_resolver_locators.iter().any(|locator| {
                 parsed
                     .secrets
@@ -259,6 +298,40 @@ impl AccessAuthFile {
             return Err(AuthConfigError::InvalidDeploymentFile);
         }
         Ok(parsed)
+    }
+
+    fn access_runtime_is_valid(&self) -> bool {
+        !self.grants.gateway_san_uris.is_empty()
+            && self.grants.gateway_san_uris.iter().all(|san| {
+                san.starts_with("spiffe://") && self.internal_mtls.allowed_san_uris.contains(san)
+            })
+            && self
+                .grants
+                .gateway_san_uris
+                .iter()
+                .collect::<BTreeSet<_>>()
+                .len()
+                == self.grants.gateway_san_uris.len()
+            && self.grants.default_ttl_seconds > 0
+            && self.grants.default_ttl_seconds <= self.grants.max_ttl_seconds
+            && self.grants.max_ttl_seconds == 3_600
+            && (5..=60).contains(&self.grants.authorization_token_ttl_seconds)
+            && (1..=60).contains(&self.grants.activation_poll_seconds)
+            && (1..=300).contains(&self.grants.activation_retry_seconds)
+            && (1..=100).contains(&self.grants.activation_max_attempts)
+            && (1..=60).contains(&self.grants.expiry_poll_seconds)
+            && (5..=300).contains(&self.grants.worker_lease_seconds)
+            && (1..=100).contains(&self.grants.max_keys_per_actor)
+            && (1..=100).contains(&self.grants.max_endpoints_per_grant)
+            && self.nats.server.starts_with("tls://")
+            && [
+                self.nats.ca_certificate_file.as_str(),
+                self.nats.client_certificate_file.as_str(),
+                self.nats.client_private_key_file.as_str(),
+                self.nats.credentials_file.as_str(),
+            ]
+            .iter()
+            .all(|path| !invalid_secret_file_path(path))
     }
 
     fn insecure_mode_is_loopback_only(&self) -> bool {
@@ -570,6 +643,24 @@ environment_owner_resolver:
   max_retries: 1
   retry_backoff_milliseconds: 100
   decision_ttl_seconds: 5
+grants:
+  gateway_san_uris: [spiffe://labweaver/gateway]
+  default_ttl_seconds: 1800
+  max_ttl_seconds: 3600
+  authorization_token_ttl_seconds: 30
+  activation_poll_seconds: 2
+  activation_retry_seconds: 10
+  activation_max_attempts: 8
+  expiry_poll_seconds: 5
+  worker_lease_seconds: 30
+  max_keys_per_actor: 10
+  max_endpoints_per_grant: 16
+nats:
+  server: tls://nats.example.test:4222
+  ca_certificate_file: nats-ca
+  client_certificate_file: nats-cert
+  client_private_key_file: nats-key
+  credentials_file: nats-creds
 "#;
         assert!(AccessAuthFile::parse_yaml(valid).is_ok());
         assert!(

@@ -1,5 +1,11 @@
 {
   "$defs": {
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
     "UtcTimestamp": {
       "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
       "type": "string"
@@ -7,35 +13,27 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Request from AuthorizedKeysCommand over mTLS. It deliberately has no target field.",
+  "description": "Revision-checked heartbeat emitted only by the owning Gateway connection.",
   "properties": {
-    "alias": {
-      "type": "string"
-    },
     "connectionId": {
       "type": "string"
+    },
+    "expectedRevision": {
+      "$ref": "#/$defs/Revision"
     },
     "gatewayIdentity": {
       "type": "string"
     },
-    "presentedKeyFingerprintSha256": {
-      "type": "string"
-    },
-    "requestedAt": {
+    "observedAt": {
       "$ref": "#/$defs/UtcTimestamp"
-    },
-    "sourceAddressHash": {
-      "type": "string"
     }
   },
   "required": [
-    "alias",
-    "presentedKeyFingerprintSha256",
     "gatewayIdentity",
     "connectionId",
-    "sourceAddressHash",
-    "requestedAt"
+    "expectedRevision",
+    "observedAt"
   ],
-  "title": "SshAuthorizationRequest",
+  "title": "HeartbeatGatewaySessionRequest",
   "type": "object"
 }

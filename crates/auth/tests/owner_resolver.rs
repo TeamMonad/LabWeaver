@@ -18,11 +18,13 @@ use axum::{
     routing::post,
 };
 use contracts::environment::{
+    EndpointHealth, EndpointProtocol, EnvironmentAccessSubjectKind, EnvironmentEndpoint,
+    EnvironmentEndpointEligibility, EnvironmentEndpointEligibilityRequest,
     EnvironmentOwnerResolution, EnvironmentOwnerResolutionRequest,
     EnvironmentOwnerResolverClientConfig,
 };
 use contracts::http::StrongEtag;
-use contracts::{ActorId, CourseId, EnvironmentId, Revision, UtcTimestamp};
+use contracts::{ActorId, CourseId, EndpointId, EnvironmentId, Revision, UtcTimestamp};
 use environment_service::{MtlsConfig, serve_owner_resolver_mtls};
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
@@ -36,6 +38,10 @@ struct ResolverState {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one ephemeral-CA scenario preserves the full mTLS, tamper, outage and SAN lifecycle"
+)]
 async fn client_enforces_mtls_identity_response_binding_and_bounded_outage()
 -> Result<(), Box<dyn std::error::Error>> {
     let ca = test_ca()?;
@@ -46,6 +52,10 @@ async fn client_enforces_mtls_identity_response_binding_and_bounded_outage()
         .route(
             "/internal/v1/environments/{environment_id}/owner:resolve",
             post(resolve_owner),
+        )
+        .route(
+            "/internal/v1/environments/{environment_id}/endpoint-eligibility:resolve",
+            post(resolve_endpoint_eligibility),
         )
         .with_state(ResolverState {
             mode: Arc::clone(&mode),
@@ -81,15 +91,60 @@ async fn client_enforces_mtls_identity_response_binding_and_bounded_outage()
     assert_eq!(resolution.environment_id, request.environment_id);
     assert_eq!(resolution.environment_revision, request.expected_revision);
 
+    let endpoint_request = EnvironmentEndpointEligibilityRequest {
+        environment_id: request.environment_id,
+        course_id: request.course_id,
+        actor_id: request.owner_actor_id,
+        subject_kind: EnvironmentAccessSubjectKind::Owner,
+        expected_revision: request.expected_revision,
+        endpoint_ids: vec![EndpointId::new()],
+    };
+    let endpoint_resolution = client
+        .resolve_endpoint_eligibility(&endpoint_request, now)
+        .await?;
+    assert_eq!(endpoint_resolution.endpoints.len(), 1);
+    assert_eq!(
+        endpoint_resolution.endpoints[0].id,
+        endpoint_request.endpoint_ids[0]
+    );
+
     mode.store(1, Ordering::SeqCst);
     assert_eq!(
         client.resolve(&request, now).await,
+        Err(OwnerResolverClientError::ScopeDenied)
+    );
+    assert_eq!(
+        client
+            .resolve_endpoint_eligibility(&endpoint_request, now)
+            .await,
         Err(OwnerResolverClientError::ScopeDenied)
     );
 
     mode.store(2, Ordering::SeqCst);
     assert_eq!(
         client.resolve(&request, now).await,
+        Err(OwnerResolverClientError::ResponseInvalid)
+    );
+    assert_eq!(
+        client
+            .resolve_endpoint_eligibility(&endpoint_request, now)
+            .await,
+        Err(OwnerResolverClientError::ResponseInvalid)
+    );
+
+    mode.store(3, Ordering::SeqCst);
+    assert_eq!(
+        client
+            .resolve_endpoint_eligibility(&endpoint_request, now)
+            .await,
+        Err(OwnerResolverClientError::ResponseInvalid)
+    );
+
+    mode.store(4, Ordering::SeqCst);
+    assert_eq!(
+        client
+            .resolve_endpoint_eligibility(&endpoint_request, now)
+            .await,
         Err(OwnerResolverClientError::ResponseInvalid)
     );
 
@@ -112,6 +167,12 @@ async fn client_enforces_mtls_identity_response_binding_and_bounded_outage()
     server.await??;
     assert_eq!(
         client.resolve(&request, now).await,
+        Err(OwnerResolverClientError::Unavailable)
+    );
+    assert_eq!(
+        client
+            .resolve_endpoint_eligibility(&endpoint_request, now)
+            .await,
         Err(OwnerResolverClientError::Unavailable)
     );
 
@@ -151,6 +212,50 @@ async fn resolve_owner(
         eligibility_expires_at: "2030-07-15T00:00:00.000Z"
             .parse()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    };
+    let etag = StrongEtag::from_revision(resolution.environment_revision).header_value();
+    Ok(([(header::ETAG, etag)], Json(resolution)).into_response())
+}
+
+async fn resolve_endpoint_eligibility(
+    State(state): State<ResolverState>,
+    Json(request): Json<EnvironmentEndpointEligibilityRequest>,
+) -> Result<Response, StatusCode> {
+    if state.mode.load(Ordering::SeqCst) == 1 {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let environment_id = if state.mode.load(Ordering::SeqCst) == 2 {
+        EnvironmentId::new()
+    } else {
+        request.environment_id
+    };
+    let environment_revision = if state.mode.load(Ordering::SeqCst) == 3 {
+        Revision::new(request.expected_revision.get() + 1).map_err(|_| StatusCode::BAD_REQUEST)?
+    } else {
+        request.expected_revision
+    };
+    let health = if state.mode.load(Ordering::SeqCst) == 4 {
+        EndpointHealth::Unhealthy
+    } else {
+        EndpointHealth::Healthy
+    };
+    let resolution = EnvironmentEndpointEligibility {
+        environment_id,
+        course_id: request.course_id,
+        owner_actor_id: request.actor_id,
+        environment_revision,
+        eligibility_expires_at: "2030-07-15T00:00:00.000Z"
+            .parse()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        endpoints: vec![EnvironmentEndpoint {
+            id: request.endpoint_ids[0],
+            protocol: EndpointProtocol::Ssh,
+            revision: request.expected_revision,
+            health,
+            observed_at: "2026-07-15T00:00:00.000Z"
+                .parse()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        }],
     };
     let etag = StrongEtag::from_revision(resolution.environment_revision).header_value();
     Ok(([(header::ETAG, etag)], Json(resolution)).into_response())

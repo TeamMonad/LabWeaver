@@ -448,6 +448,108 @@
         "summary": "Evaluate an actor session and exact resource scope for an mTLS caller"
       }
     },
+    "/internal/v1/environments/{environmentId}/endpoint-eligibility:resolve": {
+      "post": {
+        "description": "Permission: environment:resolve_endpoint_eligibility. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "resolveEndpointEligibility",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "environmentId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/environment-endpoint-eligibility-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/environment-endpoint-eligibility.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceMtls": []
+          }
+        ],
+        "summary": "resolveEndpointEligibility",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "environment:resolve_endpoint_eligibility",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "service",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
     "/internal/v1/environments/{environmentId}/owner:resolve": {
       "post": {
         "description": "Permission: environment:resolve_owner. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
@@ -610,7 +712,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "../contracts/v1/gateway-session.schema.json"
+                "$ref": "../contracts/v1/create-gateway-session-request.schema.json"
               }
             }
           },
@@ -728,7 +830,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "../contracts/v1/gateway-session.schema.json"
+                "$ref": "../contracts/v1/close-gateway-session-request.schema.json"
               }
             }
           },
@@ -736,6 +838,13 @@
         },
         "responses": {
           "204": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/gateway-session.schema.json"
+                }
+              }
+            },
             "description": "Successful response",
             "headers": {
               "ETag": {
@@ -839,7 +948,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "../contracts/v1/gateway-session.schema.json"
+                "$ref": "../contracts/v1/heartbeat-gateway-session-request.schema.json"
               }
             }
           },
@@ -847,6 +956,13 @@
         },
         "responses": {
           "204": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/gateway-session.schema.json"
+                }
+              }
+            },
             "description": "Successful response",
             "headers": {
               "ETag": {

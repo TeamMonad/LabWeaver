@@ -5,6 +5,7 @@
       "enum": [
         "requested",
         "active",
+        "denied",
         "expired",
         "revoked"
       ],

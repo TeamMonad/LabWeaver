@@ -475,7 +475,13 @@ Linux CI runs fixed Ansible dependencies, lint, syntax, fictional encrypted
 Vault loading, mandatory-preflight chain checks, and storage safety fixtures.
 These checks prove only E1/E2 controller behavior; they do not replace E3
 acceptance against the target cluster.
-## Access trust-boundary verification (planned)
+## AccessGrant and OpenSSH authorization verification
+
+Issue #49 verifies the Access-owned portion of `ssh alias@gateway`. Contract tests cover supported, weak and malformed keys; exact fingerprint binding; Grant and session state matrices; alias injection; stale revisions; token replay; and TTL bounds. PostgreSQL integration uses the forward-only Access Migration and proves global fingerprint uniqueness, one nonterminal actor/environment Grant, actor/Gateway-scoped idempotency, digest-only token storage, expired activation-lease reclamation, stale-worker fencing and immediate authorization denial after membership revocation. The ephemeral-CA mTLS suite proves endpoint eligibility rejects owner/Lease denial, revision drift, unhealthy endpoints, tampered responses and resolver outage.
+
+The remaining E2 gate must run two Access instances against real PostgreSQL, TLS JetStream and the real Environment mTLS eligibility handler, including concurrent lease recovery, publish acknowledgement/replay, SAN/certificate failures, revoke/expiry/key-delete atomicity and the 60-second close/overdue result. Controlled Kubernetes verification may claim only the deployed Access/Environment API and mTLS boundary. Native SSH-to-VM requires both #53 and #63 and must not be inferred from fixture, contract or report generation.
+
+## Deferred direct-access verification
 
 ACCESS-01a documents the required test contract; it does not supply executable authorization evidence. The implementation suite must cover valid and invalid OIDC identity, enrollment eligibility, Active-device expansion and removal, cross-user endpoint denial, unsupported protocol, missing/expired/revoked parent or direct grant, endpoint IP reuse, short-lived VNC credential scope, handoff-token replay/expiry, and no partial authorization state after a failed decision.
 

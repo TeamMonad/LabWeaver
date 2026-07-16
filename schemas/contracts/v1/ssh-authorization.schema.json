@@ -18,6 +18,10 @@
       "minimum": 0,
       "type": "integer"
     },
+    "SshPublicKeyId": {
+      "description": "Strongly typed UUIDv7 identifier for `SshPublicKeyId`.",
+      "type": "string"
+    },
     "UtcTimestamp": {
       "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
       "type": "string"
@@ -48,6 +52,9 @@
     "normalizedAuthorizedKey": {
       "type": "string"
     },
+    "sshPublicKeyId": {
+      "$ref": "#/$defs/SshPublicKeyId"
+    },
     "validUntil": {
       "$ref": "#/$defs/UtcTimestamp"
     }
@@ -58,6 +65,7 @@
     "accessGrantRevision",
     "endpointGrantId",
     "endpointId",
+    "sshPublicKeyId",
     "normalizedAuthorizedKey",
     "forceCommandToken",
     "validUntil"

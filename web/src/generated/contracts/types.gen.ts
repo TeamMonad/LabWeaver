@@ -71,7 +71,7 @@ export type AccessGrantId = string;
 /**
  * AccessGrant lifecycle.
  */
-export type AccessGrantState = 'requested' | 'active' | 'expired' | 'revoked';
+export type AccessGrantState = 'requested' | 'active' | 'denied' | 'expired' | 'revoked';
 
 /**
  * Strongly typed UUIDv7 identifier for `ActorId`.
@@ -1879,11 +1879,17 @@ export type CompleteProblemPackageUploadRequestSchemaSha256Digest = string;
  * CreateAccessGrantRequest
  */
 export type CreateAccessGrantRequestSchema = {
+    courseId: CreateAccessGrantRequestSchemaCourseId;
     endpointIds: Array<CreateAccessGrantRequestSchemaEndpointId>;
     environmentId: CreateAccessGrantRequestSchemaEnvironmentId;
     environmentRevision: CreateAccessGrantRequestSchemaRevision;
-    expiresAt: CreateAccessGrantRequestSchemaUtcTimestamp;
+    expiresAt?: CreateAccessGrantRequestSchemaUtcTimestamp | null;
 };
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type CreateAccessGrantRequestSchemaCourseId = string;
 
 /**
  * Strongly typed UUIDv7 identifier for `EndpointId`.
@@ -2204,7 +2210,7 @@ export type AccessGrantSnapshot = {
 /**
  * AccessGrant lifecycle.
  */
-export type EnvironmentAccessGrantPageSchemaAccessGrantState = 'requested' | 'active' | 'expired' | 'revoked';
+export type EnvironmentAccessGrantPageSchemaAccessGrantState = 'requested' | 'active' | 'denied' | 'expired' | 'revoked';
 
 /**
  * Safe authorization result suitable for a console timeline.
@@ -2284,7 +2290,7 @@ export type EnvironmentManagementEventSchemaAccessGrantId = string;
 /**
  * AccessGrant lifecycle.
  */
-export type EnvironmentManagementEventSchemaAccessGrantState = 'requested' | 'active' | 'expired' | 'revoked';
+export type EnvironmentManagementEventSchemaAccessGrantState = 'requested' | 'active' | 'denied' | 'expired' | 'revoked';
 
 /**
  * Strongly typed UUIDv7 identifier for `CourseId`.
@@ -4043,6 +4049,24 @@ export type UploadSessionId = string;
 export type ProblemPackageUploadSessionSchemaUtcTimestamp = string;
 
 /**
+ * RenewAccessGrantRequest
+ */
+export type RenewAccessGrantRequestSchema = {
+    expiresAt: RenewAccessGrantRequestSchemaUtcTimestamp;
+    grantId: RenewAccessGrantRequestSchemaAccessGrantId;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `AccessGrantId`.
+ */
+export type RenewAccessGrantRequestSchemaAccessGrantId = string;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type RenewAccessGrantRequestSchemaUtcTimestamp = string;
+
+/**
  * RevokeAccessGrantRequest
  */
 export type RevokeAccessGrantRequestSchema = {
@@ -4303,6 +4327,77 @@ export type GetAccessGrantResponses = {
 };
 
 export type GetAccessGrantResponse = GetAccessGrantResponses[keyof GetAccessGrantResponses];
+
+export type RenewAccessGrantData = {
+    body: RenewAccessGrantRequestSchema;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+    };
+    path: {
+        grantId: string;
+    };
+    query?: never;
+    url: '/api/v1/access-grants/{grantId}/renew';
+};
+
+export type RenewAccessGrantErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type RenewAccessGrantError = RenewAccessGrantErrors[keyof RenewAccessGrantErrors];
+
+export type RenewAccessGrantResponses = {
+    /**
+     * Successful response
+     */
+    200: AccessGrantSchema;
+};
+
+export type RenewAccessGrantResponse = RenewAccessGrantResponses[keyof RenewAccessGrantResponses];
 
 export type RevokeAccessGrantData = {
     body: RevokeAccessGrantRequestSchema;
@@ -5903,7 +5998,7 @@ export type ListEnvironmentAccessGrantsData = {
         environmentId: string;
     };
     query?: {
-        state?: 'requested' | 'active' | 'expired' | 'revoked';
+        state?: 'requested' | 'active' | 'denied' | 'expired' | 'revoked';
         endpointId?: string;
         includeTerminal?: boolean;
         cursor?: string;
