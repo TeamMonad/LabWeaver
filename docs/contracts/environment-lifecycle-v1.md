@@ -126,7 +126,7 @@ credential contents are never logged.
 | `LABWEAVER_NATS_CREDENTIALS_PATH` | NATS credentials file mounted from a Secret. |
 | `LABWEAVER_ENVIRONMENT_COMMAND_STREAM` / `LABWEAVER_ENVIRONMENT_COMMAND_CONSUMER` | Existing deployment-owned COMMANDS stream and durable consumer. |
 | `LABWEAVER_ENVIRONMENT_COMMAND_QUARANTINE_SUBJECT` | Private controlled quarantine subject; terminal invalid deliveries are acknowledged only after sanitized identity/hash evidence is persisted there. |
-| `LABWEAVER_ENVIRONMENT_RELEASE_STREAM` / `LABWEAVER_ENVIRONMENT_RELEASE_CONSUMER` | Existing deployment-owned stream and durable consumer for `labweaver.control.environment_template_release.published.v2`. |
+| `LABWEAVER_ENVIRONMENT_RELEASE_STREAM` / `LABWEAVER_ENVIRONMENT_RELEASE_CONSUMER` | Existing deployment-owned stream and durable consumer configured with exact multi-subject filters for release published v2 and withdrawn v1. |
 | `LABWEAVER_ENVIRONMENT_RELEASE_QUARANTINE_SUBJECT` | Private controlled quarantine subject for invalid v2 release projections. |
 | `LABWEAVER_RESOURCE_LEASE_VERIFICATION_SUBJECT` | Exact Resource-owned versioned request/reply subject used to verify Work Lease state and scope before command acceptance. |
 | `LABWEAVER_ENVIRONMENT_PROVIDER_BINDINGS_PATH` | Reviewed JSON array of exact `{ "binding", "subject" }` provider mappings; empty, duplicate or wildcard mappings fail startup. |
@@ -149,16 +149,20 @@ non-secret routing configuration. The formal Container Provider uses:
     "gatewayNamespace": "access-system",
     "gatewayName": "protected-gateway",
     "gatewaySection": "protected-https",
-    "imagePullSecretName": "harbor-course-pull"
+    "imagePullSecretName": "harbor-course-pull",
+    "activePolicyRevision": 1,
+    "activeTrustRevision": 1,
+    "activeTrustBundleSha256": "d58414fc98a5de1ad8c269290835b407ff258b3f567dab3399fbc2911454a981"
   }
 ]
 ```
 
 The complete example is `deploy/config/environment-providers.json.example`.
 Omitting `providerKind` selects the existing remote provider; remote entries
-must not contain Gateway or image-pull fields. Container entries require every
-Gateway field and the exact same-namespace Harbor pull Secret name, and use the
-immutable release projection described in
+must not contain Gateway, image-pull or trust-policy fields. Container entries
+require every Gateway field, the exact same-namespace Harbor pull Secret name,
+and the active policy revision, trust revision and trust-bundle SHA-256. They use
+the immutable publication plus append-only withdrawal projection described in
 `docs/contracts/container-supply-chain-v2.md`.
 
 ## Desired and observed state

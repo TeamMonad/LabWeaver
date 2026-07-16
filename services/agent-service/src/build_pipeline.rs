@@ -19,11 +19,105 @@ use contracts::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
+use uuid::Uuid;
+
+pub const BUILD_EXECUTOR_PROTOCOL_VERSION: u8 = 2;
 
 /// Immutable identity shared by every provider stage and cleanup attempt.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct BuildIdentity(pub Sha256Digest);
+
+/// Monotonic database lease identity that fences every remote build side effect.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BuildExecutionFence {
+    pub generation: u32,
+    pub lease_token: Uuid,
+    pub deadline_at: UtcTimestamp,
+}
+
+impl BuildExecutionFence {
+    pub fn new(
+        generation: u32,
+        lease_token: Uuid,
+        deadline_at: UtcTimestamp,
+    ) -> Result<Self, BuildPipelineError> {
+        if generation == 0 {
+            return Err(BuildPipelineError::new(
+                BuildFailureCode::ConfigurationInvalid,
+                false,
+                true,
+            ));
+        }
+        Ok(Self {
+            generation,
+            lease_token,
+            deadline_at,
+        })
+    }
+
+    fn request_context(
+        self,
+        build_request_id: BuildRequestId,
+        stage: BuildProviderStage,
+    ) -> BuildProviderRequestContext {
+        let request_identity = format!(
+            "{}\0{}\0{}\0{}\0{}",
+            BUILD_EXECUTOR_PROTOCOL_VERSION,
+            build_request_id,
+            self.generation,
+            self.lease_token,
+            stage.as_str()
+        );
+        BuildProviderRequestContext {
+            protocol_version: BUILD_EXECUTOR_PROTOCOL_VERSION,
+            build_request_id,
+            fence_generation: self.generation,
+            lease_token: self.lease_token,
+            stage,
+            stage_request_id: Sha256Digest::of_bytes(request_identity.as_bytes()),
+            deadline_at: self.deadline_at,
+        }
+    }
+}
+
+/// Stable build-executor stage vocabulary used for fencing and tombstones.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildProviderStage {
+    EnsurePrivateProject,
+    Build,
+    Scan,
+    Sign,
+    Publish,
+    Cleanup,
+}
+
+impl BuildProviderStage {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::EnsurePrivateProject => "ensure_private_project",
+            Self::Build => "build",
+            Self::Scan => "scan",
+            Self::Sign => "sign",
+            Self::Publish => "publish",
+            Self::Cleanup => "cleanup",
+        }
+    }
+}
+
+/// Exact operation identity the executor must persist before producing a side effect.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BuildProviderRequestContext {
+    pub protocol_version: u8,
+    pub build_request_id: BuildRequestId,
+    pub fence_generation: u32,
+    pub lease_token: Uuid,
+    pub stage: BuildProviderStage,
+    pub stage_request_id: Sha256Digest,
+    pub deadline_at: UtcTimestamp,
+}
 
 /// Non-secret policy bindings frozen into one build worker deployment.
 #[derive(Clone, Debug)]
@@ -148,33 +242,39 @@ pub trait BuildSupplyChainProvider: Send + Sync {
 
     async fn ensure_private_project(
         &self,
+        context: &BuildProviderRequestContext,
         command: &AgentBuildRequestedV2,
         identity: BuildIdentity,
     ) -> Result<PrivateRegistryProject, BuildProviderFailure>;
 
     async fn build_candidate(
         &self,
+        context: &BuildProviderRequestContext,
         command: &AgentBuildRequestedV2,
         identity: BuildIdentity,
     ) -> Result<BuiltCandidate, BuildProviderFailure>;
 
     async fn scan_candidate(
         &self,
+        context: &BuildProviderRequestContext,
         candidate: &BuiltCandidate,
     ) -> Result<ScanEvidence, BuildProviderFailure>;
 
     async fn sign_and_verify(
         &self,
+        context: &BuildProviderRequestContext,
         candidate: &BuiltCandidate,
     ) -> Result<SigstoreEvidence, BuildProviderFailure>;
 
     async fn publish_immutable(
         &self,
+        context: &BuildProviderRequestContext,
         candidate: &BuiltCandidate,
     ) -> Result<PublishedImage, BuildProviderFailure>;
 
     async fn cleanup_candidate(
         &self,
+        context: &BuildProviderRequestContext,
         build_request_id: BuildRequestId,
         identity: BuildIdentity,
     ) -> Result<(), BuildProviderFailure>;
@@ -245,6 +345,7 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
         &self,
         command: &AgentBuildRequestedV2,
         started_at: UtcTimestamp,
+        fence: BuildExecutionFence,
         cancellation: &BuildCancellation,
     ) -> Result<BuildPipelineOutput, BuildPipelineError> {
         command
@@ -259,9 +360,18 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
         }
         let identity = BuildIdentity(command.command_sha256);
         let execution_timeout = Duration::from_millis(command.request.max_duration_milliseconds);
+        if fence.deadline_at
+            != add_milliseconds(started_at, command.request.max_duration_milliseconds)?
+        {
+            return Err(BuildPipelineError::new(
+                BuildFailureCode::ConfigurationInvalid,
+                false,
+                true,
+            ));
+        }
         match tokio::time::timeout(
             execution_timeout,
-            self.execute_inner(command, started_at, cancellation, identity),
+            self.execute_inner(command, started_at, fence, cancellation, identity),
         )
         .await
         {
@@ -270,6 +380,7 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
                 .cleanup(
                     command.request.id,
                     identity,
+                    fence,
                     BuildPipelineError::new(BuildFailureCode::TimedOut, true, true),
                 )
                 .await),
@@ -284,22 +395,34 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
         &self,
         command: &AgentBuildRequestedV2,
         started_at: UtcTimestamp,
+        fence: BuildExecutionFence,
         cancellation: &BuildCancellation,
         identity: BuildIdentity,
     ) -> Result<BuildPipelineOutput, BuildPipelineError> {
+        let project_context =
+            fence.request_context(command.request.id, BuildProviderStage::EnsurePrivateProject);
         let project = self
             .stage(
                 cancellation,
-                self.provider.ensure_private_project(command, identity),
+                self.provider
+                    .ensure_private_project(&project_context, command, identity),
             )
             .await;
         let project = match project {
             Ok(project) => project,
-            Err(error) => return Err(self.cleanup(command.request.id, identity, error).await),
+            Err(error) => {
+                return Err(self
+                    .cleanup(command.request.id, identity, fence, error)
+                    .await);
+            }
         };
         let expected_repository_prefix = match expected_course_repository_prefix(command) {
             Ok(prefix) => prefix,
-            Err(error) => return Err(self.cleanup(command.request.id, identity, error).await),
+            Err(error) => {
+                return Err(self
+                    .cleanup(command.request.id, identity, fence, error)
+                    .await);
+            }
         };
         if project.build_request_id != command.request.id
             || project.build_identity != identity
@@ -316,19 +439,26 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
                 .cleanup(
                     command.request.id,
                     identity,
+                    fence,
                     BuildPipelineError::new(BuildFailureCode::RegistryProjectInvalid, false, true),
                 )
                 .await);
         }
+        let build_context = fence.request_context(command.request.id, BuildProviderStage::Build);
         let candidate = match self
             .stage(
                 cancellation,
-                self.provider.build_candidate(command, identity),
+                self.provider
+                    .build_candidate(&build_context, command, identity),
             )
             .await
         {
             Ok(candidate) => candidate,
-            Err(error) => return Err(self.cleanup(command.request.id, identity, error).await),
+            Err(error) => {
+                return Err(self
+                    .cleanup(command.request.id, identity, fence, error)
+                    .await);
+            }
         };
         if candidate.build_request_id != command.request.id
             || candidate.build_identity != identity
@@ -341,16 +471,25 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
                 .cleanup(
                     command.request.id,
                     identity,
+                    fence,
                     BuildPipelineError::new(BuildFailureCode::BuildIdentityMismatch, false, true),
                 )
                 .await);
         }
+        let scan_context = fence.request_context(command.request.id, BuildProviderStage::Scan);
         let scan = match self
-            .stage(cancellation, self.provider.scan_candidate(&candidate))
+            .stage(
+                cancellation,
+                self.provider.scan_candidate(&scan_context, &candidate),
+            )
             .await
         {
             Ok(scan) => scan,
-            Err(error) => return Err(self.cleanup(command.request.id, identity, error).await),
+            Err(error) => {
+                return Err(self
+                    .cleanup(command.request.id, identity, fence, error)
+                    .await);
+            }
         };
         if scan.build_identity != identity
             || scan.digest != candidate.digest
@@ -362,6 +501,7 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
                 .cleanup(
                     command.request.id,
                     identity,
+                    fence,
                     BuildPipelineError::new(BuildFailureCode::ScanIdentityMismatch, false, true),
                 )
                 .await);
@@ -371,20 +511,35 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
                 .cleanup(
                     command.request.id,
                     identity,
+                    fence,
                     BuildPipelineError::new(BuildFailureCode::CriticalVulnerability, false, true),
                 )
                 .await);
         }
+        let sign_context = fence.request_context(command.request.id, BuildProviderStage::Sign);
         let signature = match self
-            .stage(cancellation, self.provider.sign_and_verify(&candidate))
+            .stage(
+                cancellation,
+                self.provider.sign_and_verify(&sign_context, &candidate),
+            )
             .await
         {
             Ok(signature) => signature,
-            Err(error) => return Err(self.cleanup(command.request.id, identity, error).await),
+            Err(error) => {
+                return Err(self
+                    .cleanup(command.request.id, identity, fence, error)
+                    .await);
+            }
         };
         if signature.trust_bundle_sha256 != self.policy.trust_bundle_sha256
             || signature.fulcio_issuer != self.policy.expected_fulcio_issuer
             || signature.certificate_subject != self.policy.expected_certificate_subject
+            || signature.subject_digest
+                != validate_digest(&candidate.digest).map_err(|_| {
+                    BuildPipelineError::new(BuildFailureCode::BuildIdentityMismatch, false, true)
+                })?
+            || signature.certificate_sha256 == Sha256Digest::of_bytes(&[])
+            || signature.signature_sha256 == Sha256Digest::of_bytes(&[])
             || signature.rekor_log_id.trim().is_empty()
             || signature.ct_log_id.trim().is_empty()
             || signature.rekor_inclusion_proof_sha256 == Sha256Digest::of_bytes(&[])
@@ -399,16 +554,27 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
                 .cleanup(
                     command.request.id,
                     identity,
+                    fence,
                     BuildPipelineError::new(BuildFailureCode::SignatureInvalid, false, true),
                 )
                 .await);
         }
+        let publish_context =
+            fence.request_context(command.request.id, BuildProviderStage::Publish);
         let published = match self
-            .stage(cancellation, self.provider.publish_immutable(&candidate))
+            .stage(
+                cancellation,
+                self.provider
+                    .publish_immutable(&publish_context, &candidate),
+            )
             .await
         {
             Ok(published) => published,
-            Err(error) => return Err(self.cleanup(command.request.id, identity, error).await),
+            Err(error) => {
+                return Err(self
+                    .cleanup(command.request.id, identity, fence, error)
+                    .await);
+            }
         };
         if published.build_identity != identity
             || published.digest != candidate.digest
@@ -419,6 +585,7 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
                 .cleanup(
                     command.request.id,
                     identity,
+                    fence,
                     BuildPipelineError::new(
                         BuildFailureCode::PublicationIdentityMismatch,
                         false,
@@ -479,7 +646,9 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
         })();
         match output {
             Ok(output) => Ok(output),
-            Err(error) => Err(self.cleanup(command.request.id, identity, error).await),
+            Err(error) => Err(self
+                .cleanup(command.request.id, identity, fence, error)
+                .await),
         }
     }
 
@@ -519,11 +688,14 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
         &self,
         build_request_id: BuildRequestId,
         identity: BuildIdentity,
+        fence: BuildExecutionFence,
         mut original: BuildPipelineError,
     ) -> BuildPipelineError {
+        let context = fence.request_context(build_request_id, BuildProviderStage::Cleanup);
         match tokio::time::timeout(
             self.policy.stage_timeout,
-            self.provider.cleanup_candidate(build_request_id, identity),
+            self.provider
+                .cleanup_candidate(&context, build_request_id, identity),
         )
         .await
         {

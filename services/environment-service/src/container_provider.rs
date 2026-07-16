@@ -10,9 +10,14 @@ use contracts::authoring::{
 use contracts::environment::{
     EndpointHealth, EnvironmentEndpoint, EnvironmentInstance, ObservedEnvironmentState,
 };
-use contracts::events::{CloudEvent, EVENT_CONTRACTS, ReleasePublishedV2, subjects};
+use contracts::events::{
+    CloudEvent, EVENT_CONTRACTS, ReleasePublishedV2, ReleaseWithdrawn, subjects,
+};
 use contracts::supply_chain::ImageArtifact;
-use contracts::{ArtifactRef, EndpointId, ReleaseId, Revision, Sha256Digest, UtcTimestamp};
+use contracts::{
+    ArtifactRef, EndpointId, EnvironmentId, OperationId, ReleaseId, Revision, Sha256Digest,
+    UtcTimestamp,
+};
 use persistence_sqlx::{Domain, InboxDecision, InboxStore};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -21,6 +26,8 @@ use sqlx::{PgPool, Row};
 use crate::{
     EnvironmentProvider, ProviderFailure, ProviderFailureCode, ProviderObservation, ReconcileAction,
 };
+
+pub const CONTAINER_BACKEND_PROTOCOL_VERSION: u8 = 2;
 
 /// One server-side-apply document. The name is deterministic and never user-controlled.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -51,33 +58,82 @@ pub struct ContainerApplyObservation {
     pub observed_at: UtcTimestamp,
 }
 
+/// Durable Environment operation identity carried across the remote Kubernetes boundary.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContainerBackendFence {
+    pub protocol_version: u8,
+    pub environment_id: EnvironmentId,
+    pub operation_id: OperationId,
+    pub provider_step: u32,
+    pub operation_generation: u64,
+    pub attempt: u32,
+    pub action: ReconcileAction,
+    pub request_id: Sha256Digest,
+    pub deadline_at: UtcTimestamp,
+}
+
+impl ContainerBackendFence {
+    fn for_action(
+        instance: &EnvironmentInstance,
+        action: ReconcileAction,
+    ) -> Result<Self, ProviderFailure> {
+        let request_id = Sha256Digest::of_canonical(&serde_json::json!({
+            "protocolVersion": CONTAINER_BACKEND_PROTOCOL_VERSION,
+            "environmentId": instance.id,
+            "operationId": instance.operation.id,
+            "providerStep": instance.operation.provider_step,
+            "operationGeneration": instance.generation,
+            "attempt": instance.operation.attempt,
+            "action": action,
+        }))
+        .map_err(|_| invalid_observation())?;
+        Ok(Self {
+            protocol_version: CONTAINER_BACKEND_PROTOCOL_VERSION,
+            environment_id: instance.id,
+            operation_id: instance.operation.id,
+            provider_step: instance.operation.provider_step,
+            operation_generation: instance.generation,
+            attempt: instance.operation.attempt,
+            action,
+            request_id,
+            deadline_at: instance.operation.deadline_at,
+        })
+    }
+}
+
 /// Exact backend seam for Kubernetes server-side apply, observation, and cleanup.
 #[async_trait]
 pub trait ContainerProviderBackend: Send + Sync {
     async fn apply(
         &self,
+        fence: &ContainerBackendFence,
         plan: &ContainerResourcePlan,
     ) -> Result<ContainerApplyObservation, ProviderFailure>;
 
     async fn observe(
         &self,
+        fence: &ContainerBackendFence,
         plan: &ContainerResourcePlan,
     ) -> Result<ContainerApplyObservation, ProviderFailure>;
 
     async fn scale(
         &self,
+        fence: &ContainerBackendFence,
         plan: &ContainerResourcePlan,
         replicas: u32,
     ) -> Result<ContainerApplyObservation, ProviderFailure>;
 
     async fn restart(
         &self,
+        fence: &ContainerBackendFence,
         plan: &ContainerResourcePlan,
         operation_revision: Revision,
     ) -> Result<ContainerApplyObservation, ProviderFailure>;
 
     async fn delete_namespace(
         &self,
+        fence: &ContainerBackendFence,
         plan: &ContainerResourcePlan,
     ) -> Result<ArtifactRef, ProviderFailure>;
 }
@@ -101,9 +157,17 @@ impl NatsContainerProviderBackend {
 
     async fn request(
         &self,
+        fence: &ContainerBackendFence,
         request: ContainerBackendRequest<'_>,
     ) -> Result<ContainerBackendResponse, ProviderFailure> {
-        let payload = serde_json::to_vec(&request).map_err(|_| invalid_observation())?;
+        if !request.matches_action(fence.action) {
+            return Err(invalid_observation());
+        }
+        let payload = serde_json::to_vec(&ContainerBackendRequestEnvelope {
+            fence: *fence,
+            request,
+        })
+        .map_err(|_| invalid_observation())?;
         let message = self
             .client
             .request(self.subject.clone(), payload.into())
@@ -112,27 +176,46 @@ impl NatsContainerProviderBackend {
         if message.payload.len() > 1024 * 1024 {
             return Err(invalid_observation());
         }
-        serde_json::from_slice(&message.payload).map_err(|_| invalid_observation())
+        let response: ContainerBackendResponseEnvelope =
+            serde_json::from_slice(&message.payload).map_err(|_| invalid_observation())?;
+        if response.protocol_version != fence.protocol_version
+            || response.environment_id != fence.environment_id
+            || response.operation_id != fence.operation_id
+            || response.provider_step != fence.provider_step
+            || response.operation_generation != fence.operation_generation
+            || response.attempt != fence.attempt
+            || response.request_id != fence.request_id
+            || response.action != fence.action
+        {
+            return Err(invalid_observation());
+        }
+        Ok(response.response)
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ContainerBackendRequestEnvelope<'a> {
+    #[serde(flatten)]
+    fence: ContainerBackendFence,
+    request: ContainerBackendRequest<'a>,
 }
 
 #[async_trait]
 impl ContainerProviderBackend for NatsContainerProviderBackend {
     async fn apply(
         &self,
+        fence: &ContainerBackendFence,
         plan: &ContainerResourcePlan,
     ) -> Result<ContainerApplyObservation, ProviderFailure> {
         match self
-            .request(ContainerBackendRequest::Apply { plan })
+            .request(fence, ContainerBackendRequest::Apply { plan })
             .await?
         {
             ContainerBackendResponse::Observed {
-                environment_id,
                 plan_sha256,
                 observation,
-            } if environment_id == plan.environment_id && plan_sha256 == plan.plan_sha256 => {
-                Ok(observation)
-            }
+            } if plan_sha256 == plan.plan_sha256 => Ok(observation),
             ContainerBackendResponse::Failed { failure } => Err(failure),
             _ => Err(invalid_observation()),
         }
@@ -140,19 +223,17 @@ impl ContainerProviderBackend for NatsContainerProviderBackend {
 
     async fn observe(
         &self,
+        fence: &ContainerBackendFence,
         plan: &ContainerResourcePlan,
     ) -> Result<ContainerApplyObservation, ProviderFailure> {
         match self
-            .request(ContainerBackendRequest::Observe { plan })
+            .request(fence, ContainerBackendRequest::Observe { plan })
             .await?
         {
             ContainerBackendResponse::Observed {
-                environment_id,
                 plan_sha256,
                 observation,
-            } if environment_id == plan.environment_id && plan_sha256 == plan.plan_sha256 => {
-                Ok(observation)
-            }
+            } if plan_sha256 == plan.plan_sha256 => Ok(observation),
             ContainerBackendResponse::Failed { failure } => Err(failure),
             _ => Err(invalid_observation()),
         }
@@ -160,20 +241,18 @@ impl ContainerProviderBackend for NatsContainerProviderBackend {
 
     async fn scale(
         &self,
+        fence: &ContainerBackendFence,
         plan: &ContainerResourcePlan,
         replicas: u32,
     ) -> Result<ContainerApplyObservation, ProviderFailure> {
         match self
-            .request(ContainerBackendRequest::Scale { plan, replicas })
+            .request(fence, ContainerBackendRequest::Scale { plan, replicas })
             .await?
         {
             ContainerBackendResponse::Observed {
-                environment_id,
                 plan_sha256,
                 observation,
-            } if environment_id == plan.environment_id && plan_sha256 == plan.plan_sha256 => {
-                Ok(observation)
-            }
+            } if plan_sha256 == plan.plan_sha256 => Ok(observation),
             ContainerBackendResponse::Failed { failure } => Err(failure),
             _ => Err(invalid_observation()),
         }
@@ -181,23 +260,24 @@ impl ContainerProviderBackend for NatsContainerProviderBackend {
 
     async fn restart(
         &self,
+        fence: &ContainerBackendFence,
         plan: &ContainerResourcePlan,
         operation_revision: Revision,
     ) -> Result<ContainerApplyObservation, ProviderFailure> {
         match self
-            .request(ContainerBackendRequest::Restart {
-                plan,
-                operation_revision,
-            })
+            .request(
+                fence,
+                ContainerBackendRequest::Restart {
+                    plan,
+                    operation_revision,
+                },
+            )
             .await?
         {
             ContainerBackendResponse::Observed {
-                environment_id,
                 plan_sha256,
                 observation,
-            } if environment_id == plan.environment_id && plan_sha256 == plan.plan_sha256 => {
-                Ok(observation)
-            }
+            } if plan_sha256 == plan.plan_sha256 => Ok(observation),
             ContainerBackendResponse::Failed { failure } => Err(failure),
             _ => Err(invalid_observation()),
         }
@@ -205,20 +285,17 @@ impl ContainerProviderBackend for NatsContainerProviderBackend {
 
     async fn delete_namespace(
         &self,
+        fence: &ContainerBackendFence,
         plan: &ContainerResourcePlan,
     ) -> Result<ArtifactRef, ProviderFailure> {
         match self
-            .request(ContainerBackendRequest::DeleteNamespace { plan })
+            .request(fence, ContainerBackendRequest::DeleteNamespace { plan })
             .await?
         {
             ContainerBackendResponse::Deleted {
-                environment_id,
                 plan_sha256,
                 cleanup_evidence,
-            } if environment_id == plan.environment_id
-                && plan_sha256 == plan.plan_sha256
-                && valid_artifact_ref(&cleanup_evidence) =>
-            {
+            } if plan_sha256 == plan.plan_sha256 && valid_artifact_ref(&cleanup_evidence) => {
                 Ok(cleanup_evidence)
             }
             ContainerBackendResponse::Failed { failure } => Err(failure),
@@ -232,7 +309,7 @@ impl ContainerProviderBackend for NatsContainerProviderBackend {
 
 #[derive(Serialize)]
 #[serde(
-    tag = "action",
+    tag = "backendAction",
     rename_all = "snake_case",
     rename_all_fields = "camelCase"
 )]
@@ -256,6 +333,36 @@ enum ContainerBackendRequest<'a> {
     },
 }
 
+impl ContainerBackendRequest<'_> {
+    const fn matches_action(&self, action: ReconcileAction) -> bool {
+        matches!(
+            (self, action),
+            (
+                Self::Apply { .. },
+                ReconcileAction::Provision | ReconcileAction::Reset
+            ) | (Self::Observe { .. }, ReconcileAction::Observe)
+                | (Self::Scale { replicas: 0, .. }, ReconcileAction::Stop)
+                | (Self::Scale { .. }, ReconcileAction::Start)
+                | (Self::Restart { .. }, ReconcileAction::Restart)
+                | (Self::DeleteNamespace { .. }, ReconcileAction::Cleanup)
+        )
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ContainerBackendResponseEnvelope {
+    protocol_version: u8,
+    environment_id: EnvironmentId,
+    operation_id: OperationId,
+    provider_step: u32,
+    operation_generation: u64,
+    attempt: u32,
+    request_id: Sha256Digest,
+    action: ReconcileAction,
+    response: ContainerBackendResponse,
+}
+
 #[derive(Deserialize)]
 #[serde(
     tag = "status",
@@ -265,12 +372,10 @@ enum ContainerBackendRequest<'a> {
 )]
 enum ContainerBackendResponse {
     Observed {
-        environment_id: contracts::EnvironmentId,
         plan_sha256: Sha256Digest,
         observation: ContainerApplyObservation,
     },
     Deleted {
-        environment_id: contracts::EnvironmentId,
         plan_sha256: Sha256Digest,
         cleanup_evidence: ArtifactRef,
     },
@@ -286,7 +391,75 @@ pub trait ContainerReleaseResolver: Send + Sync {
         &self,
         release_id: ReleaseId,
         release_version: u64,
-    ) -> Result<ReleasePublishedV2, ReleaseProjectionError>;
+    ) -> Result<ResolvedContainerRelease, ReleaseProjectionError>;
+}
+
+/// Release projection paired with Environment's authority clock and append-only withdrawal state.
+#[derive(Clone, Debug)]
+pub struct ResolvedContainerRelease {
+    pub projection: ReleasePublishedV2,
+    pub authority_now: UtcTimestamp,
+    pub withdrawn_at: Option<UtcTimestamp>,
+}
+
+/// Deployment authority for the currently accepted scan policy and private trust bundle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContainerReleasePolicy {
+    pub policy_revision: Revision,
+    pub trust_revision: Revision,
+    pub trust_bundle_sha256: Sha256Digest,
+}
+
+impl ContainerReleasePolicy {
+    pub fn new(
+        policy_revision: Revision,
+        trust_revision: Revision,
+        trust_bundle_sha256: Sha256Digest,
+    ) -> Result<Self, ReleaseProjectionError> {
+        if trust_bundle_sha256 == Sha256Digest::of_bytes(&[]) {
+            return Err(ReleaseProjectionError::ConfigurationInvalid);
+        }
+        Ok(Self {
+            policy_revision,
+            trust_revision,
+            trust_bundle_sha256,
+        })
+    }
+}
+
+/// Reviewed non-secret configuration for one exact Container Provider binding.
+#[derive(Clone, Debug)]
+pub struct ContainerProviderConfiguration {
+    pub release_policy: ContainerReleasePolicy,
+    pub gateway_namespace: String,
+    pub gateway_name: String,
+    pub gateway_section: String,
+    pub image_pull_secret_name: String,
+}
+
+impl ContainerProviderConfiguration {
+    pub fn new(
+        release_policy: ContainerReleasePolicy,
+        gateway_namespace: String,
+        gateway_name: String,
+        gateway_section: String,
+        image_pull_secret_name: String,
+    ) -> Result<Self, ReleaseProjectionError> {
+        if !valid_dns_label(&gateway_namespace)
+            || !valid_dns_label(&gateway_name)
+            || !valid_dns_label(&gateway_section)
+            || !valid_dns_label(&image_pull_secret_name)
+        {
+            return Err(ReleaseProjectionError::ConfigurationInvalid);
+        }
+        Ok(Self {
+            release_policy,
+            gateway_namespace,
+            gateway_name,
+            gateway_section,
+            image_pull_secret_name,
+        })
+    }
 }
 
 /// Durable projection result for a release `CloudEvent`.
@@ -331,6 +504,7 @@ impl PgReleaseProjectionStore {
             .map_err(|_| ReleaseProjectionError::ContractInvalid)?;
         if event.subject != subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED_V2
             || event.course_id != event.data.release.course_id
+            || event.aggregate_sequence.0 != 1
             || event.aggregate_revision
                 != Revision::new(event.data.release.version)
                     .map_err(|_| ReleaseProjectionError::ContractInvalid)?
@@ -359,8 +533,8 @@ impl PgReleaseProjectionStore {
                     .map_err(|_| ReleaseProjectionError::ContractInvalid)?;
                 sqlx::query(
                     "INSERT INTO environment.release_projections \
-                     (release_id,course_id,release_version,provider_binding,projection_sha256,contract,projected_event_id) \
-                     VALUES ($1,$2,$3,$4,$5,$6,$7)",
+                     (release_id,course_id,release_version,provider_binding,projection_sha256,contract,projected_event_id,aggregate_sequence) \
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,1)",
                 )
                 .bind(event.data.release.id.as_uuid())
                 .bind(event.course_id.as_uuid())
@@ -390,6 +564,81 @@ impl PgReleaseProjectionStore {
         transaction.commit().await?;
         Ok(outcome)
     }
+
+    pub async fn accept_withdrawal(
+        &self,
+        consumer: &str,
+        event: &CloudEvent<ReleaseWithdrawn>,
+    ) -> Result<ReleaseProjectionDecision, ReleaseProjectionError> {
+        let contract = EVENT_CONTRACTS
+            .iter()
+            .copied()
+            .find(|contract| contract.subject == subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN)
+            .ok_or(ReleaseProjectionError::ContractInvalid)?;
+        event
+            .validate(contract)
+            .map_err(|_| ReleaseProjectionError::ContractInvalid)?;
+        if event.subject != subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN
+            || event.aggregate_sequence.0 != 2
+            || event.aggregate_revision
+                != Revision::new(event.data.version)
+                    .map_err(|_| ReleaseProjectionError::ContractInvalid)?
+            || event.data.reason_code.trim().is_empty()
+            || event.data.withdrawn_at != event.time
+        {
+            return Err(ReleaseProjectionError::IdentityMismatch);
+        }
+        let payload =
+            serde_json::to_value(event).map_err(|_| ReleaseProjectionError::ContractInvalid)?;
+        let payload_sha256 = canonical_hash(&payload)?;
+        let mut transaction = self.pool.begin().await?;
+        let decision = InboxStore::accept(
+            &mut transaction,
+            Domain::Environment,
+            consumer,
+            event.id.as_uuid(),
+            event.data.release_id.as_uuid(),
+            event.aggregate_sequence.0,
+            payload_sha256,
+        )
+        .await
+        .map_err(|_| ReleaseProjectionError::PersistenceFailed)?;
+        let outcome = match decision {
+            InboxDecision::Accepted => {
+                let result = sqlx::query(
+                    "UPDATE environment.release_projections \
+                     SET aggregate_sequence=2,withdrawn_at=$4,withdrawal_reason_code=$5, \
+                         withdrawal_event_id=$6,updated_at=clock_timestamp() \
+                     WHERE release_id=$1 AND course_id=$2 AND release_version=$3 \
+                       AND aggregate_sequence=1 AND withdrawn_at IS NULL",
+                )
+                .bind(event.data.release_id.as_uuid())
+                .bind(event.course_id.as_uuid())
+                .bind(
+                    i64::try_from(event.data.version)
+                        .map_err(|_| ReleaseProjectionError::IdentityMismatch)?,
+                )
+                .bind(event.data.withdrawn_at.get())
+                .bind(&event.data.reason_code)
+                .bind(event.id.as_uuid())
+                .execute(&mut *transaction)
+                .await?;
+                if result.rows_affected() != 1 {
+                    transaction.rollback().await?;
+                    return Err(ReleaseProjectionError::IdentityMismatch);
+                }
+                ReleaseProjectionDecision::Applied
+            }
+            InboxDecision::Duplicate => ReleaseProjectionDecision::Duplicate,
+            InboxDecision::Stale => ReleaseProjectionDecision::Stale,
+            InboxDecision::Gap => {
+                transaction.rollback().await?;
+                return Ok(ReleaseProjectionDecision::Gap);
+            }
+        };
+        transaction.commit().await?;
+        Ok(outcome)
+    }
 }
 
 #[async_trait]
@@ -398,9 +647,11 @@ impl ContainerReleaseResolver for PgReleaseProjectionStore {
         &self,
         release_id: ReleaseId,
         release_version: u64,
-    ) -> Result<ReleasePublishedV2, ReleaseProjectionError> {
+    ) -> Result<ResolvedContainerRelease, ReleaseProjectionError> {
         let row = sqlx::query(
-            "SELECT release_version,contract,projection_sha256 FROM environment.release_projections \
+            "SELECT release_version,contract,projection_sha256,withdrawn_at, \
+                    date_trunc('milliseconds',clock_timestamp()) AS authority_now \
+             FROM environment.release_projections \
              WHERE release_id=$1",
         )
         .bind(release_id.as_uuid())
@@ -423,7 +674,17 @@ impl ContainerReleaseResolver for PgReleaseProjectionStore {
         {
             return Err(ReleaseProjectionError::IdentityMismatch);
         }
-        Ok(projection)
+        let authority_now: time::OffsetDateTime = row.try_get("authority_now")?;
+        let withdrawn_at: Option<time::OffsetDateTime> = row.try_get("withdrawn_at")?;
+        Ok(ResolvedContainerRelease {
+            projection,
+            authority_now: UtcTimestamp::from_utc(authority_now)
+                .map_err(|_| ReleaseProjectionError::ContractInvalid)?,
+            withdrawn_at: withdrawn_at
+                .map(UtcTimestamp::from_utc)
+                .transpose()
+                .map_err(|_| ReleaseProjectionError::ContractInvalid)?,
+        })
     }
 }
 
@@ -432,6 +693,7 @@ pub struct ContainerProvider<B, R> {
     binding: String,
     backend: Arc<B>,
     releases: Arc<R>,
+    release_policy: ContainerReleasePolicy,
     gateway_namespace: String,
     gateway_name: String,
     gateway_section: String,
@@ -447,27 +709,20 @@ where
         binding: String,
         backend: Arc<B>,
         releases: Arc<R>,
-        gateway_namespace: String,
-        gateway_name: String,
-        gateway_section: String,
-        image_pull_secret_name: String,
+        configuration: ContainerProviderConfiguration,
     ) -> Result<Self, ReleaseProjectionError> {
-        if !valid_binding(&binding)
-            || !valid_dns_label(&gateway_namespace)
-            || !valid_dns_label(&gateway_name)
-            || !valid_dns_label(&gateway_section)
-            || !valid_dns_label(&image_pull_secret_name)
-        {
+        if !valid_binding(&binding) {
             return Err(ReleaseProjectionError::ConfigurationInvalid);
         }
         Ok(Self {
             binding,
             backend,
             releases,
-            gateway_namespace,
-            gateway_name,
-            gateway_section,
-            image_pull_secret_name,
+            release_policy: configuration.release_policy,
+            gateway_namespace: configuration.gateway_namespace,
+            gateway_name: configuration.gateway_name,
+            gateway_section: configuration.gateway_section,
+            image_pull_secret_name: configuration.image_pull_secret_name,
         })
     }
 
@@ -478,11 +733,14 @@ where
     pub fn plan(
         &self,
         instance: &EnvironmentInstance,
-        projection: &ReleasePublishedV2,
+        resolved: &ResolvedContainerRelease,
+        action: ReconcileAction,
     ) -> Result<ContainerResourcePlan, ReleaseProjectionError> {
+        let projection = &resolved.projection;
         projection
             .validate()
             .map_err(|_| ReleaseProjectionError::ContractInvalid)?;
+        self.validate_release_use(resolved, action)?;
         if instance.runtime_kind != RuntimeKind::Container
             || instance.release_id != projection.release.id
             || instance.release_version != projection.release.version
@@ -692,6 +950,34 @@ where
         })
     }
 
+    fn validate_release_use(
+        &self,
+        resolved: &ResolvedContainerRelease,
+        action: ReconcileAction,
+    ) -> Result<(), ReleaseProjectionError> {
+        if action == ReconcileAction::Stop {
+            return Ok(());
+        }
+        let release = &resolved.projection.release;
+        if resolved.withdrawn_at.is_some() {
+            return Err(ReleaseProjectionError::Withdrawn);
+        }
+        if resolved.authority_now >= release.image_policy_evaluation.valid_until {
+            return Err(ReleaseProjectionError::EvidenceExpired);
+        }
+        if release.image_policy_evaluation.policy_revision != self.release_policy.policy_revision
+            || release.approval.policy_revision != self.release_policy.policy_revision
+            || release.approval.trust_revision != self.release_policy.trust_revision
+            || release.image_policy_evaluation.trust_bundle_sha256
+                != self.release_policy.trust_bundle_sha256
+            || release.artifact.signature_evidence().trust_bundle_sha256
+                != self.release_policy.trust_bundle_sha256
+        {
+            return Err(ReleaseProjectionError::TrustRevisionMismatch);
+        }
+        Ok(())
+    }
+
     fn cleanup_plan(
         &self,
         instance: &EnvironmentInstance,
@@ -732,13 +1018,14 @@ where
         action: ReconcileAction,
         instance: &EnvironmentInstance,
     ) -> Result<ProviderObservation, ProviderFailure> {
+        let fence = ContainerBackendFence::for_action(instance, action)?;
         if action == ReconcileAction::Cleanup
             && instance.observed_state == ObservedEnvironmentState::Deleting
         {
             let plan = self
                 .cleanup_plan(instance)
                 .map_err(|error| projection_failure(&error))?;
-            let cleanup_evidence = self.backend.delete_namespace(&plan).await?;
+            let cleanup_evidence = self.backend.delete_namespace(&fence, &plan).await?;
             if !valid_artifact_ref(&cleanup_evidence) {
                 return Err(ProviderFailure {
                     code: ProviderFailureCode::CleanupFailed,
@@ -752,13 +1039,13 @@ where
                 operation_complete: true,
             });
         }
-        let projection = self
+        let resolved = self
             .releases
             .resolve(instance.release_id, instance.release_version)
             .await
             .map_err(|error| projection_failure(&error))?;
         let plan = self
-            .plan(instance, &projection)
+            .plan(instance, &resolved, action)
             .map_err(|error| projection_failure(&error))?;
         let no_endpoints = |next_state, operation_complete| ProviderObservation {
             next_state,
@@ -780,26 +1067,29 @@ where
                 ReconcileAction::Provision | ReconcileAction::Reset,
                 ObservedEnvironmentState::Provisioning,
             ) => {
-                let observed = self.backend.apply(&plan).await?;
+                let observed = self.backend.apply(&fence, &plan).await?;
                 ready_observation(instance, observed)
             }
             (ReconcileAction::Observe, _) => {
-                let observed = self.backend.observe(&plan).await?;
+                let observed = self.backend.observe(&fence, &plan).await?;
                 ready_observation(instance, observed)
             }
             (ReconcileAction::Start, ObservedEnvironmentState::Stopped) => {
-                let observed = self.backend.scale(&plan, 1).await?;
+                let observed = self.backend.scale(&fence, &plan, 1).await?;
                 ready_observation(instance, observed)
             }
             (ReconcileAction::Restart, ObservedEnvironmentState::Provisioning) => {
-                let observed = self.backend.restart(&plan, instance.revision).await?;
+                let observed = self
+                    .backend
+                    .restart(&fence, &plan, instance.revision)
+                    .await?;
                 ready_observation(instance, observed)
             }
             (
                 ReconcileAction::Stop,
                 ObservedEnvironmentState::Stopping | ObservedEnvironmentState::Expiring,
             ) => {
-                self.backend.scale(&plan, 0).await?;
+                self.backend.scale(&fence, &plan, 0).await?;
                 Ok(no_endpoints(ObservedEnvironmentState::Stopped, true))
             }
             _ => Err(ProviderFailure {
@@ -891,7 +1181,10 @@ fn projection_failure(error: &ReleaseProjectionError) -> ProviderFailure {
         ReleaseProjectionError::ConfigurationInvalid
         | ReleaseProjectionError::ContractInvalid
         | ReleaseProjectionError::IdentityMismatch
-        | ReleaseProjectionError::SecurityPostureInvalid => ProviderFailure {
+        | ReleaseProjectionError::SecurityPostureInvalid
+        | ReleaseProjectionError::Withdrawn
+        | ReleaseProjectionError::EvidenceExpired
+        | ReleaseProjectionError::TrustRevisionMismatch => ProviderFailure {
             code: ProviderFailureCode::Rejected,
             retryable: false,
         },
@@ -969,6 +1262,12 @@ pub enum ReleaseProjectionError {
     IdentityMismatch,
     #[error("LW_ENVIRONMENT_CONTAINER_SECURITY_POSTURE_INVALID")]
     SecurityPostureInvalid,
+    #[error("LW_ENVIRONMENT_RELEASE_WITHDRAWN")]
+    Withdrawn,
+    #[error("LW_ENVIRONMENT_RELEASE_EVIDENCE_EXPIRED")]
+    EvidenceExpired,
+    #[error("LW_ENVIRONMENT_RELEASE_TRUST_REVISION_MISMATCH")]
+    TrustRevisionMismatch,
     #[error("LW_ENVIRONMENT_RELEASE_PERSISTENCE_FAILED")]
     PersistenceFailed,
     #[error("LW_ENVIRONMENT_RELEASE_DATABASE_FAILED")]

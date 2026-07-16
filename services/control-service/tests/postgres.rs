@@ -583,6 +583,7 @@ fn release_fixture(
         trust_bundle_sha256,
         fulcio_issuer: "https://issuer.invalid".to_owned(),
         certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
+        subject_digest: artifact_sha256,
         certificate_sha256: Sha256Digest::of_bytes(b"certificate"),
         signature_sha256: Sha256Digest::of_bytes(b"signature"),
         rekor_log_id: "rekor-v1".to_owned(),

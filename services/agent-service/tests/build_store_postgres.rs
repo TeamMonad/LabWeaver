@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use agent_service::build_pipeline::{
     BuildIdentity, BuildPipeline, BuildPipelinePolicy, BuildProviderFailure,
-    BuildSupplyChainProvider, BuiltCandidate, PrivateRegistryProject, PublishedImage, ScanEvidence,
+    BuildProviderFailureCode, BuildProviderRequestContext, BuildSupplyChainProvider,
+    BuiltCandidate, PrivateRegistryProject, PublishedImage, ScanEvidence,
 };
 use agent_service::build_store::{
     BuildCommandDecision, BuildWorker, BuildWorkerOutcome, PgBuildStore,
@@ -37,6 +38,7 @@ use testcontainers_modules::postgres::Postgres;
 struct SlowProvider {
     cleanup_called: Arc<AtomicBool>,
     build_delay: Duration,
+    fail_build: bool,
 }
 
 #[async_trait]
@@ -59,6 +61,7 @@ impl BuildSupplyChainProvider for SlowProvider {
 
     async fn ensure_private_project(
         &self,
+        _context: &BuildProviderRequestContext,
         command: &AgentBuildRequestedV2,
         identity: BuildIdentity,
     ) -> Result<PrivateRegistryProject, BuildProviderFailure> {
@@ -74,11 +77,18 @@ impl BuildSupplyChainProvider for SlowProvider {
 
     async fn build_candidate(
         &self,
+        _context: &BuildProviderRequestContext,
         command: &AgentBuildRequestedV2,
         identity: BuildIdentity,
     ) -> Result<BuiltCandidate, BuildProviderFailure> {
         if !self.build_delay.is_zero() {
             tokio::time::sleep(self.build_delay).await;
+        }
+        if self.fail_build {
+            return Err(BuildProviderFailure {
+                code: BuildProviderFailureCode::Unavailable,
+                retryable: true,
+            });
         }
         Ok(BuiltCandidate {
             build_request_id: command.request.id,
@@ -92,6 +102,7 @@ impl BuildSupplyChainProvider for SlowProvider {
 
     async fn scan_candidate(
         &self,
+        _context: &BuildProviderRequestContext,
         candidate: &BuiltCandidate,
     ) -> Result<ScanEvidence, BuildProviderFailure> {
         Ok(ScanEvidence {
@@ -112,12 +123,19 @@ impl BuildSupplyChainProvider for SlowProvider {
 
     async fn sign_and_verify(
         &self,
-        _candidate: &BuiltCandidate,
+        _context: &BuildProviderRequestContext,
+        candidate: &BuiltCandidate,
     ) -> Result<SigstoreEvidence, BuildProviderFailure> {
         Ok(SigstoreEvidence {
             trust_bundle_sha256: Sha256Digest::of_bytes(b"trust-bundle"),
             fulcio_issuer: "https://fulcio.internal".to_owned(),
             certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
+            subject_digest: candidate
+                .digest
+                .strip_prefix("sha256:")
+                .expect("sha256 digest")
+                .parse()
+                .expect("valid digest"),
             certificate_sha256: Sha256Digest::of_bytes(b"certificate"),
             signature_sha256: Sha256Digest::of_bytes(b"signature"),
             rekor_log_id: "rekor-private-v1".to_owned(),
@@ -131,6 +149,7 @@ impl BuildSupplyChainProvider for SlowProvider {
 
     async fn publish_immutable(
         &self,
+        _context: &BuildProviderRequestContext,
         candidate: &BuiltCandidate,
     ) -> Result<PublishedImage, BuildProviderFailure> {
         Ok(PublishedImage {
@@ -142,6 +161,7 @@ impl BuildSupplyChainProvider for SlowProvider {
 
     async fn cleanup_candidate(
         &self,
+        _context: &BuildProviderRequestContext,
         _build_request_id: BuildRequestId,
         _identity: BuildIdentity,
     ) -> Result<(), BuildProviderFailure> {
@@ -186,6 +206,7 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
         SlowProvider {
             cleanup_called: cleanup_called.clone(),
             build_delay: Duration::from_secs(3),
+            fail_build: false,
         },
         policy()?,
     )?;
@@ -249,11 +270,12 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
         BuildCommandDecision::Accepted
     );
     let successful_worker = BuildWorker::new(
-        store,
+        store.clone(),
         BuildPipeline::new(
             SlowProvider {
                 cleanup_called: Arc::new(AtomicBool::new(false)),
                 build_delay: Duration::ZERO,
+                fail_build: false,
             },
             policy()?,
         )?,
@@ -286,6 +308,48 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
         )
     );
     assert_eq!(completed_events, 1);
+
+    let retry_command = build_command()?;
+    assert_eq!(
+        store
+            .accept_command(
+                "agent-build-command-v2",
+                &command_event(retry_command.clone())?,
+            )
+            .await?,
+        BuildCommandDecision::Accepted
+    );
+    let retry_worker = BuildWorker::new(
+        store,
+        BuildPipeline::new(
+            SlowProvider {
+                cleanup_called: Arc::new(AtomicBool::new(false)),
+                build_delay: Duration::from_millis(50),
+                fail_build: true,
+            },
+            policy()?,
+        )?,
+        "build-worker-retry".to_owned(),
+        Duration::from_secs(1),
+        Duration::from_millis(10),
+        2,
+    )?;
+    assert!(matches!(
+        retry_worker.run_once(now()).await?,
+        BuildWorkerOutcome::RetryScheduled { build_request_id, attempt: 1 }
+            if build_request_id == retry_command.request.id
+    ));
+    let (retry_state, retry_is_future): (String, bool) = sqlx::query_as(
+        "SELECT state,next_attempt_at>updated_at FROM agent.build_commands WHERE build_request_id=$1",
+    )
+    .bind(retry_command.request.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(retry_state, "requested");
+    assert!(
+        retry_is_future,
+        "retry must use the post-provider database clock"
+    );
     Ok(())
 }
 

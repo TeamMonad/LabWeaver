@@ -106,6 +106,8 @@
   Trivy policy, Fulcio/SCT/Rekor proof, immutable publication, private pull,
   code-server readiness through only the protected Gateway, and
   timeout/cancel/retry/finalizer cleanup with no reachable residual resource.
+  Fault injection must also prove executor-side highest-generation rejection,
+  cleanup/delete tombstones, delayed completion and out-of-order Start/Stop/Delete.
 - Impact: Issue #52 does not meet its E3 acceptance criteria and must not be
   marked done or presented as a real Container runtime deployment.
 

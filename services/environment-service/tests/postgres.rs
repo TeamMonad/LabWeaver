@@ -19,17 +19,18 @@ use contracts::environment::{
     EndpointHealth, EndpointProtocol, EnvironmentEndpoint, EnvironmentOperationKind,
     ObservedEnvironmentState, OperationState,
 };
-use contracts::events::CloudEvent;
+use contracts::events::{CloudEvent, EVENT_CONTRACTS, ReleaseWithdrawn, SPEC_VERSION, subjects};
 use contracts::{
-    ActorId, ArtifactId, ArtifactRef, EndpointId, EnvironmentId, EventId, OperationId, Sequence,
-    Sha256Digest, UtcTimestamp,
+    ActorId, ArtifactId, ArtifactRef, CourseId, EndpointId, EnvironmentId, EventId, OperationId,
+    ReleaseId, Revision, Sequence, Sha256Digest, UtcTimestamp,
 };
 use environment_service::{
     EnvironmentEventPublisher, EnvironmentProvider, EnvironmentStoreError, InboundCommandDecision,
     InboundLifecycleCommand, LifecycleCommand, LifecycleError, OutboxDispatchError,
-    OutboxDispatchOutcome, OutboxDispatcher, PgEnvironmentStore, ProviderFailure,
-    ProviderFailureCode, ProviderObservation, ProviderRegistry, PublishFailure, ReconcileAction,
-    ReconcileWorker, ReconcileWorkerOutcome, Reconciler, apply_provider_observation,
+    OutboxDispatchOutcome, OutboxDispatcher, PgEnvironmentStore, PgReleaseProjectionStore,
+    ProviderFailure, ProviderFailureCode, ProviderObservation, ProviderRegistry, PublishFailure,
+    ReconcileAction, ReconcileWorker, ReconcileWorkerOutcome, Reconciler,
+    ReleaseProjectionDecision, apply_provider_observation,
 };
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::{ImageExt, runners::AsyncRunner};
@@ -839,6 +840,121 @@ async fn persistent_timeout_and_ready_cancel_cleanup_are_bounded()
             .all(|endpoint| endpoint.health != EndpointHealth::Healthy)
     );
     assert!(cancelled.cleanup_evidence.is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn release_withdrawal_is_projected_in_aggregate_order()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        container.get_host_port_ipv4(5432).await?
+    );
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await?;
+    let migrations = format!(
+        "CREATE SCHEMA environment; SET search_path TO environment;\n{}\n{}\n{}",
+        include_str!("../../../migrations/environment/0001_initial.sql"),
+        include_str!("../../../migrations/environment/0002_reconcile_leases.sql"),
+        include_str!("../../../migrations/environment/0003_release_projections.sql")
+    );
+    sqlx::raw_sql(&migrations).execute(&pool).await?;
+
+    let consumer = "environment-release-v2";
+    let release_id = ReleaseId::new();
+    let course_id = CourseId::new();
+    let publication_event_id = EventId::new();
+    sqlx::query(
+        "INSERT INTO environment.inbox_events \
+         (consumer,event_id,aggregate_id,aggregate_sequence,payload_sha256) VALUES ($1,$2,$3,1,$4)",
+    )
+    .bind(consumer)
+    .bind(publication_event_id.as_uuid())
+    .bind(release_id.as_uuid())
+    .bind(Sha256Digest::of_bytes(b"publication").to_string())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO environment.inbox_watermarks (consumer,aggregate_id,last_sequence) VALUES ($1,$2,1)",
+    )
+    .bind(consumer)
+    .bind(release_id.as_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO environment.release_projections \
+         (release_id,course_id,release_version,provider_binding,projection_sha256,contract,projected_event_id) \
+         VALUES ($1,$2,1,'container-primary-v1',$3,'{}'::jsonb,$4)",
+    )
+    .bind(release_id.as_uuid())
+    .bind(course_id.as_uuid())
+    .bind(Sha256Digest::of_bytes(b"projection").to_string())
+    .bind(publication_event_id.as_uuid())
+    .execute(&pool)
+    .await?;
+
+    let withdrawn_at = timestamp("2026-07-16T09:00:00.000Z");
+    let contract = EVENT_CONTRACTS
+        .iter()
+        .copied()
+        .find(|contract| contract.subject == subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN)
+        .ok_or("withdrawal contract missing")?;
+    let event = CloudEvent {
+        specversion: SPEC_VERSION.to_owned(),
+        id: EventId::new(),
+        source: contract.source().to_owned(),
+        event_type: contract.event_type.to_owned(),
+        subject: contract.subject.to_owned(),
+        time: withdrawn_at,
+        datacontenttype: "application/json".to_owned(),
+        dataschema: contract.data_schema(),
+        course_id,
+        aggregate_revision: Revision::new(1)?,
+        aggregate_sequence: Sequence(2),
+        trace_id: "release-withdrawal-test".to_owned(),
+        data: ReleaseWithdrawn {
+            release_id,
+            version: 1,
+            actor_id: ActorId::new(),
+            reason_code: "SECURITY_REVOKED".to_owned(),
+            withdrawn_at,
+        },
+    };
+    let store = PgReleaseProjectionStore::new(pool.clone());
+    assert_eq!(
+        store.accept_withdrawal(consumer, &event).await?,
+        ReleaseProjectionDecision::Applied
+    );
+    assert_eq!(
+        store.accept_withdrawal(consumer, &event).await?,
+        ReleaseProjectionDecision::Duplicate
+    );
+    let (sequence, persisted_withdrawn_at, reason): (i64, time::OffsetDateTime, String) =
+        sqlx::query_as(
+            "SELECT aggregate_sequence,withdrawn_at,withdrawal_reason_code \
+             FROM environment.release_projections WHERE release_id=$1",
+        )
+        .bind(release_id.as_uuid())
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(sequence, 2);
+    assert_eq!(
+        UtcTimestamp::from_utc(persisted_withdrawn_at)?,
+        withdrawn_at
+    );
+    assert_eq!(reason, "SECURITY_REVOKED");
+
+    let missing_release_id = ReleaseId::new();
+    let mut gap_event = event;
+    gap_event.id = EventId::new();
+    gap_event.data.release_id = missing_release_id;
+    assert_eq!(
+        store.accept_withdrawal(consumer, &gap_event).await?,
+        ReleaseProjectionDecision::Gap
+    );
     Ok(())
 }
 

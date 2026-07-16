@@ -11,8 +11,9 @@ use contracts::supply_chain::SigstoreEvidence;
 use serde::{Deserialize, Serialize};
 
 use crate::build_pipeline::{
-    BuildIdentity, BuildProviderFailure, BuildProviderFailureCode, BuildSupplyChainProvider,
-    BuiltCandidate, PrivateRegistryProject, PublishedImage, ScanEvidence,
+    BuildIdentity, BuildProviderFailure, BuildProviderFailureCode, BuildProviderRequestContext,
+    BuildProviderStage, BuildSupplyChainProvider, BuiltCandidate, PrivateRegistryProject,
+    PublishedImage, ScanEvidence,
 };
 
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -60,9 +61,17 @@ impl NatsBuildSupplyChainProvider {
 
     async fn request(
         &self,
+        context: &BuildProviderRequestContext,
         request: ProviderRequest<'_>,
     ) -> Result<ProviderResponse, BuildProviderFailure> {
-        let payload = serde_json::to_vec(&request).map_err(|_| output_invalid())?;
+        if context.stage != request.stage() {
+            return Err(identity_mismatch());
+        }
+        let payload = serde_json::to_vec(&ProviderRequestEnvelope {
+            context: *context,
+            request,
+        })
+        .map_err(|_| output_invalid())?;
         let message = self
             .client
             .request(self.subject.clone(), payload.into())
@@ -71,7 +80,17 @@ impl NatsBuildSupplyChainProvider {
         if message.payload.len() > MAX_RESPONSE_BYTES {
             return Err(output_invalid());
         }
-        serde_json::from_slice(&message.payload).map_err(|_| output_invalid())
+        let response: ProviderResponseEnvelope =
+            serde_json::from_slice(&message.payload).map_err(|_| output_invalid())?;
+        if response.protocol_version != context.protocol_version
+            || response.build_request_id != context.build_request_id
+            || response.fence_generation != context.fence_generation
+            || response.stage != context.stage
+            || response.stage_request_id != context.stage_request_id
+        {
+            return Err(identity_mismatch());
+        }
+        Ok(response.response)
     }
 }
 
@@ -95,11 +114,15 @@ impl BuildSupplyChainProvider for NatsBuildSupplyChainProvider {
 
     async fn ensure_private_project(
         &self,
+        context: &BuildProviderRequestContext,
         command: &AgentBuildRequestedV2,
         identity: BuildIdentity,
     ) -> Result<PrivateRegistryProject, BuildProviderFailure> {
         match self
-            .request(ProviderRequest::EnsurePrivateProject { command, identity })
+            .request(
+                context,
+                ProviderRequest::EnsurePrivateProject { command, identity },
+            )
             .await?
         {
             ProviderResponse::PrivateProjectReady { project }
@@ -115,11 +138,12 @@ impl BuildSupplyChainProvider for NatsBuildSupplyChainProvider {
 
     async fn build_candidate(
         &self,
+        context: &BuildProviderRequestContext,
         command: &AgentBuildRequestedV2,
         identity: BuildIdentity,
     ) -> Result<BuiltCandidate, BuildProviderFailure> {
         match self
-            .request(ProviderRequest::Build { command, identity })
+            .request(context, ProviderRequest::Build { command, identity })
             .await?
         {
             ProviderResponse::Built { candidate }
@@ -135,9 +159,13 @@ impl BuildSupplyChainProvider for NatsBuildSupplyChainProvider {
 
     async fn scan_candidate(
         &self,
+        context: &BuildProviderRequestContext,
         candidate: &BuiltCandidate,
     ) -> Result<ScanEvidence, BuildProviderFailure> {
-        match self.request(ProviderRequest::Scan { candidate }).await? {
+        match self
+            .request(context, ProviderRequest::Scan { candidate })
+            .await?
+        {
             ProviderResponse::Scanned { evidence }
                 if evidence.build_identity == candidate.build_identity
                     && evidence.digest == candidate.digest =>
@@ -151,9 +179,13 @@ impl BuildSupplyChainProvider for NatsBuildSupplyChainProvider {
 
     async fn sign_and_verify(
         &self,
+        context: &BuildProviderRequestContext,
         candidate: &BuiltCandidate,
     ) -> Result<SigstoreEvidence, BuildProviderFailure> {
-        match self.request(ProviderRequest::Sign { candidate }).await? {
+        match self
+            .request(context, ProviderRequest::Sign { candidate })
+            .await?
+        {
             ProviderResponse::Signed {
                 build_identity,
                 digest,
@@ -168,9 +200,13 @@ impl BuildSupplyChainProvider for NatsBuildSupplyChainProvider {
 
     async fn publish_immutable(
         &self,
+        context: &BuildProviderRequestContext,
         candidate: &BuiltCandidate,
     ) -> Result<PublishedImage, BuildProviderFailure> {
-        match self.request(ProviderRequest::Publish { candidate }).await? {
+        match self
+            .request(context, ProviderRequest::Publish { candidate })
+            .await?
+        {
             ProviderResponse::Published { image }
                 if image.build_identity == candidate.build_identity
                     && image.digest == candidate.digest =>
@@ -184,14 +220,18 @@ impl BuildSupplyChainProvider for NatsBuildSupplyChainProvider {
 
     async fn cleanup_candidate(
         &self,
+        context: &BuildProviderRequestContext,
         build_request_id: BuildRequestId,
         identity: BuildIdentity,
     ) -> Result<(), BuildProviderFailure> {
         match self
-            .request(ProviderRequest::Cleanup {
-                build_request_id,
-                identity,
-            })
+            .request(
+                context,
+                ProviderRequest::Cleanup {
+                    build_request_id,
+                    identity,
+                },
+            )
             .await?
         {
             ProviderResponse::Cleaned {
@@ -205,8 +245,16 @@ impl BuildSupplyChainProvider for NatsBuildSupplyChainProvider {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderRequestEnvelope<'a> {
+    #[serde(flatten)]
+    context: BuildProviderRequestContext,
+    request: ProviderRequest<'a>,
+}
+
+#[derive(Serialize)]
 #[serde(
-    tag = "stage",
+    tag = "kind",
     rename_all = "snake_case",
     rename_all_fields = "camelCase"
 )]
@@ -232,6 +280,30 @@ enum ProviderRequest<'a> {
         build_request_id: BuildRequestId,
         identity: BuildIdentity,
     },
+}
+
+impl ProviderRequest<'_> {
+    const fn stage(&self) -> BuildProviderStage {
+        match self {
+            Self::EnsurePrivateProject { .. } => BuildProviderStage::EnsurePrivateProject,
+            Self::Build { .. } => BuildProviderStage::Build,
+            Self::Scan { .. } => BuildProviderStage::Scan,
+            Self::Sign { .. } => BuildProviderStage::Sign,
+            Self::Publish { .. } => BuildProviderStage::Publish,
+            Self::Cleanup { .. } => BuildProviderStage::Cleanup,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderResponseEnvelope {
+    protocol_version: u8,
+    build_request_id: BuildRequestId,
+    fence_generation: u32,
+    stage: BuildProviderStage,
+    stage_request_id: contracts::Sha256Digest,
+    response: ProviderResponse,
 }
 
 #[derive(Deserialize)]

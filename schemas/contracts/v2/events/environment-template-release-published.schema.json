@@ -790,6 +790,10 @@
         "signatureSha256": {
           "$ref": "#/$defs/Sha256Digest"
         },
+        "subjectDigest": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Immutable artifact digest covered by the verified signature."
+        },
         "trustBundleSha256": {
           "$ref": "#/$defs/Sha256Digest"
         },
@@ -801,6 +805,7 @@
         "trustBundleSha256",
         "fulcioIssuer",
         "certificateSubject",
+        "subjectDigest",
         "certificateSha256",
         "signatureSha256",
         "rekorLogId",

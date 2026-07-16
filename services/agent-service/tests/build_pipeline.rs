@@ -10,8 +10,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_service::build_pipeline::{
-    BuildCancellation, BuildFailureCode, BuildIdentity, BuildPipeline, BuildPipelinePolicy,
-    BuildProviderFailure, BuildSupplyChainProvider, BuiltCandidate, PrivateRegistryProject,
+    BUILD_EXECUTOR_PROTOCOL_VERSION, BuildCancellation, BuildExecutionFence, BuildFailureCode,
+    BuildIdentity, BuildPipeline, BuildPipelinePolicy, BuildProviderFailure,
+    BuildProviderRequestContext, BuildSupplyChainProvider, BuiltCandidate, PrivateRegistryProject,
     PublishedImage, ScanEvidence,
 };
 use async_trait::async_trait;
@@ -24,6 +25,7 @@ use contracts::{
     ActorId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId, CourseId, PolicyId,
     Revision, Sha256Digest, UtcTimestamp,
 };
+use uuid::Uuid;
 
 const DIGEST_HEX: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -40,6 +42,7 @@ enum Call {
 #[derive(Clone)]
 struct FakeProvider {
     calls: Arc<Mutex<Vec<Call>>>,
+    contexts: Arc<Mutex<Vec<BuildProviderRequestContext>>>,
     critical: u32,
     high: u32,
     project_private: bool,
@@ -50,12 +53,16 @@ struct FakeProvider {
     published_digest: String,
     build_delay: Duration,
     cleanup_fails: bool,
+    subject_digest: Option<Sha256Digest>,
+    certificate_sha256: Sha256Digest,
+    signature_sha256: Sha256Digest,
 }
 
 impl Default for FakeProvider {
     fn default() -> Self {
         Self {
             calls: Arc::new(Mutex::new(Vec::new())),
+            contexts: Arc::new(Mutex::new(Vec::new())),
             critical: 0,
             high: 0,
             project_private: true,
@@ -66,17 +73,25 @@ impl Default for FakeProvider {
             published_digest: digest(),
             build_delay: Duration::ZERO,
             cleanup_fails: false,
+            subject_digest: None,
+            certificate_sha256: Sha256Digest::of_bytes(b"certificate"),
+            signature_sha256: Sha256Digest::of_bytes(b"signature"),
         }
     }
 }
 
 impl FakeProvider {
-    fn record(&self, call: Call) {
+    fn record(&self, call: Call, context: &BuildProviderRequestContext) {
         self.calls.lock().expect("call lock").push(call);
+        self.contexts.lock().expect("context lock").push(*context);
     }
 
     fn calls(&self) -> Vec<Call> {
         self.calls.lock().expect("call lock").clone()
+    }
+
+    fn contexts(&self) -> Vec<BuildProviderRequestContext> {
+        self.contexts.lock().expect("context lock").clone()
     }
 }
 
@@ -100,10 +115,11 @@ impl BuildSupplyChainProvider for FakeProvider {
 
     async fn ensure_private_project(
         &self,
+        context: &BuildProviderRequestContext,
         command: &AgentBuildRequestedV2,
         identity: BuildIdentity,
     ) -> Result<PrivateRegistryProject, BuildProviderFailure> {
-        self.record(Call::EnsurePrivate);
+        self.record(Call::EnsurePrivate, context);
         Ok(PrivateRegistryProject {
             build_request_id: command.request.id,
             build_identity: identity,
@@ -119,10 +135,11 @@ impl BuildSupplyChainProvider for FakeProvider {
 
     async fn build_candidate(
         &self,
+        context: &BuildProviderRequestContext,
         command: &AgentBuildRequestedV2,
         identity: BuildIdentity,
     ) -> Result<BuiltCandidate, BuildProviderFailure> {
-        self.record(Call::Build);
+        self.record(Call::Build, context);
         if !self.build_delay.is_zero() {
             tokio::time::sleep(self.build_delay).await;
         }
@@ -138,9 +155,10 @@ impl BuildSupplyChainProvider for FakeProvider {
 
     async fn scan_candidate(
         &self,
+        context: &BuildProviderRequestContext,
         candidate: &BuiltCandidate,
     ) -> Result<ScanEvidence, BuildProviderFailure> {
-        self.record(Call::Scan);
+        self.record(Call::Scan, context);
         Ok(ScanEvidence {
             build_identity: candidate.build_identity,
             digest: candidate.digest.clone(),
@@ -159,15 +177,23 @@ impl BuildSupplyChainProvider for FakeProvider {
 
     async fn sign_and_verify(
         &self,
-        _candidate: &BuiltCandidate,
+        context: &BuildProviderRequestContext,
+        candidate: &BuiltCandidate,
     ) -> Result<SigstoreEvidence, BuildProviderFailure> {
-        self.record(Call::Sign);
+        self.record(Call::Sign, context);
+        let candidate_digest = candidate
+            .digest
+            .strip_prefix("sha256:")
+            .expect("sha256 digest")
+            .parse()
+            .expect("valid digest");
         Ok(SigstoreEvidence {
             trust_bundle_sha256: Sha256Digest::of_bytes(b"trust-bundle"),
             fulcio_issuer: self.signature_issuer.clone(),
             certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
-            certificate_sha256: Sha256Digest::of_bytes(b"certificate"),
-            signature_sha256: Sha256Digest::of_bytes(b"signature"),
+            subject_digest: self.subject_digest.unwrap_or(candidate_digest),
+            certificate_sha256: self.certificate_sha256,
+            signature_sha256: self.signature_sha256,
             rekor_log_id: "rekor-private-v1".to_owned(),
             rekor_log_index: 7,
             rekor_inclusion_proof_sha256: Sha256Digest::of_bytes(b"rekor-proof"),
@@ -179,9 +205,10 @@ impl BuildSupplyChainProvider for FakeProvider {
 
     async fn publish_immutable(
         &self,
+        context: &BuildProviderRequestContext,
         candidate: &BuiltCandidate,
     ) -> Result<PublishedImage, BuildProviderFailure> {
-        self.record(Call::Publish);
+        self.record(Call::Publish, context);
         Ok(PublishedImage {
             build_identity: candidate.build_identity,
             digest: self.published_digest.clone(),
@@ -191,10 +218,11 @@ impl BuildSupplyChainProvider for FakeProvider {
 
     async fn cleanup_candidate(
         &self,
+        context: &BuildProviderRequestContext,
         _build_request_id: BuildRequestId,
         _identity: BuildIdentity,
     ) -> Result<(), BuildProviderFailure> {
-        self.record(Call::Cleanup);
+        self.record(Call::Cleanup, context);
         if self.cleanup_fails {
             Err(BuildProviderFailure {
                 code: agent_service::build_pipeline::BuildProviderFailureCode::Unavailable,
@@ -217,11 +245,11 @@ async fn successful_build_preserves_digest_identity_and_high_warning() {
     let command = command(60_000);
 
     let first = pipeline
-        .execute(&command, now(), &BuildCancellation::new())
+        .execute(&command, now(), fence(60_000), &BuildCancellation::new())
         .await
         .expect("build succeeds");
     let second = pipeline
-        .execute(&command, now(), &BuildCancellation::new())
+        .execute(&command, now(), fence(60_000), &BuildCancellation::new())
         .await
         .expect("same command succeeds deterministically");
 
@@ -236,6 +264,57 @@ async fn successful_build_preserves_digest_identity_and_high_warning() {
     assert_eq!(first.high_severity_warnings, 3);
     assert!(matches!(first.artifact, ImageArtifact::Container { .. }));
     assert!(!calls.calls().contains(&Call::Cleanup));
+    let contexts = calls.contexts();
+    assert!(contexts.iter().all(|context| {
+        context.protocol_version == BUILD_EXECUTOR_PROTOCOL_VERSION
+            && context.fence_generation == 1
+            && context.lease_token == Uuid::from_u128(1)
+    }));
+    assert_eq!(
+        contexts
+            .iter()
+            .take(5)
+            .map(|context| context.stage_request_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        5
+    );
+}
+
+#[tokio::test]
+async fn retry_generation_changes_every_remote_stage_identity() {
+    let provider = FakeProvider::default();
+    let recorded = provider.clone();
+    let pipeline = pipeline(provider);
+    let command = command(60_000);
+    pipeline
+        .execute(
+            &command,
+            now(),
+            fence_with(1, Uuid::from_u128(1), 60_000),
+            &BuildCancellation::new(),
+        )
+        .await
+        .expect("first generation succeeds");
+    pipeline
+        .execute(
+            &command,
+            now(),
+            fence_with(2, Uuid::from_u128(2), 60_000),
+            &BuildCancellation::new(),
+        )
+        .await
+        .expect("second generation succeeds");
+
+    let contexts = recorded.contexts();
+    assert_eq!(contexts.len(), 10);
+    for (first, second) in contexts.iter().take(5).zip(contexts.iter().skip(5)) {
+        assert_eq!(first.stage, second.stage);
+        assert_eq!(first.build_request_id, second.build_request_id);
+        assert_ne!(first.fence_generation, second.fence_generation);
+        assert_ne!(first.lease_token, second.lease_token);
+        assert_ne!(first.stage_request_id, second.stage_request_id);
+    }
 }
 
 #[tokio::test]
@@ -246,7 +325,12 @@ async fn critical_vulnerability_blocks_signing_and_publication_then_cleans_up() 
     };
     let calls = provider.clone();
     let error = pipeline(provider)
-        .execute(&command(60_000), now(), &BuildCancellation::new())
+        .execute(
+            &command(60_000),
+            now(),
+            fence(60_000),
+            &BuildCancellation::new(),
+        )
         .await
         .expect_err("Critical must block");
 
@@ -276,7 +360,12 @@ async fn private_project_quota_and_robot_are_mandatory() {
     ] {
         let calls = provider.clone();
         let error = pipeline(provider)
-            .execute(&command(60_000), now(), &BuildCancellation::new())
+            .execute(
+                &command(60_000),
+                now(),
+                fence(60_000),
+                &BuildCancellation::new(),
+            )
             .await
             .expect_err("private project, quota and exact robot are required");
         assert_eq!(error.code, BuildFailureCode::RegistryProjectInvalid);
@@ -296,7 +385,12 @@ async fn issuer_mismatch_blocks_publication_and_cleans_up() {
     };
     let calls = provider.clone();
     let error = pipeline(provider)
-        .execute(&command(60_000), now(), &BuildCancellation::new())
+        .execute(
+            &command(60_000),
+            now(),
+            fence(60_000),
+            &BuildCancellation::new(),
+        )
         .await
         .expect_err("issuer mismatch must block");
 
@@ -307,6 +401,40 @@ async fn issuer_mismatch_blocks_publication_and_cleans_up() {
 }
 
 #[tokio::test]
+async fn incomplete_or_wrongly_bound_signature_evidence_is_rejected() {
+    for provider in [
+        FakeProvider {
+            subject_digest: Some(Sha256Digest::of_bytes(b"other-image")),
+            ..FakeProvider::default()
+        },
+        FakeProvider {
+            certificate_sha256: Sha256Digest::of_bytes(&[]),
+            ..FakeProvider::default()
+        },
+        FakeProvider {
+            signature_sha256: Sha256Digest::of_bytes(&[]),
+            ..FakeProvider::default()
+        },
+    ] {
+        let calls = provider.clone();
+        let error = pipeline(provider)
+            .execute(
+                &command(60_000),
+                now(),
+                fence(60_000),
+                &BuildCancellation::new(),
+            )
+            .await
+            .expect_err(
+                "signature evidence must bind non-empty certificate, signature and subject",
+            );
+        assert_eq!(error.code, BuildFailureCode::SignatureInvalid);
+        assert_eq!(calls.calls().last(), Some(&Call::Cleanup));
+        assert!(!calls.calls().contains(&Call::Publish));
+    }
+}
+
+#[tokio::test]
 async fn signature_time_outside_the_build_window_is_rejected() {
     let provider = FakeProvider {
         signature_verified_at: timestamp("2026-07-16T08:01:01.000Z"),
@@ -314,7 +442,12 @@ async fn signature_time_outside_the_build_window_is_rejected() {
     };
     let calls = provider.clone();
     let error = pipeline(provider)
-        .execute(&command(60_000), now(), &BuildCancellation::new())
+        .execute(
+            &command(60_000),
+            now(),
+            fence(60_000),
+            &BuildCancellation::new(),
+        )
         .await
         .expect_err("future-dated signature outside the build window must block");
 
@@ -330,7 +463,12 @@ async fn publication_digest_mismatch_is_fail_closed() {
     };
     let calls = provider.clone();
     let error = pipeline(provider)
-        .execute(&command(60_000), now(), &BuildCancellation::new())
+        .execute(
+            &command(60_000),
+            now(),
+            fence(60_000),
+            &BuildCancellation::new(),
+        )
         .await
         .expect_err("digest mismatch must block");
 
@@ -347,7 +485,7 @@ async fn request_deadline_cancels_provider_future_and_cleans_up() {
     };
     let calls = provider.clone();
     let error = pipeline(provider)
-        .execute(&command(10), now(), &BuildCancellation::new())
+        .execute(&command(10), now(), fence(10), &BuildCancellation::new())
         .await
         .expect_err("request deadline must stop the build");
 
@@ -365,7 +503,7 @@ async fn cancellation_cleanup_failure_is_a_terminal_blocker() {
     let cancellation = BuildCancellation::new();
     cancellation.cancel();
     let error = pipeline(provider)
-        .execute(&command(60_000), now(), &cancellation)
+        .execute(&command(60_000), now(), fence(60_000), &cancellation)
         .await
         .expect_err("cancelled build must fail");
 
@@ -396,6 +534,26 @@ fn pipeline(provider: FakeProvider) -> BuildPipeline<FakeProvider> {
         },
     )
     .expect("valid pipeline")
+}
+
+fn fence(max_duration_milliseconds: u64) -> BuildExecutionFence {
+    fence_with(1, Uuid::from_u128(1), max_duration_milliseconds)
+}
+
+fn fence_with(
+    generation: u32,
+    lease_token: Uuid,
+    max_duration_milliseconds: u64,
+) -> BuildExecutionFence {
+    let milliseconds = i64::try_from(max_duration_milliseconds).expect("duration fits i64");
+    let deadline_at = UtcTimestamp::from_utc(
+        now()
+            .get()
+            .checked_add(time::Duration::milliseconds(milliseconds))
+            .expect("deadline fits"),
+    )
+    .expect("valid deadline");
+    BuildExecutionFence::new(generation, lease_token, deadline_at).expect("valid fence")
 }
 
 fn command(max_duration_milliseconds: u64) -> AgentBuildRequestedV2 {

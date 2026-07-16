@@ -26,6 +26,7 @@ record.
 | `labweaver.agent.build.completed.v2` | Agent to Control | Build/artifact identity plus canonical artifact and policy hashes. Control reads the full authoritative Agent artifact over mTLS before projection. |
 | `labweaver.agent.build.failed.v2` | Agent to Control | Stable terminal diagnostic plus retryable and cleanup-verification flags. |
 | `labweaver.control.environment_template_release.published.v2` | Control to Environment | Full immutable release, approved `EnvironmentSpec` and canonical projection hash. Environment records an immutable projection before ACK. |
+| `labweaver.control.environment_template_release.withdrawn.v1` | Control to Environment | Append-only aggregate sequence 2 withdrawal. Environment records it against the exact projected release before ACK. |
 
 Invalid messages are published to the configured private quarantine subject and
 then acknowledged. Duplicate deliveries are acknowledged after durable Inbox
@@ -46,8 +47,8 @@ at every stage:
 4. scan the same digest with the configured Trivy version and database hash;
 5. reject any Critical finding and retain High findings as warnings;
 6. sign and verify with the exact private Fulcio issuer, workload subject, trust
-   bundle, Rekor inclusion and SCT evidence within the configured freshness
-   window;
+   bundle, non-empty certificate/signature hashes, signed subject digest, Rekor
+   inclusion and SCT evidence within the configured freshness window;
 7. publish the same digest under a non-`latest` immutable tag;
 8. atomically persist the artifact, evaluation and terminal Outbox event.
 
@@ -58,8 +59,15 @@ artifact or successful completion event.
 
 The deployment-owned executor request/reply protocol is carried on the exact
 `build.provider_subject` from
-`deploy/config/agent-control-plane.yaml.example`. Each reply repeats the build
-identity and digest; a mismatch is rejected. The executor must map approved
+`deploy/config/agent-control-plane.yaml.example`. Every request carries protocol
+version, BuildRequest ID, monotonically increasing database attempt, lease token,
+stage, deterministic stage request ID and deadline. Each reply repeats the
+protocol version, BuildRequest ID, attempt, stage and request ID as well as the
+stage-specific build identity and digest; a mismatch is rejected. The executor
+must durably reject an attempt lower than the highest generation already seen.
+Cleanup records a generation-scoped tombstone that wins over every late stage
+completion, while a newer generation cannot be removed by an older cleanup.
+The executor must map approved
 `ArtifactRef` inputs to restricted BuildKit, Harbor/Trivy and Private Sigstore;
 the service does not accept raw paths, credentials or fallback providers.
 
@@ -90,11 +98,21 @@ workload, verify that no endpoint remains reachable, clear the controlled
 namespace finalizer, and then verify namespace absence before returning that
 evidence.
 
+Every remote Kubernetes request also carries the exact reconcile action,
+`operationId`, `providerStep`, environment generation, attempt, deterministic
+request ID and deadline. The executor must persist the highest accepted
+generation/operation/step tuple, make repeats of the same request ID idempotent,
+and write a namespace tombstone before Delete returns. A late Apply, Scale,
+Restart or Observe older than that tuple or tombstone is rejected without a side
+effect.
+
 The provider binding file is
 `deploy/config/environment-providers.json.example`. `providerKind: "container"`
 selects this implementation; the subject is an exact deployment-owned
 Kubernetes executor subject. Gateway and imagePullSecret fields are mandatory
-for this provider and are forbidden for the legacy remote provider. The executor
+for this provider. The active policy revision, trust revision and trust-bundle
+SHA-256 are also mandatory and are compared again on every runtime use. These
+fields are forbidden for the legacy remote provider. The executor
 materializes the named per-course pull Secret from its reviewed credential
 locator; credentials never enter a release event, resource plan or log.
 
@@ -109,8 +127,18 @@ LABWEAVER_ENVIRONMENT_RELEASE_QUARANTINE_SUBJECT
 ```
 
 All three name deployment-owned JetStream resources; startup does not create or
-select a wildcard stream. `LABWEAVER_ENVIRONMENT_PROVIDER_BINDINGS_PATH` must be
-an absolute path to the reviewed JSON binding file.
+select a wildcard stream. The durable release consumer must use exactly two
+filter subjects: published v2 and withdrawn v1.
+`LABWEAVER_ENVIRONMENT_PROVIDER_BINDINGS_PATH` must be an absolute path to the
+reviewed JSON binding file.
+
+The release resolver reads the projection, withdrawal state and PostgreSQL
+authority clock in one statement. Provision, Observe, Start, Restart, Reset,
+Retry and Recover paths fail closed when evidence is expired, the release is
+withdrawn, or the active policy/trust identity differs. Existing running
+instances are not stopped implicitly; Stop and Cleanup remain available so the
+owner can remove access and resources safely. A withdrawn or stale release can
+never create a new Ready endpoint.
 
 PostgreSQL migrations add the Control BuildRequest-to-candidate projection,
 Agent build command state and Environment release projections. Records are

@@ -6,13 +6,14 @@ use std::time::Duration;
 
 use async_nats::connection::State as NatsConnectionState;
 use contracts::environment::EnvironmentOperationKind;
-use contracts::{ActorId, UtcTimestamp};
+use contracts::{ActorId, Revision, Sha256Digest, UtcTimestamp};
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::watch;
 
 use crate::{
-    ContainerProvider, EnvironmentStoreError, JetStreamCommandConsumer, JetStreamEventPublisher,
+    ContainerProvider, ContainerProviderConfiguration, ContainerReleasePolicy,
+    EnvironmentStoreError, JetStreamCommandConsumer, JetStreamEventPublisher,
     JetStreamReleaseConsumer, LifecycleCommand, NatsAccessRevoker, NatsContainerProviderBackend,
     NatsEnvironmentProvider, NatsMessagingError, NatsResourceLeaseVerifier, OutboxDispatchError,
     OutboxDispatcher, PgEnvironmentStore, PgReleaseProjectionStore, ProviderRegistry,
@@ -113,6 +114,9 @@ impl EnvironmentProcessRuntime {
                         || configuration.gateway_name.is_some()
                         || configuration.gateway_section.is_some()
                         || configuration.image_pull_secret_name.is_some()
+                        || configuration.active_policy_revision.is_some()
+                        || configuration.active_trust_revision.is_some()
+                        || configuration.active_trust_bundle_sha256.is_some()
                     {
                         return Err(EnvironmentProcessRuntimeError::ConfigParse);
                     }
@@ -131,18 +135,40 @@ impl EnvironmentProcessRuntime {
                         configuration.binding,
                         backend,
                         Arc::new(release_store.clone()),
-                        configuration
-                            .gateway_namespace
-                            .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
-                        configuration
-                            .gateway_name
-                            .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
-                        configuration
-                            .gateway_section
-                            .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
-                        configuration
-                            .image_pull_secret_name
-                            .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                        ContainerProviderConfiguration::new(
+                            ContainerReleasePolicy::new(
+                                Revision::new(
+                                    configuration
+                                        .active_policy_revision
+                                        .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                                )
+                                .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)?,
+                                Revision::new(
+                                    configuration
+                                        .active_trust_revision
+                                        .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                                )
+                                .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)?,
+                                Sha256Digest::from_str(
+                                    &configuration
+                                        .active_trust_bundle_sha256
+                                        .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                                )
+                                .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)?,
+                            )?,
+                            configuration
+                                .gateway_namespace
+                                .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                            configuration
+                                .gateway_name
+                                .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                            configuration
+                                .gateway_section
+                                .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                            configuration
+                                .image_pull_secret_name
+                                .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                        )?,
                     )?;
                     registry.register(Arc::new(provider))?;
                 }
@@ -508,6 +534,9 @@ struct ProviderBindingConfiguration {
     gateway_name: Option<String>,
     gateway_section: Option<String>,
     image_pull_secret_name: Option<String>,
+    active_policy_revision: Option<u64>,
+    active_trust_revision: Option<u64>,
+    active_trust_bundle_sha256: Option<String>,
 }
 
 fn load_provider_bindings(

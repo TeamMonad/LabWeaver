@@ -23,15 +23,18 @@ use contracts::{
     PolicyId, ReleaseId, Revision, Sha256Digest, UtcTimestamp,
 };
 use environment_service::{
-    ContainerApplyObservation, ContainerProvider, ContainerProviderBackend,
-    ContainerReleaseResolver, ContainerResourcePlan, EnvironmentProvider, ProviderFailure,
-    ReconcileAction, ReleaseProjectionError,
+    CONTAINER_BACKEND_PROTOCOL_VERSION, ContainerApplyObservation, ContainerBackendFence,
+    ContainerProvider, ContainerProviderBackend, ContainerProviderConfiguration,
+    ContainerReleasePolicy, ContainerReleaseResolver, ContainerResourcePlan, EnvironmentProvider,
+    ProviderFailure, ReconcileAction, ReleaseProjectionError, ResolvedContainerRelease,
 };
 use serde_json::json;
 
 #[derive(Clone)]
 struct FixtureResolver {
     projection: ReleasePublishedV2,
+    authority_now: UtcTimestamp,
+    withdrawn_at: Option<UtcTimestamp>,
 }
 
 #[async_trait]
@@ -40,27 +43,33 @@ impl ContainerReleaseResolver for FixtureResolver {
         &self,
         release_id: ReleaseId,
         release_version: u64,
-    ) -> Result<ReleasePublishedV2, ReleaseProjectionError> {
+    ) -> Result<ResolvedContainerRelease, ReleaseProjectionError> {
         if self.projection.release.id != release_id
             || self.projection.release.version != release_version
         {
             return Err(ReleaseProjectionError::NotFound);
         }
-        Ok(self.projection.clone())
+        Ok(ResolvedContainerRelease {
+            projection: self.projection.clone(),
+            authority_now: self.authority_now,
+            withdrawn_at: self.withdrawn_at,
+        })
     }
 }
 
 #[derive(Default)]
 struct FixtureBackend {
     operations: Mutex<Vec<String>>,
+    fences: Mutex<Vec<ContainerBackendFence>>,
 }
 
 impl FixtureBackend {
-    fn record(&self, operation: &str) {
+    fn record(&self, operation: &str, fence: &ContainerBackendFence) {
         self.operations
             .lock()
             .expect("operations lock")
             .push(operation.to_owned());
+        self.fences.lock().expect("fences lock").push(*fence);
     }
 }
 
@@ -68,43 +77,48 @@ impl FixtureBackend {
 impl ContainerProviderBackend for FixtureBackend {
     async fn apply(
         &self,
+        fence: &ContainerBackendFence,
         _plan: &ContainerResourcePlan,
     ) -> Result<ContainerApplyObservation, ProviderFailure> {
-        self.record("apply");
+        self.record("apply", fence);
         Ok(ready())
     }
 
     async fn observe(
         &self,
+        fence: &ContainerBackendFence,
         _plan: &ContainerResourcePlan,
     ) -> Result<ContainerApplyObservation, ProviderFailure> {
-        self.record("observe");
+        self.record("observe", fence);
         Ok(ready())
     }
 
     async fn scale(
         &self,
+        fence: &ContainerBackendFence,
         _plan: &ContainerResourcePlan,
         replicas: u32,
     ) -> Result<ContainerApplyObservation, ProviderFailure> {
-        self.record(&format!("scale:{replicas}"));
+        self.record(&format!("scale:{replicas}"), fence);
         Ok(ready())
     }
 
     async fn restart(
         &self,
+        fence: &ContainerBackendFence,
         _plan: &ContainerResourcePlan,
         _operation_revision: Revision,
     ) -> Result<ContainerApplyObservation, ProviderFailure> {
-        self.record("restart");
+        self.record("restart", fence);
         Ok(ready())
     }
 
     async fn delete_namespace(
         &self,
+        fence: &ContainerBackendFence,
         plan: &ContainerResourcePlan,
     ) -> Result<ArtifactRef, ProviderFailure> {
-        self.record("delete");
+        self.record("delete", fence);
         Ok(ArtifactRef {
             artifact_id: ArtifactId::new(),
             store_binding: "environment-cleanup-evidence-v1".to_owned(),
@@ -121,10 +135,11 @@ fn plan_uses_digest_only_image_and_only_the_protected_gateway() {
     let projection = projection();
     let instance = instance_for(&projection);
     let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
-    let first = provider.plan(&instance, &projection);
+    let resolved = resolved(projection.clone());
+    let first = provider.plan(&instance, &resolved, ReconcileAction::Provision);
     let first = first.expect("plan is valid");
     let second = provider
-        .plan(&instance, &projection)
+        .plan(&instance, &resolved, ReconcileAction::Provision)
         .expect("same release plans deterministically");
 
     assert_eq!(first.plan_sha256, second.plan_sha256);
@@ -231,7 +246,7 @@ fn non_https_container_entry_cannot_be_projected_as_a_gateway_endpoint() {
     let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
 
     assert!(matches!(
-        provider.plan(&instance, &projection),
+        provider.plan(&instance, &resolved(projection), ReconcileAction::Provision),
         Err(ReleaseProjectionError::SecurityPostureInvalid)
     ));
 }
@@ -265,6 +280,18 @@ async fn provision_returns_one_stable_healthy_endpoint() {
             .as_slice(),
         ["apply", "observe"]
     );
+    let fences = backend.fences.lock().expect("fences lock");
+    assert_eq!(fences.len(), 2);
+    assert!(fences.iter().all(|fence| {
+        fence.protocol_version == CONTAINER_BACKEND_PROTOCOL_VERSION
+            && fence.environment_id == instance.id
+            && fence.operation_id == instance.operation.id
+            && fence.provider_step == instance.operation.provider_step
+            && fence.operation_generation == instance.generation
+            && fence.attempt == instance.operation.attempt
+            && fence.deadline_at == instance.operation.deadline_at
+    }));
+    assert_ne!(fences[0].request_id, fences[1].request_id);
 }
 
 #[tokio::test]
@@ -295,20 +322,129 @@ async fn cleanup_deletes_the_namespace_and_requires_evidence() {
     );
 }
 
+#[test]
+fn withdrawn_expired_or_rotated_release_is_rejected_before_apply() {
+    let projection = projection();
+    let instance = instance_for(&projection);
+    let backend = Arc::new(FixtureBackend::default());
+    let provider = provider(projection.clone(), backend.clone());
+
+    let mut expired = resolved(projection.clone());
+    expired.authority_now = projection.release.image_policy_evaluation.valid_until;
+    assert!(matches!(
+        provider.plan(&instance, &expired, ReconcileAction::Provision),
+        Err(ReleaseProjectionError::EvidenceExpired)
+    ));
+
+    let mut withdrawn = resolved(projection.clone());
+    withdrawn.withdrawn_at = Some(timestamp("2026-07-16T08:20:00.000Z"));
+    assert!(matches!(
+        provider.plan(&instance, &withdrawn, ReconcileAction::Provision),
+        Err(ReleaseProjectionError::Withdrawn)
+    ));
+
+    let rotated = provider_with_state(
+        projection.clone(),
+        backend,
+        timestamp("2026-07-16T08:30:00.000Z"),
+        None,
+        revision(2),
+        revision(2),
+        Sha256Digest::of_bytes(b"rotated-trust-bundle"),
+    );
+    assert!(matches!(
+        rotated.plan(&instance, &resolved(projection), ReconcileAction::Provision),
+        Err(ReleaseProjectionError::TrustRevisionMismatch)
+    ));
+}
+
+#[tokio::test]
+async fn withdrawal_blocks_new_use_but_still_allows_stop() {
+    let projection = projection();
+    let mut instance = instance_for(&projection);
+    instance.observed_state = ObservedEnvironmentState::Stopping;
+    instance.desired_state = DesiredEnvironmentState::Stopped;
+    let backend = Arc::new(FixtureBackend::default());
+    let provider = provider_with_state(
+        projection,
+        backend.clone(),
+        timestamp("2026-07-16T10:00:00.000Z"),
+        Some(timestamp("2026-07-16T09:30:00.000Z")),
+        revision(1),
+        revision(1),
+        Sha256Digest::of_bytes(b"trust-bundle"),
+    );
+
+    let observation = provider
+        .execute(ReconcileAction::Stop, &instance)
+        .await
+        .expect("withdrawal must not prevent fail-closed stop");
+    assert_eq!(observation.next_state, ObservedEnvironmentState::Stopped);
+    assert_eq!(
+        backend
+            .operations
+            .lock()
+            .expect("operations lock")
+            .as_slice(),
+        ["scale:0"]
+    );
+}
+
 fn provider(
     projection: ReleasePublishedV2,
     backend: Arc<FixtureBackend>,
 ) -> ContainerProvider<FixtureBackend, FixtureResolver> {
+    provider_with_state(
+        projection,
+        backend,
+        timestamp("2026-07-16T08:30:00.000Z"),
+        None,
+        revision(1),
+        revision(1),
+        Sha256Digest::of_bytes(b"trust-bundle"),
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "negative tests vary each trust authority independently"
+)]
+fn provider_with_state(
+    projection: ReleasePublishedV2,
+    backend: Arc<FixtureBackend>,
+    authority_now: UtcTimestamp,
+    withdrawn_at: Option<UtcTimestamp>,
+    policy_revision: Revision,
+    trust_revision: Revision,
+    trust_bundle_sha256: Sha256Digest,
+) -> ContainerProvider<FixtureBackend, FixtureResolver> {
     ContainerProvider::new(
         "container-primary-v1".to_owned(),
         backend,
-        Arc::new(FixtureResolver { projection }),
-        "access-system".to_owned(),
-        "protected-gateway".to_owned(),
-        "protected-https".to_owned(),
-        "harbor-course-pull".to_owned(),
+        Arc::new(FixtureResolver {
+            projection,
+            authority_now,
+            withdrawn_at,
+        }),
+        ContainerProviderConfiguration::new(
+            ContainerReleasePolicy::new(policy_revision, trust_revision, trust_bundle_sha256)
+                .expect("release policy"),
+            "access-system".to_owned(),
+            "protected-gateway".to_owned(),
+            "protected-https".to_owned(),
+            "harbor-course-pull".to_owned(),
+        )
+        .expect("container configuration"),
     )
     .expect("provider configuration")
+}
+
+fn resolved(projection: ReleasePublishedV2) -> ResolvedContainerRelease {
+    ResolvedContainerRelease {
+        projection,
+        authority_now: timestamp("2026-07-16T08:30:00.000Z"),
+        withdrawn_at: None,
+    }
 }
 
 fn resource<'a>(
@@ -403,6 +539,7 @@ fn projection() -> ReleasePublishedV2 {
                 trust_bundle_sha256,
                 fulcio_issuer: "https://fulcio.internal".to_owned(),
                 certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
+                subject_digest: artifact_sha256,
                 certificate_sha256: Sha256Digest::of_bytes(b"certificate"),
                 signature_sha256: Sha256Digest::of_bytes(b"signature"),
                 rekor_log_id: "rekor-private-v1".to_owned(),

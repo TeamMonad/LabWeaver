@@ -76,6 +76,14 @@ still required for VM artifacts. The positive Container Release path is expected
 stable blocking diagnostic until the v2 build completion has been durably projected. Connected E3
 requires the deployment-owned BuildKit/Harbor/Trivy/Private Sigstore and Kubernetes executors.
 
+Issue #52 local regression gates additionally run the ten-stage Agent pipeline suite, six
+Container Provider tests and the Agent/Environment PostgreSQL tests. They reject empty
+certificate/signature hashes, signature subject-digest drift, expired or withdrawn releases and
+active policy/trust rotation. The PostgreSQL cases prove append-only withdrawal sequence 2 and
+that a provider delay longer than retry delay still schedules from the post-provider database
+clock. Remote executor requests carry their durable fence identity, but executor-side
+highest-generation and cleanup/delete tombstones remain connected E3 evidence.
+
 The current worktree records real versioned MinIO presign/freeze/overwrite/exact-version/cleanup
 coverage and real JetStream Agent Outbox missing-stream failure, retry and persisted-ACK ordering.
 The Control Outbox test applies the same ACK fence to both release publication and withdrawal and

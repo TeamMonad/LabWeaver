@@ -17,10 +17,11 @@ mod store;
 mod tls;
 
 pub use container_provider::{
-    ContainerApplyObservation, ContainerProvider, ContainerProviderBackend,
-    ContainerReleaseResolver, ContainerResource, ContainerResourcePlan,
+    CONTAINER_BACKEND_PROTOCOL_VERSION, ContainerApplyObservation, ContainerBackendFence,
+    ContainerProvider, ContainerProviderBackend, ContainerProviderConfiguration,
+    ContainerReleasePolicy, ContainerReleaseResolver, ContainerResource, ContainerResourcePlan,
     NatsContainerProviderBackend, PgReleaseProjectionStore, ReleaseProjectionDecision,
-    ReleaseProjectionError,
+    ReleaseProjectionError, ResolvedContainerRelease,
 };
 pub use lifecycle::{
     LifecycleCommand, LifecycleError, apply_provider_failure, apply_provider_observation,

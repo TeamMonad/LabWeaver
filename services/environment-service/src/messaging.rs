@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -12,7 +13,9 @@ use contracts::environment::{
     EnvironmentLeaseVerificationResponse, EnvironmentLifecycleCommandData,
     EnvironmentOperationKind,
 };
-use contracts::events::{CloudEvent, EVENT_CONTRACTS, ReleasePublishedV2, subjects};
+use contracts::events::{
+    CloudEvent, EVENT_CONTRACTS, ReleasePublishedV2, ReleaseWithdrawn, subjects,
+};
 use contracts::{EnvironmentId, EventId, OperationId, Revision, Sha256Digest};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -579,6 +582,11 @@ pub struct JetStreamReleaseConsumer {
     messages: async_nats::jetstream::consumer::pull::Stream,
 }
 
+enum ReleaseEvent {
+    Published(Box<CloudEvent<ReleasePublishedV2>>),
+    Withdrawn(Box<CloudEvent<ReleaseWithdrawn>>),
+}
+
 impl JetStreamReleaseConsumer {
     pub async fn bind(
         client: async_nats::Client,
@@ -601,9 +609,19 @@ impl JetStreamReleaseConsumer {
             .get_consumer(consumer_name)
             .await
             .map_err(|_| NatsMessagingError::ConsumerUnavailable)?;
-        if consumer.cached_info().config.filter_subject
-            != subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED_V2
-            || !consumer.cached_info().config.filter_subjects.is_empty()
+        let expected_subjects = BTreeSet::from([
+            subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED_V2,
+            subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN,
+        ]);
+        let configured_subjects = consumer
+            .cached_info()
+            .config
+            .filter_subjects
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        if !consumer.cached_info().config.filter_subject.is_empty()
+            || configured_subjects != expected_subjects
         {
             return Err(NatsMessagingError::Configuration);
         }
@@ -638,9 +656,7 @@ impl JetStreamReleaseConsumer {
                 .map_err(|_| NatsMessagingError::Acknowledge)?;
             return Ok(CommandConsumeOutcome::Rejected);
         }
-        let Ok(event): Result<CloudEvent<ReleasePublishedV2>, _> =
-            serde_json::from_slice(&message.payload)
-        else {
+        let Ok(envelope): Result<Value, _> = serde_json::from_slice(&message.payload) else {
             self.quarantine(&message, None, "LW_ENVIRONMENT_RELEASE_PAYLOAD_INVALID")
                 .await?;
             message
@@ -649,7 +665,37 @@ impl JetStreamReleaseConsumer {
                 .map_err(|_| NatsMessagingError::Acknowledge)?;
             return Ok(CommandConsumeOutcome::Rejected);
         };
-        match store.accept(&self.consumer_name, &event).await {
+        let subject = envelope.get("subject").and_then(Value::as_str);
+        let parsed = match subject {
+            Some(subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED_V2) => {
+                serde_json::from_value::<CloudEvent<ReleasePublishedV2>>(envelope)
+                    .map(|event| (event.id, ReleaseEvent::Published(Box::new(event))))
+            }
+            Some(subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN) => {
+                serde_json::from_value::<CloudEvent<ReleaseWithdrawn>>(envelope)
+                    .map(|event| (event.id, ReleaseEvent::Withdrawn(Box::new(event))))
+            }
+            _ => Err(serde_json::Error::io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unsupported release subject",
+            ))),
+        };
+        let Ok((event_id, event)) = parsed else {
+            self.quarantine(&message, None, "LW_ENVIRONMENT_RELEASE_PAYLOAD_INVALID")
+                .await?;
+            message
+                .double_ack_with(AckKind::Term)
+                .await
+                .map_err(|_| NatsMessagingError::Acknowledge)?;
+            return Ok(CommandConsumeOutcome::Rejected);
+        };
+        let decision = match &event {
+            ReleaseEvent::Published(event) => store.accept(&self.consumer_name, event).await,
+            ReleaseEvent::Withdrawn(event) => {
+                store.accept_withdrawal(&self.consumer_name, event).await
+            }
+        };
+        match decision {
             Ok(ReleaseProjectionDecision::Applied) => {
                 message
                     .double_ack()
@@ -682,7 +728,7 @@ impl JetStreamReleaseConsumer {
                 Ok(CommandConsumeOutcome::Deferred)
             }
             Err(_) => {
-                self.quarantine(&message, Some(event.id), "LW_ENVIRONMENT_RELEASE_REJECTED")
+                self.quarantine(&message, Some(event_id), "LW_ENVIRONMENT_RELEASE_REJECTED")
                     .await?;
                 message
                     .double_ack_with(AckKind::Term)

@@ -19,7 +19,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::build_pipeline::{
-    BuildCancellation, BuildPipeline, BuildPipelineError, BuildPipelineOutput,
+    BuildCancellation, BuildExecutionFence, BuildPipeline, BuildPipelineError, BuildPipelineOutput,
     BuildSupplyChainProvider,
 };
 
@@ -225,7 +225,6 @@ impl PgBuildStore {
         &self,
         lease: &BuildCommandLease,
         output: &BuildPipelineOutput,
-        now: UtcTimestamp,
         trace_id: &str,
     ) -> Result<(), BuildStoreError> {
         if output.build_identity.0 != lease.command.command_sha256 {
@@ -267,6 +266,7 @@ impl PgBuildStore {
         let evaluation_sha256 = canonical_hash(&evaluation_contract)?;
         let mut transaction = self.pool.begin().await?;
         fence_running(&mut transaction, lease).await?;
+        let authority_now = transaction_time(&mut transaction).await?;
         sqlx::query(
             "INSERT INTO agent.image_artifacts \
              (image_artifact_id,build_request_id,image_digest,evidence_sha256,state,contract,policy_evaluation,registry_project_evidence) \
@@ -292,7 +292,7 @@ impl PgBuildStore {
             &mut transaction,
             lease,
             subjects::AGENT_BUILD_COMPLETED_V2,
-            now,
+            authority_now,
             trace_id,
             &data,
         )
@@ -305,7 +305,6 @@ impl PgBuildStore {
         &self,
         lease: &BuildCommandLease,
         error: BuildPipelineError,
-        now: UtcTimestamp,
         trace_id: &str,
     ) -> Result<(), BuildStoreError> {
         let data = AgentBuildFailedV2 {
@@ -324,6 +323,7 @@ impl PgBuildStore {
         };
         let mut transaction = self.pool.begin().await?;
         fence_running(&mut transaction, lease).await?;
+        let authority_now = transaction_time(&mut transaction).await?;
         terminal_update(
             &mut transaction,
             lease,
@@ -337,7 +337,7 @@ impl PgBuildStore {
             &mut transaction,
             lease,
             subjects::AGENT_BUILD_FAILED_V2,
-            now,
+            authority_now,
             trace_id,
             &data,
         )
@@ -350,20 +350,28 @@ impl PgBuildStore {
         &self,
         lease: &BuildCommandLease,
         error: BuildPipelineError,
-        retry_at: UtcTimestamp,
+        retry_delay: Duration,
     ) -> Result<(), BuildStoreError> {
-        if !error.retryable || !error.cleanup_verified {
+        if !error.retryable
+            || !error.cleanup_verified
+            || retry_delay.is_zero()
+            || retry_delay.subsec_nanos() % 1_000_000 != 0
+        {
             return Err(BuildStoreError::RetryUnsafe);
         }
+        let retry_milliseconds =
+            i64::try_from(retry_delay.as_millis()).map_err(|_| BuildStoreError::ClockInvalid)?;
         let result = sqlx::query(
             "UPDATE agent.build_commands SET state='requested',worker_id=NULL,lease_token=NULL,lease_expires_at=NULL, \
-             next_attempt_at=$3,diagnostic_code=NULL,retryable=NULL,cleanup_verified=NULL,updated_at=clock_timestamp() \
+             next_attempt_at=date_trunc('milliseconds',clock_timestamp()) \
+                 + ($3::bigint * interval '1 millisecond'), \
+             diagnostic_code=NULL,retryable=NULL,cleanup_verified=NULL,updated_at=clock_timestamp() \
              WHERE build_request_id=$1 AND lease_token=$2 AND state='running' \
-               AND lease_expires_at>clock_timestamp() AND $3>clock_timestamp()",
+               AND lease_expires_at>clock_timestamp()",
         )
         .bind(lease.command.request.id.as_uuid())
         .bind(lease.lease_token)
-        .bind(retry_at.get())
+        .bind(retry_milliseconds)
         .execute(&self.pool)
         .await?;
         if result.rows_affected() != 1 {
@@ -438,7 +446,6 @@ impl<P: BuildSupplyChainProvider> BuildWorker<P> {
                     .complete(
                         &lease,
                         &output,
-                        now,
                         &format!("build:{}", lease.command.request.id),
                     )
                     .await?;
@@ -451,8 +458,9 @@ impl<P: BuildSupplyChainProvider> BuildWorker<P> {
                     && error.cleanup_verified
                     && lease.attempt < self.max_attempts =>
             {
-                let retry_at = add_duration(now, self.retry_delay)?;
-                self.store.schedule_retry(&lease, error, retry_at).await?;
+                self.store
+                    .schedule_retry(&lease, error, self.retry_delay)
+                    .await?;
                 Ok(BuildWorkerOutcome::RetryScheduled {
                     build_request_id: lease.command.request.id,
                     attempt: lease.attempt,
@@ -463,7 +471,6 @@ impl<P: BuildSupplyChainProvider> BuildWorker<P> {
                     .fail(
                         &lease,
                         error,
-                        now,
                         &format!("build:{}", lease.command.request.id),
                     )
                     .await?;
@@ -484,7 +491,15 @@ impl<P: BuildSupplyChainProvider> BuildWorker<P> {
         if lease.cancellation_requested {
             cancellation.cancel();
         }
-        let execution = self.pipeline.execute(&lease.command, now, &cancellation);
+        let execution_deadline = add_duration(
+            now,
+            Duration::from_millis(lease.command.request.max_duration_milliseconds),
+        )?;
+        let fence = BuildExecutionFence::new(lease.attempt, lease.lease_token, execution_deadline)
+            .map_err(|_| BuildStoreError::ConfigurationInvalid)?;
+        let execution = self
+            .pipeline
+            .execute(&lease.command, now, fence, &cancellation);
         tokio::pin!(execution);
         let heartbeat_period = self
             .lease_duration
@@ -547,6 +562,16 @@ async fn fence_running(
         return Err(BuildStoreError::FenceLost);
     }
     Ok(())
+}
+
+async fn transaction_time(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<UtcTimestamp, BuildStoreError> {
+    let authority_now: time::OffsetDateTime =
+        sqlx::query_scalar("SELECT date_trunc('milliseconds', clock_timestamp())")
+            .fetch_one(&mut **transaction)
+            .await?;
+    UtcTimestamp::from_utc(authority_now).map_err(|_| BuildStoreError::ClockInvalid)
 }
 
 async fn terminal_update(
