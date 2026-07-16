@@ -76,9 +76,9 @@
   Migration and mTLS boundary, D verifies the current E2 commands and build
   identity, CI passes, and the PR is merged. The Access-owned revocation
   responder, Resource-owned Lease responder, connected verification of the #52
-  Container Provider, a formal KubeVirt Provider and deployed mTLS NATS path
-  remain explicit adjacent/E3 dependencies and may not be replaced with
-  integration fixtures or fallback evidence.
+  Container Provider, connected verification of the formal #53 KubeVirt
+  Provider and deployed mTLS NATS path remain explicit adjacent/E3 dependencies
+  and may not be replaced with integration fixtures or fallback evidence.
 - Impact: #47 now binds Environment-scope authorization to the merged resolver
   through real mTLS E2 coverage. A+B review, D same-build Verify and deployed
   Gateway/internal-DNS evidence remain blockers for Issue closure and E3.
