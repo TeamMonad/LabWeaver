@@ -62,6 +62,8 @@ environment_owner_resolver:
   retry_backoff_milliseconds: 100
   decision_ttl_seconds: 5
 grants:
+  gateway_san_uris:
+    - spiffe://labweaver/gateway
   default_ttl_seconds: 1800
   max_ttl_seconds: 3600
   authorization_token_ttl_seconds: 30

@@ -70,6 +70,7 @@ pub struct AccessAuthFile {
 )]
 #[serde(deny_unknown_fields)]
 pub struct GrantRuntimeFileConfig {
+    pub gateway_san_uris: Vec<String>,
     pub default_ttl_seconds: u64,
     pub max_ttl_seconds: u64,
     pub authorization_token_ttl_seconds: u64,
@@ -300,7 +301,18 @@ impl AccessAuthFile {
     }
 
     fn access_runtime_is_valid(&self) -> bool {
-        self.grants.default_ttl_seconds > 0
+        !self.grants.gateway_san_uris.is_empty()
+            && self.grants.gateway_san_uris.iter().all(|san| {
+                san.starts_with("spiffe://") && self.internal_mtls.allowed_san_uris.contains(san)
+            })
+            && self
+                .grants
+                .gateway_san_uris
+                .iter()
+                .collect::<BTreeSet<_>>()
+                .len()
+                == self.grants.gateway_san_uris.len()
+            && self.grants.default_ttl_seconds > 0
             && self.grants.default_ttl_seconds <= self.grants.max_ttl_seconds
             && self.grants.max_ttl_seconds == 3_600
             && (5..=60).contains(&self.grants.authorization_token_ttl_seconds)
@@ -632,6 +644,7 @@ environment_owner_resolver:
   retry_backoff_milliseconds: 100
   decision_ttl_seconds: 5
 grants:
+  gateway_san_uris: [spiffe://labweaver/gateway]
   default_ttl_seconds: 1800
   max_ttl_seconds: 3600
   authorization_token_ttl_seconds: 30

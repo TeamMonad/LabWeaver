@@ -113,10 +113,38 @@ async fn client_enforces_mtls_identity_response_binding_and_bounded_outage()
         client.resolve(&request, now).await,
         Err(OwnerResolverClientError::ScopeDenied)
     );
+    assert_eq!(
+        client
+            .resolve_endpoint_eligibility(&endpoint_request, now)
+            .await,
+        Err(OwnerResolverClientError::ScopeDenied)
+    );
 
     mode.store(2, Ordering::SeqCst);
     assert_eq!(
         client.resolve(&request, now).await,
+        Err(OwnerResolverClientError::ResponseInvalid)
+    );
+    assert_eq!(
+        client
+            .resolve_endpoint_eligibility(&endpoint_request, now)
+            .await,
+        Err(OwnerResolverClientError::ResponseInvalid)
+    );
+
+    mode.store(3, Ordering::SeqCst);
+    assert_eq!(
+        client
+            .resolve_endpoint_eligibility(&endpoint_request, now)
+            .await,
+        Err(OwnerResolverClientError::ResponseInvalid)
+    );
+
+    mode.store(4, Ordering::SeqCst);
+    assert_eq!(
+        client
+            .resolve_endpoint_eligibility(&endpoint_request, now)
+            .await,
         Err(OwnerResolverClientError::ResponseInvalid)
     );
 
@@ -139,6 +167,12 @@ async fn client_enforces_mtls_identity_response_binding_and_bounded_outage()
     server.await??;
     assert_eq!(
         client.resolve(&request, now).await,
+        Err(OwnerResolverClientError::Unavailable)
+    );
+    assert_eq!(
+        client
+            .resolve_endpoint_eligibility(&endpoint_request, now)
+            .await,
         Err(OwnerResolverClientError::Unavailable)
     );
 
@@ -195,11 +229,21 @@ async fn resolve_endpoint_eligibility(
     } else {
         request.environment_id
     };
+    let environment_revision = if state.mode.load(Ordering::SeqCst) == 3 {
+        Revision::new(request.expected_revision.get() + 1).map_err(|_| StatusCode::BAD_REQUEST)?
+    } else {
+        request.expected_revision
+    };
+    let health = if state.mode.load(Ordering::SeqCst) == 4 {
+        EndpointHealth::Unhealthy
+    } else {
+        EndpointHealth::Healthy
+    };
     let resolution = EnvironmentEndpointEligibility {
         environment_id,
         course_id: request.course_id,
         owner_actor_id: request.actor_id,
-        environment_revision: request.expected_revision,
+        environment_revision,
         eligibility_expires_at: "2030-07-15T00:00:00.000Z"
             .parse()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
@@ -207,7 +251,7 @@ async fn resolve_endpoint_eligibility(
             id: request.endpoint_ids[0],
             protocol: EndpointProtocol::Ssh,
             revision: request.expected_revision,
-            health: EndpointHealth::Healthy,
+            health,
             observed_at: "2026-07-15T00:00:00.000Z"
                 .parse()
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,

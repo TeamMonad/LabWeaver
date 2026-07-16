@@ -23,7 +23,7 @@ domains:
         sha256: c00400f6c4ffd7a867dec42581737a9442573eb42b2f10267f695dd0fefbe26f
       - id: 3
         file: access/0003_access_grants.sql
-        sha256: 5b6a00f8fdd6cbeb9c18dcbb37eafaacffb705504d54c5f7b7e45f46d8fa71ba
+        sha256: b5377e9726d6aee8c731054490736d22536d12975eb8b46cf3e4133dbfe50bea
   - name: environment
     migrations:
       - id: 1

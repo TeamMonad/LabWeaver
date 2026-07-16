@@ -45,7 +45,6 @@ use super::{
     cookie_session_id, require_browser_origin, utc_timestamp,
 };
 
-const GATEWAY_SAN: &str = "spiffe://labweaver/gateway";
 const TERMINATION_SECONDS: i64 = 60;
 
 fn parse_body<T: DeserializeOwned>(body: &Bytes) -> Result<T, ApiError> {
@@ -115,14 +114,16 @@ fn request_hash<T: Serialize>(request: &T) -> Result<String, ApiError> {
 async fn reserve_idempotency(
     tx: &mut Transaction<'_, Postgres>,
     operation: &str,
+    scope_id: &str,
     key: &IdempotencyKey,
     hash: &str,
 ) -> Result<Option<Value>, ApiError> {
     let inserted = sqlx::query(
-        "INSERT INTO access.idempotency_ledger (operation,idempotency_key,request_sha256,state) \
-         VALUES ($1,$2,$3,'in_progress') ON CONFLICT DO NOTHING",
+        "INSERT INTO access.idempotency_ledger (operation,scope_id,idempotency_key,request_sha256,state) \
+         VALUES ($1,$2,$3,$4,'in_progress') ON CONFLICT DO NOTHING",
     )
     .bind(operation)
+    .bind(scope_id)
     .bind(key.as_str())
     .bind(hash)
     .execute(&mut **tx)
@@ -134,9 +135,10 @@ async fn reserve_idempotency(
     }
     let row = sqlx::query(
         "SELECT request_sha256,state,result FROM access.idempotency_ledger \
-         WHERE operation=$1 AND idempotency_key=$2 FOR UPDATE",
+         WHERE operation=$1 AND scope_id=$2 AND idempotency_key=$3 FOR UPDATE",
     )
     .bind(operation)
+    .bind(scope_id)
     .bind(key.as_str())
     .fetch_one(&mut **tx)
     .await
@@ -152,14 +154,16 @@ async fn reserve_idempotency(
 async fn complete_idempotency(
     tx: &mut Transaction<'_, Postgres>,
     operation: &str,
+    scope_id: &str,
     key: &IdempotencyKey,
     value: &Value,
 ) -> Result<(), ApiError> {
     let rows = sqlx::query(
-        "UPDATE access.idempotency_ledger SET state='completed',result=$3,completed_at=now() \
-         WHERE operation=$1 AND idempotency_key=$2 AND state='in_progress'",
+        "UPDATE access.idempotency_ledger SET state='completed',result=$4,completed_at=now() \
+         WHERE operation=$1 AND scope_id=$2 AND idempotency_key=$3 AND state='in_progress'",
     )
     .bind(operation)
+    .bind(scope_id)
     .bind(key.as_str())
     .bind(value)
     .execute(&mut **tx)
@@ -172,6 +176,14 @@ async fn complete_idempotency(
     Ok(())
 }
 
+fn actor_idempotency_scope(actor_id: ActorId) -> String {
+    format!("actor:{actor_id}")
+}
+
+fn service_idempotency_scope(principal: &MtlsPrincipal) -> String {
+    format!("service:{}", principal.san_uri)
+}
+
 pub async fn create_ssh_key(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -181,6 +193,7 @@ pub async fn create_ssh_key(
     require_mutation_auth(&state, &headers).await?;
     let identity = authenticated_identity(&state, &headers).await?;
     let actor = actor_uuid(identity.actor.actor_id)?;
+    let idem_scope = actor_idempotency_scope(identity.actor.actor_id);
     let validated = validate_ssh_public_key(&request.public_key_openssh)
         .map_err(|_| ApiError::unprocessable("LW_ACCESS_SSH_KEY_REJECTED"))?;
     let key = idempotency_key(&headers)?;
@@ -190,7 +203,9 @@ pub async fn create_ssh_key(
         .begin()
         .await
         .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
-    if let Some(value) = reserve_idempotency(&mut tx, "create_ssh_key", &key, &hash).await? {
+    if let Some(value) =
+        reserve_idempotency(&mut tx, "create_ssh_key", &idem_scope, &key, &hash).await?
+    {
         let existing = serde_json::from_value(value)
             .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?;
         tx.commit()
@@ -260,6 +275,7 @@ pub async fn create_ssh_key(
     complete_idempotency(
         &mut tx,
         "create_ssh_key",
+        &idem_scope,
         &key,
         &serde_json::to_value(&result)
             .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?,
@@ -309,6 +325,7 @@ pub async fn delete_ssh_key(
     require_mutation_auth(&state, &headers).await?;
     let identity = authenticated_identity(&state, &headers).await?;
     let actor = actor_uuid(identity.actor.actor_id)?;
+    let idem_scope = actor_idempotency_scope(identity.actor.actor_id);
     let expected = if_match(&headers)?;
     let idem = idempotency_key(&headers)?;
     let hash = request_hash(&json!({"keyId": key_id, "revision": expected}))?;
@@ -319,7 +336,7 @@ pub async fn delete_ssh_key(
         .begin()
         .await
         .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
-    if reserve_idempotency(&mut tx, "delete_ssh_key", &idem, &hash)
+    if reserve_idempotency(&mut tx, "delete_ssh_key", &idem_scope, &idem, &hash)
         .await?
         .is_some()
     {
@@ -342,7 +359,14 @@ pub async fn delete_ssh_key(
     }
     terminate_sessions_for_key(&mut tx, key_id, now, terminate_by).await?;
     enqueue_key_event(&mut tx, key_id, identity.actor.actor_id, now).await?;
-    complete_idempotency(&mut tx, "delete_ssh_key", &idem, &json!({"deleted": true})).await?;
+    complete_idempotency(
+        &mut tx,
+        "delete_ssh_key",
+        &idem_scope,
+        &idem,
+        &json!({"deleted": true}),
+    )
+    .await?;
     tx.commit()
         .await
         .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
@@ -376,6 +400,7 @@ pub async fn create_access_grant(
     }
     let identity = authenticated_identity(&state, &headers).await?;
     let actor = actor_uuid(identity.actor.actor_id)?;
+    let idem_scope = actor_idempotency_scope(identity.actor.actor_id);
     let membership =
         active_membership(&state.pool, request.course_id, actor, &identity.actor.roles).await?;
     if membership.role == PlatformRole::PlatformAdmin {
@@ -420,7 +445,9 @@ pub async fn create_access_grant(
         .begin()
         .await
         .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
-    if let Some(value) = reserve_idempotency(&mut tx, "create_access_grant", &idem, &hash).await? {
+    if let Some(value) =
+        reserve_idempotency(&mut tx, "create_access_grant", &idem_scope, &idem, &hash).await?
+    {
         let existing: AccessGrant = serde_json::from_value(value)
             .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?;
         tx.commit()
@@ -464,6 +491,7 @@ pub async fn create_access_grant(
     complete_idempotency(
         &mut tx,
         "create_access_grant",
+        &idem_scope,
         &idem,
         &serde_json::to_value(&result)
             .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?,
@@ -537,6 +565,7 @@ pub async fn renew_access_grant(
         return Err(ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"));
     }
     let identity = authenticated_identity(&state, &headers).await?;
+    let idem_scope = actor_idempotency_scope(identity.actor.actor_id);
     let expected = if_match(&headers)?;
     let idem = idempotency_key(&headers)?;
     let hash = request_hash(&request)?;
@@ -557,7 +586,9 @@ pub async fn renew_access_grant(
         .begin()
         .await
         .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
-    if let Some(value) = reserve_idempotency(&mut tx, "renew_access_grant", &idem, &hash).await? {
+    if let Some(value) =
+        reserve_idempotency(&mut tx, "renew_access_grant", &idem_scope, &idem, &hash).await?
+    {
         let grant = serde_json::from_value(value)
             .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?;
         tx.commit()
@@ -594,6 +625,7 @@ pub async fn renew_access_grant(
     complete_idempotency(
         &mut tx,
         "renew_access_grant",
+        &idem_scope,
         &idem,
         &serde_json::to_value(&grant).map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?,
     )
@@ -616,6 +648,7 @@ pub async fn revoke_access_grant(
         return Err(ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"));
     }
     let identity = authenticated_identity(&state, &headers).await?;
+    let idem_scope = actor_idempotency_scope(identity.actor.actor_id);
     let expected = if_match(&headers)?;
     let idem = idempotency_key(&headers)?;
     let hash = request_hash(&request)?;
@@ -626,7 +659,9 @@ pub async fn revoke_access_grant(
         .begin()
         .await
         .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
-    if let Some(value) = reserve_idempotency(&mut tx, "revoke_access_grant", &idem, &hash).await? {
+    if let Some(value) =
+        reserve_idempotency(&mut tx, "revoke_access_grant", &idem_scope, &idem, &hash).await?
+    {
         let grant = serde_json::from_value(value)
             .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?;
         tx.commit()
@@ -675,6 +710,7 @@ pub async fn revoke_access_grant(
     complete_idempotency(
         &mut tx,
         "revoke_access_grant",
+        &idem_scope,
         &idem,
         &serde_json::to_value(&grant).map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?,
     )
@@ -685,15 +721,17 @@ pub async fn revoke_access_grant(
     Ok((StatusCode::ACCEPTED, Json(grant)))
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the handler keeps the preflight authority check and transactional revalidation together for auditability"
+)]
 pub async fn authorize_ssh(
     State(state): State<Arc<AppState>>,
     axum::extract::Extension(principal): axum::extract::Extension<MtlsPrincipal>,
     body: Bytes,
 ) -> Result<Json<SshAuthorization>, ApiError> {
     let request: SshAuthorizationRequest = parse_body(&body)?;
-    if principal.san_uri != GATEWAY_SAN || request.gateway_identity != principal.san_uri {
-        return Err(ApiError::forbidden("LW_ACCESS_GATEWAY_IDENTITY_DENIED"));
-    }
+    ensure_gateway_request(&state, &principal, &request.gateway_identity)?;
     validate_alias(&request.alias)?;
     if !valid_fingerprint(&request.presented_key_fingerprint_sha256)
         || request.connection_id.trim().is_empty()
@@ -709,14 +747,18 @@ pub async fn authorize_ssh(
     {
         return Err(ApiError::forbidden("LW_ACCESS_AUTHORIZATION_STALE"));
     }
-    let row = sqlx::query(
-        "SELECT g.grant_id,g.revision AS grant_revision,eg.endpoint_grant_id,eg.endpoint_id, \
-                k.key_id,k.normalized_openssh,g.expires_at,eg.expires_at AS endpoint_expires_at \
+    let candidate = sqlx::query(
+        "SELECT g.grant_id,g.actor_id,g.course_id,g.environment_id,g.environment_revision,g.contract, \
+                g.revision AS grant_revision,eg.endpoint_grant_id,eg.endpoint_id,eg.endpoint_revision, \
+                k.key_id \
          FROM access.endpoint_grants eg JOIN access.access_grants g ON g.grant_id=eg.grant_id \
          JOIN access.ssh_public_keys k ON k.actor_id=g.actor_id \
+         JOIN access.course_memberships cm ON cm.course_id=g.course_id AND cm.actor_id=g.actor_id \
          WHERE eg.alias=$1 AND eg.protocol='ssh' AND eg.health='healthy' AND g.state='active' \
            AND g.not_before <= $2 AND g.expires_at > $2 AND eg.expires_at > $2 \
-           AND k.fingerprint_sha256=$3 AND k.revoked_at IS NULL",
+           AND k.fingerprint_sha256=$3 AND k.revoked_at IS NULL \
+           AND cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>$2) \
+           AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END",
     )
     .bind(&request.alias)
     .bind(now)
@@ -725,22 +767,102 @@ pub async fn authorize_ssh(
     .await
     .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?
     .ok_or_else(|| ApiError::forbidden("LW_ACCESS_SSH_DENIED"))?;
-    let grant_id = typed_id::<AccessGrantId>(row.get("grant_id"))?;
-    let endpoint_grant_id = typed_id::<EndpointGrantId>(row.get("endpoint_grant_id"))?;
-    let endpoint_id = typed_id::<EndpointId>(row.get("endpoint_id"))?;
-    let key_id = typed_id::<SshPublicKeyId>(row.get("key_id"))?;
+    let grant_id = typed_id::<AccessGrantId>(candidate.get("grant_id"))?;
+    let actor_id = typed_id::<ActorId>(candidate.get("actor_id"))?;
+    let course_id = typed_id::<CourseId>(candidate.get("course_id"))?;
+    let environment_id = typed_id::<contracts::EnvironmentId>(candidate.get("environment_id"))?;
+    let environment_revision = revision(candidate.get("environment_revision"))?;
+    let endpoint_grant_id = typed_id::<EndpointGrantId>(candidate.get("endpoint_grant_id"))?;
+    let endpoint_id = typed_id::<EndpointId>(candidate.get("endpoint_id"))?;
+    let endpoint_revision = revision(candidate.get("endpoint_revision"))?;
+    let key_id = typed_id::<SshPublicKeyId>(candidate.get("key_id"))?;
+    let contract: Value = candidate.get("contract");
+    let subject_kind: EnvironmentAccessSubjectKind = serde_json::from_value(
+        contract
+            .get("subjectKind")
+            .cloned()
+            .ok_or_else(|| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?,
+    )
+    .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?;
+    let eligibility_request = EnvironmentEndpointEligibilityRequest {
+        environment_id,
+        course_id,
+        actor_id,
+        subject_kind,
+        expected_revision: environment_revision,
+        endpoint_ids: vec![endpoint_id],
+    };
+    let eligibility = state
+        .owner_resolver
+        .resolve_endpoint_eligibility(&eligibility_request, utc_timestamp(now)?)
+        .await
+        .map_err(|error| match error {
+            auth::OwnerResolverClientError::ScopeDenied
+            | auth::OwnerResolverClientError::ResponseInvalid => {
+                ApiError::forbidden("LW_ACCESS_SSH_DENIED")
+            }
+            _ => ApiError::unavailable("LW_ACCESS_SSH_AUTHORITY_UNAVAILABLE"),
+        })?;
+    let resolved_endpoint = eligibility
+        .endpoints
+        .first()
+        .ok_or_else(|| ApiError::forbidden("LW_ACCESS_SSH_DENIED"))?;
+    if resolved_endpoint.protocol != EndpointProtocol::Ssh
+        || resolved_endpoint.health != EndpointHealth::Healthy
+        || resolved_endpoint.revision != endpoint_revision
+    {
+        return Err(ApiError::forbidden("LW_ACCESS_SSH_DENIED"));
+    }
+    let authorized_at = OffsetDateTime::now_utc();
+    if eligibility.eligibility_expires_at.get() <= authorized_at {
+        return Err(ApiError::forbidden("LW_ACCESS_SSH_DENIED"));
+    }
     let authorization_id = Uuid::now_v7();
     let token = random_token();
     let token_hash = sha256_hex(token.as_bytes());
-    let configured_until = now
+    let mut tx = state
+        .pool
+        .begin()
+        .await
+        .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
+    let current = sqlx::query(
+        "SELECT k.normalized_openssh,g.expires_at,eg.expires_at AS endpoint_expires_at,cm.expires_at AS membership_expires_at FROM access.endpoint_grants eg \
+         JOIN access.access_grants g ON g.grant_id=eg.grant_id \
+         JOIN access.ssh_public_keys k ON k.actor_id=g.actor_id \
+         JOIN access.course_memberships cm ON cm.course_id=g.course_id AND cm.actor_id=g.actor_id \
+         WHERE g.grant_id=$1 AND g.revision=$2 AND eg.endpoint_grant_id=$3 AND eg.endpoint_revision=$4 \
+           AND k.key_id=$5 AND k.fingerprint_sha256=$6 AND eg.alias=$7 \
+           AND eg.protocol='ssh' AND eg.health='healthy' AND g.state='active' \
+           AND g.not_before<=$8 AND g.expires_at>$8 AND eg.expires_at>$8 AND k.revoked_at IS NULL \
+           AND cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>$8) \
+           AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END \
+         FOR SHARE OF g,eg,k,cm",
+    )
+    .bind(grant_id.as_uuid())
+    .bind(candidate.get::<i64, _>("grant_revision"))
+    .bind(endpoint_grant_id.as_uuid())
+    .bind(i64::try_from(endpoint_revision.get()).map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?)
+    .bind(key_id.as_uuid())
+    .bind(&request.presented_key_fingerprint_sha256)
+    .bind(&request.alias)
+    .bind(authorized_at)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?
+    .ok_or_else(|| ApiError::forbidden("LW_ACCESS_SSH_DENIED"))?;
+    let configured_until = authorized_at
         + time::Duration::seconds(
             i64::try_from(state.deployment.grants.authorization_token_ttl_seconds)
                 .map_err(|_| ApiError::internal("LW_ACCESS_CONFIG_INVALID"))?,
         );
     let valid_until = [
         configured_until,
-        row.get::<OffsetDateTime, _>("expires_at"),
-        row.get::<OffsetDateTime, _>("endpoint_expires_at"),
+        current.get::<OffsetDateTime, _>("expires_at"),
+        current.get::<OffsetDateTime, _>("endpoint_expires_at"),
+        current
+            .get::<Option<OffsetDateTime>, _>("membership_expires_at")
+            .unwrap_or(configured_until),
+        eligibility.eligibility_expires_at.get(),
     ]
     .into_iter()
     .min()
@@ -750,17 +872,20 @@ pub async fn authorize_ssh(
          (authorization_id,token_sha256,grant_id,grant_revision,endpoint_grant_id,key_id,gateway_identity,connection_id,source_address_sha256,issued_at,expires_at) \
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
     ).bind(authorization_id).bind(token_hash).bind(grant_id.as_uuid())
-      .bind(row.get::<i64,_>("grant_revision")).bind(endpoint_grant_id.as_uuid()).bind(key_id.as_uuid())
-      .bind(&principal.san_uri).bind(&request.connection_id).bind(&request.source_address_hash).bind(now).bind(valid_until)
-      .execute(&state.pool).await.map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
+      .bind(candidate.get::<i64,_>("grant_revision")).bind(endpoint_grant_id.as_uuid()).bind(key_id.as_uuid())
+      .bind(&principal.san_uri).bind(&request.connection_id).bind(&request.source_address_hash).bind(authorized_at).bind(valid_until)
+      .execute(&mut *tx).await.map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
+    tx.commit()
+        .await
+        .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
     Ok(Json(SshAuthorization {
         authorization_id: authorization_id.to_string(),
         access_grant_id: grant_id,
-        access_grant_revision: revision(row.get("grant_revision"))?,
+        access_grant_revision: revision(candidate.get("grant_revision"))?,
         endpoint_grant_id,
         endpoint_id,
         ssh_public_key_id: key_id,
-        normalized_authorized_key: row.get("normalized_openssh"),
+        normalized_authorized_key: current.get("normalized_openssh"),
         force_command_token: token,
         valid_until: utc_timestamp(valid_until)?,
     }))
@@ -773,10 +898,9 @@ pub async fn create_gateway_session(
     body: Bytes,
 ) -> Result<(StatusCode, Json<GatewaySession>), ApiError> {
     let request: CreateGatewaySessionRequest = parse_body(&body)?;
-    if principal.san_uri != GATEWAY_SAN || request.gateway_identity != principal.san_uri {
-        return Err(ApiError::forbidden("LW_ACCESS_GATEWAY_IDENTITY_DENIED"));
-    }
+    ensure_gateway_request(&state, &principal, &request.gateway_identity)?;
     let idem = idempotency_key(&headers)?;
+    let idem_scope = service_idempotency_scope(&principal);
     let hash = request_hash(&request)?;
     let authorization_id = Uuid::parse_str(&request.authorization_id)
         .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
@@ -788,7 +912,7 @@ pub async fn create_gateway_session(
         .await
         .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
     if let Some(value) =
-        reserve_idempotency(&mut tx, "create_gateway_session", &idem, &hash).await?
+        reserve_idempotency(&mut tx, "create_gateway_session", &idem_scope, &idem, &hash).await?
     {
         let session = serde_json::from_value(value)
             .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?;
@@ -826,6 +950,7 @@ pub async fn create_gateway_session(
     complete_idempotency(
         &mut tx,
         "create_gateway_session",
+        &idem_scope,
         &idem,
         &serde_json::to_value(&session)
             .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?,
@@ -845,7 +970,7 @@ pub async fn heartbeat_gateway_session(
     body: Bytes,
 ) -> Result<Json<GatewaySession>, ApiError> {
     let request: HeartbeatGatewaySessionRequest = parse_body(&body)?;
-    ensure_gateway_request(&principal, &request.gateway_identity)?;
+    ensure_gateway_request(&state, &principal, &request.gateway_identity)?;
     let expected = if_match(&headers)?;
     if expected != request.expected_revision {
         return Err(ApiError::precondition("LW_REVISION_CONFLICT"));
@@ -871,7 +996,7 @@ pub async fn close_gateway_session(
     body: Bytes,
 ) -> Result<Json<GatewaySession>, ApiError> {
     let request: CloseGatewaySessionRequest = parse_body(&body)?;
-    ensure_gateway_request(&principal, &request.gateway_identity)?;
+    ensure_gateway_request(&state, &principal, &request.gateway_identity)?;
     let expected = if_match(&headers)?;
     if expected != request.expected_revision || request.reason_code.trim().is_empty() {
         return Err(ApiError::precondition("LW_REVISION_CONFLICT"));
@@ -925,7 +1050,8 @@ async fn activate_one(state: &AppState) -> Result<(), GrantRuntimeError> {
         .map_err(|_| GrantRuntimeError::Config)?;
     let row = sqlx::query(
         "WITH candidate AS (SELECT grant_id FROM access.access_grant_activation_jobs \
-         WHERE state IN ('pending','retry') AND next_attempt_at<=now() ORDER BY next_attempt_at,grant_id \
+         WHERE (state IN ('pending','retry') AND next_attempt_at<=now()) \
+            OR (state='leased' AND lease_expires_at<=now()) ORDER BY next_attempt_at,grant_id \
          FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE access.access_grant_activation_jobs j \
          SET state='leased',lease_owner=$1,lease_token=$2,lease_expires_at=now()+($3*interval '1 second'),updated_at=now() \
          FROM candidate WHERE j.grant_id=candidate.grant_id RETURNING j.grant_id",
@@ -937,8 +1063,11 @@ async fn activate_one(state: &AppState) -> Result<(), GrantRuntimeError> {
     let grant_row = sqlx::query("SELECT actor_id,course_id,environment_id,environment_revision,expires_at,contract FROM access.access_grants WHERE grant_id=$1 AND state='requested'")
         .bind(grant_uuid).fetch_optional(&state.pool).await?;
     let Some(grant_row) = grant_row else {
-        sqlx::query("UPDATE access.access_grant_activation_jobs SET state='completed',lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL WHERE grant_id=$1 AND lease_token=$2")
-            .bind(grant_uuid).bind(token).execute(&state.pool).await?;
+        let rows = sqlx::query("UPDATE access.access_grant_activation_jobs SET state='completed',lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=now() WHERE grant_id=$1 AND state='leased' AND lease_token=$2 AND lease_expires_at>now()")
+            .bind(grant_uuid).bind(token).execute(&state.pool).await?.rows_affected();
+        if rows == 0 {
+            log_activation_lease_lost(grant_uuid, "complete_inactive_grant");
+        }
         return Ok(());
     };
     let contract: Value = grant_row.get("contract");
@@ -1006,9 +1135,16 @@ async fn activate_grant(
 ) -> Result<(), GrantRuntimeError> {
     let now = OffsetDateTime::now_utc();
     let mut tx = state.pool.begin().await?;
+    if !lock_activation_lease(&mut tx, grant_id, lease_token).await? {
+        log_activation_lease_lost(grant_id, "activate");
+        tx.rollback().await?;
+        return Ok(());
+    }
     let grant = sqlx::query("SELECT expires_at,revision FROM access.access_grants WHERE grant_id=$1 AND state='requested' FOR UPDATE")
         .bind(grant_id).fetch_optional(&mut *tx).await?;
     let Some(grant) = grant else {
+        complete_activation_job(&mut tx, grant_id, lease_token, now).await?;
+        tx.commit().await?;
         return Ok(());
     };
     let expires_at = std::cmp::min(
@@ -1038,10 +1174,12 @@ async fn activate_grant(
             .bind(protocol_str(endpoint.protocol)).bind(alias).bind(expires_at).bind(contract)
             .execute(&mut *tx).await?;
     }
-    sqlx::query("UPDATE access.access_grants SET state='active',revision=revision+1,expires_at=$2,updated_at=$3,last_activation_diagnostic=NULL WHERE grant_id=$1 AND state='requested'")
-        .bind(grant_id).bind(expires_at).bind(now).execute(&mut *tx).await?;
-    sqlx::query("UPDATE access.access_grant_activation_jobs SET state='completed',lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=$3 WHERE grant_id=$1 AND lease_token=$2")
-        .bind(grant_id).bind(lease_token).bind(now).execute(&mut *tx).await?;
+    let rows = sqlx::query("UPDATE access.access_grants SET state='active',revision=revision+1,expires_at=$2,updated_at=$3,last_activation_diagnostic=NULL WHERE grant_id=$1 AND state='requested'")
+        .bind(grant_id).bind(expires_at).bind(now).execute(&mut *tx).await?.rows_affected();
+    if rows != 1 {
+        return Err(GrantRuntimeError::ActivationLeaseLost);
+    }
+    complete_activation_job(&mut tx, grant_id, lease_token, now).await?;
     let typed = typed_id::<AccessGrantId>(grant_id).map_err(|_| GrantRuntimeError::Contract)?;
     let value = load_grant_tx_runtime(&mut tx, typed).await?;
     enqueue_grant_event_runtime(&mut tx, &value, subjects::ACCESS_GRANT_ACTIVATED, now).await?;
@@ -1057,6 +1195,11 @@ async fn deny_grant(
 ) -> Result<(), GrantRuntimeError> {
     let now = OffsetDateTime::now_utc();
     let mut tx = state.pool.begin().await?;
+    if !lock_activation_lease(&mut tx, grant_id, token).await? {
+        log_activation_lease_lost(grant_id, "deny");
+        tx.rollback().await?;
+        return Ok(());
+    }
     deny_grant_tx(&mut tx, grant_id, token, diagnostic, now).await?;
     tx.commit().await?;
     Ok(())
@@ -1069,10 +1212,16 @@ async fn deny_grant_tx(
     diagnostic: &str,
     now: OffsetDateTime,
 ) -> Result<(), GrantRuntimeError> {
-    sqlx::query("UPDATE access.access_grants SET state='denied',revision=revision+1,reason_code=$2,last_activation_diagnostic=$2,updated_at=$3 WHERE grant_id=$1 AND state='requested'")
-        .bind(grant_id).bind(diagnostic).bind(now).execute(&mut **tx).await?;
-    sqlx::query("UPDATE access.access_grant_activation_jobs SET state='failed',last_diagnostic=$3,lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=$4 WHERE grant_id=$1 AND lease_token=$2")
-        .bind(grant_id).bind(token).bind(diagnostic).bind(now).execute(&mut **tx).await?;
+    let rows = sqlx::query("UPDATE access.access_grants SET state='denied',revision=revision+1,reason_code=$2,last_activation_diagnostic=$2,updated_at=$3 WHERE grant_id=$1 AND state='requested'")
+        .bind(grant_id).bind(diagnostic).bind(now).execute(&mut **tx).await?.rows_affected();
+    if rows != 1 {
+        return Err(GrantRuntimeError::ActivationLeaseLost);
+    }
+    let rows = sqlx::query("UPDATE access.access_grant_activation_jobs SET state='failed',last_diagnostic=$3,lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=$4 WHERE grant_id=$1 AND state='leased' AND lease_token=$2 AND lease_expires_at>now()")
+        .bind(grant_id).bind(token).bind(diagnostic).bind(now).execute(&mut **tx).await?.rows_affected();
+    if rows != 1 {
+        return Err(GrantRuntimeError::ActivationLeaseLost);
+    }
     let typed = typed_id::<AccessGrantId>(grant_id).map_err(|_| GrantRuntimeError::Contract)?;
     let value = load_grant_tx_runtime(tx, typed).await?;
     enqueue_grant_event_runtime(tx, &value, subjects::ACCESS_GRANT_DENIED, now).await?;
@@ -1089,18 +1238,14 @@ async fn retry_activation(
         .map_err(|_| GrantRuntimeError::Config)?;
     let mut tx = state.pool.begin().await?;
     let Some(attempts) = sqlx::query_scalar::<_, i32>(
-        "SELECT attempts FROM access.access_grant_activation_jobs WHERE grant_id=$1 AND lease_token=$2 FOR UPDATE",
+        "SELECT attempts FROM access.access_grant_activation_jobs WHERE grant_id=$1 AND state='leased' AND lease_token=$2 AND lease_expires_at>now() FOR UPDATE",
     )
     .bind(grant_id)
     .bind(token)
     .fetch_optional(&mut *tx)
     .await?
     else {
-        tracing::warn!(
-            event = "LW_ACCESS_ACTIVATION_LEASE_LOST",
-            grant_id = %grant_id,
-            "stale activation worker was fenced before retry"
-        );
+        log_activation_lease_lost(grant_id, "retry");
         tx.rollback().await?;
         return Ok(());
     };
@@ -1112,12 +1257,57 @@ async fn retry_activation(
         diagnostic
     };
     let next_state = if exhausted { "failed" } else { "retry" };
-    sqlx::query("UPDATE access.access_grant_activation_jobs SET state=$3,attempts=attempts+1,next_attempt_at=now()+($4*interval '1 second'),last_diagnostic=$5,lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=now() WHERE grant_id=$1 AND lease_token=$2")
-        .bind(grant_id).bind(token).bind(next_state).bind(retry).bind(effective_diagnostic).execute(&mut *tx).await?;
-    sqlx::query("UPDATE access.access_grants SET activation_attempts=activation_attempts+1,last_activation_diagnostic=$2,updated_at=now() WHERE grant_id=$1 AND state='requested'")
-        .bind(grant_id).bind(effective_diagnostic).execute(&mut *tx).await?;
+    let rows = sqlx::query("UPDATE access.access_grant_activation_jobs SET state=$3,attempts=attempts+1,next_attempt_at=now()+($4*interval '1 second'),last_diagnostic=$5,lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=now() WHERE grant_id=$1 AND state='leased' AND lease_token=$2 AND lease_expires_at>now()")
+        .bind(grant_id).bind(token).bind(next_state).bind(retry).bind(effective_diagnostic).execute(&mut *tx).await?.rows_affected();
+    if rows != 1 {
+        return Err(GrantRuntimeError::ActivationLeaseLost);
+    }
+    let rows = sqlx::query("UPDATE access.access_grants SET activation_attempts=activation_attempts+1,last_activation_diagnostic=$2,updated_at=now() WHERE grant_id=$1 AND state='requested'")
+        .bind(grant_id).bind(effective_diagnostic).execute(&mut *tx).await?.rows_affected();
+    if rows != 1 {
+        return Err(GrantRuntimeError::ActivationLeaseLost);
+    }
     tx.commit().await?;
     Ok(())
+}
+
+async fn lock_activation_lease(
+    tx: &mut Transaction<'_, Postgres>,
+    grant_id: Uuid,
+    token: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let held = sqlx::query_scalar::<_, bool>(
+        "SELECT true FROM access.access_grant_activation_jobs WHERE grant_id=$1 AND state='leased' AND lease_token=$2 AND lease_expires_at>now() FOR UPDATE",
+    )
+    .bind(grant_id)
+    .bind(token)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(held.unwrap_or(false))
+}
+
+async fn complete_activation_job(
+    tx: &mut Transaction<'_, Postgres>,
+    grant_id: Uuid,
+    token: Uuid,
+    now: OffsetDateTime,
+) -> Result<(), GrantRuntimeError> {
+    let rows = sqlx::query("UPDATE access.access_grant_activation_jobs SET state='completed',lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=$3 WHERE grant_id=$1 AND state='leased' AND lease_token=$2 AND lease_expires_at>now()")
+        .bind(grant_id).bind(token).bind(now).execute(&mut **tx).await?.rows_affected();
+    if rows != 1 {
+        return Err(GrantRuntimeError::ActivationLeaseLost);
+    }
+    Ok(())
+}
+
+fn log_activation_lease_lost(grant_id: Uuid, action: &'static str) {
+    tracing::warn!(
+        event = "access.grant.activation_lease_lost",
+        diagnostic = "LW_ACCESS_ACTIVATION_LEASE_LOST",
+        %grant_id,
+        action,
+        "stale activation worker was fenced"
+    );
 }
 
 pub async fn maintenance_loop(state: Arc<AppState>) -> Result<(), GrantRuntimeError> {
@@ -1692,8 +1882,18 @@ fn event_contract(subject: &str) -> Result<EventContract, ApiError> {
         .find(|c| c.subject == subject)
         .ok_or_else(|| ApiError::internal("LW_ACCESS_EVENT_INVALID"))
 }
-fn ensure_gateway_request(principal: &MtlsPrincipal, claimed: &str) -> Result<(), ApiError> {
-    if principal.san_uri == GATEWAY_SAN && claimed == principal.san_uri {
+fn ensure_gateway_request(
+    state: &AppState,
+    principal: &MtlsPrincipal,
+    claimed: &str,
+) -> Result<(), ApiError> {
+    if state
+        .deployment
+        .grants
+        .gateway_san_uris
+        .contains(&principal.san_uri)
+        && claimed == principal.san_uri
+    {
         Ok(())
     } else {
         Err(ApiError::forbidden("LW_ACCESS_GATEWAY_IDENTITY_DENIED"))
@@ -1842,6 +2042,8 @@ pub enum GrantRuntimeError {
     NatsPublish,
     #[error("LW_ACCESS_CONTRACT_INVALID")]
     Contract,
+    #[error("LW_ACCESS_ACTIVATION_LEASE_LOST")]
+    ActivationLeaseLost,
     #[error("LW_ACCESS_STORE_UNAVAILABLE")]
     Database(#[from] sqlx::Error),
 }

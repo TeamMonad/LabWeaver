@@ -12,6 +12,14 @@ CREATE TABLE ssh_public_keys (
     CHECK ((revoked_at IS NULL) = (revoke_reason_code IS NULL))
 );
 
+ALTER TABLE idempotency_ledger
+    ADD COLUMN scope_id text NOT NULL DEFAULT 'legacy:unscoped'
+        CHECK (length(scope_id) BETWEEN 1 AND 256);
+ALTER TABLE idempotency_ledger DROP CONSTRAINT idempotency_ledger_pkey;
+ALTER TABLE idempotency_ledger
+    ADD PRIMARY KEY (operation, scope_id, idempotency_key);
+ALTER TABLE idempotency_ledger ALTER COLUMN scope_id DROP DEFAULT;
+
 CREATE INDEX ssh_public_keys_actor_active_idx ON ssh_public_keys (actor_id, created_at, key_id)
     WHERE revoked_at IS NULL;
 
@@ -82,6 +90,10 @@ CREATE TABLE access_grant_activation_jobs (
 CREATE INDEX access_grant_activation_due_idx
     ON access_grant_activation_jobs (next_attempt_at, grant_id)
     WHERE state IN ('pending', 'retry');
+
+CREATE INDEX access_grant_activation_lease_expiry_idx
+    ON access_grant_activation_jobs (lease_expires_at, grant_id)
+    WHERE state = 'leased';
 
 CREATE TABLE ssh_authorizations (
     authorization_id uuid PRIMARY KEY,
