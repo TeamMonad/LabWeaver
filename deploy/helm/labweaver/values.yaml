@@ -1,0 +1,62 @@
+images:
+  access_service: ""
+  agent_service: ""
+  control_service: ""
+  environment_service: ""
+  evaluation_service: ""
+  resource_service: ""
+  web: ""
+
+workloads:
+  access-service:
+    configMap: ""
+    configSecret: ""
+    replicas: 2
+  agent-service:
+    configMap: ""
+    configSecret: ""
+    replicas: 2
+  control-service:
+    configMap: ""
+    configSecret: ""
+    replicas: 2
+  environment-service:
+    configMap: ""
+    configSecret: ""
+    replicas: 2
+  evaluation-service:
+    configMap: ""
+    configSecret: ""
+    replicas: 2
+  resource-service:
+    configMap: ""
+    configSecret: ""
+    replicas: 2
+  web:
+    configMap: ""
+    configSecret: ""
+    replicas: 2
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+    ephemeral-storage: 64Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+    ephemeral-storage: 256Mi
+
+trust:
+  registry: ""
+  revision: ""
+  issuer: ""
+  subject: ""
+  fulcioRoots: ""
+  rekorUrl: ""
+  previous:
+    revision: ""
+    issuer: ""
+    subject: ""
+    fulcioRoots: ""
+    rekorUrl: ""

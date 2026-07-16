@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://labweaver.invalid/schemas/results/platform-image-deployment-manifest.v1.schema.json",
+  "title": "PlatformImageDeploymentManifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "environment",
+    "package_manifest_sha256",
+    "source_commit",
+    "cluster_uid",
+    "helm_revision",
+    "images",
+    "previous_verified_manifest_sha256"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "platform-image-deployment-manifest.v1"
+    },
+    "environment": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,31}$"
+    },
+    "package_manifest_sha256": {
+      "$ref": "#/$defs/digest"
+    },
+    "source_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "cluster_uid": {
+      "type": "string",
+      "minLength": 1
+    },
+    "helm_revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "images": {
+      "type": "array",
+      "minItems": 7,
+      "maxItems": 7,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "component",
+          "reference"
+        ],
+        "properties": {
+          "component": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reference": {
+            "type": "string",
+            "pattern": "@sha256:[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
+    "previous_verified_manifest_sha256": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/digest"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}

@@ -6287,10 +6287,14 @@ dependencies = [
  "clap",
  "contracts",
  "persistence-sqlx",
+ "serde",
+ "serde_jcs",
  "serde_json",
+ "serde_yaml",
  "sha2",
  "sqlx",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

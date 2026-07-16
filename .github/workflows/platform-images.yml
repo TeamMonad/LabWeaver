@@ -1,0 +1,293 @@
+name: Platform Images
+
+on:
+  pull_request:
+    branches: [develop]
+    paths:
+      - containers/**
+      - deploy/helm/**
+      - deploy/kyverno/**
+      - deploy/versions.lock.yml
+      - schemas/results/platform-image-*.json
+      - xtask/**
+      - .github/workflows/platform-images.yml
+  push:
+    branches: [develop]
+    paths:
+      - containers/**
+      - deploy/helm/**
+      - deploy/kyverno/**
+      - deploy/versions.lock.yml
+      - schemas/results/platform-image-*.json
+      - xtask/**
+      - .github/workflows/platform-images.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: platform-images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract-and-policy:
+    name: platform-package-policy-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Validate package manifest contract
+        run: cargo xtask package-validate --manifest tests/fixtures/platform-image-package-manifest.json --mode static
+      - name: Test xtask negative gates
+        run: cargo test -p xtask --locked platform_images
+      - name: Render locked Helm chart
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD:/workspace" -w /workspace \
+            docker.io/alpine/helm:3.21.3@sha256:35da09ba0716fc7c3cd63b6b31ee380a9c7662e95f29ab0e4ae962420afd315b \
+            template labweaver deploy/helm/labweaver --namespace labweaver-system \
+            --values tests/fixtures/platform-images-values.yaml >"$RUNNER_TEMP/platform-images.yaml"
+          rendered="$RUNNER_TEMP/platform-images.yaml"
+          image_count="$(awk '
+            /^[[:space:]]+image: "?ghcr\.io\/teammonad\/labweaver-system\/[a-z0-9-]+@sha256:[0-9a-f]{64}"?[[:space:]]*$/ { count++ }
+            END { print count + 0 }
+          ' "$rendered")"
+          if [[ "$image_count" -ne 7 ]]; then
+            echo "LW_PACKAGE_HELM_IMAGE_COUNT_INVALID:expected=7 actual=$image_count" >&2
+            exit 1
+          fi
+          require_rendered() {
+            local diagnostic="$1"
+            local expected="$2"
+            if ! grep -Fq -- "$expected" "$rendered"; then
+              echo "$diagnostic" >&2
+              exit 1
+            fi
+          }
+          require_rendered 'LW_PACKAGE_HELM_TRUST_REVISION_MISSING' 'labweaver.io/trust-revision: "trust-v2"'
+          require_rendered 'LW_PACKAGE_HELM_PREVIOUS_TRUST_REVISION_MISSING' 'labweaver.io/previous-trust-revision: "trust-v1"'
+          require_rendered 'LW_PACKAGE_HELM_SUBJECT_MISSING' 'subject: "system:serviceaccount:labweaver-build:platform-builder"'
+          require_rendered 'LW_PACKAGE_HELM_PREVIOUS_SUBJECT_MISSING' 'subject: "system:serviceaccount:labweaver-build:platform-builder-v1"'
+      - name: Run Kyverno registry and digest negative tests
+        run: >-
+          docker run --rm
+          -v "$PWD:/workspace" -w /workspace/deploy/kyverno/platform-images
+          ghcr.io/kyverno/kyverno-cli:v1.18.2@sha256:7224ed05508c24419c3df98114c28ba682ad0a940dcdb7b9fdba0a4b6bf943cf
+          test .
+
+  build-and-scan:
+    name: build-scan-${{ matrix.component }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component:
+          - access-service
+          - agent-service
+          - control-service
+          - environment-service
+          - evaluation-service
+          - resource-service
+          - web
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+        with:
+          version: v0.35.0
+          driver-opts: image=moby/buildkit@sha256:6b59b7df63a8cb9902736f9ddf7fcff8261613d3e7449b8ea8b7537fc399c03a
+      - name: Scan source context for secrets
+        run: >-
+          docker run --rm
+          -v "$PWD:/workspace" -w /workspace
+          docker.io/aquasec/trivy:0.72.0@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f
+          fs --scanners secret --exit-code 1 --no-progress
+          --skip-dirs .git --skip-dirs .agents --skip-dirs .ansible
+          --skip-dirs .codex --skip-dirs .github --skip-dirs .idea
+          --skip-dirs .private --skip-dirs .pytest_cache --skip-dirs .tmp
+          --skip-dirs agent_team --skip-dirs artifacts --skip-dirs deploy
+          --skip-dirs docs --skip-dirs examples --skip-dirs schemas
+          --skip-dirs scripts --skip-dirs target --skip-dirs tests
+          --skip-dirs web/node_modules --skip-dirs web/dist .
+      - name: Build twice with SBOM and max provenance
+        env:
+          COMPONENT: ${{ matrix.component }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_commit="$(git rev-parse HEAD)"
+          source_date_epoch="$(git show -s --format=%ct HEAD)"
+          if [[ "$COMPONENT" == web ]]; then
+            file=containers/Containerfile.web
+            service_args=()
+          else
+            file=containers/Containerfile.rust
+            service_args=(--build-arg "SERVICE=$COMPONENT")
+          fi
+          for pass in first second; do
+            docker buildx build \
+              --file "$file" \
+              --platform linux/amd64 \
+              --build-arg "SOURCE_COMMIT=$source_commit" \
+              --build-arg "SOURCE_DATE_EPOCH=$source_date_epoch" \
+              "${service_args[@]}" \
+              --attest 'type=sbom,generator=docker.io/docker/buildkit-syft-scanner@sha256:79e7b013cbec16bbb436f312819a49a4a57752b2270c1a9332ae1a10fcc82a68' \
+              --provenance=mode=max \
+              --output "type=oci,dest=$RUNNER_TEMP/$COMPONENT-$pass.tar,rewrite-timestamp=true,oci-mediatypes=true" \
+              --metadata-file "$RUNNER_TEMP/$COMPONENT-$pass.json" .
+          done
+          for pass in first second; do
+            directory="$RUNNER_TEMP/$COMPONENT-$pass-oci"
+            mkdir "$directory"
+            tar -xf "$RUNNER_TEMP/$COMPONENT-$pass.tar" -C "$directory"
+            outer="$(jq -er '.manifests[0].digest | sub("^sha256:"; "")' "$directory/index.json")"
+            jq -er '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest' \
+              "$directory/blobs/sha256/$outer" >"$RUNNER_TEMP/$COMPONENT-$pass-subject"
+          done
+          first_digest="$(cat "$RUNNER_TEMP/$COMPONENT-first-subject")"
+          second_digest="$(cat "$RUNNER_TEMP/$COMPONENT-second-subject")"
+          test "$first_digest" = "$second_digest" || {
+            echo "LW_PACKAGE_BUILD_NOT_REPRODUCIBLE:$COMPONENT" >&2
+            exit 1
+          }
+          grep -R -q 'https://spdx.dev/Document' "$RUNNER_TEMP/$COMPONENT-first-oci/blobs/sha256" || {
+            echo "LW_PACKAGE_SBOM_MISSING:$COMPONENT" >&2
+            exit 1
+          }
+          grep -R -q 'https://slsa.dev/provenance/' "$RUNNER_TEMP/$COMPONENT-first-oci/blobs/sha256" || {
+            echo "LW_PACKAGE_PROVENANCE_MISSING:$COMPONENT" >&2
+            exit 1
+          }
+      - name: Inspect final runtime identity and filesystem
+        env:
+          COMPONENT: ${{ matrix.component }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_commit="$(git rev-parse HEAD)"
+          source_date_epoch="$(git show -s --format=%ct HEAD)"
+          if [[ "$COMPONENT" == web ]]; then
+            file=containers/Containerfile.web
+            service_args=()
+            expected_user=101:101
+          else
+            file=containers/Containerfile.rust
+            service_args=(--build-arg "SERVICE=$COMPONENT")
+            expected_user=65532:65532
+          fi
+          image="labweaver-ci/$COMPONENT:runtime-inspection"
+          docker buildx build --load --file "$file" --platform linux/amd64 \
+            --build-arg "SOURCE_COMMIT=$source_commit" \
+            --build-arg "SOURCE_DATE_EPOCH=$source_date_epoch" \
+            "${service_args[@]}" --provenance=false --sbom=false --tag "$image" .
+          test "$(docker image inspect --format '{{.Config.User}}' "$image")" = "$expected_user"
+          container="$(docker create "$image")"
+          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+          rootfs="$RUNNER_TEMP/$COMPONENT-rootfs.tar"
+          rootfs_listing="$RUNNER_TEMP/$COMPONENT-rootfs.list"
+          docker export "$container" >"$rootfs"
+          tar -tf "$rootfs" >"$rootfs_listing"
+          if ! grep -Eq '(^|/)etc/ssl/certs/ca-certificates\.crt$' "$rootfs_listing"; then
+            echo "LW_PACKAGE_RUNTIME_CA_MISSING:$COMPONENT" >&2
+            exit 1
+          fi
+          if grep -Eq '(^|/)(cargo|rustc|gcc|cc|apk|apt|apt-get|npm|pnpm)(\.exe)?$' "$rootfs_listing"; then
+            echo "LW_PACKAGE_RUNTIME_TOOLING_PRESENT:$COMPONENT" >&2
+            exit 1
+          fi
+      - name: Scan image archive; Critical blocks and High remains visible
+        env:
+          COMPONENT: ${{ matrix.component }}
+        run: >-
+          docker run --rm
+          -v "$RUNNER_TEMP:/evidence"
+          docker.io/aquasec/trivy:0.72.0@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f
+          image --input "/evidence/$COMPONENT-first-oci"
+          --scanners vuln,secret --severity HIGH,CRITICAL
+          --exit-code 0 --format json --output "/evidence/$COMPONENT-trivy.json"
+      - name: Enforce Critical threshold without hiding High findings
+        env:
+          COMPONENT: ${{ matrix.component }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          critical="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' "$RUNNER_TEMP/$COMPONENT-trivy.json")"
+          high="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' "$RUNNER_TEMP/$COMPONENT-trivy.json")"
+          secrets="$(jq '[.Results[]?.Secrets[]?] | length' "$RUNNER_TEMP/$COMPONENT-trivy.json")"
+          echo "component=$COMPONENT critical=$critical high=$high secrets=$secrets"
+          test "$secrets" -eq 0 || {
+            echo "LW_PACKAGE_SECRET_DETECTED:$COMPONENT" >&2
+            exit 1
+          }
+          test "$critical" -eq 0 || {
+            echo "LW_PACKAGE_CRITICAL_VULNERABILITY:$COMPONENT" >&2
+            exit 1
+          }
+
+  publish-ghcr:
+    name: publish-ghcr-${{ matrix.component }}
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    needs: [contract-and-policy, build-and-scan]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        component:
+          - access-service
+          - agent-service
+          - control-service
+          - environment-service
+          - evaluation-service
+          - resource-service
+          - web
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+        with:
+          version: v0.35.0
+          driver-opts: image=moby/buildkit@sha256:6b59b7df63a8cb9902736f9ddf7fcff8261613d3e7449b8ea8b7537fc399c03a
+      - name: Authenticate to GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+      - name: Publish immutable source-commit image
+        env:
+          COMPONENT: ${{ matrix.component }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_date_epoch="$(git show -s --format=%ct HEAD)"
+          image="ghcr.io/teammonad/labweaver-system/$COMPONENT:git-${GITHUB_SHA}"
+          if [[ "$COMPONENT" == web ]]; then
+            file=containers/Containerfile.web
+            service_args=()
+          else
+            file=containers/Containerfile.rust
+            service_args=(--build-arg "SERVICE=$COMPONENT")
+          fi
+          docker buildx build \
+            --file "$file" \
+            --platform linux/amd64 \
+            --build-arg "SOURCE_COMMIT=$GITHUB_SHA" \
+            --build-arg "SOURCE_DATE_EPOCH=$source_date_epoch" \
+            "${service_args[@]}" \
+            --attest 'type=sbom,generator=docker.io/docker/buildkit-syft-scanner@sha256:79e7b013cbec16bbb436f312819a49a4a57752b2270c1a9332ae1a10fcc82a68' \
+            --provenance=mode=max \
+            --output type=registry,rewrite-timestamp=true,oci-mediatypes=true \
+            --tag "$image" .
+          subject_digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest}}' |
+            jq -er '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest')"
+          [[ "$subject_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "LW_PACKAGE_REGISTRY_DIGEST_INVALID:$COMPONENT" >&2
+            exit 1
+          }
+          printf '%s\n' "component=$COMPONENT image=ghcr.io/teammonad/labweaver-system/$COMPONENT@$subject_digest" |
+            tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Remove registry credentials
+        if: always()
+        run: docker logout ghcr.io

@@ -1,0 +1,17 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: platform-image-shape
+policies:
+  - test-policy.yaml
+resources:
+  - resources.yaml
+results:
+  - policy: labweaver-platform-image-shape-test
+    rule: require-ghcr-digests
+    resources: [valid]
+    result: pass
+  - policy: labweaver-platform-image-shape-test
+    rule: require-ghcr-digests
+    resources: [tag-only, external]
+    result: fail
