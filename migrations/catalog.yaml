@@ -37,7 +37,7 @@ domains:
         sha256: 1333cf42a6c9706de5c090671d508e1c20d93e486570db1742b71ddaabd8fa87
       - id: 3
         file: environment/0003_release_projections.sql
-        sha256: f9f13e77777b5c081e4a2176c877ea0f6a1a94f0c5576f7d4415d0edbf3c0110
+        sha256: 9ae9838ec69649fea4037eb04a3858d272e1bb2884a98ff3c3a1f84b38d5dd47
   - name: agent
     migrations:
       - id: 1
