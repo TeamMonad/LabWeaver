@@ -120,12 +120,88 @@ impl Revision {
     }
 }
 
-/// Aggregate-local sequence or SSE cursor.
+/// Aggregate-local ordering sequence. This value is not an SSE resume cursor.
 #[derive(
     Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
 )]
 #[serde(transparent)]
 pub struct Sequence(pub u64);
+
+/// Monotonic cursor in a scoped public event stream.
+///
+/// The public wire representation is a canonical decimal string. This preserves every `u64`
+/// value in JavaScript clients while retaining an efficient numeric representation internally.
+/// A distinct wire type prevents an aggregate-local sequence from being accepted as a
+/// course-stream resume position.
+pub const STREAM_SEQUENCE_PATTERN: &str = concat!(
+    r"^(0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|",
+    r"184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|",
+    r"184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|",
+    r"1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|",
+    r"1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|",
+    r"184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|",
+    r"18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]|",
+    r"1844674407370955161[0-5])$"
+);
+pub const STREAM_SEQUENCE_MAX_LENGTH: u32 = 20;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, JsonSchema, Ord, PartialEq, PartialOrd)]
+#[schemars(
+    with = "String",
+    extend("pattern" = STREAM_SEQUENCE_PATTERN, "maxLength" = STREAM_SEQUENCE_MAX_LENGTH, "format" = "uint64-decimal")
+)]
+pub struct StreamSequence(pub u64);
+
+impl StreamSequence {
+    /// Returns the numeric stream position for persistence and ordering.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl Display for StreamSequence {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&self.0, formatter)
+    }
+}
+
+impl FromStr for StreamSequence {
+    type Err = FoundationError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.is_empty()
+            || (value.len() > 1 && value.starts_with('0'))
+            || !value.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(FoundationError::InvalidStreamSequence);
+        }
+        value
+            .parse::<u64>()
+            .map(Self)
+            .map_err(|_| FoundationError::InvalidStreamSequence)
+    }
+}
+
+impl Serialize for StreamSequence {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for StreamSequence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
 
 /// Canonical lowercase SHA-256 digest.
 #[derive(Clone, Copy, Debug, Eq, Hash, JsonSchema, Ord, PartialEq, PartialOrd)]
@@ -467,6 +543,8 @@ impl<'de> serde::Deserialize<'de> for StrictJsonValue {
 pub enum FoundationError {
     #[error("revision must be non-zero")]
     ZeroRevision,
+    #[error("stream sequence must be a canonical unsigned decimal string")]
+    InvalidStreamSequence,
     #[error("invalid lowercase SHA-256 digest")]
     InvalidSha256,
     #[error("canonical JSON serialization failed: {0}")]

@@ -1,0 +1,146 @@
+{
+  "$defs": {
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "DesiredEnvironmentState": {
+      "description": "Requested steady state.",
+      "enum": [
+        "running",
+        "stopped",
+        "deleted"
+      ],
+      "type": "string"
+    },
+    "EnvironmentClass": {
+      "description": "Environment business class retained from the v2.1 architecture.",
+      "enum": [
+        "experiment",
+        "work"
+      ],
+      "type": "string"
+    },
+    "ObservedEnvironmentState": {
+      "description": "Authoritative observed lifecycle state.",
+      "enum": [
+        "requested",
+        "validating",
+        "building",
+        "provisioning",
+        "ready",
+        "stopping",
+        "stopped",
+        "updating",
+        "expiring",
+        "deleting",
+        "deleted",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "ReleaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `ReleaseId`.",
+      "type": "string"
+    },
+    "RuntimeKind": {
+      "description": "Runtime kind shared by candidates, releases, and instances.",
+      "enum": [
+        "container",
+        "virtual_machine"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "class": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EnvironmentClass"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    },
+    "cursor": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "desiredState": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DesiredEnvironmentState"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "limit": {
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "observedState": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ObservedEnvironmentState"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "projectId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ProjectId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "releaseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ReleaseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "runtimeKind": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RuntimeKind"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "courseId"
+  ],
+  "title": "EnvironmentInventoryQuery",
+  "type": "object"
+}

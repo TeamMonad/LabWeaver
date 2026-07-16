@@ -13,6 +13,15 @@ const user = ref<User | null>(null)
 const isLoading = ref(false)
 const error = ref<Error | null>(null)
 
+/** Returns the current non-expired OIDC bearer for the Public API client. */
+export async function getOidcAccessToken(): Promise<string | undefined> {
+  if (!userManager) return undefined
+  const current = user.value ?? (await userManager.getUser())
+  if (!current || current.expired || !current.access_token) return undefined
+  user.value = current
+  return current.access_token
+}
+
 export function useAuth() {
   const isAuthenticated = computed(() => user.value?.expired === false)
 

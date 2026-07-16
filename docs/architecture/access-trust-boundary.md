@@ -6,7 +6,15 @@ Status: ACCESS-01a remains an E0 design baseline, while the Issue #47 OIDC/BFF a
 
 This document defines the P0 trust boundary for external access to LabWeaver environments. It separates authentication, device reachability, business authorization, direct VM transport, browser mediation, and environment-local credentials so that Tailnet reachability never becomes a substitute for Access Service authorization.
 
-It does not define a REST API, NATS subject, database schema, Headscale instance, Router firewall implementation, Guacamole extension, RBAC policy, or deployment configuration. Those interfaces remain planned until their owning implementation issues provide reviewed contracts and current-commit evidence.
+It does not define a NATS subject, database schema, Headscale instance, Router firewall implementation, Guacamole extension, RBAC policy, or deployment configuration. Issue #81 adds only the actor-safe Public REST discovery projection described below; enforcement and runtime ownership remain planned until their owning implementation issues provide reviewed contracts and current-commit evidence.
+
+## Public discovery projection
+
+`GET /api/v1/environments/{environmentId}/access-grants` returns only grants visible to the current
+actor. The response omits actor identity, endpoint host/port, credentials, Headscale policy, Router
+rules and raw authorization inputs. It exposes grant and endpoint identities/revisions, protocol,
+safe alias, effective state, expiry, and a stable decision reason so the console can explain access
+without becoming an authorization authority. Missing or unavailable ownership fails closed.
 
 ## Authority and trust domains
 

@@ -1,0 +1,76 @@
+{
+  "$defs": {
+    "EnvironmentOperationKind": {
+      "description": "Explicit operation kind; restart and destructive reset are never aliases.",
+      "enum": [
+        "create",
+        "start",
+        "stop",
+        "restart",
+        "reset",
+        "retry",
+        "cancel",
+        "recover",
+        "expire",
+        "delete",
+        "cleanup",
+        "freeze"
+      ],
+      "type": "string"
+    },
+    "EnvironmentOperationStatus": {
+      "description": "Public operation state used by REST snapshots and SSE projections.\n\nThe runtime aggregate retains its historical `OperationState`; timeout is exposed as a\ndistinct terminal fact instead of forcing clients to infer it from a generic failure code.",
+      "enum": [
+        "accepted",
+        "running",
+        "cancelling",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "timed_out"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "cursor": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "kind": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EnvironmentOperationKind"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "limit": {
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "state": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EnvironmentOperationStatus"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "title": "EnvironmentOperationListQuery",
+  "type": "object"
+}

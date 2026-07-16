@@ -249,6 +249,26 @@ idempotent replay/backfill plus dual-write watermark comparison supports a
 future approved handoff to the audit-projection worker.
 ## Environment lifecycle v1 runtime gates
 
+### Environment management API E1 gates (#81)
+
+The contract slice is verified with:
+
+```sh
+cargo test -p contracts --test environment_management_api_contract
+cargo xtask contracts check
+pnpm --dir web typecheck
+pnpm --dir web test:e2e:sdk
+```
+
+Rust tests prove bounded opaque pagination, required course scope, distinct stream cursors,
+terminal timeout/cleanup facts, generated Public OpenAPI coverage, Environment-specific 202
+identity and per-operation error status sets. Real Chromium transport tests prove BFF cookie/CSRF
+separation, direct bearer injection, absence of a duplicated `/api/v1` prefix, typed RFC 9457
+decoding, missing-credential failure, timeout/cancellation distinction and no silent retry. These
+are E1 contract and browser-transport
+evidence only; they do not prove Handler authorization, PostgreSQL snapshots, Outbox/SSE replay,
+Access ownership, UI behavior or deployment.
+
 `EnvironmentLifecycle v1` now has local E2 state-transition, repository,
 messaging, reconciler and owner-resolution evidence. Deterministic tests
 exhaust all 144 observed-state pairs and all 144 state/operation pairs. Docker

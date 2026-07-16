@@ -1230,6 +1230,85 @@ export type EnvironmentInstanceSchemaSha256Digest = string;
 export type EnvironmentInstanceSchemaUtcTimestamp = string;
 
 /**
+ * EnvironmentOperationSnapshot
+ *
+ * Safe operation representation for Public REST and SSE consumers.
+ */
+export type EnvironmentOperationSnapshotSchema = {
+    acceptedAt: EnvironmentOperationSnapshotSchemaUtcTimestamp;
+    acceptedRevision: EnvironmentOperationSnapshotSchemaRevision;
+    attempt: number;
+    cancelEligible: boolean;
+    cleanupDeadlineAt?: EnvironmentOperationSnapshotSchemaUtcTimestamp | null;
+    cleanupStartedAt?: EnvironmentOperationSnapshotSchemaUtcTimestamp | null;
+    currentRevision: EnvironmentOperationSnapshotSchemaRevision;
+    deadlineAt: EnvironmentOperationSnapshotSchemaUtcTimestamp;
+    diagnosticCode?: EnvironmentOperationSnapshotSchemaDiagnosticCode | null;
+    environmentId: EnvironmentOperationSnapshotSchemaEnvironmentId;
+    kind: EnvironmentOperationSnapshotSchemaEnvironmentOperationKind;
+    lastChangedStreamSequence: StreamSequence;
+    maxAttempts: number;
+    operationId: EnvironmentOperationSnapshotSchemaOperationId;
+    providerPhase?: PublicEnvironmentOperationPhase | null;
+    requestId: string;
+    retryEligible: boolean;
+    startedAt?: EnvironmentOperationSnapshotSchemaUtcTimestamp | null;
+    state: EnvironmentOperationStatus;
+    terminalAt?: EnvironmentOperationSnapshotSchemaUtcTimestamp | null;
+    timedOutAt?: EnvironmentOperationSnapshotSchemaUtcTimestamp | null;
+    traceId: string;
+    updatedAt: EnvironmentOperationSnapshotSchemaUtcTimestamp;
+};
+
+/**
+ * Stable machine-readable diagnostic code.
+ *
+ * Consumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so
+ * additive diagnostics do not force a wire-version change.
+ */
+export type EnvironmentOperationSnapshotSchemaDiagnosticCode = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `EnvironmentId`.
+ */
+export type EnvironmentOperationSnapshotSchemaEnvironmentId = string;
+
+/**
+ * Explicit operation kind; restart and destructive reset are never aliases.
+ */
+export type EnvironmentOperationSnapshotSchemaEnvironmentOperationKind = 'create' | 'start' | 'stop' | 'restart' | 'reset' | 'retry' | 'cancel' | 'recover' | 'expire' | 'delete' | 'cleanup' | 'freeze';
+
+/**
+ * Public operation state used by REST snapshots and SSE projections.
+ *
+ * The runtime aggregate retains its historical `OperationState`; timeout is exposed as a
+ * distinct terminal fact instead of forcing clients to infer it from a generic failure code.
+ */
+export type EnvironmentOperationStatus = 'accepted' | 'running' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled' | 'timed_out';
+
+/**
+ * Strongly typed UUIDv7 identifier for `OperationId`.
+ */
+export type EnvironmentOperationSnapshotSchemaOperationId = string;
+
+/**
+ * Provider-safe progress phase. Provider names, node identities, and raw payloads stay private.
+ */
+export type PublicEnvironmentOperationPhase = 'validating' | 'building' | 'provisioning' | 'stopping' | 'revoking_access' | 'cleaning_up' | 'finalizing';
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type EnvironmentOperationSnapshotSchemaRevision = number;
+
+export type StreamSequence = string;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type EnvironmentOperationSnapshotSchemaUtcTimestamp = string;
+
+/**
  * EnvironmentTemplateRelease
  *
  * Immutable environment-first release.
@@ -2076,6 +2155,7 @@ export type CreateAgentRunRequestSchemaSha256Digest = string;
  */
 export type CreateEnvironmentRequestSchema = {
     courseId: CreateEnvironmentRequestSchemaCourseId;
+    displayLabel?: string | null;
     releaseId: CreateEnvironmentRequestSchemaReleaseId;
     releaseVersion: number;
 };
@@ -2293,6 +2373,501 @@ export type CreateProblemPackageUploadRequestSchemaSha256Digest = string;
 export type CreateSshPublicKeyRequestSchema = {
     publicKeyOpenssh: string;
 };
+
+/**
+ * SnapshotPage
+ *
+ * Cursor page bound to one consistent REST/SSE snapshot.
+ */
+export type EnvironmentAccessGrantPageSchema = {
+    items: Array<AccessGrantSnapshot>;
+    nextCursor?: string | null;
+    snapshotAt: EnvironmentAccessGrantPageSchemaUtcTimestamp;
+    snapshotSequence: EnvironmentAccessGrantPageSchemaStreamSequence;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `AccessGrantId`.
+ */
+export type EnvironmentAccessGrantPageSchemaAccessGrantId = string;
+
+/**
+ * Actor-scoped AccessGrant snapshot used by Environment discovery APIs.
+ */
+export type AccessGrantSnapshot = {
+    decision: AuthorizationDecisionSummary;
+    endpointGrants: Array<EndpointGrantSnapshot>;
+    environmentId: EnvironmentAccessGrantPageSchemaEnvironmentId;
+    environmentRevision: EnvironmentAccessGrantPageSchemaRevision;
+    expiresAt: EnvironmentAccessGrantPageSchemaUtcTimestamp;
+    id: EnvironmentAccessGrantPageSchemaAccessGrantId;
+    issuedAt: EnvironmentAccessGrantPageSchemaUtcTimestamp;
+    lastChangedStreamSequence: EnvironmentAccessGrantPageSchemaStreamSequence;
+    reasonCode?: string | null;
+    revision: EnvironmentAccessGrantPageSchemaRevision;
+    revokedAt?: EnvironmentAccessGrantPageSchemaUtcTimestamp | null;
+    state: EnvironmentAccessGrantPageSchemaAccessGrantState;
+};
+
+/**
+ * AccessGrant lifecycle.
+ */
+export type EnvironmentAccessGrantPageSchemaAccessGrantState = 'requested' | 'active' | 'expired' | 'revoked';
+
+/**
+ * Safe authorization result suitable for a console timeline.
+ */
+export type EnvironmentAccessGrantPageSchemaAuthorizationDecision = 'allow' | 'deny' | 'terminal';
+
+export type AuthorizationDecisionSummary = {
+    decision: EnvironmentAccessGrantPageSchemaAuthorizationDecision;
+    evaluatedAt: EnvironmentAccessGrantPageSchemaUtcTimestamp;
+    reasonCode: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `EndpointGrantId`.
+ */
+export type EnvironmentAccessGrantPageSchemaEndpointGrantId = string;
+
+/**
+ * EndpointGrant projection without host, port, credential, or policy internals.
+ */
+export type EndpointGrantSnapshot = {
+    alias?: string | null;
+    endpointId: EnvironmentAccessGrantPageSchemaEndpointId;
+    endpointRevision: EnvironmentAccessGrantPageSchemaRevision;
+    expiresAt: EnvironmentAccessGrantPageSchemaUtcTimestamp;
+    id: EnvironmentAccessGrantPageSchemaEndpointGrantId;
+    protocol: EnvironmentAccessGrantPageSchemaEndpointProtocol;
+    state: EndpointGrantSnapshotState;
+};
+
+/**
+ * Effective endpoint grant state exposed to the current actor.
+ */
+export type EndpointGrantSnapshotState = 'active' | 'expired' | 'revoked' | 'unhealthy';
+
+/**
+ * Strongly typed UUIDv7 identifier for `EndpointId`.
+ */
+export type EnvironmentAccessGrantPageSchemaEndpointId = string;
+
+/**
+ * Supported controlled protocols.
+ */
+export type EnvironmentAccessGrantPageSchemaEndpointProtocol = 'http' | 'https' | 'ssh';
+
+/**
+ * Strongly typed UUIDv7 identifier for `EnvironmentId`.
+ */
+export type EnvironmentAccessGrantPageSchemaEnvironmentId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type EnvironmentAccessGrantPageSchemaRevision = number;
+
+export type EnvironmentAccessGrantPageSchemaStreamSequence = string;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type EnvironmentAccessGrantPageSchemaUtcTimestamp = string;
+
+/**
+ * SseEvent
+ */
+export type EnvironmentManagementEventSchema = {
+    cursor: EnvironmentManagementEventSchemaStreamSequence;
+    data: EnvironmentManagementStreamEvent;
+    event: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `AccessGrantId`.
+ */
+export type EnvironmentManagementEventSchemaAccessGrantId = string;
+
+/**
+ * AccessGrant lifecycle.
+ */
+export type EnvironmentManagementEventSchemaAccessGrantState = 'requested' | 'active' | 'expired' | 'revoked';
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type EnvironmentManagementEventSchemaCourseId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `EnvironmentId`.
+ */
+export type EnvironmentManagementEventSchemaEnvironmentId = string;
+
+/**
+ * Environment-management subset carried by the course event stream.
+ */
+export type EnvironmentManagementEvent = {
+    environmentId: EnvironmentManagementEventSchemaEnvironmentId;
+    kind: 'environment_changed';
+    observedState: EnvironmentManagementEventSchemaObservedEnvironmentState;
+    operationId?: EnvironmentManagementEventSchemaOperationId | null;
+    revision: EnvironmentManagementEventSchemaRevision;
+} | {
+    environmentId: EnvironmentManagementEventSchemaEnvironmentId;
+    kind: 'operation_changed';
+    operationId: EnvironmentManagementEventSchemaOperationId;
+    revision: EnvironmentManagementEventSchemaRevision;
+    state: EnvironmentManagementEventSchemaEnvironmentOperationStatus;
+} | {
+    accessGrantId: EnvironmentManagementEventSchemaAccessGrantId;
+    environmentId: EnvironmentManagementEventSchemaEnvironmentId;
+    kind: 'access_grant_changed';
+    revision: EnvironmentManagementEventSchemaRevision;
+    state: EnvironmentManagementEventSchemaAccessGrantState;
+};
+
+/**
+ * Public event envelope used for course-scoped inventory synchronization.
+ */
+export type EnvironmentManagementStreamEvent = {
+    courseId: EnvironmentManagementEventSchemaCourseId;
+    data: EnvironmentManagementEvent;
+    effectiveAt: EnvironmentManagementEventSchemaUtcTimestamp;
+    eventId: EventId;
+    projectId?: EnvironmentManagementEventSchemaProjectId | null;
+    streamSequence: EnvironmentManagementEventSchemaStreamSequence;
+};
+
+/**
+ * Public operation state used by REST snapshots and SSE projections.
+ *
+ * The runtime aggregate retains its historical `OperationState`; timeout is exposed as a
+ * distinct terminal fact instead of forcing clients to infer it from a generic failure code.
+ */
+export type EnvironmentManagementEventSchemaEnvironmentOperationStatus = 'accepted' | 'running' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled' | 'timed_out';
+
+/**
+ * Strongly typed UUIDv7 identifier for `EventId`.
+ */
+export type EventId = string;
+
+/**
+ * Authoritative observed lifecycle state.
+ */
+export type EnvironmentManagementEventSchemaObservedEnvironmentState = 'requested' | 'validating' | 'building' | 'provisioning' | 'ready' | 'stopping' | 'stopped' | 'updating' | 'expiring' | 'deleting' | 'deleted' | 'failed';
+
+/**
+ * Strongly typed UUIDv7 identifier for `OperationId`.
+ */
+export type EnvironmentManagementEventSchemaOperationId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type EnvironmentManagementEventSchemaProjectId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type EnvironmentManagementEventSchemaRevision = number;
+
+export type EnvironmentManagementEventSchemaStreamSequence = string;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type EnvironmentManagementEventSchemaUtcTimestamp = string;
+
+/**
+ * EnvironmentOperationAccepted
+ *
+ * Environment-specific accepted response. Existing OperationAccepted fields keep their v1
+ * meaning while `environmentId` removes the need to parse an undeclared status URL.
+ */
+export type EnvironmentOperationAcceptedSchema = {
+    environmentId: EnvironmentOperationAcceptedSchemaEnvironmentId;
+    operationId: EnvironmentOperationAcceptedSchemaOperationId;
+    revision: EnvironmentOperationAcceptedSchemaRevision;
+    statusUrl: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `EnvironmentId`.
+ */
+export type EnvironmentOperationAcceptedSchemaEnvironmentId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `OperationId`.
+ */
+export type EnvironmentOperationAcceptedSchemaOperationId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type EnvironmentOperationAcceptedSchemaRevision = number;
+
+/**
+ * SnapshotPage
+ *
+ * Cursor page bound to one consistent REST/SSE snapshot.
+ */
+export type EnvironmentOperationPageSchema = {
+    items: Array<EnvironmentOperationSnapshot>;
+    nextCursor?: string | null;
+    snapshotAt: EnvironmentOperationPageSchemaUtcTimestamp;
+    snapshotSequence: EnvironmentOperationPageSchemaStreamSequence;
+};
+
+/**
+ * Stable machine-readable diagnostic code.
+ *
+ * Consumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so
+ * additive diagnostics do not force a wire-version change.
+ */
+export type EnvironmentOperationPageSchemaDiagnosticCode = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `EnvironmentId`.
+ */
+export type EnvironmentOperationPageSchemaEnvironmentId = string;
+
+/**
+ * Explicit operation kind; restart and destructive reset are never aliases.
+ */
+export type EnvironmentOperationPageSchemaEnvironmentOperationKind = 'create' | 'start' | 'stop' | 'restart' | 'reset' | 'retry' | 'cancel' | 'recover' | 'expire' | 'delete' | 'cleanup' | 'freeze';
+
+/**
+ * Safe operation representation for Public REST and SSE consumers.
+ */
+export type EnvironmentOperationSnapshot = {
+    acceptedAt: EnvironmentOperationPageSchemaUtcTimestamp;
+    acceptedRevision: EnvironmentOperationPageSchemaRevision;
+    attempt: number;
+    cancelEligible: boolean;
+    cleanupDeadlineAt?: EnvironmentOperationPageSchemaUtcTimestamp | null;
+    cleanupStartedAt?: EnvironmentOperationPageSchemaUtcTimestamp | null;
+    currentRevision: EnvironmentOperationPageSchemaRevision;
+    deadlineAt: EnvironmentOperationPageSchemaUtcTimestamp;
+    diagnosticCode?: EnvironmentOperationPageSchemaDiagnosticCode | null;
+    environmentId: EnvironmentOperationPageSchemaEnvironmentId;
+    kind: EnvironmentOperationPageSchemaEnvironmentOperationKind;
+    lastChangedStreamSequence: EnvironmentOperationPageSchemaStreamSequence;
+    maxAttempts: number;
+    operationId: EnvironmentOperationPageSchemaOperationId;
+    providerPhase?: EnvironmentOperationPageSchemaPublicEnvironmentOperationPhase | null;
+    requestId: string;
+    retryEligible: boolean;
+    startedAt?: EnvironmentOperationPageSchemaUtcTimestamp | null;
+    state: EnvironmentOperationPageSchemaEnvironmentOperationStatus;
+    terminalAt?: EnvironmentOperationPageSchemaUtcTimestamp | null;
+    timedOutAt?: EnvironmentOperationPageSchemaUtcTimestamp | null;
+    traceId: string;
+    updatedAt: EnvironmentOperationPageSchemaUtcTimestamp;
+};
+
+/**
+ * Public operation state used by REST snapshots and SSE projections.
+ *
+ * The runtime aggregate retains its historical `OperationState`; timeout is exposed as a
+ * distinct terminal fact instead of forcing clients to infer it from a generic failure code.
+ */
+export type EnvironmentOperationPageSchemaEnvironmentOperationStatus = 'accepted' | 'running' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled' | 'timed_out';
+
+/**
+ * Strongly typed UUIDv7 identifier for `OperationId`.
+ */
+export type EnvironmentOperationPageSchemaOperationId = string;
+
+/**
+ * Provider-safe progress phase. Provider names, node identities, and raw payloads stay private.
+ */
+export type EnvironmentOperationPageSchemaPublicEnvironmentOperationPhase = 'validating' | 'building' | 'provisioning' | 'stopping' | 'revoking_access' | 'cleaning_up' | 'finalizing';
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type EnvironmentOperationPageSchemaRevision = number;
+
+export type EnvironmentOperationPageSchemaStreamSequence = string;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type EnvironmentOperationPageSchemaUtcTimestamp = string;
+
+/**
+ * SnapshotPage
+ *
+ * Cursor page bound to one consistent REST/SSE snapshot.
+ */
+export type EnvironmentSummaryPageSchema = {
+    items: Array<EnvironmentSummary>;
+    nextCursor?: string | null;
+    snapshotAt: EnvironmentSummaryPageSchemaUtcTimestamp;
+    snapshotSequence: EnvironmentSummaryPageSchemaStreamSequence;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type EnvironmentSummaryPageSchemaCourseId = string;
+
+/**
+ * Requested steady state.
+ */
+export type EnvironmentSummaryPageSchemaDesiredEnvironmentState = 'running' | 'stopped' | 'deleted';
+
+/**
+ * Stable machine-readable diagnostic code.
+ *
+ * Consumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so
+ * additive diagnostics do not force a wire-version change.
+ */
+export type EnvironmentSummaryPageSchemaDiagnosticCode = string;
+
+/**
+ * Access readiness projected without endpoint routes, credentials, or policy material.
+ */
+export type EnvironmentAccessEligibilityState = 'eligible' | 'ineligible' | 'active_grant';
+
+export type EnvironmentAccessEligibilitySummary = {
+    activeGrantCount: number;
+    healthyEndpointCount: number;
+    reasonCode?: EnvironmentSummaryPageSchemaDiagnosticCode | null;
+    state: EnvironmentAccessEligibilityState;
+};
+
+/**
+ * Environment business class retained from the v2.1 architecture.
+ */
+export type EnvironmentSummaryPageSchemaEnvironmentClass = 'experiment' | 'work';
+
+/**
+ * Strongly typed UUIDv7 identifier for `EnvironmentId`.
+ */
+export type EnvironmentSummaryPageSchemaEnvironmentId = string;
+
+/**
+ * Explicit operation kind; restart and destructive reset are never aliases.
+ */
+export type EnvironmentSummaryPageSchemaEnvironmentOperationKind = 'create' | 'start' | 'stop' | 'restart' | 'reset' | 'retry' | 'cancel' | 'recover' | 'expire' | 'delete' | 'cleanup' | 'freeze';
+
+/**
+ * Safe operation representation for Public REST and SSE consumers.
+ */
+export type EnvironmentSummaryPageSchemaEnvironmentOperationSnapshot = {
+    acceptedAt: EnvironmentSummaryPageSchemaUtcTimestamp;
+    acceptedRevision: EnvironmentSummaryPageSchemaRevision;
+    attempt: number;
+    cancelEligible: boolean;
+    cleanupDeadlineAt?: EnvironmentSummaryPageSchemaUtcTimestamp | null;
+    cleanupStartedAt?: EnvironmentSummaryPageSchemaUtcTimestamp | null;
+    currentRevision: EnvironmentSummaryPageSchemaRevision;
+    deadlineAt: EnvironmentSummaryPageSchemaUtcTimestamp;
+    diagnosticCode?: EnvironmentSummaryPageSchemaDiagnosticCode | null;
+    environmentId: EnvironmentSummaryPageSchemaEnvironmentId;
+    kind: EnvironmentSummaryPageSchemaEnvironmentOperationKind;
+    lastChangedStreamSequence: EnvironmentSummaryPageSchemaStreamSequence;
+    maxAttempts: number;
+    operationId: EnvironmentSummaryPageSchemaOperationId;
+    providerPhase?: EnvironmentSummaryPageSchemaPublicEnvironmentOperationPhase | null;
+    requestId: string;
+    retryEligible: boolean;
+    startedAt?: EnvironmentSummaryPageSchemaUtcTimestamp | null;
+    state: EnvironmentSummaryPageSchemaEnvironmentOperationStatus;
+    terminalAt?: EnvironmentSummaryPageSchemaUtcTimestamp | null;
+    timedOutAt?: EnvironmentSummaryPageSchemaUtcTimestamp | null;
+    traceId: string;
+    updatedAt: EnvironmentSummaryPageSchemaUtcTimestamp;
+};
+
+/**
+ * Public operation state used by REST snapshots and SSE projections.
+ *
+ * The runtime aggregate retains its historical `OperationState`; timeout is exposed as a
+ * distinct terminal fact instead of forcing clients to infer it from a generic failure code.
+ */
+export type EnvironmentSummaryPageSchemaEnvironmentOperationStatus = 'accepted' | 'running' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled' | 'timed_out';
+
+/**
+ * Actor-safe relationship to the Environment owner.
+ */
+export type EnvironmentOwnerRelation = 'self_owned' | 'managed';
+
+/**
+ * Actor-safe owner label. It deliberately carries no globally enumerable ActorId.
+ */
+export type EnvironmentOwnerSummary = {
+    displayLabel?: string | null;
+    relation: EnvironmentOwnerRelation;
+};
+
+/**
+ * Minimal Environment inventory item suitable for a GCP-style resource console.
+ */
+export type EnvironmentSummary = {
+    access: EnvironmentAccessEligibilitySummary;
+    class: EnvironmentSummaryPageSchemaEnvironmentClass;
+    courseId: EnvironmentSummaryPageSchemaCourseId;
+    createdAt: EnvironmentSummaryPageSchemaUtcTimestamp;
+    currentOperation?: EnvironmentSummaryPageSchemaEnvironmentOperationSnapshot | null;
+    desiredState: EnvironmentSummaryPageSchemaDesiredEnvironmentState;
+    displayLabel: string;
+    eligibilityExpiresAt: EnvironmentSummaryPageSchemaUtcTimestamp;
+    id: EnvironmentSummaryPageSchemaEnvironmentId;
+    lastChangedStreamSequence: EnvironmentSummaryPageSchemaStreamSequence;
+    observedState: EnvironmentSummaryPageSchemaObservedEnvironmentState;
+    owner: EnvironmentOwnerSummary;
+    projectId?: EnvironmentSummaryPageSchemaProjectId | null;
+    releaseId: EnvironmentSummaryPageSchemaReleaseId;
+    releaseVersion: number;
+    revision: EnvironmentSummaryPageSchemaRevision;
+    runtimeKind: EnvironmentSummaryPageSchemaRuntimeKind;
+    updatedAt: EnvironmentSummaryPageSchemaUtcTimestamp;
+};
+
+/**
+ * Authoritative observed lifecycle state.
+ */
+export type EnvironmentSummaryPageSchemaObservedEnvironmentState = 'requested' | 'validating' | 'building' | 'provisioning' | 'ready' | 'stopping' | 'stopped' | 'updating' | 'expiring' | 'deleting' | 'deleted' | 'failed';
+
+/**
+ * Strongly typed UUIDv7 identifier for `OperationId`.
+ */
+export type EnvironmentSummaryPageSchemaOperationId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type EnvironmentSummaryPageSchemaProjectId = string;
+
+/**
+ * Provider-safe progress phase. Provider names, node identities, and raw payloads stay private.
+ */
+export type EnvironmentSummaryPageSchemaPublicEnvironmentOperationPhase = 'validating' | 'building' | 'provisioning' | 'stopping' | 'revoking_access' | 'cleaning_up' | 'finalizing';
+
+/**
+ * Strongly typed UUIDv7 identifier for `ReleaseId`.
+ */
+export type EnvironmentSummaryPageSchemaReleaseId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type EnvironmentSummaryPageSchemaRevision = number;
+
+/**
+ * Runtime kind shared by candidates, releases, and instances.
+ */
+export type EnvironmentSummaryPageSchemaRuntimeKind = 'container' | 'virtual_machine';
+
+export type EnvironmentSummaryPageSchemaStreamSequence = string;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type EnvironmentSummaryPageSchemaUtcTimestamp = string;
 
 /**
  * FreezeSubmissionRequest
@@ -3964,6 +4539,73 @@ export type GetProblemPackageResponses = {
 
 export type GetProblemPackageResponse = GetProblemPackageResponses[keyof GetProblemPackageResponses];
 
+export type ListEnvironmentsData = {
+    body?: never;
+    path?: never;
+    query: {
+        courseId: string;
+        projectId?: string;
+        runtimeKind?: 'container' | 'virtual_machine';
+        class?: 'experiment' | 'work';
+        desiredState?: 'running' | 'stopped' | 'deleted';
+        observedState?: 'requested' | 'validating' | 'building' | 'provisioning' | 'ready' | 'stopping' | 'stopped' | 'updating' | 'expiring' | 'deleting' | 'deleted' | 'failed';
+        releaseId?: string;
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/api/v1/environments';
+};
+
+export type ListEnvironmentsErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ListEnvironmentsError = ListEnvironmentsErrors[keyof ListEnvironmentsErrors];
+
+export type ListEnvironmentsResponses = {
+    /**
+     * Successful response
+     */
+    200: EnvironmentSummaryPageSchema;
+};
+
+export type ListEnvironmentsResponse = ListEnvironmentsResponses[keyof ListEnvironmentsResponses];
+
 export type CreateEnvironmentData = {
     body: CreateEnvironmentRequestSchema;
     headers: {
@@ -4027,7 +4669,7 @@ export type CreateEnvironmentResponses = {
     /**
      * Successful response
      */
-    202: OperationAccepted;
+    202: EnvironmentOperationAcceptedSchema;
 };
 
 export type CreateEnvironmentResponse = CreateEnvironmentResponses[keyof CreateEnvironmentResponses];
@@ -4098,7 +4740,7 @@ export type DeleteEnvironmentResponses = {
     /**
      * Successful response
      */
-    202: OperationAccepted;
+    202: EnvironmentOperationAcceptedSchema;
 };
 
 export type DeleteEnvironmentResponse = DeleteEnvironmentResponses[keyof DeleteEnvironmentResponses];
@@ -4169,6 +4811,71 @@ export type GetEnvironmentResponses = {
 };
 
 export type GetEnvironmentResponse = GetEnvironmentResponses[keyof GetEnvironmentResponses];
+
+export type ListEnvironmentAccessGrantsData = {
+    body?: never;
+    path: {
+        environmentId: string;
+    };
+    query?: {
+        state?: 'requested' | 'active' | 'expired' | 'revoked';
+        endpointId?: string;
+        includeTerminal?: boolean;
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/api/v1/environments/{environmentId}/access-grants';
+};
+
+export type ListEnvironmentAccessGrantsErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ListEnvironmentAccessGrantsError = ListEnvironmentAccessGrantsErrors[keyof ListEnvironmentAccessGrantsErrors];
+
+export type ListEnvironmentAccessGrantsResponses = {
+    /**
+     * Successful response
+     */
+    200: EnvironmentAccessGrantPageSchema;
+};
+
+export type ListEnvironmentAccessGrantsResponse = ListEnvironmentAccessGrantsResponses[keyof ListEnvironmentAccessGrantsResponses];
 
 export type CreateAccessGrantData = {
     body: CreateAccessGrantRequestSchema;
@@ -4306,7 +5013,7 @@ export type CancelEnvironmentOperationResponses = {
     /**
      * Successful response
      */
-    202: OperationAccepted;
+    202: EnvironmentOperationAcceptedSchema;
 };
 
 export type CancelEnvironmentOperationResponse = CancelEnvironmentOperationResponses[keyof CancelEnvironmentOperationResponses];
@@ -4451,6 +5158,126 @@ export type FreezeSubmissionResponses = {
 
 export type FreezeSubmissionResponse = FreezeSubmissionResponses[keyof FreezeSubmissionResponses];
 
+export type ListEnvironmentOperationsData = {
+    body?: never;
+    path: {
+        environmentId: string;
+    };
+    query?: {
+        kind?: 'create' | 'start' | 'stop' | 'restart' | 'reset' | 'retry' | 'cancel' | 'recover' | 'expire' | 'delete' | 'cleanup' | 'freeze';
+        state?: 'accepted' | 'running' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled' | 'timed_out';
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/api/v1/environments/{environmentId}/operations';
+};
+
+export type ListEnvironmentOperationsErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ListEnvironmentOperationsError = ListEnvironmentOperationsErrors[keyof ListEnvironmentOperationsErrors];
+
+export type ListEnvironmentOperationsResponses = {
+    /**
+     * Successful response
+     */
+    200: EnvironmentOperationPageSchema;
+};
+
+export type ListEnvironmentOperationsResponse = ListEnvironmentOperationsResponses[keyof ListEnvironmentOperationsResponses];
+
+export type GetEnvironmentOperationData = {
+    body?: never;
+    path: {
+        environmentId: string;
+        operationId: string;
+    };
+    query?: never;
+    url: '/api/v1/environments/{environmentId}/operations/{operationId}';
+};
+
+export type GetEnvironmentOperationErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetEnvironmentOperationError = GetEnvironmentOperationErrors[keyof GetEnvironmentOperationErrors];
+
+export type GetEnvironmentOperationResponses = {
+    /**
+     * Successful response
+     */
+    200: EnvironmentOperationSnapshotSchema;
+};
+
+export type GetEnvironmentOperationResponse = GetEnvironmentOperationResponses[keyof GetEnvironmentOperationResponses];
+
 export type RecoverEnvironmentData = {
     body?: never;
     headers: {
@@ -4517,7 +5344,7 @@ export type RecoverEnvironmentResponses = {
     /**
      * Successful response
      */
-    202: OperationAccepted;
+    202: EnvironmentOperationAcceptedSchema;
 };
 
 export type RecoverEnvironmentResponse = RecoverEnvironmentResponses[keyof RecoverEnvironmentResponses];
@@ -4588,7 +5415,7 @@ export type ResetEnvironmentResponses = {
     /**
      * Successful response
      */
-    202: OperationAccepted;
+    202: EnvironmentOperationAcceptedSchema;
 };
 
 export type ResetEnvironmentResponse = ResetEnvironmentResponses[keyof ResetEnvironmentResponses];
@@ -4659,7 +5486,7 @@ export type RestartEnvironmentResponses = {
     /**
      * Successful response
      */
-    202: OperationAccepted;
+    202: EnvironmentOperationAcceptedSchema;
 };
 
 export type RestartEnvironmentResponse = RestartEnvironmentResponses[keyof RestartEnvironmentResponses];
@@ -4730,7 +5557,7 @@ export type RetryEnvironmentResponses = {
     /**
      * Successful response
      */
-    202: OperationAccepted;
+    202: EnvironmentOperationAcceptedSchema;
 };
 
 export type RetryEnvironmentResponse = RetryEnvironmentResponses[keyof RetryEnvironmentResponses];
@@ -4801,7 +5628,7 @@ export type StartEnvironmentResponses = {
     /**
      * Successful response
      */
-    202: OperationAccepted;
+    202: EnvironmentOperationAcceptedSchema;
 };
 
 export type StartEnvironmentResponse = StartEnvironmentResponses[keyof StartEnvironmentResponses];
@@ -4872,7 +5699,7 @@ export type StopEnvironmentResponses = {
     /**
      * Successful response
      */
-    202: OperationAccepted;
+    202: EnvironmentOperationAcceptedSchema;
 };
 
 export type StopEnvironmentResponse = StopEnvironmentResponses[keyof StopEnvironmentResponses];
@@ -4880,12 +5707,12 @@ export type StopEnvironmentResponse = StopEnvironmentResponses[keyof StopEnviron
 export type StreamCourseEventsData = {
     body?: never;
     headers?: {
-        'Last-Event-ID'?: number;
+        'Last-Event-ID'?: string;
     };
     path?: never;
     query: {
         courseId: string;
-        after?: number;
+        after?: string;
     };
     url: '/api/v1/events';
 };
@@ -4906,23 +5733,11 @@ export type StreamCourseEventsErrors = {
     /**
      * RFC 9457 problem detail
      */
-    404: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
     409: ProblemDetails;
     /**
      * RFC 9457 problem detail
      */
     410: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    412: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    422: ProblemDetails;
     /**
      * RFC 9457 problem detail
      */
@@ -4943,8 +5758,10 @@ export type StreamCourseEventsResponses = {
     /**
      * Successful response
      */
-    200: unknown;
+    200: EnvironmentManagementEventSchema;
 };
+
+export type StreamCourseEventsResponse = StreamCourseEventsResponses[keyof StreamCourseEventsResponses];
 
 export type GetFrozenSubmissionData = {
     body?: never;

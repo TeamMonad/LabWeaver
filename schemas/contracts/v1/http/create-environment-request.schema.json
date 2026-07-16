@@ -15,6 +15,12 @@
     "courseId": {
       "$ref": "#/$defs/CourseId"
     },
+    "displayLabel": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "releaseId": {
       "$ref": "#/$defs/ReleaseId"
     },

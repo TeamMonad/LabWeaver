@@ -112,6 +112,92 @@ pub enum AccessGrantState {
     Revoked,
 }
 
+/// Effective endpoint grant state exposed to the current actor.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointGrantSnapshotState {
+    Active,
+    Expired,
+    Revoked,
+    Unhealthy,
+}
+
+/// Safe authorization result suitable for a console timeline.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthorizationDecision {
+    Allow,
+    Deny,
+    Terminal,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AuthorizationDecisionSummary {
+    pub decision: AuthorizationDecision,
+    pub reason_code: String,
+    pub evaluated_at: UtcTimestamp,
+}
+
+/// EndpointGrant projection without host, port, credential, or policy internals.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EndpointGrantSnapshot {
+    pub id: EndpointGrantId,
+    pub endpoint_id: EndpointId,
+    pub endpoint_revision: Revision,
+    pub protocol: EndpointProtocol,
+    pub alias: Option<String>,
+    pub state: EndpointGrantSnapshotState,
+    pub expires_at: UtcTimestamp,
+}
+
+/// Actor-scoped AccessGrant snapshot used by Environment discovery APIs.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccessGrantSnapshot {
+    pub id: AccessGrantId,
+    pub environment_id: EnvironmentId,
+    pub environment_revision: Revision,
+    pub state: AccessGrantState,
+    pub revision: Revision,
+    pub endpoint_grants: Vec<EndpointGrantSnapshot>,
+    pub issued_at: UtcTimestamp,
+    pub expires_at: UtcTimestamp,
+    pub revoked_at: Option<UtcTimestamp>,
+    pub reason_code: Option<String>,
+    pub decision: AuthorizationDecisionSummary,
+    pub last_changed_stream_sequence: crate::StreamSequence,
+}
+
+impl AccessGrantSnapshot {
+    pub fn validate(&self) -> Result<(), AccessError> {
+        if self.expires_at <= self.issued_at
+            || self.endpoint_grants.is_empty()
+            || self.last_changed_stream_sequence.0 == 0
+            || self.decision.reason_code.trim().is_empty()
+            || self
+                .endpoint_grants
+                .iter()
+                .any(|endpoint| endpoint.expires_at > self.expires_at)
+        {
+            return Err(AccessError::InvalidGrantSnapshot);
+        }
+        let terminal = matches!(
+            self.state,
+            AccessGrantState::Expired | AccessGrantState::Revoked
+        );
+        if terminal != matches!(self.decision.decision, AuthorizationDecision::Terminal)
+            || (self.state == AccessGrantState::Revoked) != self.revoked_at.is_some()
+            || (self.state == AccessGrantState::Expired
+                && self.reason_code.as_deref() != Some("expired"))
+        {
+            return Err(AccessError::InvalidGrantSnapshot);
+        }
+        Ok(())
+    }
+}
+
 /// Allowed endpoint action.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -356,4 +442,6 @@ pub enum AccessError {
     InvalidSession,
     #[error("GatewaySession termination deadline exceeds 60 seconds")]
     TerminationDeadlineExceeded,
+    #[error("public AccessGrant snapshot is internally inconsistent")]
+    InvalidGrantSnapshot,
 }

@@ -15,6 +15,7 @@
     "contracts:generate": "openapi-ts",
     "contracts:check": "node scripts/contracts-check.mjs",
     "test:e2e:contract": "node --test e2e/tests/*.node.mjs",
+    "test:e2e:sdk": "playwright test --config=playwright.sdk.config.mjs",
     "test:e2e:sleep": "node scripts/fixed-sleep-check.mjs",
     "test:e2e:verify": "node scripts/verify-config.mjs",
     "test:e2e:list": "playwright test --list --config=playwright.config.mjs",

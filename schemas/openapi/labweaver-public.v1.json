@@ -2363,6 +2363,199 @@
       }
     },
     "/api/v1/environments": {
+      "get": {
+        "description": "Permission: environment:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "listEnvironments",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "courseId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "projectId",
+            "required": false,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "runtimeKind",
+            "required": false,
+            "schema": {
+              "enum": [
+                "container",
+                "virtual_machine"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "class",
+            "required": false,
+            "schema": {
+              "enum": [
+                "experiment",
+                "work"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "desiredState",
+            "required": false,
+            "schema": {
+              "enum": [
+                "running",
+                "stopped",
+                "deleted"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "observedState",
+            "required": false,
+            "schema": {
+              "enum": [
+                "requested",
+                "validating",
+                "building",
+                "provisioning",
+                "ready",
+                "stopping",
+                "stopped",
+                "updating",
+                "expiring",
+                "deleting",
+                "deleted",
+                "failed"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "releaseId",
+            "required": false,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "maxLength": 512,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_.~-]+$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/http/environment-summary-page.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "environment:read"
+            ]
+          }
+        ],
+        "summary": "listEnvironments",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_HTTP_UNAUTHENTICATED",
+          "LW_ACCESS_DENIED",
+          "LW_ENVIRONMENT_SCOPE_REQUIRED",
+          "LW_ENVIRONMENT_SCOPE_MISMATCH",
+          "LW_ENVIRONMENT_CURSOR_INVALID",
+          "LW_ENVIRONMENT_CURSOR_EXPIRED",
+          "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
+          "LW_HTTP_RATE_LIMITED",
+          "LW_HTTP_SERVICE_UNAVAILABLE",
+          "LW_HTTP_INTERNAL"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "environment:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "course",
+        "x-labweaver-timeout-ms": 30000
+      },
       "post": {
         "description": "Permission: environment:write. Timeout: 30000 ms. Cancellable: true. Retryable: true. v1 permits additive endpoints and optional response fields only.",
         "operationId": "createEnvironment",
@@ -2391,7 +2584,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OperationAccepted"
+                  "$ref": "../contracts/v1/http/environment-operation-accepted.schema.json"
                 }
               }
             },
@@ -2502,7 +2695,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OperationAccepted"
+                  "$ref": "../contracts/v1/http/environment-operation-accepted.schema.json"
                 }
               }
             },
@@ -2671,6 +2864,152 @@
       }
     },
     "/api/v1/environments/{environmentId}/access-grants": {
+      "get": {
+        "description": "Permission: access_grant:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "listEnvironmentAccessGrants",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "environmentId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "enum": [
+                "requested",
+                "active",
+                "expired",
+                "revoked"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "endpointId",
+            "required": false,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "includeTerminal",
+            "required": false,
+            "schema": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "maxLength": 512,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_.~-]+$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/http/environment-access-grant-page.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "access_grant:read"
+            ]
+          }
+        ],
+        "summary": "listEnvironmentAccessGrants",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_HTTP_UNAUTHENTICATED",
+          "LW_ACCESS_DENIED",
+          "LW_ACCESS_GRANT_CURSOR_INVALID",
+          "LW_ACCESS_GRANT_CURSOR_EXPIRED",
+          "LW_ACCESS_GRANT_SNAPSHOT_CONFLICT",
+          "LW_HTTP_RATE_LIMITED",
+          "LW_HTTP_SERVICE_UNAVAILABLE",
+          "LW_HTTP_INTERNAL"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "access_grant:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "environment",
+        "x-labweaver-timeout-ms": 30000
+      },
       "post": {
         "description": "Permission: access_grant:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
         "operationId": "createAccessGrant",
@@ -2819,7 +3158,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OperationAccepted"
+                  "$ref": "../contracts/v1/http/environment-operation-accepted.schema.json"
                 }
               }
             },
@@ -3121,6 +3460,264 @@
         "x-labweaver-timeout-ms": 30000
       }
     },
+    "/api/v1/environments/{environmentId}/operations": {
+      "get": {
+        "description": "Permission: environment:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "listEnvironmentOperations",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "environmentId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "enum": [
+                "create",
+                "start",
+                "stop",
+                "restart",
+                "reset",
+                "retry",
+                "cancel",
+                "recover",
+                "expire",
+                "delete",
+                "cleanup",
+                "freeze"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "enum": [
+                "accepted",
+                "running",
+                "cancelling",
+                "succeeded",
+                "failed",
+                "cancelled",
+                "timed_out"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "maxLength": 512,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_.~-]+$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/http/environment-operation-page.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "environment:read"
+            ]
+          }
+        ],
+        "summary": "listEnvironmentOperations",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_HTTP_UNAUTHENTICATED",
+          "LW_ACCESS_DENIED",
+          "LW_ENVIRONMENT_SCOPE_REQUIRED",
+          "LW_ENVIRONMENT_SCOPE_MISMATCH",
+          "LW_ENVIRONMENT_CURSOR_INVALID",
+          "LW_ENVIRONMENT_CURSOR_EXPIRED",
+          "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
+          "LW_HTTP_RATE_LIMITED",
+          "LW_HTTP_SERVICE_UNAVAILABLE",
+          "LW_HTTP_INTERNAL"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "environment:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "environment",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/environments/{environmentId}/operations/{operationId}": {
+      "get": {
+        "description": "Permission: environment:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getEnvironmentOperation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "environmentId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "operationId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/environment-operation-snapshot.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "environment:read"
+            ]
+          }
+        ],
+        "summary": "getEnvironmentOperation",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_HTTP_UNAUTHENTICATED",
+          "LW_ACCESS_DENIED",
+          "LW_ENVIRONMENT_SCOPE_MISMATCH",
+          "LW_ENVIRONMENT_OPERATION_NOT_FOUND",
+          "LW_ENVIRONMENT_OPERATION_STATE_CONFLICT",
+          "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
+          "LW_HTTP_RATE_LIMITED",
+          "LW_HTTP_SERVICE_UNAVAILABLE",
+          "LW_HTTP_INTERNAL"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "environment:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "environment",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
     "/api/v1/environments/{environmentId}/recover": {
       "post": {
         "description": "Permission: environment:write. Timeout: 30000 ms. Cancellable: true. Retryable: true. v1 permits additive endpoints and optional response fields only.",
@@ -3157,7 +3754,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OperationAccepted"
+                  "$ref": "../contracts/v1/http/environment-operation-accepted.schema.json"
                 }
               }
             },
@@ -3268,7 +3865,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OperationAccepted"
+                  "$ref": "../contracts/v1/http/environment-operation-accepted.schema.json"
                 }
               }
             },
@@ -3379,7 +3976,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OperationAccepted"
+                  "$ref": "../contracts/v1/http/environment-operation-accepted.schema.json"
                 }
               }
             },
@@ -3490,7 +4087,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OperationAccepted"
+                  "$ref": "../contracts/v1/http/environment-operation-accepted.schema.json"
                 }
               }
             },
@@ -3601,7 +4198,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OperationAccepted"
+                  "$ref": "../contracts/v1/http/environment-operation-accepted.schema.json"
                 }
               }
             },
@@ -3712,7 +4309,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OperationAccepted"
+                  "$ref": "../contracts/v1/http/environment-operation-accepted.schema.json"
                 }
               }
             },
@@ -3806,8 +4403,10 @@
             "name": "after",
             "required": false,
             "schema": {
-              "minimum": 0,
-              "type": "integer"
+              "format": "uint64-decimal",
+              "maxLength": 20,
+              "pattern": "^(0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]|1844674407370955161[0-5])$",
+              "type": "string"
             }
           },
           {
@@ -3815,13 +4414,22 @@
             "name": "Last-Event-ID",
             "required": false,
             "schema": {
-              "minimum": 0,
-              "type": "integer"
+              "format": "uint64-decimal",
+              "maxLength": 20,
+              "pattern": "^(0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]|1844674407370955161[0-5])$",
+              "type": "string"
             }
           }
         ],
         "responses": {
           "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "../contracts/v1/http/environment-management-event.schema.json"
+                }
+              }
+            },
             "description": "Successful response",
             "headers": {
               "ETag": {
@@ -3841,19 +4449,10 @@
           "403": {
             "$ref": "#/components/responses/Problem"
           },
-          "404": {
-            "$ref": "#/components/responses/Problem"
-          },
           "409": {
             "$ref": "#/components/responses/Problem"
           },
           "410": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "412": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "422": {
             "$ref": "#/components/responses/Problem"
           },
           "429": {
@@ -3881,9 +4480,14 @@
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_HTTP_UNAUTHENTICATED",
           "LW_ACCESS_DENIED",
-          "LW_IDEMPOTENCY_CONFLICT",
-          "LW_REVISION_CONFLICT"
+          "LW_SSE_CURSOR_CONFLICT",
+          "LW_SSE_CURSOR_EXPIRED",
+          "LW_SSE_CURSOR_GAP",
+          "LW_HTTP_RATE_LIMITED",
+          "LW_HTTP_SERVICE_UNAVAILABLE",
+          "LW_HTTP_INTERNAL"
         ],
         "x-labweaver-idempotency": "None",
         "x-labweaver-permission": "events:read",

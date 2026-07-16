@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AccessGrantId, ApprovalId, CandidateId, CourseId, DiagnosticCode, EndpointId, EnvironmentId,
-    OperationId, PlatformRole, ProblemPackageId, ReleaseId, Revision, Sequence, Sha256Digest,
-    UploadSessionId, UtcTimestamp,
+    EventId, OperationId, PlatformRole, ProblemPackageId, ProjectId, ReleaseId, Revision,
+    Sha256Digest, StreamSequence, UploadSessionId, UtcTimestamp,
 };
 
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -22,6 +22,17 @@ pub struct OperationAccepted {
     pub operation_id: OperationId,
     pub revision: Revision,
     pub status_url: String,
+}
+
+/// Environment-specific accepted response. Existing OperationAccepted fields keep their v1
+/// meaning while `environmentId` removes the need to parse an undeclared status URL.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentOperationAccepted {
+    pub operation_id: OperationId,
+    pub revision: Revision,
+    pub status_url: String,
+    pub environment_id: EnvironmentId,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -108,6 +119,23 @@ pub struct CreateEnvironmentRequest {
     pub course_id: CourseId,
     pub release_id: ReleaseId,
     pub release_version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_label: Option<String>,
+}
+
+impl CreateEnvironmentRequest {
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        if self.release_version == 0
+            || self.display_label.as_ref().is_some_and(|value| {
+                value.trim().is_empty()
+                    || value.chars().count() > 120
+                    || value.chars().any(char::is_control)
+            })
+        {
+            return Err(HttpContractError::InvalidEnvironmentQuery);
+        }
+        Ok(())
+    }
 }
 
 pub use crate::environment::{EnvironmentOwnerResolution, EnvironmentOwnerResolutionRequest};
@@ -145,6 +173,127 @@ pub struct RevokeAccessGrantRequest {
 pub struct CursorPage<T> {
     pub items: Vec<T>,
     pub next_cursor: Option<String>,
+}
+
+/// Cursor page bound to one consistent REST/SSE snapshot.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SnapshotPage<T> {
+    pub items: Vec<T>,
+    pub next_cursor: Option<String>,
+    pub snapshot_sequence: StreamSequence,
+    pub snapshot_at: UtcTimestamp,
+}
+
+pub const DEFAULT_PAGE_LIMIT: u16 = 50;
+pub const MAX_PAGE_LIMIT: u16 = 100;
+pub const MAX_CURSOR_LENGTH: usize = 512;
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentInventoryQuery {
+    pub course_id: CourseId,
+    pub project_id: Option<ProjectId>,
+    pub runtime_kind: Option<crate::authoring::RuntimeKind>,
+    pub class: Option<crate::authoring::EnvironmentClass>,
+    pub desired_state: Option<crate::environment::DesiredEnvironmentState>,
+    pub observed_state: Option<crate::environment::ObservedEnvironmentState>,
+    pub release_id: Option<ReleaseId>,
+    pub cursor: Option<String>,
+    pub limit: Option<u16>,
+}
+
+impl EnvironmentInventoryQuery {
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        validate_cursor_page(self.cursor.as_deref(), self.limit)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentOperationListQuery {
+    pub kind: Option<crate::environment::EnvironmentOperationKind>,
+    pub state: Option<crate::environment::EnvironmentOperationStatus>,
+    pub cursor: Option<String>,
+    pub limit: Option<u16>,
+}
+
+impl EnvironmentOperationListQuery {
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        validate_cursor_page(self.cursor.as_deref(), self.limit)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentAccessGrantListQuery {
+    pub state: Option<crate::access::AccessGrantState>,
+    pub endpoint_id: Option<EndpointId>,
+    #[serde(default)]
+    pub include_terminal: bool,
+    pub cursor: Option<String>,
+    pub limit: Option<u16>,
+}
+
+impl EnvironmentAccessGrantListQuery {
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        validate_cursor_page(self.cursor.as_deref(), self.limit)
+    }
+}
+
+fn validate_cursor_page(cursor: Option<&str>, limit: Option<u16>) -> Result<(), HttpContractError> {
+    if cursor.is_some_and(|value| {
+        value.is_empty()
+            || value.len() > MAX_CURSOR_LENGTH
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.~".contains(&byte))
+    }) || limit.is_some_and(|value| value == 0 || value > MAX_PAGE_LIMIT)
+    {
+        return Err(HttpContractError::InvalidCursorPage);
+    }
+    Ok(())
+}
+
+/// Environment-management subset carried by the course event stream.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum EnvironmentManagementEvent {
+    EnvironmentChanged {
+        environment_id: EnvironmentId,
+        revision: Revision,
+        observed_state: crate::environment::ObservedEnvironmentState,
+        operation_id: Option<OperationId>,
+    },
+    OperationChanged {
+        environment_id: EnvironmentId,
+        operation_id: OperationId,
+        revision: Revision,
+        state: crate::environment::EnvironmentOperationStatus,
+    },
+    AccessGrantChanged {
+        environment_id: EnvironmentId,
+        access_grant_id: AccessGrantId,
+        revision: Revision,
+        state: crate::access::AccessGrantState,
+    },
+}
+
+/// Public event envelope used for course-scoped inventory synchronization.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentManagementStreamEvent {
+    pub event_id: EventId,
+    pub stream_sequence: StreamSequence,
+    pub course_id: CourseId,
+    pub project_id: Option<ProjectId>,
+    pub effective_at: UtcTimestamp,
+    pub data: EnvironmentManagementEvent,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -197,7 +346,7 @@ impl StrongEtag {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SseEvent<T> {
-    pub cursor: Sequence,
+    pub cursor: StreamSequence,
     pub event: String,
     pub data: T,
 }
@@ -205,11 +354,11 @@ pub struct SseEvent<T> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SseResume {
     Beginning,
-    After(Sequence),
+    After(StreamSequence),
 }
 pub fn resolve_sse_resume(
-    last_event_id: Option<Sequence>,
-    after: Option<Sequence>,
+    last_event_id: Option<StreamSequence>,
+    after: Option<StreamSequence>,
 ) -> Result<SseResume, HttpContractError> {
     match (last_event_id, after) {
         (None, None) => Ok(SseResume::Beginning),
@@ -369,7 +518,27 @@ pub const OPERATION_AUTHORIZATIONS: &[OperationAuthorization] = &[
         scope: OperationScopeKind::Course,
     },
     OperationAuthorization {
+        operation_id: "listEnvironments",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
         operation_id: "getEnvironment",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Environment,
+    },
+    OperationAuthorization {
+        operation_id: "getEnvironmentOperation",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Environment,
+    },
+    OperationAuthorization {
+        operation_id: "listEnvironmentOperations",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Environment,
+    },
+    OperationAuthorization {
+        operation_id: "listEnvironmentAccessGrants",
         allowed_roles: TEACHER_OR_STUDENT,
         scope: OperationScopeKind::Environment,
     },
@@ -738,6 +907,18 @@ pub const OPERATIONS: &[OperationContract] = &[
     ),
     op!(
         Public,
+        Get,
+        "/api/v1/environments",
+        "listEnvironments",
+        "environment:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true
+    ),
+    op!(
+        Public,
         Post,
         "/api/v1/environments",
         "createEnvironment",
@@ -753,6 +934,30 @@ pub const OPERATIONS: &[OperationContract] = &[
         Get,
         "/api/v1/environments/{environmentId}",
         "getEnvironment",
+        "environment:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/environments/{environmentId}/operations/{operationId}",
+        "getEnvironmentOperation",
+        "environment:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/environments/{environmentId}/operations",
+        "listEnvironmentOperations",
         "environment:read",
         Oidc,
         None,
@@ -930,6 +1135,18 @@ pub const OPERATIONS: &[OperationContract] = &[
     ),
     op!(
         Public,
+        Get,
+        "/api/v1/environments/{environmentId}/access-grants",
+        "listEnvironmentAccessGrants",
+        "access_grant:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true
+    ),
+    op!(
+        Public,
         Post,
         "/api/v1/environments/{environmentId}/access-grants",
         "createAccessGrant",
@@ -1074,7 +1291,7 @@ pub fn validate_operation_catalog() -> Result<(), HttpContractError> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EventStreamQuery {
     pub course_id: CourseId,
-    pub after: Option<Sequence>,
+    pub after: Option<StreamSequence>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1091,6 +1308,10 @@ pub enum HttpContractError {
     InvalidOperationCatalog,
     #[error("public and internal security surfaces are mixed")]
     PublicInternalLeak,
+    #[error("cursor or page limit is invalid")]
+    InvalidCursorPage,
+    #[error("environment request or query is invalid")]
+    InvalidEnvironmentQuery,
 }
 
 #[must_use]
@@ -1118,12 +1339,17 @@ mod tests {
     }
     #[test]
     fn sse_cursor_sources_must_agree() {
+        let above_javascript_safe_integer = StreamSequence(9_007_199_254_740_992);
+        let adjacent_cursor = StreamSequence(9_007_199_254_740_993);
         assert!(matches!(
-            resolve_sse_resume(Some(Sequence(7)), Some(Sequence(7))),
-            Ok(SseResume::After(Sequence(7)))
+            resolve_sse_resume(
+                Some(above_javascript_safe_integer),
+                Some(above_javascript_safe_integer)
+            ),
+            Ok(SseResume::After(value)) if value == above_javascript_safe_integer
         ));
         assert!(matches!(
-            resolve_sse_resume(Some(Sequence(7)), Some(Sequence(8))),
+            resolve_sse_resume(Some(above_javascript_safe_integer), Some(adjacent_cursor)),
             Err(HttpContractError::ConflictingSseCursor)
         ));
     }

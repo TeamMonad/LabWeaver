@@ -18,6 +18,9 @@ No ADR is accepted in ARC-01a; this directory establishes the review process wit
   freezes desired/observed state, operation concurrency, restart/reset and cleanup semantics.
 - [ADR 0005: Contracts SSOT and Environment-first Release](0005-contracts-ssot-environment-first-release.md)
   makes the Rust `contracts` crate the sole public semantic authority.
+- [ADR 0008: Environment Resource Management API](0008-environment-resource-management-api.md)
+  defines course-scoped inventory, operation and AccessGrant discovery, stream synchronization,
+  and the authenticated Web SDK transport boundary.
 - [ADR 0006: Trusted Runtime Artifact Supply Chain](0006-trusted-runtime-artifact-supply-chain.md)
   freezes immutable Container/VM artifact, scan, signature and release evidence bindings.
 - [ADR 0007: Claude Code-only Agent Runtime](0007-claude-code-agent-runtime.md)
