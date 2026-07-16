@@ -67,6 +67,7 @@ grants:
   authorization_token_ttl_seconds: 30
   activation_poll_seconds: 2
   activation_retry_seconds: 10
+  activation_max_attempts: 8
   expiry_poll_seconds: 5
   worker_lease_seconds: 30
   max_keys_per_actor: 10

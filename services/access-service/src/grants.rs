@@ -1087,10 +1087,36 @@ async fn retry_activation(
 ) -> Result<(), GrantRuntimeError> {
     let retry = i64::try_from(state.deployment.grants.activation_retry_seconds)
         .map_err(|_| GrantRuntimeError::Config)?;
-    sqlx::query("UPDATE access.access_grant_activation_jobs SET state='retry',attempts=attempts+1,next_attempt_at=now()+($3*interval '1 second'),last_diagnostic=$4,lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=now() WHERE grant_id=$1 AND lease_token=$2")
-        .bind(grant_id).bind(token).bind(retry).bind(diagnostic).execute(&state.pool).await?;
+    let mut tx = state.pool.begin().await?;
+    let Some(attempts) = sqlx::query_scalar::<_, i32>(
+        "SELECT attempts FROM access.access_grant_activation_jobs WHERE grant_id=$1 AND lease_token=$2 FOR UPDATE",
+    )
+    .bind(grant_id)
+    .bind(token)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        tracing::warn!(
+            event = "LW_ACCESS_ACTIVATION_LEASE_LOST",
+            grant_id = %grant_id,
+            "stale activation worker was fenced before retry"
+        );
+        tx.rollback().await?;
+        return Ok(());
+    };
+    let exhausted =
+        attempts.saturating_add(1) >= i32::from(state.deployment.grants.activation_max_attempts);
+    let effective_diagnostic = if exhausted {
+        "LW_ACCESS_ENDPOINT_RESOLVER_RETRY_EXHAUSTED"
+    } else {
+        diagnostic
+    };
+    let next_state = if exhausted { "failed" } else { "retry" };
+    sqlx::query("UPDATE access.access_grant_activation_jobs SET state=$3,attempts=attempts+1,next_attempt_at=now()+($4*interval '1 second'),last_diagnostic=$5,lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=now() WHERE grant_id=$1 AND lease_token=$2")
+        .bind(grant_id).bind(token).bind(next_state).bind(retry).bind(effective_diagnostic).execute(&mut *tx).await?;
     sqlx::query("UPDATE access.access_grants SET activation_attempts=activation_attempts+1,last_activation_diagnostic=$2,updated_at=now() WHERE grant_id=$1 AND state='requested'")
-        .bind(grant_id).bind(diagnostic).execute(&state.pool).await?;
+        .bind(grant_id).bind(effective_diagnostic).execute(&mut *tx).await?;
+    tx.commit().await?;
     Ok(())
 }
 

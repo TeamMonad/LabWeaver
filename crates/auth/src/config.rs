@@ -75,6 +75,7 @@ pub struct GrantRuntimeFileConfig {
     pub authorization_token_ttl_seconds: u64,
     pub activation_poll_seconds: u64,
     pub activation_retry_seconds: u64,
+    pub activation_max_attempts: u16,
     pub expiry_poll_seconds: u64,
     pub worker_lease_seconds: u64,
     pub max_keys_per_actor: u16,
@@ -305,6 +306,7 @@ impl AccessAuthFile {
             && (5..=60).contains(&self.grants.authorization_token_ttl_seconds)
             && (1..=60).contains(&self.grants.activation_poll_seconds)
             && (1..=300).contains(&self.grants.activation_retry_seconds)
+            && (1..=100).contains(&self.grants.activation_max_attempts)
             && (1..=60).contains(&self.grants.expiry_poll_seconds)
             && (5..=300).contains(&self.grants.worker_lease_seconds)
             && (1..=100).contains(&self.grants.max_keys_per_actor)
@@ -635,6 +637,7 @@ grants:
   authorization_token_ttl_seconds: 30
   activation_poll_seconds: 2
   activation_retry_seconds: 10
+  activation_max_attempts: 8
   expiry_poll_seconds: 5
   worker_lease_seconds: 30
   max_keys_per_actor: 10
