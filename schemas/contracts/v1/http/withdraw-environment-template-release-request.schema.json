@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Append-only reason supplied when withdrawing an immutable release.",
+  "properties": {
+    "reasonCode": {
+      "description": "Stable reviewed reason code; free-form sensitive text is not accepted.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "reasonCode"
+  ],
+  "title": "WithdrawEnvironmentTemplateReleaseRequest",
+  "type": "object"
+}

@@ -40,6 +40,48 @@ It first rejects Rust-generated Schema/OpenAPI drift, then runs the complete
 the checked-in `pnpm contracts:check` entry point. Missing Cargo or pnpm tooling,
 test failure, or drift fails the aggregate command.
 
+## Issue #48 Control-plane gates
+
+The Control plane is tested as an asynchronous, authority-separated path. Control may read
+Agent outcomes and artifact evaluations only through the internal mTLS API and may advance its
+projections only with an Inbox-protected Agent event. It must never read or write the `agent`
+schema. Every mutation test supplies an `Idempotency-Key`; mutations of existing resources also
+supply an exact strong `If-Match` value.
+
+The checked-in PostgreSQL integration entry point is:
+
+```sh
+cargo test -p control-service --test postgres -- --nocapture
+```
+
+It applies the released Control and Agent Migration chains to PostgreSQL 17, proves that a
+completion state cannot exist without its fencing lease, rejects a candidate through the wrong
+kind-specific decision route without writing approval/idempotency state, verifies withdrawal in
+GET/list read models, and races twenty writers against one course SSE cursor while requiring the
+exact sequence set `1..=20`. The Agent course-scope test proves a foreign course mutation leaves
+both run and idempotency state unchanged. Contract drift, unit and static gates are:
+
+```sh
+cargo xtask contracts check
+cargo test -p artifact-store -p control-service -p agent-service --lib
+cargo clippy -p artifact-store -p control-service -p agent-service --all-targets -- -D warnings
+```
+
+Aggregate E2 is recorded only when the same worktree passes real MinIO versioned-object tests,
+JetStream publish-ACK/duplicate/gap/restart tests, and ephemeral-CA Gateway-to-Control,
+Control-to-Access and Control-to-Agent SAN/rotation/outage tests. Issue #48's local suite now
+supplies that composition; it remains distinct from deployed owner-service or Kubernetes evidence.
+Until #52/#53 provide the authoritative artifact/evaluation projection, the positive production
+Release path is expected to return a stable blocking diagnostic.
+
+The current worktree records real versioned MinIO presign/freeze/overwrite/exact-version/cleanup
+coverage and real JetStream Agent Outbox missing-stream failure, retry and persisted-ACK ordering.
+The Control Outbox test applies the same ACK fence to both release publication and withdrawal and
+proves both immutable CloudEvents reach the configured stream exactly once.
+The Control consumer suite separately proves duplicate suppression, gap rejection, durable restart,
+outcome-fetch outage, redelivery, and atomic Inbox/projection/SSE commit. The ephemeral-CA suite
+proves configured URI-SAN boundaries, leaf-certificate rotation and downstream outage mapping.
+
 ## Issue #47 controlled Keycloak verification
 
 The ignored `auth` Keycloak integration test is an explicit E2 entry point. It

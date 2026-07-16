@@ -5,11 +5,16 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:fixture": "cross-env VITE_DATA_MODE=fixture vite",
     "build": "vue-tsc --noEmit && vite build && pnpm verify:production-bundle",
+    "build:fixture": "cross-env VITE_DATA_MODE=fixture vite build --mode e2e-fixture",
+    "preview:fixture": "cross-env VITE_DATA_MODE=fixture vite preview --port 4173",
     "verify:production-bundle": "node scripts/verify-production-bundle.mjs",
     "preview": "vite preview",
     "lint": "eslint . --max-warnings=0",
     "test": "vitest run",
+    "test:fixture": "cross-env VITE_DATA_MODE=fixture vitest run",
+    "test:live": "cross-env VITE_DATA_MODE=live vitest run",
     "test:watch": "vitest",
     "typecheck": "vue-tsc --noEmit",
     "contracts:generate": "openapi-ts",
@@ -20,7 +25,9 @@
     "test:e2e:verify": "node scripts/verify-config.mjs",
     "test:e2e:list": "playwright test --list --config=playwright.config.mjs",
     "test:e2e:gate": "node scripts/e2e-gate.mjs",
-    "test:e2e": "node scripts/run-e2e.mjs"
+    "test:e2e": "node scripts/run-e2e.mjs",
+    "test:e2e:fixture": "cross-env VITE_DATA_MODE=fixture LABWEAVER_DATA_MODE=fixture pnpm build:fixture && cross-env VITE_DATA_MODE=fixture LABWEAVER_DATA_MODE=fixture LABWEAVER_BASE_URL=http://localhost:4173 playwright test --config=playwright.config.mjs",
+    "test:e2e:live": "pnpm build && cross-env LABWEAVER_DATA_MODE=live LABWEAVER_BASE_URL=http://localhost:4173 playwright test --config=playwright.config.mjs"
   },
   "dependencies": {
     "@fontsource-variable/noto-sans-sc": "^5.2.10",
@@ -45,6 +52,7 @@
     "eslint": "^8.57.0",
     "eslint-plugin-vue": "^9.27.0",
     "jsdom": "^24.1.0",
+    "cross-env": "^7.0.3",
     "tsx": "^4.23.0",
     "typescript": "^5.5.3",
     "vite": "^5.3.3",

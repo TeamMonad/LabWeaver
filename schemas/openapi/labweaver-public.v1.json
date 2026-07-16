@@ -25,6 +25,18 @@
       "CsrfTokenResponse": {
         "$ref": "../contracts/v1/csrf-token-response.schema.json"
       },
+      "InternalAgentRunMutationRequest": {
+        "$ref": "../contracts/v1/http/internal-agent-run-mutation-request.schema.json"
+      },
+      "InternalAgentRunOutcome": {
+        "$ref": "../contracts/v1/http/internal-agent-run-outcome.schema.json"
+      },
+      "InternalCreateAgentRunRequest": {
+        "$ref": "../contracts/v1/http/internal-create-agent-run-request.schema.json"
+      },
+      "InternalImageArtifactResolution": {
+        "$ref": "../contracts/v1/http/internal-image-artifact-resolution.schema.json"
+      },
       "OperationAccepted": {
         "additionalProperties": false,
         "properties": {
@@ -1110,7 +1122,8 @@
           "LW_CONTRACT_DOCUMENT_INVALID",
           "LW_ACCESS_DENIED",
           "LW_IDEMPOTENCY_CONFLICT",
-          "LW_REVISION_CONFLICT"
+          "LW_REVISION_CONFLICT",
+          "LW_CANDIDATE_KIND_MISMATCH"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
         "x-labweaver-permission": "candidate:approve",
@@ -1164,7 +1177,7 @@
                   "properties": {
                     "items": {
                       "items": {
-                        "$ref": "../contracts/v1/environment-template-release.schema.json"
+                        "$ref": "../contracts/v1/http/environment-template-release-view.schema.json"
                       },
                       "type": "array"
                     },
@@ -1392,7 +1405,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "../contracts/v1/environment-template-release.schema.json"
+                  "$ref": "../contracts/v1/http/environment-template-release-view.schema.json"
                 }
               }
             },
@@ -1507,6 +1520,16 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/withdraw-environment-template-release-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "201": {
             "description": "Successful response",
@@ -1801,7 +1824,8 @@
           "LW_CONTRACT_DOCUMENT_INVALID",
           "LW_ACCESS_DENIED",
           "LW_IDEMPOTENCY_CONFLICT",
-          "LW_REVISION_CONFLICT"
+          "LW_REVISION_CONFLICT",
+          "LW_CANDIDATE_KIND_MISMATCH"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
         "x-labweaver-permission": "candidate:approve",

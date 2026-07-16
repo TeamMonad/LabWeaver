@@ -254,7 +254,11 @@ export const withdrawEnvironmentTemplateRelease = <ThrowOnError extends boolean 
             type: 'http'
         }],
     url: '/api/v1/courses/{courseId}/environment-template-releases/{releaseId}/withdraw',
-    ...options
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
 });
 
 /**
