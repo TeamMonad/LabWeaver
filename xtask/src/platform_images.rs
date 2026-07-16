@@ -38,7 +38,9 @@ struct VersionLock {
 struct PlatformImageLock {
     platform: String,
     buildkit: String,
+    buildkit_image: String,
     buildx: String,
+    sbom_generator: String,
     trivy: String,
     cosign: String,
     kyverno_cli: String,
@@ -589,13 +591,21 @@ fn build_scan_sign(
         &source_commit[..12]
     );
     let reproducibility_tag = format!("{tag}-repro");
-    build_image(root, component, source_commit, source_date_epoch, &tag)?;
+    build_image(
+        root,
+        component,
+        source_commit,
+        source_date_epoch,
+        &tag,
+        &lock.sbom_generator,
+    )?;
     build_image(
         root,
         component,
         source_commit,
         source_date_epoch,
         &reproducibility_tag,
+        &lock.sbom_generator,
     )?;
     let first = inspect_digest(&tag)?;
     let second = inspect_digest(&reproducibility_tag)?;
@@ -732,6 +742,7 @@ fn build_image(
     source_commit: &str,
     source_date_epoch: u64,
     tag: &str,
+    sbom_generator: &str,
 ) -> Result<(), AppError> {
     let file = if component == "web" {
         "containers/Containerfile.web"
@@ -747,7 +758,8 @@ fn build_image(
         "--platform",
         "linux/amd64",
         "--provenance=mode=max",
-        "--sbom=true",
+        "--attest",
+        &format!("type=sbom,generator={sbom_generator}"),
         "--output=type=registry,rewrite-timestamp=true,oci-mediatypes=true",
         "--build-arg",
         &format!("SOURCE_COMMIT={source_commit}"),
@@ -867,6 +879,26 @@ fn verify_tools(lock: &PlatformImageLock) -> Result<(), AppError> {
         return Err(AppError::PlatformImage {
             code: "LW_PACKAGE_TOOL_IDENTITY_MISMATCH",
             detail: format!("BuildKit does not match {}", lock.buildkit),
+        });
+    }
+    if !buildkit.contains(&lock.buildkit_image) {
+        return Err(AppError::PlatformImage {
+            code: "LW_PACKAGE_TOOL_IDENTITY_MISMATCH",
+            detail: "BuildKit driver image digest differs from the component lock".to_owned(),
+        });
+    }
+    let Some((_, expected_generator_digest)) = lock.sbom_generator.rsplit_once('@') else {
+        return Err(AppError::PlatformImage {
+            code: "LW_PACKAGE_TOOL_IDENTITY_MISMATCH",
+            detail: "SBOM generator is not pinned by digest".to_owned(),
+        });
+    };
+    if !is_digest(expected_generator_digest)
+        || inspect_digest(&lock.sbom_generator)? != expected_generator_digest
+    {
+        return Err(AppError::PlatformImage {
+            code: "LW_PACKAGE_TOOL_IDENTITY_MISMATCH",
+            detail: "SBOM generator registry identity differs from the component lock".to_owned(),
         });
     }
     Ok(())

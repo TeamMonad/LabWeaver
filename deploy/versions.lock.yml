@@ -2,7 +2,10 @@ schema_version: 1
 platform_images:
   platform: linux/amd64
   buildkit: v0.31.1
+  buildkit_image: docker.io/moby/buildkit@sha256:6b59b7df63a8cb9902736f9ddf7fcff8261613d3e7449b8ea8b7537fc399c03a
   buildx: v0.35.0
+  buildx_windows_amd64_sha256: 8076395009787cd1d30c94edeb5d7ac3945273374fc162c00e9810c3e9325ebe
+  sbom_generator: docker.io/docker/buildkit-syft-scanner@sha256:79e7b013cbec16bbb436f312819a49a4a57752b2270c1a9332ae1a10fcc82a68
   dockerfile_frontend: docker.io/docker/dockerfile:1.25.0@sha256:0adf442eae370b6087e08edc7c50b552d80ddf261576f4ebd6421006b2461f12
   trivy: 0.72.0
   cosign: 3.0.6
