@@ -389,6 +389,15 @@ secret/SBOM/Trivy checks, Helm lint/template, Kyverno tests and
 tag-only or conflicting digest entries fail. Critical vulnerabilities and
 secrets fail; every High finding remains in the report.
 
+Only a `develop` push whose complete static/build/scan matrix passed may enter
+the Actions GHCR publication job. That job uses the repository-scoped
+`GITHUB_TOKEN` with job-local `packages:write`, publishes an immutable
+`git-<source-commit>` tag for each exact component, reads back the subject
+digest, and never publishes `latest` or a package manifest. Pull requests and
+failed matrices must never execute it. The unsigned digest remains
+non-deployable until the controlled router completes private signing and proof
+verification.
+
 The controlled Linux router is the only connected execution authority.
 `package-validate --mode connected` must reread the GHCR subject manifest digest,
 BuildKit SBOM/provenance attestations, Trivy DB identity, private Sigstore

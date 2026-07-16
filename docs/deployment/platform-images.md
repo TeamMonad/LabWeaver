@@ -73,7 +73,13 @@ package manifest and its Helm revision; it never moves tags or relaxes policy.
 ## Evidence and stop rules
 
 PR CI may produce E1/E2 build, reproducibility, secret/SBOM/Trivy, Helm,
-Kyverno, and static-manifest evidence. It has no GHCR write or signing credentials.
+Kyverno, and static-manifest evidence. Pull-request jobs have no GHCR write or
+signing credentials. After the same gates pass on a `develop` push, a separate
+least-privilege Actions job receives only `contents:read` and `packages:write`,
+publishes each image under the immutable `git-<source-commit>` operational tag,
+and records its `linux/amd64` subject digest. It never publishes `latest`, signs
+an image, creates a deployable package manifest, or performs admission. Private
+Sigstore signing and connected publication remain controlled-router operations.
 E3 is valid only when the controlled run binds one source commit, cluster UID,
 trust bundle revision, package/deployment manifests, and all seven OCI digests.
 

@@ -3,8 +3,11 @@
 ## Platform image trusted supply chain (#62)
 
 - The seven-image build, static validation, Helm/Kyverno policy and connected
-  package/deploy/rollback implementation exist. Local Docker/BuildKit evidence
-  does not replace GHCR publication or controlled connected verification.
+  package/deploy/rollback implementation exist. All seven local images have
+  reproducible subject digests, SBOM/provenance and runtime filesystem checks;
+  Trivy reports zero Critical and zero secrets, with all 16 Web High findings
+  retained for review. Local Docker/BuildKit evidence does not replace the
+  gated `develop` Actions publication or controlled connected verification.
 - Issue #61 must replay its private Sigstore evidence against the merged source
   identity. GHCR, Kyverno and the controlled Linux router require a read-only
   baseline before any connected #62 action.

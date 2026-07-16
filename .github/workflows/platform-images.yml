@@ -179,7 +179,7 @@ jobs:
           docker run --rm
           -v "$RUNNER_TEMP:/evidence"
           docker.io/aquasec/trivy:0.72.0@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f
-          image --input "/evidence/$COMPONENT-first.tar"
+          image --input "/evidence/$COMPONENT-first-oci"
           --scanners vuln,secret --severity HIGH,CRITICAL
           --exit-code 0 --format json --output "/evidence/$COMPONENT-trivy.json"
       - name: Enforce Critical threshold without hiding High findings
@@ -200,3 +200,72 @@ jobs:
             echo "LW_PACKAGE_CRITICAL_VULNERABILITY:$COMPONENT" >&2
             exit 1
           }
+
+  publish-ghcr:
+    name: publish-ghcr-${{ matrix.component }}
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    needs: [contract-and-policy, build-and-scan]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        component:
+          - access-service
+          - agent-service
+          - control-service
+          - environment-service
+          - evaluation-service
+          - resource-service
+          - web
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+        with:
+          version: v0.35.0
+          driver-opts: image=moby/buildkit@sha256:6b59b7df63a8cb9902736f9ddf7fcff8261613d3e7449b8ea8b7537fc399c03a
+      - name: Authenticate to GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+      - name: Publish immutable source-commit image
+        env:
+          COMPONENT: ${{ matrix.component }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_date_epoch="$(git show -s --format=%ct HEAD)"
+          image="ghcr.io/teammonad/labweaver-system/$COMPONENT:git-${GITHUB_SHA}"
+          if [[ "$COMPONENT" == web ]]; then
+            file=containers/Containerfile.web
+            service_args=()
+          else
+            file=containers/Containerfile.rust
+            service_args=(--build-arg "SERVICE=$COMPONENT")
+          fi
+          docker buildx build \
+            --file "$file" \
+            --platform linux/amd64 \
+            --build-arg "SOURCE_COMMIT=$GITHUB_SHA" \
+            --build-arg "SOURCE_DATE_EPOCH=$source_date_epoch" \
+            "${service_args[@]}" \
+            --attest 'type=sbom,generator=docker.io/docker/buildkit-syft-scanner@sha256:79e7b013cbec16bbb436f312819a49a4a57752b2270c1a9332ae1a10fcc82a68' \
+            --provenance=mode=max \
+            --output type=registry,rewrite-timestamp=true,oci-mediatypes=true \
+            --tag "$image" .
+          subject_digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest}}' |
+            jq -er '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest')"
+          [[ "$subject_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "LW_PACKAGE_REGISTRY_DIGEST_INVALID:$COMPONENT" >&2
+            exit 1
+          }
+          printf '%s\n' "component=$COMPONENT image=ghcr.io/teammonad/labweaver-system/$COMPONENT@$subject_digest" |
+            tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Remove registry credentials
+        if: always()
+        run: docker logout ghcr.io
