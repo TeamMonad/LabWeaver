@@ -84,3 +84,61 @@ jobs:
           name: playwright-role-config-report
           path: web/artifacts/playwright/playwright-role-config-report.json
           if-no-files-found: warn
+
+  playwright-fixture-runtime:
+    needs: playwright-gate
+    runs-on: ubuntu-latest
+    if: needs.playwright-gate.outputs.playwright_changed == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.18.0'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - name: Install dependencies
+        working-directory: ./web
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        working-directory: ./web
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run fixture browser matrix
+        working-directory: ./web
+        run: pnpm test:e2e:fixture
+        env:
+          VITE_DATA_MODE: fixture
+          LABWEAVER_DATA_MODE: fixture
+          LABWEAVER_BASE_URL: http://localhost:4173
+
+      - name: Upload fixture Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-fixture-report
+          path: |
+            web/playwright-report-fixture/
+            web/test-results/fixture/
+          if-no-files-found: warn
+
+      - name: Upload fixture screenshots and traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-fixture-evidence
+          path: |
+            web/e2e/tests/shell.visual.spec.mjs-snapshots/fixture/
+            web/test-results/fixture/**/*.png
+            web/test-results/fixture/**/*.webm
+            web/test-results/fixture/**/*.zip
+          if-no-files-found: warn
