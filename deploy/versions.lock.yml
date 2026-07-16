@@ -1,4 +1,23 @@
 schema_version: 1
+platform_images:
+  platform: linux/amd64
+  buildkit: v0.31.1
+  buildx: v0.35.0
+  dockerfile_frontend: docker.io/docker/dockerfile:1.25.0@sha256:0adf442eae370b6087e08edc7c50b552d80ddf261576f4ebd6421006b2461f12
+  trivy: 0.72.0
+  cosign: 3.0.6
+  kyverno_cli: v1.18.2
+  helm: v3.21.3
+  ci_images:
+    trivy: docker.io/aquasec/trivy:0.72.0@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f
+    kyverno_cli: ghcr.io/kyverno/kyverno-cli:v1.18.2@sha256:7224ed05508c24419c3df98114c28ba682ad0a940dcdb7b9fdba0a4b6bf943cf
+    helm: docker.io/alpine/helm:3.21.3@sha256:35da09ba0716fc7c3cd63b6b31ee380a9c7662e95f29ab0e4ae962420afd315b
+  pnpm: 9.15.4
+  bases:
+    rust_builder: docker.io/library/rust:1.85.1-bookworm@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4
+    rust_runtime: gcr.io/distroless/cc-debian12:nonroot@sha256:66aa873a4a14fb164aa01296058efd8253744606d72715e45acface073359faa
+    node_builder: docker.io/library/node:22.18.0-bookworm-slim@sha256:752ea8a2f758c34002a0461bd9f1cee4f9a3c36d48494586f60ffce1fc708e0e
+    web_runtime: docker.io/nginxinc/nginx-unprivileged:1.29.1-alpine@sha256:27985295bdb22a1ef8f712863210bd5877c0f3006494a593e86b3fe0fa55467e
 postgresql:
   image: postgres:17.5-alpine
 kubernetes:

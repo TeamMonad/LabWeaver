@@ -1,0 +1,40 @@
+# syntax=docker/dockerfile:1.25.0@sha256:0adf442eae370b6087e08edc7c50b552d80ddf261576f4ebd6421006b2461f12
+ARG RUST_BUILDER="docker.io/library/rust:1.85.1-bookworm@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4"
+ARG RUST_RUNTIME="gcr.io/distroless/cc-debian12:nonroot@sha256:66aa873a4a14fb164aa01296058efd8253744606d72715e45acface073359faa"
+
+FROM ${RUST_BUILDER} AS builder
+ARG SERVICE
+ARG SOURCE_DATE_EPOCH
+ARG SOURCE_COMMIT
+ENV CARGO_INCREMENTAL=0 \
+    CARGO_NET_GIT_FETCH_WITH_CLI=false \
+    SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY rust-toolchain.toml rustfmt.toml ./
+COPY .cargo .cargo
+COPY crates crates
+COPY services services
+COPY xtask xtask
+COPY migrations migrations
+COPY vendor vendor
+RUN --mount=type=cache,id=labweaver-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=labweaver-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    cargo fetch --locked
+RUN --network=none \
+    --mount=type=cache,id=labweaver-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=labweaver-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    test -n "${SERVICE}" && test -n "${SOURCE_DATE_EPOCH}" && test -n "${SOURCE_COMMIT}" && \
+    cargo build --release --locked --package "${SERVICE}" && \
+    install -D -m 0555 "target/release/${SERVICE}" /out/labweaver-service
+
+FROM ${RUST_RUNTIME} AS runtime
+ARG SERVICE
+ARG SOURCE_COMMIT
+LABEL org.opencontainers.image.source="https://github.com/TeamMonad/LabWeaver" \
+      org.opencontainers.image.revision="${SOURCE_COMMIT}" \
+      org.opencontainers.image.title="${SERVICE}"
+COPY --from=builder --chown=65532:65532 /out/labweaver-service /usr/local/bin/labweaver-service
+USER 65532:65532
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/labweaver-service"]

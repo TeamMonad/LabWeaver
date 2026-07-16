@@ -1,0 +1,224 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://labweaver.invalid/schemas/results/platform-image-package-manifest.v1.schema.json",
+  "title": "PlatformImagePackageManifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "release_id",
+    "source_commit",
+    "source_date_epoch",
+    "component_lock_hash",
+    "platform",
+    "registry",
+    "builder",
+    "trust",
+    "images",
+    "overall"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "platform-image-package-manifest.v1"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^pkg-[a-z0-9-]{1,96}$"
+    },
+    "release_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,63}$"
+    },
+    "source_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "source_date_epoch": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "component_lock_hash": {
+      "$ref": "#/$defs/digest"
+    },
+    "platform": {
+      "const": "linux/amd64"
+    },
+    "registry": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9.-]+(?::[0-9]{1,5})?$"
+    },
+    "builder": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "buildkit",
+        "buildx"
+      ],
+      "properties": {
+        "buildkit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "buildx": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "trust": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bundle_sha256",
+        "revision",
+        "issuer",
+        "subject"
+      ],
+      "properties": {
+        "bundle_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "issuer": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "subject": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "images": {
+      "type": "array",
+      "minItems": 7,
+      "maxItems": 7,
+      "items": {
+        "$ref": "#/$defs/image"
+      }
+    },
+    "overall": {
+      "const": "passed"
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "locator": {
+      "type": "string",
+      "pattern": "^oci://",
+      "minLength": 1
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "component",
+        "reference",
+        "digest",
+        "sbom",
+        "provenance",
+        "scan",
+        "signature"
+      ],
+      "properties": {
+        "component": {
+          "enum": [
+            "access-service",
+            "agent-service",
+            "control-service",
+            "environment-service",
+            "evaluation-service",
+            "resource-service",
+            "web"
+          ]
+        },
+        "reference": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9.-]+(?::[0-9]{1,5})?/labweaver-system/[a-z0-9-]+@sha256:[0-9a-f]{64}$"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "sbom": {
+          "$ref": "#/$defs/locator"
+        },
+        "provenance": {
+          "$ref": "#/$defs/locator"
+        },
+        "scan": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "scanner",
+            "database_digest",
+            "critical",
+            "high",
+            "report",
+            "report_sha256"
+          ],
+          "properties": {
+            "scanner": {
+              "type": "string",
+              "minLength": 1
+            },
+            "database_digest": {
+              "$ref": "#/$defs/digest"
+            },
+            "critical": {
+              "const": 0
+            },
+            "high": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "report": {
+              "$ref": "#/$defs/locator"
+            },
+            "report_sha256": {
+              "$ref": "#/$defs/digest"
+            }
+          }
+        },
+        "signature": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "bundle",
+            "certificate_identity",
+            "certificate_oidc_issuer",
+            "transparency_log_verified",
+            "ct_verified"
+          ],
+          "properties": {
+            "bundle": {
+              "$ref": "#/$defs/locator"
+            },
+            "certificate_identity": {
+              "type": "string",
+              "minLength": 1
+            },
+            "certificate_oidc_issuer": {
+              "type": "string",
+              "format": "uri",
+              "pattern": "^https://"
+            },
+            "transparency_log_verified": {
+              "const": true
+            },
+            "ct_verified": {
+              "const": true
+            }
+          }
+        }
+      }
+    }
+  }
+}

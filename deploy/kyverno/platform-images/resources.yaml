@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: valid
+  namespace: labweaver-system
+spec:
+  containers:
+    - name: app
+      image: harbor.invalid/labweaver-system/control-service@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: tag-only
+  namespace: labweaver-system
+spec:
+  containers:
+    - name: app
+      image: harbor.invalid/labweaver-system/control-service:latest
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: external
+  namespace: labweaver-system
+spec:
+  containers:
+    - name: app
+      image: external.invalid/labweaver-system/control-service@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

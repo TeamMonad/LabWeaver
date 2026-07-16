@@ -12,9 +12,13 @@ clap = { version = "4.5.40", features = ["derive"] }
 sha2 = "0.10"
 contracts = { path = "../crates/contracts" }
 persistence-sqlx = { path = "../crates/persistence-sqlx" }
+serde.workspace = true
+serde_jcs.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
+uuid.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ansible = { package = "ansible-rs", version = "1.1.0" }

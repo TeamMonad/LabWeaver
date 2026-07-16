@@ -1,5 +1,24 @@
 # Active Blockers
 
+## Platform image trusted supply chain (#62)
+
+- The seven-image build, static validation, Helm/Kyverno policy and connected
+  package/deploy/rollback implementation exist, but the current local environment
+  has no Docker/BuildKit daemon and cannot produce real image digest evidence.
+- Issue #61 must replay its private Sigstore evidence against the merged source
+  identity. Harbor, Kyverno and the controlled Linux router require a read-only
+  baseline before any connected #62 action.
+- Owner: A for implementation and release judgment; B for high-risk review; D
+  for independent Verify and Draft PR creation.
+- Exit condition: production Config/Secret locators are available; the read-only
+  baseline shows no conflicting deployment; one controlled run binds the source
+  commit, cluster UID, trust revision, seven reproducible digests, SBOM,
+  provenance, Trivy DB/report, certificate/SCT/Rekor proof, rollout/readiness,
+  positive and negative admission, verified rollback and cleanup. Any conflict
+  with another deployment stops the run.
+- Impact: Issue #62 remains `Blocked`; local and CI evidence must not be described
+  as a real Harbor publication or E3 deployment.
+
 ## Cross-role Day 1 gate
 
 - Frontend build and B/C/D first branches or PRs are not role A deliverables.
