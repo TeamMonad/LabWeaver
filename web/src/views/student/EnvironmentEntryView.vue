@@ -114,7 +114,7 @@
                   type="button"
                   class="filled-button"
                   :disabled="!canStart(data)"
-                  @click="lifecycle.act(data.id, data.revision, 'start')"
+                  @click="runLifecycle(data, 'start')"
                 >
                   启动
                 </button>
@@ -122,7 +122,7 @@
                   type="button"
                   class="outlined-button"
                   :disabled="!canStop(data)"
-                  @click="lifecycle.act(data.id, data.revision, 'stop')"
+                  @click="runLifecycle(data, 'stop')"
                 >
                   停止
                 </button>
@@ -130,7 +130,7 @@
                   type="button"
                   class="outlined-button"
                   :disabled="!canRestart(data)"
-                  @click="lifecycle.act(data.id, data.revision, 'restart')"
+                  @click="runLifecycle(data, 'restart')"
                 >
                   重启
                 </button>
@@ -142,6 +142,16 @@
                 >
                   删除
                 </button>
+              </div>
+
+              <div v-if="lifecycleDiagnostic" class="lifecycle-result">
+                <DiagnosticBanner
+                  :code="lifecycleDiagnostic.code"
+                  :message="lifecycleDiagnostic.message"
+                  :retryable="lifecycleDiagnostic.retryable"
+                  severity="error"
+                  @retry="retryLifecycle"
+                />
               </div>
             </div>
 
@@ -168,7 +178,7 @@
                       type="button"
                       class="filled-button"
                       :disabled="access.creating || eps.length === 0"
-                      @click="access.createGrant"
+                      @click="issueAccessGrant"
                     >
                       签发访问授权
                     </button>
@@ -176,13 +186,23 @@
                       v-if="access.grant.kind === 'success'"
                       type="button"
                       class="text-button error"
-                      @click="access.revokeGrant"
+                      @click="revokeAccessGrant"
                     >
                       撤销授权
                     </button>
                   </div>
 
-                  <AsyncStateView :state="access.grant" @retry="access.createGrant">
+                  <div v-if="createGrantDiagnostic" class="grant-result">
+                    <DiagnosticBanner
+                      :code="createGrantDiagnostic.code"
+                      :message="createGrantDiagnostic.message"
+                      :retryable="createGrantDiagnostic.retryable"
+                      severity="error"
+                      @retry="issueAccessGrant"
+                    />
+                  </div>
+
+                  <AsyncStateView :state="access.grant" @retry="issueAccessGrant">
                     <template #success="{ data: g }">
                       <div class="grant-card">
                         <div class="grant-row">
@@ -271,6 +291,15 @@ const environmentIdInput = ref(selectedEnvironmentId.value ?? '')
 const createDiagnostic = ref<DiagnosticViewModel | null>(null)
 const pendingRelease = ref<EnvironmentTemplateReleaseViewSchema | null>(null)
 const deleteEnvironment = ref<EnvironmentInstanceSchema | null>(null)
+const lifecycleDiagnostic = ref<DiagnosticViewModel | null>(null)
+const createGrantDiagnostic = ref<DiagnosticViewModel | null>(null)
+
+interface LifecycleTarget {
+  environmentId: string
+  revision: number
+  action: 'start' | 'stop' | 'restart' | 'delete'
+}
+const lastLifecycleTarget = ref<LifecycleTarget | null>(null)
 
 const env = useEnvironmentInstance(selectedEnvironmentId)
 const access = useEnvironmentAccess(
@@ -287,10 +316,25 @@ watch(
   },
 )
 
-watch(selectedEnvironmentId, (id) => {
-  access.resetGrant()
-  if (id) access.loadEndpoints()
-})
+watch(
+  selectedEnvironmentId,
+  (id) => {
+    access.resetGrant()
+    lifecycleDiagnostic.value = null
+    createGrantDiagnostic.value = null
+    if (id) access.loadEndpoints()
+  },
+  { immediate: true },
+)
+
+watch(
+  () => env.instance.kind,
+  (kind, previousKind) => {
+    if (kind === 'success' && previousKind !== 'success') {
+      access.loadEndpoints()
+    }
+  },
+)
 
 const releaseColumns: DataTableColumn<EnvironmentTemplateReleaseViewSchema & { actions?: never }>[] = [
   { key: 'runtimeKind', title: 'Runtime' },
@@ -346,7 +390,7 @@ async function createFromRelease(release: EnvironmentTemplateReleaseViewSchema) 
     const result = await lifecycle.create({
       courseId: courseId.value ?? '',
       releaseId: release.id,
-      releaseVersion: release.releaseVersion,
+      releaseVersion: release.version,
     })
     if (!result.ok) {
       createDiagnostic.value = result.diagnostic
@@ -362,6 +406,32 @@ function retryCreate() {
   if (pendingRelease.value) createFromRelease(pendingRelease.value)
 }
 
+async function runLifecycle(data: EnvironmentInstanceSchema, action: LifecycleTarget['action']) {
+  lifecycleDiagnostic.value = null
+  lastLifecycleTarget.value = { environmentId: data.id, revision: data.revision, action }
+  const result = await lifecycle.act(data.id, data.revision, action)
+  if (!result.ok) {
+    lifecycleDiagnostic.value = result.diagnostic ?? null
+  }
+}
+
+async function retryLifecycle() {
+  const target = lastLifecycleTarget.value
+  if (!target) return
+  const { environmentId, revision, action } = target
+  if (action === 'delete') {
+    const instance = env.instance.kind === 'success' ? env.instance.data : undefined
+    if (instance && instance.id === environmentId) {
+      await runLifecycle(instance, 'delete')
+    }
+    return
+  }
+  const instance = env.instance.kind === 'success' ? env.instance.data : undefined
+  if (instance && instance.id === environmentId) {
+    await runLifecycle(instance, action)
+  }
+}
+
 function openDelete(data: EnvironmentInstanceSchema) {
   deleteEnvironment.value = data
 }
@@ -370,9 +440,22 @@ async function confirmDeleteEnvironment() {
   if (!deleteEnvironment.value) return
   const data = deleteEnvironment.value
   deleteEnvironment.value = null
-  const result = await lifecycle.act(data.id, data.revision, 'delete')
-  if (!result.ok) {
-    createDiagnostic.value = result.diagnostic
+  await runLifecycle(data, 'delete')
+}
+
+async function issueAccessGrant() {
+  createGrantDiagnostic.value = null
+  const result = await access.createGrant()
+  if (result && !result.ok && result.diagnostic) {
+    createGrantDiagnostic.value = result.diagnostic
+  }
+}
+
+async function revokeAccessGrant() {
+  createGrantDiagnostic.value = null
+  const result = await access.revokeGrant()
+  if (!result.ok && result.diagnostic) {
+    createGrantDiagnostic.value = result.diagnostic
   }
 }
 </script>
@@ -424,6 +507,10 @@ async function confirmDeleteEnvironment() {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.lifecycle-result {
+  margin-top: 16px;
 }
 
 .create-hint {
@@ -611,6 +698,10 @@ async function confirmDeleteEnvironment() {
 .grant-actions {
   display: flex;
   gap: 12px;
+  margin-top: 16px;
+}
+
+.grant-result {
   margin-top: 16px;
 }
 

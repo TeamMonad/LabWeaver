@@ -6,6 +6,7 @@ import type {
 import { nowIso } from '../utils/clock'
 import { problem } from '../diagnostics'
 import type { FixtureHandler } from '../types'
+import { LIFECYCLE_FAILURE_ENV_ID } from '../stores/environmentStore'
 import * as environmentStore from '../stores/environmentStore'
 import { extractPathParam, requireActor, requireIdempotencyKey, requireIfMatch, requireRole } from './index'
 
@@ -102,6 +103,10 @@ function createOperationHandler(kind: 'start' | 'stop' | 'restart' | 'reset' | '
 
     const roleCheck = requireRole(actorResult, 'environment:write', { courseId: instance.courseId })
     if (roleCheck !== true) return roleCheck
+
+    if (environmentId === LIFECYCLE_FAILURE_ENV_ID && ['start', 'stop', 'restart'].includes(kind)) {
+      return problem(409, 'ENVIRONMENT_LIFECYCLE_FAILED', `环境 ${environmentId} 处于失败状态，无法执行 ${kind} 操作`, false)
+    }
 
     let accepted: EnvironmentOperationAcceptedSchema | null = null
     switch (kind) {

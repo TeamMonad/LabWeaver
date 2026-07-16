@@ -96,7 +96,24 @@ export function seedEnvironments(): string[] {
   ])
   deleting.instance.endpoints = toEnvironmentEndpoints(deleting.instance.id)
 
-  return [ready.instance.id, stopped.instance.id, failed.instance.id, deleting.instance.id]
+  const lifecycleFailure = createEnvironmentInternal({
+    id: LIFECYCLE_FAILURE_ENV_ID,
+    courseId: 'course-101',
+    ownerId: 'fixture-actor-teacher',
+    displayLabel: 'Lifecycle Failure Experiment',
+    class: 'experiment',
+    runtimeKind: 'virtual_machine',
+    desiredState: 'running',
+    observedState: 'failed',
+    failedPhase: 'provisioning',
+    lastDiagnosticCode: 'LW_PROVIDER_PROVISIONING_FAILED',
+  })
+  seedEndpointsFor(lifecycleFailure.instance.id, [
+    { id: `ep-${lifecycleFailure.instance.id}-ssh`, protocol: 'ssh', health: 'unhealthy' },
+  ])
+  lifecycleFailure.instance.endpoints = toEnvironmentEndpoints(lifecycleFailure.instance.id)
+
+  return [ready.instance.id, stopped.instance.id, failed.instance.id, deleting.instance.id, lifecycleFailure.instance.id]
 }
 
 interface CreateEnvironmentOptions {
@@ -109,10 +126,13 @@ interface CreateEnvironmentOptions {
   observedState: ObservedEnvironmentState
   failedPhase?: ObservedEnvironmentState | null
   lastDiagnosticCode?: string | null
+  id?: string
 }
 
+export const LIFECYCLE_FAILURE_ENV_ID = 'env-lifecycle-failure'
+
 function createEnvironmentInternal(options: CreateEnvironmentOptions): StoredEnvironment {
-  const id = nextUuid7('env')
+  const id = options.id ?? nextUuid7('env')
   const revision = nextRevision()
   const now = nowIso()
   const instance: EnvironmentInstanceSchema = {

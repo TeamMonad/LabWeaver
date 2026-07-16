@@ -8,6 +8,7 @@ import * as environmentOperations from './environmentOperations'
 import * as environments from './environments'
 import * as events from './events'
 import * as sshKeys from './sshKeys'
+import * as templateReleases from './templateReleases'
 
 interface RouteEntry {
   method: string
@@ -16,6 +17,9 @@ interface RouteEntry {
 }
 
 const routes: RouteEntry[] = [
+  // Environment template releases
+  { method: 'GET', match: (url) => /^\/api\/v1\/courses\/[^/]+\/environment-template-releases$/.test(url), handler: templateReleases.listEnvironmentTemplateReleases },
+
   // Environments
   { method: 'GET', match: (url) => url === '/api/v1/environments', handler: environments.listEnvironmentsHandler },
   { method: 'POST', match: (url) => url === '/api/v1/environments', handler: environments.createEnvironmentHandler },
