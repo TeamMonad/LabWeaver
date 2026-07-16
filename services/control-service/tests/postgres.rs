@@ -5,11 +5,20 @@ use std::sync::Arc;
 
 use artifact_store::{ImmutableObjectStore, ObjectStoreError, PresignedUpload, VerifiedObject};
 use async_trait::async_trait;
+use contracts::authoring::{AgentTrackKind, CandidateDecision};
 use contracts::http::{
-    CreateProblemPackageUploadRequest, IdempotencyKey, ProblemPackageUploadFile,
+    CandidateDecisionRequest, CreateProblemPackageUploadRequest, IdempotencyKey,
+    ProblemPackageUploadFile,
 };
-use contracts::{ArtifactId, ArtifactRef, PolicyId, Revision, Sha256Digest, UtcTimestamp};
-use control_service::{ControlConfig, ControlService};
+use contracts::supply_chain::{
+    EnvironmentTemplateRelease, ImageArtifact, ImagePolicyEvaluation, SigstoreEvidence,
+    VulnerabilitySummary,
+};
+use contracts::{
+    ActorId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId, CourseId,
+    ImageArtifactId, PolicyId, ReleaseId, Revision, Sha256Digest, UtcTimestamp,
+};
+use control_service::{ControlConfig, ControlError, ControlService};
 use sqlx::{Row, postgres::PgPoolOptions};
 use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
@@ -243,6 +252,234 @@ async fn issue_48_migrations_enforce_fencing_and_monotonic_course_sequences()
         1
     );
     Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn candidate_decision_route_kind_is_bound_before_approval()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        container.get_host_port_ipv4(5432).await?
+    );
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
+        .await?;
+    let migrations = format!(
+        "CREATE SCHEMA control; SET search_path TO control;\n{}\n{}",
+        include_str!("../../../migrations/control/0001_initial.sql"),
+        include_str!("../../../migrations/control/0002_control_plane.sql")
+    );
+    sqlx::raw_sql(&migrations).execute(&pool).await?;
+    let config = control_config()?;
+    let evaluation_schema = config.evaluation_schema_sha256;
+    let service = ControlService::new(
+        pool.clone(),
+        Arc::new(FixtureObjects { fail_second: false }),
+        config,
+    )?;
+    let course_id = CourseId::new();
+    let policy_id = PolicyId::new();
+    let candidate_id = CandidateId::new();
+    let candidate_sha256 = Sha256Digest::of_bytes(b"evaluation-candidate");
+    sqlx::query(
+        "INSERT INTO control.course_llm_policies \
+         (policy_id,course_id,revision,contract_sha256,contract,activated_at) \
+         VALUES ($1,$2,1,$3,'{}'::jsonb,now())",
+    )
+    .bind(policy_id.as_uuid())
+    .bind(course_id.as_uuid())
+    .bind(Sha256Digest::of_bytes(b"policy").to_string())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO control.candidates \
+         (candidate_id,candidate_kind,course_id,revision,state,content_sha256,contract, \
+          policy_revision,schema_sha256,projected_event_id) \
+         VALUES ($1,'evaluation',$2,1,'validated',$3,'{}'::jsonb,1,$4,$5)",
+    )
+    .bind(candidate_id.as_uuid())
+    .bind(course_id.as_uuid())
+    .bind(candidate_sha256.to_string())
+    .bind(evaluation_schema.to_string())
+    .bind(Uuid::now_v7())
+    .execute(&pool)
+    .await?;
+    let request = CandidateDecisionRequest {
+        candidate_revision: Revision::new(1)?,
+        candidate_sha256,
+        policy_revision: Revision::new(1)?,
+        schema_sha256: evaluation_schema,
+        trust_revision: Revision::new(1)?,
+        decision: CandidateDecision::Approved,
+        reason: "reviewed evaluation candidate".to_owned(),
+    };
+    let result = service
+        .decide_candidate(
+            course_id,
+            candidate_id,
+            AgentTrackKind::Environment,
+            &request,
+            ActorId::new(),
+            Revision::new(1)?,
+            &IdempotencyKey::parse("candidate-kind-mismatch")?,
+            "2026-07-16T08:00:00.000Z".parse()?,
+        )
+        .await;
+    assert!(matches!(result, Err(ControlError::CandidateKindMismatch)));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM control.candidate_approvals")
+            .fetch_one(&pool)
+            .await?,
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM control.idempotency_ledger")
+            .fetch_one(&pool)
+            .await?,
+        0
+    );
+
+    let release = release_fixture(course_id)?;
+    sqlx::query(
+        "INSERT INTO control.environment_template_releases \
+         (release_id,course_id,version,environment_candidate_id,candidate_revision, \
+          spec_sha256,image_artifact_id,contract,published_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+    )
+    .bind(release.id.as_uuid())
+    .bind(course_id.as_uuid())
+    .bind(i64::try_from(release.version)?)
+    .bind(release.candidate_id.as_uuid())
+    .bind(i64::try_from(release.candidate_revision.get())?)
+    .bind(release.environment_spec_sha256.to_string())
+    .bind(release.image_policy_evaluation.artifact_id.as_uuid())
+    .bind(serde_json::to_value(&release)?)
+    .bind(release.published_at.get())
+    .execute(&pool)
+    .await?;
+    let withdrawal = service
+        .withdraw_release(
+            course_id,
+            release.id,
+            release.version,
+            ActorId::new(),
+            "SECURITY_REVOKED",
+            &IdempotencyKey::parse("withdraw-release")?,
+            "2026-07-16T09:00:00.000Z".parse()?,
+            "trace-withdraw-release",
+        )
+        .await?;
+    let view = service.release(course_id, release.id).await?;
+    assert_eq!(view.release, release);
+    assert_eq!(view.withdrawal, Some(withdrawal.clone()));
+    let listed = service.releases(course_id, 0, 10).await?;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].withdrawal, Some(withdrawal));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT subject FROM control.outbox_events WHERE aggregate_id=$1",
+        )
+        .bind(release.id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        contracts::events::subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN
+    );
+    Ok(())
+}
+
+fn release_fixture(
+    course_id: CourseId,
+) -> Result<EnvironmentTemplateRelease, Box<dyn std::error::Error>> {
+    let published_at = "2026-07-16T08:00:00.000Z".parse::<UtcTimestamp>()?;
+    let valid_until = "2026-07-16T10:00:00.000Z".parse::<UtcTimestamp>()?;
+    let artifact_sha256 = Sha256Digest::of_bytes(b"container-image");
+    let trust_bundle_sha256 = Sha256Digest::of_bytes(b"trust-bundle");
+    let candidate_id = CandidateId::new();
+    let candidate_sha256 = Sha256Digest::of_bytes(b"environment-spec");
+    let artifact_id = ImageArtifactId::new();
+    let artifact_ref = |media_type: &str| ArtifactRef {
+        artifact_id: ArtifactId::new(),
+        store_binding: "artifact-store-v1".to_owned(),
+        object_version: "version-1".to_owned(),
+        sha256: Sha256Digest::of_bytes(media_type.as_bytes()),
+        size_bytes: 1,
+        media_type: media_type.to_owned(),
+    };
+    let signature = SigstoreEvidence {
+        trust_bundle_sha256,
+        fulcio_issuer: "https://issuer.invalid".to_owned(),
+        certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
+        certificate_sha256: Sha256Digest::of_bytes(b"certificate"),
+        signature_sha256: Sha256Digest::of_bytes(b"signature"),
+        rekor_log_id: "rekor-v1".to_owned(),
+        rekor_log_index: 1,
+        rekor_inclusion_proof_sha256: Sha256Digest::of_bytes(b"rekor-proof"),
+        ct_log_id: "ct-v1".to_owned(),
+        sct_sha256: Sha256Digest::of_bytes(b"sct"),
+        verified_at: published_at,
+    };
+    Ok(EnvironmentTemplateRelease {
+        id: ReleaseId::new(),
+        course_id,
+        version: 1,
+        candidate_id,
+        candidate_revision: Revision::new(1)?,
+        environment_spec_sha256: candidate_sha256,
+        runtime_kind: contracts::authoring::RuntimeKind::Container,
+        approval: contracts::authoring::CandidateApproval {
+            id: ApprovalId::new(),
+            candidate_id,
+            candidate_revision: Revision::new(1)?,
+            candidate_sha256,
+            policy_revision: Revision::new(1)?,
+            schema_sha256: Sha256Digest::of_bytes(b"environment"),
+            trust_revision: Revision::new(1)?,
+            actor_id: ActorId::new(),
+            decision: CandidateDecision::Approved,
+            reason: "reviewed".to_owned(),
+            decided_at: published_at,
+        },
+        artifact: ImageArtifact::Container {
+            id: artifact_id,
+            build_request_id: BuildRequestId::new(),
+            repository: "registry.invalid/course/environment".to_owned(),
+            immutable_tag: "release-1".to_owned(),
+            digest: format!("sha256:{artifact_sha256}"),
+            sbom: artifact_ref("application/spdx+json"),
+            provenance: artifact_ref("application/vnd.in-toto+json"),
+            signature,
+        },
+        image_policy_evaluation: ImagePolicyEvaluation {
+            artifact_id,
+            artifact_sha256,
+            policy_id: PolicyId::new(),
+            policy_revision: Revision::new(1)?,
+            scanner_name: "trivy".to_owned(),
+            scanner_version: "1.0.0".to_owned(),
+            scanner_database_sha256: Sha256Digest::of_bytes(b"scanner-db"),
+            vulnerabilities: VulnerabilitySummary {
+                unknown: 0,
+                low: 0,
+                medium: 0,
+                high: 1,
+                critical: 0,
+            },
+            trust_bundle_sha256,
+            expected_fulcio_issuer: "https://issuer.invalid".to_owned(),
+            expected_certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
+            require_rekor_inclusion: true,
+            require_ct_sct: true,
+            evaluated_at: published_at,
+            max_evidence_age_milliseconds: 7_200_000,
+            valid_until,
+            passed: true,
+        },
+        published_by: ActorId::new(),
+        published_at,
+    })
 }
 
 fn upload_request() -> Result<CreateProblemPackageUploadRequest, Box<dyn std::error::Error>> {

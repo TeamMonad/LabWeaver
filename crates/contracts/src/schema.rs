@@ -86,6 +86,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::supply_chain::EnvironmentTemplateRelease
     );
     document!(
+        "schemas/contracts/v1/http/environment-template-release-view.schema.json",
+        crate::supply_chain::EnvironmentTemplateReleaseView
+    );
+    document!(
         "schemas/contracts/v1/private-sigstore-workload-identity.schema.json",
         crate::supply_chain::WorkloadIdentityPolicy
     );
@@ -382,6 +386,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         "schemas/contracts/v1/events/environment-template-release-published.schema.json",
         CloudEvent<events::ReleasePublished>
     );
+    document!(
+        "schemas/contracts/v1/events/environment-template-release-withdrawn.schema.json",
+        CloudEvent<events::ReleaseWithdrawn>
+    );
 
     output.push(json_artifact(
         "schemas/openapi/labweaver-public.v1.json",
@@ -477,6 +485,18 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 "LW_ENV_OWNER_UNAVAILABLE",
                 "LW_ENV_OWNER_RESOLVER_UNAVAILABLE",
                 "LW_ENV_OWNER_CLOCK_INVALID"
+            ]);
+        }
+        if matches!(
+            operation.operation_id,
+            "appendEnvironmentCandidateDecision" | "appendEvaluationCandidateDecision"
+        ) {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_CONTRACT_DOCUMENT_INVALID",
+                "LW_ACCESS_DENIED",
+                "LW_IDEMPOTENCY_CONFLICT",
+                "LW_REVISION_CONFLICT",
+                "LW_CANDIDATE_KIND_MISMATCH"
             ]);
         }
         let authorization = operation_authorization(operation.operation_id).ok_or_else(|| {
@@ -751,9 +771,9 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "appendEnvironmentCandidateDecision" | "appendEvaluationCandidateDecision" => {
             contract_ref("candidate-approval")
         }
-        "getEnvironmentTemplateRelease" => contract_ref("environment-template-release"),
+        "getEnvironmentTemplateRelease" => contract_ref("http/environment-template-release-view"),
         "listEnvironmentTemplateReleases" => {
-            json!({"type":"object","required":["items"],"properties":{"items":{"type":"array","items":contract_ref("environment-template-release")},"nextCursor":{"type":["string","null"]}}})
+            json!({"type":"object","required":["items"],"properties":{"items":{"type":"array","items":contract_ref("http/environment-template-release-view")},"nextCursor":{"type":["string","null"]}}})
         }
         "getEnvironment" => contract_ref("environment-instance"),
         "listEnvironments" => contract_ref("http/environment-summary-page"),
@@ -883,6 +903,21 @@ mod tests {
         assert!(internal.contains("/internal/v1/auth/decision"));
         assert!(internal.contains("AuthorizationDecisionRequest"));
         assert!(internal.contains("mutualTLS"));
+        let release_view = generated
+            .iter()
+            .find(|item| {
+                item.relative_path
+                    .ends_with("environment-template-release-view.schema.json")
+            })
+            .ok_or("release view schema was not generated")?;
+        let release_view: Value = serde_json::from_slice(&release_view.bytes)?;
+        let properties = release_view
+            .get("properties")
+            .and_then(Value::as_object)
+            .ok_or("release view properties are missing")?;
+        assert!(properties.contains_key("id"));
+        assert!(properties.contains_key("withdrawal"));
+        assert!(!properties.contains_key("release"));
         Ok(())
     }
 }

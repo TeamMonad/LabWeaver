@@ -15,20 +15,25 @@ use std::sync::Arc;
 
 use artifact_store::{ImmutableObjectStore, ObjectStoreError};
 use contracts::authoring::{
-    CandidateApproval, CandidateDecision, CourseLlmEgressPolicy, EnvironmentCandidate,
-    EvaluationCandidate, PackageFile, ProblemPackage, RuntimeKind,
+    AgentTrackKind, CandidateApproval, CandidateDecision, CourseLlmEgressPolicy,
+    EnvironmentCandidate, EvaluationCandidate, PackageFile, ProblemPackage, RuntimeKind,
 };
-use contracts::events::{AgentRunEvent, CloudEvent, EVENT_CONTRACTS};
+use contracts::events::{
+    AgentRunEvent, CloudEvent, EVENT_CONTRACTS, ReleasePublished, ReleaseWithdrawn, SPEC_VERSION,
+    subjects,
+};
 use contracts::http::{
     CandidateDecisionRequest, CreateEnvironmentTemplateReleaseRequest,
     CreateProblemPackageUploadRequest, IdempotencyKey, ProblemPackageUploadFile,
     ProblemPackageUploadSession, ProblemPackageUploadTarget,
 };
-use contracts::supply_chain::{EnvironmentTemplateRelease, ImageArtifact, ReleaseWithdrawal};
+use contracts::supply_chain::{
+    EnvironmentTemplateRelease, EnvironmentTemplateReleaseView, ImageArtifact, ReleaseWithdrawal,
+};
 use contracts::{
     ActorId, ApprovalId, CandidateId, CourseId, EventId, ImageArtifactId, PolicyId,
     ProblemPackageId, ReleaseId, RetentionClass, RetentionDisposition, RetentionSnapshot, Revision,
-    Sha256Digest, UploadSessionId, UtcTimestamp,
+    Sequence, Sha256Digest, UploadSessionId, UtcTimestamp,
 };
 use persistence_sqlx::{
     Domain, IdempotencyDecision, IdempotencyStore, InboxDecision, InboxStore, OutboxStore,
@@ -46,7 +51,8 @@ const CREATE_POLICY: &str = "control_create_llm_policy_v1";
 const DECIDE_CANDIDATE: &str = "control_decide_candidate_v1";
 const CREATE_RELEASE: &str = "control_create_environment_template_release_v1";
 const WITHDRAW_RELEASE: &str = "control_withdraw_environment_template_release_v1";
-const RELEASE_SUBJECT: &str = "labweaver.control.environment_template_release.published.v1";
+const RELEASE_SUBJECT: &str = subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED;
+const WITHDRAWAL_SUBJECT: &str = subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN;
 
 /// Non-secret Control behavior configuration.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -631,19 +637,25 @@ impl ControlService {
         load_candidate_contract(&self.pool, course_id, candidate_id, "evaluation").await
     }
 
-    /// Reads one immutable Release. Withdrawal is a separate fact and never mutates this DTO.
+    /// Reads one immutable Release together with its optional append-only withdrawal fact.
     pub async fn release(
         &self,
         course_id: CourseId,
         release_id: ReleaseId,
-    ) -> Result<EnvironmentTemplateRelease, ControlError> {
-        load_contract_two(
-            &self.pool,
-            "SELECT contract FROM control.environment_template_releases WHERE release_id=$1 AND course_id=$2",
-            release_id.as_uuid(),
-            course_id.as_uuid(),
+    ) -> Result<EnvironmentTemplateReleaseView, ControlError> {
+        let row = sqlx::query(
+            "SELECT releases.contract AS release_contract,withdrawals.contract AS withdrawal_contract \
+             FROM control.environment_template_releases releases \
+             LEFT JOIN control.release_withdrawals withdrawals ON withdrawals.release_id=releases.release_id \
+             WHERE releases.release_id=$1 AND releases.course_id=$2",
         )
+        .bind(release_id.as_uuid())
+        .bind(course_id.as_uuid())
+        .fetch_optional(&self.pool)
         .await
+        .map_err(db)?
+        .ok_or(ControlError::NotFound)?;
+        release_view(&row)
     }
 
     /// Lists releases by immutable version with bounded pagination.
@@ -652,13 +664,15 @@ impl ControlService {
         course_id: CourseId,
         after_version: u64,
         limit: u32,
-    ) -> Result<Vec<EnvironmentTemplateRelease>, ControlError> {
+    ) -> Result<Vec<EnvironmentTemplateReleaseView>, ControlError> {
         if limit == 0 || limit > 200 {
             return Err(ControlError::ContractInvalid);
         }
         let rows = sqlx::query(
-            "SELECT contract FROM control.environment_template_releases \
-             WHERE course_id=$1 AND version>$2 ORDER BY version LIMIT $3",
+            "SELECT releases.contract AS release_contract,withdrawals.contract AS withdrawal_contract \
+             FROM control.environment_template_releases releases \
+             LEFT JOIN control.release_withdrawals withdrawals ON withdrawals.release_id=releases.release_id \
+             WHERE releases.course_id=$1 AND releases.version>$2 ORDER BY releases.version LIMIT $3",
         )
         .bind(course_id.as_uuid())
         .bind(i64::try_from(after_version).map_err(|_| ControlError::ContractInvalid)?)
@@ -666,12 +680,7 @@ impl ControlService {
         .fetch_all(&self.pool)
         .await
         .map_err(db)?;
-        rows.into_iter()
-            .map(|row| {
-                serde_json::from_value(row.try_get("contract").map_err(db)?)
-                    .map_err(|_| ControlError::PersistenceIdentityMismatch)
-            })
-            .collect()
+        rows.into_iter().map(|row| release_view(&row)).collect()
     }
 
     /// Projects one Agent-owned candidate using its exact source event identity.
@@ -1001,6 +1010,7 @@ impl ControlService {
         &self,
         course_id: CourseId,
         candidate_id: CandidateId,
+        expected_kind: AgentTrackKind,
         request: &CandidateDecisionRequest,
         actor_id: ActorId,
         expected_revision: Revision,
@@ -1011,7 +1021,8 @@ impl ControlService {
             return Err(ControlError::RevisionConflict);
         }
         let request_hash = canonical_hash(&json!({
-            "courseId":course_id,"candidateId":candidate_id,"request":request,"actorId":actor_id
+            "courseId":course_id,"candidateId":candidate_id,"kind":expected_kind,
+            "request":request,"actorId":actor_id
         }))?;
         let mut transaction = self.pool.begin().await.map_err(db)?;
         match IdempotencyStore::reserve(
@@ -1056,6 +1067,13 @@ impl ControlService {
             .parse()
             .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
         let kind: String = row.try_get("candidate_kind").map_err(db)?;
+        let expected_kind_name = match expected_kind {
+            AgentTrackKind::Environment => "environment",
+            AgentTrackKind::Evaluation => "evaluation",
+        };
+        if kind != expected_kind_name {
+            return Err(ControlError::CandidateKindMismatch);
+        }
         let expected_schema = match kind.as_str() {
             "environment" => self.config.environment_schema_sha256,
             "evaluation" => self.config.evaluation_schema_sha256,
@@ -1149,7 +1167,9 @@ impl ControlService {
         actor_id: ActorId,
         idempotency_key: &IdempotencyKey,
         now: UtcTimestamp,
+        trace_id: &str,
     ) -> Result<EnvironmentTemplateRelease, ControlError> {
+        validate_trace_id(trace_id)?;
         request
             .artifact
             .validate()
@@ -1316,19 +1336,44 @@ impl ControlService {
         .execute(&mut *transaction)
         .await
         .map_err(db)?;
-        let event_payload = json!({
-            "releaseId":release.id,"version":release.version,
-            "environmentSpecSha256":release.environment_spec_sha256,
-            "artifactSha256":release.artifact.content_sha256().map_err(|_| ControlError::ReleaseEvidenceInvalid)?,
-        });
+        let event_id = EventId::new();
+        let event = CloudEvent {
+            specversion: SPEC_VERSION.to_owned(),
+            id: event_id,
+            source: "urn:labweaver:control-service".to_owned(),
+            event_type: RELEASE_SUBJECT.to_owned(),
+            subject: RELEASE_SUBJECT.to_owned(),
+            time: now,
+            datacontenttype: "application/json".to_owned(),
+            dataschema: event_contract(RELEASE_SUBJECT)?.data_schema(),
+            course_id,
+            aggregate_revision: Revision::new(release.version)
+                .map_err(|_| ControlError::ContractInvalid)?,
+            aggregate_sequence: Sequence(1),
+            trace_id: trace_id.to_owned(),
+            data: ReleasePublished {
+                release_id: release.id,
+                version: release.version,
+                environment_spec_sha256: release.environment_spec_sha256,
+                artifact_sha256: release
+                    .artifact
+                    .content_sha256()
+                    .map_err(|_| ControlError::ReleaseEvidenceInvalid)?,
+            },
+        };
+        event
+            .validate(event_contract(RELEASE_SUBJECT)?)
+            .map_err(|_| ControlError::ContractInvalid)?;
+        let event_payload =
+            serde_json::to_value(&event).map_err(|_| ControlError::ContractInvalid)?;
         OutboxStore::enqueue(
             &mut transaction,
             Domain::Control,
-            EventId::new().as_uuid(),
+            event_id.as_uuid(),
             RELEASE_SUBJECT,
             RELEASE_SUBJECT,
             release.id.as_uuid(),
-            release.version,
+            1,
             &event_payload,
             canonical_hash(&event_payload)?,
         )
@@ -1371,10 +1416,12 @@ impl ControlService {
         reason_code: &str,
         idempotency_key: &IdempotencyKey,
         now: UtcTimestamp,
+        trace_id: &str,
     ) -> Result<ReleaseWithdrawal, ControlError> {
-        if reason_code.trim().is_empty() || expected_version == 0 {
+        if !valid_reason_code(reason_code) || expected_version == 0 {
             return Err(ControlError::ContractInvalid);
         }
+        validate_trace_id(trace_id)?;
         let request_hash = canonical_hash(&json!({
             "courseId":course_id,"releaseId":release_id,"expectedVersion":expected_version,
             "actorId":actor_id,"reasonCode":reason_code
@@ -1441,10 +1488,51 @@ impl ControlService {
                 db(error)
             }
         })?;
+        let event_id = EventId::new();
+        let event = CloudEvent {
+            specversion: SPEC_VERSION.to_owned(),
+            id: event_id,
+            source: "urn:labweaver:control-service".to_owned(),
+            event_type: WITHDRAWAL_SUBJECT.to_owned(),
+            subject: WITHDRAWAL_SUBJECT.to_owned(),
+            time: now,
+            datacontenttype: "application/json".to_owned(),
+            dataschema: event_contract(WITHDRAWAL_SUBJECT)?.data_schema(),
+            course_id,
+            aggregate_revision: Revision::new(expected_version)
+                .map_err(|_| ControlError::ContractInvalid)?,
+            aggregate_sequence: Sequence(2),
+            trace_id: trace_id.to_owned(),
+            data: ReleaseWithdrawn {
+                release_id,
+                version: expected_version,
+                actor_id,
+                reason_code: reason_code.to_owned(),
+                withdrawn_at: now,
+            },
+        };
+        event
+            .validate(event_contract(WITHDRAWAL_SUBJECT)?)
+            .map_err(|_| ControlError::ContractInvalid)?;
+        let event_payload =
+            serde_json::to_value(&event).map_err(|_| ControlError::ContractInvalid)?;
+        OutboxStore::enqueue(
+            &mut transaction,
+            Domain::Control,
+            event_id.as_uuid(),
+            WITHDRAWAL_SUBJECT,
+            WITHDRAWAL_SUBJECT,
+            release_id.as_uuid(),
+            2,
+            &event_payload,
+            canonical_hash(&event_payload)?,
+        )
+        .await
+        .map_err(|_| ControlError::PersistenceFailed)?;
         append_sse(
             &mut transaction,
             course_id,
-            "environment_template_release.withdrawn.v1",
+            WITHDRAWAL_SUBJECT,
             release_id.as_uuid(),
             Revision::new(expected_version).map_err(|_| ControlError::ContractInvalid)?,
             json!({"releaseId":release_id,"version":expected_version,"reasonCode":reason_code}),
@@ -2198,6 +2286,49 @@ fn sse_record(row: &sqlx::postgres::PgRow) -> Result<SseRecord, ControlError> {
     })
 }
 
+fn release_view(
+    row: &sqlx::postgres::PgRow,
+) -> Result<EnvironmentTemplateReleaseView, ControlError> {
+    let release = serde_json::from_value(row.try_get("release_contract").map_err(db)?)
+        .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+    let withdrawal = row
+        .try_get::<Option<Value>, _>("withdrawal_contract")
+        .map_err(db)?
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+    Ok(EnvironmentTemplateReleaseView {
+        release,
+        withdrawal,
+    })
+}
+
+fn event_contract(subject: &str) -> Result<contracts::events::EventContract, ControlError> {
+    EVENT_CONTRACTS
+        .iter()
+        .copied()
+        .find(|contract| contract.subject == subject)
+        .ok_or(ControlError::ContractInvalid)
+}
+
+fn validate_trace_id(trace_id: &str) -> Result<(), ControlError> {
+    if trace_id.trim().is_empty() || trace_id.len() > 256 || trace_id.chars().any(char::is_control)
+    {
+        return Err(ControlError::ContractInvalid);
+    }
+    Ok(())
+}
+
+fn valid_reason_code(reason_code: &str) -> bool {
+    let mut bytes = reason_code.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    first.is_ascii_uppercase()
+        && reason_code.len() <= 64
+        && bytes.all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
 fn canonical_hash<T: Serialize>(value: &T) -> Result<Sha256Digest, ControlError> {
     Sha256Digest::of_canonical(value).map_err(|_| ControlError::ContractInvalid)
 }
@@ -2356,6 +2487,8 @@ pub enum ControlError {
     RevisionConflict,
     #[error("LW_CANDIDATE_DECISION_CONFLICT")]
     DecisionConflict,
+    #[error("LW_CANDIDATE_KIND_MISMATCH")]
+    CandidateKindMismatch,
     #[error("LW_RELEASE_CANDIDATE_MISMATCH")]
     ReleaseCandidateMismatch,
     #[error("LW_RELEASE_EVIDENCE_INVALID")]

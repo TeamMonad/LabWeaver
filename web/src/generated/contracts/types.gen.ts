@@ -1317,222 +1317,6 @@ export type StreamSequence = string;
 export type EnvironmentOperationSnapshotSchemaUtcTimestamp = string;
 
 /**
- * EnvironmentTemplateRelease
- *
- * Immutable environment-first release.
- */
-export type EnvironmentTemplateReleaseSchema = {
-    approval: CandidateApproval;
-    artifact: ImageArtifact;
-    candidateId: EnvironmentTemplateReleaseSchemaCandidateId;
-    candidateRevision: EnvironmentTemplateReleaseSchemaRevision;
-    courseId: EnvironmentTemplateReleaseSchemaCourseId;
-    environmentSpecSha256: EnvironmentTemplateReleaseSchemaSha256Digest;
-    id: EnvironmentTemplateReleaseSchemaReleaseId;
-    imagePolicyEvaluation: ImagePolicyEvaluation;
-    publishedAt: EnvironmentTemplateReleaseSchemaUtcTimestamp;
-    publishedBy: EnvironmentTemplateReleaseSchemaActorId;
-    runtimeKind: EnvironmentTemplateReleaseSchemaRuntimeKind;
-    version: number;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `ActorId`.
- */
-export type EnvironmentTemplateReleaseSchemaActorId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `ApprovalId`.
- */
-export type EnvironmentTemplateReleaseSchemaApprovalId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `ArtifactId`.
- */
-export type EnvironmentTemplateReleaseSchemaArtifactId = string;
-
-/**
- * Immutable object-store identity without a machine-local path or credential.
- */
-export type EnvironmentTemplateReleaseSchemaArtifactRef = {
-    /**
-     * Stable metadata identity resolved by the owning service.
-     */
-    artifactId: EnvironmentTemplateReleaseSchemaArtifactId;
-    /**
-     * Registered media type.
-     */
-    mediaType: string;
-    /**
-     * Immutable backend object version.
-     */
-    objectVersion: string;
-    /**
-     * Exact content digest.
-     */
-    sha256: EnvironmentTemplateReleaseSchemaSha256Digest;
-    /**
-     * Raw object length.
-     */
-    sizeBytes: number;
-    /**
-     * Explicit object-store binding from deployment configuration.
-     */
-    storeBinding: string;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `BuildRequestId`.
- */
-export type BuildRequestId = string;
-
-/**
- * Human decision bound to an exact candidate and dependency identity.
- */
-export type CandidateApproval = {
-    actorId: EnvironmentTemplateReleaseSchemaActorId;
-    candidateId: EnvironmentTemplateReleaseSchemaCandidateId;
-    candidateRevision: EnvironmentTemplateReleaseSchemaRevision;
-    candidateSha256: EnvironmentTemplateReleaseSchemaSha256Digest;
-    decidedAt: EnvironmentTemplateReleaseSchemaUtcTimestamp;
-    decision: EnvironmentTemplateReleaseSchemaCandidateDecision;
-    id: EnvironmentTemplateReleaseSchemaApprovalId;
-    policyRevision: EnvironmentTemplateReleaseSchemaRevision;
-    reason: string;
-    schemaSha256: EnvironmentTemplateReleaseSchemaSha256Digest;
-    trustRevision: EnvironmentTemplateReleaseSchemaRevision;
-};
-
-/**
- * Append-only candidate decision.
- */
-export type EnvironmentTemplateReleaseSchemaCandidateDecision = 'approved' | 'rejected' | 'withdrawn';
-
-/**
- * Strongly typed UUIDv7 identifier for `CandidateId`.
- */
-export type EnvironmentTemplateReleaseSchemaCandidateId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `CourseId`.
- */
-export type EnvironmentTemplateReleaseSchemaCourseId = string;
-
-/**
- * Complete immutable runtime artifact identity.
- */
-export type ImageArtifact = {
-    build_request_id: BuildRequestId;
-    digest: string;
-    id: ImageArtifactId;
-    immutable_tag: string;
-    kind: 'container';
-    provenance: EnvironmentTemplateReleaseSchemaArtifactRef;
-    repository: string;
-    sbom: EnvironmentTemplateReleaseSchemaArtifactRef;
-    signature: SigstoreEvidence;
-} | {
-    base_disk: EnvironmentTemplateReleaseSchemaArtifactRef;
-    format: VirtualMachineDiskFormat;
-    id: ImageArtifactId;
-    kind: 'virtual_machine';
-    provenance: EnvironmentTemplateReleaseSchemaArtifactRef;
-    sbom: EnvironmentTemplateReleaseSchemaArtifactRef;
-    signature: SigstoreEvidence;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `ImageArtifactId`.
- */
-export type ImageArtifactId = string;
-
-/**
- * Deterministic scan and trust-policy evaluation.
- */
-export type ImagePolicyEvaluation = {
-    artifactId: ImageArtifactId;
-    artifactSha256: EnvironmentTemplateReleaseSchemaSha256Digest;
-    evaluatedAt: EnvironmentTemplateReleaseSchemaUtcTimestamp;
-    expectedCertificateSubject: string;
-    expectedFulcioIssuer: string;
-    maxEvidenceAgeMilliseconds: number;
-    passed: boolean;
-    policyId: EnvironmentTemplateReleaseSchemaPolicyId;
-    policyRevision: EnvironmentTemplateReleaseSchemaRevision;
-    requireCtSct: boolean;
-    requireRekorInclusion: boolean;
-    scannerDatabaseSha256: EnvironmentTemplateReleaseSchemaSha256Digest;
-    scannerName: string;
-    scannerVersion: string;
-    trustBundleSha256: EnvironmentTemplateReleaseSchemaSha256Digest;
-    validUntil: EnvironmentTemplateReleaseSchemaUtcTimestamp;
-    vulnerabilities: VulnerabilitySummary;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `PolicyId`.
- */
-export type EnvironmentTemplateReleaseSchemaPolicyId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `ReleaseId`.
- */
-export type EnvironmentTemplateReleaseSchemaReleaseId = string;
-
-/**
- * Monotonic aggregate revision. Zero is never a persisted revision.
- */
-export type EnvironmentTemplateReleaseSchemaRevision = number;
-
-/**
- * Runtime kind shared by candidates, releases, and instances.
- */
-export type EnvironmentTemplateReleaseSchemaRuntimeKind = 'container' | 'virtual_machine';
-
-/**
- * Canonical lowercase SHA-256 digest.
- */
-export type EnvironmentTemplateReleaseSchemaSha256Digest = string;
-
-/**
- * Private Sigstore identity and transparency evidence.
- */
-export type SigstoreEvidence = {
-    certificateSha256: EnvironmentTemplateReleaseSchemaSha256Digest;
-    certificateSubject: string;
-    ctLogId: string;
-    fulcioIssuer: string;
-    rekorInclusionProofSha256: EnvironmentTemplateReleaseSchemaSha256Digest;
-    rekorLogId: string;
-    rekorLogIndex: number;
-    sctSha256: EnvironmentTemplateReleaseSchemaSha256Digest;
-    signatureSha256: EnvironmentTemplateReleaseSchemaSha256Digest;
-    trustBundleSha256: EnvironmentTemplateReleaseSchemaSha256Digest;
-    verifiedAt: EnvironmentTemplateReleaseSchemaUtcTimestamp;
-};
-
-/**
- * UTC timestamp serialized with a literal `Z` and millisecond precision.
- */
-export type EnvironmentTemplateReleaseSchemaUtcTimestamp = string;
-
-/**
- * Supported VM base-disk encodings.
- */
-export type VirtualMachineDiskFormat = 'qcow2' | 'raw';
-
-/**
- * Vulnerability counts by severity.
- */
-export type VulnerabilitySummary = {
-    critical: number;
-    high: number;
-    low: number;
-    medium: number;
-    unknown: number;
-};
-
-/**
  * EvaluationCandidate
  *
  * Immutable validated Evaluation candidate.
@@ -1945,7 +1729,7 @@ export type FrozenSubmissionSchemaArtifactRef = {
 /**
  * Strongly typed UUIDv7 identifier for `BuildRequestId`.
  */
-export type FrozenSubmissionSchemaBuildRequestId = string;
+export type BuildRequestId = string;
 
 /**
  * Strongly typed UUIDv7 identifier for `CourseId`.
@@ -1961,7 +1745,7 @@ export type FrozenSubmissionSchemaEnvironmentId = string;
  * Frozen build and runtime identity used to reproduce collection.
  */
 export type FrozenEnvironmentIdentity = {
-    buildRequestId?: FrozenSubmissionSchemaBuildRequestId | null;
+    buildRequestId?: BuildRequestId | null;
     environmentId: FrozenSubmissionSchemaEnvironmentId;
     environmentRevision: FrozenSubmissionSchemaRevision;
     releaseId: FrozenSubmissionSchemaReleaseId;
@@ -2183,11 +1967,11 @@ export type CreateEnvironmentRequestSchemaReleaseId = string;
  */
 export type CreateEnvironmentTemplateReleaseRequestSchema = {
     approvalId: CreateEnvironmentTemplateReleaseRequestSchemaApprovalId;
-    artifact: CreateEnvironmentTemplateReleaseRequestSchemaImageArtifact;
+    artifact: ImageArtifact;
     candidateId: CreateEnvironmentTemplateReleaseRequestSchemaCandidateId;
     candidateRevision: CreateEnvironmentTemplateReleaseRequestSchemaRevision;
     environmentSpecSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
-    imagePolicyEvaluation: CreateEnvironmentTemplateReleaseRequestSchemaImagePolicyEvaluation;
+    imagePolicyEvaluation: ImagePolicyEvaluation;
     runtimeKind: CreateEnvironmentTemplateReleaseRequestSchemaRuntimeKind;
 };
 
@@ -2244,36 +2028,36 @@ export type CreateEnvironmentTemplateReleaseRequestSchemaCandidateId = string;
 /**
  * Complete immutable runtime artifact identity.
  */
-export type CreateEnvironmentTemplateReleaseRequestSchemaImageArtifact = {
+export type ImageArtifact = {
     build_request_id: CreateEnvironmentTemplateReleaseRequestSchemaBuildRequestId;
     digest: string;
-    id: CreateEnvironmentTemplateReleaseRequestSchemaImageArtifactId;
+    id: ImageArtifactId;
     immutable_tag: string;
     kind: 'container';
     provenance: CreateEnvironmentTemplateReleaseRequestSchemaArtifactRef;
     repository: string;
     sbom: CreateEnvironmentTemplateReleaseRequestSchemaArtifactRef;
-    signature: CreateEnvironmentTemplateReleaseRequestSchemaSigstoreEvidence;
+    signature: SigstoreEvidence;
 } | {
     base_disk: CreateEnvironmentTemplateReleaseRequestSchemaArtifactRef;
-    format: CreateEnvironmentTemplateReleaseRequestSchemaVirtualMachineDiskFormat;
-    id: CreateEnvironmentTemplateReleaseRequestSchemaImageArtifactId;
+    format: VirtualMachineDiskFormat;
+    id: ImageArtifactId;
     kind: 'virtual_machine';
     provenance: CreateEnvironmentTemplateReleaseRequestSchemaArtifactRef;
     sbom: CreateEnvironmentTemplateReleaseRequestSchemaArtifactRef;
-    signature: CreateEnvironmentTemplateReleaseRequestSchemaSigstoreEvidence;
+    signature: SigstoreEvidence;
 };
 
 /**
  * Strongly typed UUIDv7 identifier for `ImageArtifactId`.
  */
-export type CreateEnvironmentTemplateReleaseRequestSchemaImageArtifactId = string;
+export type ImageArtifactId = string;
 
 /**
  * Deterministic scan and trust-policy evaluation.
  */
-export type CreateEnvironmentTemplateReleaseRequestSchemaImagePolicyEvaluation = {
-    artifactId: CreateEnvironmentTemplateReleaseRequestSchemaImageArtifactId;
+export type ImagePolicyEvaluation = {
+    artifactId: ImageArtifactId;
     artifactSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
     evaluatedAt: CreateEnvironmentTemplateReleaseRequestSchemaUtcTimestamp;
     expectedCertificateSubject: string;
@@ -2289,7 +2073,7 @@ export type CreateEnvironmentTemplateReleaseRequestSchemaImagePolicyEvaluation =
     scannerVersion: string;
     trustBundleSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
     validUntil: CreateEnvironmentTemplateReleaseRequestSchemaUtcTimestamp;
-    vulnerabilities: CreateEnvironmentTemplateReleaseRequestSchemaVulnerabilitySummary;
+    vulnerabilities: VulnerabilitySummary;
 };
 
 /**
@@ -2315,7 +2099,7 @@ export type CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest = string;
 /**
  * Private Sigstore identity and transparency evidence.
  */
-export type CreateEnvironmentTemplateReleaseRequestSchemaSigstoreEvidence = {
+export type SigstoreEvidence = {
     certificateSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
     certificateSubject: string;
     ctLogId: string;
@@ -2337,12 +2121,12 @@ export type CreateEnvironmentTemplateReleaseRequestSchemaUtcTimestamp = string;
 /**
  * Supported VM base-disk encodings.
  */
-export type CreateEnvironmentTemplateReleaseRequestSchemaVirtualMachineDiskFormat = 'qcow2' | 'raw';
+export type VirtualMachineDiskFormat = 'qcow2' | 'raw';
 
 /**
  * Vulnerability counts by severity.
  */
-export type CreateEnvironmentTemplateReleaseRequestSchemaVulnerabilitySummary = {
+export type VulnerabilitySummary = {
     critical: number;
     high: number;
     low: number;
@@ -2878,6 +2662,234 @@ export type EnvironmentSummaryPageSchemaStreamSequence = string;
 export type EnvironmentSummaryPageSchemaUtcTimestamp = string;
 
 /**
+ * EnvironmentTemplateReleaseView
+ *
+ * Read model that keeps the immutable release separate from its append-only withdrawal fact.
+ */
+export type EnvironmentTemplateReleaseViewSchema = {
+    approval: CandidateApproval;
+    artifact: EnvironmentTemplateReleaseViewSchemaImageArtifact;
+    candidateId: EnvironmentTemplateReleaseViewSchemaCandidateId;
+    candidateRevision: EnvironmentTemplateReleaseViewSchemaRevision;
+    courseId: EnvironmentTemplateReleaseViewSchemaCourseId;
+    environmentSpecSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
+    id: EnvironmentTemplateReleaseViewSchemaReleaseId;
+    imagePolicyEvaluation: EnvironmentTemplateReleaseViewSchemaImagePolicyEvaluation;
+    publishedAt: EnvironmentTemplateReleaseViewSchemaUtcTimestamp;
+    publishedBy: EnvironmentTemplateReleaseViewSchemaActorId;
+    runtimeKind: EnvironmentTemplateReleaseViewSchemaRuntimeKind;
+    version: number;
+    withdrawal?: ReleaseWithdrawal | null;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type EnvironmentTemplateReleaseViewSchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ApprovalId`.
+ */
+export type EnvironmentTemplateReleaseViewSchemaApprovalId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ArtifactId`.
+ */
+export type EnvironmentTemplateReleaseViewSchemaArtifactId = string;
+
+/**
+ * Immutable object-store identity without a machine-local path or credential.
+ */
+export type EnvironmentTemplateReleaseViewSchemaArtifactRef = {
+    /**
+     * Stable metadata identity resolved by the owning service.
+     */
+    artifactId: EnvironmentTemplateReleaseViewSchemaArtifactId;
+    /**
+     * Registered media type.
+     */
+    mediaType: string;
+    /**
+     * Immutable backend object version.
+     */
+    objectVersion: string;
+    /**
+     * Exact content digest.
+     */
+    sha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
+    /**
+     * Raw object length.
+     */
+    sizeBytes: number;
+    /**
+     * Explicit object-store binding from deployment configuration.
+     */
+    storeBinding: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `BuildRequestId`.
+ */
+export type EnvironmentTemplateReleaseViewSchemaBuildRequestId = string;
+
+/**
+ * Human decision bound to an exact candidate and dependency identity.
+ */
+export type CandidateApproval = {
+    actorId: EnvironmentTemplateReleaseViewSchemaActorId;
+    candidateId: EnvironmentTemplateReleaseViewSchemaCandidateId;
+    candidateRevision: EnvironmentTemplateReleaseViewSchemaRevision;
+    candidateSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
+    decidedAt: EnvironmentTemplateReleaseViewSchemaUtcTimestamp;
+    decision: EnvironmentTemplateReleaseViewSchemaCandidateDecision;
+    id: EnvironmentTemplateReleaseViewSchemaApprovalId;
+    policyRevision: EnvironmentTemplateReleaseViewSchemaRevision;
+    reason: string;
+    schemaSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
+    trustRevision: EnvironmentTemplateReleaseViewSchemaRevision;
+};
+
+/**
+ * Append-only candidate decision.
+ */
+export type EnvironmentTemplateReleaseViewSchemaCandidateDecision = 'approved' | 'rejected' | 'withdrawn';
+
+/**
+ * Strongly typed UUIDv7 identifier for `CandidateId`.
+ */
+export type EnvironmentTemplateReleaseViewSchemaCandidateId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type EnvironmentTemplateReleaseViewSchemaCourseId = string;
+
+/**
+ * Complete immutable runtime artifact identity.
+ */
+export type EnvironmentTemplateReleaseViewSchemaImageArtifact = {
+    build_request_id: EnvironmentTemplateReleaseViewSchemaBuildRequestId;
+    digest: string;
+    id: EnvironmentTemplateReleaseViewSchemaImageArtifactId;
+    immutable_tag: string;
+    kind: 'container';
+    provenance: EnvironmentTemplateReleaseViewSchemaArtifactRef;
+    repository: string;
+    sbom: EnvironmentTemplateReleaseViewSchemaArtifactRef;
+    signature: EnvironmentTemplateReleaseViewSchemaSigstoreEvidence;
+} | {
+    base_disk: EnvironmentTemplateReleaseViewSchemaArtifactRef;
+    format: EnvironmentTemplateReleaseViewSchemaVirtualMachineDiskFormat;
+    id: EnvironmentTemplateReleaseViewSchemaImageArtifactId;
+    kind: 'virtual_machine';
+    provenance: EnvironmentTemplateReleaseViewSchemaArtifactRef;
+    sbom: EnvironmentTemplateReleaseViewSchemaArtifactRef;
+    signature: EnvironmentTemplateReleaseViewSchemaSigstoreEvidence;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ImageArtifactId`.
+ */
+export type EnvironmentTemplateReleaseViewSchemaImageArtifactId = string;
+
+/**
+ * Deterministic scan and trust-policy evaluation.
+ */
+export type EnvironmentTemplateReleaseViewSchemaImagePolicyEvaluation = {
+    artifactId: EnvironmentTemplateReleaseViewSchemaImageArtifactId;
+    artifactSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
+    evaluatedAt: EnvironmentTemplateReleaseViewSchemaUtcTimestamp;
+    expectedCertificateSubject: string;
+    expectedFulcioIssuer: string;
+    maxEvidenceAgeMilliseconds: number;
+    passed: boolean;
+    policyId: EnvironmentTemplateReleaseViewSchemaPolicyId;
+    policyRevision: EnvironmentTemplateReleaseViewSchemaRevision;
+    requireCtSct: boolean;
+    requireRekorInclusion: boolean;
+    scannerDatabaseSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
+    scannerName: string;
+    scannerVersion: string;
+    trustBundleSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
+    validUntil: EnvironmentTemplateReleaseViewSchemaUtcTimestamp;
+    vulnerabilities: EnvironmentTemplateReleaseViewSchemaVulnerabilitySummary;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `PolicyId`.
+ */
+export type EnvironmentTemplateReleaseViewSchemaPolicyId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ReleaseId`.
+ */
+export type EnvironmentTemplateReleaseViewSchemaReleaseId = string;
+
+/**
+ * Append-only release withdrawal fact.
+ */
+export type ReleaseWithdrawal = {
+    actorId: EnvironmentTemplateReleaseViewSchemaActorId;
+    reasonCode: string;
+    releaseId: EnvironmentTemplateReleaseViewSchemaReleaseId;
+    releaseVersion: number;
+    withdrawnAt: EnvironmentTemplateReleaseViewSchemaUtcTimestamp;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type EnvironmentTemplateReleaseViewSchemaRevision = number;
+
+/**
+ * Runtime kind shared by candidates, releases, and instances.
+ */
+export type EnvironmentTemplateReleaseViewSchemaRuntimeKind = 'container' | 'virtual_machine';
+
+/**
+ * Canonical lowercase SHA-256 digest.
+ */
+export type EnvironmentTemplateReleaseViewSchemaSha256Digest = string;
+
+/**
+ * Private Sigstore identity and transparency evidence.
+ */
+export type EnvironmentTemplateReleaseViewSchemaSigstoreEvidence = {
+    certificateSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
+    certificateSubject: string;
+    ctLogId: string;
+    fulcioIssuer: string;
+    rekorInclusionProofSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
+    rekorLogId: string;
+    rekorLogIndex: number;
+    sctSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
+    signatureSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
+    trustBundleSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
+    verifiedAt: EnvironmentTemplateReleaseViewSchemaUtcTimestamp;
+};
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type EnvironmentTemplateReleaseViewSchemaUtcTimestamp = string;
+
+/**
+ * Supported VM base-disk encodings.
+ */
+export type EnvironmentTemplateReleaseViewSchemaVirtualMachineDiskFormat = 'qcow2' | 'raw';
+
+/**
+ * Vulnerability counts by severity.
+ */
+export type EnvironmentTemplateReleaseViewSchemaVulnerabilitySummary = {
+    critical: number;
+    high: number;
+    low: number;
+    medium: number;
+    unknown: number;
+};
+
+/**
  * FreezeSubmissionRequest
  */
 export type FreezeSubmissionRequestSchema = {
@@ -2928,10 +2940,19 @@ export type SubmissionSource = 'workspace' | 'system_facts';
  */
 export type InternalAgentRunMutationRequestSchema = {
     /**
+     * Exact course authority that owns the target run.
+     */
+    courseId: InternalAgentRunMutationRequestSchemaCourseId;
+    /**
      * Exact Agent-owned run revision observed by Control.
      */
     expectedRevision: InternalAgentRunMutationRequestSchemaRevision;
 };
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type InternalAgentRunMutationRequestSchemaCourseId = string;
 
 /**
  * Monotonic aggregate revision. Zero is never a persisted revision.
@@ -4901,7 +4922,7 @@ export type ListEnvironmentTemplateReleasesResponses = {
      * Successful response
      */
     200: {
-        items: Array<EnvironmentTemplateReleaseSchema>;
+        items: Array<EnvironmentTemplateReleaseViewSchema>;
         nextCursor?: string | null;
     };
 };
@@ -5041,7 +5062,7 @@ export type GetEnvironmentTemplateReleaseResponses = {
     /**
      * Successful response
      */
-    200: EnvironmentTemplateReleaseSchema;
+    200: EnvironmentTemplateReleaseViewSchema;
 };
 
 export type GetEnvironmentTemplateReleaseResponse = GetEnvironmentTemplateReleaseResponses[keyof GetEnvironmentTemplateReleaseResponses];

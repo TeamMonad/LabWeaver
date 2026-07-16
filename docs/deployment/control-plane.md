@@ -24,6 +24,12 @@ that differs from any of these values even when the artifact payload is otherwis
 Rotation therefore requires a reviewed configuration rollout and new authoritative evidence; no
 historical trust policy is selected implicitly.
 
+Control publishes both Release publication and withdrawal facts from its PostgreSQL Outbox. The
+publisher uses the configured bounded ACK timeout and poll interval and marks `published_at` only
+after JetStream persistence acknowledgement. A restart therefore retries an unacknowledged fact
+with the same CloudEvent ID. Consumers must process aggregate sequence `1` (publication) before
+sequence `2` (withdrawal), and must reject new Environment creation from a withdrawn release.
+
 For ProblemPackage completion, the client manifest hash is the canonical hash of the sorted
 original upload declaration. Control separately computes the immutable completed-package manifest
 hash after freezing every exact MinIO object version. This keeps the client-verifiable upload

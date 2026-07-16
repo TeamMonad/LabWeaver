@@ -3,12 +3,13 @@
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use artifact_store::{S3Credential, S3ImmutableObjectStore, S3StoreConfig};
 use auth::{MtlsFileConfig, load_mtls_server_config};
 use control_service::api::{ApiState, router, serve_mtls};
 use control_service::clients::{AccessClient, AgentClient, MtlsClientFileConfig};
-use control_service::messaging::{AgentRunConsumer, connect_nats_mtls};
+use control_service::messaging::{AgentRunConsumer, ControlOutboxDispatcher, connect_nats_mtls};
 use control_service::{ControlConfig, ControlService};
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
@@ -42,6 +43,8 @@ struct NatsFileConfig {
     stream_name: String,
     consumer_name: String,
     quarantine_subject: String,
+    publish_timeout_milliseconds: u64,
+    outbox_poll_milliseconds: u64,
 }
 
 #[tokio::main]
@@ -70,7 +73,7 @@ async fn main() -> Result<(), StartupError> {
         )
         .await?,
     );
-    let service = ControlService::new(pool, objects, deployment.control)?;
+    let service = ControlService::new(pool.clone(), objects, deployment.control)?;
     let access = AccessClient::new(deployment.access_service)?;
     let agent = AgentClient::new(deployment.agent_service)?;
     let state = Arc::new(ApiState {
@@ -90,6 +93,11 @@ async fn main() -> Result<(), StartupError> {
         deployment.nats.credentials_file.into(),
     )
     .await?;
+    let outbox = ControlOutboxDispatcher::new(
+        pool,
+        nats.clone(),
+        Duration::from_millis(deployment.nats.publish_timeout_milliseconds),
+    )?;
     let consumer = AgentRunConsumer::bind(
         nats,
         &deployment.nats.stream_name,
@@ -99,10 +107,12 @@ async fn main() -> Result<(), StartupError> {
     .await?;
     let consumer_control = state.control.clone();
     let interval = std::time::Duration::from_secs(deployment.cleanup_interval_seconds);
+    let outbox_interval = Duration::from_millis(deployment.nats.outbox_poll_milliseconds);
     tokio::select! {
         result = serve_mtls(listener, router(state), mtls) => result?,
         result = cleanup_loop(service, interval) => result?,
         result = consumer_loop(consumer, consumer_control, agent) => result?,
+        result = outbox_loop(outbox, outbox_interval) => result?,
     }
     Ok(())
 }
@@ -114,6 +124,35 @@ async fn consumer_loop(
 ) -> Result<(), StartupError> {
     loop {
         consumer.process_next(&control, &agent).await?;
+    }
+}
+
+async fn outbox_loop(
+    outbox: ControlOutboxDispatcher,
+    interval: Duration,
+) -> Result<(), StartupError> {
+    if interval.is_zero() || interval > Duration::from_secs(60) {
+        return Err(StartupError::Configuration);
+    }
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        loop {
+            match outbox.dispatch_once().await {
+                Ok(true) => tracing::debug!(event = "control.outbox.published"),
+                Ok(false) => break,
+                Err(error) if error.retryable() => {
+                    tracing::error!(
+                        event = "control.outbox.retry_scheduled",
+                        diagnostic = %error,
+                        retry_after_milliseconds = interval.as_millis()
+                    );
+                    break;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 }
 
@@ -129,6 +168,10 @@ fn validate_deployment(deployment: &DeploymentFile) -> Result<(), StartupError> 
         || deployment.database_max_connections > 100
         || deployment.cleanup_interval_seconds == 0
         || deployment.cleanup_interval_seconds > 3_600
+        || deployment.nats.publish_timeout_milliseconds == 0
+        || deployment.nats.publish_timeout_milliseconds > 300_000
+        || deployment.nats.outbox_poll_milliseconds == 0
+        || deployment.nats.outbox_poll_milliseconds > 60_000
         || deployment.control.package_object_prefix.trim_matches('/')
             != deployment.object_store.object_prefix.trim_matches('/')
     {

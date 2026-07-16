@@ -141,6 +141,8 @@ pub struct InternalCreateAgentRunRequest {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InternalAgentRunMutationRequest {
+    /// Exact course authority that owns the target run.
+    pub course_id: CourseId,
     /// Exact Agent-owned run revision observed by Control.
     pub expected_revision: Revision,
 }

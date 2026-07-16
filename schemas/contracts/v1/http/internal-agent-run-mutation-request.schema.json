@@ -1,5 +1,9 @@
 {
   "$defs": {
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
     "Revision": {
       "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
       "format": "uint64",
@@ -11,12 +15,17 @@
   "additionalProperties": false,
   "description": "Revision precondition for Control-to-Agent cancellation and retry mutations.",
   "properties": {
+    "courseId": {
+      "$ref": "#/$defs/CourseId",
+      "description": "Exact course authority that owns the target run."
+    },
     "expectedRevision": {
       "$ref": "#/$defs/Revision",
       "description": "Exact Agent-owned run revision observed by Control."
     }
   },
   "required": [
+    "courseId",
     "expectedRevision"
   ],
   "title": "InternalAgentRunMutationRequest",

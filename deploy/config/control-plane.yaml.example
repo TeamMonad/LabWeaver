@@ -60,3 +60,5 @@ nats:
   stream_name: "LABWEAVER_AGENT_EVENTS"
   consumer_name: "control-agent-run-projection-v1"
   quarantine_subject: "labweaver.control.quarantine.agent_run.v1"
+  publish_timeout_milliseconds: 5000
+  outbox_poll_milliseconds: 250

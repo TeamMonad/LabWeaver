@@ -1122,7 +1122,8 @@
           "LW_CONTRACT_DOCUMENT_INVALID",
           "LW_ACCESS_DENIED",
           "LW_IDEMPOTENCY_CONFLICT",
-          "LW_REVISION_CONFLICT"
+          "LW_REVISION_CONFLICT",
+          "LW_CANDIDATE_KIND_MISMATCH"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
         "x-labweaver-permission": "candidate:approve",
@@ -1176,7 +1177,7 @@
                   "properties": {
                     "items": {
                       "items": {
-                        "$ref": "../contracts/v1/environment-template-release.schema.json"
+                        "$ref": "../contracts/v1/http/environment-template-release-view.schema.json"
                       },
                       "type": "array"
                     },
@@ -1404,7 +1405,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "../contracts/v1/environment-template-release.schema.json"
+                  "$ref": "../contracts/v1/http/environment-template-release-view.schema.json"
                 }
               }
             },
@@ -1823,7 +1824,8 @@
           "LW_CONTRACT_DOCUMENT_INVALID",
           "LW_ACCESS_DENIED",
           "LW_IDEMPOTENCY_CONFLICT",
-          "LW_REVISION_CONFLICT"
+          "LW_REVISION_CONFLICT",
+          "LW_CANDIDATE_KIND_MISMATCH"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
         "x-labweaver-permission": "candidate:approve",

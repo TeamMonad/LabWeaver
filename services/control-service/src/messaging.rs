@@ -6,6 +6,7 @@
 )]
 
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::Duration;
 
 use async_nats::jetstream::AckKind;
@@ -16,6 +17,9 @@ use contracts::events::{AgentRunEvent, CloudEvent, EVENT_CONTRACTS, subjects};
 use contracts::{EventId, Sha256Digest};
 use futures_util::StreamExt;
 use serde::Serialize;
+use serde_json::Value;
+use sqlx::{PgPool, Row};
+use uuid::Uuid;
 
 use crate::clients::AgentClient;
 use crate::{ControlError, ControlService};
@@ -79,6 +83,96 @@ pub async fn connect_nats_mtls(
         .connect(server)
         .await
         .map_err(|_| MessagingError::Connect)
+}
+
+/// Bounded Control Outbox publisher that marks rows only after a `JetStream` ACK.
+pub struct ControlOutboxDispatcher {
+    pool: PgPool,
+    context: async_nats::jetstream::Context,
+    timeout: Duration,
+}
+
+impl ControlOutboxDispatcher {
+    pub fn new(
+        pool: PgPool,
+        client: async_nats::Client,
+        timeout: Duration,
+    ) -> Result<Self, MessagingError> {
+        if timeout.is_zero() || timeout > Duration::from_secs(300) {
+            return Err(MessagingError::Configuration);
+        }
+        Ok(Self {
+            pool,
+            context: async_nats::jetstream::new(client),
+            timeout,
+        })
+    }
+
+    pub async fn dispatch_once(&self) -> Result<bool, MessagingError> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT event_id,subject,event_type,payload,payload_sha256 \
+             FROM control.outbox_events WHERE published_at IS NULL \
+             ORDER BY created_at,event_id FOR UPDATE SKIP LOCKED LIMIT 1",
+        )
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else {
+            transaction.rollback().await?;
+            return Ok(false);
+        };
+        let event_uuid: Uuid = row.try_get("event_id")?;
+        let subject: String = row.try_get("subject")?;
+        let event_type: String = row.try_get("event_type")?;
+        let payload: Value = row.try_get("payload")?;
+        let stored_hash: String = row.try_get("payload_sha256")?;
+        let hash = Sha256Digest::of_canonical(&payload).map_err(|_| MessagingError::Identity)?;
+        if hash.to_string() != stored_hash {
+            return Err(MessagingError::Identity);
+        }
+        let event: CloudEvent<Value> =
+            serde_json::from_value(payload).map_err(|_| MessagingError::Contract)?;
+        let event_id =
+            EventId::from_str(&event_uuid.to_string()).map_err(|_| MessagingError::Identity)?;
+        let contract = EVENT_CONTRACTS
+            .iter()
+            .copied()
+            .find(|contract| contract.subject == subject)
+            .ok_or(MessagingError::Contract)?;
+        if event.id != event_id || event_type != subject || event.validate(contract).is_err() {
+            return Err(MessagingError::Contract);
+        }
+        let bytes = serde_json::to_vec(&event).map_err(|_| MessagingError::Contract)?;
+        let publish = tokio::time::timeout(
+            self.timeout,
+            self.context.send_publish(
+                subject,
+                PublishMessage::build()
+                    .payload(bytes.into())
+                    .message_id(event.id.to_string()),
+            ),
+        )
+        .await
+        .map_err(|_| MessagingError::PublishTimeout)?
+        .map_err(|_| MessagingError::Publish)?;
+        tokio::time::timeout(self.timeout, publish)
+            .await
+            .map_err(|_| MessagingError::PublishTimeout)?
+            .map_err(|_| MessagingError::Publish)?;
+        let updated = sqlx::query(
+            "UPDATE control.outbox_events \
+             SET published_at=date_trunc('milliseconds',clock_timestamp()) \
+             WHERE event_id=$1 AND published_at IS NULL",
+        )
+        .bind(event_uuid)
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(MessagingError::Fence);
+        }
+        transaction.commit().await?;
+        Ok(true)
+    }
 }
 
 /// Existing deployment-owned durable consumer for all `AgentRun` lifecycle events.
@@ -302,4 +396,27 @@ pub enum MessagingError {
     Ack,
     #[error("LW_NATS_QUARANTINE_FAILED")]
     Quarantine,
+    #[error("LW_CONTROL_OUTBOX_IDENTITY_INVALID")]
+    Identity,
+    #[error("LW_CONTROL_OUTBOX_CONTRACT_INVALID")]
+    Contract,
+    #[error("LW_CONTROL_OUTBOX_PUBLISH_FAILED")]
+    Publish,
+    #[error("LW_CONTROL_OUTBOX_PUBLISH_TIMEOUT")]
+    PublishTimeout,
+    #[error("LW_CONTROL_OUTBOX_FENCE_LOST")]
+    Fence,
+    #[error("LW_CONTROL_OUTBOX_DATABASE_FAILED")]
+    Database(#[from] sqlx::Error),
+}
+
+impl MessagingError {
+    /// Transport and database outages retain the Outbox row and are safe to retry.
+    #[must_use]
+    pub const fn retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::Publish | Self::PublishTimeout | Self::Database(_)
+        )
+    }
 }

@@ -55,9 +55,11 @@ cargo test -p control-service --test postgres -- --nocapture
 ```
 
 It applies the released Control and Agent Migration chains to PostgreSQL 17, proves that a
-completion state cannot exist without its fencing lease, and races twenty writers against one
-course SSE cursor while requiring the exact sequence set `1..=20`. Contract drift, unit and
-static gates are:
+completion state cannot exist without its fencing lease, rejects a candidate through the wrong
+kind-specific decision route without writing approval/idempotency state, verifies withdrawal in
+GET/list read models, and races twenty writers against one course SSE cursor while requiring the
+exact sequence set `1..=20`. The Agent course-scope test proves a foreign course mutation leaves
+both run and idempotency state unchanged. Contract drift, unit and static gates are:
 
 ```sh
 cargo xtask contracts check
@@ -74,6 +76,8 @@ Release path is expected to return a stable blocking diagnostic.
 
 The current worktree records real versioned MinIO presign/freeze/overwrite/exact-version/cleanup
 coverage and real JetStream Agent Outbox missing-stream failure, retry and persisted-ACK ordering.
+The Control Outbox test applies the same ACK fence to both release publication and withdrawal and
+proves both immutable CloudEvents reach the configured stream exactly once.
 The Control consumer suite separately proves duplicate suppression, gap rejection, durable restart,
 outcome-fetch outage, redelivery, and atomic Inbox/projection/SSE commit. The ephemeral-CA suite
 proves configured URI-SAN boundaries, leaf-certificate rotation and downstream outage mapping.

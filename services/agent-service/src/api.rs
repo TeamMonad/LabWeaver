@@ -166,6 +166,7 @@ async fn cancel_run(
     let run = state
         .store
         .request_cancellation_revisioned(
+            request.course_id,
             run_id,
             request.expected_revision,
             &idempotency(&headers)?,
@@ -191,6 +192,7 @@ async fn retry_track(
     let run = state
         .store
         .retry_track_revisioned(
+            request.course_id,
             run_id,
             track,
             request.expected_revision,
@@ -334,6 +336,7 @@ impl AgentApiError {
 impl From<AgentRunStoreError> for AgentApiError {
     fn from(error: AgentRunStoreError) -> Self {
         let status = match error {
+            AgentRunStoreError::CourseMismatch => StatusCode::FORBIDDEN,
             AgentRunStoreError::RunNotFound => StatusCode::NOT_FOUND,
             AgentRunStoreError::IdempotencyConflict
             | AgentRunStoreError::RunInProgress

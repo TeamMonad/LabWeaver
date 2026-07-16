@@ -827,12 +827,14 @@ impl PostgresAgentRunStore {
     /// Returns an error for stale revision, conflicting idempotency, or persistence failure.
     pub async fn request_cancellation_revisioned(
         &self,
+        course_id: CourseId,
         run_id: AgentRunId,
         expected_revision: Revision,
         idempotency_key: &IdempotencyKey,
         now: UtcTimestamp,
     ) -> Result<AgentRun, AgentRunStoreError> {
         let request_hash = Sha256Digest::of_canonical(&serde_json::json!({
+            "courseId": course_id,
             "runId": run_id,
             "expectedRevision": expected_revision,
         }))
@@ -864,6 +866,9 @@ impl PostgresAgentRunStore {
             IdempotencyDecision::Reserved => {}
         }
         let mut run = load_run_for_update(&mut transaction, run_id).await?;
+        if run.course_id != course_id {
+            return Err(AgentRunStoreError::CourseMismatch);
+        }
         if run.revision != expected_revision {
             return Err(AgentRunStoreError::StateConflict);
         }
@@ -902,12 +907,14 @@ impl PostgresAgentRunStore {
     /// Returns an error for stale revision, invalid track state, or persistence failure.
     pub async fn retry_track_revisioned(
         &self,
+        course_id: CourseId,
         run_id: AgentRunId,
         track: AgentTrackKind,
         expected_revision: Revision,
         idempotency_key: &IdempotencyKey,
     ) -> Result<AgentRun, AgentRunStoreError> {
         let request_hash = Sha256Digest::of_canonical(&serde_json::json!({
+            "courseId": course_id,
             "runId": run_id,
             "track": track,
             "expectedRevision": expected_revision,
@@ -940,6 +947,9 @@ impl PostgresAgentRunStore {
             IdempotencyDecision::Reserved => {}
         }
         let mut run = load_run_for_update(&mut transaction, run_id).await?;
+        if run.course_id != course_id {
+            return Err(AgentRunStoreError::CourseMismatch);
+        }
         if run.revision != expected_revision
             || !matches!(
                 run.state,
@@ -1981,6 +1991,9 @@ const fn zero_usage() -> LlmUsage {
 /// Stable, payload-free durable `AgentRun` failures.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum AgentRunStoreError {
+    /// The caller's course authority does not own the target run.
+    #[error("LW_AUTH_COURSE_SCOPE_DENIED: AgentRun course authority does not match")]
+    CourseMismatch,
     /// Request, package, policy or input identity differs.
     #[error("LW_LLM_POLICY_REVISION_MISMATCH: AgentRun immutable identity does not match")]
     IdentityMismatch,
@@ -2015,6 +2028,7 @@ impl AgentRunStoreError {
     #[must_use]
     pub const fn diagnostic_code(self) -> &'static str {
         match self {
+            Self::CourseMismatch => diagnostic::AUTH_COURSE_SCOPE_DENIED,
             Self::IdentityMismatch => diagnostic::LLM_POLICY_REVISION_MISMATCH,
             Self::IdempotencyConflict => diagnostic::IDEMPOTENCY_CONFLICT,
             Self::RunInProgress | Self::StateConflict | Self::RunNotFound => {

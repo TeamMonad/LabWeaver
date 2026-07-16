@@ -348,18 +348,24 @@ async fn cancel_agent_run(
 ) -> Result<Response, ApiError> {
     authorize(&state, &principal, &headers, "cancelAgentRun", course_id).await?;
     let key = idempotency(&headers)?;
+    let expected_revision = etag(&headers)?;
+    let projected = state.control.agent_run(course_id, run_id).await?;
+    if projected.revision != expected_revision {
+        return Err(ControlError::RevisionConflict.into());
+    }
     let run = state
         .agent
         .cancel(
             run_id,
             &InternalAgentRunMutationRequest {
-                expected_revision: etag(&headers)?,
+                course_id,
+                expected_revision,
             },
             &key,
         )
         .await?;
     if run.course_id != course_id {
-        return Err(ApiError::from(ControlError::CourseMismatch));
+        return Err(DownstreamError::IdentityMismatch.into());
     }
     Ok(accepted(&run))
 }
@@ -380,19 +386,25 @@ async fn retry_agent_run(
     .await?;
     let track = parse_track(&track)?;
     let key = idempotency(&headers)?;
+    let expected_revision = etag(&headers)?;
+    let projected = state.control.agent_run(course_id, run_id).await?;
+    if projected.revision != expected_revision {
+        return Err(ControlError::RevisionConflict.into());
+    }
     let run = state
         .agent
         .retry(
             run_id,
             track,
             &InternalAgentRunMutationRequest {
-                expected_revision: etag(&headers)?,
+                course_id,
+                expected_revision,
             },
             &key,
         )
         .await?;
     if run.course_id != course_id {
-        return Err(ApiError::from(ControlError::CourseMismatch));
+        return Err(DownstreamError::IdentityMismatch.into());
     }
     Ok(accepted(&run))
 }
@@ -459,6 +471,7 @@ async fn decide_environment_candidate(
         .decide_candidate(
             course_id,
             candidate_id,
+            AgentTrackKind::Environment,
             &request,
             actor,
             etag(&headers)?,
@@ -493,6 +506,7 @@ async fn decide_evaluation_candidate(
         .decide_candidate(
             course_id,
             candidate_id,
+            AgentTrackKind::Evaluation,
             &request,
             actor,
             etag(&headers)?,
@@ -524,9 +538,10 @@ async fn create_release(
     .await?;
     let key = idempotency(&headers)?;
     let published_at = now()?;
+    let trace_id = trace_id(&headers);
     let release = match state
         .control
-        .create_release(course_id, &request, actor, &key, published_at)
+        .create_release(course_id, &request, actor, &key, published_at, &trace_id)
         .await
     {
         Ok(release) => release,
@@ -543,7 +558,7 @@ async fn create_release(
                 .await?;
             state
                 .control
-                .create_release(course_id, &request, actor, &key, published_at)
+                .create_release(course_id, &request, actor, &key, published_at, &trace_id)
                 .await?
         }
         Err(error) => return Err(error.into()),
@@ -590,7 +605,7 @@ async fn list_releases(
         .control
         .releases(course_id, query.after_version, query.limit)
         .await?;
-    let next_cursor = items.last().map(|release| release.version.to_string());
+    let next_cursor = items.last().map(|view| view.release.version.to_string());
     Ok(Json(CursorPage { items, next_cursor }).into_response())
 }
 
@@ -612,7 +627,7 @@ async fn get_release(
     Ok(with_etag(
         StatusCode::OK,
         &release,
-        Revision::new(release.version)
+        Revision::new(release.release.version)
             .map_err(|_| ApiError::internal("LW_CONTRACT_DOCUMENT_INVALID"))?,
     ))
 }
@@ -643,6 +658,7 @@ async fn withdraw_release(
             &request.reason_code,
             &idempotency(&headers)?,
             now()?,
+            &trace_id(&headers),
         )
         .await?;
     Ok((StatusCode::CREATED, Json(withdrawal)).into_response())
@@ -840,6 +856,14 @@ fn now() -> Result<UtcTimestamp, ApiError> {
     current_timestamp().map_err(|()| ApiError::internal("LW_AUTH_TIMESTAMP_INVALID"))
 }
 
+fn trace_id(headers: &HeaderMap) -> String {
+    headers
+        .get("traceparent")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty() && value.len() <= 256)
+        .map_or_else(|| Uuid::now_v7().to_string(), str::to_owned)
+}
+
 fn current_timestamp() -> Result<UtcTimestamp, ()> {
     let value = OffsetDateTime::now_utc();
     let value = value
@@ -914,6 +938,7 @@ impl From<ControlError> for ApiError {
             | ControlError::UploadStateConflict
             | ControlError::RevisionConflict
             | ControlError::DecisionConflict
+            | ControlError::CandidateKindMismatch
             | ControlError::ProjectionConflict
             | ControlError::ReleaseCandidateMismatch
             | ControlError::ArtifactMismatch => StatusCode::CONFLICT,
