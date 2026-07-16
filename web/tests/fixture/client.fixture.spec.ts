@@ -26,7 +26,10 @@ describeFixture('fixture adapter', () => {
     const result = await createSshPublicKey({
       client: generatedClient,
       headers: { 'Idempotency-Key': 'fixture-key-001' },
-      body: { publicKeyOpenssh: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample user@host' },
+      body: {
+        publicKeyOpenssh:
+          'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDIhz2GK/XCUj4i6Q5yQJNL1MKDXETe1aM1lHYMGt2SQ user@example.com',
+      },
     })
 
     expect(result.error).toBeUndefined()

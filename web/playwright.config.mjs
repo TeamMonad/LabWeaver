@@ -1,9 +1,11 @@
 import { defineConfig, devices } from '@playwright/test'
 import { ROLE_PROJECTS } from './e2e/config/role-projects.mjs'
+import { resolveEvidenceMetadata } from './e2e/evidence.mjs'
 
 const dataMode = process.env.LABWEAVER_DATA_MODE || process.env.VITE_DATA_MODE || 'live'
 const isFixture = dataMode === 'fixture'
 const evidenceLabel = isFixture ? 'fixture' : 'live'
+const evidenceMetadata = resolveEvidenceMetadata({ dataMode, evidenceLabel })
 
 export function createPlaywrightConfig({ ci = Boolean(process.env.CI) } = {}) {
   const projects = ROLE_PROJECTS.map((project) => {
@@ -58,11 +60,7 @@ export function createPlaywrightConfig({ ci = Boolean(process.env.CI) } = {}) {
     },
     expect: { timeout: 10_000 },
     projects,
-    metadata: {
-      dataMode,
-      evidenceLabel,
-      fixtureManifestHash: isFixture ? process.env.FIXTURE_MANIFEST_HASH : undefined,
-    },
+    metadata: evidenceMetadata,
     webServer: {
       command: isFixture ? 'pnpm preview:fixture' : 'pnpm preview --port 4173',
       url: 'http://localhost:4173',

@@ -28,6 +28,9 @@ const forbiddenPatterns = [
   /VITE_DATA_MODE=fixture/i,
   /installFixtureAdapter/i,
   /fixtureAdapter/i,
+  /installFixtureFetch/i,
+  /fixtureFetch/i,
+  /fetchInterceptor/i,
   /createSshKeyFixtures/i,
 ]
 

@@ -5,6 +5,8 @@
  * 用于在测试报告、截图、Trace 中做可追踪的 identity 标注。
  */
 
+import manifest from './manifest.json'
+
 export interface FixtureManifest {
   schemaVersion: 'fixture.labweaver.io/v1'
   seed: number
@@ -13,22 +15,14 @@ export interface FixtureManifest {
   handlers: string[]
 }
 
-export const fixtureManifest: FixtureManifest = {
-  schemaVersion: 'fixture.labweaver.io/v1',
-  seed: 20260711,
-  epoch: '2026-07-11T10:00:00.000Z',
-  scenarios: [
-    'ssh-keys:list',
-    'ssh-keys:create',
-    'ssh-keys:delete',
-    'auth:unauthenticated',
-    'headers:idempotency-key-missing',
-    'headers:if-match-missing',
-  ],
-  handlers: ['sshKeys'],
-}
+export const fixtureManifest: FixtureManifest = manifest as FixtureManifest
 
 async function digestHex(input: string): Promise<string> {
+  if (typeof process !== 'undefined' && process.versions?.node) {
+    const nodeCrypto = await import('crypto')
+    return nodeCrypto.createHash('sha256').update(input).digest('hex')
+  }
+
   const encoder = new TextEncoder()
   const data = encoder.encode(input)
   const buffer = await crypto.subtle.digest('SHA-256', data)

@@ -4,6 +4,10 @@ import { createPlaywrightConfig } from '../../playwright.config.mjs'
 import { PROJECT_NAMES, REQUIREMENTS_BASELINE, ROLE_PROJECTS_BY_NAME } from '../config/role-projects.mjs'
 import { buildReport, validateConfiguration } from '../../scripts/verify-config.mjs'
 
+const dataMode = process.env.LABWEAVER_DATA_MODE || process.env.VITE_DATA_MODE || 'live'
+const isFixture = dataMode === 'fixture'
+const evidenceLabel = isFixture ? 'fixture' : 'live'
+
 test('role projects are uniquely derived from the authoritative definition', () => {
   const config = createPlaywrightConfig({ ci: true })
   assert.deepEqual(config.projects.map((project) => project.name), PROJECT_NAMES)
@@ -26,6 +30,15 @@ test('role projects are uniquely derived from the authoritative definition', () 
   assert.equal(ROLE_PROJECTS_BY_NAME['platform-admin'].aliases.includes('admin'), true)
   assert.equal(config.forbidOnly, true)
   assert.match(config.outputDir, /^\.\/test-results(?:\/(live|fixture))?$/)
+  assert.equal(config.metadata.dataMode, dataMode)
+  assert.equal(config.metadata.evidenceLabel, evidenceLabel)
+  assert.match(config.metadata.sourceCommit, /^[0-9a-f]{40}$/i)
+  if (isFixture) {
+    assert.match(config.metadata.fixtureManifestHash, /^[0-9a-f]{16}$/i)
+    assert.equal(typeof config.metadata.browser, 'string')
+    assert.equal(typeof config.metadata.browserVersion, 'string')
+    assert.deepEqual(config.metadata.viewport, { width: 1440, height: 900 })
+  }
 })
 
 test('configuration contract retains failure artifacts and reports E1 only', async () => {

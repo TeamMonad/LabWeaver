@@ -1,11 +1,14 @@
 /**
- * 稳定的序列生成器，用于 fixture 中的 ID、revision 等。
+ * Stable sequence generator for fixture IDs and revisions.
  */
+
+import { resetIdentity } from './identity'
 
 let counter = 0
 
 export function resetSequence(): void {
   counter = 0
+  resetIdentity()
 }
 
 export function nextId(prefix: string): string {

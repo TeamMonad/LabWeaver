@@ -13,7 +13,9 @@ export interface FixtureResponse<T = unknown> {
   headers?: Record<string, string>
 }
 
-export type FixtureHandler = (req: FixtureRequest) => FixtureResponse | Promise<FixtureResponse>
+export type FixtureHandlerResult = FixtureResponse | Response | Promise<FixtureResponse | Response>
+
+export type FixtureHandler = (req: FixtureRequest) => FixtureHandlerResult
 
 export interface FixtureRoute {
   method: string

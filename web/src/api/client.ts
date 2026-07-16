@@ -221,6 +221,14 @@ if (IS_FIXTURE) {
 defaultSdkClient.setConfig({
   axios: sdkTransport,
   baseURL: '',
+  auth: IS_FIXTURE
+    ? async () => {
+        // Fixture mode does not use OIDC; fall back to the local test token
+        // so that SDK SSE requests carry the Bearer header intercepted by the
+        // fixture fetch wrapper.
+        return localStorage.getItem('access_token') ?? undefined
+      }
+    : undefined,
 })
 
 /** Health checks are intentionally outside the authenticated Public API contract. */

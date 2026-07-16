@@ -65,6 +65,30 @@ export async function fixtureAdapter(config: AxiosRequestConfig): Promise<AxiosR
 
   const result = await dispatch(req)
 
+  if (result instanceof Response) {
+    const text = await result.text()
+    const response: AxiosResponse = {
+      data: text,
+      status: result.status,
+      statusText: `${result.status}`,
+      headers: Object.fromEntries(result.headers.entries()),
+      config: config as InternalAxiosRequestConfig,
+      request: undefined,
+    }
+    if (result.status >= 400) {
+      return Promise.reject(
+        new axios.AxiosError(
+          `fixture request failed: ${method} ${url}`,
+          undefined,
+          config as InternalAxiosRequestConfig,
+          undefined,
+          response,
+        ) as AxiosError,
+      )
+    }
+    return response
+  }
+
   const response: AxiosResponse = {
     data: result.data,
     status: result.status,

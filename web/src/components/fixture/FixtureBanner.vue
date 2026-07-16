@@ -14,14 +14,23 @@ import SvgIcon from '@/components/common/SvgIcon.vue'
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-wrap: wrap;
   gap: 8px;
-  height: 32px;
-  padding: 0 16px;
+  min-height: 32px;
+  height: auto;
+  padding: 6px 16px;
   background: var(--md-sys-color-warning-container);
   color: var(--md-sys-color-warning);
   font: var(--md-sys-label-large);
-  white-space: nowrap;
+  text-align: center;
   overflow: hidden;
-  text-overflow: ellipsis;
+}
+
+@media (max-width: 390px) {
+  .fixture-banner {
+    gap: 4px;
+    padding: 6px 8px;
+    font-size: 12px;
+  }
 }
 </style>
