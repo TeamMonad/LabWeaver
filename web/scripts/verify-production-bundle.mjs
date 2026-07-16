@@ -1,6 +1,8 @@
 /**
- * Production bundle gate: ensure no MSW, fixture handlers, or demo-only code
- * ends up in the production build.
+ * Production bundle gate: ensure no MSW, fixture handlers, demo-only code,
+ * fixture identity, or fixture manifest ends up in the production build.
+ *
+ * Scans JS/CSS/HTML and source maps.
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -15,6 +17,27 @@ const forbiddenPatterns = [
   /fixture handler/i,
   /FIXTURE_MODE_ENABLED/i,
   /伪角色/i,
+  /FIXTURE MODE/i,
+  /dataMode=fixture/i,
+  /fixture-actor/i,
+  /fixture-token/i,
+  /fixture-bypass/i,
+  /fixture-manifest/i,
+  /src[/\\]fixture[/\\]/i,
+  /components[/\\]fixture[/\\]/i,
+  /VITE_DATA_MODE=fixture/i,
+  /installFixtureAdapter/i,
+  /fixtureAdapter/i,
+  /installFixtureFetch/i,
+  /fixtureFetch/i,
+  /fetchInterceptor/i,
+  /createSshKeyFixtures/i,
+]
+
+const forbiddenFilenameFragments = [
+  'FixtureBanner',
+  'fixture',
+  'mockServiceWorker',
 ]
 
 function walk(dir) {
@@ -23,7 +46,13 @@ function walk(dir) {
     const fullPath = path.join(dir, entry.name)
     if (entry.isDirectory()) {
       entries.push(...walk(fullPath))
-    } else if (entry.isFile() && (entry.name.endsWith('.js') || entry.name.endsWith('.css') || entry.name.endsWith('.html'))) {
+    } else if (
+      entry.isFile() &&
+      (entry.name.endsWith('.js') ||
+        entry.name.endsWith('.css') ||
+        entry.name.endsWith('.html') ||
+        entry.name.endsWith('.map'))
+    ) {
       entries.push(fullPath)
     }
   }
@@ -40,10 +69,19 @@ function main() {
   const violations = []
 
   for (const file of files) {
+    const relative = path.relative(distDir, file)
+    const basename = path.basename(file)
+
+    for (const fragment of forbiddenFilenameFragments) {
+      if (basename.includes(fragment)) {
+        violations.push({ file: relative, pattern: `filename:${fragment}` })
+      }
+    }
+
     const content = fs.readFileSync(file, 'utf-8')
     for (const pattern of forbiddenPatterns) {
       if (pattern.test(content)) {
-        violations.push({ file: path.relative(distDir, file), pattern: pattern.source })
+        violations.push({ file: relative, pattern: pattern.source })
       }
     }
   }

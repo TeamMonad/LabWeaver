@@ -10,6 +10,10 @@ const WEB_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 const REPOSITORY_ROOT = path.resolve(WEB_ROOT, '..')
 const DEFAULT_REPORT_PATH = path.join(WEB_ROOT, 'artifacts', 'playwright', 'playwright-role-config-report.json')
 
+const dataMode = process.env.LABWEAVER_DATA_MODE || process.env.VITE_DATA_MODE || 'live'
+const isFixture = dataMode === 'fixture'
+const evidenceLabel = isFixture ? 'fixture' : 'live'
+
 export function resolveReportPath() {
   return process.env.LABWEAVER_E2E_REPORT_PATH
     ? path.resolve(process.env.LABWEAVER_E2E_REPORT_PATH)
@@ -54,7 +58,17 @@ export async function validateConfiguration({ requirementsBaselineHead } = {}) {
   diagnostic(config.use.screenshot === 'only-on-failure', 'PW_TRACE_RETENTION_DISABLED', diagnostics)
   diagnostic(config.use.video === 'retain-on-failure', 'PW_TRACE_RETENTION_DISABLED', diagnostics)
   diagnostic(config.forbidOnly === true, 'PW_PROJECT_SET_INVALID', diagnostics)
-  diagnostic(config.outputDir === './test-results', 'PW_PROJECT_SET_INVALID', diagnostics)
+  diagnostic(/^\.\/test-results(?:\/(live|fixture))?$/.test(config.outputDir), 'PW_PROJECT_SET_INVALID', diagnostics)
+  diagnostic(typeof config.metadata === 'object' && config.metadata !== null, 'PW_EVIDENCE_IDENTITY_MISSING', diagnostics)
+  diagnostic(config.metadata?.dataMode === dataMode, 'PW_EVIDENCE_IDENTITY_MISSING', diagnostics)
+  diagnostic(config.metadata?.evidenceLabel === evidenceLabel, 'PW_EVIDENCE_IDENTITY_MISSING', diagnostics)
+  diagnostic(typeof config.metadata?.sourceCommit === 'string' && /^[0-9a-f]{40}$/i.test(config.metadata.sourceCommit), 'PW_EVIDENCE_IDENTITY_MISSING', diagnostics)
+  if (isFixture) {
+    diagnostic(typeof config.metadata?.fixtureManifestHash === 'string' && /^[0-9a-f]{16}$/i.test(config.metadata.fixtureManifestHash), 'PW_EVIDENCE_IDENTITY_MISSING', diagnostics)
+    diagnostic(typeof config.metadata?.browser === 'string' && config.metadata.browser.length > 0, 'PW_EVIDENCE_IDENTITY_MISSING', diagnostics)
+    diagnostic(typeof config.metadata?.browserVersion === 'string' && config.metadata.browserVersion.length > 0, 'PW_EVIDENCE_IDENTITY_MISSING', diagnostics)
+    diagnostic(typeof config.metadata?.viewport === 'object' && config.metadata.viewport !== null, 'PW_EVIDENCE_IDENTITY_MISSING', diagnostics)
+  }
   diagnostic(!requirementsBaselineHead || requirementsBaselineHead === REQUIREMENTS_BASELINE.head, 'PW_REQUIREMENTS_BASELINE_CHANGED', diagnostics)
   const fixedSleeps = await findFixedSleeps()
   if (fixedSleeps.length > 0) diagnostics.push('PW_FIXED_SLEEP_DETECTED')

@@ -4,6 +4,7 @@
     :class="{ 'is-rail': drawerRail }"
     :data-theme="themeStore.effectiveTheme"
   >
+    <FixtureBanner v-if="showFixtureBanner" class="fixture-banner" />
     <TopAppBar
       :drawer-open="drawerOpen"
       @toggle-drawer="drawerOpen = !drawerOpen"
@@ -23,11 +24,17 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, defineAsyncComponent } from 'vue'
 import TopAppBar from './TopAppBar.vue'
 import NavigationDrawer from './NavigationDrawer.vue'
 import { useThemeStore } from '@/stores/theme'
 import { useAuth } from '@/composables/useAuth'
+import { IS_FIXTURE } from '@/config/dataMode'
+
+const showFixtureBanner = __FIXTURE_BANNER__
+const FixtureBanner = showFixtureBanner
+  ? defineAsyncComponent(() => import('@/components/fixture/FixtureBanner.vue'))
+  : null
 
 const themeStore = useThemeStore()
 const auth = useAuth()
@@ -43,19 +50,24 @@ onMounted(() => {
 <style scoped>
 .app-shell {
   display: grid;
-  grid-template-rows: var(--app-top-bar-height) 1fr;
+  grid-template-rows: auto var(--app-top-bar-height) 1fr;
   grid-template-columns: 1fr;
   height: 100%;
   background: var(--md-sys-color-background);
 }
 
-.top-app-bar {
+.fixture-banner {
   grid-row: 1;
   grid-column: 1 / -1;
 }
 
-.app-main {
+.top-app-bar {
   grid-row: 2;
+  grid-column: 1 / -1;
+}
+
+.app-main {
+  grid-row: 3;
   grid-column: 1;
   overflow-y: auto;
   padding: 24px 16px 48px;
