@@ -6,7 +6,7 @@ metadata:
 spec:
   containers:
     - name: app
-      image: harbor.invalid/labweaver-system/control-service@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      image: ghcr.io/teammonad/labweaver-system/control-service@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 ---
 apiVersion: v1
 kind: Pod
@@ -16,7 +16,7 @@ metadata:
 spec:
   containers:
     - name: app
-      image: harbor.invalid/labweaver-system/control-service:latest
+      image: ghcr.io/teammonad/labweaver-system/control-service:latest
 ---
 apiVersion: v1
 kind: Pod

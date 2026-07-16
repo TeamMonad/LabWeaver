@@ -1,4 +1,7 @@
 {{- $registry := required "trust.registry is required" .Values.trust.registry -}}
+{{- if ne $registry "ghcr.io/teammonad" -}}
+{{- fail "trust.registry must equal ghcr.io/teammonad" -}}
+{{- end -}}
 {{- $revision := required "trust.revision is required" .Values.trust.revision -}}
 {{- $issuer := required "trust.issuer is required" .Values.trust.issuer -}}
 {{- $subject := required "trust.subject is required" .Values.trust.subject -}}
@@ -26,14 +29,14 @@ spec:
     failurePolicy: Fail
     timeoutSeconds: 10
   rules:
-    - name: require-harbor-digests
+    - name: require-ghcr-digests
       match:
         any:
           - resources:
               kinds: ["Pod"]
               namespaces: ["labweaver-system"]
       validate:
-        message: Platform images must use the approved Harbor project and an immutable digest.
+        message: Platform images must use the approved GitHub Packages namespace and an immutable digest.
         foreach:
           - list: request.object.spec.containers
             pattern:

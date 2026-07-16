@@ -3,7 +3,8 @@
 Issue #62 owns the seven production platform images: `control-service`,
 `access-service`, `resource-service`, `environment-service`, `agent-service`,
 `evaluation-service`, and `web`. The only supported P0 target is
-`linux/amd64`. The package and deployment manifests reference Harbor images by
+`linux/amd64`. The package and deployment manifests reference GitHub Packages
+Container registry images under `ghcr.io/teammonad/labweaver-system` by
 digest; tags are operational aliases and are never deployment authority.
 
 ## Locked inputs
@@ -37,7 +38,10 @@ cargo xtask rollback --env adopted --release-revision <revision> --yes
 ```
 
 Connected packaging and validation run only on the controlled Linux router.
-They require explicit environment locators for the Harbor registry, Trivy DB
+`LABWEAVER_PLATFORM_REGISTRY` must equal `ghcr.io/teammonad`. GHCR login uses a
+controlled classic PAT locator with `write:packages`; the token is passed to
+`docker login --password-stdin` outside repository logs and is never written to
+the manifest. Connected commands also require explicit locators for Trivy DB
 identity, private Sigstore trusted root, Fulcio and Rekor endpoints, workload
 identity token, exact issuer/subject, and trust revision. Deployment additionally
 requires private Helm values and kubeconfig locators. The repository and result
@@ -55,25 +59,25 @@ Each component is built twice and the resulting digest must match. Packaging
 then pushes the digest, records BuildKit SBOM/provenance, runs Trivy, signs with
 the private Sigstore identity, verifies certificate and transparency proof, and
 only then atomically renames the canonical package manifest into place. A failed
-stage can leave an unreferenced Harbor digest, but never a deployable manifest;
+stage can leave an unreferenced GHCR digest, but never a deployable manifest;
 the tool does not move tags or delete shared registry data.
 
 Helm values must provide all seven digests, resources, existing Config/Secret
 locators, and the current plus explicitly recorded previous trust identity.
 Workloads use a read-only root filesystem, `RuntimeDefault` seccomp, no privilege
 escalation, no capabilities, no ServiceAccount token, and HTTP live/ready probes.
-Kyverno admits only `labweaver-system` Harbor digests with the exact registered
+Kyverno admits only `ghcr.io/teammonad/labweaver-system` digests with the exact registered
 private Sigstore identity. Rollback consumes a previously connected-verified
 package manifest and its Helm revision; it never moves tags or relaxes policy.
 
 ## Evidence and stop rules
 
 PR CI may produce E1/E2 build, reproducibility, secret/SBOM/Trivy, Helm,
-Kyverno, and static-manifest evidence. It has no Harbor or signing credentials.
+Kyverno, and static-manifest evidence. It has no GHCR write or signing credentials.
 E3 is valid only when the controlled run binds one source commit, cluster UID,
 trust bundle revision, package/deployment manifests, and all seven OCI digests.
 
 Before E3, record a read-only cluster baseline. Stop immediately if another
 deployment may be affected. Missing post-merge Issue #61 identity replay,
-production Config/Secret locators, Harbor/BuildKit/Kyverno readiness, or any
+production Config/Secret locators, GHCR/BuildKit/Kyverno readiness, or any
 real dependency keeps Issue #62 blocked; fixtures must not substitute for them.

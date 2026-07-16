@@ -381,7 +381,7 @@ private cluster are available, those E3 checks remain `blocked`/`not_run`.
 
 ### Platform image supply-chain gates (Issue #62)
 
-PR/static gates run without Harbor or signing credentials. They require
+PR/static gates run without GHCR write or signing credentials. They require
 `cargo fmt --all -- --check`, strict `cargo clippy -p xtask`, `cargo test -p
 xtask`, static package-manifest validation, seven two-pass image builds,
 secret/SBOM/Trivy checks, Helm lint/template, Kyverno tests and
@@ -390,7 +390,7 @@ tag-only or conflicting digest entries fail. Critical vulnerabilities and
 secrets fail; every High finding remains in the report.
 
 The controlled Linux router is the only connected execution authority.
-`package-validate --mode connected` must reread the Harbor manifest digest,
+`package-validate --mode connected` must reread the GHCR subject manifest digest,
 BuildKit SBOM/provenance attestations, Trivy DB identity, private Sigstore
 certificate, SCT, Rekor inclusion and current or explicitly previous trust
 revision. A connected prerequisite failure never invokes static validation as

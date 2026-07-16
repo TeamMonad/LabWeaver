@@ -271,7 +271,7 @@ fn validate_manifest(manifest: &PackageManifest) -> Result<(), AppError> {
             );
         }
         if image.reference != expected || image.reference.contains(":latest") {
-            return manifest_invalid("image reference is not the expected Harbor digest reference");
+            return manifest_invalid("image reference is not the expected GHCR digest reference");
         }
     }
     if names.len() != COMPONENTS.len() || COMPONENTS.iter().any(|name| !names.contains(name)) {
@@ -322,18 +322,11 @@ fn validate_release(value: &str) -> Result<(), AppError> {
 }
 
 fn validate_registry(value: &str) -> Result<(), AppError> {
-    if !value.is_empty()
-        && value.len() <= 253
-        && !value.contains('/')
-        && !value.contains("://")
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b".-:".contains(&byte))
-    {
+    if value == "ghcr.io/teammonad" {
         Ok(())
     } else {
         Err(AppError::InvalidArgument {
-            role: "Harbor registry host",
+            role: "GitHub Packages registry namespace",
         })
     }
 }
@@ -607,8 +600,8 @@ fn build_scan_sign(
         &reproducibility_tag,
         &lock.sbom_generator,
     )?;
-    let first = inspect_digest(&tag)?;
-    let second = inspect_digest(&reproducibility_tag)?;
+    let first = inspect_platform_digest(&tag)?;
+    let second = inspect_platform_digest(&reproducibility_tag)?;
     if first != second {
         return Err(AppError::PlatformImage {
             code: "LW_PACKAGE_BUILD_NOT_REPRODUCIBLE",
@@ -620,6 +613,7 @@ fn build_scan_sign(
     sign_and_attest(
         run_dir,
         component,
+        &tag,
         &reference,
         &scan_path(run_dir, component),
         trust,
@@ -700,6 +694,7 @@ fn scan_path(run_dir: &Path, component: &str) -> PathBuf {
 fn sign_and_attest(
     run_dir: &Path,
     component: &str,
+    build_reference: &str,
     reference: &str,
     scan: &Path,
     trust: &TrustIdentity,
@@ -727,8 +722,12 @@ fn sign_and_attest(
     )?;
     let sbom_path = run_dir.join(format!("sbom-{component}.json"));
     let provenance_path = run_dir.join(format!("provenance-{component}.json"));
-    extract_attestation(reference, "{{ json .SBOM.SPDX }}", &sbom_path)?;
-    extract_attestation(reference, "{{ json .Provenance.SLSA }}", &provenance_path)?;
+    extract_attestation(build_reference, "{{ json .SBOM.SPDX }}", &sbom_path)?;
+    extract_attestation(
+        build_reference,
+        "{{ json .Provenance.SLSA }}",
+        &provenance_path,
+    )?;
     cosign_attest(reference, "spdxjson", &sbom_path)?;
     cosign_attest(reference, "slsaprovenance", &provenance_path)?;
     cosign_attest(reference, "vuln", scan)?;
@@ -791,6 +790,62 @@ fn inspect_digest(reference: &str) -> Result<String, AppError> {
     } else {
         manifest_invalid("registry returned an invalid digest").and(Ok(String::new()))
     }
+}
+
+#[cfg(target_os = "linux")]
+fn inspect_platform_digest(reference: &str) -> Result<String, AppError> {
+    let output = run_checked(
+        Command::new("docker").args([
+            "buildx",
+            "imagetools",
+            "inspect",
+            reference,
+            "--format",
+            "{{json .Manifest}}",
+        ]),
+        "inspect OCI platform manifest",
+    )?;
+    let value: serde_json::Value =
+        serde_json::from_str(&output).map_err(|error| AppError::PlatformImage {
+            code: "LW_PACKAGE_DIGEST_MISSING",
+            detail: error.to_string(),
+        })?;
+    platform_digest_from_index(&value, reference)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn platform_digest_from_index(
+    value: &serde_json::Value,
+    reference: &str,
+) -> Result<String, AppError> {
+    let digest = value
+        .get("manifests")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|descriptor| {
+            descriptor
+                .pointer("/platform/os")
+                .and_then(serde_json::Value::as_str)
+                == Some("linux")
+                && descriptor
+                    .pointer("/platform/architecture")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("amd64")
+        })
+        .and_then(|descriptor| descriptor.get("digest"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or(AppError::PlatformImage {
+            code: "LW_PACKAGE_DIGEST_MISSING",
+            detail: format!("{reference} has no linux/amd64 subject manifest"),
+        })?;
+    if !is_digest(digest) {
+        return Err(AppError::PlatformImage {
+            code: "LW_PACKAGE_DIGEST_MISSING",
+            detail: "platform manifest digest is invalid".to_owned(),
+        });
+    }
+    Ok(digest.to_owned())
 }
 
 #[cfg(target_os = "linux")]
@@ -1252,7 +1307,7 @@ mod tests {
                 .map_or(1, |duration| duration.as_secs()),
             component_lock_hash: digest('b'),
             platform: "linux/amd64".to_owned(),
-            registry: "harbor.internal.example".to_owned(),
+            registry: "ghcr.io/teammonad".to_owned(),
             builder: BuilderIdentity {
                 buildkit: "v0.31.1".to_owned(),
                 buildx: "v0.35.0".to_owned(),
@@ -1269,9 +1324,8 @@ mod tests {
                 .map(|(index, component)| {
                     let digest_char = ['3', '4', '5', '6', '7', '8', '9'][index];
                     let image_digest = digest(digest_char);
-                    let reference = format!(
-                        "harbor.internal.example/labweaver-system/{component}@{image_digest}"
-                    );
+                    let reference =
+                        format!("ghcr.io/teammonad/labweaver-system/{component}@{image_digest}");
                     ImageEvidence {
                         component: (*component).to_owned(),
                         reference: reference.clone(),
@@ -1338,5 +1392,35 @@ mod tests {
         let mut wrong_subject = valid_manifest();
         wrong_subject.images[0].signature.certificate_identity = "someone-else".to_owned();
         assert!(validate_manifest(&wrong_subject).is_err());
+    }
+
+    #[test]
+    fn platform_digest_ignores_run_specific_attestation_manifest() -> Result<(), String> {
+        let subject = digest('a');
+        for attestation in [digest('b'), digest('c')] {
+            let index = serde_json::json!({
+                "manifests": [
+                    {
+                        "digest": subject,
+                        "platform": {"os": "linux", "architecture": "amd64"}
+                    },
+                    {
+                        "digest": attestation,
+                        "platform": {"os": "unknown", "architecture": "unknown"}
+                    }
+                ]
+            });
+            let actual =
+                platform_digest_from_index(&index, "fixture").map_err(|error| error.to_string())?;
+            assert_eq!(actual, subject);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn package_registry_is_exactly_the_github_organization_namespace() {
+        assert!(validate_registry("ghcr.io/teammonad").is_ok());
+        assert!(validate_registry("ghcr.io/other-owner").is_err());
+        assert!(validate_registry("harbor.internal.example").is_err());
     }
 }

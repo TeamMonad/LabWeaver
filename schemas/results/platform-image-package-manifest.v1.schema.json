@@ -45,8 +45,7 @@
       "const": "linux/amd64"
     },
     "registry": {
-      "type": "string",
-      "pattern": "^[A-Za-z0-9.-]+(?::[0-9]{1,5})?$"
+      "const": "ghcr.io/teammonad"
     },
     "builder": {
       "type": "object",
@@ -142,7 +141,7 @@
         },
         "reference": {
           "type": "string",
-          "pattern": "^[A-Za-z0-9.-]+(?::[0-9]{1,5})?/labweaver-system/[a-z0-9-]+@sha256:[0-9a-f]{64}$"
+          "pattern": "^ghcr\\.io/teammonad/labweaver-system/[a-z0-9-]+@sha256:[0-9a-f]{64}$"
         },
         "digest": {
           "$ref": "#/$defs/digest"

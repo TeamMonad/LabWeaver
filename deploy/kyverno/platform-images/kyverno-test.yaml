@@ -8,10 +8,10 @@ resources:
   - resources.yaml
 results:
   - policy: labweaver-platform-image-shape-test
-    rule: require-harbor-digests
+    rule: require-ghcr-digests
     resources: [valid]
     result: pass
   - policy: labweaver-platform-image-shape-test
-    rule: require-harbor-digests
+    rule: require-ghcr-digests
     resources: [tag-only, external]
     result: fail

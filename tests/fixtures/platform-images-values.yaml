@@ -1,11 +1,11 @@
 images:
-  access_service: harbor.invalid/labweaver-system/access-service@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-  agent_service: harbor.invalid/labweaver-system/agent-service@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-  control_service: harbor.invalid/labweaver-system/control-service@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-  environment_service: harbor.invalid/labweaver-system/environment-service@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-  evaluation_service: harbor.invalid/labweaver-system/evaluation-service@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
-  resource_service: harbor.invalid/labweaver-system/resource-service@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-  web: harbor.invalid/labweaver-system/web@sha256:1111111111111111111111111111111111111111111111111111111111111111
+  access_service: ghcr.io/teammonad/labweaver-system/access-service@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  agent_service: ghcr.io/teammonad/labweaver-system/agent-service@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  control_service: ghcr.io/teammonad/labweaver-system/control-service@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+  environment_service: ghcr.io/teammonad/labweaver-system/environment-service@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+  evaluation_service: ghcr.io/teammonad/labweaver-system/evaluation-service@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  resource_service: ghcr.io/teammonad/labweaver-system/resource-service@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+  web: ghcr.io/teammonad/labweaver-system/web@sha256:1111111111111111111111111111111111111111111111111111111111111111
 workloads:
   access-service: {configMap: access-service-runtime, configSecret: access-service-runtime, replicas: 2}
   agent-service: {configMap: agent-service-runtime, configSecret: agent-service-runtime, replicas: 2}
@@ -15,7 +15,7 @@ workloads:
   resource-service: {configMap: resource-service-runtime, configSecret: resource-service-runtime, replicas: 2}
   web: {configMap: web-runtime, configSecret: web-runtime, replicas: 2}
 trust:
-  registry: harbor.invalid
+  registry: ghcr.io/teammonad
   revision: trust-v2
   issuer: https://identity.invalid/realms/labweaver
   subject: system:serviceaccount:labweaver-build:platform-builder
