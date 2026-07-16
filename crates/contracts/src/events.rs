@@ -39,6 +39,8 @@ pub mod subjects {
     pub const LAB_RELEASE_APPROVED: &str = "labweaver.control.lab_release.approved.v1";
     pub const ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED: &str =
         "labweaver.control.environment_template_release.published.v1";
+    pub const ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN: &str =
+        "labweaver.control.environment_template_release.withdrawn.v1";
 }
 
 /// Strict CloudEvents 1.0 envelope carried as structured JSON.
@@ -207,6 +209,11 @@ pub const EVENT_CONTRACTS: &[EventContract] = &[
         event_type: subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED,
         schema_name: "environment-template-release-published",
     },
+    EventContract {
+        subject: subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN,
+        event_type: subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN,
+        schema_name: "environment-template-release-withdrawn",
+    },
 ];
 
 pub fn validate_registry() -> Result<(), EventError> {
@@ -270,6 +277,16 @@ pub struct ReleasePublished {
     pub version: u64,
     pub environment_spec_sha256: Sha256Digest,
     pub artifact_sha256: Sha256Digest,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReleaseWithdrawn {
+    pub release_id: ReleaseId,
+    pub version: u64,
+    pub actor_id: ActorId,
+    pub reason_code: String,
+    pub withdrawn_at: UtcTimestamp,
 }
 
 fn reject_protected_payload(value: &serde_json::Value) -> Result<(), EventError> {

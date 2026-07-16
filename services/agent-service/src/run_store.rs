@@ -1,11 +1,12 @@
 //! Durable idempotent `AgentRun` orchestration over the Agent-owned `PostgreSQL` schema.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 use std::time::Duration;
 
 use contracts::authoring::{
     AgentAttempt, AgentAttemptState, AgentRun, AgentRunState, AgentTrack, AgentTrackKind,
-    CourseLlmEgressPolicy, EnvironmentCandidate, EvaluationCandidate, LlmUsage,
+    CourseLlmEgressPolicy, EnvironmentCandidate, EvaluationCandidate, LlmUsage, ProblemPackage,
 };
 use contracts::diagnostic;
 use contracts::events::{
@@ -13,7 +14,8 @@ use contracts::events::{
 };
 use contracts::http::{CreateAgentRunRequest, IdempotencyKey};
 use contracts::{
-    AgentRunId, CandidateId, CourseId, EventId, Revision, Sequence, Sha256Digest, UtcTimestamp,
+    AgentRunId, ArtifactId, CandidateId, CourseId, EventId, Revision, Sequence, Sha256Digest,
+    UtcTimestamp,
 };
 use persistence_sqlx::{Domain, IdempotencyDecision, IdempotencyStore, OutboxStore};
 use serde::{Deserialize, Serialize};
@@ -28,6 +30,8 @@ use crate::claude_code::{
 };
 
 const CREATE_OPERATION: &str = "create_agent_run_v1";
+const CANCEL_OPERATION: &str = "cancel_agent_run_v1";
+const RETRY_OPERATION: &str = "retry_agent_run_track_v1";
 
 /// Input required to reserve one idempotent `AgentRun`.
 pub struct ReserveAgentRun<'a> {
@@ -45,6 +49,29 @@ pub struct ReserveAgentRun<'a> {
     pub now: UtcTimestamp,
     /// Sanitized distributed trace identity.
     pub trace_id: &'a str,
+}
+
+/// Immutable Control dispatch retained before any object read or LLM invocation.
+#[derive(Clone, Debug)]
+pub struct AgentRunDispatchLease {
+    /// Authoritative reserved run.
+    pub run: AgentRun,
+    /// Immutable public create request.
+    pub request: CreateAgentRunRequest,
+    /// Control-verified package contract.
+    pub package: ProblemPackage,
+    /// Opaque object keys indexed by package artifact identity.
+    pub object_locators: BTreeMap<ArtifactId, String>,
+    /// Control-verified active course policy.
+    pub policy: CourseLlmEgressPolicy,
+    /// Original request key used only for exact reservation replay.
+    pub idempotency_key: IdempotencyKey,
+    /// Sanitized distributed trace identity.
+    pub trace_id: String,
+    /// Canonical pre-preparation dispatch identity.
+    pub dispatch_sha256: Sha256Digest,
+    /// Opaque preparation fencing token.
+    pub lease_token: Uuid,
 }
 
 /// Result of atomically reserving an `AgentRun` request.
@@ -141,6 +168,381 @@ impl PostgresAgentRunStore {
     #[must_use]
     pub const fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Returns the Agent-role pool for authority-local read models.
+    #[must_use]
+    pub const fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
+    /// Atomically reserves a Control-verified dispatch for background preparation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid identities, conflicting idempotency, or persistence failure.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_lines)]
+    pub async fn reserve_dispatch(
+        &self,
+        course_id: CourseId,
+        request: &CreateAgentRunRequest,
+        package: &ProblemPackage,
+        object_locators: &BTreeMap<ArtifactId, String>,
+        policy: &CourseLlmEgressPolicy,
+        idempotency_key: &IdempotencyKey,
+        now: UtcTimestamp,
+        trace_id: &str,
+    ) -> Result<AgentRunReservation, AgentRunStoreError> {
+        package
+            .validate()
+            .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        policy
+            .validate()
+            .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        if package.course_id != course_id
+            || policy.course_id != course_id
+            || request.package_id != package.id
+            || request.package_revision != package.revision
+            || request.package_sha256 != package.manifest_sha256
+            || request.policy_id != policy.id
+            || request.policy_revision != policy.revision
+        {
+            return Err(AgentRunStoreError::IdentityMismatch);
+        }
+        let expected_artifacts = package
+            .files
+            .iter()
+            .map(|file| file.object.artifact_id)
+            .collect::<BTreeSet<_>>();
+        if object_locators.keys().copied().collect::<BTreeSet<_>>() != expected_artifacts
+            || object_locators.values().any(|key| {
+                key.trim().is_empty()
+                    || key.contains("..")
+                    || key.bytes().any(|byte| byte.is_ascii_control())
+            })
+        {
+            return Err(AgentRunStoreError::IdentityMismatch);
+        }
+        let request_hash = Sha256Digest::of_canonical(&serde_json::json!({
+            "courseId": course_id,
+            "request": request,
+        }))
+        .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        let dispatch_sha256 = Sha256Digest::of_canonical(&serde_json::json!({
+            "request": request,
+            "package": package,
+            "objectLocators": object_locators,
+            "policy": policy,
+        }))
+        .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        match IdempotencyStore::reserve(
+            &mut transaction,
+            Domain::Agent,
+            CREATE_OPERATION,
+            idempotency_key.as_str(),
+            request_hash,
+        )
+        .await
+        .map_err(|_| AgentRunStoreError::PersistenceFailed)?
+        {
+            IdempotencyDecision::Replay(value) => {
+                let reserved = decode_run(value)?;
+                let run = load_run_for_update(&mut transaction, reserved.id).await?;
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+                return Ok(AgentRunReservation::Replayed(run));
+            }
+            IdempotencyDecision::Conflict => return Err(AgentRunStoreError::IdempotencyConflict),
+            IdempotencyDecision::InProgress => return Err(AgentRunStoreError::RunInProgress),
+            IdempotencyDecision::Reserved => {}
+        }
+        let run = requested_run(request, course_id)?;
+        let contract =
+            serde_json::to_value(&run).map_err(|_| AgentRunStoreError::InvalidContract)?;
+        sqlx::query(
+            "INSERT INTO agent.agent_runs (run_id,course_id,problem_package_id,revision,state,provider_binding,input_sha256,policy_revision,contract) \
+             VALUES ($1,$2,$3,$4,'requested',$5,$6,$7,$8)",
+        )
+        .bind(run.id.as_uuid()).bind(course_id.as_uuid()).bind(package.id.as_uuid())
+        .bind(revision_i64(run.revision)?).bind(&policy.binding.runtime_binding)
+        .bind(dispatch_sha256.to_string()).bind(revision_i64(policy.revision)?).bind(&contract)
+        .execute(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        for track in [AgentTrackKind::Environment, AgentTrackKind::Evaluation] {
+            sqlx::query("INSERT INTO agent.agent_track_work_items (run_id,track,state,input_sha256) VALUES ($1,$2,'requested',$3)")
+                .bind(run.id.as_uuid()).bind(track_name(track)).bind(dispatch_sha256.to_string())
+                .execute(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        }
+        sqlx::query(
+            "INSERT INTO agent.agent_run_dispatches (run_id,dispatch_sha256,idempotency_key,request,package,object_locators,policy,trace_id,state) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending')",
+        )
+        .bind(run.id.as_uuid()).bind(dispatch_sha256.to_string()).bind(idempotency_key.as_str())
+        .bind(serde_json::to_value(request).map_err(|_| AgentRunStoreError::InvalidContract)?)
+        .bind(serde_json::to_value(package).map_err(|_| AgentRunStoreError::InvalidContract)?)
+        .bind(
+            serde_json::to_value(object_locators)
+                .map_err(|_| AgentRunStoreError::InvalidContract)?,
+        )
+        .bind(serde_json::to_value(policy).map_err(|_| AgentRunStoreError::InvalidContract)?)
+        .bind(trace_id)
+        .execute(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        enqueue_run_event(
+            &mut transaction,
+            &run,
+            subjects::AGENT_RUN_REQUESTED,
+            1,
+            0,
+            None,
+            now,
+            trace_id,
+        )
+        .await?;
+        IdempotencyStore::complete(
+            &mut transaction,
+            Domain::Agent,
+            CREATE_OPERATION,
+            idempotency_key.as_str(),
+            &contract,
+        )
+        .await
+        .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        Ok(AgentRunReservation::Created(run))
+    }
+
+    /// Claims one pending or expired preparation dispatch with a fencing token.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the lease is invalid or persistence fails.
+    pub async fn claim_dispatch(
+        &self,
+        lease_duration: Duration,
+    ) -> Result<Option<AgentRunDispatchLease>, AgentRunStoreError> {
+        let lease_milliseconds = lease_milliseconds(lease_duration)?;
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        let row = sqlx::query(
+            "SELECT run_id,dispatch_sha256,idempotency_key,request,package,object_locators,policy,trace_id \
+             FROM agent.agent_run_dispatches \
+             WHERE (state IN ('pending','prepared') OR (state='preparing' AND lease_expires_at <= now())) \
+               AND EXISTS (SELECT 1 FROM agent.agent_track_work_items work \
+                           WHERE work.run_id=agent_run_dispatches.run_id \
+                             AND work.state IN ('requested','running')) \
+             ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1",
+        )
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        let Some(row) = row else {
+            transaction
+                .rollback()
+                .await
+                .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+            return Ok(None);
+        };
+        let run_id = AgentRunId::from_str(
+            &row.try_get::<Uuid, _>("run_id")
+                .map_err(|_| AgentRunStoreError::InvalidContract)?
+                .to_string(),
+        )
+        .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        let lease_token = Uuid::now_v7();
+        sqlx::query("UPDATE agent.agent_run_dispatches SET state='preparing',lease_token=$2,lease_expires_at=now()+($3*interval '1 millisecond'),updated_at=now() WHERE run_id=$1")
+            .bind(run_id.as_uuid()).bind(lease_token).bind(lease_milliseconds)
+            .execute(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        let lease = AgentRunDispatchLease {
+            run: load_run_for_update(&mut transaction, run_id).await?,
+            request: serde_json::from_value(
+                row.try_get("request")
+                    .map_err(|_| AgentRunStoreError::InvalidContract)?,
+            )
+            .map_err(|_| AgentRunStoreError::InvalidContract)?,
+            package: serde_json::from_value(
+                row.try_get("package")
+                    .map_err(|_| AgentRunStoreError::InvalidContract)?,
+            )
+            .map_err(|_| AgentRunStoreError::InvalidContract)?,
+            object_locators: serde_json::from_value(
+                row.try_get("object_locators")
+                    .map_err(|_| AgentRunStoreError::InvalidContract)?,
+            )
+            .map_err(|_| AgentRunStoreError::InvalidContract)?,
+            policy: serde_json::from_value(
+                row.try_get("policy")
+                    .map_err(|_| AgentRunStoreError::InvalidContract)?,
+            )
+            .map_err(|_| AgentRunStoreError::InvalidContract)?,
+            idempotency_key: IdempotencyKey::parse(
+                &row.try_get::<String, _>("idempotency_key")
+                    .map_err(|_| AgentRunStoreError::InvalidContract)?,
+            )
+            .map_err(|_| AgentRunStoreError::InvalidContract)?,
+            trace_id: row
+                .try_get("trace_id")
+                .map_err(|_| AgentRunStoreError::InvalidContract)?,
+            dispatch_sha256: row
+                .try_get::<String, _>("dispatch_sha256")
+                .map_err(|_| AgentRunStoreError::InvalidContract)?
+                .parse()
+                .map_err(|_| AgentRunStoreError::InvalidContract)?,
+            lease_token,
+        };
+        transaction
+            .commit()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        Ok(Some(lease))
+    }
+
+    /// Rebinds requested work items to the verified prepared input under the dispatch fence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the lease is lost, identities conflict, or persistence fails.
+    pub async fn bind_prepared_dispatch(
+        &self,
+        lease: &AgentRunDispatchLease,
+        input_sha256: Sha256Digest,
+    ) -> Result<(), AgentRunStoreError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        let updated = sqlx::query("UPDATE agent.agent_run_dispatches SET state='prepared',prepared_input_sha256=$3,lease_token=NULL,lease_expires_at=NULL,updated_at=now() WHERE run_id=$1 AND state='preparing' AND lease_token=$2 AND lease_expires_at>now() AND (prepared_input_sha256 IS NULL OR prepared_input_sha256=$3)")
+            .bind(lease.run.id.as_uuid()).bind(lease.lease_token).bind(input_sha256.to_string())
+            .execute(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        if updated.rows_affected() != 1 {
+            return Err(AgentRunStoreError::LeaseLost);
+        }
+        let run = sqlx::query("UPDATE agent.agent_runs SET input_sha256=$2,updated_at=now() WHERE run_id=$1 AND input_sha256 IN ($2,$3)")
+            .bind(lease.run.id.as_uuid()).bind(input_sha256.to_string()).bind(lease.dispatch_sha256.to_string())
+            .execute(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        if run.rows_affected() != 1 {
+            return Err(AgentRunStoreError::StateConflict);
+        }
+        let work = sqlx::query("UPDATE agent.agent_track_work_items SET input_sha256=$2,updated_at=now() WHERE run_id=$1 AND input_sha256 IN ($2,$3)")
+            .bind(lease.run.id.as_uuid()).bind(input_sha256.to_string()).bind(lease.dispatch_sha256.to_string())
+            .execute(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        if work.rows_affected() != 2 {
+            return Err(AgentRunStoreError::StateConflict);
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)
+    }
+
+    /// Terminates both tracks when deterministic preparation fails before any invocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the lease is lost, the diagnostic is invalid, or persistence fails.
+    pub async fn fail_dispatch_preparation(
+        &self,
+        lease: &AgentRunDispatchLease,
+        diagnostic_code: &str,
+        now: UtcTimestamp,
+    ) -> Result<AgentRun, AgentRunStoreError> {
+        if diagnostic_code.trim().is_empty() {
+            return Err(AgentRunStoreError::InvalidContract);
+        }
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        let fenced = sqlx::query_scalar::<_, bool>("SELECT lease_expires_at>now() FROM agent.agent_run_dispatches WHERE run_id=$1 AND state='preparing' AND lease_token=$2 FOR UPDATE")
+            .bind(lease.run.id.as_uuid()).bind(lease.lease_token).fetch_optional(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        if fenced != Some(true) {
+            return Err(AgentRunStoreError::LeaseLost);
+        }
+        let mut run = load_run_for_update(&mut transaction, lease.run.id).await?;
+        let cancellation_requested = sqlx::query_scalar::<_, bool>(
+            "SELECT cancellation_requested_at IS NOT NULL FROM agent.agent_runs WHERE run_id=$1",
+        )
+        .bind(run.id.as_uuid())
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        if run.tracks.iter().any(|track| !track.attempts.is_empty()) {
+            return Err(AgentRunStoreError::StateConflict);
+        }
+        let terminal_diagnostic = if cancellation_requested {
+            "LW_LLM_CANCELLED"
+        } else {
+            diagnostic_code
+        };
+        let attempt_state = if cancellation_requested {
+            AgentAttemptState::Cancelled
+        } else {
+            AgentAttemptState::Failed
+        };
+        for track in &mut run.tracks {
+            track.attempts.push(AgentAttempt {
+                number: 1,
+                state: attempt_state,
+                input_sha256: lease.dispatch_sha256,
+                output_sha256: None,
+                checkpoint: None,
+                usage: zero_usage(),
+                usage_observed: false,
+                diagnostic_code: Some(terminal_diagnostic.to_owned()),
+            });
+        }
+        run.state = if cancellation_requested {
+            AgentRunState::Cancelled
+        } else {
+            AgentRunState::Failed
+        };
+        run.revision = next_revision(run.revision)?;
+        run.validate()
+            .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        update_run(&mut transaction, &run).await?;
+        let work_state = if cancellation_requested {
+            "cancelled"
+        } else {
+            "failed"
+        };
+        let work = sqlx::query("UPDATE agent.agent_track_work_items SET state=$2,attempt_number=1,worker_id=NULL,lease_token=NULL,lease_expires_at=NULL,heartbeat_at=NULL,updated_at=now() WHERE run_id=$1 AND state='requested'")
+            .bind(run.id.as_uuid()).bind(work_state).execute(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        if work.rows_affected() != 2 {
+            return Err(AgentRunStoreError::StateConflict);
+        }
+        sqlx::query("UPDATE agent.agent_run_dispatches SET state='failed',terminal_diagnostic=$3,lease_token=NULL,lease_expires_at=NULL,updated_at=now() WHERE run_id=$1 AND lease_token=$2")
+            .bind(run.id.as_uuid()).bind(lease.lease_token).bind(terminal_diagnostic).execute(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        let sequence = next_outbox_sequence(&mut transaction, run.id).await?;
+        enqueue_run_event(
+            &mut transaction,
+            &run,
+            subjects::AGENT_RUN_FAILED,
+            sequence,
+            1,
+            Some(terminal_diagnostic),
+            now,
+            &lease.trace_id,
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        Ok(run)
     }
 
     /// Atomically reserves an idempotency key, run row and requested Outbox event.
@@ -418,6 +820,183 @@ impl PostgresAgentRunStore {
         Ok(run)
     }
 
+    /// Idempotently requests cancellation at one exact run revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for stale revision, conflicting idempotency, or persistence failure.
+    pub async fn request_cancellation_revisioned(
+        &self,
+        course_id: CourseId,
+        run_id: AgentRunId,
+        expected_revision: Revision,
+        idempotency_key: &IdempotencyKey,
+        now: UtcTimestamp,
+    ) -> Result<AgentRun, AgentRunStoreError> {
+        let request_hash = Sha256Digest::of_canonical(&serde_json::json!({
+            "courseId": course_id,
+            "runId": run_id,
+            "expectedRevision": expected_revision,
+        }))
+        .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        match IdempotencyStore::reserve(
+            &mut transaction,
+            Domain::Agent,
+            CANCEL_OPERATION,
+            idempotency_key.as_str(),
+            request_hash,
+        )
+        .await
+        .map_err(|_| AgentRunStoreError::PersistenceFailed)?
+        {
+            IdempotencyDecision::Replay(value) => {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+                return decode_run(value);
+            }
+            IdempotencyDecision::Conflict => return Err(AgentRunStoreError::IdempotencyConflict),
+            IdempotencyDecision::InProgress => return Err(AgentRunStoreError::RunInProgress),
+            IdempotencyDecision::Reserved => {}
+        }
+        let mut run = load_run_for_update(&mut transaction, run_id).await?;
+        if run.course_id != course_id {
+            return Err(AgentRunStoreError::CourseMismatch);
+        }
+        if run.revision != expected_revision {
+            return Err(AgentRunStoreError::StateConflict);
+        }
+        if !is_terminal_run(run.state) {
+            if run.state == AgentRunState::Running {
+                run.state = AgentRunState::Cancelling;
+                run.revision = next_revision(run.revision)?;
+                run.validate()
+                    .map_err(|_| AgentRunStoreError::InvalidContract)?;
+                update_run(&mut transaction, &run).await?;
+            }
+            sqlx::query("UPDATE agent.agent_runs SET cancellation_requested_at=COALESCE(cancellation_requested_at,$2),updated_at=now() WHERE run_id=$1")
+                .bind(run_id.as_uuid()).bind(now.get()).execute(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        }
+        let result = serde_json::to_value(&run).map_err(|_| AgentRunStoreError::InvalidContract)?;
+        IdempotencyStore::complete(
+            &mut transaction,
+            Domain::Agent,
+            CANCEL_OPERATION,
+            idempotency_key.as_str(),
+            &result,
+        )
+        .await
+        .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        Ok(run)
+    }
+
+    /// Idempotently requeues one failed or cancelled track at an exact run revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for stale revision, invalid track state, or persistence failure.
+    pub async fn retry_track_revisioned(
+        &self,
+        course_id: CourseId,
+        run_id: AgentRunId,
+        track: AgentTrackKind,
+        expected_revision: Revision,
+        idempotency_key: &IdempotencyKey,
+    ) -> Result<AgentRun, AgentRunStoreError> {
+        let request_hash = Sha256Digest::of_canonical(&serde_json::json!({
+            "courseId": course_id,
+            "runId": run_id,
+            "track": track,
+            "expectedRevision": expected_revision,
+        }))
+        .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        match IdempotencyStore::reserve(
+            &mut transaction,
+            Domain::Agent,
+            RETRY_OPERATION,
+            idempotency_key.as_str(),
+            request_hash,
+        )
+        .await
+        .map_err(|_| AgentRunStoreError::PersistenceFailed)?
+        {
+            IdempotencyDecision::Replay(value) => {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+                return decode_run(value);
+            }
+            IdempotencyDecision::Conflict => return Err(AgentRunStoreError::IdempotencyConflict),
+            IdempotencyDecision::InProgress => return Err(AgentRunStoreError::RunInProgress),
+            IdempotencyDecision::Reserved => {}
+        }
+        let mut run = load_run_for_update(&mut transaction, run_id).await?;
+        if run.course_id != course_id {
+            return Err(AgentRunStoreError::CourseMismatch);
+        }
+        if run.revision != expected_revision
+            || !matches!(
+                run.state,
+                AgentRunState::Failed
+                    | AgentRunState::PartiallySucceeded
+                    | AgentRunState::Cancelled
+            )
+        {
+            return Err(AgentRunStoreError::StateConflict);
+        }
+        let selected = run
+            .tracks
+            .iter()
+            .find(|candidate| candidate.kind == track)
+            .ok_or(AgentRunStoreError::InvalidContract)?;
+        if !matches!(
+            selected.attempts.last().map(|attempt| attempt.state),
+            Some(AgentAttemptState::Failed | AgentAttemptState::Cancelled)
+        ) {
+            return Err(AgentRunStoreError::StateConflict);
+        }
+        let updated = sqlx::query("UPDATE agent.agent_track_work_items SET state='requested',next_retry_at=now(),worker_id=NULL,lease_token=NULL,lease_expires_at=NULL,heartbeat_at=NULL,updated_at=now() WHERE run_id=$1 AND track=$2 AND state IN ('failed','cancelled')")
+            .bind(run_id.as_uuid()).bind(track_name(track)).execute(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        if updated.rows_affected() != 1 {
+            return Err(AgentRunStoreError::StateConflict);
+        }
+        run.revision = next_revision(run.revision)?;
+        run.validate()
+            .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        update_run(&mut transaction, &run).await?;
+        let result = serde_json::to_value(&run).map_err(|_| AgentRunStoreError::InvalidContract)?;
+        IdempotencyStore::complete(
+            &mut transaction,
+            Domain::Agent,
+            RETRY_OPERATION,
+            idempotency_key.as_str(),
+            &result,
+        )
+        .await
+        .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        Ok(run)
+    }
+
     /// Commits one terminal track checkpoint through its current fencing token.
     ///
     /// The checkpoint is durable immediately; aggregate terminal state and the terminal Outbox
@@ -510,11 +1089,12 @@ impl PostgresAgentRunStore {
         }
         if is_terminal_run(run.state) {
             let (subject, diagnostic_code) = terminal_event(&run);
+            let sequence = next_outbox_sequence(&mut transaction, run.id).await?;
             enqueue_run_event(
                 &mut transaction,
                 &run,
                 subject,
-                2,
+                sequence,
                 u64::from(lease.attempt),
                 diagnostic_code,
                 now,
@@ -691,9 +1271,6 @@ impl AgentRunService {
         let run = match reservation {
             AgentRunReservation::Created(run) | AgentRunReservation::Replayed(run) => run,
         };
-        if is_terminal_run(run.state) {
-            return Ok(AgentRunDispatch::Replayed(run));
-        }
         let input_sha256 = command.input.sha256();
         let environment = self
             .store
@@ -1304,6 +1881,20 @@ async fn enqueue_run_event(
     .map_err(|_| AgentRunStoreError::PersistenceFailed)
 }
 
+async fn next_outbox_sequence(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: AgentRunId,
+) -> Result<u64, AgentRunStoreError> {
+    let next = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(MAX(aggregate_sequence),0)+1 FROM agent.outbox_events WHERE aggregate_id=$1",
+    )
+    .bind(run_id.as_uuid())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+    u64::try_from(next).map_err(|_| AgentRunStoreError::InvalidContract)
+}
+
 fn event_contract(subject: &str) -> Result<EventContract, AgentRunStoreError> {
     EVENT_CONTRACTS
         .iter()
@@ -1400,6 +1991,9 @@ const fn zero_usage() -> LlmUsage {
 /// Stable, payload-free durable `AgentRun` failures.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum AgentRunStoreError {
+    /// The caller's course authority does not own the target run.
+    #[error("LW_AUTH_COURSE_SCOPE_DENIED: AgentRun course authority does not match")]
+    CourseMismatch,
     /// Request, package, policy or input identity differs.
     #[error("LW_LLM_POLICY_REVISION_MISMATCH: AgentRun immutable identity does not match")]
     IdentityMismatch,
@@ -1434,6 +2028,7 @@ impl AgentRunStoreError {
     #[must_use]
     pub const fn diagnostic_code(self) -> &'static str {
         match self {
+            Self::CourseMismatch => diagnostic::AUTH_COURSE_SCOPE_DENIED,
             Self::IdentityMismatch => diagnostic::LLM_POLICY_REVISION_MISMATCH,
             Self::IdempotencyConflict => diagnostic::IDEMPOTENCY_CONFLICT,
             Self::RunInProgress | Self::StateConflict | Self::RunNotFound => {

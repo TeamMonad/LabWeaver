@@ -734,6 +734,16 @@ pub struct ReleaseWithdrawal {
     pub withdrawn_at: UtcTimestamp,
 }
 
+/// Read model that keeps the immutable release separate from its append-only withdrawal fact.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentTemplateReleaseView {
+    /// Existing release fields remain at the response root for additive wire compatibility.
+    #[serde(flatten)]
+    pub release: EnvironmentTemplateRelease,
+    pub withdrawal: Option<ReleaseWithdrawal>,
+}
+
 fn validate_oci_digest(value: &str) -> Result<(), SupplyChainError> {
     let Some(digest) = value.strip_prefix("sha256:") else {
         return Err(SupplyChainError::DigestMismatch);

@@ -12,6 +12,14 @@ export type AuthorizationDecisionRequest = AuthorizationDecisionRequestSchema;
 
 export type CsrfTokenResponse = CsrfTokenResponseSchema;
 
+export type InternalAgentRunMutationRequest = InternalAgentRunMutationRequestSchema;
+
+export type InternalAgentRunOutcome = InternalAgentRunOutcomeSchema;
+
+export type InternalCreateAgentRunRequest = InternalCreateAgentRunRequestSchema;
+
+export type InternalImageArtifactResolution = InternalImageArtifactResolutionSchema;
+
 export type OperationAccepted = {
     operationId: string;
     revision: number;
@@ -1309,222 +1317,6 @@ export type StreamSequence = string;
 export type EnvironmentOperationSnapshotSchemaUtcTimestamp = string;
 
 /**
- * EnvironmentTemplateRelease
- *
- * Immutable environment-first release.
- */
-export type EnvironmentTemplateReleaseSchema = {
-    approval: CandidateApproval;
-    artifact: ImageArtifact;
-    candidateId: EnvironmentTemplateReleaseSchemaCandidateId;
-    candidateRevision: EnvironmentTemplateReleaseSchemaRevision;
-    courseId: EnvironmentTemplateReleaseSchemaCourseId;
-    environmentSpecSha256: EnvironmentTemplateReleaseSchemaSha256Digest;
-    id: EnvironmentTemplateReleaseSchemaReleaseId;
-    imagePolicyEvaluation: ImagePolicyEvaluation;
-    publishedAt: EnvironmentTemplateReleaseSchemaUtcTimestamp;
-    publishedBy: EnvironmentTemplateReleaseSchemaActorId;
-    runtimeKind: EnvironmentTemplateReleaseSchemaRuntimeKind;
-    version: number;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `ActorId`.
- */
-export type EnvironmentTemplateReleaseSchemaActorId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `ApprovalId`.
- */
-export type EnvironmentTemplateReleaseSchemaApprovalId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `ArtifactId`.
- */
-export type EnvironmentTemplateReleaseSchemaArtifactId = string;
-
-/**
- * Immutable object-store identity without a machine-local path or credential.
- */
-export type EnvironmentTemplateReleaseSchemaArtifactRef = {
-    /**
-     * Stable metadata identity resolved by the owning service.
-     */
-    artifactId: EnvironmentTemplateReleaseSchemaArtifactId;
-    /**
-     * Registered media type.
-     */
-    mediaType: string;
-    /**
-     * Immutable backend object version.
-     */
-    objectVersion: string;
-    /**
-     * Exact content digest.
-     */
-    sha256: EnvironmentTemplateReleaseSchemaSha256Digest;
-    /**
-     * Raw object length.
-     */
-    sizeBytes: number;
-    /**
-     * Explicit object-store binding from deployment configuration.
-     */
-    storeBinding: string;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `BuildRequestId`.
- */
-export type BuildRequestId = string;
-
-/**
- * Human decision bound to an exact candidate and dependency identity.
- */
-export type CandidateApproval = {
-    actorId: EnvironmentTemplateReleaseSchemaActorId;
-    candidateId: EnvironmentTemplateReleaseSchemaCandidateId;
-    candidateRevision: EnvironmentTemplateReleaseSchemaRevision;
-    candidateSha256: EnvironmentTemplateReleaseSchemaSha256Digest;
-    decidedAt: EnvironmentTemplateReleaseSchemaUtcTimestamp;
-    decision: EnvironmentTemplateReleaseSchemaCandidateDecision;
-    id: EnvironmentTemplateReleaseSchemaApprovalId;
-    policyRevision: EnvironmentTemplateReleaseSchemaRevision;
-    reason: string;
-    schemaSha256: EnvironmentTemplateReleaseSchemaSha256Digest;
-    trustRevision: EnvironmentTemplateReleaseSchemaRevision;
-};
-
-/**
- * Append-only candidate decision.
- */
-export type EnvironmentTemplateReleaseSchemaCandidateDecision = 'approved' | 'rejected' | 'withdrawn';
-
-/**
- * Strongly typed UUIDv7 identifier for `CandidateId`.
- */
-export type EnvironmentTemplateReleaseSchemaCandidateId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `CourseId`.
- */
-export type EnvironmentTemplateReleaseSchemaCourseId = string;
-
-/**
- * Complete immutable runtime artifact identity.
- */
-export type ImageArtifact = {
-    build_request_id: BuildRequestId;
-    digest: string;
-    id: ImageArtifactId;
-    immutable_tag: string;
-    kind: 'container';
-    provenance: EnvironmentTemplateReleaseSchemaArtifactRef;
-    repository: string;
-    sbom: EnvironmentTemplateReleaseSchemaArtifactRef;
-    signature: SigstoreEvidence;
-} | {
-    base_disk: EnvironmentTemplateReleaseSchemaArtifactRef;
-    format: VirtualMachineDiskFormat;
-    id: ImageArtifactId;
-    kind: 'virtual_machine';
-    provenance: EnvironmentTemplateReleaseSchemaArtifactRef;
-    sbom: EnvironmentTemplateReleaseSchemaArtifactRef;
-    signature: SigstoreEvidence;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `ImageArtifactId`.
- */
-export type ImageArtifactId = string;
-
-/**
- * Deterministic scan and trust-policy evaluation.
- */
-export type ImagePolicyEvaluation = {
-    artifactId: ImageArtifactId;
-    artifactSha256: EnvironmentTemplateReleaseSchemaSha256Digest;
-    evaluatedAt: EnvironmentTemplateReleaseSchemaUtcTimestamp;
-    expectedCertificateSubject: string;
-    expectedFulcioIssuer: string;
-    maxEvidenceAgeMilliseconds: number;
-    passed: boolean;
-    policyId: EnvironmentTemplateReleaseSchemaPolicyId;
-    policyRevision: EnvironmentTemplateReleaseSchemaRevision;
-    requireCtSct: boolean;
-    requireRekorInclusion: boolean;
-    scannerDatabaseSha256: EnvironmentTemplateReleaseSchemaSha256Digest;
-    scannerName: string;
-    scannerVersion: string;
-    trustBundleSha256: EnvironmentTemplateReleaseSchemaSha256Digest;
-    validUntil: EnvironmentTemplateReleaseSchemaUtcTimestamp;
-    vulnerabilities: VulnerabilitySummary;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `PolicyId`.
- */
-export type EnvironmentTemplateReleaseSchemaPolicyId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `ReleaseId`.
- */
-export type EnvironmentTemplateReleaseSchemaReleaseId = string;
-
-/**
- * Monotonic aggregate revision. Zero is never a persisted revision.
- */
-export type EnvironmentTemplateReleaseSchemaRevision = number;
-
-/**
- * Runtime kind shared by candidates, releases, and instances.
- */
-export type EnvironmentTemplateReleaseSchemaRuntimeKind = 'container' | 'virtual_machine';
-
-/**
- * Canonical lowercase SHA-256 digest.
- */
-export type EnvironmentTemplateReleaseSchemaSha256Digest = string;
-
-/**
- * Private Sigstore identity and transparency evidence.
- */
-export type SigstoreEvidence = {
-    certificateSha256: EnvironmentTemplateReleaseSchemaSha256Digest;
-    certificateSubject: string;
-    ctLogId: string;
-    fulcioIssuer: string;
-    rekorInclusionProofSha256: EnvironmentTemplateReleaseSchemaSha256Digest;
-    rekorLogId: string;
-    rekorLogIndex: number;
-    sctSha256: EnvironmentTemplateReleaseSchemaSha256Digest;
-    signatureSha256: EnvironmentTemplateReleaseSchemaSha256Digest;
-    trustBundleSha256: EnvironmentTemplateReleaseSchemaSha256Digest;
-    verifiedAt: EnvironmentTemplateReleaseSchemaUtcTimestamp;
-};
-
-/**
- * UTC timestamp serialized with a literal `Z` and millisecond precision.
- */
-export type EnvironmentTemplateReleaseSchemaUtcTimestamp = string;
-
-/**
- * Supported VM base-disk encodings.
- */
-export type VirtualMachineDiskFormat = 'qcow2' | 'raw';
-
-/**
- * Vulnerability counts by severity.
- */
-export type VulnerabilitySummary = {
-    critical: number;
-    high: number;
-    low: number;
-    medium: number;
-    unknown: number;
-};
-
-/**
  * EvaluationCandidate
  *
  * Immutable validated Evaluation candidate.
@@ -1937,7 +1729,7 @@ export type FrozenSubmissionSchemaArtifactRef = {
 /**
  * Strongly typed UUIDv7 identifier for `BuildRequestId`.
  */
-export type FrozenSubmissionSchemaBuildRequestId = string;
+export type BuildRequestId = string;
 
 /**
  * Strongly typed UUIDv7 identifier for `CourseId`.
@@ -1953,7 +1745,7 @@ export type FrozenSubmissionSchemaEnvironmentId = string;
  * Frozen build and runtime identity used to reproduce collection.
  */
 export type FrozenEnvironmentIdentity = {
-    buildRequestId?: FrozenSubmissionSchemaBuildRequestId | null;
+    buildRequestId?: BuildRequestId | null;
     environmentId: FrozenSubmissionSchemaEnvironmentId;
     environmentRevision: FrozenSubmissionSchemaRevision;
     releaseId: FrozenSubmissionSchemaReleaseId;
@@ -2175,11 +1967,11 @@ export type CreateEnvironmentRequestSchemaReleaseId = string;
  */
 export type CreateEnvironmentTemplateReleaseRequestSchema = {
     approvalId: CreateEnvironmentTemplateReleaseRequestSchemaApprovalId;
-    artifact: CreateEnvironmentTemplateReleaseRequestSchemaImageArtifact;
+    artifact: ImageArtifact;
     candidateId: CreateEnvironmentTemplateReleaseRequestSchemaCandidateId;
     candidateRevision: CreateEnvironmentTemplateReleaseRequestSchemaRevision;
     environmentSpecSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
-    imagePolicyEvaluation: CreateEnvironmentTemplateReleaseRequestSchemaImagePolicyEvaluation;
+    imagePolicyEvaluation: ImagePolicyEvaluation;
     runtimeKind: CreateEnvironmentTemplateReleaseRequestSchemaRuntimeKind;
 };
 
@@ -2236,36 +2028,36 @@ export type CreateEnvironmentTemplateReleaseRequestSchemaCandidateId = string;
 /**
  * Complete immutable runtime artifact identity.
  */
-export type CreateEnvironmentTemplateReleaseRequestSchemaImageArtifact = {
+export type ImageArtifact = {
     build_request_id: CreateEnvironmentTemplateReleaseRequestSchemaBuildRequestId;
     digest: string;
-    id: CreateEnvironmentTemplateReleaseRequestSchemaImageArtifactId;
+    id: ImageArtifactId;
     immutable_tag: string;
     kind: 'container';
     provenance: CreateEnvironmentTemplateReleaseRequestSchemaArtifactRef;
     repository: string;
     sbom: CreateEnvironmentTemplateReleaseRequestSchemaArtifactRef;
-    signature: CreateEnvironmentTemplateReleaseRequestSchemaSigstoreEvidence;
+    signature: SigstoreEvidence;
 } | {
     base_disk: CreateEnvironmentTemplateReleaseRequestSchemaArtifactRef;
-    format: CreateEnvironmentTemplateReleaseRequestSchemaVirtualMachineDiskFormat;
-    id: CreateEnvironmentTemplateReleaseRequestSchemaImageArtifactId;
+    format: VirtualMachineDiskFormat;
+    id: ImageArtifactId;
     kind: 'virtual_machine';
     provenance: CreateEnvironmentTemplateReleaseRequestSchemaArtifactRef;
     sbom: CreateEnvironmentTemplateReleaseRequestSchemaArtifactRef;
-    signature: CreateEnvironmentTemplateReleaseRequestSchemaSigstoreEvidence;
+    signature: SigstoreEvidence;
 };
 
 /**
  * Strongly typed UUIDv7 identifier for `ImageArtifactId`.
  */
-export type CreateEnvironmentTemplateReleaseRequestSchemaImageArtifactId = string;
+export type ImageArtifactId = string;
 
 /**
  * Deterministic scan and trust-policy evaluation.
  */
-export type CreateEnvironmentTemplateReleaseRequestSchemaImagePolicyEvaluation = {
-    artifactId: CreateEnvironmentTemplateReleaseRequestSchemaImageArtifactId;
+export type ImagePolicyEvaluation = {
+    artifactId: ImageArtifactId;
     artifactSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
     evaluatedAt: CreateEnvironmentTemplateReleaseRequestSchemaUtcTimestamp;
     expectedCertificateSubject: string;
@@ -2281,7 +2073,7 @@ export type CreateEnvironmentTemplateReleaseRequestSchemaImagePolicyEvaluation =
     scannerVersion: string;
     trustBundleSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
     validUntil: CreateEnvironmentTemplateReleaseRequestSchemaUtcTimestamp;
-    vulnerabilities: CreateEnvironmentTemplateReleaseRequestSchemaVulnerabilitySummary;
+    vulnerabilities: VulnerabilitySummary;
 };
 
 /**
@@ -2307,7 +2099,7 @@ export type CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest = string;
 /**
  * Private Sigstore identity and transparency evidence.
  */
-export type CreateEnvironmentTemplateReleaseRequestSchemaSigstoreEvidence = {
+export type SigstoreEvidence = {
     certificateSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
     certificateSubject: string;
     ctLogId: string;
@@ -2329,12 +2121,12 @@ export type CreateEnvironmentTemplateReleaseRequestSchemaUtcTimestamp = string;
 /**
  * Supported VM base-disk encodings.
  */
-export type CreateEnvironmentTemplateReleaseRequestSchemaVirtualMachineDiskFormat = 'qcow2' | 'raw';
+export type VirtualMachineDiskFormat = 'qcow2' | 'raw';
 
 /**
  * Vulnerability counts by severity.
  */
-export type CreateEnvironmentTemplateReleaseRequestSchemaVulnerabilitySummary = {
+export type VulnerabilitySummary = {
     critical: number;
     high: number;
     low: number;
@@ -2870,6 +2662,234 @@ export type EnvironmentSummaryPageSchemaStreamSequence = string;
 export type EnvironmentSummaryPageSchemaUtcTimestamp = string;
 
 /**
+ * EnvironmentTemplateReleaseView
+ *
+ * Read model that keeps the immutable release separate from its append-only withdrawal fact.
+ */
+export type EnvironmentTemplateReleaseViewSchema = {
+    approval: CandidateApproval;
+    artifact: EnvironmentTemplateReleaseViewSchemaImageArtifact;
+    candidateId: EnvironmentTemplateReleaseViewSchemaCandidateId;
+    candidateRevision: EnvironmentTemplateReleaseViewSchemaRevision;
+    courseId: EnvironmentTemplateReleaseViewSchemaCourseId;
+    environmentSpecSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
+    id: EnvironmentTemplateReleaseViewSchemaReleaseId;
+    imagePolicyEvaluation: EnvironmentTemplateReleaseViewSchemaImagePolicyEvaluation;
+    publishedAt: EnvironmentTemplateReleaseViewSchemaUtcTimestamp;
+    publishedBy: EnvironmentTemplateReleaseViewSchemaActorId;
+    runtimeKind: EnvironmentTemplateReleaseViewSchemaRuntimeKind;
+    version: number;
+    withdrawal?: ReleaseWithdrawal | null;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type EnvironmentTemplateReleaseViewSchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ApprovalId`.
+ */
+export type EnvironmentTemplateReleaseViewSchemaApprovalId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ArtifactId`.
+ */
+export type EnvironmentTemplateReleaseViewSchemaArtifactId = string;
+
+/**
+ * Immutable object-store identity without a machine-local path or credential.
+ */
+export type EnvironmentTemplateReleaseViewSchemaArtifactRef = {
+    /**
+     * Stable metadata identity resolved by the owning service.
+     */
+    artifactId: EnvironmentTemplateReleaseViewSchemaArtifactId;
+    /**
+     * Registered media type.
+     */
+    mediaType: string;
+    /**
+     * Immutable backend object version.
+     */
+    objectVersion: string;
+    /**
+     * Exact content digest.
+     */
+    sha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
+    /**
+     * Raw object length.
+     */
+    sizeBytes: number;
+    /**
+     * Explicit object-store binding from deployment configuration.
+     */
+    storeBinding: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `BuildRequestId`.
+ */
+export type EnvironmentTemplateReleaseViewSchemaBuildRequestId = string;
+
+/**
+ * Human decision bound to an exact candidate and dependency identity.
+ */
+export type CandidateApproval = {
+    actorId: EnvironmentTemplateReleaseViewSchemaActorId;
+    candidateId: EnvironmentTemplateReleaseViewSchemaCandidateId;
+    candidateRevision: EnvironmentTemplateReleaseViewSchemaRevision;
+    candidateSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
+    decidedAt: EnvironmentTemplateReleaseViewSchemaUtcTimestamp;
+    decision: EnvironmentTemplateReleaseViewSchemaCandidateDecision;
+    id: EnvironmentTemplateReleaseViewSchemaApprovalId;
+    policyRevision: EnvironmentTemplateReleaseViewSchemaRevision;
+    reason: string;
+    schemaSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
+    trustRevision: EnvironmentTemplateReleaseViewSchemaRevision;
+};
+
+/**
+ * Append-only candidate decision.
+ */
+export type EnvironmentTemplateReleaseViewSchemaCandidateDecision = 'approved' | 'rejected' | 'withdrawn';
+
+/**
+ * Strongly typed UUIDv7 identifier for `CandidateId`.
+ */
+export type EnvironmentTemplateReleaseViewSchemaCandidateId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type EnvironmentTemplateReleaseViewSchemaCourseId = string;
+
+/**
+ * Complete immutable runtime artifact identity.
+ */
+export type EnvironmentTemplateReleaseViewSchemaImageArtifact = {
+    build_request_id: EnvironmentTemplateReleaseViewSchemaBuildRequestId;
+    digest: string;
+    id: EnvironmentTemplateReleaseViewSchemaImageArtifactId;
+    immutable_tag: string;
+    kind: 'container';
+    provenance: EnvironmentTemplateReleaseViewSchemaArtifactRef;
+    repository: string;
+    sbom: EnvironmentTemplateReleaseViewSchemaArtifactRef;
+    signature: EnvironmentTemplateReleaseViewSchemaSigstoreEvidence;
+} | {
+    base_disk: EnvironmentTemplateReleaseViewSchemaArtifactRef;
+    format: EnvironmentTemplateReleaseViewSchemaVirtualMachineDiskFormat;
+    id: EnvironmentTemplateReleaseViewSchemaImageArtifactId;
+    kind: 'virtual_machine';
+    provenance: EnvironmentTemplateReleaseViewSchemaArtifactRef;
+    sbom: EnvironmentTemplateReleaseViewSchemaArtifactRef;
+    signature: EnvironmentTemplateReleaseViewSchemaSigstoreEvidence;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ImageArtifactId`.
+ */
+export type EnvironmentTemplateReleaseViewSchemaImageArtifactId = string;
+
+/**
+ * Deterministic scan and trust-policy evaluation.
+ */
+export type EnvironmentTemplateReleaseViewSchemaImagePolicyEvaluation = {
+    artifactId: EnvironmentTemplateReleaseViewSchemaImageArtifactId;
+    artifactSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
+    evaluatedAt: EnvironmentTemplateReleaseViewSchemaUtcTimestamp;
+    expectedCertificateSubject: string;
+    expectedFulcioIssuer: string;
+    maxEvidenceAgeMilliseconds: number;
+    passed: boolean;
+    policyId: EnvironmentTemplateReleaseViewSchemaPolicyId;
+    policyRevision: EnvironmentTemplateReleaseViewSchemaRevision;
+    requireCtSct: boolean;
+    requireRekorInclusion: boolean;
+    scannerDatabaseSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
+    scannerName: string;
+    scannerVersion: string;
+    trustBundleSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
+    validUntil: EnvironmentTemplateReleaseViewSchemaUtcTimestamp;
+    vulnerabilities: EnvironmentTemplateReleaseViewSchemaVulnerabilitySummary;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `PolicyId`.
+ */
+export type EnvironmentTemplateReleaseViewSchemaPolicyId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ReleaseId`.
+ */
+export type EnvironmentTemplateReleaseViewSchemaReleaseId = string;
+
+/**
+ * Append-only release withdrawal fact.
+ */
+export type ReleaseWithdrawal = {
+    actorId: EnvironmentTemplateReleaseViewSchemaActorId;
+    reasonCode: string;
+    releaseId: EnvironmentTemplateReleaseViewSchemaReleaseId;
+    releaseVersion: number;
+    withdrawnAt: EnvironmentTemplateReleaseViewSchemaUtcTimestamp;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type EnvironmentTemplateReleaseViewSchemaRevision = number;
+
+/**
+ * Runtime kind shared by candidates, releases, and instances.
+ */
+export type EnvironmentTemplateReleaseViewSchemaRuntimeKind = 'container' | 'virtual_machine';
+
+/**
+ * Canonical lowercase SHA-256 digest.
+ */
+export type EnvironmentTemplateReleaseViewSchemaSha256Digest = string;
+
+/**
+ * Private Sigstore identity and transparency evidence.
+ */
+export type EnvironmentTemplateReleaseViewSchemaSigstoreEvidence = {
+    certificateSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
+    certificateSubject: string;
+    ctLogId: string;
+    fulcioIssuer: string;
+    rekorInclusionProofSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
+    rekorLogId: string;
+    rekorLogIndex: number;
+    sctSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
+    signatureSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
+    trustBundleSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
+    verifiedAt: EnvironmentTemplateReleaseViewSchemaUtcTimestamp;
+};
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type EnvironmentTemplateReleaseViewSchemaUtcTimestamp = string;
+
+/**
+ * Supported VM base-disk encodings.
+ */
+export type EnvironmentTemplateReleaseViewSchemaVirtualMachineDiskFormat = 'qcow2' | 'raw';
+
+/**
+ * Vulnerability counts by severity.
+ */
+export type EnvironmentTemplateReleaseViewSchemaVulnerabilitySummary = {
+    critical: number;
+    high: number;
+    low: number;
+    medium: number;
+    unknown: number;
+};
+
+/**
  * FreezeSubmissionRequest
  */
 export type FreezeSubmissionRequestSchema = {
@@ -2912,6 +2932,1059 @@ export type SubmissionManifest = {
  * Source available to a bounded Collector.
  */
 export type SubmissionSource = 'workspace' | 'system_facts';
+
+/**
+ * InternalAgentRunMutationRequest
+ *
+ * Revision precondition for Control-to-Agent cancellation and retry mutations.
+ */
+export type InternalAgentRunMutationRequestSchema = {
+    /**
+     * Exact course authority that owns the target run.
+     */
+    courseId: InternalAgentRunMutationRequestSchemaCourseId;
+    /**
+     * Exact Agent-owned run revision observed by Control.
+     */
+    expectedRevision: InternalAgentRunMutationRequestSchemaRevision;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type InternalAgentRunMutationRequestSchemaCourseId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type InternalAgentRunMutationRequestSchemaRevision = number;
+
+/**
+ * InternalAgentRunOutcome
+ *
+ * Terminal or in-progress Agent result used to rebuild Control projections after replay.
+ */
+export type InternalAgentRunOutcomeSchema = {
+    /**
+     * Validated Environment candidate, if that track succeeded.
+     */
+    environmentCandidate?: EnvironmentCandidate | null;
+    /**
+     * Validated Evaluation candidate, if that track succeeded.
+     */
+    evaluationCandidate?: EvaluationCandidate | null;
+    /**
+     * Canonical hash over this response, excluding this field.
+     */
+    outcomeSha256: InternalAgentRunOutcomeSchemaSha256Digest;
+    /**
+     * Authoritative aggregate.
+     */
+    run: AgentRun;
+};
+
+/**
+ * Preserve the advisory failure without changing deterministic results.
+ */
+export type InternalAgentRunOutcomeSchemaAdvisoryFailurePolicy = 'continue_advisory';
+
+/**
+ * Emit a `goal-review/v1` assessment.
+ */
+export type InternalAgentRunOutcomeSchemaAdvisoryOutputMode = 'goal_assessment';
+
+/**
+ * Reviews allowlisted submission paths without producing a score.
+ */
+export type InternalAgentRunOutcomeSchemaAdvisoryRunnerSpec = {
+    /**
+     * Submission-relative paths visible to the LLM.
+     */
+    include: Array<string>;
+    kind: 'llm_review';
+    /**
+     * Versioned advisory output shape.
+     */
+    outputMode: InternalAgentRunOutcomeSchemaAdvisoryOutputMode;
+    /**
+     * Immutable advisory rubric locator.
+     */
+    rubric: string;
+};
+
+/**
+ * One append-only attempt in an Agent track.
+ */
+export type InternalAgentRunOutcomeSchemaAgentAttempt = {
+    checkpoint?: InternalAgentRunOutcomeSchemaArtifactRef | null;
+    diagnosticCode?: string | null;
+    inputSha256: InternalAgentRunOutcomeSchemaSha256Digest;
+    number: number;
+    outputSha256?: InternalAgentRunOutcomeSchemaSha256Digest | null;
+    state: InternalAgentRunOutcomeSchemaAgentAttemptState;
+    usage: InternalAgentRunOutcomeSchemaLlmUsage;
+    /**
+     * Whether a terminal provider envelope made this usage observable.
+     */
+    usageObserved: boolean;
+};
+
+/**
+ * State of one immutable Agent attempt.
+ */
+export type InternalAgentRunOutcomeSchemaAgentAttemptState = 'pending' | 'running' | 'repairing' | 'succeeded' | 'failed' | 'cancelled';
+
+/**
+ * One idempotent, auditable dual-candidate Agent run.
+ */
+export type AgentRun = {
+    courseId: InternalAgentRunOutcomeSchemaCourseId;
+    id: InternalAgentRunOutcomeSchemaAgentRunId;
+    packageId: InternalAgentRunOutcomeSchemaProblemPackageId;
+    policyId: InternalAgentRunOutcomeSchemaPolicyId;
+    policyRevision: InternalAgentRunOutcomeSchemaRevision;
+    requestedRuntime: InternalAgentRunOutcomeSchemaRuntimeKind;
+    revision: InternalAgentRunOutcomeSchemaRevision;
+    state: InternalAgentRunOutcomeSchemaAgentRunState;
+    tracks: Array<InternalAgentRunOutcomeSchemaAgentTrack>;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `AgentRunId`.
+ */
+export type InternalAgentRunOutcomeSchemaAgentRunId = string;
+
+/**
+ * Aggregate AgentRun state derived from both tracks.
+ */
+export type InternalAgentRunOutcomeSchemaAgentRunState = 'requested' | 'running' | 'partially_succeeded' | 'succeeded' | 'failed' | 'cancelling' | 'cancelled';
+
+/**
+ * Independent track and its retained attempts.
+ */
+export type InternalAgentRunOutcomeSchemaAgentTrack = {
+    attempts: Array<InternalAgentRunOutcomeSchemaAgentAttempt>;
+    candidateId?: InternalAgentRunOutcomeSchemaCandidateId | null;
+    kind: InternalAgentRunOutcomeSchemaAgentTrackKind;
+};
+
+/**
+ * Independent Agent track.
+ */
+export type InternalAgentRunOutcomeSchemaAgentTrackKind = 'environment' | 'evaluation';
+
+/**
+ * Required Gate status used by deterministic aggregation.
+ */
+export type InternalAgentRunOutcomeSchemaAggregationGate = {
+    requiredStatus: InternalAgentRunOutcomeSchemaRequiredStatus;
+    step: string;
+};
+
+/**
+ * Checked sum of deterministic Score steps.
+ */
+export type InternalAgentRunOutcomeSchemaAggregationKind = 'deterministic_sum';
+
+/**
+ * Pure deterministic score aggregation contract.
+ */
+export type InternalAgentRunOutcomeSchemaAggregationSpec = {
+    gates: Array<InternalAgentRunOutcomeSchemaAggregationGate>;
+    kind: InternalAgentRunOutcomeSchemaAggregationKind;
+    maxScore: number;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ArtifactId`.
+ */
+export type InternalAgentRunOutcomeSchemaArtifactId = string;
+
+/**
+ * Immutable object-store identity without a machine-local path or credential.
+ */
+export type InternalAgentRunOutcomeSchemaArtifactRef = {
+    /**
+     * Stable metadata identity resolved by the owning service.
+     */
+    artifactId: InternalAgentRunOutcomeSchemaArtifactId;
+    /**
+     * Registered media type.
+     */
+    mediaType: string;
+    /**
+     * Immutable backend object version.
+     */
+    objectVersion: string;
+    /**
+     * Exact content digest.
+     */
+    sha256: InternalAgentRunOutcomeSchemaSha256Digest;
+    /**
+     * Raw object length.
+     */
+    sizeBytes: number;
+    /**
+     * Explicit object-store binding from deployment configuration.
+     */
+    storeBinding: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `CandidateId`.
+ */
+export type InternalAgentRunOutcomeSchemaCandidateId = string;
+
+/**
+ * Deterministic Checker configurations frozen for v1.
+ */
+export type InternalAgentRunOutcomeSchemaCheckerSpec = {
+    kind: 'exact';
+} | {
+    kind: 'token';
+} | {
+    /**
+     * Required exit code.
+     */
+    expected: number;
+    kind: 'exit_code';
+} | {
+    kind: 'json_schema';
+    /**
+     * Immutable schema locator.
+     */
+    schemaRef: string;
+} | {
+    /**
+     * Required service state.
+     */
+    expected: InternalAgentRunOutcomeSchemaExpectedServiceState;
+    kind: 'service_state';
+    /**
+     * Stable service name.
+     */
+    service: string;
+};
+
+/**
+ * Supported P0 submission collectors.
+ */
+export type InternalAgentRunOutcomeSchemaCollectorSpec = {
+    /**
+     * Excluded submission-relative paths.
+     */
+    exclude?: Array<string>;
+    /**
+     * Included submission-relative paths.
+     */
+    include: Array<string>;
+    kind: 'workspace_snapshot';
+    /**
+     * Maximum collected bytes.
+     */
+    maxBytes: number;
+} | {
+    /**
+     * Named facts to collect.
+     */
+    facts: Array<string>;
+    kind: 'system_facts';
+    /**
+     * Maximum collected bytes.
+     */
+    maxBytes: number;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type InternalAgentRunOutcomeSchemaCourseId = string;
+
+/**
+ * Deterministic Runner configurations frozen for P0 OJ and Linux evaluation.
+ */
+export type InternalAgentRunOutcomeSchemaDeterministicRunnerSpec = {
+    kind: 'file_assertion';
+    /**
+     * Required submission-relative files.
+     */
+    requiredFiles: Array<string>;
+} | {
+    /**
+     * Submission-relative program input.
+     */
+    input: string;
+    kind: 'program';
+    /**
+     * Mandatory execution limits.
+     */
+    limits: InternalAgentRunOutcomeSchemaExecutionLimits;
+    /**
+     * Compile or test phase.
+     */
+    phase: InternalAgentRunOutcomeSchemaProgramPhase;
+    /**
+     * Deterministic test groups used by the test phase.
+     */
+    testGroups?: Array<InternalAgentRunOutcomeSchemaTestGroup>;
+    /**
+     * Explicit approved toolchain binding.
+     */
+    toolchainProfile: string;
+} | {
+    /**
+     * Facts expected from the probe.
+     */
+    assertions: Array<InternalAgentRunOutcomeSchemaFactAssertion>;
+    kind: 'ansible_probe';
+    /**
+     * Modules requested from the frozen P0 allowlist.
+     */
+    moduleAllowlist: Array<string>;
+    /**
+     * Explicit approved playbook binding.
+     */
+    playbookProfile: string;
+    /**
+     * Must remain true in v1.
+     */
+    readOnly: boolean;
+};
+
+/**
+ * Supported controlled protocols.
+ */
+export type InternalAgentRunOutcomeSchemaEndpointProtocol = 'http' | 'https' | 'ssh';
+
+export type InternalAgentRunOutcomeSchemaEnvironmentApiVersion = 'environment.labweaver.io/v1';
+
+/**
+ * Immutable validated Environment candidate.
+ */
+export type EnvironmentCandidate = {
+    createdAt: InternalAgentRunOutcomeSchemaUtcTimestamp;
+    id: InternalAgentRunOutcomeSchemaCandidateId;
+    model: string;
+    policyRevision: InternalAgentRunOutcomeSchemaRevision;
+    revision: InternalAgentRunOutcomeSchemaRevision;
+    runId: InternalAgentRunOutcomeSchemaAgentRunId;
+    schemaSha256: InternalAgentRunOutcomeSchemaSha256Digest;
+    spec: InternalAgentRunOutcomeSchemaEnvironmentSpec;
+    specSha256: InternalAgentRunOutcomeSchemaSha256Digest;
+};
+
+/**
+ * Environment business class retained from the v2.1 architecture.
+ */
+export type InternalAgentRunOutcomeSchemaEnvironmentClass = 'experiment' | 'work';
+
+export type InternalAgentRunOutcomeSchemaEnvironmentDocumentKind = 'EnvironmentSpec';
+
+/**
+ * One named service entry exposed only through the controlled access plane.
+ */
+export type InternalAgentRunOutcomeSchemaEnvironmentEntrySpec = {
+    name: string;
+    protocol: InternalAgentRunOutcomeSchemaEndpointProtocol;
+    servicePort: number;
+};
+
+/**
+ * Strict runtime-specific environment shape.
+ */
+export type InternalAgentRunOutcomeSchemaEnvironmentRuntimeSpec = {
+    base_image_digest: string;
+    build_context: InternalAgentRunOutcomeSchemaArtifactRef;
+    kind: 'container';
+    provider_binding: string;
+    service_port: number;
+} | {
+    base_disk: InternalAgentRunOutcomeSchemaArtifactRef;
+    kind: 'virtual_machine';
+    provider_binding: string;
+    ssh_port: number;
+    storage_class_binding: string;
+};
+
+/**
+ * Runtime-independent minimum security posture.
+ */
+export type InternalAgentRunOutcomeSchemaEnvironmentSecuritySpec = {
+    privilegeEscalationPolicy: InternalAgentRunOutcomeSchemaPrivilegeEscalationPolicy;
+    publicExposurePolicy: InternalAgentRunOutcomeSchemaPublicExposurePolicy;
+    rootFilesystemPolicy: InternalAgentRunOutcomeSchemaRootFilesystemPolicy;
+    securityProfileBinding: string;
+    userPolicy: InternalAgentRunOutcomeSchemaRuntimeUserPolicy;
+};
+
+/**
+ * Stable EnvironmentSpec v1.
+ */
+export type InternalAgentRunOutcomeSchemaEnvironmentSpec = {
+    apiVersion: InternalAgentRunOutcomeSchemaEnvironmentApiVersion;
+    class: InternalAgentRunOutcomeSchemaEnvironmentClass;
+    entries: Array<InternalAgentRunOutcomeSchemaEnvironmentEntrySpec>;
+    kind: InternalAgentRunOutcomeSchemaEnvironmentDocumentKind;
+    name: string;
+    network: InternalAgentRunOutcomeSchemaNetworkPolicySpec;
+    resources: InternalAgentRunOutcomeSchemaResourceRequirements;
+    retention: InternalAgentRunOutcomeSchemaRetentionSnapshot;
+    runtime: InternalAgentRunOutcomeSchemaEnvironmentRuntimeSpec;
+    security: InternalAgentRunOutcomeSchemaEnvironmentSecuritySpec;
+};
+
+export type InternalAgentRunOutcomeSchemaEvaluationApiVersion = 'evaluation.labweaver.io/v1';
+
+/**
+ * Submission, step, aggregation, and review decomposition of an evaluation.
+ */
+export type InternalAgentRunOutcomeSchemaEvaluationBody = {
+    aggregation: InternalAgentRunOutcomeSchemaAggregationSpec;
+    review: InternalAgentRunOutcomeSchemaReviewPolicy;
+    steps: Array<InternalAgentRunOutcomeSchemaEvaluationStep>;
+    submission: InternalAgentRunOutcomeSchemaSubmissionSpec;
+};
+
+/**
+ * Immutable validated Evaluation candidate.
+ */
+export type EvaluationCandidate = {
+    createdAt: InternalAgentRunOutcomeSchemaUtcTimestamp;
+    id: InternalAgentRunOutcomeSchemaCandidateId;
+    model: string;
+    policyRevision: InternalAgentRunOutcomeSchemaRevision;
+    revision: InternalAgentRunOutcomeSchemaRevision;
+    runId: InternalAgentRunOutcomeSchemaAgentRunId;
+    schemaSha256: InternalAgentRunOutcomeSchemaSha256Digest;
+    spec: InternalAgentRunOutcomeSchemaEvaluationSpec;
+    specSha256: InternalAgentRunOutcomeSchemaSha256Digest;
+};
+
+export type InternalAgentRunOutcomeSchemaEvaluationKind = 'EvaluationSpec';
+
+/**
+ * Stable name and version of an evaluation definition.
+ */
+export type InternalAgentRunOutcomeSchemaEvaluationMetadata = {
+    name: string;
+    version: string;
+};
+
+/**
+ * Versioned evaluation definition shared by OJ and Linux system experiments.
+ */
+export type InternalAgentRunOutcomeSchemaEvaluationSpec = {
+    apiVersion: InternalAgentRunOutcomeSchemaEvaluationApiVersion;
+    kind: InternalAgentRunOutcomeSchemaEvaluationKind;
+    metadata: InternalAgentRunOutcomeSchemaEvaluationMetadata;
+    spec: InternalAgentRunOutcomeSchemaEvaluationBody;
+};
+
+/**
+ * A role-specific evaluation step.
+ */
+export type InternalAgentRunOutcomeSchemaEvaluationStep = {
+    checker: InternalAgentRunOutcomeSchemaCheckerSpec;
+    dependsOn?: Array<string>;
+    failurePolicy: InternalAgentRunOutcomeSchemaGateFailurePolicy;
+    id: string;
+    role: 'gate';
+    runner: InternalAgentRunOutcomeSchemaDeterministicRunnerSpec;
+} | {
+    checker: InternalAgentRunOutcomeSchemaCheckerSpec;
+    dependsOn?: Array<string>;
+    failurePolicy: InternalAgentRunOutcomeSchemaScoreFailurePolicy;
+    id: string;
+    role: 'score';
+    runner: InternalAgentRunOutcomeSchemaDeterministicRunnerSpec;
+    score: InternalAgentRunOutcomeSchemaScoreSpec;
+} | {
+    dependsOn?: Array<string>;
+    failurePolicy: InternalAgentRunOutcomeSchemaAdvisoryFailurePolicy;
+    id: string;
+    role: 'advisory';
+    runner: InternalAgentRunOutcomeSchemaAdvisoryRunnerSpec;
+};
+
+/**
+ * Resource and output limits for a program Runner.
+ */
+export type InternalAgentRunOutcomeSchemaExecutionLimits = {
+    memoryBytes: number;
+    outputBytes: number;
+    wallTimeSeconds: number;
+};
+
+/**
+ * Expected state of a system service.
+ */
+export type InternalAgentRunOutcomeSchemaExpectedServiceState = 'active' | 'inactive';
+
+/**
+ * Expected fact emitted by a Linux probe.
+ */
+export type InternalAgentRunOutcomeSchemaFactAssertion = {
+    fact: string;
+};
+
+/**
+ * Stop downstream deterministic execution.
+ */
+export type InternalAgentRunOutcomeSchemaGateFailurePolicy = 'stop';
+
+/**
+ * Frozen LLM usage for one attempt.
+ */
+export type InternalAgentRunOutcomeSchemaLlmUsage = {
+    costMicrousd: number;
+    inputTokens: number;
+    outputTokens: number;
+    requests: number;
+};
+
+/**
+ * Conditions that force manual teacher review.
+ */
+export type InternalAgentRunOutcomeSchemaManualReviewReason = 'infrastructureError' | 'invalidEvidence';
+
+/**
+ * Network egress posture for a published environment.
+ */
+export type InternalAgentRunOutcomeSchemaNetworkPolicySpec = {
+    mode: 'deny_all';
+} | {
+    mode: 'restricted';
+    policy_binding: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `PolicyId`.
+ */
+export type InternalAgentRunOutcomeSchemaPolicyId = string;
+
+export type InternalAgentRunOutcomeSchemaPrivilegeEscalationPolicy = 'deny';
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProblemPackageId`.
+ */
+export type InternalAgentRunOutcomeSchemaProblemPackageId = string;
+
+/**
+ * Approved program Runner phase.
+ */
+export type InternalAgentRunOutcomeSchemaProgramPhase = 'compile' | 'test';
+
+export type InternalAgentRunOutcomeSchemaPublicExposurePolicy = 'deny';
+
+/**
+ * The Gate must pass.
+ */
+export type InternalAgentRunOutcomeSchemaRequiredStatus = 'passed';
+
+/**
+ * Bounded runtime resources expressed without Kubernetes-dependent parsing.
+ */
+export type InternalAgentRunOutcomeSchemaResourceRequirements = {
+    cpuMillicores: number;
+    memoryBytes: number;
+    storageBytes: number;
+};
+
+/**
+ * Retention classes with distinct privacy and recovery requirements.
+ */
+export type InternalAgentRunOutcomeSchemaRetentionClass = 'course_material' | 'build_evidence' | 'run_evidence' | 'student_submission' | 'security_audit';
+
+/**
+ * Required action after retention expires.
+ */
+export type InternalAgentRunOutcomeSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt';
+
+/**
+ * Frozen data-retention decision for an immutable resource.
+ */
+export type InternalAgentRunOutcomeSchemaRetentionSnapshot = {
+    /**
+     * Stable retention class.
+     */
+    class: InternalAgentRunOutcomeSchemaRetentionClass;
+    /**
+     * Required terminal disposition.
+     */
+    disposition: InternalAgentRunOutcomeSchemaRetentionDisposition;
+    /**
+     * Policy identity.
+     */
+    policyId: InternalAgentRunOutcomeSchemaPolicyId;
+    /**
+     * Exact policy revision used at creation.
+     */
+    policyRevision: InternalAgentRunOutcomeSchemaRevision;
+    /**
+     * Absolute retention boundary.
+     */
+    retainUntil: InternalAgentRunOutcomeSchemaUtcTimestamp;
+};
+
+/**
+ * Mandatory approval and manual-review policy.
+ */
+export type InternalAgentRunOutcomeSchemaReviewPolicy = {
+    forceManualWhen: Array<InternalAgentRunOutcomeSchemaManualReviewReason>;
+    teacherApprovalRequiredForRelease: true;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type InternalAgentRunOutcomeSchemaRevision = number;
+
+export type InternalAgentRunOutcomeSchemaRootFilesystemPolicy = 'read_only_required' | 'mutable_required';
+
+/**
+ * Runtime kind shared by candidates, releases, and instances.
+ */
+export type InternalAgentRunOutcomeSchemaRuntimeKind = 'container' | 'virtual_machine';
+
+export type InternalAgentRunOutcomeSchemaRuntimeUserPolicy = 'non_root_required';
+
+/**
+ * Failure behavior for a Score step.
+ */
+export type InternalAgentRunOutcomeSchemaScoreFailurePolicy = 'stop' | 'continue';
+
+/**
+ * Maximum contribution of a deterministic Score step.
+ */
+export type InternalAgentRunOutcomeSchemaScoreSpec = {
+    max: number;
+};
+
+/**
+ * Canonical lowercase SHA-256 digest.
+ */
+export type InternalAgentRunOutcomeSchemaSha256Digest = string;
+
+/**
+ * Submission collection boundary used before evaluation starts.
+ */
+export type InternalAgentRunOutcomeSchemaSubmissionSpec = {
+    collector: InternalAgentRunOutcomeSchemaCollectorSpec;
+    llmReadable: Array<string>;
+};
+
+/**
+ * One deterministic program test group.
+ */
+export type InternalAgentRunOutcomeSchemaTestGroup = {
+    maxPoints: number;
+    name: string;
+    source: string;
+};
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type InternalAgentRunOutcomeSchemaUtcTimestamp = string;
+
+/**
+ * InternalCreateAgentRunRequest
+ *
+ * Control-to-Agent command carried only over an allowlisted mTLS service identity.
+ */
+export type InternalCreateAgentRunRequestSchema = {
+    /**
+     * Authoritative route course.
+     */
+    courseId: InternalCreateAgentRunRequestSchemaCourseId;
+    /**
+     * Internal artifact ID to opaque object-key mapping; keys never contain original paths.
+     */
+    objectLocators: {
+        [key: string]: string;
+    };
+    /**
+     * Completed Control-owned package; Agent re-reads and re-hashes every object.
+     */
+    package: ProblemPackage;
+    /**
+     * Active immutable course policy.
+     */
+    policy: CourseLlmEgressPolicy;
+    /**
+     * Public immutable request whose idempotency key remains an HTTP header.
+     */
+    request: CreateAgentRunRequest;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ArtifactId`.
+ */
+export type InternalCreateAgentRunRequestSchemaArtifactId = string;
+
+/**
+ * Immutable object-store identity without a machine-local path or credential.
+ */
+export type InternalCreateAgentRunRequestSchemaArtifactRef = {
+    /**
+     * Stable metadata identity resolved by the owning service.
+     */
+    artifactId: InternalCreateAgentRunRequestSchemaArtifactId;
+    /**
+     * Registered media type.
+     */
+    mediaType: string;
+    /**
+     * Immutable backend object version.
+     */
+    objectVersion: string;
+    /**
+     * Exact content digest.
+     */
+    sha256: InternalCreateAgentRunRequestSchemaSha256Digest;
+    /**
+     * Raw object length.
+     */
+    sizeBytes: number;
+    /**
+     * Explicit object-store binding from deployment configuration.
+     */
+    storeBinding: string;
+};
+
+/**
+ * Immutable Claude Code worker binding.
+ *
+ * Provider-specific transport and authentication remain deployment-owned Claude Code
+ * configuration. The contract binds only a sanitized profile identity, exact model, CLI version,
+ * worker image, effective non-secret runtime configuration hash, and per-worker admission limit.
+ */
+export type InternalCreateAgentRunRequestSchemaClaudeCodeBindingV1 = {
+    /**
+     * Exact Claude Code CLI version baked into the worker image.
+     */
+    claudeCodeVersion: string;
+    /**
+     * Maximum concurrent Claude Code child processes admitted by one worker instance.
+     */
+    maxInFlightPerWorker: number;
+    /**
+     * Exact model identifier passed to Claude Code; moving aliases are rejected.
+     */
+    model: string;
+    /**
+     * Deployment-owned opaque runtime profile; never a credential or endpoint URL.
+     */
+    runtimeBinding: string;
+    /**
+     * Hash of the effective sanitized Claude Code runtime configuration.
+     */
+    runtimeConfigSha256: InternalCreateAgentRunRequestSchemaSha256Digest;
+    /**
+     * Immutable SHA-256 identity of the worker container image.
+     */
+    workerImageSha256: InternalCreateAgentRunRequestSchemaSha256Digest;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type InternalCreateAgentRunRequestSchemaCourseId = string;
+
+/**
+ * Versioned course policy governing all LLM egress.
+ */
+export type CourseLlmEgressPolicy = {
+    activatedAt: InternalCreateAgentRunRequestSchemaUtcTimestamp;
+    binding: InternalCreateAgentRunRequestSchemaClaudeCodeBindingV1;
+    budget: InternalCreateAgentRunRequestSchemaLlmBudget;
+    courseId: InternalCreateAgentRunRequestSchemaCourseId;
+    deniedDataClasses: Array<InternalCreateAgentRunRequestSchemaDeniedDataClass>;
+    id: InternalCreateAgentRunRequestSchemaPolicyId;
+    revision: InternalCreateAgentRunRequestSchemaRevision;
+    studentContentMode: InternalCreateAgentRunRequestSchemaStudentContentMode;
+};
+
+export type CreateAgentRunRequest = {
+    packageId: InternalCreateAgentRunRequestSchemaProblemPackageId;
+    packageRevision: InternalCreateAgentRunRequestSchemaRevision;
+    packageSha256: InternalCreateAgentRunRequestSchemaSha256Digest;
+    policyId: InternalCreateAgentRunRequestSchemaPolicyId;
+    policyRevision: InternalCreateAgentRunRequestSchemaRevision;
+    requestedRuntime: InternalCreateAgentRunRequestSchemaRuntimeKind;
+};
+
+/**
+ * Non-overridable content classifications at the LLM boundary.
+ */
+export type InternalCreateAgentRunRequestSchemaDeniedDataClass = 'secret' | 'token' | 'private_key' | 'personally_identifiable_information' | 'unallowlisted_student_submission';
+
+/**
+ * Per-attempt bounded LLM budget.
+ */
+export type InternalCreateAgentRunRequestSchemaLlmBudget = {
+    maxCostMicrousd: number;
+    maxInputTokens: number;
+    maxOutputTokens: number;
+    maxRequests: number;
+    maxSchemaRepairs: number;
+    maxTransientRetries: number;
+    timeoutMilliseconds: number;
+};
+
+/**
+ * One immutable file in a teacher ProblemPackage.
+ */
+export type PackageFile = {
+    /**
+     * Immutable object reference.
+     */
+    object: InternalCreateAgentRunRequestSchemaArtifactRef;
+    /**
+     * Normalized package-relative file path.
+     */
+    path: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `PolicyId`.
+ */
+export type InternalCreateAgentRunRequestSchemaPolicyId = string;
+
+/**
+ * Immutable, atomically completed teacher material package.
+ */
+export type ProblemPackage = {
+    completedAt: InternalCreateAgentRunRequestSchemaUtcTimestamp;
+    courseId: InternalCreateAgentRunRequestSchemaCourseId;
+    files: Array<PackageFile>;
+    id: InternalCreateAgentRunRequestSchemaProblemPackageId;
+    manifestSha256: InternalCreateAgentRunRequestSchemaSha256Digest;
+    retention: InternalCreateAgentRunRequestSchemaRetentionSnapshot;
+    revision: InternalCreateAgentRunRequestSchemaRevision;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProblemPackageId`.
+ */
+export type InternalCreateAgentRunRequestSchemaProblemPackageId = string;
+
+/**
+ * Retention classes with distinct privacy and recovery requirements.
+ */
+export type InternalCreateAgentRunRequestSchemaRetentionClass = 'course_material' | 'build_evidence' | 'run_evidence' | 'student_submission' | 'security_audit';
+
+/**
+ * Required action after retention expires.
+ */
+export type InternalCreateAgentRunRequestSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt';
+
+/**
+ * Frozen data-retention decision for an immutable resource.
+ */
+export type InternalCreateAgentRunRequestSchemaRetentionSnapshot = {
+    /**
+     * Stable retention class.
+     */
+    class: InternalCreateAgentRunRequestSchemaRetentionClass;
+    /**
+     * Required terminal disposition.
+     */
+    disposition: InternalCreateAgentRunRequestSchemaRetentionDisposition;
+    /**
+     * Policy identity.
+     */
+    policyId: InternalCreateAgentRunRequestSchemaPolicyId;
+    /**
+     * Exact policy revision used at creation.
+     */
+    policyRevision: InternalCreateAgentRunRequestSchemaRevision;
+    /**
+     * Absolute retention boundary.
+     */
+    retainUntil: InternalCreateAgentRunRequestSchemaUtcTimestamp;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type InternalCreateAgentRunRequestSchemaRevision = number;
+
+/**
+ * Runtime kind shared by candidates, releases, and instances.
+ */
+export type InternalCreateAgentRunRequestSchemaRuntimeKind = 'container' | 'virtual_machine';
+
+/**
+ * Canonical lowercase SHA-256 digest.
+ */
+export type InternalCreateAgentRunRequestSchemaSha256Digest = string;
+
+/**
+ * Only explicit SubmissionManifest paths may disclose student content.
+ */
+export type InternalCreateAgentRunRequestSchemaStudentContentMode = 'manifest_allowlist_only';
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type InternalCreateAgentRunRequestSchemaUtcTimestamp = string;
+
+/**
+ * InternalImageArtifactResolution
+ *
+ * Agent-owned artifact and policy evaluation resolved for Control publication.
+ */
+export type InternalImageArtifactResolutionSchema = {
+    artifact: InternalImageArtifactResolutionSchemaImageArtifact;
+    artifactId: InternalImageArtifactResolutionSchemaImageArtifactId;
+    policyEvaluation: InternalImageArtifactResolutionSchemaImagePolicyEvaluation;
+    resolutionSha256: InternalImageArtifactResolutionSchemaSha256Digest;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ArtifactId`.
+ */
+export type InternalImageArtifactResolutionSchemaArtifactId = string;
+
+/**
+ * Immutable object-store identity without a machine-local path or credential.
+ */
+export type InternalImageArtifactResolutionSchemaArtifactRef = {
+    /**
+     * Stable metadata identity resolved by the owning service.
+     */
+    artifactId: InternalImageArtifactResolutionSchemaArtifactId;
+    /**
+     * Registered media type.
+     */
+    mediaType: string;
+    /**
+     * Immutable backend object version.
+     */
+    objectVersion: string;
+    /**
+     * Exact content digest.
+     */
+    sha256: InternalImageArtifactResolutionSchemaSha256Digest;
+    /**
+     * Raw object length.
+     */
+    sizeBytes: number;
+    /**
+     * Explicit object-store binding from deployment configuration.
+     */
+    storeBinding: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `BuildRequestId`.
+ */
+export type InternalImageArtifactResolutionSchemaBuildRequestId = string;
+
+/**
+ * Complete immutable runtime artifact identity.
+ */
+export type InternalImageArtifactResolutionSchemaImageArtifact = {
+    build_request_id: InternalImageArtifactResolutionSchemaBuildRequestId;
+    digest: string;
+    id: InternalImageArtifactResolutionSchemaImageArtifactId;
+    immutable_tag: string;
+    kind: 'container';
+    provenance: InternalImageArtifactResolutionSchemaArtifactRef;
+    repository: string;
+    sbom: InternalImageArtifactResolutionSchemaArtifactRef;
+    signature: InternalImageArtifactResolutionSchemaSigstoreEvidence;
+} | {
+    base_disk: InternalImageArtifactResolutionSchemaArtifactRef;
+    format: InternalImageArtifactResolutionSchemaVirtualMachineDiskFormat;
+    id: InternalImageArtifactResolutionSchemaImageArtifactId;
+    kind: 'virtual_machine';
+    provenance: InternalImageArtifactResolutionSchemaArtifactRef;
+    sbom: InternalImageArtifactResolutionSchemaArtifactRef;
+    signature: InternalImageArtifactResolutionSchemaSigstoreEvidence;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ImageArtifactId`.
+ */
+export type InternalImageArtifactResolutionSchemaImageArtifactId = string;
+
+/**
+ * Deterministic scan and trust-policy evaluation.
+ */
+export type InternalImageArtifactResolutionSchemaImagePolicyEvaluation = {
+    artifactId: InternalImageArtifactResolutionSchemaImageArtifactId;
+    artifactSha256: InternalImageArtifactResolutionSchemaSha256Digest;
+    evaluatedAt: InternalImageArtifactResolutionSchemaUtcTimestamp;
+    expectedCertificateSubject: string;
+    expectedFulcioIssuer: string;
+    maxEvidenceAgeMilliseconds: number;
+    passed: boolean;
+    policyId: InternalImageArtifactResolutionSchemaPolicyId;
+    policyRevision: InternalImageArtifactResolutionSchemaRevision;
+    requireCtSct: boolean;
+    requireRekorInclusion: boolean;
+    scannerDatabaseSha256: InternalImageArtifactResolutionSchemaSha256Digest;
+    scannerName: string;
+    scannerVersion: string;
+    trustBundleSha256: InternalImageArtifactResolutionSchemaSha256Digest;
+    validUntil: InternalImageArtifactResolutionSchemaUtcTimestamp;
+    vulnerabilities: InternalImageArtifactResolutionSchemaVulnerabilitySummary;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `PolicyId`.
+ */
+export type InternalImageArtifactResolutionSchemaPolicyId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type InternalImageArtifactResolutionSchemaRevision = number;
+
+/**
+ * Canonical lowercase SHA-256 digest.
+ */
+export type InternalImageArtifactResolutionSchemaSha256Digest = string;
+
+/**
+ * Private Sigstore identity and transparency evidence.
+ */
+export type InternalImageArtifactResolutionSchemaSigstoreEvidence = {
+    certificateSha256: InternalImageArtifactResolutionSchemaSha256Digest;
+    certificateSubject: string;
+    ctLogId: string;
+    fulcioIssuer: string;
+    rekorInclusionProofSha256: InternalImageArtifactResolutionSchemaSha256Digest;
+    rekorLogId: string;
+    rekorLogIndex: number;
+    sctSha256: InternalImageArtifactResolutionSchemaSha256Digest;
+    signatureSha256: InternalImageArtifactResolutionSchemaSha256Digest;
+    trustBundleSha256: InternalImageArtifactResolutionSchemaSha256Digest;
+    verifiedAt: InternalImageArtifactResolutionSchemaUtcTimestamp;
+};
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type InternalImageArtifactResolutionSchemaUtcTimestamp = string;
+
+/**
+ * Supported VM base-disk encodings.
+ */
+export type InternalImageArtifactResolutionSchemaVirtualMachineDiskFormat = 'qcow2' | 'raw';
+
+/**
+ * Vulnerability counts by severity.
+ */
+export type InternalImageArtifactResolutionSchemaVulnerabilitySummary = {
+    critical: number;
+    high: number;
+    low: number;
+    medium: number;
+    unknown: number;
+};
 
 /**
  * ProblemPackageUploadSession
@@ -2983,6 +4056,18 @@ export type RevokeAccessGrantRequestSchema = {
 export type RevokeAccessGrantRequestSchemaAccessGrantId = string;
 
 /**
+ * WithdrawEnvironmentTemplateReleaseRequest
+ *
+ * Append-only reason supplied when withdrawing an immutable release.
+ */
+export type WithdrawEnvironmentTemplateReleaseRequestSchema = {
+    /**
+     * Stable reviewed reason code; free-form sensitive text is not accepted.
+     */
+    reasonCode: string;
+};
+
+/**
  * ProblemPackage
  *
  * Immutable, atomically completed teacher material package.
@@ -2990,7 +4075,7 @@ export type RevokeAccessGrantRequestSchemaAccessGrantId = string;
 export type ProblemPackageSchema = {
     completedAt: ProblemPackageSchemaUtcTimestamp;
     courseId: ProblemPackageSchemaCourseId;
-    files: Array<PackageFile>;
+    files: Array<ProblemPackageSchemaPackageFile>;
     id: ProblemPackageSchemaProblemPackageId;
     manifestSha256: ProblemPackageSchemaSha256Digest;
     retention: ProblemPackageSchemaRetentionSnapshot;
@@ -3040,7 +4125,7 @@ export type ProblemPackageSchemaCourseId = string;
 /**
  * One immutable file in a teacher ProblemPackage.
  */
-export type PackageFile = {
+export type ProblemPackageSchemaPackageFile = {
     /**
      * Immutable object reference.
      */
@@ -3837,7 +4922,7 @@ export type ListEnvironmentTemplateReleasesResponses = {
      * Successful response
      */
     200: {
-        items: Array<EnvironmentTemplateReleaseSchema>;
+        items: Array<EnvironmentTemplateReleaseViewSchema>;
         nextCursor?: string | null;
     };
 };
@@ -3977,13 +5062,13 @@ export type GetEnvironmentTemplateReleaseResponses = {
     /**
      * Successful response
      */
-    200: EnvironmentTemplateReleaseSchema;
+    200: EnvironmentTemplateReleaseViewSchema;
 };
 
 export type GetEnvironmentTemplateReleaseResponse = GetEnvironmentTemplateReleaseResponses[keyof GetEnvironmentTemplateReleaseResponses];
 
 export type WithdrawEnvironmentTemplateReleaseData = {
-    body?: never;
+    body: WithdrawEnvironmentTemplateReleaseRequestSchema;
     headers: {
         'Idempotency-Key': string;
         'If-Match': string;

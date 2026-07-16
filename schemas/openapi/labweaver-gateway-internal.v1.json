@@ -25,6 +25,18 @@
       "CsrfTokenResponse": {
         "$ref": "../contracts/v1/csrf-token-response.schema.json"
       },
+      "InternalAgentRunMutationRequest": {
+        "$ref": "../contracts/v1/http/internal-agent-run-mutation-request.schema.json"
+      },
+      "InternalAgentRunOutcome": {
+        "$ref": "../contracts/v1/http/internal-agent-run-outcome.schema.json"
+      },
+      "InternalCreateAgentRunRequest": {
+        "$ref": "../contracts/v1/http/internal-create-agent-run-request.schema.json"
+      },
+      "InternalImageArtifactResolution": {
+        "$ref": "../contracts/v1/http/internal-image-artifact-resolution.schema.json"
+      },
       "OperationAccepted": {
         "additionalProperties": false,
         "properties": {
@@ -134,6 +146,269 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/internal/v1/agent-runs": {
+      "post": {
+        "operationId": "createInternalAgentRun",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 16,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InternalCreateAgentRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./agent-run.schema.json"
+                }
+              }
+            },
+            "description": "AgentRun accepted"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceMtls": []
+          }
+        ],
+        "summary": "Reserve an Agent-owned run from a Control-verified immutable package and policy"
+      }
+    },
+    "/internal/v1/agent-runs/{runId}": {
+      "get": {
+        "operationId": "getInternalAgentRun",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "runId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./agent-run.schema.json"
+                }
+              }
+            },
+            "description": "Authoritative AgentRun"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceMtls": []
+          }
+        ],
+        "summary": "Read the authoritative Agent-owned run"
+      }
+    },
+    "/internal/v1/agent-runs/{runId}/cancel": {
+      "post": {
+        "operationId": "cancelInternalAgentRun",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "runId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 16,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InternalAgentRunMutationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./agent-run.schema.json"
+                }
+              }
+            },
+            "description": "Updated authoritative AgentRun"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceMtls": []
+          }
+        ],
+        "summary": "Request cancellation at an exact AgentRun revision"
+      }
+    },
+    "/internal/v1/agent-runs/{runId}/outcome": {
+      "get": {
+        "operationId": "getInternalAgentRunOutcome",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "runId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalAgentRunOutcome"
+                }
+              }
+            },
+            "description": "Authoritative outcome"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceMtls": []
+          }
+        ],
+        "summary": "Resolve the authoritative run and retained candidate checkpoints"
+      }
+    },
+    "/internal/v1/agent-runs/{runId}/tracks/{track}/retry": {
+      "post": {
+        "operationId": "retryInternalAgentRunTrack",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "runId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "track",
+            "required": true,
+            "schema": {
+              "enum": [
+                "environment",
+                "evaluation"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 16,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InternalAgentRunMutationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./agent-run.schema.json"
+                }
+              }
+            },
+            "description": "Updated authoritative AgentRun"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceMtls": []
+          }
+        ],
+        "summary": "Retry one failed AgentRun track at an exact revision"
+      }
+    },
     "/internal/v1/auth/decision": {
       "post": {
         "operationId": "decideAuthorization",
@@ -275,6 +550,46 @@
         "x-labweaver-retryable": true,
         "x-labweaver-scope": "service",
         "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/internal/v1/image-artifacts/{artifactId}": {
+      "get": {
+        "operationId": "resolveInternalImageArtifact",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "artifactId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalImageArtifactResolution"
+                }
+              }
+            },
+            "description": "Authoritative artifact resolution"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceMtls": []
+          }
+        ],
+        "summary": "Resolve one Agent-owned verified artifact identity"
       }
     },
     "/internal/v1/sessions": {
