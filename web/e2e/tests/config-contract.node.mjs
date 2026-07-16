@@ -25,6 +25,7 @@ test('role projects are uniquely derived from the authoritative definition', () 
   assert.equal(config.projects.some((project) => project.use?.storageState === '.auth/researcher.json'), false)
   assert.equal(ROLE_PROJECTS_BY_NAME['platform-admin'].aliases.includes('admin'), true)
   assert.equal(config.forbidOnly, true)
+  assert.match(config.outputDir, /^\.\/test-results(?:\/(live|fixture))?$/)
 })
 
 test('configuration contract retains failure artifacts and reports E1 only', async () => {

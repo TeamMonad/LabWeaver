@@ -54,7 +54,7 @@ export async function validateConfiguration({ requirementsBaselineHead } = {}) {
   diagnostic(config.use.screenshot === 'only-on-failure', 'PW_TRACE_RETENTION_DISABLED', diagnostics)
   diagnostic(config.use.video === 'retain-on-failure', 'PW_TRACE_RETENTION_DISABLED', diagnostics)
   diagnostic(config.forbidOnly === true, 'PW_PROJECT_SET_INVALID', diagnostics)
-  diagnostic(config.outputDir === './test-results', 'PW_PROJECT_SET_INVALID', diagnostics)
+  diagnostic(/^\.\/test-results(?:\/(live|fixture))?$/.test(config.outputDir), 'PW_PROJECT_SET_INVALID', diagnostics)
   diagnostic(!requirementsBaselineHead || requirementsBaselineHead === REQUIREMENTS_BASELINE.head, 'PW_REQUIREMENTS_BASELINE_CHANGED', diagnostics)
   const fixedSleeps = await findFixedSleeps()
   if (fixedSleeps.length > 0) diagnostics.push('PW_FIXED_SLEEP_DETECTED')
