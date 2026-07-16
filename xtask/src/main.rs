@@ -9,6 +9,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 #[cfg(target_os = "linux")]
 use sha2::{Digest, Sha256};
 
+mod platform_images;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "cargo xtask",
@@ -50,8 +52,8 @@ enum Command {
     DevDeps(ConfirmArgs),
     Migrate(ConfirmArgs),
     Dev(ConfirmArgs),
-    Package,
-    PackageValidate,
+    Package(PackageArgs),
+    PackageValidate(PackageValidateArgs),
     ReleaseGate,
     #[command(subcommand)]
     Contracts(ContractsCommand),
@@ -79,6 +81,34 @@ struct EnvironmentArgs {
     infra: bool,
     #[arg(long)]
     yes: bool,
+    #[arg(long)]
+    package_manifest: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct PackageArgs {
+    #[arg(long)]
+    env: String,
+    #[arg(long)]
+    release: String,
+    #[arg(long)]
+    yes: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum PackageValidationMode {
+    Static,
+    Connected,
+}
+
+#[derive(Debug, Args)]
+struct PackageValidateArgs {
+    #[arg(long)]
+    manifest: PathBuf,
+    #[arg(long, value_enum)]
+    mode: PackageValidationMode,
+    #[arg(long, required_if_eq("mode", "connected"))]
+    env: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -216,6 +246,10 @@ enum AppError {
     ContractDrift {
         path: String,
     },
+    PlatformImage {
+        code: &'static str,
+        detail: String,
+    },
     InvalidArgument {
         role: &'static str,
     },
@@ -233,6 +267,7 @@ impl AppError {
             Self::ConfirmationRequired { .. } => "XTASK_CONFIRMATION_REQUIRED",
             Self::Io { .. } => "XTASK_IO_FAILED",
             Self::ContractDrift { .. } => "LW_CONTRACT_DRIFT",
+            Self::PlatformImage { code, .. } => code,
             Self::InvalidArgument { .. } => "XTASK_INVALID_ARGUMENT",
             #[cfg(not(target_os = "linux"))]
             Self::UnsupportedPlatform { .. } => "XTASK_INFRA_UNSUPPORTED_PLATFORM",
@@ -266,6 +301,7 @@ impl Display for AppError {
             Self::ContractDrift { path } => {
                 write!(formatter, "generated contract differs from {path}")
             }
+            Self::PlatformImage { code, detail } => write!(formatter, "{code}: {detail}"),
             Self::InvalidArgument { role } => {
                 write!(
                     formatter,
@@ -339,7 +375,12 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::PrivateSigstore(args) => private_sigstore(&args),
         Command::IdentityFoundation(args) => identity_foundation(&args),
         Command::Upgrade(args) => destructive_not_implemented("upgrade", args.yes),
-        Command::Rollback(args) => destructive_not_implemented("rollback", args.yes),
+        Command::Rollback(args) => platform_images::rollback(
+            &args.env,
+            &args.release_revision,
+            args.yes,
+            &repository_root(),
+        ),
         Command::Restore(args) => destructive_not_implemented("restore", args.yes),
         Command::Destroy(args) => destructive_not_implemented("destroy", args.yes),
         Command::Demo(command) => match command {
@@ -353,8 +394,15 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::DevDeps(args) => destructive_not_implemented("dev-deps", args.yes),
         Command::Migrate(args) => destructive_not_implemented("migrate", args.yes),
         Command::Dev(args) => destructive_not_implemented("dev", args.yes),
-        Command::Package => not_implemented("package"),
-        Command::PackageValidate => not_implemented("package-validate"),
+        Command::Package(args) => {
+            platform_images::package(&args.env, &args.release, args.yes, &repository_root())
+        }
+        Command::PackageValidate(args) => platform_images::validate(
+            &args.manifest,
+            args.mode == PackageValidationMode::Connected,
+            args.env.as_deref(),
+            &repository_root(),
+        ),
         Command::ReleaseGate => not_implemented("release-gate"),
         Command::Contracts(ContractsCommand::Generate) => contracts_generate(),
         Command::Contracts(ContractsCommand::Check) => contracts_check(),
@@ -442,7 +490,18 @@ fn deploy(args: &EnvironmentArgs) -> Result<(), AppError> {
         return Err(AppError::ConfirmationRequired { command: "deploy" });
     }
     if !args.infra {
-        return not_implemented(format!("deploy --env {} (product deployment)", args.env));
+        let manifest = args
+            .package_manifest
+            .as_deref()
+            .ok_or(AppError::InvalidArgument {
+                role: "product deployment package manifest",
+            })?;
+        return platform_images::deploy(&args.env, manifest, &repository_root());
+    }
+    if args.package_manifest.is_some() {
+        return Err(AppError::InvalidArgument {
+            role: "infrastructure deployment does not accept --package-manifest",
+        });
     }
     validate_environment_name(&args.env)?;
     run_infrastructure(&args.env, "95-harbor.yml", "deploy --infra")
@@ -1171,6 +1230,7 @@ mod tests {
                 env: env.into(),
                 infra,
                 yes,
+                package_manifest: None,
             },
             action: PrivateSigstoreAction::Deploy,
         }
@@ -1182,6 +1242,7 @@ mod tests {
                 env: env.into(),
                 infra,
                 yes,
+                package_manifest: None,
             },
             action: IdentityFoundationAction::Deploy,
         }
@@ -1193,6 +1254,7 @@ mod tests {
             env: "dev".into(),
             infra: true,
             yes: false,
+            package_manifest: None,
         }) else {
             return Err("an infrastructure deployment without --yes must fail".into());
         };
@@ -1226,21 +1288,25 @@ mod tests {
     }
 
     #[test]
-    fn product_deploy_never_selects_the_infrastructure_path() -> Result<(), String> {
+    fn product_deploy_requires_an_explicit_verified_manifest() -> Result<(), String> {
         let Err(error) = deploy(&EnvironmentArgs {
             env: "dev".into(),
             infra: false,
             yes: true,
+            package_manifest: None,
         }) else {
             return Err(
                 "a product deployment must not silently run infrastructure reconciliation".into(),
             );
         };
 
-        if error.diagnostic_code() != "XTASK_NOT_IMPLEMENTED" {
+        if error.diagnostic_code() != "XTASK_INVALID_ARGUMENT" {
             return Err("unexpected product deployment diagnostic".into());
         }
-        if !error.to_string().contains("product deployment") {
+        if !error
+            .to_string()
+            .contains("product deployment package manifest")
+        {
             return Err("product deployment diagnostic omitted the product path".into());
         }
         Ok(())
@@ -1282,6 +1348,7 @@ mod tests {
             env: "dev".into(),
             infra: true,
             yes: true,
+            package_manifest: None,
         }) else {
             return Err("non-Linux infrastructure deployment must fail".into());
         };

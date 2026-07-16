@@ -1,0 +1,177 @@
+{
+  "schema_version": "platform-image-package-manifest.v1",
+  "run_id": "pkg-fixture-0001",
+  "release_id": "fixture-0001",
+  "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "source_date_epoch": 1700000000,
+  "component_lock_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "platform": "linux/amd64",
+  "registry": "ghcr.io/teammonad",
+  "builder": {
+    "buildkit": "v0.31.1",
+    "buildx": "v0.35.0"
+  },
+  "trust": {
+    "bundle_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "revision": "fixture-trust-v1",
+    "issuer": "https://identity.invalid/realms/labweaver",
+    "subject": "system:serviceaccount:labweaver-build:platform-builder"
+  },
+  "images": [
+    {
+      "component": "access-service",
+      "reference": "ghcr.io/teammonad/labweaver-system/access-service@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "sbom": "oci://ghcr.io/teammonad/labweaver-system/access-service@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd#sbom-spdx",
+      "provenance": "oci://ghcr.io/teammonad/labweaver-system/access-service@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd#slsa-provenance",
+      "scan": {
+        "scanner": "trivy:0.72.0",
+        "database_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "critical": 0,
+        "high": 0,
+        "report": "oci://ghcr.io/teammonad/labweaver-system/access-service@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd#trivy-vulnerability-report",
+        "report_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "signature": {
+        "bundle": "oci://ghcr.io/teammonad/labweaver-system/access-service@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd#sigstore-bundle",
+        "certificate_identity": "system:serviceaccount:labweaver-build:platform-builder",
+        "certificate_oidc_issuer": "https://identity.invalid/realms/labweaver",
+        "transparency_log_verified": true,
+        "ct_verified": true
+      }
+    },
+    {
+      "component": "agent-service",
+      "reference": "ghcr.io/teammonad/labweaver-system/agent-service@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "sbom": "oci://ghcr.io/teammonad/labweaver-system/agent-service@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee#sbom-spdx",
+      "provenance": "oci://ghcr.io/teammonad/labweaver-system/agent-service@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee#slsa-provenance",
+      "scan": {
+        "scanner": "trivy:0.72.0",
+        "database_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "critical": 0,
+        "high": 1,
+        "report": "oci://ghcr.io/teammonad/labweaver-system/agent-service@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee#trivy-vulnerability-report",
+        "report_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "signature": {
+        "bundle": "oci://ghcr.io/teammonad/labweaver-system/agent-service@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee#sigstore-bundle",
+        "certificate_identity": "system:serviceaccount:labweaver-build:platform-builder",
+        "certificate_oidc_issuer": "https://identity.invalid/realms/labweaver",
+        "transparency_log_verified": true,
+        "ct_verified": true
+      }
+    },
+    {
+      "component": "control-service",
+      "reference": "ghcr.io/teammonad/labweaver-system/control-service@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "sbom": "oci://ghcr.io/teammonad/labweaver-system/control-service@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff#sbom-spdx",
+      "provenance": "oci://ghcr.io/teammonad/labweaver-system/control-service@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff#slsa-provenance",
+      "scan": {
+        "scanner": "trivy:0.72.0",
+        "database_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "critical": 0,
+        "high": 2,
+        "report": "oci://ghcr.io/teammonad/labweaver-system/control-service@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff#trivy-vulnerability-report",
+        "report_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "signature": {
+        "bundle": "oci://ghcr.io/teammonad/labweaver-system/control-service@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff#sigstore-bundle",
+        "certificate_identity": "system:serviceaccount:labweaver-build:platform-builder",
+        "certificate_oidc_issuer": "https://identity.invalid/realms/labweaver",
+        "transparency_log_verified": true,
+        "ct_verified": true
+      }
+    },
+    {
+      "component": "environment-service",
+      "reference": "ghcr.io/teammonad/labweaver-system/environment-service@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "sbom": "oci://ghcr.io/teammonad/labweaver-system/environment-service@sha256:3333333333333333333333333333333333333333333333333333333333333333#sbom-spdx",
+      "provenance": "oci://ghcr.io/teammonad/labweaver-system/environment-service@sha256:3333333333333333333333333333333333333333333333333333333333333333#slsa-provenance",
+      "scan": {
+        "scanner": "trivy:0.72.0",
+        "database_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "critical": 0,
+        "high": 3,
+        "report": "oci://ghcr.io/teammonad/labweaver-system/environment-service@sha256:3333333333333333333333333333333333333333333333333333333333333333#trivy-vulnerability-report",
+        "report_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "signature": {
+        "bundle": "oci://ghcr.io/teammonad/labweaver-system/environment-service@sha256:3333333333333333333333333333333333333333333333333333333333333333#sigstore-bundle",
+        "certificate_identity": "system:serviceaccount:labweaver-build:platform-builder",
+        "certificate_oidc_issuer": "https://identity.invalid/realms/labweaver",
+        "transparency_log_verified": true,
+        "ct_verified": true
+      }
+    },
+    {
+      "component": "evaluation-service",
+      "reference": "ghcr.io/teammonad/labweaver-system/evaluation-service@sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "sbom": "oci://ghcr.io/teammonad/labweaver-system/evaluation-service@sha256:4444444444444444444444444444444444444444444444444444444444444444#sbom-spdx",
+      "provenance": "oci://ghcr.io/teammonad/labweaver-system/evaluation-service@sha256:4444444444444444444444444444444444444444444444444444444444444444#slsa-provenance",
+      "scan": {
+        "scanner": "trivy:0.72.0",
+        "database_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "critical": 0,
+        "high": 4,
+        "report": "oci://ghcr.io/teammonad/labweaver-system/evaluation-service@sha256:4444444444444444444444444444444444444444444444444444444444444444#trivy-vulnerability-report",
+        "report_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "signature": {
+        "bundle": "oci://ghcr.io/teammonad/labweaver-system/evaluation-service@sha256:4444444444444444444444444444444444444444444444444444444444444444#sigstore-bundle",
+        "certificate_identity": "system:serviceaccount:labweaver-build:platform-builder",
+        "certificate_oidc_issuer": "https://identity.invalid/realms/labweaver",
+        "transparency_log_verified": true,
+        "ct_verified": true
+      }
+    },
+    {
+      "component": "resource-service",
+      "reference": "ghcr.io/teammonad/labweaver-system/resource-service@sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "sbom": "oci://ghcr.io/teammonad/labweaver-system/resource-service@sha256:5555555555555555555555555555555555555555555555555555555555555555#sbom-spdx",
+      "provenance": "oci://ghcr.io/teammonad/labweaver-system/resource-service@sha256:5555555555555555555555555555555555555555555555555555555555555555#slsa-provenance",
+      "scan": {
+        "scanner": "trivy:0.72.0",
+        "database_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "critical": 0,
+        "high": 5,
+        "report": "oci://ghcr.io/teammonad/labweaver-system/resource-service@sha256:5555555555555555555555555555555555555555555555555555555555555555#trivy-vulnerability-report",
+        "report_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "signature": {
+        "bundle": "oci://ghcr.io/teammonad/labweaver-system/resource-service@sha256:5555555555555555555555555555555555555555555555555555555555555555#sigstore-bundle",
+        "certificate_identity": "system:serviceaccount:labweaver-build:platform-builder",
+        "certificate_oidc_issuer": "https://identity.invalid/realms/labweaver",
+        "transparency_log_verified": true,
+        "ct_verified": true
+      }
+    },
+    {
+      "component": "web",
+      "reference": "ghcr.io/teammonad/labweaver-system/web@sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "sbom": "oci://ghcr.io/teammonad/labweaver-system/web@sha256:6666666666666666666666666666666666666666666666666666666666666666#sbom-spdx",
+      "provenance": "oci://ghcr.io/teammonad/labweaver-system/web@sha256:6666666666666666666666666666666666666666666666666666666666666666#slsa-provenance",
+      "scan": {
+        "scanner": "trivy:0.72.0",
+        "database_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "critical": 0,
+        "high": 6,
+        "report": "oci://ghcr.io/teammonad/labweaver-system/web@sha256:6666666666666666666666666666666666666666666666666666666666666666#trivy-vulnerability-report",
+        "report_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "signature": {
+        "bundle": "oci://ghcr.io/teammonad/labweaver-system/web@sha256:6666666666666666666666666666666666666666666666666666666666666666#sigstore-bundle",
+        "certificate_identity": "system:serviceaccount:labweaver-build:platform-builder",
+        "certificate_oidc_issuer": "https://identity.invalid/realms/labweaver",
+        "transparency_log_verified": true,
+        "ct_verified": true
+      }
+    }
+  ],
+  "overall": "passed"
+}

@@ -1,0 +1,20 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: labweaver-platform-image-shape-test
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: require-ghcr-digests
+      match:
+        any:
+          - resources:
+              kinds: ["Pod"]
+              namespaces: ["labweaver-system"]
+      validate:
+        message: Platform images must use the approved GitHub Packages namespace and an immutable digest.
+        foreach:
+          - list: request.object.spec.containers
+            pattern:
+              image: "ghcr.io/teammonad/labweaver-system/*@sha256:*"

@@ -421,6 +421,42 @@ TLS, NetworkPolicy, OIDC, SCT, Rekor inclusion and TUF has an independent status
 required check prevents overall `passed`. Until Keycloak, offline root and the
 private cluster are available, those E3 checks remain `blocked`/`not_run`.
 
+### Platform image supply-chain gates (Issue #62)
+
+PR/static gates run without GHCR write or signing credentials. They require
+`cargo fmt --all -- --check`, strict `cargo clippy -p xtask`, `cargo test -p
+xtask`, static package-manifest validation, seven two-pass image builds,
+secret/SBOM/Trivy checks, Helm lint/template, Kyverno tests and
+`git diff --check`. The component set is exact. Missing, duplicate, external,
+tag-only or conflicting digest entries fail. Critical vulnerabilities and
+secrets fail; every High finding remains in the report.
+
+Only a `develop` push whose complete static/build/scan matrix passed may enter
+the Actions GHCR publication job. That job uses the repository-scoped
+`GITHUB_TOKEN` with job-local `packages:write`, publishes an immutable
+`git-<source-commit>` tag for each exact component, reads back the subject
+digest, and never publishes `latest` or a package manifest. Pull requests and
+failed matrices must never execute it. The unsigned digest remains
+non-deployable until the controlled router completes private signing and proof
+verification.
+
+The controlled Linux router is the only connected execution authority.
+`package-validate --mode connected` must reread the GHCR subject manifest digest,
+BuildKit SBOM/provenance attestations, Trivy DB identity, private Sigstore
+certificate, SCT, Rekor inclusion and current or explicitly previous trust
+revision. A connected prerequisite failure never invokes static validation as
+a fallback, and a partial run never publishes the canonical package manifest.
+
+E3 begins with a read-only concurrency and infrastructure baseline. A possible
+impact on another deployment stops the run. The run-scoped namespace must then
+prove all seven real binaries and dependencies reach readiness, accepted exact
+identity/digest admission, rejection of unsigned, external, tag-only, wrong
+identity/trust and tampered-digest inputs, rollback to the previous still-valid
+verified manifest, and cleanup. The report binds one source commit, cluster UID,
+trust revision, package/deployment manifest pair and seven digests. Missing
+Issue #61 post-merge identity replay or production Config/Secret locators keeps
+the result blocked rather than fixture-backed.
+
 ### VM-01a E3 run
 
 Issue #15 has one current-run E3 artifact at source commit
