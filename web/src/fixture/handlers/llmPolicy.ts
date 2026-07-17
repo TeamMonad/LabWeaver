@@ -1,6 +1,7 @@
 import { problem } from '../diagnostics'
 import type { FixtureHandler } from '../types'
-import { getActivePolicy } from '../stores/llmPolicyStore'
+import { getActivePolicy, rotatePolicy } from '../stores/llmPolicyStore'
+import { consumePolicyRotation } from '../scenarioFlags'
 import { extractPathParam, requireActor, requireRole } from './index'
 
 export const getActiveCourseLlmPolicy: FixtureHandler = (req) => {
@@ -12,6 +13,13 @@ export const getActiveCourseLlmPolicy: FixtureHandler = (req) => {
 
   const roleCheck = requireRole(actorResult, 'llm_policy:read', { courseId })
   if (roleCheck !== true) return roleCheck
+
+  // Deterministic conflict scenario: rotate the policy revision once when the
+  // localStorage flag is set, so the next write sees a revision mismatch.
+  if (consumePolicyRotation()) {
+    const rotated = rotatePolicy(courseId)
+    if (rotated) return { status: 200, data: rotated }
+  }
 
   const policy = getActivePolicy(courseId)
   if (!policy) return problem(404, 'LLM_POLICY_NOT_FOUND', `课程 ${courseId} 没有生效中的 LLM 出站策略`, false)

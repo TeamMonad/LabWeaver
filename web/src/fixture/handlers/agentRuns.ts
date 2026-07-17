@@ -2,6 +2,7 @@ import type { CreateAgentRunRequestSchema } from '@/generated/contracts'
 import { problem } from '../diagnostics'
 import type { FixtureHandler } from '../types'
 import * as agentRunStore from '../stores/agentRunStore'
+import { consumeAgentRunPollFailure } from '../scenarioFlags'
 import { extractPathParam, parseIfMatchRevision, requireActor, requireIdempotencyKey, requireIfMatch, requireRole } from './index'
 
 export const createAgentRun: FixtureHandler = (req) => {
@@ -37,6 +38,11 @@ export const getAgentRun: FixtureHandler = (req) => {
 
   const roleCheck = requireRole(actorResult, 'agent_run:read', { courseId })
   if (roleCheck !== true) return roleCheck
+
+  // Deterministic transient failure scenario for poll-gap recovery demos.
+  if (consumeAgentRunPollFailure()) {
+    return problem(500, 'AGENT_RUN_POLL_TRANSIENT', 'AgentRun 状态刷新失败（fixture 模拟瞬时故障）', true)
+  }
 
   const run = agentRunStore.getAgentRun(courseId, runId)
   if (!run) return problem(404, 'AGENT_RUN_NOT_FOUND', `未找到 AgentRun ${runId}`, false)

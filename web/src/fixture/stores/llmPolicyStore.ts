@@ -51,6 +51,20 @@ export function getActivePolicy(courseId: string): CourseLlmEgressPolicySchema |
   return policies.get(courseId)
 }
 
+/** Rotates the active policy to a new revision, simulating a concurrent edit. */
+export function rotatePolicy(courseId: string): CourseLlmEgressPolicySchema | undefined {
+  const current = policies.get(courseId)
+  if (!current) return undefined
+  const next: CourseLlmEgressPolicySchema = {
+    ...current,
+    id: `policy-${courseId}`,
+    revision: current.revision + 1,
+    activatedAt: nowIso(),
+  }
+  policies.set(courseId, next)
+  return next
+}
+
 export function resetLlmPolicyStore(): void {
   policies.clear()
 }

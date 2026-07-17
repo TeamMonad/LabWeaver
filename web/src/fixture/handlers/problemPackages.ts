@@ -2,6 +2,8 @@ import type { CompleteProblemPackageUploadRequestSchema, CreateProblemPackageUpl
 import { problem } from '../diagnostics'
 import type { FixtureHandler } from '../types'
 import { completeUploadSession, createUploadSession } from '../stores/problemPackageStore'
+import { rotatePolicy } from '../stores/llmPolicyStore'
+import { consumePolicyRotation } from '../scenarioFlags'
 import { extractPathParam, parseIfMatchRevision, requireActor, requireIdempotencyKey, requireIfMatch, requireRole } from './index'
 
 export const createProblemPackageUpload: FixtureHandler = (req) => {
@@ -16,6 +18,12 @@ export const createProblemPackageUpload: FixtureHandler = (req) => {
 
   const idempotencyResult = requireIdempotencyKey(req)
   if (typeof idempotencyResult !== 'string') return idempotencyResult
+
+  // Deterministic conflict scenario: rotate the active policy once when the
+  // localStorage flag is set, so the client's stale revision is rejected.
+  if (consumePolicyRotation()) {
+    rotatePolicy(courseId)
+  }
 
   const body = req.body as CreateProblemPackageUploadRequestSchema
   const result = createUploadSession(courseId, body, idempotencyResult)

@@ -1,6 +1,7 @@
 import { ref, computed } from 'vue'
 import { UserManager, type User, WebStorageStateStore } from 'oidc-client-ts'
 import { OIDC_CONFIG, OIDC_ENABLED } from '@/config'
+import { IS_FIXTURE } from '@/config/dataMode'
 
 const userManager = OIDC_ENABLED
   ? new UserManager({
@@ -30,6 +31,12 @@ export function useAuth() {
       error.value = new Error('OIDC is not configured')
       return
     }
+    if (__IS_FIXTURE__ && IS_FIXTURE) {
+      // The fixture OIDC authority cannot complete a real redirect; the home
+      // page renders the deterministic fixture sign-in panel instead.
+      window.location.assign('/')
+      return
+    }
     isLoading.value = true
     try {
       await userManager.signinRedirect()
@@ -54,6 +61,13 @@ export function useAuth() {
 
   async function logout() {
     if (!userManager) return
+    if (__IS_FIXTURE__ && IS_FIXTURE) {
+      // Fixture identities live purely in localStorage; clear them locally
+      // instead of redirecting to the fake OIDC authority.
+      const { signOutFixtureDemo } = await import('@/fixture/devAuth')
+      signOutFixtureDemo()
+      return
+    }
     isLoading.value = true
     try {
       await userManager.signoutRedirect()

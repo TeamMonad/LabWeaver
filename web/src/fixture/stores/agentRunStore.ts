@@ -10,6 +10,8 @@ const POLLS_TO_TERMINAL = 2
 interface StoredAgentRun {
   run: AgentRunSchema
   polls: number
+  /** When true, the run transitions to `failed` the first time it reaches a terminal state. */
+  failsOnce?: boolean
 }
 
 const runs = new Map<string, StoredAgentRun>()
@@ -63,6 +65,10 @@ export function createAgentRun(
     return { kind: 'revision-mismatch', detail: 'LLM 出站策略 revision 已变化，请刷新后重试' }
   }
 
+  // Deterministic failure scenario: if the uploaded package contains a file
+  // whose path includes `__run-fail__`, the run fails once and can be retried.
+  const failsOnce = pkg.files.some((f) => f.path.includes('__run-fail__'))
+
   const run: AgentRunSchema = {
     id: nextUuid7('run'),
     courseId,
@@ -74,7 +80,7 @@ export function createAgentRun(
     state: 'running',
     tracks: [buildTrack('environment', 'running'), buildTrack('evaluation', 'running')],
   }
-  runs.set(run.id, { run, polls: 0 })
+  runs.set(run.id, { run, polls: 0, failsOnce })
   createIdempotency.set(idempotencyKey, run)
   return { kind: 'ok', run }
 }
@@ -90,9 +96,15 @@ function advance(stored: StoredAgentRun): void {
   if (run.state !== 'running') return
   stored.polls += 1
   if (stored.polls >= POLLS_TO_TERMINAL) {
-    run.state = 'succeeded'
-    run.revision = nextRevision()
-    run.tracks = [buildTrack('environment', 'succeeded'), buildTrack('evaluation', 'succeeded')]
+    if (stored.failsOnce) {
+      run.state = 'failed'
+      run.revision = nextRevision()
+      run.tracks = [buildTrack('environment', 'failed'), buildTrack('evaluation', 'failed')]
+    } else {
+      run.state = 'succeeded'
+      run.revision = nextRevision()
+      run.tracks = [buildTrack('environment', 'succeeded'), buildTrack('evaluation', 'succeeded')]
+    }
   }
 }
 
@@ -143,6 +155,8 @@ export function retryAgentRunTrack(
   stored.run.state = 'running'
   stored.run.revision = nextRevision()
   stored.polls = 0
+  // Retry clears the one-shot failure flag so the run can eventually succeed.
+  stored.failsOnce = false
   return stored.run
 }
 
