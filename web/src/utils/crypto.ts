@@ -6,7 +6,9 @@
  */
 
 export async function sha256Hex(input: ArrayBuffer | Uint8Array): Promise<string> {
-  const buffer = input instanceof Uint8Array ? input.buffer : input
+  // Uint8Array views may carry a byteOffset into a larger buffer; slice()
+  // copies the exact view range so only the intended bytes are hashed.
+  const buffer = input instanceof Uint8Array ? input.slice().buffer : input
   const digest = await crypto.subtle.digest('SHA-256', buffer)
   return Array.from(new Uint8Array(digest))
     .map((b) => b.toString(16).padStart(2, '0'))

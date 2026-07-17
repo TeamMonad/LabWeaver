@@ -220,7 +220,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { useCourseContext } from '@/composables/useCourseContext'
 import { useActiveCourseLlmPolicy } from '@/composables/useActiveCourseLlmPolicy'
 import { useProblemPackageUpload } from '@/composables/useProblemPackageUpload'
@@ -312,6 +312,13 @@ watch(() => agent.run.kind, (kind, oldKind) => {
   } else if (kind !== 'success') {
     disconnectEvents()
   }
+})
+
+// Release background work when leaving the page: stop the AgentRun poll
+// timer and close the SSE stream so neither outlives the view.
+onUnmounted(() => {
+  agent.stopPolling()
+  disconnectEvents()
 })
 </script>
 
