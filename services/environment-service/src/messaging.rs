@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -12,7 +13,9 @@ use contracts::environment::{
     EnvironmentLeaseVerificationResponse, EnvironmentLifecycleCommandData,
     EnvironmentOperationKind,
 };
-use contracts::events::{CloudEvent, EVENT_CONTRACTS, subjects};
+use contracts::events::{
+    CloudEvent, EVENT_CONTRACTS, ReleasePublishedV2, ReleaseWithdrawn, subjects,
+};
 use contracts::{EnvironmentId, EventId, OperationId, Revision, Sha256Digest};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -20,8 +23,9 @@ use serde_json::Value;
 
 use crate::{
     EnvironmentEventPublisher, EnvironmentProvider, InboundCommandDecision,
-    InboundLifecycleCommand, PgEnvironmentStore, ProviderFailure, ProviderFailureCode,
-    ProviderObservation, PublishFailure, ReconcileAction,
+    InboundLifecycleCommand, PgEnvironmentStore, PgReleaseProjectionStore, ProviderFailure,
+    ProviderFailureCode, ProviderObservation, PublishFailure, ReconcileAction,
+    ReleaseProjectionDecision,
 };
 
 const MAX_COMMAND_BYTES: usize = 1024 * 1024;
@@ -560,6 +564,206 @@ impl JetStreamCommandConsumer {
                 PublishMessage::build()
                     .payload(payload.into())
                     .message_id(format!("{payload_hash}:{diagnostic_code}")),
+            )
+            .await
+            .map_err(|_| NatsMessagingError::Quarantine)?;
+        acknowledgement
+            .await
+            .map_err(|_| NatsMessagingError::Quarantine)?;
+        Ok(())
+    }
+}
+
+/// Durable Control release consumer feeding the Environment-owned immutable projection.
+pub struct JetStreamReleaseConsumer {
+    consumer_name: String,
+    quarantine_subject: String,
+    context: async_nats::jetstream::Context,
+    messages: async_nats::jetstream::consumer::pull::Stream,
+}
+
+enum ReleaseEvent {
+    Published(Box<CloudEvent<ReleasePublishedV2>>),
+    Withdrawn(Box<CloudEvent<ReleaseWithdrawn>>),
+}
+
+impl JetStreamReleaseConsumer {
+    pub async fn bind(
+        client: async_nats::Client,
+        stream_name: &str,
+        consumer_name: &str,
+        quarantine_subject: &str,
+    ) -> Result<Self, NatsMessagingError> {
+        if !valid_token(stream_name)
+            || !valid_token(consumer_name)
+            || !valid_subject(quarantine_subject)
+        {
+            return Err(NatsMessagingError::Configuration);
+        }
+        let context = async_nats::jetstream::new(client);
+        let stream = context
+            .get_stream(stream_name)
+            .await
+            .map_err(|_| NatsMessagingError::StreamUnavailable)?;
+        let consumer: PullConsumer = stream
+            .get_consumer(consumer_name)
+            .await
+            .map_err(|_| NatsMessagingError::ConsumerUnavailable)?;
+        let expected_subjects = BTreeSet::from([
+            subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED_V2,
+            subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN,
+        ]);
+        let configured_subjects = consumer
+            .cached_info()
+            .config
+            .filter_subjects
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        if !consumer.cached_info().config.filter_subject.is_empty()
+            || configured_subjects != expected_subjects
+        {
+            return Err(NatsMessagingError::Configuration);
+        }
+        let messages = consumer
+            .messages()
+            .await
+            .map_err(|_| NatsMessagingError::ConsumerUnavailable)?;
+        Ok(Self {
+            consumer_name: consumer_name.to_owned(),
+            quarantine_subject: quarantine_subject.to_owned(),
+            context,
+            messages,
+        })
+    }
+
+    pub async fn process_next(
+        &mut self,
+        store: &PgReleaseProjectionStore,
+    ) -> Result<CommandConsumeOutcome, NatsMessagingError> {
+        let message = self
+            .messages
+            .next()
+            .await
+            .ok_or(NatsMessagingError::ConsumerClosed)?
+            .map_err(|_| NatsMessagingError::Receive)?;
+        if message.payload.len() > MAX_COMMAND_BYTES {
+            self.quarantine(&message, None, "LW_ENVIRONMENT_RELEASE_PAYLOAD_TOO_LARGE")
+                .await?;
+            message
+                .double_ack_with(AckKind::Term)
+                .await
+                .map_err(|_| NatsMessagingError::Acknowledge)?;
+            return Ok(CommandConsumeOutcome::Rejected);
+        }
+        let Ok(envelope): Result<Value, _> = serde_json::from_slice(&message.payload) else {
+            self.quarantine(&message, None, "LW_ENVIRONMENT_RELEASE_PAYLOAD_INVALID")
+                .await?;
+            message
+                .double_ack_with(AckKind::Term)
+                .await
+                .map_err(|_| NatsMessagingError::Acknowledge)?;
+            return Ok(CommandConsumeOutcome::Rejected);
+        };
+        let subject = envelope.get("subject").and_then(Value::as_str);
+        let parsed = match subject {
+            Some(subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED_V2) => {
+                serde_json::from_value::<CloudEvent<ReleasePublishedV2>>(envelope)
+                    .map(|event| (event.id, ReleaseEvent::Published(Box::new(event))))
+            }
+            Some(subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN) => {
+                serde_json::from_value::<CloudEvent<ReleaseWithdrawn>>(envelope)
+                    .map(|event| (event.id, ReleaseEvent::Withdrawn(Box::new(event))))
+            }
+            _ => Err(serde_json::Error::io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unsupported release subject",
+            ))),
+        };
+        let Ok((event_id, event)) = parsed else {
+            self.quarantine(&message, None, "LW_ENVIRONMENT_RELEASE_PAYLOAD_INVALID")
+                .await?;
+            message
+                .double_ack_with(AckKind::Term)
+                .await
+                .map_err(|_| NatsMessagingError::Acknowledge)?;
+            return Ok(CommandConsumeOutcome::Rejected);
+        };
+        let decision = match &event {
+            ReleaseEvent::Published(event) => store.accept(&self.consumer_name, event).await,
+            ReleaseEvent::Withdrawn(event) => {
+                store.accept_withdrawal(&self.consumer_name, event).await
+            }
+        };
+        match decision {
+            Ok(ReleaseProjectionDecision::Applied) => {
+                message
+                    .double_ack()
+                    .await
+                    .map_err(|_| NatsMessagingError::Acknowledge)?;
+                Ok(CommandConsumeOutcome::Applied)
+            }
+            Ok(ReleaseProjectionDecision::Duplicate | ReleaseProjectionDecision::Stale) => {
+                message
+                    .double_ack()
+                    .await
+                    .map_err(|_| NatsMessagingError::Acknowledge)?;
+                Ok(CommandConsumeOutcome::Ignored)
+            }
+            Ok(ReleaseProjectionDecision::Gap) => {
+                message
+                    .ack_with(AckKind::Nak(Some(REDELIVERY_DELAY)))
+                    .await
+                    .map_err(|_| NatsMessagingError::Acknowledge)?;
+                Ok(CommandConsumeOutcome::Deferred)
+            }
+            Err(
+                crate::ReleaseProjectionError::Database(_)
+                | crate::ReleaseProjectionError::PersistenceFailed,
+            ) => {
+                message
+                    .ack_with(AckKind::Nak(Some(REDELIVERY_DELAY)))
+                    .await
+                    .map_err(|_| NatsMessagingError::Acknowledge)?;
+                Ok(CommandConsumeOutcome::Deferred)
+            }
+            Err(_) => {
+                self.quarantine(&message, Some(event_id), "LW_ENVIRONMENT_RELEASE_REJECTED")
+                    .await?;
+                message
+                    .double_ack_with(AckKind::Term)
+                    .await
+                    .map_err(|_| NatsMessagingError::Acknowledge)?;
+                Ok(CommandConsumeOutcome::Rejected)
+            }
+        }
+    }
+
+    async fn quarantine(
+        &self,
+        message: &async_nats::jetstream::Message,
+        event_id: Option<EventId>,
+        diagnostic_code: &'static str,
+    ) -> Result<(), NatsMessagingError> {
+        let payload_sha256 = Sha256Digest::of_bytes(&message.payload);
+        let record = QuarantineRecord {
+            version: 1,
+            consumer: &self.consumer_name,
+            source_subject: message.subject.as_str(),
+            event_id,
+            payload_sha256,
+            size_bytes: u64::try_from(message.payload.len())
+                .map_err(|_| NatsMessagingError::Quarantine)?,
+            diagnostic_code,
+        };
+        let payload = serde_json::to_vec(&record).map_err(|_| NatsMessagingError::Quarantine)?;
+        let acknowledgement = self
+            .context
+            .send_publish(
+                self.quarantine_subject.clone(),
+                PublishMessage::build()
+                    .payload(payload.into())
+                    .message_id(format!("{payload_sha256}:{diagnostic_code}")),
             )
             .await
             .map_err(|_| NatsMessagingError::Quarantine)?;

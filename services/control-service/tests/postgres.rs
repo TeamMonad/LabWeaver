@@ -5,20 +5,24 @@ use std::sync::Arc;
 
 use artifact_store::{ImmutableObjectStore, ObjectStoreError, PresignedUpload, VerifiedObject};
 use async_trait::async_trait;
-use contracts::authoring::{AgentTrackKind, CandidateDecision};
-use contracts::http::{
-    CandidateDecisionRequest, CreateProblemPackageUploadRequest, IdempotencyKey,
-    ProblemPackageUploadFile,
+use contracts::authoring::{
+    AgentTrackKind, CandidateDecision, EnvironmentCandidate, EnvironmentSpec,
 };
+use contracts::events::{AgentBuildRequestedV2, CloudEvent};
+use contracts::http::{
+    CandidateDecisionRequest, CreateEnvironmentTemplateReleaseRequest,
+    CreateProblemPackageUploadRequest, IdempotencyKey, ProblemPackageUploadFile,
+};
+use contracts::supply_chain::BuildNetworkPolicy;
 use contracts::supply_chain::{
     EnvironmentTemplateRelease, ImageArtifact, ImagePolicyEvaluation, SigstoreEvidence,
     VulnerabilitySummary,
 };
 use contracts::{
-    ActorId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId, CourseId,
-    ImageArtifactId, PolicyId, ReleaseId, Revision, Sha256Digest, UtcTimestamp,
+    ActorId, AgentRunId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId,
+    CourseId, EventId, ImageArtifactId, PolicyId, ReleaseId, Revision, Sha256Digest, UtcTimestamp,
 };
-use control_service::{ControlConfig, ControlError, ControlService};
+use control_service::{ContainerBuildPolicy, ControlConfig, ControlError, ControlService};
 use sqlx::{Row, postgres::PgPoolOptions};
 use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
@@ -38,9 +42,10 @@ async fn issue_48_migrations_enforce_fencing_and_monotonic_course_sequences()
         .connect(&url)
         .await?;
     let control = format!(
-        "CREATE SCHEMA control; SET search_path TO control;\n{}\n{}",
+        "CREATE SCHEMA control; SET search_path TO control;\n{}\n{}\n{}",
         include_str!("../../../migrations/control/0001_initial.sql"),
-        include_str!("../../../migrations/control/0002_control_plane.sql")
+        include_str!("../../../migrations/control/0002_control_plane.sql"),
+        include_str!("../../../migrations/control/0003_container_build_projections.sql")
     );
     sqlx::raw_sql(&control).execute(&pool).await?;
     let agent = format!(
@@ -268,13 +273,16 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
         .connect(&url)
         .await?;
     let migrations = format!(
-        "CREATE SCHEMA control; SET search_path TO control;\n{}\n{}",
+        "CREATE SCHEMA control; SET search_path TO control;\n{}\n{}\n{}",
         include_str!("../../../migrations/control/0001_initial.sql"),
-        include_str!("../../../migrations/control/0002_control_plane.sql")
+        include_str!("../../../migrations/control/0002_control_plane.sql"),
+        include_str!("../../../migrations/control/0003_container_build_projections.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;
     let config = control_config()?;
     let evaluation_schema = config.evaluation_schema_sha256;
+    let environment_schema = config.environment_schema_sha256;
+    let image_policy_id = config.image_policy_id;
     let service = ControlService::new(
         pool.clone(),
         Arc::new(FixtureObjects { fail_second: false }),
@@ -342,24 +350,125 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
         0
     );
 
-    let release = release_fixture(course_id)?;
+    let environment_candidate = environment_candidate(environment_schema)?;
     sqlx::query(
-        "INSERT INTO control.environment_template_releases \
-         (release_id,course_id,version,environment_candidate_id,candidate_revision, \
-          spec_sha256,image_artifact_id,contract,published_at) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+        "INSERT INTO control.candidates \
+         (candidate_id,candidate_kind,course_id,revision,state,content_sha256,contract, \
+          policy_revision,schema_sha256,projected_event_id) \
+         VALUES ($1,'environment',$2,1,'validated',$3,$4,1,$5,$6)",
     )
-    .bind(release.id.as_uuid())
+    .bind(environment_candidate.id.as_uuid())
     .bind(course_id.as_uuid())
-    .bind(i64::try_from(release.version)?)
-    .bind(release.candidate_id.as_uuid())
-    .bind(i64::try_from(release.candidate_revision.get())?)
-    .bind(release.environment_spec_sha256.to_string())
-    .bind(release.image_policy_evaluation.artifact_id.as_uuid())
-    .bind(serde_json::to_value(&release)?)
-    .bind(release.published_at.get())
+    .bind(environment_candidate.spec_sha256.to_string())
+    .bind(serde_json::to_value(&environment_candidate)?)
+    .bind(environment_schema.to_string())
+    .bind(Uuid::now_v7())
     .execute(&pool)
     .await?;
+    let approval = service
+        .decide_candidate(
+            course_id,
+            environment_candidate.id,
+            AgentTrackKind::Environment,
+            &CandidateDecisionRequest {
+                candidate_revision: environment_candidate.revision,
+                candidate_sha256: environment_candidate.spec_sha256,
+                policy_revision: environment_candidate.policy_revision,
+                schema_sha256: environment_candidate.schema_sha256,
+                trust_revision: Revision::new(1)?,
+                decision: CandidateDecision::Approved,
+                reason: "reviewed container candidate".to_owned(),
+            },
+            ActorId::new(),
+            Revision::new(1)?,
+            &IdempotencyKey::parse("approve-container-candidate")?,
+            "2026-07-16T08:00:00.000Z".parse()?,
+        )
+        .await?;
+    let payload: serde_json::Value = sqlx::query_scalar(
+        "SELECT payload FROM control.outbox_events WHERE subject=$1 AND aggregate_id<>$2",
+    )
+    .bind(contracts::events::subjects::AGENT_BUILD_REQUESTED_V2)
+    .bind(approval.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let build_event: CloudEvent<AgentBuildRequestedV2> = serde_json::from_value(payload)?;
+    build_event.data.validate()?;
+    assert_eq!(
+        build_event.data.request.candidate_id,
+        environment_candidate.id
+    );
+    assert_eq!(build_event.data.request.approval_id, approval.id);
+    assert_eq!(
+        build_event.data.request.output_repository,
+        format!(
+            "harbor.internal/course-{course_id}/{}",
+            environment_candidate.id
+        )
+    );
+    assert_eq!(
+        build_event.data.request.context,
+        match &environment_candidate.spec.runtime {
+            contracts::authoring::EnvironmentRuntimeSpec::Container { build_context, .. } => {
+                build_context.clone()
+            }
+            contracts::authoring::EnvironmentRuntimeSpec::VirtualMachine { .. } => {
+                return Err("fixture must be Container".into());
+            }
+        }
+    );
+
+    let mut supply_chain = release_fixture(course_id)?;
+    supply_chain.candidate_id = environment_candidate.id;
+    supply_chain.candidate_revision = environment_candidate.revision;
+    supply_chain.environment_spec_sha256 = environment_candidate.spec_sha256;
+    supply_chain.approval = approval.clone();
+    if let ImageArtifact::Container {
+        build_request_id, ..
+    } = &mut supply_chain.artifact
+    {
+        *build_request_id = build_event.data.request.id;
+    }
+    supply_chain.image_policy_evaluation.policy_id = image_policy_id;
+    supply_chain.image_policy_evaluation.artifact_sha256 =
+        supply_chain.artifact.content_sha256()?;
+    assert!(matches!(
+        service
+            .project_artifact(
+                EventId::new(),
+                CourseId::new(),
+                &supply_chain.artifact,
+                &supply_chain.image_policy_evaluation,
+            )
+            .await,
+        Err(ControlError::CourseMismatch)
+    ));
+    service
+        .project_artifact(
+            EventId::new(),
+            course_id,
+            &supply_chain.artifact,
+            &supply_chain.image_policy_evaluation,
+        )
+        .await?;
+    let release = service
+        .create_release(
+            course_id,
+            &CreateEnvironmentTemplateReleaseRequest {
+                candidate_id: environment_candidate.id,
+                candidate_revision: environment_candidate.revision,
+                environment_spec_sha256: environment_candidate.spec_sha256,
+                runtime_kind: contracts::authoring::RuntimeKind::Container,
+                approval_id: approval.id,
+                artifact: supply_chain.artifact,
+                image_policy_evaluation: supply_chain.image_policy_evaluation,
+            },
+            ActorId::new(),
+            &IdempotencyKey::parse("publish-container-release")?,
+            "2026-07-16T08:30:00.000Z".parse()?,
+            "trace-publish-container-release",
+        )
+        .await?;
     let withdrawal = service
         .withdraw_release(
             course_id,
@@ -378,16 +487,78 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     let listed = service.releases(course_id, 0, 10).await?;
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].withdrawal, Some(withdrawal));
-    assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            "SELECT subject FROM control.outbox_events WHERE aggregate_id=$1",
-        )
-        .bind(release.id.as_uuid())
-        .fetch_one(&pool)
-        .await?,
-        contracts::events::subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN
-    );
+    for subject in [
+        contracts::events::subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED_V2,
+        contracts::events::subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN,
+    ] {
+        assert!(
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM control.outbox_events \
+                 WHERE aggregate_id=$1 AND subject=$2)",
+            )
+            .bind(release.id.as_uuid())
+            .bind(subject)
+            .fetch_one(&pool)
+            .await?
+        );
+    }
     Ok(())
+}
+
+fn environment_candidate(
+    schema_sha256: Sha256Digest,
+) -> Result<EnvironmentCandidate, Box<dyn std::error::Error>> {
+    let spec: EnvironmentSpec = serde_json::from_value(serde_json::json!({
+        "apiVersion":"environment.labweaver.io/v1",
+        "kind":"EnvironmentSpec",
+        "name":"code-server",
+        "class":"experiment",
+        "resources":{"cpuMillicores":1000,"memoryBytes":1_073_741_824_u64,"storageBytes":1_073_741_824_u64},
+        "network":{"mode":"deny_all"},
+        "entries":[{"name":"code-server","protocol":"https","servicePort":8080}],
+        "security":{
+            "userPolicy":"non_root_required",
+            "rootFilesystemPolicy":"read_only_required",
+            "privilegeEscalationPolicy":"deny",
+            "publicExposurePolicy":"deny",
+            "securityProfileBinding":"restricted-v1"
+        },
+        "runtime":{
+            "kind":"container",
+            "provider_binding":"container-primary-v1",
+            "build_context":{
+                "artifactId":ArtifactId::new(),
+                "storeBinding":"approved-context-v1",
+                "objectVersion":"version-1",
+                "sha256":Sha256Digest::of_bytes(b"context"),
+                "sizeBytes":7,
+                "mediaType":"application/vnd.oci.image.layer.v1.tar+gzip"
+            },
+            "base_image_digest":format!("sha256:{}","c".repeat(64)),
+            "service_port":8080
+        },
+        "retention":{
+            "policyId":PolicyId::new(),
+            "policyRevision":1,
+            "class":"run_evidence",
+            "retainUntil":"2026-08-16T08:00:00.000Z",
+            "disposition":"delete"
+        }
+    }))?;
+    let spec_sha256 = Sha256Digest::of_canonical(&spec)?;
+    let candidate = EnvironmentCandidate {
+        id: CandidateId::new(),
+        run_id: AgentRunId::new(),
+        revision: Revision::new(1)?,
+        spec,
+        spec_sha256,
+        policy_revision: Revision::new(1)?,
+        schema_sha256,
+        model: "fixture-provider-v1".to_owned(),
+        created_at: "2026-07-16T08:00:00.000Z".parse()?,
+    };
+    candidate.validate()?;
+    Ok(candidate)
 }
 
 fn release_fixture(
@@ -412,6 +583,7 @@ fn release_fixture(
         trust_bundle_sha256,
         fulcio_issuer: "https://issuer.invalid".to_owned(),
         certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
+        subject_digest: artifact_sha256,
         certificate_sha256: Sha256Digest::of_bytes(b"certificate"),
         signature_sha256: Sha256Digest::of_bytes(b"signature"),
         rekor_log_id: "rekor-v1".to_owned(),
@@ -520,6 +692,15 @@ fn control_config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
         certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
         environment_schema_sha256: Sha256Digest::of_bytes(b"environment"),
         evaluation_schema_sha256: Sha256Digest::of_bytes(b"evaluation"),
+        container_build: ContainerBuildPolicy {
+            builder_binding: "buildkit-primary-v1".to_owned(),
+            output_repository_prefix: "harbor.internal".to_owned(),
+            dockerfile_path: "Dockerfile".to_owned(),
+            network: BuildNetworkPolicy::DenyAll,
+            max_duration_milliseconds: 600_000,
+            max_cpu_millicores: 2_000,
+            max_memory_bytes: 2_147_483_648,
+        },
     })
 }
 

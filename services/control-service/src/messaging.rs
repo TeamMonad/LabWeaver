@@ -13,15 +13,17 @@ use async_nats::jetstream::AckKind;
 use async_nats::jetstream::consumer::PullConsumer;
 use async_nats::jetstream::message::PublishMessage;
 use async_trait::async_trait;
-use contracts::events::{AgentRunEvent, CloudEvent, EVENT_CONTRACTS, subjects};
-use contracts::{EventId, Sha256Digest};
+use contracts::events::{
+    AgentBuildCompletedV2, AgentBuildFailedV2, AgentRunEvent, CloudEvent, EVENT_CONTRACTS, subjects,
+};
+use contracts::{EventId, ImageArtifactId, Sha256Digest};
 use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use crate::clients::AgentClient;
+use crate::clients::{AgentClient, DownstreamError};
 use crate::{ControlError, ControlService};
 
 const MAX_EVENT_BYTES: usize = 1024 * 1024;
@@ -55,6 +57,26 @@ impl AgentAuthority for AgentClient {
         run_id: contracts::AgentRunId,
     ) -> Result<contracts::http::InternalAgentRunOutcome, crate::clients::DownstreamError> {
         AgentClient::outcome(self, run_id).await
+    }
+}
+
+/// Agent-owned immutable artifact readback used by build completion projection.
+#[async_trait]
+pub trait BuildArtifactAuthority: Send + Sync {
+    async fn artifact(
+        &self,
+        artifact_id: ImageArtifactId,
+    ) -> Result<contracts::http::InternalImageArtifactResolution, crate::clients::DownstreamError>;
+}
+
+#[async_trait]
+impl BuildArtifactAuthority for AgentClient {
+    async fn artifact(
+        &self,
+        artifact_id: ImageArtifactId,
+    ) -> Result<contracts::http::InternalImageArtifactResolution, crate::clients::DownstreamError>
+    {
+        AgentClient::artifact(self, artifact_id).await
     }
 }
 
@@ -366,6 +388,329 @@ impl AgentRunConsumer {
     }
 }
 
+/// Dedicated completion/failure consumer; deployment filtering must match only Agent build events.
+pub struct AgentBuildConsumer {
+    context: async_nats::jetstream::Context,
+    messages: async_nats::jetstream::consumer::pull::Stream,
+    quarantine_subject: String,
+}
+
+impl AgentBuildConsumer {
+    pub async fn bind(
+        client: async_nats::Client,
+        stream_name: &str,
+        consumer_name: &str,
+        quarantine_subject: &str,
+    ) -> Result<Self, MessagingError> {
+        if [stream_name, consumer_name, quarantine_subject]
+            .iter()
+            .any(|value| value.trim().is_empty() || value.chars().any(char::is_whitespace))
+        {
+            return Err(MessagingError::Configuration);
+        }
+        let context = async_nats::jetstream::new(client);
+        let stream = context
+            .get_stream(stream_name)
+            .await
+            .map_err(|_| MessagingError::Stream)?;
+        let consumer: PullConsumer = stream
+            .get_consumer(consumer_name)
+            .await
+            .map_err(|_| MessagingError::Consumer)?;
+        let mut filters = consumer.cached_info().config.filter_subjects.clone();
+        filters.sort_unstable();
+        let mut expected_filters = vec![
+            subjects::AGENT_BUILD_COMPLETED_V2.to_owned(),
+            subjects::AGENT_BUILD_FAILED_V2.to_owned(),
+        ];
+        expected_filters.sort_unstable();
+        if !consumer.cached_info().config.filter_subject.is_empty() || filters != expected_filters {
+            return Err(MessagingError::Configuration);
+        }
+        let messages = consumer
+            .messages()
+            .await
+            .map_err(|_| MessagingError::Consumer)?;
+        Ok(Self {
+            context,
+            messages,
+            quarantine_subject: quarantine_subject.to_owned(),
+        })
+    }
+
+    pub async fn process_next<A: BuildArtifactAuthority>(
+        &mut self,
+        control: &ControlService,
+        agent: &A,
+    ) -> Result<(), MessagingError> {
+        let message = self
+            .messages
+            .next()
+            .await
+            .ok_or(MessagingError::Closed)?
+            .map_err(|_| MessagingError::Receive)?;
+        if message.payload.len() > MAX_EVENT_BYTES {
+            self.quarantine(&message, None, "LW_EVENT_PAYLOAD_TOO_LARGE")
+                .await?;
+            message
+                .double_ack_with(AckKind::Term)
+                .await
+                .map_err(|_| MessagingError::Ack)?;
+            return Ok(());
+        }
+        let Ok(event): Result<CloudEvent<Value>, _> = serde_json::from_slice(&message.payload)
+        else {
+            self.quarantine(&message, None, "LW_EVENT_ENVELOPE_INVALID")
+                .await?;
+            message
+                .double_ack_with(AckKind::Term)
+                .await
+                .map_err(|_| MessagingError::Ack)?;
+            return Ok(());
+        };
+        let Some(contract) = EVENT_CONTRACTS
+            .iter()
+            .copied()
+            .find(|contract| contract.subject == event.subject)
+        else {
+            self.quarantine(&message, Some(event.id), "LW_EVENT_SUBJECT_MISMATCH")
+                .await?;
+            message
+                .double_ack_with(AckKind::Term)
+                .await
+                .map_err(|_| MessagingError::Ack)?;
+            return Ok(());
+        };
+        if event.validate(contract).is_err() {
+            self.quarantine(&message, Some(event.id), "LW_EVENT_ENVELOPE_INVALID")
+                .await?;
+            message
+                .double_ack_with(AckKind::Term)
+                .await
+                .map_err(|_| MessagingError::Ack)?;
+            return Ok(());
+        }
+        match event.subject.as_str() {
+            subjects::AGENT_BUILD_COMPLETED_V2 => {
+                let Ok(data): Result<AgentBuildCompletedV2, _> =
+                    serde_json::from_value(event.data.clone())
+                else {
+                    self.quarantine(
+                        &message,
+                        Some(event.id),
+                        "LW_AGENT_BUILD_OUTCOME_IDENTITY_INVALID",
+                    )
+                    .await?;
+                    message
+                        .double_ack_with(AckKind::Term)
+                        .await
+                        .map_err(|_| MessagingError::Ack)?;
+                    return Ok(());
+                };
+                let resolution = match agent.artifact(data.artifact_id).await {
+                    Ok(resolution) => resolution,
+                    Err(DownstreamError::Unavailable) => {
+                        message
+                            .ack_with(AckKind::Nak(Some(REDELIVERY_DELAY)))
+                            .await
+                            .map_err(|_| MessagingError::Ack)?;
+                        return Ok(());
+                    }
+                    Err(DownstreamError::Configuration | DownstreamError::Denied) => {
+                        return Err(MessagingError::ArtifactAuthority);
+                    }
+                    Err(
+                        DownstreamError::ProtocolInvalid
+                        | DownstreamError::IdentityMismatch
+                        | DownstreamError::NotFound
+                        | DownstreamError::Conflict,
+                    ) => {
+                        self.quarantine(
+                            &message,
+                            Some(event.id),
+                            "LW_AGENT_BUILD_ARTIFACT_READBACK_REJECTED",
+                        )
+                        .await?;
+                        message
+                            .double_ack_with(AckKind::Term)
+                            .await
+                            .map_err(|_| MessagingError::Ack)?;
+                        return Ok(());
+                    }
+                };
+                if resolution.validate().is_err()
+                    || resolution.artifact_id != data.artifact_id
+                    || resolution.artifact.content_sha256().ok() != Some(data.artifact_sha256)
+                    || canonical_hash(&resolution.policy_evaluation)?
+                        != data.policy_evaluation_sha256
+                    || container_build_request_id(&resolution.artifact)
+                        != Some(data.build_request_id)
+                {
+                    self.quarantine(
+                        &message,
+                        Some(event.id),
+                        "LW_AGENT_BUILD_OUTCOME_IDENTITY_INVALID",
+                    )
+                    .await?;
+                    message
+                        .double_ack_with(AckKind::Term)
+                        .await
+                        .map_err(|_| MessagingError::Ack)?;
+                    return Ok(());
+                }
+                match control
+                    .project_artifact(
+                        event.id,
+                        event.course_id,
+                        &resolution.artifact,
+                        &resolution.policy_evaluation,
+                    )
+                    .await
+                {
+                    Ok(()) => message
+                        .double_ack()
+                        .await
+                        .map_err(|_| MessagingError::Ack)?,
+                    Err(crate::ControlError::PersistenceFailed) => message
+                        .ack_with(AckKind::Nak(Some(REDELIVERY_DELAY)))
+                        .await
+                        .map_err(|_| MessagingError::Ack)?,
+                    Err(_) => {
+                        self.quarantine(
+                            &message,
+                            Some(event.id),
+                            "LW_AGENT_BUILD_PROJECTION_REJECTED",
+                        )
+                        .await?;
+                        message
+                            .double_ack_with(AckKind::Term)
+                            .await
+                            .map_err(|_| MessagingError::Ack)?;
+                    }
+                }
+            }
+            subjects::AGENT_BUILD_FAILED_V2 => {
+                let Ok(data): Result<AgentBuildFailedV2, _> =
+                    serde_json::from_value(event.data.clone())
+                else {
+                    self.quarantine(
+                        &message,
+                        Some(event.id),
+                        "LW_AGENT_BUILD_OUTCOME_IDENTITY_INVALID",
+                    )
+                    .await?;
+                    message
+                        .double_ack_with(AckKind::Term)
+                        .await
+                        .map_err(|_| MessagingError::Ack)?;
+                    return Ok(());
+                };
+                if data.validate().is_err() {
+                    self.quarantine(
+                        &message,
+                        Some(event.id),
+                        "LW_AGENT_BUILD_OUTCOME_IDENTITY_INVALID",
+                    )
+                    .await?;
+                    message
+                        .double_ack_with(AckKind::Term)
+                        .await
+                        .map_err(|_| MessagingError::Ack)?;
+                } else if let Err(error) = control
+                    .project_build_failure(event.id, event.course_id, &data)
+                    .await
+                {
+                    if matches!(error, crate::ControlError::PersistenceFailed) {
+                        message
+                            .ack_with(AckKind::Nak(Some(REDELIVERY_DELAY)))
+                            .await
+                            .map_err(|_| MessagingError::Ack)?;
+                        return Ok(());
+                    }
+                    self.quarantine(
+                        &message,
+                        Some(event.id),
+                        "LW_AGENT_BUILD_PROJECTION_REJECTED",
+                    )
+                    .await?;
+                    message
+                        .double_ack_with(AckKind::Term)
+                        .await
+                        .map_err(|_| MessagingError::Ack)?;
+                } else {
+                    tracing::warn!(
+                        event = "control.agent_build.failed",
+                        build_request_id = %data.build_request_id,
+                        diagnostic_code = %data.diagnostic_code,
+                        retryable = data.retryable,
+                        cleanup_verified = data.cleanup_verified,
+                    );
+                    message
+                        .double_ack()
+                        .await
+                        .map_err(|_| MessagingError::Ack)?;
+                }
+            }
+            _ => {
+                self.quarantine(&message, Some(event.id), "LW_EVENT_SUBJECT_MISMATCH")
+                    .await?;
+                message
+                    .double_ack_with(AckKind::Term)
+                    .await
+                    .map_err(|_| MessagingError::Ack)?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn quarantine(
+        &self,
+        message: &async_nats::jetstream::Message,
+        event_id: Option<EventId>,
+        diagnostic_code: &'static str,
+    ) -> Result<(), MessagingError> {
+        let payload_sha256 = Sha256Digest::of_bytes(&message.payload);
+        let record = QuarantineRecord {
+            version: 1,
+            event_id,
+            payload_sha256,
+            size_bytes: u64::try_from(message.payload.len())
+                .map_err(|_| MessagingError::Quarantine)?,
+            diagnostic_code,
+        };
+        let payload = serde_json::to_vec(&record).map_err(|_| MessagingError::Quarantine)?;
+        let acknowledgement = self
+            .context
+            .send_publish(
+                self.quarantine_subject.clone(),
+                PublishMessage::build()
+                    .payload(payload.into())
+                    .message_id(format!("{payload_sha256}:{diagnostic_code}")),
+            )
+            .await
+            .map_err(|_| MessagingError::Quarantine)?;
+        acknowledgement
+            .await
+            .map_err(|_| MessagingError::Quarantine)?;
+        Ok(())
+    }
+}
+
+fn canonical_hash<T: Serialize>(value: &T) -> Result<Sha256Digest, MessagingError> {
+    Sha256Digest::of_canonical(value).map_err(|_| MessagingError::Contract)
+}
+
+fn container_build_request_id(
+    artifact: &contracts::supply_chain::ImageArtifact,
+) -> Option<contracts::BuildRequestId> {
+    match artifact {
+        contracts::supply_chain::ImageArtifact::Container {
+            build_request_id, ..
+        } => Some(*build_request_id),
+        contracts::supply_chain::ImageArtifact::VirtualMachine { .. } => None,
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct QuarantineRecord {
@@ -394,6 +739,8 @@ pub enum MessagingError {
     Receive,
     #[error("LW_NATS_ACK_FAILED")]
     Ack,
+    #[error("LW_CONTROL_AGENT_ARTIFACT_AUTHORITY_INVALID")]
+    ArtifactAuthority,
     #[error("LW_NATS_QUARANTINE_FAILED")]
     Quarantine,
     #[error("LW_CONTROL_OUTBOX_IDENTITY_INVALID")]

@@ -75,9 +75,10 @@
 - Exit condition for Issue #51 acceptance: A approves the high-risk contract,
   Migration and mTLS boundary, D verifies the current E2 commands and build
   identity, CI passes, and the PR is merged. The Access-owned revocation
-  responder, Resource-owned Lease responder, formal Container/KubeVirt Provider
-  and deployed mTLS NATS path remain explicit adjacent/E3 dependencies and may
-  not be replaced with integration fixtures or fallback evidence.
+  responder, Resource-owned Lease responder, connected verification of the #52
+  Container Provider, a formal KubeVirt Provider and deployed mTLS NATS path
+  remain explicit adjacent/E3 dependencies and may not be replaced with
+  integration fixtures or fallback evidence.
 - Impact: #47 now binds Environment-scope authorization to the merged resolver
   through real mTLS E2 coverage. A+B review, D same-build Verify and deployed
   Gateway/internal-DNS evidence remain blockers for Issue closure and E3.
@@ -91,6 +92,24 @@
 - Exit condition: reviewed contract plus negative tests for permission escalation, stale/mismatched
   approval and repeated or changed-input dispatch.
 - Impact: Issue #13 remains partially implemented and must not be submitted as complete.
+
+## IMG-02a connected Container evidence (#52)
+
+- The v2 Control, Agent and Environment paths have local E1 and PostgreSQL E2
+  evidence, but the deployment-owned BuildKit/Harbor/Trivy/Private Sigstore and
+  Kubernetes executor subjects have no connected same-build implementation or
+  replay in this worktree.
+- Owner: B for the executor integration and Container behavior; A for the
+  high-risk Contract/security review; D for independent connected Verify.
+- Exit condition: one reviewed build identity proves the per-course private
+  Harbor Project/quota/robot, immutable context and base digest, SBOM/in-toto,
+  Trivy policy, Fulcio/SCT/Rekor proof, immutable publication, private pull,
+  code-server readiness through only the protected Gateway, and
+  timeout/cancel/retry/finalizer cleanup with no reachable residual resource.
+  Fault injection must also prove executor-side highest-generation rejection,
+  cleanup/delete tombstones, delayed completion and out-of-order Start/Stop/Delete.
+- Impact: Issue #52 does not meet its E3 acceptance criteria and must not be
+  marked done or presented as a real Container runtime deployment.
 
 ## AG-01b Fixture Backend
 

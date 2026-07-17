@@ -5,6 +5,8 @@ use std::collections::BTreeSet;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::authoring::{CandidateApproval, CandidateDecision, EnvironmentSpec};
+use crate::supply_chain::{BuildRequest, EnvironmentTemplateRelease};
 use crate::{
     AccessGrantId, ActorId, AgentRunId, BuildRequestId, CourseId, EnvironmentId, EventId,
     FrozenSubmissionId, GatewaySessionId, ReleaseId, Revision, Sequence, Sha256Digest,
@@ -19,8 +21,11 @@ pub mod subjects {
     pub const AGENT_RUN_COMPLETED: &str = "labweaver.agent.run.completed.v1";
     pub const AGENT_RUN_FAILED: &str = "labweaver.agent.run.failed.v1";
     pub const AGENT_BUILD_REQUESTED: &str = "labweaver.agent.build.requested.v1";
+    pub const AGENT_BUILD_REQUESTED_V2: &str = "labweaver.control.agent_build.requested.v2";
     pub const AGENT_BUILD_COMPLETED: &str = "labweaver.agent.build.completed.v1";
+    pub const AGENT_BUILD_COMPLETED_V2: &str = "labweaver.agent.build.completed.v2";
     pub const AGENT_BUILD_FAILED: &str = "labweaver.agent.build.failed.v1";
+    pub const AGENT_BUILD_FAILED_V2: &str = "labweaver.agent.build.failed.v2";
     pub const ENVIRONMENT_PROVISION_REQUESTED: &str =
         "labweaver.environment.instance.provision_requested.v1";
     pub const ENVIRONMENT_READY: &str = "labweaver.environment.instance.ready.v1";
@@ -49,6 +54,8 @@ pub mod subjects {
     pub const LAB_RELEASE_APPROVED: &str = "labweaver.control.lab_release.approved.v1";
     pub const ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED: &str =
         "labweaver.control.environment_template_release.published.v1";
+    pub const ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED_V2: &str =
+        "labweaver.control.environment_template_release.published.v2";
     pub const ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN: &str =
         "labweaver.control.environment_template_release.withdrawn.v1";
 }
@@ -103,7 +110,12 @@ pub struct EventContract {
 impl EventContract {
     #[must_use]
     pub fn data_schema(self) -> String {
-        format!("{DATA_SCHEMA_BASE}/{}.schema.json", self.schema_name)
+        let base = if self.subject.ends_with(".v2") {
+            "https://schemas.labweaver.io/contracts/v2/events"
+        } else {
+            DATA_SCHEMA_BASE
+        };
+        format!("{base}/{}.schema.json", self.schema_name)
     }
 
     /// Returns the authoritative owner identity encoded by the registered subject.
@@ -145,13 +157,28 @@ pub const EVENT_CONTRACTS: &[EventContract] = &[
         schema_name: "agent-build-requested",
     },
     EventContract {
+        subject: subjects::AGENT_BUILD_REQUESTED_V2,
+        event_type: subjects::AGENT_BUILD_REQUESTED_V2,
+        schema_name: "agent-build-requested",
+    },
+    EventContract {
         subject: subjects::AGENT_BUILD_COMPLETED,
         event_type: subjects::AGENT_BUILD_COMPLETED,
         schema_name: "agent-build-completed",
     },
     EventContract {
+        subject: subjects::AGENT_BUILD_COMPLETED_V2,
+        event_type: subjects::AGENT_BUILD_COMPLETED_V2,
+        schema_name: "agent-build-completed",
+    },
+    EventContract {
         subject: subjects::AGENT_BUILD_FAILED,
         event_type: subjects::AGENT_BUILD_FAILED,
+        schema_name: "agent-build-failed",
+    },
+    EventContract {
+        subject: subjects::AGENT_BUILD_FAILED_V2,
+        event_type: subjects::AGENT_BUILD_FAILED_V2,
         schema_name: "agent-build-failed",
     },
     EventContract {
@@ -255,6 +282,11 @@ pub const EVENT_CONTRACTS: &[EventContract] = &[
         schema_name: "environment-template-release-published",
     },
     EventContract {
+        subject: subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED_V2,
+        event_type: subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED_V2,
+        schema_name: "environment-template-release-published",
+    },
+    EventContract {
         subject: subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN,
         event_type: subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN,
         schema_name: "environment-template-release-withdrawn",
@@ -265,8 +297,8 @@ pub fn validate_registry() -> Result<(), EventError> {
     let mut subjects = BTreeSet::new();
     let mut event_types = BTreeSet::new();
     for contract in EVENT_CONTRACTS {
-        if !contract.subject.ends_with(".v1")
-            || !contract.event_type.ends_with(".v1")
+        if !(contract.subject.ends_with(".v1") || contract.subject.ends_with(".v2"))
+            || contract.event_type != contract.subject
             || !subjects.insert(contract.subject)
             || !event_types.insert(contract.event_type)
         {
@@ -289,6 +321,82 @@ pub struct AgentRunEvent {
 pub struct AgentBuildRequested {
     pub build_request_id: BuildRequestId,
     pub candidate_sha256: Sha256Digest,
+}
+
+/// Complete, approved, immutable command consumed by the Agent build executor.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentBuildRequestedV2 {
+    pub request: BuildRequest,
+    pub approval: CandidateApproval,
+    pub idempotency_key: String,
+    pub command_sha256: Sha256Digest,
+}
+
+impl AgentBuildRequestedV2 {
+    /// Verifies approval, build-input and canonical command identities before execution.
+    pub fn validate(&self) -> Result<(), EventError> {
+        self.request
+            .validate()
+            .map_err(|_| EventError::PayloadIdentityMismatch)?;
+        if self.approval.decision != CandidateDecision::Approved
+            || self.approval.id != self.request.approval_id
+            || self.approval.candidate_id != self.request.candidate_id
+            || self.approval.candidate_revision != self.request.candidate_revision
+            || self.approval.candidate_sha256 != self.request.candidate_sha256
+            || self.idempotency_key.len() < 16
+            || self.idempotency_key.len() > 128
+            || !self
+                .idempotency_key
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+        {
+            return Err(EventError::PayloadIdentityMismatch);
+        }
+        let command_sha256 = Sha256Digest::of_canonical(&serde_json::json!({
+            "request": self.request,
+            "approval": self.approval,
+            "idempotencyKey": self.idempotency_key,
+        }))
+        .map_err(|error| EventError::Serialization(error.to_string()))?;
+        if command_sha256 != self.command_sha256 {
+            return Err(EventError::PayloadIdentityMismatch);
+        }
+        Ok(())
+    }
+}
+
+/// Safe terminal identity emitted after artifact and policy evidence commit atomically.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentBuildCompletedV2 {
+    pub build_request_id: BuildRequestId,
+    pub artifact_id: crate::ImageArtifactId,
+    pub artifact_sha256: Sha256Digest,
+    pub policy_evaluation_sha256: Sha256Digest,
+}
+
+/// Safe terminal failure emitted only after candidate-resource cleanup was attempted.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentBuildFailedV2 {
+    pub build_request_id: BuildRequestId,
+    pub command_sha256: Sha256Digest,
+    pub diagnostic_code: String,
+    pub retryable: bool,
+    pub cleanup_verified: bool,
+}
+
+impl AgentBuildFailedV2 {
+    pub fn validate(&self) -> Result<(), EventError> {
+        crate::DiagnosticCode::parse(&self.diagnostic_code)
+            .map_err(|_| EventError::PayloadIdentityMismatch)?;
+        let cleanup_failed = self.diagnostic_code == "LW_AGENT_BUILD_CLEANUP_FAILED";
+        if self.cleanup_verified == cleanup_failed || (self.retryable && !self.cleanup_verified) {
+            return Err(EventError::PayloadIdentityMismatch);
+        }
+        Ok(())
+    }
 }
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -342,6 +450,43 @@ pub struct ReleasePublished {
     pub version: u64,
     pub environment_spec_sha256: Sha256Digest,
     pub artifact_sha256: Sha256Digest,
+}
+
+/// Complete immutable runtime projection consumed by the Environment state owner.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReleasePublishedV2 {
+    pub release: EnvironmentTemplateRelease,
+    pub environment_spec: EnvironmentSpec,
+    pub projection_sha256: Sha256Digest,
+}
+
+impl ReleasePublishedV2 {
+    /// Verifies the exact approved spec, artifact and projection identity.
+    pub fn validate(&self) -> Result<(), EventError> {
+        self.release
+            .validate()
+            .map_err(|_| EventError::PayloadIdentityMismatch)?;
+        self.environment_spec
+            .validate()
+            .map_err(|_| EventError::PayloadIdentityMismatch)?;
+        let spec_sha256 = Sha256Digest::of_canonical(&self.environment_spec)
+            .map_err(|error| EventError::Serialization(error.to_string()))?;
+        if self.environment_spec.runtime.kind() != self.release.runtime_kind
+            || spec_sha256 != self.release.environment_spec_sha256
+        {
+            return Err(EventError::PayloadIdentityMismatch);
+        }
+        let projection_sha256 = Sha256Digest::of_canonical(&serde_json::json!({
+            "release": self.release,
+            "environmentSpec": self.environment_spec,
+        }))
+        .map_err(|error| EventError::Serialization(error.to_string()))?;
+        if projection_sha256 != self.projection_sha256 {
+            return Err(EventError::PayloadIdentityMismatch);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -422,6 +567,8 @@ pub enum EventError {
     RegistryConflict,
     #[error("event payload contains protected content")]
     ProtectedPayload,
+    #[error("event payload identity, approval, or immutable hash does not match")]
+    PayloadIdentityMismatch,
     #[error("event aggregate sequence is duplicate or stale")]
     DuplicateOrStale,
     #[error("event aggregate sequence contains a gap")]
@@ -475,5 +622,30 @@ mod tests {
             assert!(contract.source().starts_with("urn:labweaver:"));
             assert!(contract.source().ends_with("-service"));
         }
+    }
+
+    #[test]
+    fn build_failure_retry_requires_verified_cleanup() {
+        let build_request_id = BuildRequestId::new();
+        let command_sha256 = Sha256Digest::of_bytes(b"command");
+        let unsafe_retry = AgentBuildFailedV2 {
+            build_request_id,
+            command_sha256,
+            diagnostic_code: "LW_AGENT_BUILD_CLEANUP_FAILED".to_owned(),
+            retryable: true,
+            cleanup_verified: false,
+        };
+        assert!(matches!(
+            unsafe_retry.validate(),
+            Err(EventError::PayloadIdentityMismatch)
+        ));
+        let cleaned_failure = AgentBuildFailedV2 {
+            build_request_id,
+            command_sha256,
+            diagnostic_code: "LW_AGENT_BUILD_TIMEOUT".to_owned(),
+            retryable: true,
+            cleanup_verified: true,
+        };
+        assert!(cleaned_failure.validate().is_ok());
     }
 }

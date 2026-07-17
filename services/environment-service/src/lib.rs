@@ -5,6 +5,7 @@
     reason = "the public contract crate and focused contract document own field-level wire documentation"
 )]
 
+mod container_provider;
 mod lifecycle;
 mod messaging;
 mod outbox;
@@ -15,14 +16,24 @@ mod runtime;
 mod store;
 mod tls;
 
+pub use container_provider::{
+    CONTAINER_BACKEND_PROTOCOL_VERSION, ContainerApplyObservation, ContainerBackendFence,
+    ContainerExecutorBackend, ContainerExecutorFenceError, ContainerExecutorRequest,
+    ContainerExecutorRequestEnvelope, ContainerExecutorResponse, ContainerExecutorResponseEnvelope,
+    ContainerProvider, ContainerProviderBackend, ContainerProviderConfiguration,
+    ContainerReleasePolicy, ContainerReleaseResolver, ContainerResource, ContainerResourcePlan,
+    FencedContainerExecutor, NatsContainerExecutorServer, NatsContainerProviderBackend,
+    PgContainerExecutorFenceStore, PgReleaseProjectionStore, ReleaseProjectionDecision,
+    ReleaseProjectionError, ResolvedContainerRelease,
+};
 pub use lifecycle::{
     LifecycleCommand, LifecycleError, apply_provider_failure, apply_provider_observation,
     apply_retry, begin_timeout_cleanup, plan_command, plan_command_authorized,
 };
 pub use messaging::{
     CommandConsumeOutcome, JetStreamCommandConsumer, JetStreamEventPublisher,
-    LifecycleCommandMessage, NatsAccessRevoker, NatsEnvironmentProvider, NatsMessagingError,
-    NatsResourceLeaseVerifier, connect_nats_mtls,
+    JetStreamReleaseConsumer, LifecycleCommandMessage, NatsAccessRevoker, NatsEnvironmentProvider,
+    NatsMessagingError, NatsResourceLeaseVerifier, connect_nats_mtls,
 };
 pub use outbox::{
     EnvironmentEventPublisher, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,

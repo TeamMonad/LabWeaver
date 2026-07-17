@@ -9,10 +9,14 @@ use std::time::Duration;
 
 use contracts::authoring::{AgentRun, AgentTrackKind};
 use contracts::http::{
-    IdempotencyKey, InternalAgentRunMutationRequest, InternalAgentRunOutcome,
+    IdempotencyKey, InternalAgentBuildCancellationRequest, InternalAgentBuildCancellationResult,
+    InternalAgentBuildStatusQuery, InternalAgentRunMutationRequest, InternalAgentRunOutcome,
     InternalCreateAgentRunRequest, InternalImageArtifactResolution,
 };
-use contracts::{AgentRunId, AuthorizationDecision, AuthorizationDecisionRequest, ImageArtifactId};
+use contracts::{
+    AgentRunId, AuthorizationDecision, AuthorizationDecisionRequest, BuildRequestId,
+    ImageArtifactId,
+};
 use reqwest::{Certificate, Identity, StatusCode, Url};
 use serde::Deserialize;
 use thiserror::Error;
@@ -165,6 +169,44 @@ impl AgentClient {
                 ))?)
                 .header("Idempotency-Key", key.as_str())
                 .json(request),
+        )
+        .await
+    }
+
+    /// Sends one fully fenced build cancellation over the existing Control mTLS identity.
+    pub async fn cancel_build(
+        &self,
+        build_request_id: BuildRequestId,
+        request: &InternalAgentBuildCancellationRequest,
+        key: &IdempotencyKey,
+    ) -> Result<InternalAgentBuildCancellationResult, DownstreamError> {
+        if request.build_request_id != build_request_id {
+            return Err(DownstreamError::IdentityMismatch);
+        }
+        send_json(
+            self.client
+                .post(self.config.endpoint(&format!(
+                    "internal/v1/build-requests/{build_request_id}/cancel"
+                ))?)
+                .header("Idempotency-Key", key.as_str())
+                .json(request),
+        )
+        .await
+    }
+
+    /// Reads the authoritative Agent build state before a revision-fenced mutation.
+    pub async fn get_build(
+        &self,
+        build_request_id: BuildRequestId,
+        query: &InternalAgentBuildStatusQuery,
+    ) -> Result<InternalAgentBuildCancellationResult, DownstreamError> {
+        send_json(
+            self.client
+                .get(
+                    self.config
+                        .endpoint(&format!("internal/v1/build-requests/{build_request_id}"))?,
+                )
+                .query(query),
         )
         .await
     }

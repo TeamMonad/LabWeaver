@@ -25,6 +25,15 @@
       "CsrfTokenResponse": {
         "$ref": "../contracts/v1/csrf-token-response.schema.json"
       },
+      "InternalAgentBuildCancellationRequest": {
+        "$ref": "../contracts/v1/http/internal-agent-build-cancellation-request.schema.json"
+      },
+      "InternalAgentBuildCancellationResult": {
+        "$ref": "../contracts/v1/http/internal-agent-build-cancellation-result.schema.json"
+      },
+      "InternalAgentBuildStatusQuery": {
+        "$ref": "../contracts/v1/http/internal-agent-build-status-query.schema.json"
+      },
       "InternalAgentRunMutationRequest": {
         "$ref": "../contracts/v1/http/internal-agent-run-mutation-request.schema.json"
       },

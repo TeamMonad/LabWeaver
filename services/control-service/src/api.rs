@@ -539,30 +539,10 @@ async fn create_release(
     let key = idempotency(&headers)?;
     let published_at = now()?;
     let trace_id = trace_id(&headers);
-    let release = match state
+    let release = state
         .control
         .create_release(course_id, &request, actor, &key, published_at, &trace_id)
-        .await
-    {
-        Ok(release) => release,
-        Err(ControlError::ArtifactNotAuthoritative) => {
-            let artifact_id = request.image_policy_evaluation.artifact_id;
-            let resolution = state.agent.artifact(artifact_id).await?;
-            state
-                .control
-                .project_artifact(
-                    contracts::EventId::new(),
-                    &resolution.artifact,
-                    &resolution.policy_evaluation,
-                )
-                .await?;
-            state
-                .control
-                .create_release(course_id, &request, actor, &key, published_at, &trace_id)
-                .await?
-        }
-        Err(error) => return Err(error.into()),
-    };
+        .await?;
     Ok(Json(OperationAccepted {
         operation_id: OperationId::new(),
         revision: Revision::new(release.version)

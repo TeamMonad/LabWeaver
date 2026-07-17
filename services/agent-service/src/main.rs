@@ -7,17 +7,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_service::api::{AgentApiState, router, serve_mtls};
+use agent_service::build_pipeline::{BuildPipeline, BuildPipelinePolicy};
+use agent_service::build_provider::NatsBuildSupplyChainProvider;
+use agent_service::build_store::{BuildWorker, PgBuildStore};
 use agent_service::classifier::DeterministicEgressClassifier;
 use agent_service::claude_code::{
     EgressClassifier, PackageObjectReadError, ProblemPackageEgressGate, ProblemPackageReader,
     RunCancellation, TokioClaudeCodeProcess,
 };
-use agent_service::messaging::{AgentOutboxDispatcher, connect_nats_mtls};
+use agent_service::messaging::{
+    AgentBuildCommandConsumer, AgentOutboxDispatcher, connect_nats_mtls,
+};
 use agent_service::run_store::{AgentRunService, ExecuteAgentRun, PostgresAgentRunStore};
 use artifact_store::{ImmutableObjectStore, S3Credential, S3ImmutableObjectStore, S3StoreConfig};
 use async_trait::async_trait;
 use auth::{MtlsFileConfig, load_mtls_server_config};
-use contracts::{ArtifactId, ArtifactRef, Revision, UtcTimestamp};
+use contracts::{ArtifactId, ArtifactRef, PolicyId, Revision, Sha256Digest, UtcTimestamp};
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 use time::OffsetDateTime;
@@ -39,7 +44,32 @@ struct DeploymentFile {
     track_lease_seconds: u64,
     poll_interval_milliseconds: u64,
     worker_environment_files: BTreeMap<String, String>,
+    build: BuildFileConfig,
     nats: NatsFileConfig,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuildFileConfig {
+    provider_subject: String,
+    builder_binding: String,
+    scanner_binding: String,
+    signer_binding: String,
+    registry_binding: String,
+    policy_id: PolicyId,
+    policy_revision: Revision,
+    scanner_name: String,
+    scanner_version: String,
+    scanner_database_sha256: Sha256Digest,
+    trust_bundle_sha256: Sha256Digest,
+    expected_fulcio_issuer: String,
+    expected_certificate_subject: String,
+    registry_robot_name: String,
+    evidence_ttl_milliseconds: u64,
+    stage_timeout_milliseconds: u64,
+    worker_lease_seconds: u64,
+    retry_delay_milliseconds: u64,
+    max_attempts: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -50,11 +80,18 @@ struct NatsFileConfig {
     client_certificate_file: String,
     client_private_key_file: String,
     credentials_file: String,
+    build_command_stream_name: String,
+    build_command_consumer_name: String,
+    build_command_quarantine_subject: String,
     publish_timeout_milliseconds: u64,
     outbox_poll_milliseconds: u64,
 }
 
 #[tokio::main]
+#[allow(
+    clippy::too_many_lines,
+    reason = "startup keeps every fail-closed Agent dependency binding in one auditable boundary"
+)]
 async fn main() -> Result<(), StartupError> {
     telemetry::init(env!("CARGO_PKG_NAME"))?;
     let deployment = load_deployment()?;
@@ -64,7 +101,8 @@ async fn main() -> Result<(), StartupError> {
         .connect(&read_trimmed(&deployment.database_url_file)?)
         .await?;
     verify_schema(&pool).await?;
-    let store = PostgresAgentRunStore::new(pool);
+    let store = PostgresAgentRunStore::new(pool.clone());
+    let build_store = PgBuildStore::new(pool);
     let nats = connect_nats_mtls(
         &deployment.nats.server,
         deployment.nats.ca_file.clone().into(),
@@ -75,9 +113,55 @@ async fn main() -> Result<(), StartupError> {
     .await?;
     let outbox = AgentOutboxDispatcher::new(
         store.pool().clone(),
-        nats,
+        nats.clone(),
         Duration::from_millis(deployment.nats.publish_timeout_milliseconds),
     )?;
+    let build_consumer = AgentBuildCommandConsumer::bind(
+        nats.clone(),
+        &deployment.nats.build_command_stream_name,
+        &deployment.nats.build_command_consumer_name,
+        &deployment.nats.build_command_quarantine_subject,
+    )
+    .await?;
+    let build_provider = NatsBuildSupplyChainProvider::new(
+        nats,
+        deployment.build.provider_subject.clone(),
+        deployment.build.builder_binding.clone(),
+        deployment.build.scanner_binding.clone(),
+        deployment.build.signer_binding.clone(),
+        deployment.build.registry_binding.clone(),
+    )
+    .map_err(|_| StartupError::Configuration)?;
+    let build_pipeline = BuildPipeline::new(
+        build_provider,
+        BuildPipelinePolicy {
+            builder_binding: deployment.build.builder_binding.clone(),
+            scanner_binding: deployment.build.scanner_binding.clone(),
+            signer_binding: deployment.build.signer_binding.clone(),
+            registry_binding: deployment.build.registry_binding.clone(),
+            policy_id: deployment.build.policy_id,
+            policy_revision: deployment.build.policy_revision,
+            scanner_name: deployment.build.scanner_name.clone(),
+            scanner_version: deployment.build.scanner_version.clone(),
+            scanner_database_sha256: deployment.build.scanner_database_sha256,
+            trust_bundle_sha256: deployment.build.trust_bundle_sha256,
+            expected_fulcio_issuer: deployment.build.expected_fulcio_issuer.clone(),
+            expected_certificate_subject: deployment.build.expected_certificate_subject.clone(),
+            registry_robot_name: deployment.build.registry_robot_name.clone(),
+            evidence_ttl_milliseconds: deployment.build.evidence_ttl_milliseconds,
+            stage_timeout: Duration::from_millis(deployment.build.stage_timeout_milliseconds),
+        },
+    )
+    .map_err(|_| StartupError::Configuration)?;
+    let build_worker = BuildWorker::new(
+        build_store.clone(),
+        build_pipeline,
+        format!("{}:build", deployment.worker_id),
+        Duration::from_secs(deployment.build.worker_lease_seconds),
+        Duration::from_millis(deployment.build.retry_delay_milliseconds),
+        deployment.build.max_attempts,
+    )
+    .map_err(|_| StartupError::Configuration)?;
     let outbox_poll = Duration::from_millis(deployment.nats.outbox_poll_milliseconds);
     let objects = Arc::new(
         S3ImmutableObjectStore::new(
@@ -106,6 +190,7 @@ async fn main() -> Result<(), StartupError> {
     )?));
     let state = Arc::new(AgentApiState {
         store: store.clone(),
+        build_store: build_store.clone(),
     });
     let bind = SocketAddr::from_str(&deployment.control_mtls.bind_addr)
         .map_err(|_| StartupError::Configuration)?;
@@ -124,9 +209,40 @@ async fn main() -> Result<(), StartupError> {
     tokio::select! {
         result = serve_mtls(listener, router(state), mtls) => result?,
         result = worker.run() => result?,
+        result = build_command_loop(build_consumer, build_store) => result?,
+        result = build_worker_loop(
+            build_worker,
+            Duration::from_millis(deployment.poll_interval_milliseconds)
+        ) => result?,
         result = outbox_loop(outbox, outbox_poll) => result?,
     }
     Ok(())
+}
+
+async fn build_command_loop(
+    mut consumer: AgentBuildCommandConsumer,
+    store: PgBuildStore,
+) -> Result<(), StartupError> {
+    loop {
+        let outcome = consumer.process_next(&store).await?;
+        tracing::info!(event = "agent.build.command_consumed", ?outcome);
+    }
+}
+
+async fn build_worker_loop(
+    worker: BuildWorker<NatsBuildSupplyChainProvider>,
+    interval: Duration,
+) -> Result<(), StartupError> {
+    if interval.is_zero() || interval > Duration::from_secs(60) {
+        return Err(StartupError::Configuration);
+    }
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        let outcome = worker.run_once(timestamp()?).await?;
+        tracing::debug!(event = "agent.build.worker_completed", ?outcome);
+    }
 }
 
 async fn outbox_loop(
@@ -263,6 +379,12 @@ fn validate_deployment(deployment: &DeploymentFile) -> Result<(), StartupError> 
         || deployment.track_lease_seconds == 0
         || deployment.poll_interval_milliseconds == 0
         || deployment.poll_interval_milliseconds > 60_000
+        || deployment.build.worker_lease_seconds == 0
+        || deployment.build.worker_lease_seconds > 300
+        || deployment.build.retry_delay_milliseconds == 0
+        || deployment.build.retry_delay_milliseconds > 300_000
+        || deployment.build.max_attempts == 0
+        || deployment.build.max_attempts > 100
     {
         return Err(StartupError::Configuration);
     }
@@ -299,7 +421,8 @@ fn read_trimmed(path: &str) -> Result<String, StartupError> {
 async fn verify_schema(pool: &sqlx::PgPool) -> Result<(), StartupError> {
     let ready: bool = sqlx::query_scalar(
         "SELECT to_regclass('agent.agent_run_dispatches') IS NOT NULL \
-         AND to_regclass('agent.agent_track_work_items') IS NOT NULL",
+         AND to_regclass('agent.agent_track_work_items') IS NOT NULL \
+         AND to_regclass('agent.build_commands') IS NOT NULL",
     )
     .fetch_one(pool)
     .await?;
@@ -337,6 +460,8 @@ enum StartupError {
     ObjectStore(#[from] artifact_store::ObjectStoreError),
     #[error(transparent)]
     Store(#[from] agent_service::run_store::AgentRunStoreError),
+    #[error(transparent)]
+    BuildStore(#[from] agent_service::build_store::BuildStoreError),
     #[error(transparent)]
     Runtime(#[from] agent_service::claude_code::ClaudeCodeRuntimeError),
     #[error(transparent)]

@@ -1,0 +1,66 @@
+{
+  "$defs": {
+    "BuildRequestId": {
+      "description": "Strongly typed UUIDv7 identifier for `BuildRequestId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "InternalAgentBuildState": {
+      "description": "Agent-owned durable state used as an optimistic precondition for build cancellation.",
+      "enum": [
+        "requested",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "Sha256Digest": {
+      "description": "Canonical lowercase SHA-256 digest.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Durable result returned for an accepted or exactly replayed build cancellation.",
+  "properties": {
+    "buildRequestId": {
+      "$ref": "#/$defs/BuildRequestId"
+    },
+    "cancellationRequested": {
+      "type": "boolean"
+    },
+    "commandSha256": {
+      "$ref": "#/$defs/Sha256Digest"
+    },
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    },
+    "revision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "state": {
+      "$ref": "#/$defs/InternalAgentBuildState"
+    }
+  },
+  "required": [
+    "courseId",
+    "buildRequestId",
+    "commandSha256",
+    "state",
+    "revision",
+    "cancellationRequested"
+  ],
+  "title": "InternalAgentBuildCancellationResult",
+  "type": "object"
+}

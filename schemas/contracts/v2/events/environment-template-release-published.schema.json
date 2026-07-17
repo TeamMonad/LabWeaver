@@ -127,6 +127,272 @@
       "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
       "type": "string"
     },
+    "EndpointProtocol": {
+      "description": "Supported controlled protocols.",
+      "enum": [
+        "http",
+        "https",
+        "ssh"
+      ],
+      "type": "string"
+    },
+    "EnvironmentApiVersion": {
+      "enum": [
+        "environment.labweaver.io/v1"
+      ],
+      "type": "string"
+    },
+    "EnvironmentClass": {
+      "description": "Environment business class retained from the v2.1 architecture.",
+      "enum": [
+        "experiment",
+        "work"
+      ],
+      "type": "string"
+    },
+    "EnvironmentDocumentKind": {
+      "enum": [
+        "EnvironmentSpec"
+      ],
+      "type": "string"
+    },
+    "EnvironmentEntrySpec": {
+      "additionalProperties": false,
+      "description": "One named service entry exposed only through the controlled access plane.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "protocol": {
+          "$ref": "#/$defs/EndpointProtocol"
+        },
+        "servicePort": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "protocol",
+        "servicePort"
+      ],
+      "type": "object"
+    },
+    "EnvironmentRuntimeSpec": {
+      "description": "Strict runtime-specific environment shape.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "base_image_digest": {
+              "type": "string"
+            },
+            "build_context": {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            "kind": {
+              "const": "container",
+              "type": "string"
+            },
+            "provider_binding": {
+              "type": "string"
+            },
+            "service_port": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "provider_binding",
+            "build_context",
+            "base_image_digest",
+            "service_port"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "base_disk": {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            "kind": {
+              "const": "virtual_machine",
+              "type": "string"
+            },
+            "provider_binding": {
+              "type": "string"
+            },
+            "ssh_port": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "storage_class_binding": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "provider_binding",
+            "base_disk",
+            "storage_class_binding",
+            "ssh_port"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "EnvironmentSecuritySpec": {
+      "additionalProperties": false,
+      "description": "Runtime-independent minimum security posture.",
+      "properties": {
+        "privilegeEscalationPolicy": {
+          "$ref": "#/$defs/PrivilegeEscalationPolicy"
+        },
+        "publicExposurePolicy": {
+          "$ref": "#/$defs/PublicExposurePolicy"
+        },
+        "rootFilesystemPolicy": {
+          "$ref": "#/$defs/RootFilesystemPolicy"
+        },
+        "securityProfileBinding": {
+          "type": "string"
+        },
+        "userPolicy": {
+          "$ref": "#/$defs/RuntimeUserPolicy"
+        }
+      },
+      "required": [
+        "userPolicy",
+        "rootFilesystemPolicy",
+        "privilegeEscalationPolicy",
+        "publicExposurePolicy",
+        "securityProfileBinding"
+      ],
+      "type": "object"
+    },
+    "EnvironmentSpec": {
+      "additionalProperties": false,
+      "description": "Stable EnvironmentSpec v1.",
+      "properties": {
+        "apiVersion": {
+          "$ref": "#/$defs/EnvironmentApiVersion"
+        },
+        "class": {
+          "$ref": "#/$defs/EnvironmentClass"
+        },
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/EnvironmentEntrySpec"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "$ref": "#/$defs/EnvironmentDocumentKind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "network": {
+          "$ref": "#/$defs/NetworkPolicySpec"
+        },
+        "resources": {
+          "$ref": "#/$defs/ResourceRequirements"
+        },
+        "retention": {
+          "$ref": "#/$defs/RetentionSnapshot"
+        },
+        "runtime": {
+          "$ref": "#/$defs/EnvironmentRuntimeSpec"
+        },
+        "security": {
+          "$ref": "#/$defs/EnvironmentSecuritySpec"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "name",
+        "class",
+        "resources",
+        "network",
+        "entries",
+        "security",
+        "runtime",
+        "retention"
+      ],
+      "type": "object"
+    },
+    "EnvironmentTemplateRelease": {
+      "additionalProperties": false,
+      "description": "Immutable environment-first release.",
+      "properties": {
+        "approval": {
+          "$ref": "#/$defs/CandidateApproval"
+        },
+        "artifact": {
+          "$ref": "#/$defs/ImageArtifact"
+        },
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
+        },
+        "candidateRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "courseId": {
+          "$ref": "#/$defs/CourseId"
+        },
+        "environmentSpecSha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "id": {
+          "$ref": "#/$defs/ReleaseId"
+        },
+        "imagePolicyEvaluation": {
+          "$ref": "#/$defs/ImagePolicyEvaluation"
+        },
+        "publishedAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "publishedBy": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "runtimeKind": {
+          "$ref": "#/$defs/RuntimeKind"
+        },
+        "version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "courseId",
+        "version",
+        "candidateId",
+        "candidateRevision",
+        "environmentSpecSha256",
+        "runtimeKind",
+        "approval",
+        "artifact",
+        "imagePolicyEvaluation",
+        "publishedBy",
+        "publishedAt"
+      ],
+      "type": "object"
+    },
+    "EventId": {
+      "description": "Strongly typed UUIDv7 identifier for `EventId`.",
+      "type": "string"
+    },
     "ImageArtifact": {
       "description": "Complete immutable runtime artifact identity.",
       "oneOf": [
@@ -297,42 +563,160 @@
       ],
       "type": "object"
     },
+    "NetworkPolicySpec": {
+      "description": "Network egress posture for a published environment.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "const": "deny_all",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "const": "restricted",
+              "type": "string"
+            },
+            "policy_binding": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "policy_binding"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "PolicyId": {
       "description": "Strongly typed UUIDv7 identifier for `PolicyId`.",
+      "type": "string"
+    },
+    "PrivilegeEscalationPolicy": {
+      "enum": [
+        "deny"
+      ],
+      "type": "string"
+    },
+    "PublicExposurePolicy": {
+      "enum": [
+        "deny"
+      ],
       "type": "string"
     },
     "ReleaseId": {
       "description": "Strongly typed UUIDv7 identifier for `ReleaseId`.",
       "type": "string"
     },
-    "ReleaseWithdrawal": {
+    "ReleasePublishedV2": {
       "additionalProperties": false,
-      "description": "Append-only release withdrawal fact.",
+      "description": "Complete immutable runtime projection consumed by the Environment state owner.",
       "properties": {
-        "actorId": {
-          "$ref": "#/$defs/ActorId"
+        "environmentSpec": {
+          "$ref": "#/$defs/EnvironmentSpec"
         },
-        "reasonCode": {
-          "type": "string"
+        "projectionSha256": {
+          "$ref": "#/$defs/Sha256Digest"
         },
-        "releaseId": {
-          "$ref": "#/$defs/ReleaseId"
+        "release": {
+          "$ref": "#/$defs/EnvironmentTemplateRelease"
+        }
+      },
+      "required": [
+        "release",
+        "environmentSpec",
+        "projectionSha256"
+      ],
+      "type": "object"
+    },
+    "ResourceRequirements": {
+      "additionalProperties": false,
+      "description": "Bounded runtime resources expressed without Kubernetes-dependent parsing.",
+      "properties": {
+        "cpuMillicores": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
         },
-        "releaseVersion": {
+        "memoryBytes": {
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
         },
-        "withdrawnAt": {
-          "$ref": "#/$defs/UtcTimestamp"
+        "storageBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
         }
       },
       "required": [
-        "releaseId",
-        "releaseVersion",
-        "actorId",
-        "reasonCode",
-        "withdrawnAt"
+        "cpuMillicores",
+        "memoryBytes",
+        "storageBytes"
+      ],
+      "type": "object"
+    },
+    "RetentionClass": {
+      "description": "Retention classes with distinct privacy and recovery requirements.",
+      "enum": [
+        "course_material",
+        "build_evidence",
+        "run_evidence",
+        "student_submission",
+        "security_audit"
+      ],
+      "type": "string"
+    },
+    "RetentionDisposition": {
+      "description": "Required action after retention expires.",
+      "enum": [
+        "delete",
+        "purge_after_export",
+        "retain_sanitized_receipt"
+      ],
+      "type": "string"
+    },
+    "RetentionSnapshot": {
+      "additionalProperties": false,
+      "description": "Frozen data-retention decision for an immutable resource.",
+      "properties": {
+        "class": {
+          "$ref": "#/$defs/RetentionClass",
+          "description": "Stable retention class."
+        },
+        "disposition": {
+          "$ref": "#/$defs/RetentionDisposition",
+          "description": "Required terminal disposition."
+        },
+        "policyId": {
+          "$ref": "#/$defs/PolicyId",
+          "description": "Policy identity."
+        },
+        "policyRevision": {
+          "$ref": "#/$defs/Revision",
+          "description": "Exact policy revision used at creation."
+        },
+        "retainUntil": {
+          "$ref": "#/$defs/UtcTimestamp",
+          "description": "Absolute retention boundary."
+        }
+      },
+      "required": [
+        "policyId",
+        "policyRevision",
+        "class",
+        "retainUntil",
+        "disposition"
       ],
       "type": "object"
     },
@@ -342,6 +726,13 @@
       "minimum": 0,
       "type": "integer"
     },
+    "RootFilesystemPolicy": {
+      "enum": [
+        "read_only_required",
+        "mutable_required"
+      ],
+      "type": "string"
+    },
     "RuntimeKind": {
       "description": "Runtime kind shared by candidates, releases, and instances.",
       "enum": [
@@ -349,6 +740,18 @@
         "virtual_machine"
       ],
       "type": "string"
+    },
+    "RuntimeUserPolicy": {
+      "enum": [
+        "non_root_required"
+      ],
+      "type": "string"
+    },
+    "Sequence": {
+      "description": "Aggregate-local ordering sequence. This value is not an SSE resume cursor.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
     },
     "Sha256Digest": {
       "description": "Canonical lowercase SHA-256 digest.",
@@ -468,71 +871,63 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Read model that keeps the immutable release separate from its append-only withdrawal fact.",
+  "description": "Strict CloudEvents 1.0 envelope carried as structured JSON.",
   "properties": {
-    "approval": {
-      "$ref": "#/$defs/CandidateApproval"
-    },
-    "artifact": {
-      "$ref": "#/$defs/ImageArtifact"
-    },
-    "candidateId": {
-      "$ref": "#/$defs/CandidateId"
-    },
-    "candidateRevision": {
+    "aggregateRevision": {
       "$ref": "#/$defs/Revision"
+    },
+    "aggregateSequence": {
+      "$ref": "#/$defs/Sequence"
     },
     "courseId": {
       "$ref": "#/$defs/CourseId"
     },
-    "environmentSpecSha256": {
-      "$ref": "#/$defs/Sha256Digest"
+    "data": {
+      "$ref": "#/$defs/ReleasePublishedV2"
+    },
+    "datacontenttype": {
+      "type": "string"
+    },
+    "dataschema": {
+      "type": "string"
     },
     "id": {
-      "$ref": "#/$defs/ReleaseId"
+      "$ref": "#/$defs/EventId"
     },
-    "imagePolicyEvaluation": {
-      "$ref": "#/$defs/ImagePolicyEvaluation"
+    "source": {
+      "type": "string"
     },
-    "publishedAt": {
+    "specversion": {
+      "type": "string"
+    },
+    "subject": {
+      "type": "string"
+    },
+    "time": {
       "$ref": "#/$defs/UtcTimestamp"
     },
-    "publishedBy": {
-      "$ref": "#/$defs/ActorId"
+    "traceId": {
+      "type": "string"
     },
-    "runtimeKind": {
-      "$ref": "#/$defs/RuntimeKind"
-    },
-    "version": {
-      "format": "uint64",
-      "minimum": 0,
-      "type": "integer"
-    },
-    "withdrawal": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/ReleaseWithdrawal"
-        },
-        {
-          "type": "null"
-        }
-      ]
+    "type": {
+      "type": "string"
     }
   },
   "required": [
+    "specversion",
     "id",
+    "source",
+    "type",
+    "subject",
+    "time",
+    "datacontenttype",
+    "dataschema",
     "courseId",
-    "version",
-    "candidateId",
-    "candidateRevision",
-    "environmentSpecSha256",
-    "runtimeKind",
-    "approval",
-    "artifact",
-    "imagePolicyEvaluation",
-    "publishedBy",
-    "publishedAt"
+    "aggregateRevision",
+    "aggregateSequence",
+    "traceId",
+    "data"
   ],
-  "title": "EnvironmentTemplateReleaseView",
+  "title": "CloudEvent",
   "type": "object"
 }

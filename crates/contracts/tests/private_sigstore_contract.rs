@@ -159,6 +159,7 @@ fn trust_bundle_rejects_wrong_transparency_and_certificate_identity() {
         trust_bundle_sha256: bundle.trust_bundle_sha256,
         fulcio_issuer: bundle.fulcio_issuer.clone(),
         certificate_subject: bundle.allowed_subjects[0].clone(),
+        subject_digest: digest(b"image"),
         certificate_sha256: digest(b"certificate"),
         signature_sha256: digest(b"signature"),
         rekor_log_id: bundle.rekor_log_id.clone(),
@@ -183,6 +184,18 @@ fn trust_bundle_rejects_wrong_transparency_and_certificate_identity() {
     );
     evidence.rekor_log_id = bundle.rekor_log_id.clone();
     evidence.sct_sha256 = Sha256Digest::of_bytes(&[]);
+    assert_eq!(
+        bundle.verify_evidence(&evidence),
+        Err(SupplyChainError::SignatureInvalid)
+    );
+    evidence.sct_sha256 = digest(b"sct");
+    evidence.certificate_sha256 = Sha256Digest::of_bytes(&[]);
+    assert_eq!(
+        bundle.verify_evidence(&evidence),
+        Err(SupplyChainError::SignatureInvalid)
+    );
+    evidence.certificate_sha256 = digest(b"certificate");
+    evidence.signature_sha256 = Sha256Digest::of_bytes(&[]);
     assert_eq!(
         bundle.verify_evidence(&evidence),
         Err(SupplyChainError::SignatureInvalid)

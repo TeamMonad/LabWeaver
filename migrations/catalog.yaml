@@ -13,6 +13,9 @@ domains:
       - id: 2
         file: control/0002_control_plane.sql
         sha256: cde8fab6337c4dcc9711243e3d93ba1090268fafb53a0214b3b5e23330711892
+      - id: 3
+        file: control/0003_container_build_projections.sql
+        sha256: e3ad469e525cece4458597ef816dea3b72e3438306cabd631b929ab07be5f38a
   - name: access
     migrations:
       - id: 1
@@ -32,6 +35,12 @@ domains:
       - id: 2
         file: environment/0002_reconcile_leases.sql
         sha256: 1333cf42a6c9706de5c090671d508e1c20d93e486570db1742b71ddaabd8fa87
+      - id: 3
+        file: environment/0003_release_projections.sql
+        sha256: 9ae9838ec69649fea4037eb04a3858d272e1bb2884a98ff3c3a1f84b38d5dd47
+      - id: 4
+        file: environment/0004_container_executor_fence.sql
+        sha256: 90541f85a13423b416759f77a34d3c44c3becd65cda7847ec8a38d1396c4accd
   - name: agent
     migrations:
       - id: 1
@@ -43,6 +52,12 @@ domains:
       - id: 3
         file: agent/0003_control_dispatch.sql
         sha256: fd40241a73cc7a10dad043100a0576b0974188785692460bb3e8e06a5d10a8f2
+      - id: 4
+        file: agent/0004_build_pipeline.sql
+        sha256: cccfbbb81d143a5eff1919ca0bedd5a26fb763054ab939524d66214e0b55df83
+      - id: 5
+        file: agent/0005_build_cancellation_fence.sql
+        sha256: 5b2a8b1c82f744a241ab0aaa93eed2e177287859c488f31ae815f1207ad0cf26
   - name: evaluation
     migrations:
       - id: 1

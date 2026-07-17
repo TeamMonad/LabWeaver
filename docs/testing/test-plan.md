@@ -71,8 +71,18 @@ Aggregate E2 is recorded only when the same worktree passes real MinIO versioned
 JetStream publish-ACK/duplicate/gap/restart tests, and ephemeral-CA Gateway-to-Control,
 Control-to-Access and Control-to-Agent SAN/rotation/outage tests. Issue #48's local suite now
 supplies that composition; it remains distinct from deployed owner-service or Kubernetes evidence.
-Until #52/#53 provide the authoritative artifact/evaluation projection, the positive production
-Release path is expected to return a stable blocking diagnostic.
+Issue #52 now provides the local authoritative Container artifact/evaluation projection; #53 is
+still required for VM artifacts. The positive Container Release path is expected to return a
+stable blocking diagnostic until the v2 build completion has been durably projected. Connected E3
+requires the deployment-owned BuildKit/Harbor/Trivy/Private Sigstore and Kubernetes executors.
+
+Issue #52 local regression gates additionally run the ten-stage Agent pipeline suite, six
+Container Provider tests and the Agent/Environment PostgreSQL tests. They reject empty
+certificate/signature hashes, signature subject-digest drift, expired or withdrawn releases and
+active policy/trust rotation. The PostgreSQL cases prove append-only withdrawal sequence 2 and
+that a provider delay longer than retry delay still schedules from the post-provider database
+clock. Remote executor requests carry their durable fence identity, but executor-side
+highest-generation and cleanup/delete tombstones remain connected E3 evidence.
 
 The current worktree records real versioned MinIO presign/freeze/overwrite/exact-version/cleanup
 coverage and real JetStream Agent Outbox missing-stream failure, retry and persisted-ACK ordering.
@@ -187,6 +197,11 @@ cargo test --locked -p agent-service
 cargo clippy -p agent-service --all-targets --all-features -- -D warnings
 cargo xtask contracts check
 pnpm --dir web contracts:check
+
+# Docker/Colima-backed PostgreSQL executor fencing, restart replay and cancellation.
+cargo test --locked -p agent-service --test build_store_postgres
+cargo test --locked -p environment-service --test postgres \
+  container_executor_persists_generation_and_permanent_delete_tombstone
 
 # Requires a disposable PostgreSQL server with CREATEDB, supplied by
 # LABWEAVER_TEST_DATABASE_URL, or a Docker-backed PostgreSQL container.

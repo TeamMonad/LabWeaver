@@ -27,9 +27,10 @@ async fn release_and_withdrawal_are_marked_published_only_after_jetstream_ack()
         .connect(&database_url)
         .await?;
     let migrations = format!(
-        "CREATE SCHEMA control; SET search_path TO control;\n{}\n{}",
+        "CREATE SCHEMA control; SET search_path TO control;\n{}\n{}\n{}",
         include_str!("../../../migrations/control/0001_initial.sql"),
-        include_str!("../../../migrations/control/0002_control_plane.sql")
+        include_str!("../../../migrations/control/0002_control_plane.sql"),
+        include_str!("../../../migrations/control/0003_container_build_projections.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;
 

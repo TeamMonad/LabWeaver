@@ -178,6 +178,9 @@ impl PrivateSigstoreTrustBundle {
             || !self
                 .allowed_subjects
                 .contains(&evidence.certificate_subject)
+            || evidence.subject_digest == Sha256Digest::of_bytes(&[])
+            || evidence.certificate_sha256 == Sha256Digest::of_bytes(&[])
+            || evidence.signature_sha256 == Sha256Digest::of_bytes(&[])
             || evidence.rekor_log_id != self.rekor_log_id
             || evidence.ct_log_id != self.ct_log_id
             || evidence.rekor_inclusion_proof_sha256 == Sha256Digest::of_bytes(&[])
@@ -499,6 +502,8 @@ pub struct SigstoreEvidence {
     pub trust_bundle_sha256: Sha256Digest,
     pub fulcio_issuer: String,
     pub certificate_subject: String,
+    /// Immutable artifact digest covered by the verified signature.
+    pub subject_digest: Sha256Digest,
     pub certificate_sha256: Sha256Digest,
     pub signature_sha256: Sha256Digest,
     pub rekor_log_id: String,
@@ -597,10 +602,16 @@ impl ImageArtifact {
             || provenance.size_bytes == 0
             || signature.fulcio_issuer.trim().is_empty()
             || signature.certificate_subject.trim().is_empty()
+            || signature.subject_digest == Sha256Digest::of_bytes(&[])
+            || signature.certificate_sha256 == Sha256Digest::of_bytes(&[])
+            || signature.signature_sha256 == Sha256Digest::of_bytes(&[])
             || signature.rekor_log_id.trim().is_empty()
             || signature.ct_log_id.trim().is_empty()
         {
             return Err(SupplyChainError::IncompleteArtifact);
+        }
+        if signature.subject_digest != self.content_sha256()? {
+            return Err(SupplyChainError::DigestMismatch);
         }
         Ok(())
     }
@@ -708,6 +719,9 @@ impl EnvironmentTemplateRelease {
             || self.image_policy_evaluation.expected_fulcio_issuer != signature.fulcio_issuer
             || self.image_policy_evaluation.expected_certificate_subject
                 != signature.certificate_subject
+            || signature.subject_digest != self.image_policy_evaluation.artifact_sha256
+            || signature.certificate_sha256 == Sha256Digest::of_bytes(&[])
+            || signature.signature_sha256 == Sha256Digest::of_bytes(&[])
             || signature.rekor_inclusion_proof_sha256 == Sha256Digest::of_bytes(&[])
             || signature.sct_sha256 == Sha256Digest::of_bytes(&[])
         {
