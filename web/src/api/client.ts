@@ -210,26 +210,37 @@ const sdkTransport: AxiosInstance = axios.create({
 attachAuthInterceptor(sdkTransport, { mode: 'bearer', accessToken: getOidcAccessToken })
 attachResponseInterceptor(sdkTransport)
 
-// Fixture adapter is loaded dynamically so that fixture modules are not part
-// of the production bundle.
-if (IS_FIXTURE) {
-  const { installFixtureAdapter } = await import('@/fixture/install')
-  installFixtureAdapter(sdkTransport)
-}
+/**
+ * Initialize the generated SDK client transport.
+ *
+ * In fixture mode this dynamically installs the local fixture adapter so that
+ * fixture modules are not part of the production bundle. Must be awaited before
+ * the Vue app mounts so that the first SDK calls use the configured transport.
+ */
+export async function initializeSdkClient(): Promise<void> {
+  // The compile-time __IS_FIXTURE__ flag is a literal `false` in production
+  // builds, so Rollup eliminates this branch and the fixture adapter chunk is
+  // never emitted (enforced by the production bundle gate). The runtime
+  // IS_FIXTURE check stays as defense-in-depth for fixture builds.
+  if (__IS_FIXTURE__ && IS_FIXTURE) {
+    const { installFixtureAdapter } = await import('@/fixture/install')
+    installFixtureAdapter(sdkTransport)
+  }
 
-// Make the generated SDK functions use the configured SDK transport.
-defaultSdkClient.setConfig({
-  axios: sdkTransport,
-  baseURL: '',
-  auth: IS_FIXTURE
-    ? async () => {
-        // Fixture mode does not use OIDC; fall back to the local test token
-        // so that SDK SSE requests carry the Bearer header intercepted by the
-        // fixture fetch wrapper.
-        return localStorage.getItem('access_token') ?? undefined
-      }
-    : undefined,
-})
+  // Make the generated SDK functions use the configured SDK transport.
+  defaultSdkClient.setConfig({
+    axios: sdkTransport,
+    baseURL: '',
+    auth: IS_FIXTURE
+      ? async () => {
+          // Fixture mode does not use OIDC; fall back to the local test token
+          // so that SDK SSE requests carry the Bearer header intercepted by the
+          // fixture fetch wrapper.
+          return localStorage.getItem('access_token') ?? undefined
+        }
+      : undefined,
+  })
+}
 
 /** Health checks are intentionally outside the authenticated Public API contract. */
 export async function healthCheck(config?: AxiosRequestConfig) {

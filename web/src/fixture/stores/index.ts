@@ -6,6 +6,7 @@ import { resetEndpointStore } from './endpointStore'
 import { resetEnvironmentStore, seedEnvironments } from './environmentStore'
 import { resetEventLog } from './eventLog'
 import { resetOperationStore, seedTimedOutOperation } from './operationStore'
+import { resetTemplateReleaseStore, seedTemplateReleases } from './templateReleaseStore'
 
 /**
  * Resets every fixture store, sequence, and clock offset to a deterministic
@@ -20,9 +21,11 @@ export function resetFixtureState(): void {
   resetEnvironmentStore()
   resetEventLog()
   resetSshKeyStore()
+  resetTemplateReleaseStore()
   const envIds = seedEnvironments()
   seedAccessGrants(envIds)
   seedTimedOutOperation(envIds[0])
+  seedTemplateReleases(['course-101', 'course-102', 'course-admin'])
 }
 
 export * from './actorStore'

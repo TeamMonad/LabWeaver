@@ -48,7 +48,7 @@
           <SvgIcon name="person" size="sm" aria-hidden="true" />
           <span class="user-name">{{ userDisplayName }}</span>
         </span>
-        <button type="button" class="text-button" @click="logout">
+        <button type="button" class="text-button" aria-label="退出" @click="logout">
           <SvgIcon name="logout" size="sm" aria-hidden="true" />
           <span class="text-button__label">退出</span>
         </button>
@@ -56,7 +56,7 @@
 
       <template v-else>
         <span class="login-status">未认证</span>
-        <button v-if="oidcEnabled" type="button" class="filled-button" @click="login">
+        <button v-if="oidcEnabled" type="button" class="filled-button" aria-label="登录" @click="login">
           <SvgIcon name="login" size="sm" aria-hidden="true" />
           <span class="filled-button__label">登录</span>
         </button>

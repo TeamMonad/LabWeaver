@@ -3,6 +3,7 @@
   "seed": 20260711,
   "epoch": "2026-07-11T10:00:00.000Z",
   "scenarios": [
+    "template-releases:list",
     "ssh-keys:list",
     "ssh-keys:create",
     "ssh-keys:delete",
@@ -40,6 +41,7 @@
   ],
   "handlers": [
     "sshKeys",
+    "templateReleases",
     "environments",
     "environmentEndpoints",
     "environmentAccessGrants",

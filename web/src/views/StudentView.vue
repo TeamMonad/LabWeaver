@@ -14,7 +14,8 @@ import RoleLayout from '@/components/layout/RoleLayout.vue'
 
 const tabs = [
   { path: '/student', label: '我的实验' },
-  { path: '/student/environments', label: '环境入口' },
+  { path: '/student/environments', label: '环境控制台' },
+  { path: '/student/ssh-keys', label: 'SSH 公钥' },
   { path: '/student/results', label: '评测结果' },
 ]
 </script>

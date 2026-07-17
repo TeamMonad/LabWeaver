@@ -8,6 +8,7 @@ import * as environmentOperations from './environmentOperations'
 import * as environments from './environments'
 import * as events from './events'
 import * as sshKeys from './sshKeys'
+import * as templateReleases from './templateReleases'
 
 interface RouteEntry {
   method: string
@@ -16,6 +17,9 @@ interface RouteEntry {
 }
 
 const routes: RouteEntry[] = [
+  // Environment template releases
+  { method: 'GET', match: (url) => /^\/api\/v1\/courses\/[^/]+\/environment-template-releases$/.test(url), handler: templateReleases.listEnvironmentTemplateReleases },
+
   // Environments
   { method: 'GET', match: (url) => url === '/api/v1/environments', handler: environments.listEnvironmentsHandler },
   { method: 'POST', match: (url) => url === '/api/v1/environments', handler: environments.createEnvironmentHandler },
@@ -92,4 +96,22 @@ export function requireRole(actor: FixtureActor, action: Parameters<typeof can>[
 export function extractPathParam(url: string, pattern: RegExp, groupIndex: number): string | null {
   const match = pattern.exec(url)
   return match?.[groupIndex] ?? null
+}
+
+/**
+ * Parse the revision from an If-Match header.
+ *
+ * Mirrors `StrongEtag::parse` (crates/contracts/src/http.rs): the value must be
+ * the quoted `"rev-<n>"` strong validator. Weak validators (`W/` prefix),
+ * unquoted values and zero revisions are rejected so fixture behavior matches
+ * the real backend contract.
+ */
+export function parseIfMatchRevision(value: string): number | null {
+  const trimmed = value.trim()
+  if (trimmed.startsWith('W/')) return null
+  const match = /^"rev-(\d+)"$/.exec(trimmed)
+  if (!match) return null
+  const parsed = Number(match[1])
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) return null
+  return parsed
 }

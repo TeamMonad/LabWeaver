@@ -18,6 +18,10 @@ export default defineConfig(({ command, mode }) => {
     plugins: [vue()],
     define: {
       __FIXTURE_BANNER__: bannerVisible,
+      // Compile-time fixture data-mode flag. In production builds this is the
+      // literal `false`, so Rollup can eliminate the fixture adapter import
+      // branch and no fixture chunk is emitted (production bundle gate).
+      __IS_FIXTURE__: isFixture,
     },
     resolve: {
       alias: {
