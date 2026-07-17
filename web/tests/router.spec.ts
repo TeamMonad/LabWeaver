@@ -7,6 +7,7 @@ const loginMock = vi.fn()
 const loadUserMock = vi.fn()
 
 let mockUser: User | null = null
+const isFixtureMode = import.meta.env.VITE_DATA_MODE === 'fixture'
 
 vi.mock('@/config', () => ({
   OIDC_ENABLED: true,
@@ -56,9 +57,13 @@ describe('route guard', () => {
     expect(router.currentRoute.value.path).toBe('/')
   })
 
-  it('triggers OIDC login for unauthenticated users accessing role routes', async () => {
+  it(`${isFixtureMode ? 'redirects fixture unauthenticated users to home' : 'triggers OIDC login for unauthenticated users accessing role routes'}`, async () => {
     await router.push('/teacher')
-    expect(loginMock).toHaveBeenCalled()
+    if (isFixtureMode) {
+      expect(router.currentRoute.value.name).toBe('home')
+    } else {
+      expect(loginMock).toHaveBeenCalled()
+    }
     // roleRoute redirects to the first child, so the remembered return path is /teacher/overview.
     expect(window.sessionStorage.getItem('auth-return-to')).toBe('/teacher/overview')
   })
