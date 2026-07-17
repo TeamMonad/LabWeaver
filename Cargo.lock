@@ -6293,6 +6293,7 @@ dependencies = [
  "ansible-rs",
  "clap",
  "contracts",
+ "jsonschema",
  "persistence-sqlx",
  "serde",
  "serde_jcs",
@@ -6300,6 +6301,8 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "sqlx",
+ "tempfile",
+ "time",
  "tokio",
  "uuid",
 ]

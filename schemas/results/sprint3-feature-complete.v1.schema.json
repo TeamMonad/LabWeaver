@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://labweaver.dev/schemas/results/sprint3-feature-complete.v1.schema.json",
+  "title": "Sprint 3 Feature Complete evidence index",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "result", "sourceCommit", "buildIdentity", "deploymentIdentity", "environmentIdentity", "tenantId", "courseId", "sprint2Issue64Evidence", "ojE4Report", "containerCloneE4Report", "kubevirtCloneE4Report", "unresolvedBlockers", "knownLimitations"],
+  "properties": {
+    "schemaVersion": {"const": "sprint3-feature-complete.v1"},
+    "result": {"enum": ["planned", "passed", "failed", "blocked"]},
+    "sourceCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "buildIdentity": {"type": "string", "minLength": 1}, "deploymentIdentity": {"type": "string", "minLength": 1},
+    "environmentIdentity": {"type": "string", "minLength": 1}, "tenantId": {"type": "string", "minLength": 1},
+    "courseId": {"type": "string", "minLength": 1},
+    "sprint2Issue64Evidence": {"type": "string"}, "ojE4Report": {"type": "string"},
+    "containerCloneE4Report": {"type": "string"}, "kubevirtCloneE4Report": {"type": "string"},
+    "unresolvedBlockers": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "knownLimitations": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+  }
+}
