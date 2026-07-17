@@ -50,7 +50,15 @@ export function useProblemPackageUpload(courseId: Ref<string | undefined>, polic
     if (entry.isDirectory) {
       const dir = entry as FileSystemDirectoryEntry
       const reader = dir.createReader()
-      const children: FileSystemEntry[] = await new Promise((resolve, reject) => reader.readEntries(resolve, reject))
+      // Chromium returns directory entries in batches; a single readEntries
+      // call silently drops everything past the first batch. Keep reading
+      // until an empty batch marks the end of the directory.
+      const children: FileSystemEntry[] = []
+      for (;;) {
+        const batch = await new Promise<FileSystemEntry[]>((resolve, reject) => reader.readEntries(resolve, reject))
+        if (batch.length === 0) break
+        children.push(...batch)
+      }
       await Promise.all(children.map((child) => collectFiles(child, path, out)))
     } else if (entry.isFile) {
       const file = await new Promise<File>((resolve, reject) => (entry as FileSystemFileEntry).file(resolve, reject))
@@ -94,8 +102,10 @@ export function useProblemPackageUpload(courseId: Ref<string | undefined>, polic
 
   function removeFile(path: string) {
     files.value = files.value.filter((f) => f.path !== path)
+    // The upload session is bound to the file set it was created for; once the
+    // set changes, completing it would archive files that were never sent.
+    session.value = null
     if (files.value.length === 0) {
-      session.value = null
       state.value = { kind: 'idle' }
     }
   }
@@ -159,17 +169,24 @@ export function useProblemPackageUpload(courseId: Ref<string | undefined>, polic
       uploadSession.files.map((f) => ({ path: f.path, sizeBytes: f.sizeBytes, sha256: f.sha256, mediaType: f.mediaType })),
     )
 
+    // Every outcome is settled locally: a failed object PUT must never reject
+    // the whole batch, otherwise the page would strand in `uploading` with an
+    // unhandled rejection instead of reaching the aggregated diagnostic.
     await Promise.all(
       uploadSession.uploadTargets.map(async (target) => {
         const file = files.value.find((f) => f.path === target.path)
-        if (!file) return
+        if (!file || file.status === 'done') return
         file.status = 'uploading'
         try {
           if (IS_FIXTURE) {
             // Object-storage egress (presigned PUT) is outside the Public API
             // contract and cannot be intercepted by the fixture adapter, which
             // only wraps the SDK axios transport. Fixture mode marks the upload
-            // deterministically; the live path below stays the real XHR PUT.
+            // deterministically; paths tagged `__put-fail__` demonstrate the
+            // object-failure diagnostic. The live path below stays the real PUT.
+            if (target.path.includes('__put-fail__')) {
+              throw new Error('对象上传失败（fixture 确定性失败场景）')
+            }
             file.progress = 100
             file.status = 'done'
             return
@@ -181,7 +198,6 @@ export function useProblemPackageUpload(courseId: Ref<string | undefined>, polic
         } catch (err) {
           file.status = 'error'
           file.error = err instanceof Error ? err.message : String(err)
-          throw err
         }
       }),
     )
@@ -200,6 +216,25 @@ export function useProblemPackageUpload(courseId: Ref<string | undefined>, polic
     }
 
     await complete(manifestSha256)
+  }
+
+  /**
+   * Retry after an upload error: reuse the existing session when the file set
+   * is unchanged (only failed objects are resent); otherwise start a fresh
+   * session for the current files.
+   */
+  async function retry() {
+    const current = session.value
+    const matchesCurrentFiles =
+      current !== null &&
+      current.files.length === files.value.length &&
+      files.value.every((f) => current.files.some((sf) => sf.path === f.path))
+    if (current && matchesCurrentFiles) {
+      await uploadFiles(current)
+    } else {
+      session.value = null
+      await createSession()
+    }
   }
 
   function putFileWithProgress(
@@ -262,6 +297,7 @@ export function useProblemPackageUpload(courseId: Ref<string | undefined>, polic
     removeFile,
     clear,
     createSession,
+    retry,
     formatBytes,
   })
 }

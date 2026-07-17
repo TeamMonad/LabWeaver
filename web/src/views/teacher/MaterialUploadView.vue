@@ -131,7 +131,7 @@
           :message="upload.state.diagnostic.message"
           :retryable="upload.state.diagnostic.retryable"
           severity="error"
-          @retry="upload.createSession"
+          @retry="upload.retry"
         />
       </div>
 
@@ -211,9 +211,23 @@
         </template>
       </AsyncStateView>
 
+      <div v-if="agent.pollError" class="poll-error">
+        <DiagnosticBanner
+          :code="agent.pollError.code"
+          :message="agent.pollError.message"
+          :retryable="agent.pollError.retryable"
+          severity="warning"
+          @retry="agent.resumePolling"
+        />
+      </div>
+
+      <p v-if="agent.run.kind === 'success'" class="stream-state" role="status">
+        事件流：{{ streamStateText }}
+      </p>
+
       <div v-if="events.length > 0" class="timeline-section">
-        <h4 class="section-subtitle">实时事件</h4>
-        <EventTimeline :events="events" aria-label="AgentRun 事件时间线" />
+        <h4 class="section-subtitle">实时事件（按当前 AgentRun 过滤）</h4>
+        <EventTimeline :events="events" aria-label="按当前 AgentRun 过滤的实时事件时间线" />
       </div>
     </section>
   </div>
@@ -244,7 +258,26 @@ const policy = useActiveCourseLlmPolicy(courseId)
 const policyRevision = computed(() => (policy.state.kind === 'success' ? policy.state.data.revision : undefined))
 const upload = useProblemPackageUpload(courseId, policyRevision)
 const agent = useAgentRun(courseId)
-const { events, connect: connectEvents, disconnect: disconnectEvents } = useCourseEventStream(courseId)
+const currentRunId = computed(() => (agent.run.kind === 'success' ? agent.run.data.id : undefined))
+const { events, state: streamState, connect: connectEvents, disconnect: disconnectEvents } = useCourseEventStream(
+  courseId,
+  currentRunId,
+)
+
+const streamStateText = computed(() => {
+  switch (streamState.value) {
+    case 'connecting':
+      return '连接中…'
+    case 'open':
+      return '已连接'
+    case 'error':
+      return '连接错误'
+    case 'closed':
+      return '已断开'
+    default:
+      return '未连接'
+  }
+})
 
 const fileInput = ref<HTMLInputElement | null>(null)
 const dragOver = ref(false)
@@ -576,6 +609,16 @@ onUnmounted(() => {
 .run-actions {
   display: flex;
   gap: 8px;
+}
+
+.stream-state {
+  margin: 12px 0 0;
+  font: var(--md-sys-body-small);
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.poll-error {
+  margin-top: 12px;
 }
 
 .timeline-section {
