@@ -1,9 +1,7 @@
 import { reactive, ref, type Ref } from 'vue'
-import type { AxiosError } from 'axios'
-import { apiClient } from '@/api/client'
 import { createAgentRun, getAgentRun, cancelAgentRun, retryAgentRunTrack } from '@/generated/contracts'
-import type { AgentRunSchema, CreateAgentRunRequestSchema, ProblemDetails } from '@/generated/contracts'
-import { makeDiagnostic, type AsyncState } from '@/types/async'
+import type { AgentRunSchema, CreateAgentRunRequestSchema } from '@/generated/contracts'
+import { extractProblemDetails, makeDiagnostic, type AsyncState } from '@/types/async'
 import { idempotencyKey, ifMatch } from '@/utils/format'
 
 const TERMINAL_STATES = new Set(['succeeded', 'failed', 'cancelled', 'partially_succeeded'])
@@ -25,16 +23,13 @@ export function useAgentRun(courseId: Ref<string | undefined>) {
 
     run.value = { kind: 'loading', message: '创建 AgentRun…' }
     const result = await createAgentRun({
-      client: apiClient,
       path: { courseId: id },
       headers: { 'Idempotency-Key': idempotencyKey() },
       body: request,
     })
 
     if (result.error) {
-      const problem = ((result.error as AxiosError).response?.data ?? (result.error as { error?: ProblemDetails }).error) as
-        | ProblemDetails
-        | undefined
+      const problem = extractProblemDetails(result.error)
       run.value = {
         kind: 'error',
         diagnostic: makeDiagnostic(
@@ -53,7 +48,7 @@ export function useAgentRun(courseId: Ref<string | undefined>) {
   async function poll(runId: string) {
     const id = courseId.value
     if (!id) return
-    const result = await getAgentRun({ client: apiClient, path: { courseId: id, runId } })
+    const result = await getAgentRun({ path: { courseId: id, runId } })
     if (result.error) {
       // Surface polling errors as non-fatal so the user can still see the last known state.
       console.warn('[useAgentRun] poll failed', result.error)
@@ -86,14 +81,11 @@ export function useAgentRun(courseId: Ref<string | undefined>) {
     const id = courseId.value
     if (!current || !id) return
     const result = await cancelAgentRun({
-      client: apiClient,
       path: { courseId: id, runId: current.id },
       headers: { 'Idempotency-Key': idempotencyKey(), 'If-Match': ifMatch(current.revision) },
     })
     if (result.error) {
-      const problem = ((result.error as AxiosError).response?.data ?? (result.error as { error?: ProblemDetails }).error) as
-        | ProblemDetails
-        | undefined
+      const problem = extractProblemDetails(result.error)
       run.value = {
         kind: 'error',
         diagnostic: makeDiagnostic(
@@ -113,14 +105,11 @@ export function useAgentRun(courseId: Ref<string | undefined>) {
     const id = courseId.value
     if (!current || !id) return
     const result = await retryAgentRunTrack({
-      client: apiClient,
       path: { courseId: id, runId: current.id, track },
       headers: { 'Idempotency-Key': idempotencyKey(), 'If-Match': ifMatch(current.revision) },
     })
     if (result.error) {
-      const problem = ((result.error as AxiosError).response?.data ?? (result.error as { error?: ProblemDetails }).error) as
-        | ProblemDetails
-        | undefined
+      const problem = extractProblemDetails(result.error)
       run.value = {
         kind: 'error',
         diagnostic: makeDiagnostic(

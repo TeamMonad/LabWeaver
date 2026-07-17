@@ -1,12 +1,10 @@
 import { reactive, ref, type Ref } from 'vue'
-import type { AxiosError } from 'axios'
-import { apiClient } from '@/api/client'
 import { createProblemPackageUpload, completeProblemPackageUpload } from '@/generated/contracts'
-import type { ProblemDetails } from '@/generated/contracts'
 import type { ProblemPackageSchema, ProblemPackageUploadSessionSchema } from '@/generated/contracts'
+import { IS_FIXTURE } from '@/config/dataMode'
 import { computeManifestSha256, sha256File } from '@/utils/crypto'
 import { formatBytes, idempotencyKey, ifMatch } from '@/utils/format'
-import { makeDiagnostic } from '@/types/async'
+import { extractProblemDetails, makeDiagnostic } from '@/types/async'
 
 export type UploadFile = {
   file: File
@@ -125,7 +123,6 @@ export function useProblemPackageUpload(courseId: Ref<string | undefined>, polic
 
     state.value = { kind: 'creating' }
     const result = await createProblemPackageUpload({
-      client: apiClient,
       path: { courseId: id },
       headers: { 'Idempotency-Key': idempotencyKey() },
       body: {
@@ -140,9 +137,7 @@ export function useProblemPackageUpload(courseId: Ref<string | undefined>, polic
     })
 
     if (result.error) {
-      const problem = ((result.error as AxiosError).response?.data ?? (result.error as { error?: ProblemDetails }).error) as
-        | ProblemDetails
-        | undefined
+      const problem = extractProblemDetails(result.error)
       state.value = {
         kind: 'error',
         diagnostic: makeDiagnostic(
@@ -170,6 +165,15 @@ export function useProblemPackageUpload(courseId: Ref<string | undefined>, polic
         if (!file) return
         file.status = 'uploading'
         try {
+          if (IS_FIXTURE) {
+            // Object-storage egress (presigned PUT) is outside the Public API
+            // contract and cannot be intercepted by the fixture adapter, which
+            // only wraps the SDK axios transport. Fixture mode marks the upload
+            // deterministically; the live path below stays the real XHR PUT.
+            file.progress = 100
+            file.status = 'done'
+            return
+          }
           await putFileWithProgress(file.file, target.uploadUrl, target.requiredHeaders, (progress) => {
             file.progress = progress
           })
@@ -228,16 +232,13 @@ export function useProblemPackageUpload(courseId: Ref<string | undefined>, polic
 
     state.value = { kind: 'completing' }
     const result = await completeProblemPackageUpload({
-      client: apiClient,
       path: { courseId: id, uploadId },
       headers: { 'Idempotency-Key': idempotencyKey(), 'If-Match': ifMatch(session.value!.revision) },
       body: { manifestSha256 },
     })
 
     if (result.error) {
-      const problem = ((result.error as AxiosError).response?.data ?? (result.error as { error?: ProblemDetails }).error) as
-        | ProblemDetails
-        | undefined
+      const problem = extractProblemDetails(result.error)
       state.value = {
         kind: 'error',
         diagnostic: makeDiagnostic(

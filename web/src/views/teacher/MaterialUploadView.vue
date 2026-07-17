@@ -6,9 +6,16 @@
     </header>
 
     <DiagnosticBanner
-      v-if="isDemoContext"
-      code="DEMO_COURSE_CONTEXT"
-      message="当前使用 .env 中的演示课程上下文；真实课程选择待 #47 接入。"
+      v-if="isContextMissing"
+      code="COURSE_CONTEXT_MISSING"
+      message="课程上下文未绑定，无法加载 LLM 出站策略与材料上传。请通过课程选择器选择课程或联系管理员完成 #47。"
+      :retryable="false"
+      severity="error"
+    />
+    <DiagnosticBanner
+      v-else-if="isContextFromEnv"
+      code="COURSE_CONTEXT_FROM_ENV"
+      message="当前使用部署配置中的默认课程上下文；真实课程选择待 #47 接入。"
       :retryable="false"
       severity="warning"
     />
@@ -18,7 +25,7 @@
         <SvgIcon name="policy" size="sm" aria-hidden="true" />
         课程 LLM 出站策略
       </h3>
-      <AsyncStateView :state="policy.state" @retry="policy.load">
+      <AsyncStateView v-if="!isContextMissing" :state="policy.state" @retry="policy.load">
         <template #success="{ data }">
           <div class="policy-card md-card">
             <div class="policy-row">
@@ -214,7 +221,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { useCourseStore } from '@/stores/course'
+import { useCourseContext } from '@/composables/useCourseContext'
 import { useActiveCourseLlmPolicy } from '@/composables/useActiveCourseLlmPolicy'
 import { useProblemPackageUpload } from '@/composables/useProblemPackageUpload'
 import { useAgentRun } from '@/composables/useAgentRun'
@@ -228,9 +235,10 @@ import { truncateSha256 } from '@/utils/format'
 import type { DataTableColumn } from '@/components/common/DataTable.vue'
 import type { UploadFile } from '@/composables/useProblemPackageUpload'
 
-const courseStore = useCourseStore()
-const courseId = computed(() => courseStore.currentContext?.courseId ?? (import.meta.env.VITE_DEMO_COURSE_ID as string | undefined))
-const isDemoContext = computed(() => courseStore.currentContext === null && !!import.meta.env.VITE_DEMO_COURSE_ID)
+const course = useCourseContext()
+const courseId = course.courseId
+const isContextMissing = computed(() => course.context.value === null)
+const isContextFromEnv = computed(() => course.context.value?.source === 'env')
 
 const policy = useActiveCourseLlmPolicy(courseId)
 const policyRevision = computed(() => (policy.state.kind === 'success' ? policy.state.data.revision : undefined))

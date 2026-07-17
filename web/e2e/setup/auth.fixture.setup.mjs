@@ -72,17 +72,22 @@ test('prepare fixture auth states', async () => {
       name: 'Fixture Admin',
       email: 'admin@fixture.labweaver.io',
     },
-    // Deterministic blocked student: no course_id claim and no default course env,
+    // Deterministic blocked actors: no course_id claim and no default course env,
     // so useCourseContext resolves to null and protected pages show the blocked diagnostic.
     {
       role: 'student',
       name: 'Fixture Student Without Course',
       email: 'student-blocked@fixture.labweaver.io',
     },
+    {
+      role: 'teacher',
+      name: 'Fixture Teacher Without Course',
+      email: 'teacher-blocked@fixture.labweaver.io',
+    },
   ]
 
   for (const state of states) {
-    const fileName = state.courseId === undefined && state.role === 'student' ? 'student-blocked.json' : `${state.role}.json`
+    const fileName = state.courseId === undefined ? `${state.role}-blocked.json` : `${state.role}.json`
     fs.writeFileSync(
       path.join(authDir, fileName),
       JSON.stringify(fixtureStorageState(state), null, 2),

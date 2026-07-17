@@ -1,10 +1,8 @@
 import { reactive, ref, watch, type Ref } from 'vue'
-import type { AxiosError } from 'axios'
-import { apiClient } from '@/api/client'
 import { getActiveCourseLlmPolicy } from '@/generated/contracts'
-import type { CourseLlmEgressPolicySchema, ProblemDetails } from '@/generated/contracts'
+import type { CourseLlmEgressPolicySchema } from '@/generated/contracts'
 import type { AsyncState } from '@/types/async'
-import { makeDiagnostic } from '@/types/async'
+import { extractProblemDetails, makeDiagnostic } from '@/types/async'
 
 export function useActiveCourseLlmPolicy(courseId: Ref<string | undefined>) {
   const state = ref<AsyncState<CourseLlmEgressPolicySchema>>({ kind: 'idle' })
@@ -16,7 +14,7 @@ export function useActiveCourseLlmPolicy(courseId: Ref<string | undefined>) {
         kind: 'blocked',
         diagnostic: makeDiagnostic(
           'COURSE_CONTEXT_MISSING',
-          '课程上下文未绑定，无法加载 LLM 出站策略。请联系架构 Owner 完成 #47 课程成员 API。',
+          '课程上下文未绑定，无法加载 LLM 出站策略。请通过课程选择器选择课程或联系管理员完成 #47。',
           false,
         ),
       }
@@ -25,14 +23,11 @@ export function useActiveCourseLlmPolicy(courseId: Ref<string | undefined>) {
 
     state.value = { kind: 'loading', message: '加载课程 LLM 策略…' }
     const result = await getActiveCourseLlmPolicy({
-      client: apiClient,
       path: { courseId: id },
     })
 
     if (result.error) {
-      const problem = ((result.error as AxiosError).response?.data ?? (result.error as { error?: ProblemDetails }).error) as
-        | ProblemDetails
-        | undefined
+      const problem = extractProblemDetails(result.error)
       state.value = {
         kind: 'error',
         diagnostic: makeDiagnostic(

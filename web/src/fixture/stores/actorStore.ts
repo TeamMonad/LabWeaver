@@ -40,6 +40,10 @@ export type FixtureAction =
   | 'access_grant:read'
   | 'access_grant:write'
   | 'access_grant:revoke'
+  | 'llm_policy:read'
+  | 'problem_package:write'
+  | 'agent_run:read'
+  | 'agent_run:write'
   | 'ssh_key:read'
   | 'ssh_key:write'
   | 'events:read'
@@ -62,6 +66,10 @@ export function can(role: FixtureRole, action: FixtureAction, resource?: Fixture
         case 'access_grant:read':
         case 'access_grant:write':
         case 'access_grant:revoke':
+        case 'llm_policy:read':
+        case 'problem_package:write':
+        case 'agent_run:read':
+        case 'agent_run:write':
         case 'submission:freeze':
           return resource?.courseId === undefined || ROLE_COURSES.teacher.includes(resource.courseId)
         case 'ssh_key:read':

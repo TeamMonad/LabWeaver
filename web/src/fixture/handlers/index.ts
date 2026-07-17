@@ -2,11 +2,14 @@ import { notFound, unauthorized, missingHeader, forbidden } from '../diagnostics
 import { can, parseActor, type FixtureActor } from '../stores/actorStore'
 import type { FixtureHandler, FixtureHandlerResult, FixtureRequest, FixtureResponse } from '../types'
 import * as accessGrants from './accessGrants'
+import * as agentRuns from './agentRuns'
 import * as environmentAccessGrants from './environmentAccessGrants'
 import * as environmentEndpoints from './environmentEndpoints'
 import * as environmentOperations from './environmentOperations'
 import * as environments from './environments'
 import * as events from './events'
+import * as llmPolicy from './llmPolicy'
+import * as problemPackages from './problemPackages'
 import * as sshKeys from './sshKeys'
 import * as templateReleases from './templateReleases'
 
@@ -19,6 +22,19 @@ interface RouteEntry {
 const routes: RouteEntry[] = [
   // Environment template releases
   { method: 'GET', match: (url) => /^\/api\/v1\/courses\/[^/]+\/environment-template-releases$/.test(url), handler: templateReleases.listEnvironmentTemplateReleases },
+
+  // Course LLM egress policy
+  { method: 'GET', match: (url) => /^\/api\/v1\/courses\/[^/]+\/llm-egress-policies\/active$/.test(url), handler: llmPolicy.getActiveCourseLlmPolicy },
+
+  // Problem package uploads
+  { method: 'POST', match: (url) => /^\/api\/v1\/courses\/[^/]+\/problem-package-uploads$/.test(url), handler: problemPackages.createProblemPackageUpload },
+  { method: 'POST', match: (url) => /^\/api\/v1\/courses\/[^/]+\/problem-package-uploads\/[^/]+\/complete$/.test(url), handler: problemPackages.completeProblemPackageUpload },
+
+  // Agent runs
+  { method: 'POST', match: (url) => /^\/api\/v1\/courses\/[^/]+\/agent-runs$/.test(url), handler: agentRuns.createAgentRun },
+  { method: 'GET', match: (url) => /^\/api\/v1\/courses\/[^/]+\/agent-runs\/[^/]+$/.test(url), handler: agentRuns.getAgentRun },
+  { method: 'POST', match: (url) => /^\/api\/v1\/courses\/[^/]+\/agent-runs\/[^/]+\/cancel$/.test(url), handler: agentRuns.cancelAgentRun },
+  { method: 'POST', match: (url) => /^\/api\/v1\/courses\/[^/]+\/agent-runs\/[^/]+\/tracks\/[^/]+\/retry$/.test(url), handler: agentRuns.retryAgentRunTrack },
 
   // Environments
   { method: 'GET', match: (url) => url === '/api/v1/environments', handler: environments.listEnvironmentsHandler },
@@ -60,10 +76,13 @@ const routes: RouteEntry[] = [
 
 export function dispatch(req: FixtureRequest): FixtureHandlerResult {
   const method = req.method.toUpperCase()
-  const url = req.url
-  const route = routes.find((r) => r.method === method && r.match(url))
+  // Match routes on the pathname only; handlers still receive the full URL
+  // (with query string) so query-aware handlers like the SSE stream can parse
+  // parameters themselves.
+  const pathname = req.url.split('?')[0].split('#')[0]
+  const route = routes.find((r) => r.method === method && r.match(pathname))
   if (!route) {
-    return notFound(`${method} ${url}`)
+    return notFound(`${method} ${req.url}`)
   }
   return route.handler(req)
 }

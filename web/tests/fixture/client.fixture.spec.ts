@@ -8,6 +8,12 @@ import {
   listEnvironmentEndpoints,
   createAccessGrant,
   revokeAccessGrant,
+  getActiveCourseLlmPolicy,
+  createProblemPackageUpload,
+  completeProblemPackageUpload,
+  createAgentRun,
+  getAgentRun,
+  cancelAgentRun,
 } from '@/generated/contracts'
 import { DATA_MODE } from '@/config/dataMode'
 
@@ -87,5 +93,138 @@ describeFixture('fixture adapter', () => {
     expect(revoked.error).toBeUndefined()
     expect(revoked.data?.operationId).toBeDefined()
     expect(revoked.data?.statusUrl).toBe(`/api/v1/access-grants/${created.data.id}`)
+  })
+
+  it('completes teacher material upload and agent run lifecycle', async () => {
+    window.localStorage.setItem('access_token', 'fixture-teacher')
+    const sha = (ch: string) => ch.repeat(64)
+
+    const policy = await getActiveCourseLlmPolicy({ client: generatedClient, path: { courseId: 'course-101' } })
+    expect(policy.error).toBeUndefined()
+    expect(policy.data.courseId).toBe('course-101')
+
+    const upload = await createProblemPackageUpload({
+      client: generatedClient,
+      path: { courseId: 'course-101' },
+      headers: { 'Idempotency-Key': 'fixture-upload-001' },
+      body: {
+        files: [{ path: 'problem/README.md', sizeBytes: 128, sha256: sha('1'), mediaType: 'text/markdown' }],
+        retentionPolicyRevision: policy.data.revision,
+      },
+    })
+    expect(upload.error).toBeUndefined()
+    expect(upload.data.uploadTargets).toHaveLength(1)
+
+    const completed = await completeProblemPackageUpload({
+      client: generatedClient,
+      path: { courseId: 'course-101', uploadId: upload.data.id },
+      headers: { 'Idempotency-Key': 'fixture-upload-002', 'If-Match': `"rev-${upload.data.revision}"` },
+      body: { manifestSha256: sha('2') },
+    })
+    expect(completed.error).toBeUndefined()
+    expect(completed.data.files).toHaveLength(1)
+
+    const run = await createAgentRun({
+      client: generatedClient,
+      path: { courseId: 'course-101' },
+      headers: { 'Idempotency-Key': 'fixture-run-001' },
+      body: {
+        packageId: completed.data.id,
+        packageRevision: completed.data.revision,
+        packageSha256: completed.data.manifestSha256,
+        policyId: policy.data.id,
+        policyRevision: policy.data.revision,
+        requestedRuntime: 'container',
+      },
+    })
+    expect(run.error).toBeUndefined()
+    expect(run.data.state).toBe('running')
+
+    const first = await getAgentRun({ client: generatedClient, path: { courseId: 'course-101', runId: run.data.id } })
+    expect(first.error).toBeUndefined()
+    const second = await getAgentRun({ client: generatedClient, path: { courseId: 'course-101', runId: run.data.id } })
+    expect(second.data.state).toBe('succeeded')
+  })
+
+  it('rejects agent run creation with a stale policy revision', async () => {
+    window.localStorage.setItem('access_token', 'fixture-teacher')
+    const sha = (ch: string) => ch.repeat(64)
+
+    const policy = await getActiveCourseLlmPolicy({ client: generatedClient, path: { courseId: 'course-101' } })
+    const upload = await createProblemPackageUpload({
+      client: generatedClient,
+      path: { courseId: 'course-101' },
+      headers: { 'Idempotency-Key': 'fixture-upload-003' },
+      body: {
+        files: [{ path: 'problem/main.py', sizeBytes: 64, sha256: sha('3'), mediaType: 'text/x-python' }],
+        retentionPolicyRevision: policy.data.revision,
+      },
+    })
+    const completed = await completeProblemPackageUpload({
+      client: generatedClient,
+      path: { courseId: 'course-101', uploadId: upload.data.id },
+      headers: { 'Idempotency-Key': 'fixture-upload-004', 'If-Match': `"rev-${upload.data.revision}"` },
+      body: { manifestSha256: sha('4') },
+    })
+
+    const stale = await createAgentRun({
+      client: generatedClient,
+      path: { courseId: 'course-101' },
+      headers: { 'Idempotency-Key': 'fixture-run-002' },
+      body: {
+        packageId: completed.data.id,
+        packageRevision: completed.data.revision,
+        packageSha256: completed.data.manifestSha256,
+        policyId: policy.data.id,
+        policyRevision: policy.data.revision + 99,
+        requestedRuntime: 'container',
+      },
+    })
+    expect(stale.error).toMatchObject({ status: 409, diagnosticCode: 'REVISION_MISMATCH' })
+  })
+
+  it('cancels a running agent run with strong ETag', async () => {
+    window.localStorage.setItem('access_token', 'fixture-teacher')
+    const sha = (ch: string) => ch.repeat(64)
+
+    const policy = await getActiveCourseLlmPolicy({ client: generatedClient, path: { courseId: 'course-101' } })
+    const upload = await createProblemPackageUpload({
+      client: generatedClient,
+      path: { courseId: 'course-101' },
+      headers: { 'Idempotency-Key': 'fixture-upload-005' },
+      body: {
+        files: [{ path: 'problem/lab.md', sizeBytes: 32, sha256: sha('5'), mediaType: 'text/markdown' }],
+        retentionPolicyRevision: policy.data.revision,
+      },
+    })
+    const completed = await completeProblemPackageUpload({
+      client: generatedClient,
+      path: { courseId: 'course-101', uploadId: upload.data.id },
+      headers: { 'Idempotency-Key': 'fixture-upload-006', 'If-Match': `"rev-${upload.data.revision}"` },
+      body: { manifestSha256: sha('6') },
+    })
+    const run = await createAgentRun({
+      client: generatedClient,
+      path: { courseId: 'course-101' },
+      headers: { 'Idempotency-Key': 'fixture-run-003' },
+      body: {
+        packageId: completed.data.id,
+        packageRevision: completed.data.revision,
+        packageSha256: completed.data.manifestSha256,
+        policyId: policy.data.id,
+        policyRevision: policy.data.revision,
+        requestedRuntime: 'virtual_machine',
+      },
+    })
+
+    const cancelled = await cancelAgentRun({
+      client: generatedClient,
+      path: { courseId: 'course-101', runId: run.data.id },
+      headers: { 'Idempotency-Key': 'fixture-run-004', 'If-Match': `"rev-${run.data.revision}"` },
+    })
+    expect(cancelled.error).toBeUndefined()
+
+    const polled = await getAgentRun({ client: generatedClient, path: { courseId: 'course-101', runId: run.data.id } })
+    expect(polled.data.state).toBe('cancelled')
   })
 })

@@ -64,21 +64,21 @@ describe('MaterialUploadView', () => {
     expect(wrapper.text()).toContain('课程上下文未绑定')
   })
 
-  it('shows demo banner and loads active LLM policy from env fallback', async () => {
-    vi.stubEnv('VITE_DEMO_COURSE_ID', 'demo-course-1')
+  it('shows env fallback banner and loads active LLM policy from env context', async () => {
+    vi.stubEnv('VITE_DEFAULT_COURSE_ID', 'demo-course-1')
     vi.mocked(getActiveCourseLlmPolicy).mockResolvedValue({
       data: mockPolicy,
       error: undefined as never,
     })
     const wrapper = mount(MaterialUploadView)
-    await vi.waitFor(() => wrapper.text().includes('演示课程上下文'))
-    expect(wrapper.text()).toContain('演示课程上下文')
+    await vi.waitFor(() => wrapper.text().includes('部署配置中的默认课程上下文'))
+    expect(wrapper.text()).toContain('部署配置中的默认课程上下文')
     expect(wrapper.text()).toContain('claude-3-5-sonnet')
     expect(wrapper.text()).toContain('secret')
   })
 
   it('surfaces policy load errors as diagnostic', async () => {
-    vi.stubEnv('VITE_DEMO_COURSE_ID', 'demo-course-1')
+    vi.stubEnv('VITE_DEFAULT_COURSE_ID', 'demo-course-1')
     vi.mocked(getActiveCourseLlmPolicy).mockResolvedValue({
       data: undefined as never,
       error: {
