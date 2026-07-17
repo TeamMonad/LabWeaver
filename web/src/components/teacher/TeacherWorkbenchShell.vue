@@ -170,7 +170,7 @@ h1 {
     align-items: center;
     justify-content: center;
     position: fixed;
-    left: 12px;
+    right: 12px;
     bottom: 16px;
     z-index: 20;
     width: 44px;
@@ -197,7 +197,9 @@ h1 {
   }
 
   .workspace {
-    padding: 24px 16px 56px;
+    /* Leave room for the fixed mobile module-nav toggle so it never overlaps
+       the last lines of content on small screens. */
+    padding: 24px 16px 88px;
   }
 
   .workspace-header {

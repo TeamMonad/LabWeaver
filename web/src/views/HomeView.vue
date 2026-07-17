@@ -118,7 +118,21 @@ onMounted(async () => {
 })
 
 function signInFixtureDemo(roleId: string) {
-  fixtureSignIn?.(roleId)
+  const entry = fixtureDemoRoles.value.find((r) => r.id === roleId)
+  if (!entry || !fixtureSignIn) return
+
+  // If the user arrived here from a protected route, only return to that route
+  // when the selected fixture role can actually enter it. Otherwise drop the
+  // stored return path so the role lands on its own home page instead of a
+  // role-denied error page.
+  const effectiveRole: AppRole = entry.role === 'platform-admin' ? 'admin' : entry.role
+  const roleCard = roleCards.find((c) => c.role === effectiveRole)
+  const returnTo = window.sessionStorage.getItem('auth-return-to')
+  if (returnTo && roleCard && !returnTo.startsWith(roleCard.path)) {
+    window.sessionStorage.removeItem('auth-return-to')
+  }
+
+  fixtureSignIn(roleId)
 }
 
 interface RoleCard {
