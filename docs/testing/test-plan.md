@@ -1,5 +1,28 @@
 # Test Plan
 
+## TEST-03a Sprint 3 acceptance asset gate
+
+Issue #94 adds a static E1 gate that freezes three future E4 golden paths, six deterministic C++17
+samples, the complete security/error matrix, frontend acceptance inventory, evidence schema and
+Feature Complete reference contract:
+
+```sh
+cargo test -p xtask --locked
+cargo xtask acceptance-assets validate
+cargo xtask acceptance-assets list
+cargo xtask acceptance-assets validate-fixtures
+cargo xtask acceptance-assets validate-report --report tests/fixtures/acceptance/reports/valid/planned-e1.json
+cargo xtask acceptance-assets validate-report --report tests/fixtures/acceptance/reports/valid/local-e2.json
+```
+
+Negative fixtures must exit non-zero with the exact diagnostic recorded in
+`tests/fixtures/acceptance/fixture-expectations.json`. The suite covers evidence-level escalation,
+Mock/fixture E3/E4 claims, missing and cross-bound identity, cleanup, rollback, blockers, skipped
+steps, unknown scenario/gate, all report-reference path classes, incomplete negative/frontend/sample
+inventories and Feature Complete prerequisites. C++ timeout, memory and output samples are never
+executed by this static gate. See `docs/testing/sprint3-acceptance-assets.md` for the evidence
+boundary and future E4 prerequisites.
+
 ## Requirements-baseline traceability
 
 `docs/requirements/acceptance-criteria.md` assigns AC-01 through AC-10-P1 to

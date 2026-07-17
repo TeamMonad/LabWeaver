@@ -9,6 +9,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 #[cfg(target_os = "linux")]
 use sha2::{Digest, Sha256};
 
+mod acceptance_assets;
 mod platform_images;
 
 #[derive(Debug, Parser)]
@@ -55,8 +56,33 @@ enum Command {
     Package(PackageArgs),
     PackageValidate(PackageValidateArgs),
     ReleaseGate,
+    /// Validate frozen Sprint 3 acceptance assets without executing a provider.
+    AcceptanceAssets(AcceptanceAssetsArgs),
     #[command(subcommand)]
     Contracts(ContractsCommand),
+}
+
+#[derive(Debug, Args)]
+struct AcceptanceAssetsArgs {
+    #[command(subcommand)]
+    action: AcceptanceAssetsAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum AcceptanceAssetsAction {
+    /// Fail closed unless every checked-in acceptance asset is internally consistent.
+    Validate,
+    /// Print the three future live E4 scenario identifiers.
+    List,
+    ValidateReport {
+        #[arg(long)]
+        report: PathBuf,
+    },
+    ValidateFeatureComplete {
+        #[arg(long)]
+        report: PathBuf,
+    },
+    ValidateFixtures,
 }
 
 #[derive(Debug, Args)]
@@ -250,6 +276,10 @@ enum AppError {
         code: &'static str,
         detail: String,
     },
+    AcceptanceAsset {
+        code: &'static str,
+        detail: String,
+    },
     InvalidArgument {
         role: &'static str,
     },
@@ -268,6 +298,7 @@ impl AppError {
             Self::Io { .. } => "XTASK_IO_FAILED",
             Self::ContractDrift { .. } => "LW_CONTRACT_DRIFT",
             Self::PlatformImage { code, .. } => code,
+            Self::AcceptanceAsset { code, .. } => code,
             Self::InvalidArgument { .. } => "XTASK_INVALID_ARGUMENT",
             #[cfg(not(target_os = "linux"))]
             Self::UnsupportedPlatform { .. } => "XTASK_INFRA_UNSUPPORTED_PLATFORM",
@@ -302,6 +333,7 @@ impl Display for AppError {
                 write!(formatter, "generated contract differs from {path}")
             }
             Self::PlatformImage { code, detail } => write!(formatter, "{code}: {detail}"),
+            Self::AcceptanceAsset { detail, .. } => write!(formatter, "{detail}"),
             Self::InvalidArgument { role } => {
                 write!(
                     formatter,
@@ -374,6 +406,22 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::Backup(args) => backup(&args),
         Command::PrivateSigstore(args) => private_sigstore(&args),
         Command::IdentityFoundation(args) => identity_foundation(&args),
+        Command::AcceptanceAssets(args) => match args.action {
+            AcceptanceAssetsAction::Validate => acceptance_assets::validate(&repository_root()),
+            AcceptanceAssetsAction::List => {
+                acceptance_assets::list();
+                Ok(())
+            }
+            AcceptanceAssetsAction::ValidateReport { report } => {
+                acceptance_assets::validate_report(&repository_root(), &report)
+            }
+            AcceptanceAssetsAction::ValidateFeatureComplete { report } => {
+                acceptance_assets::validate_feature_complete(&repository_root(), &report)
+            }
+            AcceptanceAssetsAction::ValidateFixtures => {
+                acceptance_assets::validate_fixtures(&repository_root())
+            }
+        },
         Command::Upgrade(args) => destructive_not_implemented("upgrade", args.yes),
         Command::Rollback(args) => platform_images::rollback(
             &args.env,
