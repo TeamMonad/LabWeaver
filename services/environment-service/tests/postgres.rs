@@ -25,12 +25,15 @@ use contracts::{
     ReleaseId, Revision, Sequence, Sha256Digest, UtcTimestamp,
 };
 use environment_service::{
-    EnvironmentEventPublisher, EnvironmentProvider, EnvironmentStoreError, InboundCommandDecision,
-    InboundLifecycleCommand, LifecycleCommand, LifecycleError, OutboxDispatchError,
-    OutboxDispatchOutcome, OutboxDispatcher, PgEnvironmentStore, PgReleaseProjectionStore,
-    ProviderFailure, ProviderFailureCode, ProviderObservation, ProviderRegistry, PublishFailure,
-    ReconcileAction, ReconcileWorker, ReconcileWorkerOutcome, Reconciler,
-    ReleaseProjectionDecision, apply_provider_observation,
+    CONTAINER_BACKEND_PROTOCOL_VERSION, ContainerApplyObservation, ContainerBackendFence,
+    ContainerExecutorBackend, ContainerExecutorFenceError, ContainerExecutorRequest,
+    ContainerExecutorRequestEnvelope, ContainerExecutorResponse, ContainerResourcePlan,
+    EnvironmentEventPublisher, EnvironmentProvider, EnvironmentStoreError, FencedContainerExecutor,
+    InboundCommandDecision, InboundLifecycleCommand, LifecycleCommand, LifecycleError,
+    OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher, PgContainerExecutorFenceStore,
+    PgEnvironmentStore, PgReleaseProjectionStore, ProviderFailure, ProviderFailureCode,
+    ProviderObservation, ProviderRegistry, PublishFailure, ReconcileAction, ReconcileWorker,
+    ReconcileWorkerOutcome, Reconciler, ReleaseProjectionDecision, apply_provider_observation,
 };
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::{ImageExt, runners::AsyncRunner};
@@ -956,6 +959,270 @@ async fn release_withdrawal_is_projected_in_aggregate_order()
         ReleaseProjectionDecision::Gap
     );
     Ok(())
+}
+
+#[derive(Clone)]
+struct CountingContainerExecutor {
+    calls: Arc<AtomicUsize>,
+    observed_at: UtcTimestamp,
+}
+
+#[async_trait]
+impl ContainerExecutorBackend for CountingContainerExecutor {
+    async fn execute(
+        &self,
+        _fence: &ContainerBackendFence,
+        request: &ContainerExecutorRequest,
+    ) -> ContainerExecutorResponse {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        match request {
+            ContainerExecutorRequest::DeleteNamespace { plan } => {
+                ContainerExecutorResponse::Deleted {
+                    plan_sha256: plan.plan_sha256,
+                    cleanup_evidence: ArtifactRef {
+                        artifact_id: ArtifactId::new(),
+                        store_binding: "environment-cleanup-evidence-v1".to_owned(),
+                        object_version: plan.plan_sha256.to_string(),
+                        sha256: Sha256Digest::of_bytes(plan.namespace.as_bytes()),
+                        size_bytes: 1,
+                        media_type: "application/json".to_owned(),
+                    },
+                }
+            }
+            request => ContainerExecutorResponse::Observed {
+                plan_sha256: container_request_plan(request).plan_sha256,
+                observation: ContainerApplyObservation {
+                    ready: true,
+                    observed_at: self.observed_at,
+                },
+            },
+        }
+    }
+}
+
+#[tokio::test]
+async fn container_executor_persists_generation_and_permanent_delete_tombstone()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        container.get_host_port_ipv4(5432).await?
+    );
+    let pool = PgPoolOptions::new()
+        .max_connections(3)
+        .connect(&url)
+        .await?;
+    let migrations = format!(
+        "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
+        include_str!("../../../migrations/environment/0004_container_executor_fence.sql")
+    );
+    sqlx::raw_sql(&migrations).execute(&pool).await?;
+    let authority_now = container_database_now(&pool).await?;
+    let deadline = container_add_time(authority_now, time::Duration::minutes(1))?;
+    let environment_id = EnvironmentId::new();
+    let plan = ContainerResourcePlan {
+        environment_id,
+        namespace: format!("lw-env-{environment_id}"),
+        image: format!("harbor.internal/course/image@sha256:{}", "a".repeat(64)),
+        resources: Vec::new(),
+        plan_sha256: Sha256Digest::of_bytes(b"container-plan"),
+    };
+    let calls = Arc::new(AtomicUsize::new(0));
+    let operation_one = OperationId::new();
+    let first = container_executor_envelope(
+        plan.clone(),
+        operation_one,
+        1,
+        1,
+        1,
+        ReconcileAction::Provision,
+        deadline,
+    )?;
+    FencedContainerExecutor::new(
+        PgContainerExecutorFenceStore::new(pool.clone()),
+        CountingContainerExecutor {
+            calls: calls.clone(),
+            observed_at: authority_now,
+        },
+    )
+    .execute(first.clone())
+    .await?;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // Reconstructing the executor simulates restart; exact delivery replays the stored result.
+    FencedContainerExecutor::new(
+        PgContainerExecutorFenceStore::new(pool.clone()),
+        CountingContainerExecutor {
+            calls: calls.clone(),
+            observed_at: authority_now,
+        },
+    )
+    .execute(first)
+    .await?;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let operation_two = OperationId::new();
+    let executor = FencedContainerExecutor::new(
+        PgContainerExecutorFenceStore::new(pool.clone()),
+        CountingContainerExecutor {
+            calls: calls.clone(),
+            observed_at: authority_now,
+        },
+    );
+    executor
+        .execute(container_executor_envelope(
+            plan.clone(),
+            operation_two,
+            2,
+            1,
+            1,
+            ReconcileAction::Provision,
+            deadline,
+        )?)
+        .await?;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    assert!(matches!(
+        executor
+            .execute(container_executor_envelope(
+                plan.clone(),
+                operation_one,
+                1,
+                2,
+                1,
+                ReconcileAction::Cleanup,
+                deadline,
+            )?)
+            .await,
+        Err(ContainerExecutorFenceError::StaleGeneration)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    executor
+        .execute(container_executor_envelope(
+            plan.clone(),
+            operation_two,
+            2,
+            2,
+            1,
+            ReconcileAction::Cleanup,
+            deadline,
+        )?)
+        .await?;
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert!(matches!(
+        executor
+            .execute(container_executor_envelope(
+                plan,
+                OperationId::new(),
+                3,
+                1,
+                1,
+                ReconcileAction::Provision,
+                deadline,
+            )?)
+            .await,
+        Err(ContainerExecutorFenceError::Tombstoned)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+    let expired_environment_id = EnvironmentId::new();
+    let expired_plan = ContainerResourcePlan {
+        environment_id: expired_environment_id,
+        namespace: format!("lw-env-{expired_environment_id}"),
+        image: String::new(),
+        resources: Vec::new(),
+        plan_sha256: Sha256Digest::of_bytes(b"expired-plan"),
+    };
+    assert!(matches!(
+        executor
+            .execute(container_executor_envelope(
+                expired_plan,
+                OperationId::new(),
+                1,
+                1,
+                1,
+                ReconcileAction::Provision,
+                container_add_time(
+                    container_database_now(&pool).await?,
+                    time::Duration::seconds(-1)
+                )?,
+            )?)
+            .await,
+        Err(ContainerExecutorFenceError::DeadlineExceeded)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    Ok(())
+}
+
+fn container_executor_envelope(
+    plan: ContainerResourcePlan,
+    operation_id: OperationId,
+    operation_generation: u64,
+    provider_step: u32,
+    attempt: u32,
+    action: ReconcileAction,
+    deadline_at: UtcTimestamp,
+) -> Result<ContainerExecutorRequestEnvelope, Box<dyn std::error::Error>> {
+    let request = match action {
+        ReconcileAction::Provision | ReconcileAction::Reset => {
+            ContainerExecutorRequest::Apply { plan }
+        }
+        ReconcileAction::Cleanup => ContainerExecutorRequest::DeleteNamespace { plan },
+        _ => return Err("unsupported executor fixture action".into()),
+    };
+    let request_id = Sha256Digest::of_canonical(&serde_json::json!({
+        "protocolVersion": CONTAINER_BACKEND_PROTOCOL_VERSION,
+        "environmentId": container_request_plan(&request).environment_id,
+        "operationId": operation_id,
+        "providerStep": provider_step,
+        "operationGeneration": operation_generation,
+        "attempt": attempt,
+        "action": action,
+        "deadlineAt": deadline_at,
+        "request": &request,
+    }))?;
+    Ok(ContainerExecutorRequestEnvelope {
+        fence: ContainerBackendFence {
+            protocol_version: CONTAINER_BACKEND_PROTOCOL_VERSION,
+            environment_id: container_request_plan(&request).environment_id,
+            operation_id,
+            provider_step,
+            operation_generation,
+            attempt,
+            action,
+            request_id,
+            deadline_at,
+        },
+        request,
+    })
+}
+
+const fn container_request_plan(request: &ContainerExecutorRequest) -> &ContainerResourcePlan {
+    match request {
+        ContainerExecutorRequest::Apply { plan }
+        | ContainerExecutorRequest::Observe { plan }
+        | ContainerExecutorRequest::Scale { plan, .. }
+        | ContainerExecutorRequest::Restart { plan, .. }
+        | ContainerExecutorRequest::DeleteNamespace { plan } => plan,
+    }
+}
+
+async fn container_database_now(
+    pool: &sqlx::PgPool,
+) -> Result<UtcTimestamp, Box<dyn std::error::Error>> {
+    let value: time::OffsetDateTime =
+        sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
+            .fetch_one(pool)
+            .await?;
+    Ok(UtcTimestamp::from_utc(value)?)
+}
+
+fn container_add_time(
+    timestamp: UtcTimestamp,
+    duration: time::Duration,
+) -> Result<UtcTimestamp, Box<dyn std::error::Error>> {
+    Ok(UtcTimestamp::from_utc(timestamp.get() + duration)?)
 }
 
 fn success_worker(

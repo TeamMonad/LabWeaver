@@ -198,6 +198,11 @@ cargo clippy -p agent-service --all-targets --all-features -- -D warnings
 cargo xtask contracts check
 pnpm --dir web contracts:check
 
+# Docker/Colima-backed PostgreSQL executor fencing, restart replay and cancellation.
+cargo test --locked -p agent-service --test build_store_postgres
+cargo test --locked -p environment-service --test postgres \
+  container_executor_persists_generation_and_permanent_delete_tombstone
+
 # Requires a disposable PostgreSQL server with CREATEDB, supplied by
 # LABWEAVER_TEST_DATABASE_URL, or a Docker-backed PostgreSQL container.
 cargo test --locked -p agent-service --test claude_code_runtime \

@@ -250,6 +250,18 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::http::InternalAgentRunMutationRequest
     );
     document!(
+        "schemas/contracts/v1/http/internal-agent-build-cancellation-request.schema.json",
+        crate::http::InternalAgentBuildCancellationRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/internal-agent-build-cancellation-result.schema.json",
+        crate::http::InternalAgentBuildCancellationResult
+    );
+    document!(
+        "schemas/contracts/v1/http/internal-agent-build-status-query.schema.json",
+        crate::http::InternalAgentBuildStatusQuery
+    );
+    document!(
         "schemas/contracts/v1/http/internal-agent-run-outcome.schema.json",
         crate::http::InternalAgentRunOutcome
     );
@@ -622,6 +634,9 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 ,"AuthorizationDecision": contract_ref("authorization-decision")
                 ,"InternalCreateAgentRunRequest": contract_ref("http/internal-create-agent-run-request")
                 ,"InternalAgentRunMutationRequest": contract_ref("http/internal-agent-run-mutation-request")
+                ,"InternalAgentBuildCancellationRequest": contract_ref("http/internal-agent-build-cancellation-request")
+                ,"InternalAgentBuildCancellationResult": contract_ref("http/internal-agent-build-cancellation-result")
+                ,"InternalAgentBuildStatusQuery": contract_ref("http/internal-agent-build-status-query")
                 ,"InternalAgentRunOutcome": contract_ref("http/internal-agent-run-outcome")
                 ,"InternalImageArtifactResolution": contract_ref("http/internal-image-artifact-resolution")
             },
@@ -676,6 +691,14 @@ fn add_auth_paths(surface: ApiSurface, paths: &mut BTreeMap<String, Value>) {
             paths.insert(
                 "/internal/v1/agent-runs/{runId}/cancel".to_owned(),
                 json!({"post":{"operationId":"cancelInternalAgentRun","summary":"Request cancellation at an exact AgentRun revision","security":[{"serviceMtls":[]}],"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentRunMutationRequest"}}}},"responses":{"200":{"description":"Updated authoritative AgentRun","content":{"application/json":{"schema":{"$ref":"./agent-run.schema.json"}}}},"409":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+            );
+            paths.insert(
+                "/internal/v1/build-requests/{buildRequestId}/cancel".to_owned(),
+                json!({"post":{"operationId":"cancelInternalAgentBuild","summary":"Request one actor-attributed build cancellation at an exact course, command hash, state and revision","security":[{"serviceMtls":[]}],"parameters":[{"name":"buildRequestId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentBuildCancellationRequest"}}}},"responses":{"202":{"description":"Durable cancellation requested","content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentBuildCancellationResult"}}}},"403":{"$ref":"#/components/responses/Problem"},"409":{"$ref":"#/components/responses/Problem"},"422":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+            );
+            paths.insert(
+                "/internal/v1/build-requests/{buildRequestId}".to_owned(),
+                json!({"get":{"operationId":"getInternalAgentBuild","summary":"Read the Agent-owned build state and revision for an exact course and command hash","security":[{"serviceMtls":[]}],"parameters":[{"name":"buildRequestId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"courseId","in":"query","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"commandSha256","in":"query","required":true,"schema":{"type":"string","pattern":"^[0-9a-f]{64}$"}}],"responses":{"200":{"description":"Authoritative build status","content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentBuildCancellationResult"}}}},"403":{"$ref":"#/components/responses/Problem"},"404":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/internal/v1/agent-runs/{runId}/tracks/{track}/retry".to_owned(),

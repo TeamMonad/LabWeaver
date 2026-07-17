@@ -38,6 +38,9 @@ domains:
       - id: 3
         file: environment/0003_release_projections.sql
         sha256: 9ae9838ec69649fea4037eb04a3858d272e1bb2884a98ff3c3a1f84b38d5dd47
+      - id: 4
+        file: environment/0004_container_executor_fence.sql
+        sha256: 90541f85a13423b416759f77a34d3c44c3becd65cda7847ec8a38d1396c4accd
   - name: agent
     migrations:
       - id: 1
@@ -52,6 +55,9 @@ domains:
       - id: 4
         file: agent/0004_build_pipeline.sql
         sha256: cccfbbb81d143a5eff1919ca0bedd5a26fb763054ab939524d66214e0b55df83
+      - id: 5
+        file: agent/0005_build_cancellation_fence.sql
+        sha256: 5b2a8b1c82f744a241ab0aaa93eed2e177287859c488f31ae815f1207ad0cf26
   - name: evaluation
     migrations:
       - id: 1

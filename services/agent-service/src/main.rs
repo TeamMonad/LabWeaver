@@ -190,6 +190,7 @@ async fn main() -> Result<(), StartupError> {
     )?));
     let state = Arc::new(AgentApiState {
         store: store.clone(),
+        build_store: build_store.clone(),
     });
     let bind = SocketAddr::from_str(&deployment.control_mtls.bind_addr)
         .map_err(|_| StartupError::Configuration)?;

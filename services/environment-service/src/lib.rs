@@ -18,9 +18,12 @@ mod tls;
 
 pub use container_provider::{
     CONTAINER_BACKEND_PROTOCOL_VERSION, ContainerApplyObservation, ContainerBackendFence,
+    ContainerExecutorBackend, ContainerExecutorFenceError, ContainerExecutorRequest,
+    ContainerExecutorRequestEnvelope, ContainerExecutorResponse, ContainerExecutorResponseEnvelope,
     ContainerProvider, ContainerProviderBackend, ContainerProviderConfiguration,
     ContainerReleasePolicy, ContainerReleaseResolver, ContainerResource, ContainerResourcePlan,
-    NatsContainerProviderBackend, PgReleaseProjectionStore, ReleaseProjectionDecision,
+    FencedContainerExecutor, NatsContainerExecutorServer, NatsContainerProviderBackend,
+    PgContainerExecutorFenceStore, PgReleaseProjectionStore, ReleaseProjectionDecision,
     ReleaseProjectionError, ResolvedContainerRelease,
 };
 pub use lifecycle::{

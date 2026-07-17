@@ -57,16 +57,34 @@ admission invokes cleanup. A build can retry only when the failure is marked
 retryable and cleanup was verified. Cleanup failure is terminal and prevents an
 artifact or successful completion event.
 
+Control can request cancellation through
+`POST /internal/v1/build-requests/{buildRequestId}/cancel` over the existing
+allowlisted Control-to-Agent mTLS identity. The command binds the route and body
+BuildRequest ID, course, command SHA-256, expected Agent state/revision, actor,
+exact Control SAN, `Idempotency-Key` and a five-minute `requestedAt` window.
+Agent reserves idempotency and updates the cancellation flag plus audit identity
+in one PostgreSQL transaction. Replays return the stored result; cross-course,
+stale, hash-conflicting, expired and authority-mismatched commands fail closed.
+Before mutating, Control reads the authoritative state/revision through
+`GET /internal/v1/build-requests/{buildRequestId}` with the exact course and
+command SHA-256, so it never guesses a worker transition revision.
+
 The deployment-owned executor request/reply protocol is carried on the exact
 `build.provider_subject` from
 `deploy/config/agent-control-plane.yaml.example`. Every request carries protocol
 version, BuildRequest ID, monotonically increasing database attempt, lease token,
-stage, deterministic stage request ID and deadline. Each reply repeats the
+stage, payload-bound deterministic stage request ID and deadline. Each reply repeats the
 protocol version, BuildRequest ID, attempt, stage and request ID as well as the
 stage-specific build identity and digest; a mismatch is rejected. The executor
 must durably reject an attempt lower than the highest generation already seen.
 Cleanup records a generation-scoped tombstone that wins over every late stage
 completion, while a newer generation cannot be removed by an older cleanup.
+`PgBuildExecutorFenceStore` persists the highest generation, lease, stage,
+tombstone, deadline and completed response before/after the adapter boundary.
+`FencedBuildExecutor` serializes in-flight effects, replays completed responses
+after restart, rejects lower generations and enforces the database-approved
+deadline around the side-effect future. A newer attempt may replace only a
+completed older-attempt cleanup tombstone; delayed older cleanup is rejected.
 The executor must map approved
 `ArtifactRef` inputs to restricted BuildKit, Harbor/Trivy and Private Sigstore;
 the service does not accept raw paths, credentials or fallback providers.
@@ -100,18 +118,23 @@ evidence.
 
 Every remote Kubernetes request also carries the exact reconcile action,
 `operationId`, `providerStep`, environment generation, attempt, deterministic
-request ID and deadline. The executor must persist the highest accepted
+payload-bound request ID and deadline. The executor must persist the highest accepted
 generation/operation/step tuple, make repeats of the same request ID idempotent,
 and write a namespace tombstone before Delete returns. A late Apply, Scale,
 Restart or Observe older than that tuple or tombstone is rejected without a side
 effect.
+`PgContainerExecutorFenceStore` and `FencedContainerExecutor` implement this
+server-side boundary: the ledger is committed before the adapter runs, an
+in-flight effect blocks newer admission until completion/deadline, exact replies
+are replayed after restart, and Delete creates a permanent environment-ID
+tombstone before namespace deletion begins.
 
 The provider binding file is
 `deploy/config/environment-providers.json.example`. `providerKind: "container"`
 selects this implementation; the subject is an exact deployment-owned
 Kubernetes executor subject. Gateway and imagePullSecret fields are mandatory
-for this provider. The active policy revision, trust revision and trust-bundle
-SHA-256 are also mandatory and are compared again on every runtime use. These
+for this provider. The active image-policy ID/revision, trust revision and
+trust-bundle SHA-256 are also mandatory and are compared again on every runtime use. These
 fields are forbidden for the legacy remote provider. The executor
 materializes the named per-course pull Secret from its reviewed credential
 locator; credentials never enter a release event, resource plan or log.
@@ -141,7 +164,7 @@ owner can remove access and resources safely. A withdrawn or stale release can
 never create a new Ready endpoint.
 
 PostgreSQL migrations add the Control BuildRequest-to-candidate projection,
-Agent build command state and Environment release projections. Records are
+Agent build command/cancellation state, both executor fence ledgers and Environment release projections. Records are
 immutable or fenced by leases, and terminal artifact, policy and Outbox writes
 are atomic. Control accepts a completed artifact only for the exact persisted
 course, candidate revision, candidate hash, approval and BuildRequest identity;
@@ -152,9 +175,12 @@ of the old identity.
 
 ## Evidence and remaining gate
 
-Current local evidence covers deterministic identity, High/Critical policy,
+Current local evidence covers deterministic identity, independent course and
+image-policy revisions, same-revision/different-policy-ID rejection, High/Critical policy,
 issuer and publication-digest mismatch, deadline/cancellation cleanup,
 PostgreSQL lease heartbeat and live cancellation with one terminal Outbox,
+idempotent mTLS cancellation storage, executor response replay across restart,
+lower-generation rejection, cleanup/delete tombstones and deadline-before-effect,
 complete Migration application, deterministic Kubernetes plans, protected
 routing, stable endpoint projection and cleanup. E3 still requires one
 connected, same-build replay against the

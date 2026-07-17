@@ -7,13 +7,19 @@
 
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use agent_service::build_pipeline::{
-    BuildIdentity, BuildPipeline, BuildPipelinePolicy, BuildProviderFailure,
-    BuildProviderFailureCode, BuildProviderRequestContext, BuildSupplyChainProvider,
-    BuiltCandidate, PrivateRegistryProject, PublishedImage, ScanEvidence,
+    BUILD_EXECUTOR_PROTOCOL_VERSION, BuildIdentity, BuildPipeline, BuildPipelinePolicy,
+    BuildProviderFailure, BuildProviderFailureCode, BuildProviderRequestContext,
+    BuildProviderStage, BuildSupplyChainProvider, BuiltCandidate, PrivateRegistryProject,
+    PublishedImage, ScanEvidence,
+};
+use agent_service::build_provider::{
+    BuildExecutorBackend, BuildExecutorFenceError, BuildExecutorRequest,
+    BuildExecutorRequestEnvelope, BuildExecutorResponse, FencedBuildExecutor,
+    PgBuildExecutorFenceStore,
 };
 use agent_service::build_store::{
     BuildCommandDecision, BuildWorker, BuildWorkerOutcome, PgBuildStore,
@@ -22,6 +28,10 @@ use async_trait::async_trait;
 use contracts::authoring::{CandidateApproval, CandidateDecision};
 use contracts::events::{
     AgentBuildRequestedV2, CloudEvent, EVENT_CONTRACTS, SPEC_VERSION, subjects,
+};
+use contracts::http::{
+    IdempotencyKey, InternalAgentBuildCancellationRequest, InternalAgentBuildState,
+    InternalAgentBuildStatusQuery,
 };
 use contracts::supply_chain::{
     BuildNetworkPolicy, BuildRequest, SigstoreEvidence, VulnerabilitySummary,
@@ -182,14 +192,41 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
         .max_connections(4)
         .connect(&url)
         .await?;
-    let migrations = format!(
+    let base_migrations = format!(
         "CREATE SCHEMA agent; SET search_path TO agent;\n{}\n{}\n{}\n{}",
         include_str!("../../../migrations/agent/0001_initial.sql"),
         include_str!("../../../migrations/agent/0002_track_leases.sql"),
         include_str!("../../../migrations/agent/0003_control_dispatch.sql"),
         include_str!("../../../migrations/agent/0004_build_pipeline.sql")
     );
-    sqlx::raw_sql(&migrations).execute(&pool).await?;
+    sqlx::raw_sql(&base_migrations).execute(&pool).await?;
+    let legacy_build_request_id = BuildRequestId::new();
+    sqlx::query(
+        "INSERT INTO agent.build_commands \
+         (build_request_id,course_id,command_sha256,idempotency_key,state,command, \
+          cancellation_requested,diagnostic_code,retryable,cleanup_verified,completed_at) \
+         VALUES ($1,$2,$3,$4,'cancelled','{}'::jsonb,true,'LW_AGENT_BUILD_CANCELLED',false,true,clock_timestamp())",
+    )
+    .bind(legacy_build_request_id.as_uuid())
+    .bind(CourseId::new().as_uuid())
+    .bind(Sha256Digest::of_bytes(b"legacy-command").to_string())
+    .bind(format!("legacy:{legacy_build_request_id}"))
+    .execute(&pool)
+    .await?;
+    let upgrade = format!(
+        "SET search_path TO agent;\n{}",
+        include_str!("../../../migrations/agent/0005_build_cancellation_fence.sql")
+    );
+    sqlx::raw_sql(&upgrade).execute(&pool).await?;
+    let (legacy_audit_version, legacy_actor): (i16, Option<uuid::Uuid>) = sqlx::query_as(
+        "SELECT cancellation_audit_version,cancellation_actor_id \
+         FROM agent.build_commands WHERE build_request_id=$1",
+    )
+    .bind(legacy_build_request_id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(legacy_audit_version, 0);
+    assert!(legacy_actor.is_none());
 
     let command = build_command()?;
     let event = command_event(command.clone())?;
@@ -230,7 +267,40 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
     .fetch_one(&pool)
     .await?;
     assert!(lease_current, "heartbeat must keep the exact lease current");
-    assert!(store.request_cancellation(command.request.id).await?);
+    let cancellation_requested_at = database_now(&pool).await?;
+    let running = store
+        .load_status(
+            command.request.id,
+            &InternalAgentBuildStatusQuery {
+                course_id: command.request.course_id,
+                command_sha256: command.command_sha256,
+            },
+        )
+        .await?;
+    assert_eq!(running.state, InternalAgentBuildState::Running);
+    assert_eq!(running.revision, revision(2)?);
+    let cancellation = InternalAgentBuildCancellationRequest {
+        course_id: command.request.course_id,
+        build_request_id: command.request.id,
+        command_sha256: command.command_sha256,
+        expected_state: running.state,
+        expected_revision: running.revision,
+        actor_id: ActorId::new(),
+        authority_san_uri: "spiffe://labweaver/control-service".to_owned(),
+        requested_at: cancellation_requested_at,
+    };
+    let cancellation_key = IdempotencyKey::parse(&format!("cancel:{}", command.request.id))?;
+    let result = store
+        .request_cancellation(&cancellation, &cancellation_key)
+        .await?;
+    assert!(result.cancellation_requested);
+    assert_eq!(result.revision, revision(3)?);
+    assert_eq!(
+        store
+            .request_cancellation(&cancellation, &cancellation_key)
+            .await?,
+        result
+    );
 
     let outcome = tokio::time::timeout(Duration::from_secs(2), worker_task).await???;
     assert!(matches!(
@@ -353,6 +423,240 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
     Ok(())
 }
 
+#[derive(Clone)]
+struct CountingBuildExecutor {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl BuildExecutorBackend for CountingBuildExecutor {
+    async fn execute(
+        &self,
+        _context: &BuildProviderRequestContext,
+        request: &BuildExecutorRequest,
+    ) -> BuildExecutorResponse {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        match request {
+            BuildExecutorRequest::EnsurePrivateProject { command, identity } => {
+                BuildExecutorResponse::PrivateProjectReady {
+                    project: PrivateRegistryProject {
+                        build_request_id: command.request.id,
+                        build_identity: *identity,
+                        repository_prefix: format!(
+                            "harbor.internal/course-{}",
+                            command.request.course_id
+                        ),
+                        private: true,
+                        storage_quota_bytes: 1,
+                        robot_subject: "robot$runtime".to_owned(),
+                    },
+                }
+            }
+            BuildExecutorRequest::Cleanup {
+                build_request_id,
+                identity,
+            } => BuildExecutorResponse::Cleaned {
+                build_request_id: *build_request_id,
+                build_identity: *identity,
+            },
+            _ => BuildExecutorResponse::Failed {
+                failure: BuildProviderFailure {
+                    code: BuildProviderFailureCode::Rejected,
+                    retryable: false,
+                },
+            },
+        }
+    }
+}
+
+#[tokio::test]
+async fn executor_fence_survives_restart_and_cleanup_dominates_its_generation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        container.get_host_port_ipv4(5432).await?
+    );
+    let pool = PgPoolOptions::new()
+        .max_connections(3)
+        .connect(&url)
+        .await?;
+    let migrations = format!(
+        "CREATE SCHEMA agent; SET search_path TO agent;\n{}\n{}\n{}\n{}\n{}",
+        include_str!("../../../migrations/agent/0001_initial.sql"),
+        include_str!("../../../migrations/agent/0002_track_leases.sql"),
+        include_str!("../../../migrations/agent/0003_control_dispatch.sql"),
+        include_str!("../../../migrations/agent/0004_build_pipeline.sql"),
+        include_str!("../../../migrations/agent/0005_build_cancellation_fence.sql")
+    );
+    sqlx::raw_sql(&migrations).execute(&pool).await?;
+    let command = build_command()?;
+    let deadline = add_time(database_now(&pool).await?, time::Duration::minutes(1))?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let lease_one = uuid::Uuid::new_v4();
+    let first = build_executor_envelope(
+        &command,
+        1,
+        lease_one,
+        BuildProviderStage::EnsurePrivateProject,
+        deadline,
+    );
+    FencedBuildExecutor::new(
+        PgBuildExecutorFenceStore::new(pool.clone()),
+        CountingBuildExecutor {
+            calls: calls.clone(),
+        },
+    )
+    .execute(first.clone())
+    .await?;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // A newly constructed executor replays the persisted response without repeating the effect.
+    FencedBuildExecutor::new(
+        PgBuildExecutorFenceStore::new(pool.clone()),
+        CountingBuildExecutor {
+            calls: calls.clone(),
+        },
+    )
+    .execute(first)
+    .await?;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let lease_two = uuid::Uuid::new_v4();
+    let second = build_executor_envelope(
+        &command,
+        2,
+        lease_two,
+        BuildProviderStage::EnsurePrivateProject,
+        deadline,
+    );
+    let executor = FencedBuildExecutor::new(
+        PgBuildExecutorFenceStore::new(pool.clone()),
+        CountingBuildExecutor {
+            calls: calls.clone(),
+        },
+    );
+    executor.execute(second).await?;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    let delayed_cleanup = build_executor_envelope(
+        &command,
+        1,
+        lease_one,
+        BuildProviderStage::Cleanup,
+        deadline,
+    );
+    assert!(matches!(
+        executor.execute(delayed_cleanup).await,
+        Err(BuildExecutorFenceError::StaleGeneration)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    executor
+        .execute(build_executor_envelope(
+            &command,
+            2,
+            lease_two,
+            BuildProviderStage::Cleanup,
+            deadline,
+        ))
+        .await?;
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert!(matches!(
+        executor
+            .execute(build_executor_envelope(
+                &command,
+                2,
+                lease_two,
+                BuildProviderStage::Build,
+                deadline,
+            ))
+            .await,
+        Err(BuildExecutorFenceError::Tombstoned)
+    ));
+
+    // Build cleanup tombstones only the failed attempt; a strictly newer lease may retry.
+    executor
+        .execute(build_executor_envelope(
+            &command,
+            3,
+            uuid::Uuid::new_v4(),
+            BuildProviderStage::EnsurePrivateProject,
+            deadline,
+        ))
+        .await?;
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
+
+    let expired_command = build_command()?;
+    assert!(matches!(
+        executor
+            .execute(build_executor_envelope(
+                &expired_command,
+                1,
+                uuid::Uuid::new_v4(),
+                BuildProviderStage::EnsurePrivateProject,
+                add_time(database_now(&pool).await?, time::Duration::seconds(-1))?,
+            ))
+            .await,
+        Err(BuildExecutorFenceError::DeadlineExceeded)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    Ok(())
+}
+
+fn build_executor_envelope(
+    command: &AgentBuildRequestedV2,
+    generation: u32,
+    lease_token: uuid::Uuid,
+    stage: BuildProviderStage,
+    deadline_at: UtcTimestamp,
+) -> BuildExecutorRequestEnvelope {
+    let request = match stage {
+        BuildProviderStage::EnsurePrivateProject => BuildExecutorRequest::EnsurePrivateProject {
+            command: command.clone(),
+            identity: BuildIdentity(command.command_sha256),
+        },
+        BuildProviderStage::Build => BuildExecutorRequest::Build {
+            command: command.clone(),
+            identity: BuildIdentity(command.command_sha256),
+        },
+        BuildProviderStage::Cleanup => BuildExecutorRequest::Cleanup {
+            build_request_id: command.request.id,
+            identity: BuildIdentity(command.command_sha256),
+        },
+        _ => unreachable!("fixture uses only command-bound stages"),
+    };
+    let stage_request_id = Sha256Digest::of_canonical(&serde_json::json!({
+        "protocolVersion": BUILD_EXECUTOR_PROTOCOL_VERSION,
+        "buildRequestId": command.request.id,
+        "fenceGeneration": generation,
+        "leaseToken": lease_token,
+        "stage": stage,
+        "deadlineAt": deadline_at,
+        "request": &request,
+    }))
+    .expect("executor request identity");
+    BuildExecutorRequestEnvelope {
+        context: BuildProviderRequestContext {
+            protocol_version: BUILD_EXECUTOR_PROTOCOL_VERSION,
+            build_request_id: command.request.id,
+            fence_generation: generation,
+            lease_token,
+            stage,
+            stage_request_id,
+            deadline_at,
+        },
+        request,
+    }
+}
+
+fn add_time(
+    timestamp: UtcTimestamp,
+    duration: time::Duration,
+) -> Result<UtcTimestamp, Box<dyn std::error::Error>> {
+    Ok(UtcTimestamp::from_utc(timestamp.get() + duration)?)
+}
+
 async fn wait_until_running(
     pool: &sqlx::PgPool,
     build_request_id: BuildRequestId,
@@ -373,6 +677,14 @@ async fn wait_until_running(
     })
     .await??;
     Ok(())
+}
+
+async fn database_now(pool: &sqlx::PgPool) -> Result<UtcTimestamp, Box<dyn std::error::Error>> {
+    let value: time::OffsetDateTime =
+        sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
+            .fetch_one(pool)
+            .await?;
+    Ok(UtcTimestamp::from_utc(value)?)
 }
 
 fn build_command() -> Result<AgentBuildRequestedV2, Box<dyn std::error::Error>> {

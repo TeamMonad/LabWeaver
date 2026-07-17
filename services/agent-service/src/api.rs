@@ -4,15 +4,16 @@
 use std::sync::Arc;
 
 use auth::extract_mtls_principal;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use contracts::authoring::AgentTrackKind;
 use contracts::http::{
-    IdempotencyKey, InternalAgentRunMutationRequest, InternalAgentRunOutcome,
-    InternalCreateAgentRunRequest, InternalImageArtifactResolution,
+    IdempotencyKey, InternalAgentBuildCancellationRequest, InternalAgentBuildStatusQuery,
+    InternalAgentRunMutationRequest, InternalAgentRunOutcome, InternalCreateAgentRunRequest,
+    InternalImageArtifactResolution,
 };
 use contracts::{
     AgentRunId, DiagnosticCode, ImageArtifactId, ProblemDetails, Sha256Digest, UtcTimestamp,
@@ -25,6 +26,7 @@ use sqlx::Row;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use crate::build_store::{BuildStoreError, PgBuildStore};
 use crate::run_store::{
     AgentRunReservation, AgentRunStoreError, PostgresAgentRunStore, StoredCandidate,
 };
@@ -34,6 +36,8 @@ use crate::run_store::{
 pub struct AgentApiState {
     /// Agent-owned run repository.
     pub store: PostgresAgentRunStore,
+    /// Agent-owned build command repository.
+    pub build_store: PgBuildStore,
 }
 
 /// Exact allowlisted Control URI SAN.
@@ -49,6 +53,14 @@ pub fn router(state: Arc<AgentApiState>) -> Router {
         .route("/internal/v1/agent-runs", post(create_run))
         .route("/internal/v1/agent-runs/{run_id}", get(get_run))
         .route("/internal/v1/agent-runs/{run_id}/cancel", post(cancel_run))
+        .route(
+            "/internal/v1/build-requests/{build_request_id}/cancel",
+            post(cancel_build),
+        )
+        .route(
+            "/internal/v1/build-requests/{build_request_id}",
+            get(get_build),
+        )
         .route(
             "/internal/v1/agent-runs/{run_id}/tracks/{track}/retry",
             post(retry_track),
@@ -174,6 +186,42 @@ async fn cancel_run(
         )
         .await?;
     Ok(Json(run).into_response())
+}
+
+async fn cancel_build(
+    State(state): State<Arc<AgentApiState>>,
+    Extension(principal): Extension<ControlPrincipal>,
+    Path(build_request_id): Path<contracts::BuildRequestId>,
+    headers: HeaderMap,
+    Json(request): Json<InternalAgentBuildCancellationRequest>,
+) -> Result<Response, AgentApiError> {
+    require_control(&principal)?;
+    if request.build_request_id != build_request_id
+        || request.authority_san_uri != principal.san_uri
+    {
+        return Err(AgentApiError::denied());
+    }
+    let result = state
+        .build_store
+        .request_cancellation(&request, &idempotency(&headers)?)
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(result)).into_response())
+}
+
+async fn get_build(
+    State(state): State<Arc<AgentApiState>>,
+    Extension(principal): Extension<ControlPrincipal>,
+    Path(build_request_id): Path<contracts::BuildRequestId>,
+    Query(query): Query<InternalAgentBuildStatusQuery>,
+) -> Result<Response, AgentApiError> {
+    require_control(&principal)?;
+    Ok(Json(
+        state
+            .build_store
+            .load_status(build_request_id, &query)
+            .await?,
+    )
+    .into_response())
 }
 
 async fn retry_track(
@@ -352,6 +400,57 @@ impl From<AgentRunStoreError> for AgentApiError {
                 error,
                 AgentRunStoreError::RunInProgress | AgentRunStoreError::PersistenceFailed
             ),
+        }
+    }
+}
+impl From<BuildStoreError> for AgentApiError {
+    fn from(error: BuildStoreError) -> Self {
+        let status = match error {
+            BuildStoreError::AuthorityMismatch | BuildStoreError::CourseMismatch => {
+                StatusCode::FORBIDDEN
+            }
+            BuildStoreError::NotFound => StatusCode::NOT_FOUND,
+            BuildStoreError::StateConflict
+            | BuildStoreError::IdempotencyConflict
+            | BuildStoreError::RequestInProgress
+            | BuildStoreError::FenceLost
+            | BuildStoreError::RetryUnsafe
+            | BuildStoreError::ClockInvalid => StatusCode::CONFLICT,
+            BuildStoreError::ConfigurationInvalid
+            | BuildStoreError::ContractInvalid
+            | BuildStoreError::IdentityMismatch
+            | BuildStoreError::RequestExpired => StatusCode::UNPROCESSABLE_ENTITY,
+            BuildStoreError::PersistenceFailed | BuildStoreError::Database(_) => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+        };
+        let retryable = matches!(
+            error,
+            BuildStoreError::RequestInProgress
+                | BuildStoreError::PersistenceFailed
+                | BuildStoreError::Database(_)
+        );
+        let diagnostic = match error {
+            BuildStoreError::ConfigurationInvalid => "LW_AGENT_BUILD_STORE_CONFIGURATION_INVALID",
+            BuildStoreError::ContractInvalid => "LW_AGENT_BUILD_CONTRACT_INVALID",
+            BuildStoreError::IdentityMismatch => "LW_AGENT_BUILD_IDENTITY_MISMATCH",
+            BuildStoreError::AuthorityMismatch => "LW_AGENT_BUILD_AUTHORITY_MISMATCH",
+            BuildStoreError::CourseMismatch => "LW_AGENT_BUILD_COURSE_MISMATCH",
+            BuildStoreError::NotFound => "LW_AGENT_BUILD_NOT_FOUND",
+            BuildStoreError::StateConflict => "LW_AGENT_BUILD_STATE_CONFLICT",
+            BuildStoreError::IdempotencyConflict => "LW_AGENT_BUILD_IDEMPOTENCY_CONFLICT",
+            BuildStoreError::RequestInProgress => "LW_AGENT_BUILD_REQUEST_IN_PROGRESS",
+            BuildStoreError::RequestExpired => "LW_AGENT_BUILD_CANCELLATION_EXPIRED",
+            BuildStoreError::FenceLost => "LW_AGENT_BUILD_FENCE_LOST",
+            BuildStoreError::RetryUnsafe => "LW_AGENT_BUILD_RETRY_WITHOUT_CLEANUP_FORBIDDEN",
+            BuildStoreError::ClockInvalid => "LW_AGENT_BUILD_CLOCK_INVALID",
+            BuildStoreError::PersistenceFailed => "LW_AGENT_BUILD_PERSISTENCE_FAILED",
+            BuildStoreError::Database(_) => "LW_AGENT_BUILD_DATABASE_FAILED",
+        };
+        Self {
+            status,
+            diagnostic,
+            retryable,
         }
     }
 }

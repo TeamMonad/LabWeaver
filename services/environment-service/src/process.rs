@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use async_nats::connection::State as NatsConnectionState;
 use contracts::environment::EnvironmentOperationKind;
-use contracts::{ActorId, Revision, Sha256Digest, UtcTimestamp};
+use contracts::{ActorId, PolicyId, Revision, Sha256Digest, UtcTimestamp};
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::watch;
@@ -114,7 +114,8 @@ impl EnvironmentProcessRuntime {
                         || configuration.gateway_name.is_some()
                         || configuration.gateway_section.is_some()
                         || configuration.image_pull_secret_name.is_some()
-                        || configuration.active_policy_revision.is_some()
+                        || configuration.active_image_policy_id.is_some()
+                        || configuration.active_image_policy_revision.is_some()
                         || configuration.active_trust_revision.is_some()
                         || configuration.active_trust_bundle_sha256.is_some()
                     {
@@ -137,9 +138,15 @@ impl EnvironmentProcessRuntime {
                         Arc::new(release_store.clone()),
                         ContainerProviderConfiguration::new(
                             ContainerReleasePolicy::new(
+                                PolicyId::from_str(
+                                    &configuration
+                                        .active_image_policy_id
+                                        .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                                )
+                                .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)?,
                                 Revision::new(
                                     configuration
-                                        .active_policy_revision
+                                        .active_image_policy_revision
                                         .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
                                 )
                                 .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)?,
@@ -534,7 +541,8 @@ struct ProviderBindingConfiguration {
     gateway_name: Option<String>,
     gateway_section: Option<String>,
     image_pull_secret_name: Option<String>,
-    active_policy_revision: Option<u64>,
+    active_image_policy_id: Option<String>,
+    active_image_policy_revision: Option<u64>,
     active_trust_revision: Option<u64>,
     active_trust_bundle_sha256: Option<String>,
 }

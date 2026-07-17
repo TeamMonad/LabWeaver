@@ -348,12 +348,52 @@ fn withdrawn_expired_or_rotated_release_is_rejected_before_apply() {
         backend,
         timestamp("2026-07-16T08:30:00.000Z"),
         None,
+        PolicyId::new(),
         revision(2),
         revision(2),
         Sha256Digest::of_bytes(b"rotated-trust-bundle"),
     );
     assert!(matches!(
         rotated.plan(&instance, &resolved(projection), ReconcileAction::Provision),
+        Err(ReleaseProjectionError::TrustRevisionMismatch)
+    ));
+}
+
+#[test]
+fn course_approval_policy_revision_is_independent_from_image_policy_identity() {
+    let projection = projection();
+    assert_ne!(
+        projection.release.approval.policy_revision,
+        projection.release.image_policy_evaluation.policy_revision
+    );
+    let instance = instance_for(&projection);
+    let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
+
+    provider
+        .plan(&instance, &resolved(projection), ReconcileAction::Provision)
+        .expect("the unrelated course approval policy revision is not an image policy identity");
+}
+
+#[test]
+fn same_revision_different_image_policy_id_is_rejected() {
+    let projection = projection();
+    let instance = instance_for(&projection);
+    let provider = provider_with_state(
+        projection.clone(),
+        Arc::new(FixtureBackend::default()),
+        timestamp("2026-07-16T08:30:00.000Z"),
+        None,
+        PolicyId::new(),
+        projection.release.image_policy_evaluation.policy_revision,
+        projection.release.approval.trust_revision,
+        projection
+            .release
+            .image_policy_evaluation
+            .trust_bundle_sha256,
+    );
+
+    assert!(matches!(
+        provider.plan(&instance, &resolved(projection), ReconcileAction::Provision),
         Err(ReleaseProjectionError::TrustRevisionMismatch)
     ));
 }
@@ -366,12 +406,13 @@ async fn withdrawal_blocks_new_use_but_still_allows_stop() {
     instance.desired_state = DesiredEnvironmentState::Stopped;
     let backend = Arc::new(FixtureBackend::default());
     let provider = provider_with_state(
-        projection,
+        projection.clone(),
         backend.clone(),
         timestamp("2026-07-16T10:00:00.000Z"),
         Some(timestamp("2026-07-16T09:30:00.000Z")),
-        revision(1),
-        revision(1),
+        projection.release.image_policy_evaluation.policy_id,
+        projection.release.image_policy_evaluation.policy_revision,
+        projection.release.approval.trust_revision,
         Sha256Digest::of_bytes(b"trust-bundle"),
     );
 
@@ -394,14 +435,22 @@ fn provider(
     projection: ReleasePublishedV2,
     backend: Arc<FixtureBackend>,
 ) -> ContainerProvider<FixtureBackend, FixtureResolver> {
+    let image_policy_id = projection.release.image_policy_evaluation.policy_id;
+    let image_policy_revision = projection.release.image_policy_evaluation.policy_revision;
+    let trust_revision = projection.release.approval.trust_revision;
+    let trust_bundle_sha256 = projection
+        .release
+        .image_policy_evaluation
+        .trust_bundle_sha256;
     provider_with_state(
         projection,
         backend,
         timestamp("2026-07-16T08:30:00.000Z"),
         None,
-        revision(1),
-        revision(1),
-        Sha256Digest::of_bytes(b"trust-bundle"),
+        image_policy_id,
+        image_policy_revision,
+        trust_revision,
+        trust_bundle_sha256,
     )
 }
 
@@ -414,7 +463,8 @@ fn provider_with_state(
     backend: Arc<FixtureBackend>,
     authority_now: UtcTimestamp,
     withdrawn_at: Option<UtcTimestamp>,
-    policy_revision: Revision,
+    image_policy_id: PolicyId,
+    image_policy_revision: Revision,
     trust_revision: Revision,
     trust_bundle_sha256: Sha256Digest,
 ) -> ContainerProvider<FixtureBackend, FixtureResolver> {
@@ -427,8 +477,13 @@ fn provider_with_state(
             withdrawn_at,
         }),
         ContainerProviderConfiguration::new(
-            ContainerReleasePolicy::new(policy_revision, trust_revision, trust_bundle_sha256)
-                .expect("release policy"),
+            ContainerReleasePolicy::new(
+                image_policy_id,
+                image_policy_revision,
+                trust_revision,
+                trust_bundle_sha256,
+            )
+            .expect("release policy"),
             "access-system".to_owned(),
             "protected-gateway".to_owned(),
             "protected-https".to_owned(),
@@ -519,7 +574,7 @@ fn projection() -> ReleasePublishedV2 {
             candidate_id,
             candidate_revision: revision(1),
             candidate_sha256: environment_spec_sha256,
-            policy_revision: revision(1),
+            policy_revision: revision(7),
             schema_sha256: Sha256Digest::of_bytes(b"schema"),
             trust_revision: revision(1),
             actor_id: ActorId::new(),
@@ -554,7 +609,7 @@ fn projection() -> ReleasePublishedV2 {
             artifact_id,
             artifact_sha256,
             policy_id: PolicyId::new(),
-            policy_revision: revision(1),
+            policy_revision: revision(2),
             scanner_name: "trivy".to_owned(),
             scanner_version: "0.58.0".to_owned(),
             scanner_database_sha256: Sha256Digest::of_bytes(b"trivy-db"),

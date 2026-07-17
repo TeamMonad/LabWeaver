@@ -1,0 +1,29 @@
+{
+  "$defs": {
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "Sha256Digest": {
+      "description": "Canonical lowercase SHA-256 digest.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Scope and immutable identity required to read one Agent-owned build status.",
+  "properties": {
+    "commandSha256": {
+      "$ref": "#/$defs/Sha256Digest"
+    },
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    }
+  },
+  "required": [
+    "courseId",
+    "commandSha256"
+  ],
+  "title": "InternalAgentBuildStatusQuery",
+  "type": "object"
+}

@@ -6,9 +6,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AccessGrantId, ApprovalId, CandidateId, CourseId, DiagnosticCode, EndpointId, EnvironmentId,
-    EventId, ImageArtifactId, OperationId, PlatformRole, ProblemPackageId, ProjectId, ReleaseId,
-    Revision, Sha256Digest, StreamSequence, UploadSessionId, UtcTimestamp,
+    AccessGrantId, ActorId, ApprovalId, BuildRequestId, CandidateId, CourseId, DiagnosticCode,
+    EndpointId, EnvironmentId, EventId, ImageArtifactId, OperationId, PlatformRole,
+    ProblemPackageId, ProjectId, ReleaseId, Revision, Sha256Digest, StreamSequence,
+    UploadSessionId, UtcTimestamp,
 };
 
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -145,6 +146,52 @@ pub struct InternalAgentRunMutationRequest {
     pub course_id: CourseId,
     /// Exact Agent-owned run revision observed by Control.
     pub expected_revision: Revision,
+}
+
+/// Agent-owned durable state used as an optimistic precondition for build cancellation.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InternalAgentBuildState {
+    Requested,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+/// Control-to-Agent build cancellation command carried only over allowlisted mTLS.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InternalAgentBuildCancellationRequest {
+    pub course_id: CourseId,
+    pub build_request_id: BuildRequestId,
+    pub command_sha256: Sha256Digest,
+    pub expected_state: InternalAgentBuildState,
+    pub expected_revision: Revision,
+    pub actor_id: ActorId,
+    /// Exact verified Control URI SAN; the Agent compares it with the mTLS peer principal.
+    pub authority_san_uri: String,
+    pub requested_at: UtcTimestamp,
+}
+
+/// Scope and immutable identity required to read one Agent-owned build status.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InternalAgentBuildStatusQuery {
+    pub course_id: CourseId,
+    pub command_sha256: Sha256Digest,
+}
+
+/// Durable result returned for an accepted or exactly replayed build cancellation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InternalAgentBuildCancellationResult {
+    pub course_id: CourseId,
+    pub build_request_id: BuildRequestId,
+    pub command_sha256: Sha256Digest,
+    pub state: InternalAgentBuildState,
+    pub revision: Revision,
+    pub cancellation_requested: bool,
 }
 
 /// Terminal or in-progress Agent result used to rebuild Control projections after replay.

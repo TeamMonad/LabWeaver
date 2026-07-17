@@ -15,9 +15,10 @@ use contracts::events::{
 };
 use contracts::supply_chain::ImageArtifact;
 use contracts::{
-    ArtifactRef, EndpointId, EnvironmentId, OperationId, ReleaseId, Revision, Sha256Digest,
-    UtcTimestamp,
+    ArtifactRef, EndpointId, EnvironmentId, OperationId, PolicyId, ReleaseId, Revision,
+    Sha256Digest, UtcTimestamp,
 };
+use futures_util::StreamExt;
 use persistence_sqlx::{Domain, InboxDecision, InboxStore};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -28,6 +29,7 @@ use crate::{
 };
 
 pub const CONTAINER_BACKEND_PROTOCOL_VERSION: u8 = 2;
+const MAX_CONTAINER_EXECUTOR_MESSAGE_BYTES: usize = 1024 * 1024;
 
 /// One server-side-apply document. The name is deterministic and never user-controlled.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -158,25 +160,23 @@ impl NatsContainerProviderBackend {
     async fn request(
         &self,
         fence: &ContainerBackendFence,
-        request: ContainerBackendRequest<'_>,
-    ) -> Result<ContainerBackendResponse, ProviderFailure> {
+        request: ContainerExecutorRequest,
+    ) -> Result<ContainerExecutorResponse, ProviderFailure> {
         if !request.matches_action(fence.action) {
             return Err(invalid_observation());
         }
-        let payload = serde_json::to_vec(&ContainerBackendRequestEnvelope {
-            fence: *fence,
-            request,
-        })
-        .map_err(|_| invalid_observation())?;
+        let fence = bind_container_executor_request(*fence, &request)?;
+        let payload = serde_json::to_vec(&ContainerExecutorRequestEnvelope { fence, request })
+            .map_err(|_| invalid_observation())?;
         let message = self
             .client
             .request(self.subject.clone(), payload.into())
             .await
             .map_err(|_| unavailable())?;
-        if message.payload.len() > 1024 * 1024 {
+        if message.payload.len() > MAX_CONTAINER_EXECUTOR_MESSAGE_BYTES {
             return Err(invalid_observation());
         }
-        let response: ContainerBackendResponseEnvelope =
+        let response: ContainerExecutorResponseEnvelope =
             serde_json::from_slice(&message.payload).map_err(|_| invalid_observation())?;
         if response.protocol_version != fence.protocol_version
             || response.environment_id != fence.environment_id
@@ -193,12 +193,12 @@ impl NatsContainerProviderBackend {
     }
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ContainerBackendRequestEnvelope<'a> {
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContainerExecutorRequestEnvelope {
     #[serde(flatten)]
-    fence: ContainerBackendFence,
-    request: ContainerBackendRequest<'a>,
+    pub fence: ContainerBackendFence,
+    pub request: ContainerExecutorRequest,
 }
 
 #[async_trait]
@@ -209,14 +209,17 @@ impl ContainerProviderBackend for NatsContainerProviderBackend {
         plan: &ContainerResourcePlan,
     ) -> Result<ContainerApplyObservation, ProviderFailure> {
         match self
-            .request(fence, ContainerBackendRequest::Apply { plan })
+            .request(
+                fence,
+                ContainerExecutorRequest::Apply { plan: plan.clone() },
+            )
             .await?
         {
-            ContainerBackendResponse::Observed {
+            ContainerExecutorResponse::Observed {
                 plan_sha256,
                 observation,
             } if plan_sha256 == plan.plan_sha256 => Ok(observation),
-            ContainerBackendResponse::Failed { failure } => Err(failure),
+            ContainerExecutorResponse::Failed { failure } => Err(failure),
             _ => Err(invalid_observation()),
         }
     }
@@ -227,14 +230,17 @@ impl ContainerProviderBackend for NatsContainerProviderBackend {
         plan: &ContainerResourcePlan,
     ) -> Result<ContainerApplyObservation, ProviderFailure> {
         match self
-            .request(fence, ContainerBackendRequest::Observe { plan })
+            .request(
+                fence,
+                ContainerExecutorRequest::Observe { plan: plan.clone() },
+            )
             .await?
         {
-            ContainerBackendResponse::Observed {
+            ContainerExecutorResponse::Observed {
                 plan_sha256,
                 observation,
             } if plan_sha256 == plan.plan_sha256 => Ok(observation),
-            ContainerBackendResponse::Failed { failure } => Err(failure),
+            ContainerExecutorResponse::Failed { failure } => Err(failure),
             _ => Err(invalid_observation()),
         }
     }
@@ -246,14 +252,20 @@ impl ContainerProviderBackend for NatsContainerProviderBackend {
         replicas: u32,
     ) -> Result<ContainerApplyObservation, ProviderFailure> {
         match self
-            .request(fence, ContainerBackendRequest::Scale { plan, replicas })
+            .request(
+                fence,
+                ContainerExecutorRequest::Scale {
+                    plan: plan.clone(),
+                    replicas,
+                },
+            )
             .await?
         {
-            ContainerBackendResponse::Observed {
+            ContainerExecutorResponse::Observed {
                 plan_sha256,
                 observation,
             } if plan_sha256 == plan.plan_sha256 => Ok(observation),
-            ContainerBackendResponse::Failed { failure } => Err(failure),
+            ContainerExecutorResponse::Failed { failure } => Err(failure),
             _ => Err(invalid_observation()),
         }
     }
@@ -267,18 +279,18 @@ impl ContainerProviderBackend for NatsContainerProviderBackend {
         match self
             .request(
                 fence,
-                ContainerBackendRequest::Restart {
-                    plan,
+                ContainerExecutorRequest::Restart {
+                    plan: plan.clone(),
                     operation_revision,
                 },
             )
             .await?
         {
-            ContainerBackendResponse::Observed {
+            ContainerExecutorResponse::Observed {
                 plan_sha256,
                 observation,
             } if plan_sha256 == plan.plan_sha256 => Ok(observation),
-            ContainerBackendResponse::Failed { failure } => Err(failure),
+            ContainerExecutorResponse::Failed { failure } => Err(failure),
             _ => Err(invalid_observation()),
         }
     }
@@ -289,16 +301,19 @@ impl ContainerProviderBackend for NatsContainerProviderBackend {
         plan: &ContainerResourcePlan,
     ) -> Result<ArtifactRef, ProviderFailure> {
         match self
-            .request(fence, ContainerBackendRequest::DeleteNamespace { plan })
+            .request(
+                fence,
+                ContainerExecutorRequest::DeleteNamespace { plan: plan.clone() },
+            )
             .await?
         {
-            ContainerBackendResponse::Deleted {
+            ContainerExecutorResponse::Deleted {
                 plan_sha256,
                 cleanup_evidence,
             } if plan_sha256 == plan.plan_sha256 && valid_artifact_ref(&cleanup_evidence) => {
                 Ok(cleanup_evidence)
             }
-            ContainerBackendResponse::Failed { failure } => Err(failure),
+            ContainerExecutorResponse::Failed { failure } => Err(failure),
             _ => Err(ProviderFailure {
                 code: ProviderFailureCode::CleanupFailed,
                 retryable: true,
@@ -307,33 +322,34 @@ impl ContainerProviderBackend for NatsContainerProviderBackend {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(
     tag = "backendAction",
     rename_all = "snake_case",
-    rename_all_fields = "camelCase"
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
 )]
-enum ContainerBackendRequest<'a> {
+pub enum ContainerExecutorRequest {
     Apply {
-        plan: &'a ContainerResourcePlan,
+        plan: ContainerResourcePlan,
     },
     Observe {
-        plan: &'a ContainerResourcePlan,
+        plan: ContainerResourcePlan,
     },
     Scale {
-        plan: &'a ContainerResourcePlan,
+        plan: ContainerResourcePlan,
         replicas: u32,
     },
     Restart {
-        plan: &'a ContainerResourcePlan,
+        plan: ContainerResourcePlan,
         operation_revision: Revision,
     },
     DeleteNamespace {
-        plan: &'a ContainerResourcePlan,
+        plan: ContainerResourcePlan,
     },
 }
 
-impl ContainerBackendRequest<'_> {
+impl ContainerExecutorRequest {
     const fn matches_action(&self, action: ReconcileAction) -> bool {
         matches!(
             (self, action),
@@ -349,28 +365,28 @@ impl ContainerBackendRequest<'_> {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ContainerBackendResponseEnvelope {
-    protocol_version: u8,
-    environment_id: EnvironmentId,
-    operation_id: OperationId,
-    provider_step: u32,
-    operation_generation: u64,
-    attempt: u32,
-    request_id: Sha256Digest,
-    action: ReconcileAction,
-    response: ContainerBackendResponse,
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContainerExecutorResponseEnvelope {
+    pub protocol_version: u8,
+    pub environment_id: EnvironmentId,
+    pub operation_id: OperationId,
+    pub provider_step: u32,
+    pub operation_generation: u64,
+    pub attempt: u32,
+    pub request_id: Sha256Digest,
+    pub action: ReconcileAction,
+    pub response: ContainerExecutorResponse,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(
     tag = "status",
     rename_all = "snake_case",
     rename_all_fields = "camelCase",
     deny_unknown_fields
 )]
-enum ContainerBackendResponse {
+pub enum ContainerExecutorResponse {
     Observed {
         plan_sha256: Sha256Digest,
         observation: ContainerApplyObservation,
@@ -382,6 +398,420 @@ enum ContainerBackendResponse {
     Failed {
         failure: ProviderFailure,
     },
+}
+
+/// Kubernetes side-effect adapter invoked only after durable executor admission.
+#[async_trait]
+pub trait ContainerExecutorBackend: Send + Sync {
+    async fn execute(
+        &self,
+        fence: &ContainerBackendFence,
+        request: &ContainerExecutorRequest,
+    ) -> ContainerExecutorResponse;
+}
+
+/// Executor-side `PostgreSQL` highest-generation and permanent-delete ledger.
+#[derive(Clone, Debug)]
+pub struct PgContainerExecutorFenceStore {
+    pool: PgPool,
+}
+
+impl PgContainerExecutorFenceStore {
+    #[must_use]
+    pub const fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "admission keeps the complete row-lock, generation and tombstone decision auditable"
+    )]
+    async fn admit(
+        &self,
+        envelope: &ContainerExecutorRequestEnvelope,
+    ) -> Result<ContainerExecutorAdmission, ContainerExecutorFenceError> {
+        validate_container_executor_request(envelope)?;
+        let fence = envelope.fence;
+        let mut transaction = self.pool.begin().await?;
+        let authority_now: time::OffsetDateTime =
+            sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
+                .fetch_one(&mut *transaction)
+                .await?;
+        if authority_now >= fence.deadline_at.get() {
+            return Err(ContainerExecutorFenceError::DeadlineExceeded);
+        }
+        let remaining = std::time::Duration::try_from(fence.deadline_at.get() - authority_now)
+            .map_err(|_| ContainerExecutorFenceError::DeadlineExceeded)?;
+        let current = sqlx::query(
+            "SELECT highest_generation,operation_id,provider_step,attempt,tombstoned, \
+                    last_request_id,last_response,deadline_at \
+             FROM environment.container_executor_fences WHERE environment_id=$1 FOR UPDATE",
+        )
+        .bind(fence.environment_id.as_uuid())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(row) = current {
+            let highest_generation = u64::try_from(row.try_get::<i64, _>("highest_generation")?)
+                .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
+            let operation_id =
+                OperationId::from_str(&row.try_get::<uuid::Uuid, _>("operation_id")?.to_string())
+                    .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
+            let provider_step = u32::try_from(row.try_get::<i32, _>("provider_step")?)
+                .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
+            let attempt = u32::try_from(row.try_get::<i32, _>("attempt")?)
+                .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
+            let tombstoned: bool = row.try_get("tombstoned")?;
+            let last_request_id: String = row.try_get("last_request_id")?;
+            let last_response = row.try_get::<Option<Value>, _>("last_response")?;
+            let previous_deadline: time::OffsetDateTime = row.try_get("deadline_at")?;
+            if last_request_id == fence.request_id.to_string() {
+                if let Some(value) = last_response {
+                    transaction.rollback().await?;
+                    return Ok(ContainerExecutorAdmission::Replay(value));
+                }
+                return Err(ContainerExecutorFenceError::InProgress);
+            }
+            if last_response.is_none() && authority_now < previous_deadline {
+                return Err(ContainerExecutorFenceError::InProgress);
+            }
+            if tombstoned {
+                return Err(ContainerExecutorFenceError::Tombstoned);
+            }
+            if fence.operation_generation < highest_generation
+                || (fence.operation_generation == highest_generation
+                    && (fence.provider_step < provider_step
+                        || (fence.provider_step == provider_step && fence.attempt < attempt)))
+            {
+                return Err(ContainerExecutorFenceError::StaleGeneration);
+            }
+            if fence.operation_generation == highest_generation
+                && fence.operation_id != operation_id
+            {
+                return Err(ContainerExecutorFenceError::IdentityMismatch);
+            }
+            sqlx::query(
+                "UPDATE environment.container_executor_fences SET highest_generation=$2, \
+                     operation_id=$3,provider_step=$4,attempt=$5,tombstoned=$6,last_action=$7, \
+                     last_request_id=$8,last_response=NULL,deadline_at=$9,updated_at=clock_timestamp() \
+                 WHERE environment_id=$1",
+            )
+            .bind(fence.environment_id.as_uuid())
+            .bind(i64::try_from(fence.operation_generation).map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?)
+            .bind(fence.operation_id.as_uuid())
+            .bind(i32::try_from(fence.provider_step).map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?)
+            .bind(i32::try_from(fence.attempt).map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?)
+            .bind(fence.action == ReconcileAction::Cleanup)
+            .bind(reconcile_action_name(fence.action))
+            .bind(fence.request_id.to_string())
+            .bind(fence.deadline_at.get())
+            .execute(&mut *transaction)
+            .await?;
+        } else {
+            sqlx::query(
+                "INSERT INTO environment.container_executor_fences \
+                 (environment_id,highest_generation,operation_id,provider_step,attempt,tombstoned, \
+                  last_action,last_request_id,deadline_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+            )
+            .bind(fence.environment_id.as_uuid())
+            .bind(
+                i64::try_from(fence.operation_generation)
+                    .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?,
+            )
+            .bind(fence.operation_id.as_uuid())
+            .bind(
+                i32::try_from(fence.provider_step)
+                    .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?,
+            )
+            .bind(
+                i32::try_from(fence.attempt)
+                    .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?,
+            )
+            .bind(fence.action == ReconcileAction::Cleanup)
+            .bind(reconcile_action_name(fence.action))
+            .bind(fence.request_id.to_string())
+            .bind(fence.deadline_at.get())
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(ContainerExecutorAdmission::Execute(remaining))
+    }
+
+    async fn complete(
+        &self,
+        fence: ContainerBackendFence,
+        response: &ContainerExecutorResponse,
+    ) -> Result<(), ContainerExecutorFenceError> {
+        let value = serde_json::to_value(response)
+            .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
+        let updated = sqlx::query(
+            "UPDATE environment.container_executor_fences SET last_response=$7,updated_at=clock_timestamp() \
+             WHERE environment_id=$1 AND highest_generation=$2 AND operation_id=$3 \
+               AND provider_step=$4 AND attempt=$5 AND last_request_id=$6 AND last_response IS NULL",
+        )
+        .bind(fence.environment_id.as_uuid())
+        .bind(i64::try_from(fence.operation_generation).map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?)
+        .bind(fence.operation_id.as_uuid())
+        .bind(i32::try_from(fence.provider_step).map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?)
+        .bind(i32::try_from(fence.attempt).map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?)
+        .bind(fence.request_id.to_string())
+        .bind(value)
+        .execute(&self.pool)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(ContainerExecutorFenceError::StaleGeneration);
+        }
+        Ok(())
+    }
+}
+
+enum ContainerExecutorAdmission {
+    Execute(std::time::Duration),
+    Replay(Value),
+}
+
+/// Server-side wrapper that persists fencing/tombstones before Kubernetes side effects.
+pub struct FencedContainerExecutor<B> {
+    store: PgContainerExecutorFenceStore,
+    backend: B,
+}
+
+impl<B: ContainerExecutorBackend> FencedContainerExecutor<B> {
+    #[must_use]
+    pub const fn new(store: PgContainerExecutorFenceStore, backend: B) -> Self {
+        Self { store, backend }
+    }
+
+    pub async fn execute(
+        &self,
+        envelope: ContainerExecutorRequestEnvelope,
+    ) -> Result<ContainerExecutorResponseEnvelope, ContainerExecutorFenceError> {
+        let response = match self.store.admit(&envelope).await? {
+            ContainerExecutorAdmission::Execute(remaining) => {
+                let response = tokio::time::timeout(
+                    remaining,
+                    self.backend.execute(&envelope.fence, &envelope.request),
+                )
+                .await
+                .map_err(|_| ContainerExecutorFenceError::DeadlineExceeded)?;
+                self.store.complete(envelope.fence, &response).await?;
+                response
+            }
+            ContainerExecutorAdmission::Replay(value) => serde_json::from_value(value)
+                .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?,
+        };
+        Ok(ContainerExecutorResponseEnvelope {
+            protocol_version: envelope.fence.protocol_version,
+            environment_id: envelope.fence.environment_id,
+            operation_id: envelope.fence.operation_id,
+            provider_step: envelope.fence.provider_step,
+            operation_generation: envelope.fence.operation_generation,
+            attempt: envelope.fence.attempt,
+            request_id: envelope.fence.request_id,
+            action: envelope.fence.action,
+            response,
+        })
+    }
+}
+
+/// NATS request/reply server used by the deployment-owned Kubernetes executor process.
+pub struct NatsContainerExecutorServer<B> {
+    client: async_nats::Client,
+    subject: String,
+    executor: Arc<FencedContainerExecutor<B>>,
+}
+
+impl<B: ContainerExecutorBackend + 'static> NatsContainerExecutorServer<B> {
+    pub fn new(
+        client: async_nats::Client,
+        subject: String,
+        executor: FencedContainerExecutor<B>,
+    ) -> Result<Self, ContainerExecutorFenceError> {
+        if !valid_subject(&subject) {
+            return Err(ContainerExecutorFenceError::ConfigurationInvalid);
+        }
+        Ok(Self {
+            client,
+            subject,
+            executor: Arc::new(executor),
+        })
+    }
+
+    /// Serves bounded requests and never invokes Kubernetes for malformed/no-reply messages.
+    pub async fn serve(self) -> Result<(), ContainerExecutorFenceError> {
+        let mut subscriber = self
+            .client
+            .subscribe(self.subject)
+            .await
+            .map_err(|_| ContainerExecutorFenceError::Transport)?;
+        while let Some(message) = subscriber.next().await {
+            let Some(reply) = message.reply.clone() else {
+                tracing::warn!(
+                    event = "environment.container_executor.request_rejected",
+                    diagnostic = "LW_ENVIRONMENT_CONTAINER_EXECUTOR_REPLY_REQUIRED"
+                );
+                continue;
+            };
+            if message.payload.len() > MAX_CONTAINER_EXECUTOR_MESSAGE_BYTES {
+                tracing::warn!(
+                    event = "environment.container_executor.request_rejected",
+                    diagnostic = "LW_ENVIRONMENT_CONTAINER_EXECUTOR_PAYLOAD_TOO_LARGE"
+                );
+                continue;
+            }
+            let Ok(envelope) =
+                serde_json::from_slice::<ContainerExecutorRequestEnvelope>(&message.payload)
+            else {
+                tracing::warn!(
+                    event = "environment.container_executor.request_rejected",
+                    diagnostic = "LW_ENVIRONMENT_CONTAINER_EXECUTOR_CONTRACT_INVALID"
+                );
+                continue;
+            };
+            let client = self.client.clone();
+            let executor = Arc::clone(&self.executor);
+            tokio::spawn(async move {
+                let fence = envelope.fence;
+                let response = match executor.execute(envelope).await {
+                    Ok(response) => response,
+                    Err(error) => ContainerExecutorResponseEnvelope {
+                        protocol_version: fence.protocol_version,
+                        environment_id: fence.environment_id,
+                        operation_id: fence.operation_id,
+                        provider_step: fence.provider_step,
+                        operation_generation: fence.operation_generation,
+                        attempt: fence.attempt,
+                        request_id: fence.request_id,
+                        action: fence.action,
+                        response: ContainerExecutorResponse::Failed {
+                            failure: container_executor_failure(&error),
+                        },
+                    },
+                };
+                let Ok(payload) = serde_json::to_vec(&response) else {
+                    tracing::error!(
+                        event = "environment.container_executor.response_failed",
+                        diagnostic = "LW_ENVIRONMENT_CONTAINER_EXECUTOR_RESPONSE_INVALID"
+                    );
+                    return;
+                };
+                if client.publish(reply, payload.into()).await.is_err() {
+                    tracing::warn!(
+                        event = "environment.container_executor.response_failed",
+                        diagnostic = "LW_ENVIRONMENT_CONTAINER_EXECUTOR_TRANSPORT_FAILED"
+                    );
+                }
+            });
+        }
+        Err(ContainerExecutorFenceError::Transport)
+    }
+}
+
+const fn container_executor_failure(error: &ContainerExecutorFenceError) -> ProviderFailure {
+    match error {
+        ContainerExecutorFenceError::InProgress
+        | ContainerExecutorFenceError::Database(_)
+        | ContainerExecutorFenceError::Transport => ProviderFailure {
+            code: ProviderFailureCode::Unavailable,
+            retryable: true,
+        },
+        ContainerExecutorFenceError::ConfigurationInvalid
+        | ContainerExecutorFenceError::IdentityMismatch
+        | ContainerExecutorFenceError::DeadlineExceeded
+        | ContainerExecutorFenceError::StaleGeneration
+        | ContainerExecutorFenceError::Tombstoned => ProviderFailure {
+            code: ProviderFailureCode::Rejected,
+            retryable: false,
+        },
+    }
+}
+
+fn validate_container_executor_request(
+    envelope: &ContainerExecutorRequestEnvelope,
+) -> Result<(), ContainerExecutorFenceError> {
+    let fence = envelope.fence;
+    let expected_request_id = container_executor_request_id(fence, &envelope.request)?;
+    if fence.protocol_version != CONTAINER_BACKEND_PROTOCOL_VERSION
+        || fence.operation_generation == 0
+        || fence.request_id != expected_request_id
+        || !envelope.request.matches_action(fence.action)
+        || container_executor_plan(&envelope.request).environment_id != fence.environment_id
+    {
+        return Err(ContainerExecutorFenceError::IdentityMismatch);
+    }
+    Ok(())
+}
+
+fn bind_container_executor_request(
+    mut fence: ContainerBackendFence,
+    request: &ContainerExecutorRequest,
+) -> Result<ContainerBackendFence, ProviderFailure> {
+    fence.request_id =
+        container_executor_request_id(fence, request).map_err(|_| invalid_observation())?;
+    Ok(fence)
+}
+
+fn container_executor_request_id(
+    fence: ContainerBackendFence,
+    request: &ContainerExecutorRequest,
+) -> Result<Sha256Digest, ContainerExecutorFenceError> {
+    Sha256Digest::of_canonical(&serde_json::json!({
+        "protocolVersion": fence.protocol_version,
+        "environmentId": fence.environment_id,
+        "operationId": fence.operation_id,
+        "providerStep": fence.provider_step,
+        "operationGeneration": fence.operation_generation,
+        "attempt": fence.attempt,
+        "action": fence.action,
+        "deadlineAt": fence.deadline_at,
+        "request": request,
+    }))
+    .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)
+}
+
+const fn container_executor_plan(request: &ContainerExecutorRequest) -> &ContainerResourcePlan {
+    match request {
+        ContainerExecutorRequest::Apply { plan }
+        | ContainerExecutorRequest::Observe { plan }
+        | ContainerExecutorRequest::Scale { plan, .. }
+        | ContainerExecutorRequest::Restart { plan, .. }
+        | ContainerExecutorRequest::DeleteNamespace { plan } => plan,
+    }
+}
+
+const fn reconcile_action_name(action: ReconcileAction) -> &'static str {
+    match action {
+        ReconcileAction::Validate => "validate",
+        ReconcileAction::Build => "build",
+        ReconcileAction::Provision => "provision",
+        ReconcileAction::Observe => "observe",
+        ReconcileAction::Start => "start",
+        ReconcileAction::Stop => "stop",
+        ReconcileAction::Restart => "restart",
+        ReconcileAction::Reset => "reset",
+        ReconcileAction::Configure => "configure",
+        ReconcileAction::Cleanup => "cleanup",
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ContainerExecutorFenceError {
+    #[error("LW_ENVIRONMENT_CONTAINER_EXECUTOR_CONFIGURATION_INVALID")]
+    ConfigurationInvalid,
+    #[error("LW_ENVIRONMENT_CONTAINER_EXECUTOR_IDENTITY_MISMATCH")]
+    IdentityMismatch,
+    #[error("LW_ENVIRONMENT_CONTAINER_EXECUTOR_DEADLINE_EXCEEDED")]
+    DeadlineExceeded,
+    #[error("LW_ENVIRONMENT_CONTAINER_EXECUTOR_STALE_GENERATION")]
+    StaleGeneration,
+    #[error("LW_ENVIRONMENT_CONTAINER_EXECUTOR_TOMBSTONED")]
+    Tombstoned,
+    #[error("LW_ENVIRONMENT_CONTAINER_EXECUTOR_REQUEST_IN_PROGRESS")]
+    InProgress,
+    #[error("LW_ENVIRONMENT_CONTAINER_EXECUTOR_DATABASE_FAILED")]
+    Database(#[from] sqlx::Error),
+    #[error("LW_ENVIRONMENT_CONTAINER_EXECUTOR_TRANSPORT_FAILED")]
+    Transport,
 }
 
 /// Exact immutable Release lookup used by a Provider action.
@@ -405,14 +835,16 @@ pub struct ResolvedContainerRelease {
 /// Deployment authority for the currently accepted scan policy and private trust bundle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ContainerReleasePolicy {
-    pub policy_revision: Revision,
+    pub image_policy_id: PolicyId,
+    pub image_policy_revision: Revision,
     pub trust_revision: Revision,
     pub trust_bundle_sha256: Sha256Digest,
 }
 
 impl ContainerReleasePolicy {
     pub fn new(
-        policy_revision: Revision,
+        image_policy_id: PolicyId,
+        image_policy_revision: Revision,
         trust_revision: Revision,
         trust_bundle_sha256: Sha256Digest,
     ) -> Result<Self, ReleaseProjectionError> {
@@ -420,7 +852,8 @@ impl ContainerReleasePolicy {
             return Err(ReleaseProjectionError::ConfigurationInvalid);
         }
         Ok(Self {
-            policy_revision,
+            image_policy_id,
+            image_policy_revision,
             trust_revision,
             trust_bundle_sha256,
         })
@@ -965,8 +1398,9 @@ where
         if resolved.authority_now >= release.image_policy_evaluation.valid_until {
             return Err(ReleaseProjectionError::EvidenceExpired);
         }
-        if release.image_policy_evaluation.policy_revision != self.release_policy.policy_revision
-            || release.approval.policy_revision != self.release_policy.policy_revision
+        if release.image_policy_evaluation.policy_id != self.release_policy.image_policy_id
+            || release.image_policy_evaluation.policy_revision
+                != self.release_policy.image_policy_revision
             || release.approval.trust_revision != self.release_policy.trust_revision
             || release.image_policy_evaluation.trust_bundle_sha256
                 != self.release_policy.trust_bundle_sha256

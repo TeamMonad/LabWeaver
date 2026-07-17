@@ -25,6 +25,15 @@
       "CsrfTokenResponse": {
         "$ref": "../contracts/v1/csrf-token-response.schema.json"
       },
+      "InternalAgentBuildCancellationRequest": {
+        "$ref": "../contracts/v1/http/internal-agent-build-cancellation-request.schema.json"
+      },
+      "InternalAgentBuildCancellationResult": {
+        "$ref": "../contracts/v1/http/internal-agent-build-cancellation-result.schema.json"
+      },
+      "InternalAgentBuildStatusQuery": {
+        "$ref": "../contracts/v1/http/internal-agent-build-status-query.schema.json"
+      },
       "InternalAgentRunMutationRequest": {
         "$ref": "../contracts/v1/http/internal-agent-run-mutation-request.schema.json"
       },
@@ -446,6 +455,133 @@
           }
         ],
         "summary": "Evaluate an actor session and exact resource scope for an mTLS caller"
+      }
+    },
+    "/internal/v1/build-requests/{buildRequestId}": {
+      "get": {
+        "operationId": "getInternalAgentBuild",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "buildRequestId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "courseId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "commandSha256",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalAgentBuildCancellationResult"
+                }
+              }
+            },
+            "description": "Authoritative build status"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceMtls": []
+          }
+        ],
+        "summary": "Read the Agent-owned build state and revision for an exact course and command hash"
+      }
+    },
+    "/internal/v1/build-requests/{buildRequestId}/cancel": {
+      "post": {
+        "operationId": "cancelInternalAgentBuild",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "buildRequestId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 16,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InternalAgentBuildCancellationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalAgentBuildCancellationResult"
+                }
+              }
+            },
+            "description": "Durable cancellation requested"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceMtls": []
+          }
+        ],
+        "summary": "Request one actor-attributed build cancellation at an exact course, command hash, state and revision"
       }
     },
     "/internal/v1/environments/{environmentId}/endpoint-eligibility:resolve": {
