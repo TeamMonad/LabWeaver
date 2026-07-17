@@ -1,5 +1,4 @@
 import { reactive, ref, type Ref } from 'vue'
-import type { AxiosError } from 'axios'
 import {
   createEnvironment,
   startEnvironment,
@@ -7,8 +6,8 @@ import {
   restartEnvironment,
   deleteEnvironment,
 } from '@/generated/contracts'
-import type { CreateEnvironmentRequestSchema, EnvironmentOperationAcceptedSchema, ProblemDetails } from '@/generated/contracts'
-import { makeDiagnostic } from '@/types/async'
+import type { CreateEnvironmentRequestSchema, EnvironmentOperationAcceptedSchema } from '@/generated/contracts'
+import { extractProblemDetails, makeDiagnostic } from '@/types/async'
 import { idempotencyKey, ifMatch } from '@/utils/format'
 
 export type LifecycleAction = 'start' | 'stop' | 'restart' | 'delete'
@@ -35,9 +34,7 @@ export function useEnvironmentLifecycle(courseId: Ref<string | undefined>) {
       body: request,
     })
     if (result.error) {
-      const problem = ((result.error as AxiosError).response?.data ?? (result.error as { error?: ProblemDetails }).error) as
-        | ProblemDetails
-        | undefined
+      const problem = extractProblemDetails(result.error)
       return {
         ok: false,
         diagnostic: makeDiagnostic(
@@ -66,9 +63,7 @@ export function useEnvironmentLifecycle(courseId: Ref<string | undefined>) {
               : deleteEnvironment({ path, headers })
       const result = await fn
       if (result.error) {
-        const problem = ((result.error as AxiosError).response?.data ?? (result.error as { error?: ProblemDetails }).error) as
-          | ProblemDetails
-          | undefined
+        const problem = extractProblemDetails(result.error)
         return {
           ok: false,
           diagnostic: makeDiagnostic(

@@ -7,6 +7,7 @@ import {
   listEnvironmentTemplateReleases,
   getEnvironment,
   listEnvironmentEndpoints,
+  startEnvironment,
 } from '@/generated/contracts'
 
 vi.mock('@/generated/contracts', async (importOriginal) => {
@@ -17,6 +18,10 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
     createEnvironment: vi.fn(),
     getEnvironment: vi.fn(),
     listEnvironmentEndpoints: vi.fn(),
+    startEnvironment: vi.fn(),
+    stopEnvironment: vi.fn(),
+    restartEnvironment: vi.fn(),
+    deleteEnvironment: vi.fn(),
   }
 })
 
@@ -117,12 +122,79 @@ describe('EnvironmentEntryView', () => {
       error: undefined as never,
     })
     vi.mocked(listEnvironmentEndpoints).mockResolvedValue({
-      data: { items: [] },
+      data: { items: [{ id: 'ep-1', protocol: 'ssh', health: 'healthy', observedAt: '2026-07-11T10:00:00.000Z' }] },
       error: undefined as never,
     })
     const { wrapper } = await mountAt({ environmentId: 'env-1' })
     await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
     expect(wrapper.text()).toContain('ready')
     expect(wrapper.text()).toContain('启动')
+    await vi.waitFor(() => expect(vi.mocked(listEnvironmentEndpoints)).toHaveBeenCalledWith({ path: { environmentId: 'env-1' } }))
+    expect(wrapper.text()).toContain('ssh')
+  })
+
+  it('shows lifecycle failure diagnostic to student', async () => {
+    vi.stubEnv('VITE_DEFAULT_COURSE_ID', 'demo-course-1')
+    vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({
+      data: { items: [] },
+      error: undefined as never,
+    })
+    vi.mocked(getEnvironment).mockResolvedValue({
+      data: {
+        id: 'env-1',
+        courseId: 'demo-course-1',
+        class: 'experiment',
+        desiredState: 'stopped',
+        eligibilityExpiresAt: '2026-07-12T10:00:00.000Z',
+        endpoints: [],
+        observedState: 'failed',
+        operation: {
+          id: 'op-1',
+          acceptedAt: '2026-07-11T10:00:00.000Z',
+          acceptedRevision: 1,
+          actorId: 'student-1',
+          attempt: 1,
+          deadlineAt: '2026-07-11T10:05:00.000Z',
+          kind: 'create',
+          maxAttempts: 3,
+          nextAttemptAt: '2026-07-11T10:00:00.000Z',
+          preserveMutableDisk: false,
+          providerStep: 0,
+          state: 'failed',
+          traceId: 'trace-1',
+        },
+        ownerId: 'student-1',
+        providerBinding: 'static',
+        releaseId: 'release-1',
+        releaseVersion: 1,
+        revision: 2,
+        runtimeKind: 'container',
+      },
+      error: undefined as never,
+    })
+    vi.mocked(listEnvironmentEndpoints).mockResolvedValue({
+      data: { items: [] },
+      error: undefined as never,
+    })
+    vi.mocked(startEnvironment).mockResolvedValue({
+      data: undefined as never,
+      error: {
+        response: {
+          data: {
+            diagnosticCode: 'ENVIRONMENT_LIFECYCLE_FAILED',
+            detail: '环境 env-1 处于失败状态，无法执行 start 操作',
+            retryable: false,
+          },
+        },
+      } as never,
+    })
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
+
+    const startButton = wrapper.findAll('button').find((b) => b.text() === '启动')
+    expect(startButton).toBeDefined()
+    await startButton!.trigger('click')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('ENVIRONMENT_LIFECYCLE_FAILED'))
+    expect(wrapper.text()).toContain('环境 env-1 处于失败状态')
   })
 })

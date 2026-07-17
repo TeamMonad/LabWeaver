@@ -12,6 +12,12 @@ export type AuthorizationDecisionRequest = AuthorizationDecisionRequestSchema;
 
 export type CsrfTokenResponse = CsrfTokenResponseSchema;
 
+export type InternalAgentBuildCancellationRequest = InternalAgentBuildCancellationRequestSchema;
+
+export type InternalAgentBuildCancellationResult = InternalAgentBuildCancellationResultSchema;
+
+export type InternalAgentBuildStatusQuery = InternalAgentBuildStatusQuerySchema;
+
 export type InternalAgentRunMutationRequest = InternalAgentRunMutationRequestSchema;
 
 export type InternalAgentRunOutcome = InternalAgentRunOutcomeSchema;
@@ -2115,6 +2121,10 @@ export type SigstoreEvidence = {
     rekorLogIndex: number;
     sctSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
     signatureSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
+    /**
+     * Immutable artifact digest covered by the verified signature.
+     */
+    subjectDigest: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
     trustBundleSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
     verifiedAt: CreateEnvironmentTemplateReleaseRequestSchemaUtcTimestamp;
 };
@@ -2870,6 +2880,10 @@ export type EnvironmentTemplateReleaseViewSchemaSigstoreEvidence = {
     rekorLogIndex: number;
     sctSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
     signatureSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
+    /**
+     * Immutable artifact digest covered by the verified signature.
+     */
+    subjectDigest: EnvironmentTemplateReleaseViewSchemaSha256Digest;
     trustBundleSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
     verifiedAt: EnvironmentTemplateReleaseViewSchemaUtcTimestamp;
 };
@@ -2938,6 +2952,119 @@ export type SubmissionManifest = {
  * Source available to a bounded Collector.
  */
 export type SubmissionSource = 'workspace' | 'system_facts';
+
+/**
+ * InternalAgentBuildCancellationRequest
+ *
+ * Control-to-Agent build cancellation command carried only over allowlisted mTLS.
+ */
+export type InternalAgentBuildCancellationRequestSchema = {
+    actorId: InternalAgentBuildCancellationRequestSchemaActorId;
+    /**
+     * Exact verified Control URI SAN; the Agent compares it with the mTLS peer principal.
+     */
+    authoritySanUri: string;
+    buildRequestId: InternalAgentBuildCancellationRequestSchemaBuildRequestId;
+    commandSha256: InternalAgentBuildCancellationRequestSchemaSha256Digest;
+    courseId: InternalAgentBuildCancellationRequestSchemaCourseId;
+    expectedRevision: InternalAgentBuildCancellationRequestSchemaRevision;
+    expectedState: InternalAgentBuildState;
+    requestedAt: InternalAgentBuildCancellationRequestSchemaUtcTimestamp;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type InternalAgentBuildCancellationRequestSchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `BuildRequestId`.
+ */
+export type InternalAgentBuildCancellationRequestSchemaBuildRequestId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type InternalAgentBuildCancellationRequestSchemaCourseId = string;
+
+/**
+ * Agent-owned durable state used as an optimistic precondition for build cancellation.
+ */
+export type InternalAgentBuildState = 'requested' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type InternalAgentBuildCancellationRequestSchemaRevision = number;
+
+/**
+ * Canonical lowercase SHA-256 digest.
+ */
+export type InternalAgentBuildCancellationRequestSchemaSha256Digest = string;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type InternalAgentBuildCancellationRequestSchemaUtcTimestamp = string;
+
+/**
+ * InternalAgentBuildCancellationResult
+ *
+ * Durable result returned for an accepted or exactly replayed build cancellation.
+ */
+export type InternalAgentBuildCancellationResultSchema = {
+    buildRequestId: InternalAgentBuildCancellationResultSchemaBuildRequestId;
+    cancellationRequested: boolean;
+    commandSha256: InternalAgentBuildCancellationResultSchemaSha256Digest;
+    courseId: InternalAgentBuildCancellationResultSchemaCourseId;
+    revision: InternalAgentBuildCancellationResultSchemaRevision;
+    state: InternalAgentBuildCancellationResultSchemaInternalAgentBuildState;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `BuildRequestId`.
+ */
+export type InternalAgentBuildCancellationResultSchemaBuildRequestId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type InternalAgentBuildCancellationResultSchemaCourseId = string;
+
+/**
+ * Agent-owned durable state used as an optimistic precondition for build cancellation.
+ */
+export type InternalAgentBuildCancellationResultSchemaInternalAgentBuildState = 'requested' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type InternalAgentBuildCancellationResultSchemaRevision = number;
+
+/**
+ * Canonical lowercase SHA-256 digest.
+ */
+export type InternalAgentBuildCancellationResultSchemaSha256Digest = string;
+
+/**
+ * InternalAgentBuildStatusQuery
+ *
+ * Scope and immutable identity required to read one Agent-owned build status.
+ */
+export type InternalAgentBuildStatusQuerySchema = {
+    commandSha256: InternalAgentBuildStatusQuerySchemaSha256Digest;
+    courseId: InternalAgentBuildStatusQuerySchemaCourseId;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type InternalAgentBuildStatusQuerySchemaCourseId = string;
+
+/**
+ * Canonical lowercase SHA-256 digest.
+ */
+export type InternalAgentBuildStatusQuerySchemaSha256Digest = string;
 
 /**
  * InternalAgentRunMutationRequest
@@ -3967,6 +4094,10 @@ export type InternalImageArtifactResolutionSchemaSigstoreEvidence = {
     rekorLogIndex: number;
     sctSha256: InternalImageArtifactResolutionSchemaSha256Digest;
     signatureSha256: InternalImageArtifactResolutionSchemaSha256Digest;
+    /**
+     * Immutable artifact digest covered by the verified signature.
+     */
+    subjectDigest: InternalImageArtifactResolutionSchemaSha256Digest;
     trustBundleSha256: InternalImageArtifactResolutionSchemaSha256Digest;
     verifiedAt: InternalImageArtifactResolutionSchemaUtcTimestamp;
 };

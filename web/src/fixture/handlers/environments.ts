@@ -8,7 +8,7 @@ import { problem } from '../diagnostics'
 import type { FixtureHandler } from '../types'
 import { LIFECYCLE_FAILURE_ENV_ID } from '../stores/environmentStore'
 import * as environmentStore from '../stores/environmentStore'
-import { extractPathParam, requireActor, requireIdempotencyKey, requireIfMatch, requireRole } from './index'
+import { extractPathParam, parseIfMatchRevision, requireActor, requireIdempotencyKey, requireIfMatch, requireRole } from './index'
 
 export const listEnvironmentsHandler: FixtureHandler = (req) => {
   const actorResult = requireActor(req)
@@ -84,8 +84,10 @@ export const deleteEnvironmentHandler: FixtureHandler = (req) => {
   if (typeof idempotencyResult !== 'string') return idempotencyResult
   const ifMatchResult = requireIfMatch(req)
   if (typeof ifMatchResult !== 'string') return ifMatchResult
+  const expectedRevision = parseIfMatchRevision(ifMatchResult)
+  if (expectedRevision === null) return problem(412, 'PRECONDITION_FAILED', 'If-Match header 不是有效的强 ETag revision', false)
 
-  const accepted = environmentStore.deleteEnvironment(environmentId, ifMatchResult, idempotencyResult)
+  const accepted = environmentStore.deleteEnvironment(environmentId, String(expectedRevision), idempotencyResult)
   if (!accepted) return problem(412, 'PRECONDITION_FAILED', 'If-Match revision 不匹配', false)
   return { status: 202, data: accepted }
 }
@@ -104,8 +106,16 @@ function createOperationHandler(kind: 'start' | 'stop' | 'restart' | 'reset' | '
     const roleCheck = requireRole(actorResult, 'environment:write', { courseId: instance.courseId })
     if (roleCheck !== true) return roleCheck
 
+    const idempotencyResult = requireIdempotencyKey(req)
+    if (typeof idempotencyResult !== 'string') return idempotencyResult
+    const ifMatchResult = requireIfMatch(req)
+    if (typeof ifMatchResult !== 'string') return ifMatchResult
+    const expectedRevision = parseIfMatchRevision(ifMatchResult)
+    if (expectedRevision === null) return problem(412, 'PRECONDITION_FAILED', 'If-Match header 不是有效的强 ETag revision', false)
+    if (instance.revision !== expectedRevision) return problem(412, 'PRECONDITION_FAILED', 'If-Match revision 不匹配', false)
+
     if (environmentId === LIFECYCLE_FAILURE_ENV_ID && ['start', 'stop', 'restart'].includes(kind)) {
-      return problem(409, 'ENVIRONMENT_LIFECYCLE_FAILED', `环境 ${environmentId} 处于失败状态，无法执行 ${kind} 操作`, false)
+      return problem(409, `ENVIRONMENT_${kind.toUpperCase()}_FAILED`, `${kind} 失败：环境 ${environmentId} 处于失败状态，需要先恢复或重建`, false)
     }
 
     let accepted: EnvironmentOperationAcceptedSchema | null = null
@@ -158,6 +168,8 @@ export const cancelEnvironmentHandler: FixtureHandler = (req) => {
   if (typeof idempotencyResult !== 'string') return idempotencyResult
   const ifMatchResult = requireIfMatch(req)
   if (typeof ifMatchResult !== 'string') return ifMatchResult
+  const expectedRevision = parseIfMatchRevision(ifMatchResult)
+  if (expectedRevision === null) return problem(412, 'PRECONDITION_FAILED', 'If-Match header 不是有效的强 ETag revision', false)
 
   const accepted = environmentStore.cancelEnvironment(environmentId)
   if (!accepted) return problem(409, 'FIXTURE_INVALID_STATE', '当前没有可取消的操作', false)
@@ -181,8 +193,10 @@ export const freezeEnvironmentHandler: FixtureHandler = (req) => {
   if (typeof idempotencyResult !== 'string') return idempotencyResult
   const ifMatchResult = requireIfMatch(req)
   if (typeof ifMatchResult !== 'string') return ifMatchResult
+  const expectedRevision = parseIfMatchRevision(ifMatchResult)
+  if (expectedRevision === null) return problem(412, 'PRECONDITION_FAILED', 'If-Match header 不是有效的强 ETag revision', false)
 
-  const accepted = environmentStore.freezeEnvironment(environmentId, ifMatchResult, idempotencyResult)
+  const accepted = environmentStore.freezeEnvironment(environmentId, String(expectedRevision), idempotencyResult)
   if (!accepted) return problem(412, 'PRECONDITION_FAILED', 'If-Match revision 不匹配', false)
   return { status: 202, data: accepted }
 }

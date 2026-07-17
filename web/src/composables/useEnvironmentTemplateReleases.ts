@@ -1,8 +1,7 @@
 import { reactive, ref, watch, type Ref } from 'vue'
-import type { AxiosError } from 'axios'
 import { listEnvironmentTemplateReleases } from '@/generated/contracts'
-import type { EnvironmentTemplateReleaseViewSchema, ProblemDetails } from '@/generated/contracts'
-import { makeDiagnostic, type AsyncState } from '@/types/async'
+import type { EnvironmentTemplateReleaseViewSchema } from '@/generated/contracts'
+import { extractProblemDetails, makeDiagnostic, type AsyncState } from '@/types/async'
 
 export function useEnvironmentTemplateReleases(courseId: Ref<string | undefined>) {
   const releases = ref<AsyncState<EnvironmentTemplateReleaseViewSchema[]>>({ kind: 'idle' })
@@ -14,7 +13,7 @@ export function useEnvironmentTemplateReleases(courseId: Ref<string | undefined>
         kind: 'blocked',
         diagnostic: makeDiagnostic(
           'COURSE_CONTEXT_MISSING',
-          '课程上下文未绑定，无法加载环境模板版本。请联系架构 Owner 完成 #47。',
+          '课程上下文未绑定，无法加载环境模板版本。请通过课程选择器选择课程或联系管理员完成 #47。',
           false,
         ),
       }
@@ -24,9 +23,7 @@ export function useEnvironmentTemplateReleases(courseId: Ref<string | undefined>
     releases.value = { kind: 'loading', message: '加载已发布版本…' }
     const result = await listEnvironmentTemplateReleases({ path: { courseId: id } })
     if (result.error) {
-      const problem = ((result.error as AxiosError).response?.data ?? (result.error as { error?: ProblemDetails }).error) as
-        | ProblemDetails
-        | undefined
+      const problem = extractProblemDetails(result.error)
       releases.value = {
         kind: 'error',
         diagnostic: makeDiagnostic(

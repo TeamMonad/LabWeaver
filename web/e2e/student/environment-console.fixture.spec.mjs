@@ -37,25 +37,30 @@ for (const theme of themes) {
   }
 }
 
-for (const theme of themes) {
-  for (const viewport of viewports) {
-    test(`environment console blocked ${theme} ${viewport.name}`, async ({ page }) => {
-      test.use({ storageState: '.auth/student-blocked.json' })
-      await page.emulateMedia({ colorScheme: theme })
-      await page.setViewportSize({ width: viewport.width, height: viewport.height })
-      await page.goto('/student/environments')
-      await page.waitForSelector('.environment-entry')
-      await expect(page.locator('text=课程上下文未绑定')).toBeVisible()
+// The blocked student state (no course_id claim) needs a different storage
+// state, which can only be overridden at describe level, not inside a test.
+test.describe('environment console blocked', () => {
+  test.use({ storageState: '.auth/student-blocked.json' })
 
-      await expectNoA11yViolations(page, 'blocked console should have no a11y violations')
+  for (const theme of themes) {
+    for (const viewport of viewports) {
+      test(`environment console blocked ${theme} ${viewport.name}`, async ({ page }) => {
+        await page.emulateMedia({ colorScheme: theme })
+        await page.setViewportSize({ width: viewport.width, height: viewport.height })
+        await page.goto('/student/environments')
+        await page.waitForSelector('.environment-entry')
+        await expect(page.locator('text=课程上下文未绑定')).toBeVisible()
 
-      await expect(page).toHaveScreenshot(`environment-console-blocked-${theme}-${viewport.name}.png`, {
-        fullPage: true,
-        animations: 'disabled',
+        await expectNoA11yViolations(page, 'blocked console should have no a11y violations')
+
+        await expect(page).toHaveScreenshot(`environment-console-blocked-${theme}-${viewport.name}.png`, {
+          fullPage: true,
+          animations: 'disabled',
+        })
       })
-    })
+    }
   }
-}
+})
 
 for (const theme of themes) {
   for (const viewport of viewports) {
@@ -75,6 +80,36 @@ for (const theme of themes) {
     })
   }
 }
+
+test('environment console direct entry loads endpoints', async ({ page }) => {
+  await page.goto('/student/environments?environmentId=env-lifecycle-failure')
+  await page.waitForSelector('.environment-entry')
+
+  // The env card should load from the direct URL.
+  await waitForEnvironmentCard(page)
+  await expect(page.locator('.env-state')).toHaveText('failed')
+
+  // Endpoints must load automatically so the grant button is enabled.
+  await expect(page.locator('.access-section .data-table__row')).toHaveCount(1)
+  await expect(page.locator('button:has-text("签发访问授权")')).toBeEnabled()
+})
+
+test('environment console lifecycle failure shows diagnostic', async ({ page }) => {
+  await page.goto('/student/environments?environmentId=env-lifecycle-failure')
+  await page.waitForSelector('.environment-entry')
+  await waitForEnvironmentCard(page)
+
+  // The failed env has desiredState=running, so stop and restart are enabled.
+  // Attempt stop; the fixture rejects the operation and the UI shows a diagnostic.
+  await page.locator('button:has-text("停止")').click()
+  await expect(page.locator('.lifecycle-result')).toContainText('ENVIRONMENT_STOP_FAILED')
+  await expect(page.locator('.lifecycle-result')).toContainText('stop 失败')
+
+  // Attempt restart; the previous diagnostic is replaced by the new one.
+  await page.locator('button:has-text("重启")').click()
+  await expect(page.locator('.lifecycle-result')).toContainText('ENVIRONMENT_RESTART_FAILED')
+  await expect(page.locator('.lifecycle-result')).toContainText('restart 失败')
+})
 
 test('environment console create, lifecycle, grant and revoke', async ({ page }) => {
   await page.goto('/student/environments')

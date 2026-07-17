@@ -112,7 +112,10 @@ export function createAccessGrant(
   if (endpoints.length !== request.endpointIds.length) return 'endpoint-missing'
 
   const id = nextUuid7('grant')
-  const expiresAt = request.expiresAt
+  // 授权有效期不得超过环境资格截止时间（AccessGrant fail-closed 语义）。
+  // fixture 环境资格时间基于固定时钟，clamp 后授权输出保持确定性。
+  const expiresAt =
+    request.expiresAt <= env.eligibilityExpiresAt ? request.expiresAt : env.eligibilityExpiresAt
   const endpointGrants: AccessGrantSchema['endpointGrants'] = endpoints.map((ep) => ({
     id: nextUuid7('epgrant'),
     accessGrantId: id,

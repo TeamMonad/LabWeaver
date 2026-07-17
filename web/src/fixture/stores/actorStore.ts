@@ -76,7 +76,10 @@ export function can(role: FixtureRole, action: FixtureAction, resource?: Fixture
     case 'student': {
       switch (action) {
         case 'environment:read':
+        case 'environment:write':
         case 'access_grant:read':
+        case 'access_grant:write':
+        case 'access_grant:revoke':
         case 'events:read':
           return resource?.courseId === undefined || ROLE_COURSES.student.includes(resource.courseId)
         case 'ssh_key:read':

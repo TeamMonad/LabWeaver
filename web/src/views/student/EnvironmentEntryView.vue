@@ -25,7 +25,7 @@
         <SvgIcon name="deployed_code" size="sm" aria-hidden="true" />
         已发布版本
       </h3>
-      <AsyncStateView :state="releases.releases" @retry="releases.load">
+      <AsyncStateView v-if="!isContextMissing" :state="releases.releases" @retry="releases.load">
         <template #success="{ data }">
           <DataTable :columns="releaseColumns" :rows="data" aria-label="已发布环境版本">
             <template #runtimeKind="{ row }">

@@ -97,3 +97,21 @@ export function extractPathParam(url: string, pattern: RegExp, groupIndex: numbe
   const match = pattern.exec(url)
   return match?.[groupIndex] ?? null
 }
+
+/**
+ * Parse the revision from an If-Match header.
+ *
+ * Mirrors `StrongEtag::parse` (crates/contracts/src/http.rs): the value must be
+ * the quoted `"rev-<n>"` strong validator. Weak validators (`W/` prefix),
+ * unquoted values and zero revisions are rejected so fixture behavior matches
+ * the real backend contract.
+ */
+export function parseIfMatchRevision(value: string): number | null {
+  const trimmed = value.trim()
+  if (trimmed.startsWith('W/')) return null
+  const match = /^"rev-(\d+)"$/.exec(trimmed)
+  if (!match) return null
+  const parsed = Number(match[1])
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) return null
+  return parsed
+}

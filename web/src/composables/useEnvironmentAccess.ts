@@ -1,9 +1,8 @@
 import { reactive, ref, type Ref } from 'vue'
-import type { AxiosError } from 'axios'
 import { listEnvironmentEndpoints, createAccessGrant, revokeAccessGrant } from '@/generated/contracts'
-import type { AccessGrantSchema, EnvironmentEndpointSchema, ProblemDetails } from '@/generated/contracts'
-import { makeDiagnostic, type AsyncState } from '@/types/async'
-import { idempotencyKey } from '@/utils/format'
+import type { AccessGrantSchema, EnvironmentEndpointSchema } from '@/generated/contracts'
+import { extractProblemDetails, makeDiagnostic, type AsyncState } from '@/types/async'
+import { idempotencyKey, ifMatch } from '@/utils/format'
 
 function addHours(date: Date, hours: number): string {
   const d = new Date(date.getTime() + hours * 60 * 60 * 1000)
@@ -28,9 +27,7 @@ export function useEnvironmentAccess(
     endpoints.value = { kind: 'loading', message: '加载环境入口…' }
     const result = await listEnvironmentEndpoints({ path: { environmentId: id } })
     if (result.error) {
-      const problem = ((result.error as AxiosError).response?.data ?? (result.error as { error?: ProblemDetails }).error) as
-        | ProblemDetails
-        | undefined
+      const problem = extractProblemDetails(result.error)
       endpoints.value = {
         kind: 'error',
         diagnostic: makeDiagnostic(
@@ -76,9 +73,7 @@ export function useEnvironmentAccess(
         },
       })
       if (result.error) {
-        const problem = ((result.error as AxiosError).response?.data ?? (result.error as { error?: ProblemDetails }).error) as
-          | ProblemDetails
-          | undefined
+        const problem = extractProblemDetails(result.error)
         grant.value = {
           kind: 'error',
           diagnostic: makeDiagnostic(
@@ -105,9 +100,7 @@ export function useEnvironmentAccess(
       body: { grantId: current.id, reasonCode: 'user_revoked' },
     })
     if (result.error) {
-      const problem = ((result.error as AxiosError).response?.data ?? (result.error as { error?: ProblemDetails }).error) as
-        | ProblemDetails
-        | undefined
+      const problem = extractProblemDetails(result.error)
       return {
         ok: false,
         diagnostic: makeDiagnostic(

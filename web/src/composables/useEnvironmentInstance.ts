@@ -1,8 +1,7 @@
 import { reactive, ref, watch, type Ref } from 'vue'
-import type { AxiosError } from 'axios'
 import { getEnvironment } from '@/generated/contracts'
-import type { EnvironmentInstanceSchema, ProblemDetails } from '@/generated/contracts'
-import { makeDiagnostic, type AsyncState } from '@/types/async'
+import type { EnvironmentInstanceSchema } from '@/generated/contracts'
+import { extractProblemDetails, makeDiagnostic, type AsyncState } from '@/types/async'
 
 export function useEnvironmentInstance(environmentId: Ref<string | undefined>) {
   const instance = ref<AsyncState<EnvironmentInstanceSchema>>({ kind: 'idle' })
@@ -20,9 +19,7 @@ export function useEnvironmentInstance(environmentId: Ref<string | undefined>) {
     }
     const result = await getEnvironment({ path: { environmentId: id } })
     if (result.error) {
-      const problem = ((result.error as AxiosError).response?.data ?? (result.error as { error?: ProblemDetails }).error) as
-        | ProblemDetails
-        | undefined
+      const problem = extractProblemDetails(result.error)
       instance.value = {
         kind: 'error',
         diagnostic: makeDiagnostic(

@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest'
-import '@/api/client'
+import { describe, it, expect, beforeAll } from 'vitest'
+import { initializeSdkClient } from '@/api/client'
 import { client as generatedClient } from '@/generated/contracts/client.gen'
 import { listSshPublicKeys } from '@/generated/contracts'
 import { DATA_MODE } from '@/config/dataMode'
@@ -7,6 +7,10 @@ import { DATA_MODE } from '@/config/dataMode'
 const describeLive = DATA_MODE === 'live' ? describe : describe.skip
 
 describeLive('live mode does not fall back to fixture', () => {
+  beforeAll(async () => {
+    await initializeSdkClient()
+  })
+
   it('fails with a real network error instead of fixture 401', async () => {
     await expect(
       listSshPublicKeys({ client: generatedClient, throwOnError: true }),

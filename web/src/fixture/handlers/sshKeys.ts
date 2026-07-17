@@ -4,6 +4,7 @@ import type { FixtureHandler } from '../types'
 import { nowIso } from '../utils/clock'
 import { nextId, nextRevision } from '../utils/sequence'
 import { parseActor } from '../stores/actorStore'
+import { parseIfMatchRevision } from './index'
 
 const ALLOWED_ALGORITHMS = [
   'ssh-rsa',
@@ -184,6 +185,10 @@ export const deleteSshPublicKey: FixtureHandler = (req) => {
   if (!ifMatch) {
     return problem(400, 'IF_MATCH_MISSING', '缺少 If-Match header', false)
   }
+  const expectedRevision = parseIfMatchRevision(ifMatch)
+  if (expectedRevision === null) {
+    return problem(412, 'PRECONDITION_FAILED', 'If-Match header 不是有效的强 ETag revision', false)
+  }
 
   const keyId = (req.url.split('/').pop() ?? '').trim()
   const index = keys.findIndex((k) => k.id === keyId)
@@ -195,7 +200,7 @@ export const deleteSshPublicKey: FixtureHandler = (req) => {
   if (key.actorId !== actor.actorId) {
     return forbidden('只能删除自己的 SSH 公钥')
   }
-  if (String(key.revision) !== ifMatch) {
+  if (key.revision !== expectedRevision) {
     return preconditionFailed('If-Match revision 不匹配')
   }
 

@@ -1,8 +1,7 @@
 import { reactive, ref } from 'vue'
-import type { AxiosError } from 'axios'
 import { listSshPublicKeys, createSshPublicKey, deleteSshPublicKey } from '@/generated/contracts'
-import type { SshPublicKeySchema, ProblemDetails } from '@/generated/contracts'
-import { makeDiagnostic, type AsyncState } from '@/types/async'
+import type { SshPublicKeySchema } from '@/generated/contracts'
+import { extractProblemDetails, makeDiagnostic, type AsyncState } from '@/types/async'
 import { idempotencyKey, ifMatch } from '@/utils/format'
 
 export function useSshPublicKeys() {
@@ -14,9 +13,7 @@ export function useSshPublicKeys() {
     keys.value = { kind: 'loading', message: '加载 SSH 公钥…' }
     const result = await listSshPublicKeys()
     if (result.error) {
-      const problem = ((result.error as AxiosError).response?.data ?? (result.error as { error?: ProblemDetails }).error) as
-        | ProblemDetails
-        | undefined
+      const problem = extractProblemDetails(result.error)
       keys.value = {
         kind: 'error',
         diagnostic: makeDiagnostic(
@@ -39,9 +36,7 @@ export function useSshPublicKeys() {
         body: { publicKeyOpenssh },
       })
       if (result.error) {
-        const problem = ((result.error as AxiosError).response?.data ?? (result.error as { error?: ProblemDetails }).error) as
-          | ProblemDetails
-          | undefined
+        const problem = extractProblemDetails(result.error)
         return {
           ok: false,
           diagnostic: makeDiagnostic(
@@ -66,9 +61,7 @@ export function useSshPublicKeys() {
         headers: { 'Idempotency-Key': idempotencyKey(), 'If-Match': ifMatch(key.revision) }
       })
       if (result.error) {
-        const problem = ((result.error as AxiosError).response?.data ?? (result.error as { error?: ProblemDetails }).error) as
-          | ProblemDetails
-          | undefined
+        const problem = extractProblemDetails(result.error)
         return {
           ok: false,
           diagnostic: makeDiagnostic(

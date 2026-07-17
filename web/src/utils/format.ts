@@ -19,8 +19,15 @@ export function idempotencyKey(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
 
+/**
+ * Build the If-Match header value for a revision.
+ *
+ * The Public API contract uses strong ETags: the backend parses the quoted
+ * `"rev-<n>"` form via `StrongEtag::parse` (crates/contracts/src/http.rs) and
+ * rejects unquoted or weak validators.
+ */
 export function ifMatch(revision: number): string {
-  return `rev-${revision}`
+  return `"rev-${revision}"`
 }
 
 export function formatTimestamp(iso: string): string {
