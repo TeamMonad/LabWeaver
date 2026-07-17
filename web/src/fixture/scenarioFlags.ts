@@ -54,3 +54,15 @@ export function consumePolicyRotation(): boolean {
   writeFlag('rotatePolicy', null)
   return true
 }
+
+/**
+ * `fixture:imageGate` — one-shot: mutate the next Environment candidate's
+ * image evidence so a specific release gate fires. Allowed values:
+ * `critical`, `high`, `unsigned`, `wrong-issuer`, `wrong-digest`.
+ */
+export function consumeImageGateScenario(): string | null {
+  const value = readFlag('imageGate')
+  if (value === null) return null
+  writeFlag('imageGate', null)
+  return value
+}

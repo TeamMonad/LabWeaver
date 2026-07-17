@@ -44,6 +44,10 @@ export type FixtureAction =
   | 'problem_package:write'
   | 'agent_run:read'
   | 'agent_run:write'
+  | 'candidate:read'
+  | 'candidate:approve'
+  | 'release:read'
+  | 'release:publish'
   | 'ssh_key:read'
   | 'ssh_key:write'
   | 'events:read'
@@ -71,6 +75,10 @@ export function can(role: FixtureRole, action: FixtureAction, resource?: Fixture
         case 'agent_run:read':
         case 'agent_run:write':
         case 'submission:freeze':
+        case 'candidate:read':
+        case 'candidate:approve':
+        case 'release:read':
+        case 'release:publish':
           return resource?.courseId === undefined || ROLE_COURSES.teacher.includes(resource.courseId)
         case 'ssh_key:read':
         case 'ssh_key:write':
