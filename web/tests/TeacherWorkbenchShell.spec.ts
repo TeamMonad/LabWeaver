@@ -1,9 +1,14 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import TeacherWorkbenchShell from '@/components/teacher/TeacherWorkbenchShell.vue'
 
+vi.mock('vue-router', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('vue-router')>()
+  return { ...actual, useRoute: () => ({ meta: { title: '实验总览' } }) }
+})
+
 describe('TeacherWorkbenchShell', () => {
-  it('provides the five workbench modules and an explicit API-not-bound diagnostic', () => {
+  it('provides the six workbench modules and an explicit API-not-bound diagnostic', () => {
     const wrapper = mount(TeacherWorkbenchShell, {
       global: {
         stubs: {
@@ -13,7 +18,8 @@ describe('TeacherWorkbenchShell', () => {
       },
     })
 
-    expect(wrapper.findAll('.module-nav a')).toHaveLength(5)
+    expect(wrapper.findAll('.module-nav a')).toHaveLength(6)
+    expect(wrapper.text()).toContain('材料')
     expect(wrapper.text()).toContain('课程与实验 API 尚未绑定')
   })
 

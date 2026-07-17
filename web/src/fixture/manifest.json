@@ -4,6 +4,13 @@
   "epoch": "2026-07-11T10:00:00.000Z",
   "scenarios": [
     "template-releases:list",
+    "llm-policy:get-active",
+    "problem-packages:create-upload",
+    "problem-packages:complete-upload",
+    "agent-runs:create",
+    "agent-runs:get",
+    "agent-runs:cancel",
+    "agent-runs:retry-track",
     "ssh-keys:list",
     "ssh-keys:create",
     "ssh-keys:delete",
@@ -42,6 +49,9 @@
   "handlers": [
     "sshKeys",
     "templateReleases",
+    "llmPolicy",
+    "problemPackages",
+    "agentRuns",
     "environments",
     "environmentEndpoints",
     "environmentAccessGrants",

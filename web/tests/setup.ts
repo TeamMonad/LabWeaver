@@ -1,5 +1,23 @@
 import { vi } from 'vitest'
 
+if (typeof globalThis.crypto === 'undefined') {
+  Object.defineProperty(globalThis, 'crypto', { value: {} as Crypto })
+}
+if (!globalThis.crypto.subtle) {
+  Object.defineProperty(globalThis.crypto, 'subtle', {
+    value: {
+      digest: vi.fn(async (_algorithm: string, buffer: ArrayBuffer | Uint8Array) => {
+        const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer)
+        const digest = new Uint8Array(32)
+        for (let i = 0; i < bytes.length; i++) {
+          digest[i % 32] ^= bytes[i]
+        }
+        return digest.buffer
+      }),
+    },
+  })
+}
+
 Object.defineProperty(window, 'matchMedia', {
   writable: true,
   value: vi.fn().mockImplementation((query: string) => ({

@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteRecordRaw, RouteRecordNormalized } from 'vue-router'
 import { useAuth } from '@/composables/useAuth'
 import { OIDC_ENABLED } from '@/config'
+import { IS_FIXTURE } from '@/config/dataMode'
 
 export type AppRole = 'teacher' | 'student' | 'researcher' | 'admin'
 
@@ -120,6 +121,12 @@ router.beforeEach(async (to) => {
       // Remember the originally requested path so the callback view can
       // redirect back after a successful OIDC login.
       window.sessionStorage.setItem('auth-return-to', to.fullPath)
+      if (IS_FIXTURE) {
+        // The fixture OIDC authority cannot complete a redirect; send the
+        // user to the home page where the deterministic fixture sign-in
+        // panel issues a local identity and returns to this path.
+        return { name: 'home' }
+      }
       await auth.login()
       return false
     }

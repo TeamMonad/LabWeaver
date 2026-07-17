@@ -1,5 +1,6 @@
 import axios, { type AxiosError, type AxiosRequestConfig, type AxiosResponse, InternalAxiosRequestConfig } from 'axios'
 import { dispatch } from './handlers'
+import { demoDelayMs } from './scenarioFlags'
 import type { FixtureRequest } from './types'
 
 function normalizeHeaders(raw: unknown): Record<string, string> {
@@ -52,6 +53,12 @@ function extractRequestParts(config: AxiosRequestConfig): Pick<FixtureRequest, '
 }
 
 export async function fixtureAdapter(config: AxiosRequestConfig): Promise<AxiosResponse> {
+  // Optional deterministic delay so loading states are demonstrable.
+  const delay = demoDelayMs()
+  if (delay > 0) {
+    await new Promise((resolve) => setTimeout(resolve, delay))
+  }
+
   const method = (config.method ?? 'GET').toUpperCase()
   const { url, headers, body } = extractRequestParts(config)
 
