@@ -1,89 +1,47 @@
-# Platform Image Trusted Supply Chain
+# Sprint 2 platform images
 
-Issue #62 owns the seven production platform images: `control-service`,
-`access-service`, `resource-service`, `environment-service`, `agent-service`,
-`evaluation-service`, and `web`. The only supported P0 target is
-`linux/amd64`. The package and deployment manifests reference GitHub Packages
-Container registry images under `ghcr.io/teammonad/labweaver-system` by
-digest; tags are operational aliases and are never deployment authority.
+Sprint 2 packages the enabled platform workloads into Harbor and deploys only immutable digest references. The authoritative package evidence is `PlatformImagePackageManifest.json`, validated by `schemas/results/platform-image-package-manifest.v1.schema.json`.
 
-## Locked inputs
+## Included images
 
-`deploy/versions.lock.yml` is the source of truth for BuildKit/buildx, Trivy,
-Cosign, Kyverno CLI, Helm, pnpm, and every builder/runtime image. Packaging
-fails when an executable or base identity differs from the lock. Container
-builds use `Cargo.lock`, `pnpm-lock.yaml`, `SOURCE_DATE_EPOCH`, BuildKit
-provenance/SBOM generation, and timestamp rewriting. The final images run as a
-fixed non-root user and contain no compiler or package manager.
+- `control-service`
+- `access-service`
+- `agent-service` (also runs `build-executor`)
+- `environment-service` (also runs `runtime-executor`)
+- `openssh-gateway`
+- `web`
 
-The build context is governed by `.dockerignore`. Both the context and the
-resulting images are secret-scanned. A secret or Critical vulnerability is a
-hard failure. High vulnerabilities remain visible in the signed package
-evidence and require an explicit human risk decision.
+Evaluation and Resource remain separate code domains but are not packaged or deployed by the Sprint 2 profile.
 
-## Commands and trust inputs
+## Package gate
+
+Run on the approved Linux packaging host:
 
 ```sh
-cargo xtask package --env adopted --release <release-id> --yes
-cargo xtask package-validate \
-  --manifest artifacts/platform-images/<release-id>/PlatformImagePackageManifest.json \
-  --mode static
-cargo xtask package-validate \
-  --manifest artifacts/platform-images/<release-id>/PlatformImagePackageManifest.json \
-  --mode connected --env adopted
-cargo xtask deploy --env adopted \
-  --package-manifest artifacts/platform-images/<release-id>/PlatformImagePackageManifest.json \
-  --yes
-cargo xtask rollback --env adopted --release-revision <revision> --yes
+export LABWEAVER_PLATFORM_REGISTRY=harbor.example.internal
+export LABWEAVER_TRIVY_DATABASE_REFERENCE=harbor.example.internal/cache/trivy-db@sha256:<digest>
+export LABWEAVER_TRIVY_DATABASE_DIGEST=sha256:<digest>
+cargo xtask package --env demo --release sprint2 --yes
 ```
 
-Connected packaging and validation run only on the controlled Linux router.
-`LABWEAVER_PLATFORM_REGISTRY` must equal `ghcr.io/teammonad`. GHCR login uses a
-controlled classic PAT locator with `write:packages`; the token is passed to
-`docker login --password-stdin` outside repository logs and is never written to
-the manifest. Connected commands also require explicit locators for Trivy DB
-identity, private Sigstore trusted root, Fulcio and Rekor endpoints, workload
-identity token, exact issuer/subject, and trust revision. Deployment additionally
-requires private Helm values and kubeconfig locators. The repository and result
-manifests contain only sanitized locators and hashes, never credentials.
+The command fails unless the source tree is clean, BuildKit/Buildx/Trivy match `deploy/versions.lock.yml`, the Trivy database is digest pinned, both reproducibility builds resolve to the same `linux/amd64` manifest digest, no secret or critical vulnerability is found, and every image is recorded as a Harbor digest reference. High vulnerabilities remain visible in the report but do not silently alter the gate.
 
-Static validation proves only schema, exact component set, digest-only image
-references, locked identity, Helm rendering, Kyverno fixtures, and evidence
-shape. Connected validation rereads OCI digests, attestations, scanner DB
-identity, certificate/SCT/Rekor proof, and the active trust bundle. It cannot
-fall back to static mode.
+The package manifest records the source commit, component lock hash, builder versions, Harbor host, image digests, Trivy version/database identity, vulnerability counts, and content hash of each retained scan report. Sprint 2 intentionally does not generate or validate Sigstore, Fulcio, Rekor, CT, TUF, SBOM, provenance, or Kyverno evidence.
 
-## Atomic publication and rollback
+## Connected validation and deployment
 
-Each component is built twice and the resulting digest must match. Packaging
-then pushes the digest, records BuildKit SBOM/provenance, runs Trivy, signs with
-the private Sigstore identity, verifies certificate and transparency proof, and
-only then atomically renames the canonical package manifest into place. A failed
-stage can leave an unreferenced GHCR digest, but never a deployable manifest;
-the tool does not move tags or delete shared registry data.
+```sh
+cargo xtask package-validate --manifest artifacts/package/<run-id>/PlatformImagePackageManifest.json --mode connected --env demo
+cargo xtask deploy --env demo --manifest artifacts/package/<run-id>/PlatformImagePackageManifest.json
+```
 
-Helm values must provide all seven digests, resources, existing Config/Secret
-locators, and the current plus explicitly recorded previous trust identity.
-Workloads use a read-only root filesystem, `RuntimeDefault` seccomp, no privilege
-escalation, no capabilities, no ServiceAccount token, and HTTP live/ready probes.
-Kyverno admits only `ghcr.io/teammonad/labweaver-system` digests with the exact registered
-private Sigstore identity. Rollback consumes a previously connected-verified
-package manifest and its Helm revision; it never moves tags or relaxes policy.
+Connected validation rereads the version lock, Trivy database identity, and every Harbor digest before Helm rollout. Deployment uses the existing chart and environment values, writes a deployment manifest bound to the cluster UID and Helm revision, and never substitutes mutable tags.
 
-## Evidence and stop rules
+Rollback requires the exact previously verified package manifest:
 
-PR CI may produce E1/E2 build, reproducibility, secret/SBOM/Trivy, Helm,
-Kyverno, and static-manifest evidence. Pull-request jobs have no GHCR write or
-signing credentials. After the same gates pass on a `develop` push, a separate
-least-privilege Actions job receives only `contents:read` and `packages:write`,
-publishes each image under the immutable `git-<source-commit>` operational tag,
-and records its `linux/amd64` subject digest. It never publishes `latest`, signs
-an image, creates a deployable package manifest, or performs admission. Private
-Sigstore signing and connected publication remain controlled-router operations.
-E3 is valid only when the controlled run binds one source commit, cluster UID,
-trust bundle revision, package/deployment manifests, and all seven OCI digests.
+```sh
+export LABWEAVER_PLATFORM_ROLLBACK_MANIFEST=artifacts/package/<previous-run>/PlatformImagePackageManifest.json
+cargo xtask rollback --env demo --revision <helm-revision> --yes
+```
 
-Before E3, record a read-only cluster baseline. Stop immediately if another
-deployment may be affected. Missing post-merge Issue #61 identity replay,
-production Config/Secret locators, GHCR/BuildKit/Kyverno readiness, or any
-real dependency keeps Issue #62 blocked; fixtures must not substitute for them.
+Package, connected validation, deployment, rollback, and real runtime verification are distinct evidence boundaries. A static manifest or successful image build is not evidence that Container or KubeVirt flows work in the cluster.

@@ -15,6 +15,7 @@ COPY rust-toolchain.toml rustfmt.toml ./
 COPY .cargo .cargo
 COPY crates crates
 COPY services services
+COPY access-gateway access-gateway
 COPY xtask xtask
 COPY migrations migrations
 COPY vendor vendor

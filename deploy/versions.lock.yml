@@ -5,15 +5,11 @@ platform_images:
   buildkit_image: docker.io/moby/buildkit@sha256:6b59b7df63a8cb9902736f9ddf7fcff8261613d3e7449b8ea8b7537fc399c03a
   buildx: v0.35.0
   buildx_windows_amd64_sha256: 8076395009787cd1d30c94edeb5d7ac3945273374fc162c00e9810c3e9325ebe
-  sbom_generator: docker.io/docker/buildkit-syft-scanner@sha256:79e7b013cbec16bbb436f312819a49a4a57752b2270c1a9332ae1a10fcc82a68
   dockerfile_frontend: docker.io/docker/dockerfile:1.25.0@sha256:0adf442eae370b6087e08edc7c50b552d80ddf261576f4ebd6421006b2461f12
   trivy: 0.72.0
-  cosign: 3.0.6
-  kyverno_cli: v1.18.2
   helm: v3.21.3
   ci_images:
     trivy: docker.io/aquasec/trivy:0.72.0@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f
-    kyverno_cli: ghcr.io/kyverno/kyverno-cli:v1.18.2@sha256:7224ed05508c24419c3df98114c28ba682ad0a940dcdb7b9fdba0a4b6bf943cf
     helm: docker.io/alpine/helm:3.21.3@sha256:35da09ba0716fc7c3cd63b6b31ee380a9c7662e95f29ab0e4ae962420afd315b
   pnpm: 9.15.4
   bases:
@@ -21,6 +17,8 @@ platform_images:
     rust_runtime: gcr.io/distroless/cc-debian12:nonroot@sha256:66aa873a4a14fb164aa01296058efd8253744606d72715e45acface073359faa
     node_builder: docker.io/library/node:22.18.0-bookworm-slim@sha256:752ea8a2f758c34002a0461bd9f1cee4f9a3c36d48494586f60ffce1fc708e0e
     web_runtime: docker.io/nginxinc/nginx-unprivileged:1.29.5-alpine@sha256:42a7d7f2ee23e9f5a1dcdf3647ba5c585bbd18f79e79cd817e70e8cd61c55779
+    gateway_builder: docker.io/library/rust:1.85.1-alpine3.21@sha256:4333721398de61f53ccbe53b0b855bcc4bb49e55828e8f652d7a8ac33dd0c118
+    gateway_runtime: docker.io/library/alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
 postgresql:
   image: postgres:17.5-alpine
 kubernetes:
@@ -40,7 +38,6 @@ nfs_csi:
 cert_manager: v1.21.0
 kubevirt: v1.8.4
 cdi: v1.65.0
-kyverno: v1.18.2
 etcd: 3.6.6
 harbor:
   chart: 1.19.1
@@ -64,27 +61,6 @@ harbor:
     redis: local-path
     registry: nfs-rwx
     trivy: nfs-rwx
-private_sigstore:
-  scaffold_chart: 0.6.111
-  scaffold_chart_archive_sha256: sha256:317e725c98d34cb600aa5a80aed7e455672e5dab7f9d70aad874949314551b08
-  cosign: 3.0.6
-  cosign_linux_amd64_sha256: sha256:c956e5dfcac53d52bcf058360d579472f0c1d2d9b69f55209e256fe7783f4c74
-  images:
-    fulcio: ghcr.io/sigstore/fulcio:v1.8.8@sha256:ef72cf56c64b7455ceda5268d1cc801b92992e7ce36b744b40b7761684d60753
-    rekor: ghcr.io/sigstore/rekor/rekor-server:v1.5.3@sha256:ef3ac5d318fe8fb50997d6bf3e39c04e8ccc87708ff991e16d74e956f85ca74e
-    ctlog: ghcr.io/sigstore/scaffolding/ct_server:v0.7.31@sha256:66664ba563e7c2564ba32fb5d0e8fdeb42d7f0d5ce45f0df5d80074daea5126c
-    tuf: ghcr.io/sigstore/scaffolding/server:v0.7.31@sha256:ae8eb69c7b7065456370c7025ff781487704352d73231b08d16b525b0cb16b54
-    trillian_log_server: ghcr.io/sigstore/scaffolding/trillian_log_server:v1.7.2@sha256:d953a8eb3f9311e55ebee754de234f1f63e4db2d5e76c15326c288fb0887bb11
-    trillian_log_signer: ghcr.io/sigstore/scaffolding/trillian_log_signer:v1.7.2@sha256:51631983a7e6f0b3faeb188c590e65b9793a6a6617e0631f8b4fd68e98d0460e
-    database: gcr.io/trillian-opensource-ci/db_server:v1.5.3@sha256:2a685a38dd0129cceb646c232d285383f614c7e6fa51ff8f512aef78e4298461
-    redis: docker.io/redis:6.2.17-alpine3.21@sha256:148bb5411c184abd288d9aaed139c98123eeb8824c5d3fce03cf721db58066d8
-    curl: docker.io/curlimages/curl:8.17.0@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40
-    create_certs: ghcr.io/sigstore/scaffolding/createcerts:v0.7.31@sha256:7f59f7c08d1a82ac5fbd6d0f1f9082152dadc8d59022c52780eb3648f4b88112
-    create_tree: ghcr.io/sigstore/scaffolding/createtree:v0.7.31@sha256:e5232e8c9122fcf87260b48f4b05bcb95c35c8aaa57581b42f0fde7460bd3e91
-    create_ct_config: ghcr.io/sigstore/scaffolding/createctconfig:v0.7.31@sha256:3a061734c5be610d69830ea1e223bd6a8b86bc262b67ff7409147d7db698df51
-    createdb: ghcr.io/sigstore/scaffolding/createdb@sha256:3cee6c78973b82af6c3c3632bf8d44dafbab1632b3999a7292b170237c5dd5cc
-    netcat: docker.io/subfuzion/netcat@sha256:7e808e84a631d9c2cd5a04f6a084f925ea388e3127553461536c1248c3333c8a
-    tuf_static: docker.io/library/busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
 identity_foundation:
   keycloak: 26.7.0
   postgres: 17.6-alpine

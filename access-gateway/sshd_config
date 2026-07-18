@@ -1,6 +1,6 @@
 Port 2222
 Protocol 2
-HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/labweaver/secrets/ssh_host_ed25519_key
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitRootLogin no
@@ -17,7 +17,8 @@ X11Forwarding no
 AllowAgentForwarding no
 PermitUserEnvironment no
 PermitUserRC no
-Subsystem sftp internal-sftp
+AllowUsers gateway
+Subsystem sftp /bin/false
 MaxAuthTries 2
 LoginGraceTime 30
 ClientAliveInterval 15

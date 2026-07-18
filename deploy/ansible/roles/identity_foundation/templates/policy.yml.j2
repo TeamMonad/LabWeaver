@@ -12,7 +12,6 @@ spec:
   ingress:
     - from:
         - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ identity_namespace }}}}
-        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: sigstore-system}}
         - ipBlock: {cidr: 10.20.0.0/16}
   egress:
     - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ identity_namespace }}}}]
