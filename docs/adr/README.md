@@ -25,3 +25,6 @@ No ADR is accepted in ARC-01a; this directory establishes the review process wit
   freezes immutable Container/VM artifact, scan, signature and release evidence bindings.
 - [ADR 0007: Claude Code-only Agent Runtime](0007-claude-code-agent-runtime.md)
   proposes one pinned, shell-free Claude Code worker boundary with provider-opaque configuration.
+- [ADR 0009: Fenced KubeVirt Runtime Provider and Private SSH Endpoint](0009-kubevirt-runtime-provider.md)
+  defines immutable VM/storage binding, executor fencing, guest/SSH readiness,
+  identity persistence and deletion tombstones for Issue #53.

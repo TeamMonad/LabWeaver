@@ -94,10 +94,11 @@ Aggregate E2 is recorded only when the same worktree passes real MinIO versioned
 JetStream publish-ACK/duplicate/gap/restart tests, and ephemeral-CA Gateway-to-Control,
 Control-to-Access and Control-to-Agent SAN/rotation/outage tests. Issue #48's local suite now
 supplies that composition; it remains distinct from deployed owner-service or Kubernetes evidence.
-Issue #52 now provides the local authoritative Container artifact/evaluation projection; #53 is
-still required for VM artifacts. The positive Container Release path is expected to return a
-stable blocking diagnostic until the v2 build completion has been durably projected. Connected E3
-requires the deployment-owned BuildKit/Harbor/Trivy/Private Sigstore and Kubernetes executors.
+Issue #52 now provides the local authoritative Container artifact/evaluation projection. Issue #53
+adds the VM release consumer path and exact KubeVirt/CDI artifact, storage and SSH readiness
+binding. The positive release path is expected to return a stable blocking diagnostic until the
+v2 build completion has been durably projected. Connected E3 requires the deployment-owned
+BuildKit/Harbor/Trivy/Private Sigstore and Kubernetes/KubeVirt executors.
 
 Issue #52 local regression gates additionally run the ten-stage Agent pipeline suite, six
 Container Provider tests and the Agent/Environment PostgreSQL tests. They reject empty
@@ -380,11 +381,44 @@ target convergence, serialized Work configuration, configuration-failure
 transition to `Failed`, access denial for any non-Ready or unhealthy endpoint,
 grant revocation before reset/expiry/failure/delete cleanup, deletion
 idempotency and sanitized `Deleted` tombstone evidence. The current slice proves
-the transport and state-owner boundaries; concrete Container/KubeVirt Provider,
-Access-owned revocation responder, Resource-owned Lease responder and E3
-deployment evidence remain planned. #47 now consumes the merged #51 resolver
-contract through mTLS, but the combined build identity still requires A+B
-review and D Verify before Issue closure.
+the transport and state-owner boundaries. #52 and #53 now add formal local
+Container and KubeVirt Providers; the KubeVirt suite verifies deterministic
+VM/CDI resources, default-deny plus Gateway-only SSH ingress, safe fixed
+base64 `data.userdata` cloud-init, strict one-entry `ssh:22` projection,
+VMI/CDI/scratch-aware quota without unsafe equal guest limits, guest/SSH
+readiness gating, duplicate fence identity, stop-start identity preservation
+and cleanup. A real PostgreSQL 17 test applies Migration
+0004 and proves exact replay, stale-fence rejection, disk/host-key preservation
+and deletion tombstones. Access-owned revocation responder, Resource-owned Lease
+responder and connected E3 deployment evidence remain required. #47 now
+consumes the merged #51 resolver contract through mTLS, but the combined build
+identity still requires A+B review and D Verify before Issue closure.
+
+### KubeVirt RuntimeProvider local and E3 gates (#53)
+
+The local regression entry points are:
+
+```sh
+cargo test -p environment-service --test kubevirt_provider
+cargo test -p environment-service --test postgres \
+  kubevirt_observation_identity_is_durable_fenced_and_tombstoned
+```
+
+The first command is E1 Provider/fake-executor evidence; the second is local E2
+PostgreSQL evidence and uses the caller's configured Docker-compatible runtime.
+
+E3 uses the reviewed deployment binding and same commit to import the exact VM
+artifact through CDI, wait for current KubeVirt observed generation, guest agent
+and SSH host-key handshake, then record one private SSH endpoint. It repeats the
+same reconcile and proves one VM/DataVolume/PVC; writes a marker to the guest
+disk and proves it survives start-stop-start; attempts non-Gateway network
+access and proves denial; and injects apply, readiness, cancellation, restart,
+observation and delete failures. Every terminal cleanup case must show Access
+revocation plus absence of Namespace, VM, VMI, DataVolume, PVC, Secret, Service
+and NetworkPolicy. The same report records the actual VMI memory overhead and
+CDI default pod requests and proves they do not exceed the deployment binding's
+explicit budgets. A Fixture result or the pre-existing infrastructure VM
+TestFlight cannot satisfy this gate.
 ## Infrastructure automation
 
 | Layer | Required evidence | Failure condition |

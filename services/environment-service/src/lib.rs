@@ -6,6 +6,7 @@
 )]
 
 mod container_provider;
+mod kubevirt_provider;
 mod lifecycle;
 mod messaging;
 mod outbox;
@@ -25,6 +26,14 @@ pub use container_provider::{
     FencedContainerExecutor, NatsContainerExecutorServer, NatsContainerProviderBackend,
     PgContainerExecutorFenceStore, PgReleaseProjectionStore, ReleaseProjectionDecision,
     ReleaseProjectionError, ResolvedContainerRelease,
+};
+pub use kubevirt_provider::{
+    KUBEVIRT_BACKEND_PROTOCOL_VERSION, KubeVirtBackendFence, KubeVirtCleanupPlan,
+    KubeVirtObservationStore, KubeVirtObservationStoreError, KubeVirtProvider,
+    KubeVirtProviderBackend, KubeVirtProviderConfiguration, KubeVirtResource,
+    KubeVirtResourceBudget, KubeVirtResourcePlan, KubeVirtRunningObservation, KubeVirtSshBootstrap,
+    KubeVirtStoppedObservation, KubeVirtStorageBinding, NatsKubeVirtProviderBackend,
+    PgKubeVirtObservationStore,
 };
 pub use lifecycle::{
     LifecycleCommand, LifecycleError, apply_provider_failure, apply_provider_observation,

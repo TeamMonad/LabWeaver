@@ -14,10 +14,13 @@ use tokio::sync::watch;
 use crate::{
     ContainerProvider, ContainerProviderConfiguration, ContainerReleasePolicy,
     EnvironmentStoreError, JetStreamCommandConsumer, JetStreamEventPublisher,
-    JetStreamReleaseConsumer, LifecycleCommand, NatsAccessRevoker, NatsContainerProviderBackend,
-    NatsEnvironmentProvider, NatsMessagingError, NatsResourceLeaseVerifier, OutboxDispatchError,
-    OutboxDispatcher, PgEnvironmentStore, PgReleaseProjectionStore, ProviderRegistry,
-    ReconcileError, ReconcileWorker, ReconcileWorkerError, Reconciler, connect_nats_mtls,
+    JetStreamReleaseConsumer, KubeVirtProvider, KubeVirtProviderConfiguration,
+    KubeVirtResourceBudget, KubeVirtSshBootstrap, KubeVirtStorageBinding, LifecycleCommand,
+    NatsAccessRevoker, NatsContainerProviderBackend, NatsEnvironmentProvider,
+    NatsKubeVirtProviderBackend, NatsMessagingError, NatsResourceLeaseVerifier,
+    OutboxDispatchError, OutboxDispatcher, PgEnvironmentStore, PgKubeVirtObservationStore,
+    PgReleaseProjectionStore, ProviderRegistry, ReconcileError, ReconcileWorker,
+    ReconcileWorkerError, Reconciler, connect_nats_mtls,
 };
 
 const DATABASE_URL: &str = "LABWEAVER_DATABASE_URL";
@@ -110,15 +113,7 @@ impl EnvironmentProcessRuntime {
         for configuration in provider_bindings {
             match configuration.provider_kind.as_deref().unwrap_or("remote") {
                 "remote" => {
-                    if configuration.gateway_namespace.is_some()
-                        || configuration.gateway_name.is_some()
-                        || configuration.gateway_section.is_some()
-                        || configuration.image_pull_secret_name.is_some()
-                        || configuration.active_image_policy_id.is_some()
-                        || configuration.active_image_policy_revision.is_some()
-                        || configuration.active_trust_revision.is_some()
-                        || configuration.active_trust_bundle_sha256.is_some()
-                    {
+                    if configuration.has_provider_specific_fields() {
                         return Err(EnvironmentProcessRuntimeError::ConfigParse);
                     }
                     registry.register(Arc::new(NatsEnvironmentProvider::new(
@@ -128,54 +123,116 @@ impl EnvironmentProcessRuntime {
                     )?))?;
                 }
                 "container" => {
+                    if configuration.has_kubevirt_fields() {
+                        return Err(EnvironmentProcessRuntimeError::ConfigParse);
+                    }
                     let backend = Arc::new(NatsContainerProviderBackend::new(
                         nats.clone(),
-                        configuration.subject,
+                        configuration.subject.clone(),
                     )?);
                     let provider = ContainerProvider::new(
-                        configuration.binding,
+                        configuration.binding.clone(),
                         backend,
                         Arc::new(release_store.clone()),
                         ContainerProviderConfiguration::new(
-                            ContainerReleasePolicy::new(
-                                PolicyId::from_str(
-                                    &configuration
-                                        .active_image_policy_id
-                                        .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
-                                )
-                                .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)?,
-                                Revision::new(
-                                    configuration
-                                        .active_image_policy_revision
-                                        .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
-                                )
-                                .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)?,
-                                Revision::new(
-                                    configuration
-                                        .active_trust_revision
-                                        .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
-                                )
-                                .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)?,
-                                Sha256Digest::from_str(
-                                    &configuration
-                                        .active_trust_bundle_sha256
-                                        .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
-                                )
-                                .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)?,
-                            )?,
+                            configuration.release_policy()?,
                             configuration
                                 .gateway_namespace
+                                .clone()
                                 .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
                             configuration
                                 .gateway_name
+                                .clone()
                                 .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
                             configuration
                                 .gateway_section
+                                .clone()
                                 .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
                             configuration
                                 .image_pull_secret_name
+                                .clone()
                                 .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
                         )?,
+                    )?;
+                    registry.register(Arc::new(provider))?;
+                }
+                "kubevirt" => {
+                    if configuration.has_container_only_fields()
+                        || !configuration.has_complete_kubevirt_fields()
+                    {
+                        return Err(EnvironmentProcessRuntimeError::ConfigParse);
+                    }
+                    let backend = Arc::new(
+                        NatsKubeVirtProviderBackend::new(
+                            nats.clone(),
+                            configuration.subject.clone(),
+                        )
+                        .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)?,
+                    );
+                    let provider = KubeVirtProvider::new(
+                        configuration.binding.clone(),
+                        backend,
+                        Arc::new(release_store.clone()),
+                        Arc::new(PgKubeVirtObservationStore::new(pool.clone())),
+                        KubeVirtProviderConfiguration::new(
+                            configuration.release_policy()?,
+                            KubeVirtStorageBinding::new(
+                                configuration
+                                    .storage_class_binding
+                                    .clone()
+                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                                configuration
+                                    .storage_class_name
+                                    .clone()
+                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                                configuration
+                                    .data_source_namespace
+                                    .clone()
+                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                                configuration
+                                    .data_source_name
+                                    .clone()
+                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                            )?,
+                            KubeVirtSshBootstrap::new(
+                                configuration
+                                    .gateway_namespace
+                                    .clone()
+                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                                configuration
+                                    .gateway_pod_label
+                                    .clone()
+                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                                configuration
+                                    .guest_user
+                                    .clone()
+                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                                configuration
+                                    .ssh_user_ca_public_key
+                                    .as_deref()
+                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                            )?,
+                            KubeVirtResourceBudget::new(
+                                configuration
+                                    .vmi_memory_overhead_bytes
+                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                                configuration
+                                    .cdi_importer_cpu_request_millicores
+                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                                configuration
+                                    .cdi_importer_cpu_limit_millicores
+                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                                configuration
+                                    .cdi_importer_memory_request_bytes
+                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                                configuration
+                                    .cdi_importer_memory_limit_bytes
+                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                                configuration
+                                    .cdi_scratch_storage_bytes
+                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                            )?,
+                        ),
                     )?;
                     registry.register(Arc::new(provider))?;
                 }
@@ -493,7 +550,8 @@ async fn require_schema(pool: &sqlx::PgPool) -> Result<(), EnvironmentProcessRun
          AND to_regclass('environment.environment_operations') IS NOT NULL \
          AND to_regclass('environment.outbox_events') IS NOT NULL \
          AND to_regclass('environment.inbox_events') IS NOT NULL \
-         AND to_regclass('environment.release_projections') IS NOT NULL",
+         AND to_regclass('environment.release_projections') IS NOT NULL \
+         AND to_regclass('environment.kubevirt_runtime_observations') IS NOT NULL",
     )
     .fetch_one(pool)
     .await?;
@@ -545,6 +603,102 @@ struct ProviderBindingConfiguration {
     active_image_policy_revision: Option<u64>,
     active_trust_revision: Option<u64>,
     active_trust_bundle_sha256: Option<String>,
+    storage_class_binding: Option<String>,
+    storage_class_name: Option<String>,
+    data_source_namespace: Option<String>,
+    data_source_name: Option<String>,
+    gateway_pod_label: Option<String>,
+    guest_user: Option<String>,
+    ssh_user_ca_public_key: Option<String>,
+    vmi_memory_overhead_bytes: Option<u64>,
+    cdi_importer_cpu_request_millicores: Option<u32>,
+    cdi_importer_cpu_limit_millicores: Option<u32>,
+    cdi_importer_memory_request_bytes: Option<u64>,
+    cdi_importer_memory_limit_bytes: Option<u64>,
+    cdi_scratch_storage_bytes: Option<u64>,
+}
+
+impl ProviderBindingConfiguration {
+    fn release_policy(&self) -> Result<ContainerReleasePolicy, EnvironmentProcessRuntimeError> {
+        ContainerReleasePolicy::new(
+            PolicyId::from_str(
+                self.active_image_policy_id
+                    .as_deref()
+                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+            )
+            .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)?,
+            Revision::new(
+                self.active_image_policy_revision
+                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+            )
+            .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)?,
+            Revision::new(
+                self.active_trust_revision
+                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+            )
+            .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)?,
+            Sha256Digest::from_str(
+                self.active_trust_bundle_sha256
+                    .as_deref()
+                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+            )
+            .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)?,
+        )
+        .map_err(EnvironmentProcessRuntimeError::from)
+    }
+
+    fn has_container_only_fields(&self) -> bool {
+        self.gateway_name.is_some()
+            || self.gateway_section.is_some()
+            || self.image_pull_secret_name.is_some()
+    }
+
+    fn has_kubevirt_fields(&self) -> bool {
+        self.storage_class_binding.is_some()
+            || self.storage_class_name.is_some()
+            || self.data_source_namespace.is_some()
+            || self.data_source_name.is_some()
+            || self.gateway_pod_label.is_some()
+            || self.guest_user.is_some()
+            || self.ssh_user_ca_public_key.is_some()
+            || self.vmi_memory_overhead_bytes.is_some()
+            || self.cdi_importer_cpu_request_millicores.is_some()
+            || self.cdi_importer_cpu_limit_millicores.is_some()
+            || self.cdi_importer_memory_request_bytes.is_some()
+            || self.cdi_importer_memory_limit_bytes.is_some()
+            || self.cdi_scratch_storage_bytes.is_some()
+    }
+
+    fn has_complete_kubevirt_fields(&self) -> bool {
+        self.gateway_namespace.is_some()
+            && self.storage_class_binding.is_some()
+            && self.storage_class_name.is_some()
+            && self.data_source_namespace.is_some()
+            && self.data_source_name.is_some()
+            && self.gateway_pod_label.is_some()
+            && self.guest_user.is_some()
+            && self.ssh_user_ca_public_key.is_some()
+            && self.vmi_memory_overhead_bytes.is_some()
+            && self.cdi_importer_cpu_request_millicores.is_some()
+            && self.cdi_importer_cpu_limit_millicores.is_some()
+            && self.cdi_importer_memory_request_bytes.is_some()
+            && self.cdi_importer_memory_limit_bytes.is_some()
+            && self.cdi_scratch_storage_bytes.is_some()
+            && self.active_image_policy_id.is_some()
+            && self.active_image_policy_revision.is_some()
+            && self.active_trust_revision.is_some()
+            && self.active_trust_bundle_sha256.is_some()
+    }
+
+    fn has_provider_specific_fields(&self) -> bool {
+        self.gateway_namespace.is_some()
+            || self.has_container_only_fields()
+            || self.has_kubevirt_fields()
+            || self.active_image_policy_id.is_some()
+            || self.active_image_policy_revision.is_some()
+            || self.active_trust_revision.is_some()
+            || self.active_trust_bundle_sha256.is_some()
+    }
 }
 
 fn load_provider_bindings(
