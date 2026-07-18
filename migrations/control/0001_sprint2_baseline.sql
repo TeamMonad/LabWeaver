@@ -1,3 +1,59 @@
+-- Sprint 2 destructive baseline for the control domain.
+-- Pre-baseline development data is intentionally not upgrade-compatible.
+
+-- Folded from 0001_initial.sql.
+CREATE TABLE idempotency_ledger (
+    operation text NOT NULL,
+    idempotency_key text NOT NULL,
+    request_sha256 text NOT NULL CHECK (request_sha256 ~ '^[0-9a-f]{64}$'),
+    state text NOT NULL CHECK (state IN ('in_progress', 'completed')),
+    result jsonb,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    completed_at timestamptz,
+    PRIMARY KEY (operation, idempotency_key),
+    CHECK ((state = 'completed') = (result IS NOT NULL AND completed_at IS NOT NULL))
+);
+CREATE TABLE outbox_events (
+    event_id uuid PRIMARY KEY, subject text NOT NULL, event_type text NOT NULL,
+    aggregate_id uuid NOT NULL, aggregate_sequence bigint NOT NULL CHECK (aggregate_sequence > 0),
+    payload jsonb NOT NULL CHECK (jsonb_typeof(payload) = 'object'),
+    payload_sha256 text NOT NULL CHECK (payload_sha256 ~ '^[0-9a-f]{64}$'),
+    created_at timestamptz NOT NULL DEFAULT now(), published_at timestamptz,
+    UNIQUE (aggregate_id, aggregate_sequence)
+);
+CREATE TABLE inbox_events (
+    consumer text NOT NULL, event_id uuid NOT NULL, aggregate_id uuid NOT NULL,
+    aggregate_sequence bigint NOT NULL CHECK (aggregate_sequence > 0),
+    payload_sha256 text NOT NULL CHECK (payload_sha256 ~ '^[0-9a-f]{64}$'),
+    processed_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (consumer, event_id),
+    UNIQUE (consumer, aggregate_id, aggregate_sequence)
+);
+CREATE TABLE inbox_watermarks (
+    consumer text NOT NULL, aggregate_id uuid NOT NULL, last_sequence bigint NOT NULL CHECK (last_sequence >= 0),
+    updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (consumer, aggregate_id)
+);
+CREATE TABLE candidates (
+    candidate_id uuid PRIMARY KEY, candidate_kind text NOT NULL CHECK (candidate_kind IN ('environment', 'evaluation')),
+    course_id uuid NOT NULL, revision bigint NOT NULL CHECK (revision > 0), state text NOT NULL,
+    content_sha256 text NOT NULL CHECK (content_sha256 ~ '^[0-9a-f]{64}$'), contract jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(), UNIQUE (candidate_id, revision),
+    CHECK (jsonb_typeof(contract) = 'object')
+);
+CREATE TABLE candidate_approvals (
+    approval_id uuid PRIMARY KEY, candidate_id uuid NOT NULL, candidate_revision bigint NOT NULL CHECK (candidate_revision > 0),
+    decision text NOT NULL CHECK (decision IN ('approved', 'rejected')), actor_id uuid NOT NULL,
+    decision_sha256 text NOT NULL CHECK (decision_sha256 ~ '^[0-9a-f]{64}$'), contract jsonb NOT NULL,
+    decided_at timestamptz NOT NULL, UNIQUE (candidate_id, candidate_revision), CHECK (jsonb_typeof(contract) = 'object')
+);
+CREATE TABLE environment_template_releases (
+    release_id uuid PRIMARY KEY, course_id uuid NOT NULL, version bigint NOT NULL CHECK (version > 0),
+    environment_candidate_id uuid NOT NULL, candidate_revision bigint NOT NULL CHECK (candidate_revision > 0),
+    spec_sha256 text NOT NULL CHECK (spec_sha256 ~ '^[0-9a-f]{64}$'), image_artifact_id uuid,
+    contract jsonb NOT NULL, published_at timestamptz NOT NULL, UNIQUE (course_id, version),
+    CHECK (jsonb_typeof(contract) = 'object')
+);
+
+-- Folded from 0002_control_plane.sql.
 CREATE TABLE problem_package_upload_sessions (
     upload_id uuid PRIMARY KEY,
     course_id uuid NOT NULL,
@@ -132,3 +188,30 @@ CREATE TABLE object_cleanup_ledger (
 
 CREATE INDEX object_cleanup_due_idx ON object_cleanup_ledger(next_attempt_at)
     WHERE completed_at IS NULL;
+
+-- Folded from 0003_container_build_projections.sql.
+CREATE TABLE container_build_projections (
+    build_request_id uuid PRIMARY KEY,
+    course_id uuid NOT NULL,
+    candidate_id uuid NOT NULL,
+    candidate_revision bigint NOT NULL CHECK (candidate_revision > 0),
+    candidate_sha256 text NOT NULL CHECK (candidate_sha256 ~ '^[0-9a-f]{64}$'),
+    approval_id uuid NOT NULL UNIQUE,
+    command_sha256 text NOT NULL UNIQUE CHECK (command_sha256 ~ '^[0-9a-f]{64}$'),
+    state text NOT NULL CHECK (state IN ('requested', 'succeeded', 'failed', 'cancelled')),
+    image_artifact_id uuid UNIQUE,
+    terminal_diagnostic text,
+    cleanup_verified boolean,
+    contract jsonb NOT NULL CHECK (jsonb_typeof(contract) = 'object'),
+    terminal_event_id uuid UNIQUE,
+    created_at timestamptz NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    completed_at timestamptz,
+    UNIQUE (candidate_id, candidate_revision),
+    CHECK ((state = 'succeeded') = (image_artifact_id IS NOT NULL)),
+    CHECK ((state IN ('failed', 'cancelled')) = (terminal_diagnostic IS NOT NULL AND cleanup_verified IS NOT NULL)),
+    CHECK ((state = 'requested') = (completed_at IS NULL AND terminal_event_id IS NULL))
+);
+
+CREATE INDEX container_build_projections_course_idx
+    ON container_build_projections (course_id, candidate_id, candidate_revision);

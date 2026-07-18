@@ -8,75 +8,30 @@ domains:
   - name: control
     migrations:
       - id: 1
-        file: control/0001_initial.sql
-        sha256: f702fc37add9ae46eddd78c55df98ff49b7df27365b3192f4de26c6441f3573c
-      - id: 2
-        file: control/0002_control_plane.sql
-        sha256: cde8fab6337c4dcc9711243e3d93ba1090268fafb53a0214b3b5e23330711892
-      - id: 3
-        file: control/0003_container_build_projections.sql
-        sha256: e3ad469e525cece4458597ef816dea3b72e3438306cabd631b929ab07be5f38a
+        file: control/0001_sprint2_baseline.sql
+        sha256: ece6f9d2bd19f8219fa670d827c7fdf9d1b21c7f6d4c4836b8ec5868f950883e
   - name: access
     migrations:
       - id: 1
-        file: access/0001_initial.sql
-        sha256: c9d2fa11daeb3af15c185cbc3f5aaa21aeef93f3a221873ae420e36740d2910c
-      - id: 2
-        file: access/0002_auth.sql
-        sha256: c00400f6c4ffd7a867dec42581737a9442573eb42b2f10267f695dd0fefbe26f
-      - id: 3
-        file: access/0003_access_grants.sql
-        sha256: 329bbefad11126cb539a82dee163280cb43d4525818a655f8950adcb2c3e4441
+        file: access/0001_sprint2_baseline.sql
+        sha256: b8cd92479a7e5f314a2b79fcc578845c149be38334d344a84b784bad0ebafe5b
   - name: environment
     migrations:
       - id: 1
-        file: environment/0001_initial.sql
-        sha256: 3d2dfaacfdec2fe4096e43c17d969b20369185b1ac2d82628dd8eb95584b9817
-      - id: 2
-        file: environment/0002_reconcile_leases.sql
-        sha256: 1333cf42a6c9706de5c090671d508e1c20d93e486570db1742b71ddaabd8fa87
-      - id: 3
-        file: environment/0003_release_projections.sql
-        sha256: 9ae9838ec69649fea4037eb04a3858d272e1bb2884a98ff3c3a1f84b38d5dd47
-      - id: 4
-        file: environment/0004_container_executor_fence.sql
-        sha256: 90541f85a13423b416759f77a34d3c44c3becd65cda7847ec8a38d1396c4accd
-      - id: 5
-        file: environment/0005_kubevirt_runtime_observations.sql
-        sha256: 4b4d9ead61e7fee8ba25fb95fa4d59ae8e77f1fb6650efee0405c4e6510a1457
-      - id: 6
-        file: environment/0006_kubevirt_executor_fence.sql
-        sha256: 71735e3729ad2499c6af231cf295f1fe50e1382d32da23fa0b29cbf1879bd819
+        file: environment/0001_sprint2_baseline.sql
+        sha256: f15187a4ff58743a2d550a63167bf7deba3567223782b055dcc7a802adcf6fdc
   - name: agent
     migrations:
       - id: 1
-        file: agent/0001_initial.sql
-        sha256: 4d55737b46f7bac6abbafb9dc388ce1d9712ee6819695347e677f84a527777d1
-      - id: 2
-        file: agent/0002_track_leases.sql
-        sha256: 096c1bbae2329db2b3ba1a42100967c04c6de0a42217019549ad15ed61e36b60
-      - id: 3
-        file: agent/0003_control_dispatch.sql
-        sha256: fd40241a73cc7a10dad043100a0576b0974188785692460bb3e8e06a5d10a8f2
-      - id: 4
-        file: agent/0004_build_pipeline.sql
-        sha256: cccfbbb81d143a5eff1919ca0bedd5a26fb763054ab939524d66214e0b55df83
-      - id: 5
-        file: agent/0005_build_cancellation_fence.sql
-        sha256: 5b2a8b1c82f744a241ab0aaa93eed2e177287859c488f31ae815f1207ad0cf26
-      - id: 6
-        file: agent/0006_build_executor_artifacts.sql
-        sha256: e2d4d3d4054dcc923916b0a767a30f9ba20477b0416387768d5f6ae011fe991c
+        file: agent/0001_sprint2_baseline.sql
+        sha256: 8e0c1708907f8df2a15cf2377cf95e79af5ad64c5cfd15c02459417a66b8075c
   - name: evaluation
     migrations:
       - id: 1
-        file: evaluation/0001_initial.sql
-        sha256: a95e8c3a51ebfb0623af9b2213b2bad84aced6de6b243d41d49ca3bda685f6e0
-      - id: 2
-        file: evaluation/0002_submission_freezes.sql
-        sha256: 89c1c9ca5bededb8560da15d304065ddc6adf649e43e27c22e31cc3ce989ae93
+        file: evaluation/0001_sprint2_baseline.sql
+        sha256: 268a01ab906d477d96567849ce354f212757238825e9f48f13c3b436b500c8a4
   - name: resource
     migrations:
       - id: 1
-        file: resource/0001_initial.sql
-        sha256: 90f02da8e74986aeae38a55ad24dc73afba9b5b4103c3e93d423e37ade7fe002
+        file: resource/0001_sprint2_baseline.sql
+        sha256: 54b2f428109fb3e819da9db23802b58ecd760858f39404e7ef4d028cfa508e79

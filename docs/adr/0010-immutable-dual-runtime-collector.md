@@ -86,11 +86,10 @@ single-Environment issuer are mandatory before VM acceptance.
 
 ## Compatibility, rollback and evidence
 
-Migration `evaluation/0002_submission_freezes.sql` is additive except for
-removing the legacy content-only uniqueness rule, which incorrectly conflated
-independent approved freezes with identical bytes. The v1 frozen event remains
-registered; new authoritative publication uses the additive v2 event and
-generated Schema. Empty regular files are valid and remain hash-addressed.
+The destructive reset applies `evaluation/0001_sprint2_baseline.sql`, including
+the corrected freeze uniqueness rule that distinguishes independent approved
+freezes with identical bytes. No pre-reset Evaluation data upgrade is
+supported. Empty regular files are valid and remain hash-addressed.
 
 Before publication, rollback is whole-PR reversion. After Object Lock upload,
 rollback disables new collection, retains request/attempt rows and locked

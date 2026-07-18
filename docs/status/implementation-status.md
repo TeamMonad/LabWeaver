@@ -11,7 +11,7 @@ Current source baseline: `release/sprint2` created from
 
 | Capability | Owner | State | Current evidence | Blocker or limitation |
 | --- | --- | --- | --- | --- |
-| Six service and six PostgreSQL domain boundaries | A | implemented | Cargo workspace, service crates, migration catalog | Evaluation and Resource have no Sprint 2 production path and are disabled by the target deployment |
+| Six service and six PostgreSQL domain boundaries | A | implemented | Cargo workspace, service crates, deterministic catalog and one `0001_sprint2_baseline.sql` per domain | destructive reset only; no pre-reset business-data upgrade path; Evaluation and Resource have no Sprint 2 production path |
 | Contracts, OpenAPI and Web SDK | A/C | implemented, simplifying | Rust contract tests and generated projections | v1/v2 event duplication and removed trust fields must be collapsed to the ADR 0011 v1 contract |
 | Keycloak/OIDC and course-scoped authorization | A | implemented locally | Access BFF, bearer/mTLS checks, PostgreSQL tests | same-build deployed Keycloak/browser/Gateway verification is pending |
 | Control material, AgentRun, candidate approval and release | A/B | implemented locally | PostgreSQL, MinIO, JetStream and mTLS integration tests | deployment configuration and connected executors are pending |

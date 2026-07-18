@@ -87,10 +87,8 @@ async fn mtls_sans_rotation_and_outage_fail_closed_on_control_routes()
         ))
         .await?;
     sqlx::raw_sql(&format!(
-        "CREATE SCHEMA control; SET search_path TO control;\n{}\n{}\n{}",
-        include_str!("../../../migrations/control/0001_initial.sql"),
-        include_str!("../../../migrations/control/0002_control_plane.sql"),
-        include_str!("../../../migrations/control/0003_container_build_projections.sql")
+        "CREATE SCHEMA control; SET search_path TO control;\n{}",
+        include_str!("../../../migrations/control/0001_sprint2_baseline.sql")
     ))
     .execute(&pool)
     .await?;

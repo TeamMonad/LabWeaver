@@ -109,10 +109,9 @@ a Ready endpoint.
 
 ## Compatibility and migration
 
-Migrations `environment/0005_kubevirt_runtime_observations.sql` and
-`environment/0006_kubevirt_executor_fence.sql` are applied before enabling a
-KubeVirt provider binding. They will be folded into the destructive Sprint 2
-baseline before cluster reset; no upgrade compatibility is promised for the
+The destructive reset applies `environment/0001_sprint2_baseline.sql` before
+enabling a KubeVirt provider binding. Observation identity and executor fences
+are part of that single baseline; no upgrade compatibility is promised for
 pre-reset development data.
 Existing remote and Container bindings retain their behavior, and provider-
 specific fields are rejected on the wrong kind.

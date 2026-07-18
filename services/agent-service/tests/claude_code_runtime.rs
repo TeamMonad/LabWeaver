@@ -1044,11 +1044,8 @@ async fn isolated_agent_database(
     sqlx::query("SET search_path = agent, pg_catalog")
         .execute(&mut *migration_connection)
         .await?;
-    sqlx::raw_sql(include_str!("../../../migrations/agent/0001_initial.sql"))
-        .execute(&mut *migration_connection)
-        .await?;
     sqlx::raw_sql(include_str!(
-        "../../../migrations/agent/0002_track_leases.sql"
+        "../../../migrations/agent/0001_sprint2_baseline.sql"
     ))
     .execute(&mut *migration_connection)
     .await?;

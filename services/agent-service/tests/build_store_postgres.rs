@@ -155,41 +155,11 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
         .max_connections(4)
         .connect(&url)
         .await?;
-    let base_migrations = format!(
-        "CREATE SCHEMA agent; SET search_path TO agent;\n{}\n{}\n{}\n{}",
-        include_str!("../../../migrations/agent/0001_initial.sql"),
-        include_str!("../../../migrations/agent/0002_track_leases.sql"),
-        include_str!("../../../migrations/agent/0003_control_dispatch.sql"),
-        include_str!("../../../migrations/agent/0004_build_pipeline.sql")
+    let baseline = format!(
+        "CREATE SCHEMA agent; SET search_path TO agent;\n{}",
+        include_str!("../../../migrations/agent/0001_sprint2_baseline.sql")
     );
-    sqlx::raw_sql(&base_migrations).execute(&pool).await?;
-    let legacy_build_request_id = BuildRequestId::new();
-    sqlx::query(
-        "INSERT INTO agent.build_commands \
-         (build_request_id,course_id,command_sha256,idempotency_key,state,command, \
-          cancellation_requested,diagnostic_code,retryable,cleanup_verified,completed_at) \
-         VALUES ($1,$2,$3,$4,'cancelled','{}'::jsonb,true,'LW_AGENT_BUILD_CANCELLED',false,true,clock_timestamp())",
-    )
-    .bind(legacy_build_request_id.as_uuid())
-    .bind(CourseId::new().as_uuid())
-    .bind(Sha256Digest::of_bytes(b"legacy-command").to_string())
-    .bind(format!("legacy:{legacy_build_request_id}"))
-    .execute(&pool)
-    .await?;
-    let upgrade = format!(
-        "SET search_path TO agent;\n{}",
-        include_str!("../../../migrations/agent/0005_build_cancellation_fence.sql")
-    );
-    sqlx::raw_sql(&upgrade).execute(&pool).await?;
-    let (legacy_audit_version, legacy_actor): (i16, Option<uuid::Uuid>) = sqlx::query_as(
-        "SELECT cancellation_audit_version,cancellation_actor_id \
-         FROM agent.build_commands WHERE build_request_id=$1",
-    )
-    .bind(legacy_build_request_id.as_uuid())
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(legacy_audit_version, 0);
-    assert!(legacy_actor.is_none());
+    sqlx::raw_sql(&baseline).execute(&pool).await?;
 
     let command = build_command()?;
     let event = command_event(command.clone())?;
@@ -445,12 +415,8 @@ async fn executor_fence_survives_restart_and_cleanup_dominates_its_generation()
         .connect(&url)
         .await?;
     let migrations = format!(
-        "CREATE SCHEMA agent; SET search_path TO agent;\n{}\n{}\n{}\n{}\n{}",
-        include_str!("../../../migrations/agent/0001_initial.sql"),
-        include_str!("../../../migrations/agent/0002_track_leases.sql"),
-        include_str!("../../../migrations/agent/0003_control_dispatch.sql"),
-        include_str!("../../../migrations/agent/0004_build_pipeline.sql"),
-        include_str!("../../../migrations/agent/0005_build_cancellation_fence.sql")
+        "CREATE SCHEMA agent; SET search_path TO agent;\n{}",
+        include_str!("../../../migrations/agent/0001_sprint2_baseline.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;
     let command = build_command()?;

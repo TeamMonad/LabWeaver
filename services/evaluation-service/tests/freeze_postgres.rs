@@ -218,9 +218,8 @@ impl TestContext {
             .connect(&database_url)
             .await?;
         let migrations = format!(
-            "CREATE SCHEMA evaluation; SET search_path TO evaluation;\n{}\n{}",
-            include_str!("../../../migrations/evaluation/0001_initial.sql"),
-            include_str!("../../../migrations/evaluation/0002_submission_freezes.sql")
+            "CREATE SCHEMA evaluation; SET search_path TO evaluation;\n{}",
+            include_str!("../../../migrations/evaluation/0001_sprint2_baseline.sql")
         );
         sqlx::raw_sql(&migrations).execute(&pool).await?;
         let store = PgFreezeStore::new(pool.clone());

@@ -60,171 +60,13 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
         .max_connections(4)
         .connect(&url)
         .await?;
-    let initial = format!(
+    let baseline = format!(
         "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
-        include_str!("../../../migrations/environment/0001_initial.sql")
+        include_str!("../../../migrations/environment/0001_sprint2_baseline.sql")
     );
-    sqlx::raw_sql(&initial).execute(&pool).await?;
-
-    let mut legacy = support::ready_instance();
-    legacy.operation.attempt = 6;
-    let mut legacy_contract = serde_json::to_value(&legacy)?;
-    legacy_contract
-        .as_object_mut()
-        .ok_or("legacy instance must be an object")?
-        .remove("eligibilityExpiresAt");
-    legacy_contract
-        .as_object_mut()
-        .ok_or("legacy instance must be an object")?
-        .remove("capacityBinding");
-    legacy_contract
-        .as_object_mut()
-        .ok_or("legacy instance must be an object")?
-        .remove("failedPhase");
-    let legacy_operation = legacy_contract
-        .get_mut("operation")
-        .and_then(serde_json::Value::as_object_mut)
-        .ok_or("legacy operation must be an object")?;
-    legacy_operation.remove("maxAttempts");
-    legacy_operation.remove("nextAttemptAt");
-    legacy_operation.remove("traceId");
-    legacy_operation.remove("cleanupStartedAt");
-    legacy_operation.remove("providerStep");
-    legacy_operation.remove("retryFromPhase");
-    legacy_operation.remove("resetTarget");
-    legacy_operation.remove("leaseAuthorization");
-    let legacy_operation_contract = serde_json::Value::Object(legacy_operation.clone());
-    sqlx::query(
-        "INSERT INTO environment.environment_instances \
-         (environment_id, release_id, generation, observed_generation, desired_state, \
-          observed_state, provider_binding, lease_id, revision, terminal_diagnostic, contract) \
-         VALUES ($1,$2,1,1,'running','ready',$3,NULL,2,NULL,$4)",
-    )
-    .bind(legacy.id.as_uuid())
-    .bind(legacy.release_id.as_uuid())
-    .bind(&legacy.provider_binding)
-    .bind(&legacy_contract)
-    .execute(&pool)
-    .await?;
-    sqlx::query(
-        "INSERT INTO environment.environment_operations \
-         (operation_id, environment_id, operation_kind, expected_revision, target_generation, \
-          state, retry_count, diagnostic, contract) \
-         VALUES ($1,$2,'create',1,1,'succeeded',5,NULL,$3)",
-    )
-    .bind(legacy.operation.id.as_uuid())
-    .bind(legacy.id.as_uuid())
-    .bind(&legacy_operation_contract)
-    .execute(&pool)
-    .await?;
-
-    let legacy_failed_id = EnvironmentId::new();
-    let legacy_failed_operation_id = OperationId::new();
-    let mut legacy_failed_contract = legacy_contract.clone();
-    let failed_object = legacy_failed_contract
-        .as_object_mut()
-        .ok_or("legacy failed instance must be an object")?;
-    failed_object.insert("id".to_owned(), serde_json::to_value(legacy_failed_id)?);
-    failed_object.insert(
-        "observedState".to_owned(),
-        serde_json::Value::String("failed".to_owned()),
-    );
-    failed_object.insert("endpoints".to_owned(), serde_json::json!([]));
-    failed_object.insert(
-        "lastDiagnosticCode".to_owned(),
-        serde_json::Value::String("LW_ENVIRONMENT_PROVIDER_UNAVAILABLE".to_owned()),
-    );
-    let failed_operation = failed_object
-        .get_mut("operation")
-        .and_then(serde_json::Value::as_object_mut)
-        .ok_or("legacy failed operation must be an object")?;
-    failed_operation.insert(
-        "id".to_owned(),
-        serde_json::to_value(legacy_failed_operation_id)?,
-    );
-    failed_operation.insert(
-        "state".to_owned(),
-        serde_json::Value::String("failed".to_owned()),
-    );
-    failed_operation.insert(
-        "diagnosticCode".to_owned(),
-        serde_json::Value::String("LW_ENVIRONMENT_PROVIDER_UNAVAILABLE".to_owned()),
-    );
-    let legacy_failed_operation_contract = serde_json::Value::Object(failed_operation.clone());
-    sqlx::query(
-        "INSERT INTO environment.environment_instances \
-         (environment_id, release_id, generation, observed_generation, desired_state, \
-          observed_state, provider_binding, lease_id, revision, terminal_diagnostic, contract) \
-         VALUES ($1,$2,1,1,'running','failed',$3,NULL,2,$4,$5)",
-    )
-    .bind(legacy_failed_id.as_uuid())
-    .bind(legacy.release_id.as_uuid())
-    .bind(&legacy.provider_binding)
-    .bind("LW_ENVIRONMENT_PROVIDER_UNAVAILABLE")
-    .bind(&legacy_failed_contract)
-    .execute(&pool)
-    .await?;
-    sqlx::query(
-        "INSERT INTO environment.environment_operations \
-         (operation_id, environment_id, operation_kind, expected_revision, target_generation, \
-          state, retry_count, diagnostic, contract) \
-         VALUES ($1,$2,'create',1,1,'failed',5,$3,$4)",
-    )
-    .bind(legacy_failed_operation_id.as_uuid())
-    .bind(legacy_failed_id.as_uuid())
-    .bind("LW_ENVIRONMENT_PROVIDER_UNAVAILABLE")
-    .bind(&legacy_failed_operation_contract)
-    .execute(&pool)
-    .await?;
-
-    let reconcile_migration = format!(
-        "SET search_path TO environment;\n{}",
-        include_str!("../../../migrations/environment/0002_reconcile_leases.sql")
-    );
-    sqlx::raw_sql(&reconcile_migration).execute(&pool).await?;
+    sqlx::raw_sql(&baseline).execute(&pool).await?;
 
     let store = PgEnvironmentStore::new(pool.clone());
-    let upgraded = store.load(legacy.id).await?;
-    assert_eq!(upgraded.operation.attempt, 6);
-    assert_eq!(upgraded.operation.max_attempts, 6);
-    assert!(upgraded.operation.trace_id.starts_with("migration-v1-"));
-    assert_eq!(upgraded.operation.provider_step, 1);
-    let migrated_max_attempts: i64 = sqlx::query_scalar(
-        "SELECT max_attempts FROM environment.environment_operations WHERE operation_id=$1",
-    )
-    .bind(legacy.operation.id.as_uuid())
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(migrated_max_attempts, 6);
-    assert!(matches!(
-        store.load(legacy_failed_id).await,
-        Err(EnvironmentStoreError::Contract(
-            contracts::environment::EnvironmentError::FailedPhaseRequired
-        ))
-    ));
-    let migrated_failed_phase: Option<String> = sqlx::query_scalar(
-        "SELECT failed_phase FROM environment.environment_instances WHERE environment_id=$1",
-    )
-    .bind(legacy_failed_id.as_uuid())
-    .fetch_one(&pool)
-    .await?;
-    assert!(migrated_failed_phase.is_none());
-    sqlx::query("DELETE FROM environment.environment_operations WHERE operation_id=$1")
-        .bind(legacy_failed_operation_id.as_uuid())
-        .execute(&pool)
-        .await?;
-    sqlx::query("DELETE FROM environment.environment_instances WHERE environment_id=$1")
-        .bind(legacy_failed_id.as_uuid())
-        .execute(&pool)
-        .await?;
-    sqlx::query("DELETE FROM environment.environment_operations WHERE operation_id=$1")
-        .bind(legacy.operation.id.as_uuid())
-        .execute(&pool)
-        .await?;
-    sqlx::query("DELETE FROM environment.environment_instances WHERE environment_id=$1")
-        .bind(legacy.id.as_uuid())
-        .execute(&pool)
-        .await?;
 
     let mut invalid_ready_create = support::ready_instance();
     invalid_ready_create.operation.state = OperationState::Accepted;
@@ -746,9 +588,8 @@ async fn persistent_timeout_and_ready_cancel_cleanup_are_bounded()
         .connect(&url)
         .await?;
     let migrations = format!(
-        "CREATE SCHEMA environment; SET search_path TO environment;\n{}\n{}",
-        include_str!("../../../migrations/environment/0001_initial.sql"),
-        include_str!("../../../migrations/environment/0002_reconcile_leases.sql")
+        "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
+        include_str!("../../../migrations/environment/0001_sprint2_baseline.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;
     let store = PgEnvironmentStore::new(pool);
@@ -866,10 +707,8 @@ async fn release_withdrawal_is_projected_in_aggregate_order()
         .connect(&url)
         .await?;
     let migrations = format!(
-        "CREATE SCHEMA environment; SET search_path TO environment;\n{}\n{}\n{}",
-        include_str!("../../../migrations/environment/0001_initial.sql"),
-        include_str!("../../../migrations/environment/0002_reconcile_leases.sql"),
-        include_str!("../../../migrations/environment/0003_release_projections.sql")
+        "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
+        include_str!("../../../migrations/environment/0001_sprint2_baseline.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;
 
@@ -1021,7 +860,7 @@ async fn container_executor_persists_generation_and_permanent_delete_tombstone()
         .await?;
     let migrations = format!(
         "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
-        include_str!("../../../migrations/environment/0004_container_executor_fence.sql")
+        include_str!("../../../migrations/environment/0001_sprint2_baseline.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;
     let authority_now = container_database_now(&pool).await?;
@@ -1298,7 +1137,7 @@ async fn kubevirt_executor_replays_and_permanently_tombstones_cleanup()
         .await?;
     sqlx::raw_sql(&format!(
         "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
-        include_str!("../../../migrations/environment/0006_kubevirt_executor_fence.sql")
+        include_str!("../../../migrations/environment/0001_sprint2_baseline.sql")
     ))
     .execute(&pool)
     .await?;
@@ -1455,7 +1294,7 @@ async fn kubevirt_observation_identity_is_durable_fenced_and_tombstoned()
         .await?;
     let migration = format!(
         "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
-        include_str!("../../../migrations/environment/0005_kubevirt_runtime_observations.sql")
+        include_str!("../../../migrations/environment/0001_sprint2_baseline.sql")
     );
     sqlx::raw_sql(&migration).execute(&pool).await?;
     let store = PgKubeVirtObservationStore::new(pool.clone());

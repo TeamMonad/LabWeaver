@@ -41,17 +41,13 @@ async fn issue_48_migrations_enforce_fencing_and_monotonic_course_sequences()
         .connect(&url)
         .await?;
     let control = format!(
-        "CREATE SCHEMA control; SET search_path TO control;\n{}\n{}\n{}",
-        include_str!("../../../migrations/control/0001_initial.sql"),
-        include_str!("../../../migrations/control/0002_control_plane.sql"),
-        include_str!("../../../migrations/control/0003_container_build_projections.sql")
+        "CREATE SCHEMA control; SET search_path TO control;\n{}",
+        include_str!("../../../migrations/control/0001_sprint2_baseline.sql")
     );
     sqlx::raw_sql(&control).execute(&pool).await?;
     let agent = format!(
-        "CREATE SCHEMA agent; SET search_path TO agent;\n{}\n{}\n{}",
-        include_str!("../../../migrations/agent/0001_initial.sql"),
-        include_str!("../../../migrations/agent/0002_track_leases.sql"),
-        include_str!("../../../migrations/agent/0003_control_dispatch.sql")
+        "CREATE SCHEMA agent; SET search_path TO agent;\n{}",
+        include_str!("../../../migrations/agent/0001_sprint2_baseline.sql")
     );
     sqlx::raw_sql(&agent).execute(&pool).await?;
 
@@ -272,10 +268,8 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
         .connect(&url)
         .await?;
     let migrations = format!(
-        "CREATE SCHEMA control; SET search_path TO control;\n{}\n{}\n{}",
-        include_str!("../../../migrations/control/0001_initial.sql"),
-        include_str!("../../../migrations/control/0002_control_plane.sql"),
-        include_str!("../../../migrations/control/0003_container_build_projections.sql")
+        "CREATE SCHEMA control; SET search_path TO control;\n{}",
+        include_str!("../../../migrations/control/0001_sprint2_baseline.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;
     let config = control_config()?;

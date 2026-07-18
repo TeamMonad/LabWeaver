@@ -23,10 +23,8 @@ async fn outbox_is_marked_published_only_after_jetstream_ack()
         .connect(&database_url)
         .await?;
     let migrations = format!(
-        "CREATE SCHEMA agent; SET search_path TO agent;\n{}\n{}\n{}",
-        include_str!("../../../migrations/agent/0001_initial.sql"),
-        include_str!("../../../migrations/agent/0002_track_leases.sql"),
-        include_str!("../../../migrations/agent/0003_control_dispatch.sql")
+        "CREATE SCHEMA agent; SET search_path TO agent;\n{}",
+        include_str!("../../../migrations/agent/0001_sprint2_baseline.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;
 

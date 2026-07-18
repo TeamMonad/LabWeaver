@@ -271,9 +271,8 @@ async fn shutdown_future_failure_is_propagated_as_a_typed_server_error()
 
 async fn migrate(pool: &PgPool) -> Result<(), sqlx::Error> {
     let migration = format!(
-        "CREATE SCHEMA environment; SET search_path TO environment;\n{}\n{}",
-        include_str!("../../../migrations/environment/0001_initial.sql"),
-        include_str!("../../../migrations/environment/0002_reconcile_leases.sql")
+        "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
+        include_str!("../../../migrations/environment/0001_sprint2_baseline.sql")
     );
     sqlx::raw_sql(&migration).execute(pool).await?;
     Ok(())

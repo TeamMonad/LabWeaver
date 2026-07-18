@@ -41,10 +41,8 @@ async fn control_projection_is_transactional_across_duplicate_restart_outage_and
         ))
         .await?;
     sqlx::raw_sql(&format!(
-        "CREATE SCHEMA control; SET search_path TO control;\n{}\n{}\n{}",
-        include_str!("../../../migrations/control/0001_initial.sql"),
-        include_str!("../../../migrations/control/0002_control_plane.sql"),
-        include_str!("../../../migrations/control/0003_container_build_projections.sql")
+        "CREATE SCHEMA control; SET search_path TO control;\n{}",
+        include_str!("../../../migrations/control/0001_sprint2_baseline.sql")
     ))
     .execute(&pool)
     .await?;
