@@ -33,7 +33,10 @@ class AnsibleFixtureTests(unittest.TestCase):
     def test_sprint2_administration_tools_are_locked_and_installed_before_foundation(self) -> None:
         lock = yaml.safe_load((ROOT / "deploy/versions.lock.yml").read_text(encoding="utf-8"))
         tools = lock["sprint2_foundation"]["admin_tools"]
-        playbook = (ROOT / "deploy/ansible/playbooks/92-sprint2-foundation.yml").read_text(
+        foundation_playbook = (ROOT / "deploy/ansible/playbooks/92-sprint2-foundation.yml").read_text(
+            encoding="utf-8"
+        )
+        tool_playbook = (ROOT / "deploy/ansible/playbooks/91-sprint2-admin-tools.yml").read_text(
             encoding="utf-8"
         )
         tasks = (ROOT / "deploy/ansible/roles/sprint2_admin_tools/tasks/main.yml").read_text(
@@ -47,7 +50,9 @@ class AnsibleFixtureTests(unittest.TestCase):
         for name in ("nats_cli", "nsc", "minio_client", "buildctl", "keycloak_admin"):
             self.assertRegex(tools[name]["linux_amd64_sha256"], r"^[0-9a-f]{64}$")
             self.assertTrue(tools[name]["linux_amd64_url"].startswith("https://github.com/"))
-        self.assertLess(playbook.index("role: sprint2_admin_tools"), playbook.index("roles: [sprint2_foundation]"))
+        self.assertIn("- import_playbook: 91-sprint2-admin-tools.yml", foundation_playbook)
+        self.assertIn("sprint2_admin_tools_profile: authoring", tool_playbook)
+        self.assertIn("sprint2_admin_tools_profile: execution", tool_playbook)
         self.assertIn("checksum: \"sha256:", tasks)
         self.assertNotIn("ansible.builtin.shell", tasks)
 
@@ -66,8 +71,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         )
 
         self.assertIn("labweaver_preflight_scope: sprint2-foundation", playbook)
-        self.assertIn("sprint2_admin_tools_profile: authoring", playbook)
-        self.assertIn("sprint2_admin_tools_profile: execution", playbook)
+        self.assertIn("- import_playbook: 91-sprint2-admin-tools.yml", playbook)
         self.assertIn("sprint2-foundation --infra", (
             ROOT / "docs/deployment/ansible.md"
         ).read_text(encoding="utf-8"))
