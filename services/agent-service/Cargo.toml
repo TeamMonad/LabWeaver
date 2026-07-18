@@ -14,9 +14,11 @@ auth = { path = "../../crates/auth" }
 axum.workspace = true
 contracts = { path = "../../crates/contracts" }
 futures-util = "0.3.31"
+flate2 = "=1.1.9"
 persistence-sqlx = { path = "../../crates/persistence-sqlx" }
 hyper-util.workspace = true
 regex = "1.12.2"
+reqwest.workspace = true
 serde_yaml.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -24,6 +26,7 @@ sqlx.workspace = true
 telemetry = { path = "../../crates/telemetry" }
 thiserror.workspace = true
 tempfile.workspace = true
+tar = "=0.4.46"
 time.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true

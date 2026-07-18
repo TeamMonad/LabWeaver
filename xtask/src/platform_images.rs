@@ -651,6 +651,14 @@ fn build_image(
     ]);
     if component != "web" && component != "openssh-gateway" {
         command.args(["--build-arg", &format!("SERVICE={component}")]);
+        command.args([
+            "--target",
+            if component == "agent-service" {
+                "agent-runtime"
+            } else {
+                "runtime"
+            },
+        ]);
     }
     command.args(["--tag", tag, "."]);
     run_checked(&mut command, "BuildKit platform image build").map(|_| ())

@@ -7,8 +7,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_service::api::{AgentApiState, router, serve_mtls};
+use agent_service::build_executor::{ProductionBuildExecutor, ProductionBuildExecutorConfig};
 use agent_service::build_pipeline::{BuildPipeline, BuildPipelinePolicy};
 use agent_service::build_provider::NatsBuildSupplyChainProvider;
+use agent_service::build_provider::{
+    FencedBuildExecutor, NatsBuildExecutorServer, PgBuildExecutorFenceStore,
+};
 use agent_service::build_store::{BuildWorker, PgBuildStore};
 use agent_service::classifier::DeterministicEgressClassifier;
 use agent_service::claude_code::{
@@ -83,13 +87,49 @@ struct NatsFileConfig {
     outbox_poll_milliseconds: u64,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuildExecutorDeploymentFile {
+    database_url_file: String,
+    database_max_connections: u32,
+    object_store: S3StoreConfig,
+    object_store_access_key_file: String,
+    object_store_secret_key_file: String,
+    object_store_session_token_file: Option<String>,
+    nats: BuildExecutorNatsFileConfig,
+    executor: ProductionBuildExecutorConfig,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuildExecutorNatsFileConfig {
+    server: String,
+    ca_file: String,
+    client_certificate_file: String,
+    client_private_key_file: String,
+    credentials_file: String,
+    request_subject: String,
+}
+
 #[tokio::main]
+async fn main() -> Result<(), StartupError> {
+    telemetry::init(env!("CARGO_PKG_NAME"))?;
+    let mut arguments = std::env::args().skip(1);
+    if arguments.next().as_deref() != Some("--mode") || arguments.size_hint().0 != 1 {
+        return Err(StartupError::Configuration);
+    }
+    match arguments.next().as_deref() {
+        Some("agent-service") => Box::pin(run_agent_service()).await,
+        Some("build-executor") => Box::pin(run_build_executor()).await,
+        _ => Err(StartupError::Configuration),
+    }
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "startup keeps every fail-closed Agent dependency binding in one auditable boundary"
 )]
-async fn main() -> Result<(), StartupError> {
-    telemetry::init(env!("CARGO_PKG_NAME"))?;
+async fn run_agent_service() -> Result<(), StartupError> {
     let deployment = load_deployment()?;
     validate_deployment(&deployment)?;
     let pool = PgPoolOptions::new()
@@ -207,6 +247,56 @@ async fn main() -> Result<(), StartupError> {
         ) => result?,
         result = outbox_loop(outbox, outbox_poll) => result?,
     }
+    Ok(())
+}
+
+async fn run_build_executor() -> Result<(), StartupError> {
+    let deployment = load_build_executor_deployment()?;
+    if deployment.database_max_connections == 0 || deployment.database_max_connections > 32 {
+        return Err(StartupError::Configuration);
+    }
+    let pool = PgPoolOptions::new()
+        .max_connections(deployment.database_max_connections)
+        .connect(&read_trimmed(&deployment.database_url_file)?)
+        .await?;
+    let schema_ready: bool = sqlx::query_scalar(
+        "SELECT to_regclass('agent.build_executor_fences') IS NOT NULL \
+         AND to_regclass('agent.build_executor_artifacts') IS NOT NULL",
+    )
+    .fetch_one(&pool)
+    .await?;
+    if !schema_ready {
+        return Err(StartupError::SchemaUnavailable);
+    }
+    let objects = Arc::new(
+        S3ImmutableObjectStore::new(
+            deployment.object_store,
+            S3Credential {
+                access_key_id: read_trimmed(&deployment.object_store_access_key_file)?,
+                secret_access_key: read_trimmed(&deployment.object_store_secret_key_file)?,
+                session_token: deployment
+                    .object_store_session_token_file
+                    .as_deref()
+                    .map(read_trimmed)
+                    .transpose()?,
+            },
+        )
+        .await?,
+    );
+    let nats = connect_nats_mtls(
+        &deployment.nats.server,
+        deployment.nats.ca_file.into(),
+        deployment.nats.client_certificate_file.into(),
+        deployment.nats.client_private_key_file.into(),
+        deployment.nats.credentials_file.into(),
+    )
+    .await?;
+    let backend = ProductionBuildExecutor::new(deployment.executor, pool.clone(), objects)
+        .map_err(|_| StartupError::Configuration)?;
+    let executor = FencedBuildExecutor::new(PgBuildExecutorFenceStore::new(pool), backend);
+    NatsBuildExecutorServer::new(nats, deployment.nats.request_subject, executor)?
+        .serve()
+        .await?;
     Ok(())
 }
 
@@ -362,6 +452,12 @@ fn load_deployment() -> Result<DeploymentFile, StartupError> {
     serde_yaml::from_str(&std::fs::read_to_string(path)?).map_err(|_| StartupError::Configuration)
 }
 
+fn load_build_executor_deployment() -> Result<BuildExecutorDeploymentFile, StartupError> {
+    let path = std::env::var("LABWEAVER_BUILD_EXECUTOR_CONFIG_FILE")
+        .map_err(|_| StartupError::Configuration)?;
+    serde_yaml::from_str(&std::fs::read_to_string(path)?).map_err(|_| StartupError::Configuration)
+}
+
 fn validate_deployment(deployment: &DeploymentFile) -> Result<(), StartupError> {
     if deployment.database_max_connections == 0
         || deployment.database_max_connections > 100
@@ -457,4 +553,6 @@ enum StartupError {
     Runtime(#[from] agent_service::claude_code::ClaudeCodeRuntimeError),
     #[error(transparent)]
     Messaging(#[from] agent_service::messaging::AgentMessagingError),
+    #[error(transparent)]
+    BuildExecutor(#[from] agent_service::build_provider::BuildExecutorFenceError),
 }

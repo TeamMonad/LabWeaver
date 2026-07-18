@@ -1305,6 +1305,16 @@ impl ControlService {
                 ..
             } = &candidate.spec.runtime
             {
+                let context_object_key = sqlx::query_scalar::<_, String>(
+                    "SELECT object_key FROM control.problem_package_upload_files \
+                     WHERE artifact_id=$1 AND object_version=$2",
+                )
+                .bind(build_context.artifact_id.as_uuid())
+                .bind(&build_context.object_version)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(db)?
+                .ok_or(ControlError::PersistenceIdentityMismatch)?;
                 let build_request = BuildRequest {
                     id: BuildRequestId::new(),
                     course_id,
@@ -1314,6 +1324,7 @@ impl ControlService {
                     approval_id: approval.id,
                     builder_binding: self.config.container_build.builder_binding.clone(),
                     context: build_context.clone(),
+                    context_object_key,
                     dockerfile_path: self.config.container_build.dockerfile_path.clone(),
                     base_image_digest: base_image_digest.clone(),
                     output_repository: format!(

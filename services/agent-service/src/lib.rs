@@ -5,6 +5,7 @@
 )]
 
 pub mod api;
+pub mod build_executor;
 pub mod build_pipeline;
 pub mod build_provider;
 pub mod build_store;

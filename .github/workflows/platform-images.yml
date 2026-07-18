@@ -83,13 +83,15 @@ jobs:
           source_commit="$(git rev-parse HEAD)"
           source_date_epoch="$(git show -s --format=%ct HEAD)"
           file=containers/Containerfile.rust
-          service_args=(--build-arg "SERVICE=$COMPONENT")
+          service_args=(--build-arg "SERVICE=$COMPONENT" --target runtime)
           if [[ "$COMPONENT" == web ]]; then
             file=containers/Containerfile.web
             service_args=()
           elif [[ "$COMPONENT" == openssh-gateway ]]; then
             file=access-gateway/Dockerfile
             service_args=()
+          elif [[ "$COMPONENT" == agent-service ]]; then
+            service_args=(--build-arg "SERVICE=$COMPONENT" --target agent-runtime)
           fi
           for pass in first second; do
             docker buildx build --file "$file" --platform linux/amd64 \

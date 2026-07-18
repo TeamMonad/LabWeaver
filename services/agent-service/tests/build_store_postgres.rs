@@ -664,6 +664,7 @@ fn build_command() -> Result<AgentBuildRequested, Box<dyn std::error::Error>> {
         approval_id,
         builder_binding: "buildkit-primary-v1".to_owned(),
         context: artifact_ref("application/vnd.oci.image.layer.v1.tar+gzip"),
+        context_object_key: "build-contexts/context.tar.gz".to_owned(),
         dockerfile_path: "Dockerfile".to_owned(),
         base_image_digest: format!("sha256:{}", "c".repeat(64)),
         output_repository: format!("harbor.internal/course-{course_id}/{candidate_id}"),

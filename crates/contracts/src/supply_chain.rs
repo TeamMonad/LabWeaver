@@ -29,6 +29,8 @@ pub struct BuildRequest {
     pub approval_id: crate::ApprovalId,
     pub builder_binding: String,
     pub context: ArtifactRef,
+    /// Object-store key resolved by Control and bound to the immutable context reference.
+    pub context_object_key: String,
     pub dockerfile_path: String,
     pub base_image_digest: String,
     pub output_repository: String,
@@ -48,6 +50,7 @@ impl BuildRequest {
             || self.max_cpu_millicores == 0
             || self.max_memory_bytes == 0
             || self.context.size_bytes == 0
+            || crate::validate_relative_path(&self.context_object_key).is_err()
         {
             return Err(SupplyChainError::IncompleteBuildRequest);
         }
