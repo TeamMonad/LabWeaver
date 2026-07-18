@@ -218,6 +218,10 @@
                           <span>{{ formatTimestamp(g.issuedAt) }} → {{ formatTimestamp(g.expiresAt) }}</span>
                         </div>
                         <div class="grant-row">
+                          <span>过期</span>
+                          <span>{{ formatExpiry(g.expiresAt) }}</span>
+                        </div>
+                        <div class="grant-row">
                           <span>入口授权</span>
                           <div class="endpoint-grants">
                             <span v-for="eg in g.endpointGrants" :key="eg.id" class="tag">
@@ -226,15 +230,93 @@
                           </div>
                         </div>
                       </div>
+
+                      <div v-if="g.state === 'active'" class="runtime-access">
+                        <div v-if="httpsGrant(g)" class="access-card">
+                          <h5 class="access-card__title">
+                            <SvgIcon name="code" size="sm" aria-hidden="true" />
+                            code-server
+                          </h5>
+                          <p class="access-card__desc">通过 OIDC 与 AccessGrant 经受保护 Gateway 打开 code-server。</p>
+                          <button
+                            type="button"
+                            class="filled-button"
+                            :disabled="!connectUrl(g)"
+                            @click="openCodeServer(g)"
+                          >
+                            打开 code-server
+                          </button>
+                          <p v-if="!connectUrl(g)" class="access-card__hint">连接地址缺失，无法打开。</p>
+                        </div>
+
+                        <div v-if="sshGrant(g)" class="access-card">
+                          <h5 class="access-card__title">
+                            <SvgIcon name="terminal" size="sm" aria-hidden="true" />
+                            SSH
+                          </h5>
+                          <p class="access-card__desc">单行命令到唯一 VM；无需下载配置。</p>
+                          <div v-if="sshCommand(g)" class="ssh-command">
+                            <code class="ssh-command__text">{{ sshCommand(g) }}</code>
+                            <CopyButton :text="sshCommand(g) ?? ''" aria-label="复制 SSH 命令" />
+                          </div>
+                          <div v-if="sshCommand(g)" class="ssh-meta">
+                            <span>Gateway fingerprint：<code>{{ truncateSha256(g.gatewayFingerprintSha256 ?? '') }}</code></span>
+                            <span>Grant：{{ formatExpiry(g.expiresAt) }}</span>
+                          </div>
+                          <p v-else class="access-card__hint">SSH 别名或 Gateway 缺失，无法生成命令。</p>
+                        </div>
+                      </div>
                     </template>
                   </AsyncStateView>
                 </template>
               </AsyncStateView>
             </div>
 
-            <div v-if="timelineEvents.length > 0" class="timeline-section">
-              <h4 class="section-subtitle">生命周期事件</h4>
-              <EventTimeline :events="timelineEvents" aria-label="环境生命周期时间线" />
+            <div class="freeze-section">
+              <h4 class="section-subtitle">冻结提交与证据</h4>
+              <p class="freeze-desc">将当前工作区冻结为不可变提交，保留 Collector object version 与 SHA-256。</p>
+              <button
+                type="button"
+                class="filled-button"
+                :disabled="!canFreeze(data) || freezeState.kind === 'loading'"
+                @click="freeze(data)"
+              >
+                {{ freezeState.kind === 'loading' ? '冻结中…' : '冻结提交' }}
+              </button>
+
+              <div v-if="freezeDiagnostic" class="freeze-result">
+                <DiagnosticBanner
+                  :code="freezeDiagnostic.code"
+                  :message="freezeDiagnostic.message"
+                  :retryable="freezeDiagnostic.retryable"
+                  severity="error"
+                  @retry="retryFreeze"
+                />
+              </div>
+
+              <div v-if="freezeEvidence(data)" class="evidence-card">
+                <div class="grant-row">
+                  <span>Object Version</span>
+                  <code>{{ freezeEvidence(data)?.objectVersion }}</code>
+                </div>
+                <div class="grant-row">
+                  <span>SHA-256</span>
+                  <code>{{ freezeEvidence(data)?.sha256 }}</code>
+                </div>
+                <div class="grant-row">
+                  <span>Media Type</span>
+                  <code>{{ freezeEvidence(data)?.mediaType }}</code>
+                </div>
+                <div class="grant-row">
+                  <span>大小</span>
+                  <code>{{ freezeEvidence(data)?.sizeBytes }} B</code>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="operations.operations.kind === 'success' && operations.operations.data.length > 0" class="timeline-section">
+              <h4 class="section-subtitle">操作与诊断时间线</h4>
+              <EventTimeline :events="operationTimeline" aria-label="环境操作与诊断时间线" />
             </div>
           </template>
         </AsyncStateView>
@@ -261,17 +343,33 @@ import { useEnvironmentTemplateReleases } from '@/composables/useEnvironmentTemp
 import { useEnvironmentInstance } from '@/composables/useEnvironmentInstance'
 import { useEnvironmentLifecycle } from '@/composables/useEnvironmentLifecycle'
 import { useEnvironmentAccess } from '@/composables/useEnvironmentAccess'
+import { useEnvironmentOperations } from '@/composables/useEnvironmentOperations'
+import { freezeSubmission } from '@/generated/contracts'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
+import CopyButton from '@/components/common/CopyButton.vue'
 import DataTable from '@/components/common/DataTable.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import EventTimeline from '@/components/common/EventTimeline.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
-import { formatTimestamp } from '@/utils/format'
-import { makeDiagnostic, type DiagnosticViewModel } from '@/types/async'
+import { formatTimestamp, idempotencyKey, ifMatch, truncateSha256 } from '@/utils/format'
+import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import type { DataTableColumn } from '@/components/common/DataTable.vue'
-import type { EnvironmentInstanceSchema, EnvironmentTemplateReleaseViewSchema } from '@/generated/contracts'
+import type {
+  EndpointGrant,
+  EnvironmentInstanceSchema,
+  EnvironmentOperationSnapshotSchema,
+  EnvironmentTemplateReleaseViewSchema,
+  OperationAccepted,
+} from '@/generated/contracts'
 import type { TimelineEvent } from '@/components/common/EventTimeline.vue'
+import {
+  buildSshCommand,
+  formatExpiry,
+  resolveConnectUrl,
+  type AccessGrantWithGateway,
+  type EnvironmentInstanceWithFreeze,
+} from '@/types/access'
 
 const course = useCourseContext()
 const courseId = course.courseId
@@ -307,6 +405,11 @@ const access = useEnvironmentAccess(
   computed(() => (env.instance.kind === 'success' ? env.instance.data.revision : undefined)),
   courseId,
 )
+const operations = useEnvironmentOperations(selectedEnvironmentId)
+
+const freezeState = ref<AsyncState<OperationAccepted>>({ kind: 'idle' })
+const freezeDiagnostic = ref<DiagnosticViewModel | null>(null)
+const lastFreezeEnvironmentId = ref<string | null>(null)
 
 watch(
   () => route.query.environmentId,
@@ -350,18 +453,102 @@ const endpointColumns: DataTableColumn<{ protocol: string; health: string; obser
   { key: 'observedAt', title: '观测时间' },
 ]
 
-const timelineEvents = computed<TimelineEvent[]>(() => {
-  if (env.instance.kind !== 'success') return []
-  const op = env.instance.data.operation
-  return [
-    {
-      id: `${op.kind}-${op.acceptedAt}`,
-      title: op.kind,
-      timestamp: op.acceptedAt,
-      description: `actor: ${op.actorId}, revision: ${op.acceptedRevision}`,
-    },
-  ]
+const operationTimeline = computed<TimelineEvent[]>(() => {
+  if (operations.operations.kind !== 'success') return []
+  return operations.operations.data.map((op: EnvironmentOperationSnapshotSchema) => ({
+    id: op.operationId,
+    title: `${op.kind} · ${op.state}`,
+    timestamp: op.terminalAt ?? op.startedAt ?? op.acceptedAt,
+    description: op.diagnosticCode
+      ? `diagnostic: ${op.diagnosticCode}, revision: ${op.currentRevision}`
+      : `revision: ${op.currentRevision}`,
+  }))
 })
+
+function endpointGrantOf(g: AccessGrantWithGateway, protocol: 'https' | 'ssh') {
+  return g.endpointGrants.find((eg) => eg.protocol === protocol && eg.health === 'healthy') ?? null
+}
+
+function httpsGrant(g: AccessGrantWithGateway) {
+  return endpointGrantOf(g, 'https')
+}
+
+function sshGrant(g: AccessGrantWithGateway) {
+  return endpointGrantOf(g, 'ssh')
+}
+
+function connectUrl(g: AccessGrantWithGateway): string | null {
+  const eg = httpsGrant(g)
+  return eg ? resolveConnectUrl(eg) : null
+}
+
+function openCodeServer(g: AccessGrantWithGateway) {
+  const url = connectUrl(g)
+  if (url) window.open(url, '_blank', 'noopener,noreferrer')
+}
+
+function sshCommand(g: AccessGrantWithGateway): string | null {
+  const eg = sshGrant(g)
+  return eg ? buildSshCommand(g, eg) : null
+}
+
+function canFreeze(data: EnvironmentInstanceSchema): boolean {
+  return data.observedState === 'ready' && freezeState.value.kind !== 'loading'
+}
+
+function freezeEvidence(data: EnvironmentInstanceSchema) {
+  return (data as EnvironmentInstanceWithFreeze).freezeEvidence ?? null
+}
+
+async function freeze(data: EnvironmentInstanceSchema) {
+  freezeDiagnostic.value = null
+  lastFreezeEnvironmentId.value = data.id
+  freezeState.value = { kind: 'loading', message: '冻结提交中…' }
+  const result = await freezeSubmission({
+    path: { environmentId: data.id },
+    headers: { 'Idempotency-Key': idempotencyKey(), 'If-Match': ifMatch(data.revision) },
+    body: {
+      manifest: {
+        apiVersion: 'evaluation.labweaver.io/v1',
+        kind: 'SubmissionManifest',
+        name: 'workspace-freeze',
+        include: [{ kind: 'directoryTree', path: 'workspace' }],
+        exclude: [],
+        required: [],
+        llmReadable: [],
+        followSymlinks: false,
+        maxFiles: 1000,
+        maxTotalBytes: 10485760,
+        source: 'workspace',
+      },
+    },
+  })
+  if (result.error) {
+    const problem = extractProblemDetails(result.error)
+    freezeState.value = {
+      kind: 'error',
+      diagnostic: makeDiagnostic(
+        problem?.diagnosticCode ?? 'FREEZE_FAILED',
+        problem?.detail ?? '冻结提交失败',
+        problem?.retryable ?? true,
+      ),
+    }
+    freezeDiagnostic.value = freezeState.value.kind === 'error' ? freezeState.value.diagnostic : null
+    return
+  }
+  freezeState.value = { kind: 'success', data: result.data }
+  await env.load()
+  await operations.load()
+}
+
+async function retryFreeze() {
+  const id = lastFreezeEnvironmentId.value
+  if (!id) return
+  const instance = env.instance.kind === 'success' ? env.instance.data : undefined
+  if (instance && instance.id === id) {
+    await freeze(instance)
+  }
+}
 
 function canStart(data: EnvironmentInstanceSchema) {
   return data.desiredState !== 'running' && !lifecycle.operating.has(`${data.id}:start`)
@@ -752,5 +939,87 @@ async function revokeAccessGrant() {
 
 .timeline-section {
   margin-top: 24px;
+}
+
+.runtime-access {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 20px;
+}
+
+.access-card {
+  padding: 16px;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-medium);
+  background: var(--md-sys-color-surface-container-low);
+}
+
+.access-card__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font: var(--md-sys-title-small);
+  color: var(--md-sys-color-on-surface);
+  margin: 0 0 8px;
+}
+
+.access-card__desc {
+  font: var(--md-sys-body-small);
+  color: var(--md-sys-color-on-surface-variant);
+  margin: 0 0 12px;
+}
+
+.access-card__hint {
+  font: var(--md-sys-body-small);
+  color: var(--md-sys-color-error);
+  margin: 8px 0 0;
+}
+
+.ssh-command {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.ssh-command__text {
+  padding: 8px 12px;
+  border-radius: var(--md-sys-shape-small);
+  background: var(--md-sys-color-surface-container-highest);
+  color: var(--md-sys-color-on-surface);
+  font: var(--md-sys-body-medium);
+  word-break: break-all;
+}
+
+.ssh-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 12px;
+  font: var(--md-sys-body-small);
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.freeze-section {
+  margin-top: 24px;
+}
+
+.freeze-desc {
+  font: var(--md-sys-body-small);
+  color: var(--md-sys-color-on-surface-variant);
+  margin: 0 0 12px;
+}
+
+.freeze-result {
+  margin-top: 16px;
+}
+
+.evidence-card {
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-medium);
+  background: var(--md-sys-color-surface-container-low);
 }
 </style>
