@@ -82,7 +82,6 @@ struct ScanEvidence {
     report_sha256: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg(target_os = "linux")]
 #[derive(Debug, Serialize)]
 struct DeploymentManifest<'a> {
@@ -90,8 +89,10 @@ struct DeploymentManifest<'a> {
     environment: &'a str,
     package_manifest_sha256: String,
     source_commit: &'a str,
+    run_id: String,
     cluster_uid: String,
     helm_revision: u64,
+    migration_catalog_sha256: String,
     images: Vec<DeploymentImage<'a>>,
     previous_verified_manifest_sha256: Option<String>,
 }
@@ -919,13 +920,25 @@ fn deploy_linux(
     let revision = helm_revision(&kubeconfig)?;
     let manifest_bytes =
         fs::read(manifest_path).map_err(|error| io_error("read package manifest", error))?;
+    let run_id = std::env::var("LABWEAVER_RUN_ID").map_err(|_| AppError::PlatformImage {
+        code: "LW_PACKAGE_DEPLOYMENT_RUN_ID_MISSING",
+        detail: "LABWEAVER_RUN_ID is required".to_owned(),
+    })?;
+    uuid::Uuid::parse_str(&run_id).map_err(|_| AppError::PlatformImage {
+        code: "LW_PACKAGE_DEPLOYMENT_RUN_ID_INVALID",
+        detail: "LABWEAVER_RUN_ID must be a UUID".to_owned(),
+    })?;
+    let migration_catalog = fs::read(root.join("migrations/catalog.yaml"))
+        .map_err(|error| io_error("read migration catalog", error))?;
     let deployment = DeploymentManifest {
         schema_version: DEPLOYMENT_SCHEMA,
         environment,
         package_manifest_sha256: sha256(&manifest_bytes),
         source_commit: &manifest.source_commit,
+        run_id,
         cluster_uid,
         helm_revision: revision,
+        migration_catalog_sha256: sha256(&migration_catalog),
         images: manifest
             .images
             .iter()

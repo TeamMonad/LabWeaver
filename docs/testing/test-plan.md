@@ -1,5 +1,9 @@
 # Test Plan
 
+The Sprint 2 terminal gate and its evidence contract are documented in
+[`release-gate.md`](release-gate.md). A local or Fixture pass cannot satisfy a
+check whose gate mode is `connected`.
+
 Tests are grouped by the boundary they actually exercise. Reports must name the
 source identity and must not promote Fixture or static evidence to a connected
 runtime claim.

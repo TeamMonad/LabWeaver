@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 
 mod acceptance_assets;
 mod platform_images;
+mod release_gate;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -245,6 +246,10 @@ enum AppError {
         code: &'static str,
         detail: String,
     },
+    ReleaseGate {
+        code: &'static str,
+        detail: String,
+    },
     InvalidArgument {
         role: &'static str,
     },
@@ -264,6 +269,7 @@ impl AppError {
             Self::ContractDrift { .. } => "LW_CONTRACT_DRIFT",
             Self::PlatformImage { code, .. } => code,
             Self::AcceptanceAsset { code, .. } => code,
+            Self::ReleaseGate { code, .. } => code,
             Self::InvalidArgument { .. } => "XTASK_INVALID_ARGUMENT",
             #[cfg(not(target_os = "linux"))]
             Self::UnsupportedPlatform { .. } => "XTASK_INFRA_UNSUPPORTED_PLATFORM",
@@ -299,6 +305,7 @@ impl Display for AppError {
             }
             Self::PlatformImage { code, detail } => write!(formatter, "{code}: {detail}"),
             Self::AcceptanceAsset { detail, .. } => write!(formatter, "{detail}"),
+            Self::ReleaseGate { detail, .. } => write!(formatter, "{detail}"),
             Self::InvalidArgument { role } => {
                 write!(
                     formatter,
@@ -313,6 +320,8 @@ impl Display for AppError {
         }
     }
 }
+
+impl std::error::Error for AppError {}
 
 fn main() -> ExitCode {
     match run(Cli::parse()) {
@@ -397,7 +406,7 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::Destroy(args) => destructive_not_implemented("destroy", args.yes),
         Command::Demo(command) => match command {
             DemoCommand::Seed(args) => not_implemented(format!("demo seed --env {}", args.env)),
-            DemoCommand::Replay => not_implemented("demo replay"),
+            DemoCommand::Replay => demo_replay(),
             DemoCommand::Reset(args) => destructive_not_implemented("demo reset", args.yes),
         },
         Command::Playwright(PlaywrightCommand::Install) => not_implemented("playwright install"),
@@ -415,7 +424,7 @@ fn run(cli: Cli) -> Result<(), AppError> {
             args.env.as_deref(),
             &repository_root(),
         ),
-        Command::ReleaseGate => not_implemented("release-gate"),
+        Command::ReleaseGate => release_gate::run(&repository_root()),
         Command::Contracts(ContractsCommand::Generate) => contracts_generate(),
         Command::Contracts(ContractsCommand::Check) => contracts_check(),
     }
@@ -580,6 +589,37 @@ fn validate_environment_name(environment: &str) -> Result<(), AppError> {
             role: "infrastructure environment",
         })
     }
+}
+
+fn demo_replay() -> Result<(), AppError> {
+    let environment = std::env::var("LABWEAVER_DEMO_ENV").map_err(|_| AppError::ReleaseGate {
+        code: "LW_DEMO_ENVIRONMENT_MISSING",
+        detail: "LABWEAVER_DEMO_ENV is required".to_owned(),
+    })?;
+    validate_environment_name(&environment)?;
+    verify(&EnvironmentArgs {
+        env: environment,
+        infra: true,
+        yes: true,
+        package_manifest: None,
+    })?;
+    let status = ProcessCommand::new("pnpm")
+        .args(["--dir=web", "test:e2e:live"])
+        .current_dir(repository_root())
+        .status()
+        .map_err(|error| AppError::ExternalCommand {
+            role: "live Playwright demo replay",
+            code: None,
+            detail: Some(error.to_string()),
+        })?;
+    if !status.success() {
+        return Err(AppError::ExternalCommand {
+            role: "live Playwright demo replay",
+            code: status.code(),
+            detail: None,
+        });
+    }
+    release_gate::run(&repository_root())
 }
 
 #[cfg(target_os = "linux")]
