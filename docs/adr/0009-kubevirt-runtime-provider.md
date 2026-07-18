@@ -14,7 +14,7 @@ the root disk and SSH host identity, while reset is the only operation allowed
 to replace them.
 
 The Environment service owns lifecycle state and the sanitized VM observation.
-The deployment-owned KubeVirt executor owns Kubernetes/CDI API calls. Access
+The deployment-owned `runtime-executor` owns Kubernetes/CDI API calls. Access
 owns grants and the Gateway connection boundary. No component may infer another
 owner's authoritative state from object existence or message order.
 
@@ -49,7 +49,8 @@ provider step, environment generation, attempt, action, deterministic request
 ID and deadline. The executor must persist the highest accepted fence per
 environment, return the exact prior result for an exact request replay, reject
 older or payload-conflicting requests, and persist a namespace deletion
-tombstone before reporting cleanup. Server-side apply uses deterministic field
+tombstone before reporting cleanup. The implementation uses a typed, allowlisted
+HTTPS client and never invokes `kubectl` or accepts a command string. Server-side apply uses deterministic field
 ownership and names; it must verify the CDI source/PVC corresponds to the exact
 base-disk object version and SHA-256 rather than trusting a mutable name or
 annotation.
@@ -108,8 +109,11 @@ a Ready endpoint.
 
 ## Compatibility and migration
 
-Migration `environment/0005_kubevirt_runtime_observations.sql` is additive and
-forward-only. It must be applied before enabling a KubeVirt provider binding.
+Migrations `environment/0005_kubevirt_runtime_observations.sql` and
+`environment/0006_kubevirt_executor_fence.sql` are applied before enabling a
+KubeVirt provider binding. They will be folded into the destructive Sprint 2
+baseline before cluster reset; no upgrade compatibility is promised for the
+pre-reset development data.
 Existing remote and Container bindings retain their behavior, and provider-
 specific fields are rejected on the wrong kind.
 

@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use artifact_store::{S3Credential, S3ImmutableObjectStore, S3StoreConfig};
 use environment_service::{
-    FencedContainerExecutor, KubernetesContainerExecutor, NatsContainerExecutorServer,
-    PgContainerExecutorFenceStore, RuntimeExecutorConfiguration, connect_nats_mtls,
+    FencedContainerExecutor, FencedKubeVirtExecutor, KubernetesContainerExecutor,
+    NatsContainerExecutorServer, NatsKubeVirtExecutorServer, PgContainerExecutorFenceStore,
+    PgKubeVirtExecutorFenceStore, RuntimeExecutorConfiguration, connect_nats_mtls,
 };
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
@@ -35,6 +36,7 @@ struct RuntimeExecutorNats {
     client_private_key_file: String,
     credentials_file: String,
     container_request_subject: String,
+    kubevirt_request_subject: String,
 }
 
 #[tokio::main]
@@ -76,7 +78,8 @@ async fn run_runtime_executor() -> Result<(), MainError> {
         .connect(&read_secret(&deployment.database_url_file)?)
         .await?;
     let schema_ready: bool = sqlx::query_scalar(
-        "SELECT to_regclass('environment.container_executor_fences') IS NOT NULL",
+        "SELECT to_regclass('environment.container_executor_fences') IS NOT NULL \
+         AND to_regclass('environment.kubevirt_executor_fences') IS NOT NULL",
     )
     .fetch_one(&pool)
     .await?;
@@ -108,10 +111,31 @@ async fn run_runtime_executor() -> Result<(), MainError> {
     .await?;
     let backend = KubernetesContainerExecutor::new(deployment.executor, objects)
         .map_err(|_| MainError::Configuration)?;
-    let executor = FencedContainerExecutor::new(PgContainerExecutorFenceStore::new(pool), backend);
-    NatsContainerExecutorServer::new(nats, deployment.nats.container_request_subject, executor)?
-        .serve()
-        .await?;
+    let container_executor = FencedContainerExecutor::new(
+        PgContainerExecutorFenceStore::new(pool.clone()),
+        backend.clone(),
+    );
+    let kubevirt_executor =
+        FencedKubeVirtExecutor::new(PgKubeVirtExecutorFenceStore::new(pool), backend);
+    let container_server = NatsContainerExecutorServer::new(
+        nats.clone(),
+        deployment.nats.container_request_subject,
+        container_executor,
+    )?;
+    let kubevirt_server = NatsKubeVirtExecutorServer::new(
+        nats,
+        deployment.nats.kubevirt_request_subject,
+        kubevirt_executor,
+    )?;
+    tokio::try_join!(
+        async { container_server.serve().await.map_err(MainError::Executor) },
+        async {
+            kubevirt_server
+                .serve()
+                .await
+                .map_err(MainError::KubeVirtExecutor)
+        },
+    )?;
     Ok(())
 }
 
@@ -146,6 +170,8 @@ enum MainError {
     Nats(#[from] environment_service::NatsMessagingError),
     #[error(transparent)]
     Executor(#[from] environment_service::ContainerExecutorFenceError),
+    #[error(transparent)]
+    KubeVirtExecutor(#[from] environment_service::KubeVirtExecutorFenceError),
     #[error(transparent)]
     Store(#[from] artifact_store::ObjectStoreError),
     #[error(transparent)]

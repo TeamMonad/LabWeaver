@@ -18,6 +18,7 @@ hyper-util = { version = "0.1.20", features = ["server", "service", "tokio"] }
 futures-util = "0.3.31"
 persistence-sqlx = { path = "../../crates/persistence-sqlx" }
 reqwest.workspace = true
+russh = { version = "=0.62.2", default-features = false, features = ["ring"] }
 rustls = { version = "0.23.42", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2.2.0"
 serde.workspace = true

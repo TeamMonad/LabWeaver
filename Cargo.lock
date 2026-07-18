@@ -2200,6 +2200,7 @@ dependencies = [
  "persistence-sqlx",
  "rcgen",
  "reqwest",
+ "russh",
  "rustls 0.23.42",
  "rustls-pemfile 2.2.0",
  "serde",

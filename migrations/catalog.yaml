@@ -44,6 +44,9 @@ domains:
       - id: 5
         file: environment/0005_kubevirt_runtime_observations.sql
         sha256: 4b4d9ead61e7fee8ba25fb95fa4d59ae8e77f1fb6650efee0405c4e6510a1457
+      - id: 6
+        file: environment/0006_kubevirt_executor_fence.sql
+        sha256: 71735e3729ad2499c6af231cf295f1fe50e1382d32da23fa0b29cbf1879bd819
   - name: agent
     migrations:
       - id: 1

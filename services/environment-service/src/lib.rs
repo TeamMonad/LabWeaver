@@ -29,12 +29,14 @@ pub use container_provider::{
     ReleaseProjectionError, ResolvedContainerRelease,
 };
 pub use kubevirt_provider::{
-    KUBEVIRT_BACKEND_PROTOCOL_VERSION, KubeVirtBackendFence, KubeVirtCleanupPlan,
-    KubeVirtObservationStore, KubeVirtObservationStoreError, KubeVirtProvider,
-    KubeVirtProviderBackend, KubeVirtProviderConfiguration, KubeVirtResource,
+    FencedKubeVirtExecutor, KUBEVIRT_BACKEND_PROTOCOL_VERSION, KubeVirtBackendFence,
+    KubeVirtCleanupPlan, KubeVirtExecutorBackend, KubeVirtExecutorFenceError,
+    KubeVirtExecutorRequest, KubeVirtExecutorRequestEnvelope, KubeVirtExecutorResponse,
+    KubeVirtExecutorResponseEnvelope, KubeVirtObservationStore, KubeVirtObservationStoreError,
+    KubeVirtProvider, KubeVirtProviderBackend, KubeVirtProviderConfiguration, KubeVirtResource,
     KubeVirtResourceBudget, KubeVirtResourcePlan, KubeVirtRunningObservation, KubeVirtSshBootstrap,
-    KubeVirtStoppedObservation, KubeVirtStorageBinding, NatsKubeVirtProviderBackend,
-    PgKubeVirtObservationStore,
+    KubeVirtStoppedObservation, KubeVirtStorageBinding, NatsKubeVirtExecutorServer,
+    NatsKubeVirtProviderBackend, PgKubeVirtExecutorFenceStore, PgKubeVirtObservationStore,
 };
 pub use lifecycle::{
     LifecycleCommand, LifecycleError, apply_provider_failure, apply_provider_observation,

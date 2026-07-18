@@ -30,14 +30,17 @@ use environment_service::{
     ContainerExecutorBackend, ContainerExecutorFenceError, ContainerExecutorRequest,
     ContainerExecutorRequestEnvelope, ContainerExecutorResponse, ContainerResourcePlan,
     EnvironmentEventPublisher, EnvironmentProvider, EnvironmentStoreError, FencedContainerExecutor,
-    InboundCommandDecision, InboundLifecycleCommand, KubeVirtBackendFence, KubeVirtCleanupPlan,
-    KubeVirtObservationStore, KubeVirtObservationStoreError, KubeVirtResourcePlan,
-    KubeVirtRunningObservation, KubeVirtStoppedObservation, LifecycleCommand, LifecycleError,
-    OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher, PgContainerExecutorFenceStore,
-    PgEnvironmentStore, PgKubeVirtObservationStore, PgReleaseProjectionStore, ProviderFailure,
-    ProviderFailureCode, ProviderObservation, ProviderRegistry, PublishFailure, ReconcileAction,
-    ReconcileWorker, ReconcileWorkerOutcome, Reconciler, ReleaseProjectionDecision,
-    apply_provider_observation,
+    FencedKubeVirtExecutor, InboundCommandDecision, InboundLifecycleCommand,
+    KUBEVIRT_BACKEND_PROTOCOL_VERSION, KubeVirtBackendFence, KubeVirtCleanupPlan,
+    KubeVirtExecutorBackend, KubeVirtExecutorFenceError, KubeVirtExecutorRequest,
+    KubeVirtExecutorRequestEnvelope, KubeVirtExecutorResponse, KubeVirtObservationStore,
+    KubeVirtObservationStoreError, KubeVirtResourcePlan, KubeVirtRunningObservation,
+    KubeVirtStoppedObservation, LifecycleCommand, LifecycleError, OutboxDispatchError,
+    OutboxDispatchOutcome, OutboxDispatcher, PgContainerExecutorFenceStore, PgEnvironmentStore,
+    PgKubeVirtExecutorFenceStore, PgKubeVirtObservationStore, PgReleaseProjectionStore,
+    ProviderFailure, ProviderFailureCode, ProviderObservation, ProviderRegistry, PublishFailure,
+    ReconcileAction, ReconcileWorker, ReconcileWorkerOutcome, Reconciler,
+    ReleaseProjectionDecision, apply_provider_observation,
 };
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::{ImageExt, runners::AsyncRunner};
@@ -1227,6 +1230,215 @@ fn container_add_time(
     duration: time::Duration,
 ) -> Result<UtcTimestamp, Box<dyn std::error::Error>> {
     Ok(UtcTimestamp::from_utc(timestamp.get() + duration)?)
+}
+
+struct CountingKubeVirtExecutor {
+    calls: Arc<AtomicUsize>,
+    observed_at: UtcTimestamp,
+}
+
+#[async_trait]
+impl KubeVirtExecutorBackend for CountingKubeVirtExecutor {
+    async fn execute(
+        &self,
+        fence: &KubeVirtBackendFence,
+        request: &KubeVirtExecutorRequest,
+    ) -> KubeVirtExecutorResponse {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        match request {
+            KubeVirtExecutorRequest::DeleteNamespace { plan } => {
+                KubeVirtExecutorResponse::Deleted {
+                    plan_sha256: plan.plan_sha256,
+                    cleanup_evidence: ArtifactRef {
+                        artifact_id: ArtifactId::new(),
+                        store_binding: "environment-cleanup-evidence-v1".to_owned(),
+                        object_version: plan.plan_sha256.to_string(),
+                        sha256: Sha256Digest::of_bytes(plan.namespace.as_bytes()),
+                        size_bytes: 1,
+                        media_type: "application/json".to_owned(),
+                    },
+                }
+            }
+            KubeVirtExecutorRequest::Apply { plan }
+            | KubeVirtExecutorRequest::Observe { plan }
+            | KubeVirtExecutorRequest::Start { plan }
+            | KubeVirtExecutorRequest::Stop { plan }
+            | KubeVirtExecutorRequest::Restart { plan } => KubeVirtExecutorResponse::Running {
+                plan_sha256: plan.plan_sha256,
+                observation: KubeVirtRunningObservation {
+                    observed_environment_generation: fence.environment_generation,
+                    vm_resource_generation: 1,
+                    observed_vm_resource_generation: 1,
+                    vm_uid: uuid::Uuid::new_v4(),
+                    vmi_uid: uuid::Uuid::new_v4(),
+                    root_disk_uid: uuid::Uuid::new_v4(),
+                    guest_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2)),
+                    service_cluster_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 96, 0, 2)),
+                    ssh_host_key_sha256: Sha256Digest::of_bytes(b"host-key"),
+                    guest_agent_connected: true,
+                    ssh_ready: true,
+                    observed_at: self.observed_at,
+                },
+            },
+        }
+    }
+}
+
+#[tokio::test]
+async fn kubevirt_executor_replays_and_permanently_tombstones_cleanup()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        container.get_host_port_ipv4(5432).await?
+    );
+    let pool = PgPoolOptions::new()
+        .max_connections(3)
+        .connect(&url)
+        .await?;
+    sqlx::raw_sql(&format!(
+        "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
+        include_str!("../../../migrations/environment/0006_kubevirt_executor_fence.sql")
+    ))
+    .execute(&pool)
+    .await?;
+    let observed_at = container_database_now(&pool).await?;
+    let deadline = container_add_time(observed_at, time::Duration::minutes(1))?;
+    let environment_id = EnvironmentId::new();
+    let plan = kubevirt_executor_plan(environment_id);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let operation_id = OperationId::new();
+    let first = kubevirt_executor_envelope(
+        plan.clone(),
+        operation_id,
+        1,
+        1,
+        ReconcileAction::Provision,
+        deadline,
+    )?;
+    for _ in 0..2 {
+        FencedKubeVirtExecutor::new(
+            PgKubeVirtExecutorFenceStore::new(pool.clone()),
+            CountingKubeVirtExecutor {
+                calls: Arc::clone(&calls),
+                observed_at,
+            },
+        )
+        .execute(first.clone())
+        .await?;
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let executor = FencedKubeVirtExecutor::new(
+        PgKubeVirtExecutorFenceStore::new(pool),
+        CountingKubeVirtExecutor {
+            calls: Arc::clone(&calls),
+            observed_at,
+        },
+    );
+    executor
+        .execute(kubevirt_executor_envelope(
+            plan.clone(),
+            operation_id,
+            1,
+            2,
+            ReconcileAction::Cleanup,
+            deadline,
+        )?)
+        .await?;
+    assert!(matches!(
+        executor
+            .execute(kubevirt_executor_envelope(
+                plan,
+                OperationId::new(),
+                2,
+                1,
+                ReconcileAction::Provision,
+                deadline,
+            )?)
+            .await,
+        Err(KubeVirtExecutorFenceError::Tombstoned)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    Ok(())
+}
+
+fn kubevirt_executor_plan(environment_id: EnvironmentId) -> KubeVirtResourcePlan {
+    KubeVirtResourcePlan {
+        environment_id,
+        namespace: format!("lw-env-{environment_id}"),
+        virtual_machine_name: "runtime".to_owned(),
+        data_volume_name: "rootdisk".to_owned(),
+        base_disk: ArtifactRef {
+            artifact_id: ArtifactId::new(),
+            store_binding: "artifact-store-v1".to_owned(),
+            object_version: "version-1".to_owned(),
+            sha256: Sha256Digest::of_bytes(b"vm-base-disk"),
+            size_bytes: 1024,
+            media_type: "application/x-qemu-disk".to_owned(),
+        },
+        base_disk_format: VirtualMachineDiskFormat::Qcow2,
+        storage_class_name: "local-path".to_owned(),
+        resources: Vec::new(),
+        plan_sha256: Sha256Digest::of_bytes(b"vm-plan"),
+    }
+}
+
+fn kubevirt_executor_envelope(
+    plan: KubeVirtResourcePlan,
+    operation_id: OperationId,
+    generation: u64,
+    provider_step: u32,
+    action: ReconcileAction,
+    deadline_at: UtcTimestamp,
+) -> Result<KubeVirtExecutorRequestEnvelope, Box<dyn std::error::Error>> {
+    let request = match action {
+        ReconcileAction::Provision => KubeVirtExecutorRequest::Apply { plan },
+        ReconcileAction::Cleanup => KubeVirtExecutorRequest::DeleteNamespace {
+            plan: KubeVirtCleanupPlan {
+                environment_id: plan.environment_id,
+                namespace: plan.namespace,
+                virtual_machine_name: plan.virtual_machine_name,
+                plan_sha256: plan.plan_sha256,
+            },
+        },
+        _ => return Err("unsupported executor fixture action".into()),
+    };
+    let request_id = Sha256Digest::of_canonical(&serde_json::json!({
+        "protocolVersion": KUBEVIRT_BACKEND_PROTOCOL_VERSION,
+        "environmentId": environment_id_for_kubevirt_request(&request),
+        "operationId": operation_id,
+        "providerStep": provider_step,
+        "environmentGeneration": generation,
+        "attempt": 1,
+        "action": action,
+        "deadlineAt": deadline_at,
+        "request": &request,
+    }))?;
+    Ok(KubeVirtExecutorRequestEnvelope {
+        fence: KubeVirtBackendFence {
+            protocol_version: KUBEVIRT_BACKEND_PROTOCOL_VERSION,
+            environment_id: environment_id_for_kubevirt_request(&request),
+            operation_id,
+            provider_step,
+            environment_generation: generation,
+            attempt: 1,
+            action,
+            request_id,
+            deadline_at,
+        },
+        request,
+    })
+}
+
+const fn environment_id_for_kubevirt_request(request: &KubeVirtExecutorRequest) -> EnvironmentId {
+    match request {
+        KubeVirtExecutorRequest::Apply { plan }
+        | KubeVirtExecutorRequest::Observe { plan }
+        | KubeVirtExecutorRequest::Start { plan }
+        | KubeVirtExecutorRequest::Stop { plan }
+        | KubeVirtExecutorRequest::Restart { plan } => plan.environment_id,
+        KubeVirtExecutorRequest::DeleteNamespace { plan } => plan.environment_id,
+    }
 }
 
 #[tokio::test]

@@ -16,11 +16,11 @@ Current source baseline: `release/sprint2` created from
 | Keycloak/OIDC and course-scoped authorization | A | implemented locally | Access BFF, bearer/mTLS checks, PostgreSQL tests | same-build deployed Keycloak/browser/Gateway verification is pending |
 | Control material, AgentRun, candidate approval and release | A/B | implemented locally | PostgreSQL, MinIO, JetStream and mTLS integration tests | deployment configuration and connected executors are pending |
 | Claude Code Agent runtime | B | implemented locally | bounded process runtime, leases, cancellation and candidate validation tests | deployment Secret/config injection and dual-candidate live replay are pending |
-| BuildKit/Harbor/Trivy supply chain | B | in progress | durable pipeline and executor protocol tests | real `build-executor` side effects do not yet exist; Sigstore stages are being removed |
-| Environment lifecycle and owner resolver | B/A | implemented locally | lifecycle, PostgreSQL, JetStream and mTLS tests | real Container/KubeVirt executor and deployed API path are pending |
-| Container runtime | B | in progress | deterministic resource plan and fence tests | real Kubernetes apply/observe/cleanup worker is pending |
-| KubeVirt runtime | B | in progress | deterministic VM/CDI plan, persistence and fence tests | real KubeVirt/CDI/SSH/cleanup worker replay is pending |
-| AccessGrant and session authorization | A | implemented locally | Access contract, PostgreSQL and mTLS tests | OpenSSH Gateway image/helper and connected revocation replay are pending |
+| BuildKit/Harbor/Trivy supply chain | B | implemented locally | fixed-command `build-executor`, persistent fence, context/Dockerfile negative tests and pipeline tests | real BuildKit/Harbor/Trivy combination replay is pending |
+| Environment lifecycle and owner resolver | B/A | implemented locally | lifecycle, PostgreSQL, JetStream, mTLS and typed executor tests | deployed owner/executor API path is pending |
+| Container runtime | B | implemented locally | deterministic plan, persistent fence and restricted Kubernetes SSA/observe/scale/restart/delete backend | connected Kubernetes apply, object-lock cleanup and access replay are pending |
+| KubeVirt runtime | B | implemented locally | deterministic VM/CDI plan, independent persistent fence, restricted API/subresource backend and SSH host-key probe | real KubeVirt/CDI/guest-agent/SSH/cleanup replay is pending |
+| AccessGrant and session authorization | A | implemented locally | fixed local OpenSSH account, post-auth alias redemption, one-time token and session contracts | built Gateway image and connected expiry/revocation replay are pending |
 | Dual-runtime submission freeze | B | implemented locally | bounded PVC/SFTP collection and immutable MinIO tests | deployment certificate issuer and real PVC/VM replay are pending |
 | Web teacher/student journeys | C | implemented against SDK and fixture modes | component, SDK and fixture Playwright tests | real Keycloak and same-build backend Playwright remain pending |
 | Sprint 2 Helm deployment | A/D | blocked | generic chart exists | current chart does not match per-process config, ports, identity or worker topology |
