@@ -98,9 +98,7 @@ CREATE INDEX access_grant_activation_lease_expiry_idx
 CREATE TABLE ssh_authorizations (
     authorization_id uuid PRIMARY KEY,
     token_sha256 text NOT NULL UNIQUE CHECK (token_sha256 ~ '^[0-9a-f]{64}$'),
-    grant_id uuid NOT NULL REFERENCES access_grants(grant_id) ON DELETE RESTRICT,
-    grant_revision bigint NOT NULL CHECK (grant_revision > 0),
-    endpoint_grant_id uuid NOT NULL REFERENCES endpoint_grants(endpoint_grant_id) ON DELETE RESTRICT,
+    actor_id uuid NOT NULL REFERENCES actors(actor_id) ON DELETE RESTRICT,
     key_id uuid NOT NULL REFERENCES ssh_public_keys(key_id) ON DELETE RESTRICT,
     gateway_identity text NOT NULL CHECK (gateway_identity LIKE 'spiffe://%'),
     connection_id text NOT NULL CHECK (length(connection_id) BETWEEN 1 AND 128),

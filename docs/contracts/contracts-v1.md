@@ -29,7 +29,7 @@ Public REST is under `/api/v1`; Internal Gateway routes are under `/internal/v1`
 
 SSE uses `GET /api/v1/events?courseId=...`. `Last-Event-ID` and `after` are equivalent and conflicting values are rejected. Expired cursors return 410 `LW_SSE_CURSOR_EXPIRED`; gaps return `LW_SSE_CURSOR_GAP` and require REST snapshot recovery. Events contain only sanitized identity, revision/hash and diagnostic fields.
 
-SSH authorization accepts server alias and Gateway identity, never target host/port. The response is scoped to one key, ForceCommand token, endpoint identity and shortest validity. It grants no generic shell, forwarding, SCP or SFTP semantics.
+OpenSSH authenticates only the fixed local account `gateway`. `AuthorizedKeysCommand` accepts the presented key and Gateway identity but deliberately has no target field because OpenSSH resolves the local account before running the helper. The client selects one server-generated alias only through the exact forced-command grammar `connect lw-<id>`. Access Service revalidates that alias, key, actor, grant, membership and Environment endpoint before consuming the one-time token. Neither phase accepts a target host/port, generic shell, forwarding, SCP or SFTP semantics.
 
 The Gateway creates, heartbeats and closes sessions through dedicated request types. A one-time opaque token is bound to Gateway identity, connection, key, grant revision and endpoint; only its SHA-256 digest is stored and consumption is atomic. A session records the key and grant revision. Revocation creates an explicit `terminating` deadline, and a missing close receipt becomes `terminationOverdue` rather than a successful close.
 

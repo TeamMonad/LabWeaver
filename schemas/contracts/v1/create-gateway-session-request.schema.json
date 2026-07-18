@@ -9,6 +9,10 @@
   "additionalProperties": false,
   "description": "Redeems exactly one SSH authorization into a tracked Gateway session.",
   "properties": {
+    "alias": {
+      "description": "Exact server-generated SSH endpoint alias parsed from `connect <alias>`.",
+      "type": "string"
+    },
     "authorizationId": {
       "type": "string"
     },
@@ -28,6 +32,7 @@
   "required": [
     "authorizationId",
     "forceCommandToken",
+    "alias",
     "gatewayIdentity",
     "connectionId",
     "openedAt"

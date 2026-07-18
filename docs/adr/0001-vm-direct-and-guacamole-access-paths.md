@@ -4,7 +4,7 @@ Status: deferred future proposal. It is not the selected P0 path for Issues #49/
 
 ## Context
 
-LabWeaver may later need lower-latency native VM access without making Tailnet reachability an authorization bypass. The production P0 selected for the current course slice is `ssh alias@gateway`: Access Service owns authorization, Issue #63 owns the OpenSSH Gateway, and Issue #53 owns the real VM endpoint. This ADR preserves a possible later direction only.
+LabWeaver may later need lower-latency native VM access without making reachability an authorization bypass. The production P0 selected for the current course slice is the fixed account flow `ssh gateway@gateway connect <server-alias>`: Access Service owns authorization, Issue #63 owns the OpenSSH Gateway, and Issue #53 owns the real VM endpoint. This ADR preserves a possible later direction only.
 
 ## Decision
 

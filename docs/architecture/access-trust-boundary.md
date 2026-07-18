@@ -1,6 +1,6 @@
 # Access Trust Boundary
 
-Status: the current P0 is `ssh alias@gateway`. Issue #49 owns Access authorization and session facts, #53 owns real VM endpoints, and #63 owns the OpenSSH Gateway/ForceCommand process. `DirectAccessGrant`, Headscale/Router direct access and Guacamole are deferred proposals. Current local evidence does not prove native SSH-to-VM or a deployed production path.
+Status: the current P0 is `ssh gateway@gateway connect <server-alias>`. Issue #49 owns Access authorization and session facts, #53 owns real VM endpoints, and #63 owns the OpenSSH Gateway/ForceCommand process. `DirectAccessGrant`, Headscale/Router direct access and Guacamole are deferred proposals. Current local evidence does not prove native SSH-to-VM or a deployed production path.
 
 ## Purpose and non-goals
 
@@ -68,7 +68,7 @@ flowchart LR
     A --> R
 ```
 
-The current P0 uses `ssh alias@gateway`. The alias is a strict database lookup key and never contains or derives host/port. Access authorizes exactly the fingerprint presented by OpenSSH, issues a short-lived one-time token bound to Gateway/connection/key/grant revision/endpoint, and owns the session lifecycle. Environment eligibility returns only endpoint identity, protocol, health, revision and deadline; route resolution stays in #53/#63.
+The current P0 authenticates the fixed `gateway` Unix account, then accepts only `connect <server-alias>` as `SSH_ORIGINAL_COMMAND`. This ordering is required because OpenSSH rejects an unknown Unix account before `AuthorizedKeysCommand` can run. The alias is a strict database lookup key and never contains or derives host/port. The first phase binds a short-lived one-time token to Gateway, connection, actor and key; redemption binds it to the exact grant revision and endpoint after a fresh Environment eligibility decision. Route resolution stays in #53/#63.
 
 The following `DirectAccessGrant` and Guacamole sections are retained only as a deferred future proposal and are not requirements or completion evidence for #49/#53/#63.
 

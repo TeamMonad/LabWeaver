@@ -342,11 +342,11 @@ impl AccessGrant {
     }
 }
 
-/// Request from AuthorizedKeysCommand over mTLS. It deliberately has no target field.
+/// Request from `AuthorizedKeysCommand` over mTLS. Target selection happens only after
+/// public-key authentication, through the fixed command grammar.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SshAuthorizationRequest {
-    pub alias: String,
     pub presented_key_fingerprint_sha256: String,
     pub gateway_identity: String,
     pub connection_id: String,
@@ -359,10 +359,6 @@ pub struct SshAuthorizationRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SshAuthorization {
     pub authorization_id: String,
-    pub access_grant_id: AccessGrantId,
-    pub access_grant_revision: Revision,
-    pub endpoint_grant_id: EndpointGrantId,
-    pub endpoint_id: EndpointId,
     pub ssh_public_key_id: SshPublicKeyId,
     pub normalized_authorized_key: String,
     pub force_command_token: String,
@@ -374,10 +370,6 @@ impl fmt::Debug for SshAuthorization {
         formatter
             .debug_struct("SshAuthorization")
             .field("authorization_id", &self.authorization_id)
-            .field("access_grant_id", &self.access_grant_id)
-            .field("access_grant_revision", &self.access_grant_revision)
-            .field("endpoint_grant_id", &self.endpoint_grant_id)
-            .field("endpoint_id", &self.endpoint_id)
             .field("ssh_public_key_id", &self.ssh_public_key_id)
             .field("normalized_authorized_key", &"[REDACTED]")
             .field("force_command_token", &"[REDACTED]")
@@ -392,6 +384,8 @@ impl fmt::Debug for SshAuthorization {
 pub struct CreateGatewaySessionRequest {
     pub authorization_id: String,
     pub force_command_token: String,
+    /// Exact server-generated SSH endpoint alias parsed from `connect <alias>`.
+    pub alias: String,
     pub gateway_identity: String,
     pub connection_id: String,
     pub opened_at: UtcTimestamp,
@@ -403,6 +397,7 @@ impl fmt::Debug for CreateGatewaySessionRequest {
             .debug_struct("CreateGatewaySessionRequest")
             .field("authorization_id", &self.authorization_id)
             .field("force_command_token", &"[REDACTED]")
+            .field("alias", &self.alias)
             .field("gateway_identity", &self.gateway_identity)
             .field("connection_id", &self.connection_id)
             .field("opened_at", &self.opened_at)
@@ -640,10 +635,6 @@ mod tests {
     fn authorization_debug_output_redacts_key_and_one_time_token() {
         let authorization = SshAuthorization {
             authorization_id: "authorization-1".to_owned(),
-            access_grant_id: AccessGrantId::new(),
-            access_grant_revision: revision(1),
-            endpoint_grant_id: EndpointGrantId::new(),
-            endpoint_id: crate::EndpointId::new(),
             ssh_public_key_id: SshPublicKeyId::new(),
             normalized_authorized_key: "ssh-ed25519 SECRET_KEY_BODY".to_owned(),
             force_command_token: "secret-token".to_owned(),

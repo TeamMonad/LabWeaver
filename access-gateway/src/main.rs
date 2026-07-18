@@ -108,21 +108,22 @@ async fn run() -> Result<(), GatewayError> {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
         Some("authorized-keys") => {
-            let alias = args.next().ok_or(GatewayError::InvalidInput)?;
+            let local_user = args.next().ok_or(GatewayError::InvalidInput)?;
             let key = args.next().ok_or(GatewayError::InvalidInput)?;
             let connection_id = connection_id()?;
-            authorized_keys(&GatewayConfig::load()?, &alias, &key, &connection_id).await
+            authorized_keys(&GatewayConfig::load()?, &local_user, &key, &connection_id).await
         }
         Some("force-command") => {
             let authorization_id = args.next().ok_or(GatewayError::InvalidInput)?;
             let token = args.next().ok_or(GatewayError::InvalidInput)?;
-            let alias = args.next().ok_or(GatewayError::InvalidInput)?;
             let connection_id = args.next().ok_or(GatewayError::InvalidInput)?;
+            if args.next().is_some() {
+                return Err(GatewayError::InvalidInput);
+            }
             force_command(
                 &GatewayConfig::load()?,
                 &authorization_id,
                 &token,
-                &alias,
                 &connection_id,
             )
             .await
@@ -133,15 +134,16 @@ async fn run() -> Result<(), GatewayError> {
 
 async fn authorized_keys(
     config: &GatewayConfig,
-    alias: &str,
+    local_user: &str,
     presented_key: &str,
     connection_id: &str,
 ) -> Result<(), GatewayError> {
-    validate_alias(alias)?;
+    if local_user != "gateway" {
+        return Err(GatewayError::InvalidInput);
+    }
     validate_connection_id(connection_id)?;
     let key = PublicKey::from_openssh(presented_key).map_err(|_| GatewayError::InvalidInput)?;
     let request = SshAuthorizationRequest {
-        alias: alias.to_owned(),
         presented_key_fingerprint_sha256: key.fingerprint(HashAlg::Sha256).to_string(),
         gateway_identity: config.gateway_identity.clone(),
         connection_id: connection_id.to_owned(),
@@ -162,10 +164,9 @@ async fn authorized_keys(
         return Err(GatewayError::Authority);
     }
     println!(
-        "no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-user-rc,command=\"/usr/local/bin/labweaver-gateway force-command {} {} {} {}\" {}",
+        "restrict,command=\"/usr/local/bin/labweaver-gateway force-command {} {} {}\" {}",
         shell_token(&authorization.authorization_id)?,
         shell_token(&authorization.force_command_token)?,
-        alias,
         connection_id,
         authorization.normalized_authorized_key
     );
@@ -176,17 +177,15 @@ async fn force_command(
     config: &GatewayConfig,
     authorization_id: &str,
     token: &str,
-    alias: &str,
     connection_id: &str,
 ) -> Result<(), GatewayError> {
-    validate_alias(alias)?;
     validate_connection_id(connection_id)?;
-    if env::var("SSH_ORIGINAL_COMMAND").is_ok_and(|command| !command.trim().is_empty()) {
-        return Err(GatewayError::InvalidInput);
-    }
+    let original_command = required_env("SSH_ORIGINAL_COMMAND")?;
+    let alias = parse_connect_command(&original_command)?;
     let request = CreateGatewaySessionRequest {
         authorization_id: authorization_id.to_owned(),
         force_command_token: token.to_owned(),
+        alias: alias.to_owned(),
         gateway_identity: config.gateway_identity.clone(),
         connection_id: connection_id.to_owned(),
         opened_at: now()?,
@@ -315,6 +314,19 @@ fn validate_alias(value: &str) -> Result<(), GatewayError> {
     valid.then_some(()).ok_or(GatewayError::InvalidInput)
 }
 
+fn parse_connect_command(value: &str) -> Result<&str, GatewayError> {
+    let mut tokens = value.split_ascii_whitespace();
+    if tokens.next() != Some("connect") {
+        return Err(GatewayError::InvalidInput);
+    }
+    let alias = tokens.next().ok_or(GatewayError::InvalidInput)?;
+    if tokens.next().is_some() {
+        return Err(GatewayError::InvalidInput);
+    }
+    validate_alias(alias)?;
+    Ok(alias)
+}
+
 fn validate_connection_id(value: &str) -> Result<(), GatewayError> {
     (value.starts_with("ssh-")
         && value.len() == 68
@@ -336,4 +348,27 @@ fn shell_token(value: &str) -> Result<&str, GatewayError> {
 
 fn now() -> Result<UtcTimestamp, GatewayError> {
     UtcTimestamp::from_utc(OffsetDateTime::now_utc()).map_err(|_| GatewayError::Configuration)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixed_command_accepts_only_one_server_alias() {
+        assert!(matches!(
+            parse_connect_command("connect lw-abcdefghijklmnopqrst"),
+            Ok("lw-abcdefghijklmnopqrst")
+        ));
+        for invalid in [
+            "",
+            "connect",
+            "connect lw-abcdefghijklmnopqrst extra",
+            "ssh lw-abcdefghijklmnopqrst",
+            "connect lw-abcdefghijklmnopqrs;id",
+            "scp file lw-abcdefghijklmnopqrst:/tmp",
+        ] {
+            assert!(parse_connect_command(invalid).is_err(), "{invalid}");
+        }
+    }
 }

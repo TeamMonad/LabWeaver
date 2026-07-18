@@ -59,11 +59,10 @@ async fn access_schema_enforces_unique_keys_single_live_grant_and_hashed_tokens(
     sqlx::query("INSERT INTO access.endpoint_grants (endpoint_grant_id,grant_id,endpoint_id,endpoint_revision,protocol,health,alias,expires_at,contract) VALUES ($1,$2,$3,1,'ssh','healthy','lw-abcdefghijklmnopqrst',now()+interval '30 minutes','{}')")
         .bind(endpoint_grant_id).bind(grant_id).bind(Uuid::now_v7()).execute(&pool).await?;
     let authorization_id = Uuid::now_v7();
-    sqlx::query("INSERT INTO access.ssh_authorizations (authorization_id,token_sha256,grant_id,grant_revision,endpoint_grant_id,key_id,gateway_identity,connection_id,source_address_sha256,issued_at,expires_at) VALUES ($1,$2,$3,1,$4,$5,'spiffe://labweaver/gateway','connection-1',$6,now(),now()+interval '30 seconds')")
+    sqlx::query("INSERT INTO access.ssh_authorizations (authorization_id,token_sha256,actor_id,key_id,gateway_identity,connection_id,source_address_sha256,issued_at,expires_at) VALUES ($1,$2,$3,$4,'spiffe://labweaver/gateway','connection-1',$5,now(),now()+interval '30 seconds')")
         .bind(authorization_id)
         .bind("b".repeat(64))
-        .bind(grant_id)
-        .bind(endpoint_grant_id)
+        .bind(actor)
         .bind(key_id)
         .bind("c".repeat(64))
         .execute(&pool).await?;
