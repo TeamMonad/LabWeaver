@@ -1,0 +1,310 @@
+#!/usr/bin/env python3
+"""Create private Sprint 2 foundation PKI, NATS JWTs, and bundle inputs."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import secrets
+import shutil
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+
+class FoundationError(Exception):
+    """Stable fail-closed foundation-authoring diagnostic."""
+
+
+NATS_USERS: dict[str, tuple[tuple[str, ...], tuple[str, ...], bool]] = {
+    "control-service": (
+        (
+            "$JS.API.>",
+            "labweaver.control.>",
+            "labweaver.agent.run.requested.v1",
+        ),
+        ("_INBOX.>", "labweaver.agent.run.>", "labweaver.agent.build.>"),
+        False,
+    ),
+    "access-service": (("labweaver.access.>",), (), False),
+    "agent-service": (
+        ("$JS.API.>", "labweaver.agent.>", "labweaver.provider.container_build.execute.v1"),
+        ("_INBOX.>", "labweaver.control.agent_build.requested.v1"),
+        False,
+    ),
+    "build-executor": ((), ("labweaver.provider.container_build.execute.v1",), True),
+    "environment-service": (
+        (
+            "$JS.API.>",
+            "labweaver.environment.>",
+            "labweaver.provider.kubernetes.container.v1",
+            "labweaver.provider.kubevirt.vm.v1",
+        ),
+        (
+            "_INBOX.>",
+            "labweaver.access.>",
+            "labweaver.control.environment_template_release.>",
+            "labweaver.environment.instance.lifecycle_requested.v1",
+        ),
+        False,
+    ),
+    "container-executor": ((), ("labweaver.provider.kubernetes.container.v1",), True),
+    "kubevirt-executor": ((), ("labweaver.provider.kubevirt.vm.v1",), True),
+}
+
+
+def _private_output(path: Path) -> Path:
+    resolved = path.resolve()
+    if not any(part in {".private", "private"} for part in resolved.parts):
+        raise FoundationError("LW_SPRINT2_FOUNDATION_PRIVATE_PATH_REQUIRED")
+    if resolved.exists():
+        raise FoundationError("LW_SPRINT2_FOUNDATION_OUTPUT_EXISTS")
+    if not resolved.parent.is_dir():
+        raise FoundationError("LW_SPRINT2_FOUNDATION_PARENT_MISSING")
+    return resolved
+
+
+def _trusted_binary(path: Path, expected_name: str) -> Path:
+    if not path.is_absolute():
+        raise FoundationError("LW_SPRINT2_FOUNDATION_TOOL_INVALID")
+    try:
+        resolved = path.resolve(strict=True)
+        mode = resolved.stat().st_mode
+    except OSError as error:
+        raise FoundationError("LW_SPRINT2_FOUNDATION_TOOL_INVALID") from error
+    if not resolved.is_file() or resolved.name != expected_name or mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise FoundationError("LW_SPRINT2_FOUNDATION_TOOL_INVALID")
+    return resolved
+
+
+def _run(binary: Path, arguments: list[str], private_home: Path) -> None:
+    environment = {
+        "HOME": str(private_home),
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+    }
+    try:
+        subprocess.run(
+            [str(binary), *arguments],
+            check=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            env=environment,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise FoundationError("LW_SPRINT2_FOUNDATION_TOOL_FAILED") from error
+
+
+def _write(path: Path, payload: bytes, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _certificate(
+    openssl: Path,
+    private_home: Path,
+    authority: Path,
+    output: Path,
+    common_name: str,
+    sans: tuple[str, ...],
+    usage: str,
+    days: int,
+) -> tuple[Path, Path]:
+    key = authority / f"{common_name}.key"
+    request = authority / f"{common_name}.csr"
+    extension = authority / f"{common_name}.ext"
+    certificate = authority / f"{common_name}.crt"
+    _write(
+        extension,
+        (
+            "basicConstraints=critical,CA:FALSE\n"
+            "keyUsage=critical,digitalSignature,keyEncipherment\n"
+            f"extendedKeyUsage={usage}\n"
+            f"subjectAltName={','.join(sans)}\n"
+        ).encode(),
+    )
+    _run(openssl, ["genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:3072", "-out", str(key)], private_home)
+    _run(openssl, ["req", "-new", "-key", str(key), "-subj", f"/CN={common_name}", "-out", str(request)], private_home)
+    _run(
+        openssl,
+        [
+            "x509", "-req", "-in", str(request), "-CA", str(authority / "ca.crt"),
+            "-CAkey", str(authority / "ca.key"), "-CAcreateserial", "-days", str(days),
+            "-sha256", "-extfile", str(extension), "-out", str(certificate),
+        ],
+        private_home,
+    )
+    shutil.copyfile(key, output / "key")
+    shutil.copyfile(certificate, output / "certificate")
+    os.chmod(output / "key", 0o600)
+    os.chmod(output / "certificate", 0o600)
+    return key, certificate
+
+
+def _copy(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    with source.open("rb") as reader:
+        _write(destination, reader.read())
+
+
+def _nsc(nsc: Path, store: Path, arguments: list[str], private_home: Path) -> None:
+    _run(nsc, ["--all-dirs", str(store), *arguments], private_home)
+
+
+def prepare(output: Path, openssl: Path, nsc: Path, days: int) -> dict[str, object]:
+    if not 30 <= days <= 825:
+        raise FoundationError("LW_SPRINT2_FOUNDATION_VALIDITY_INVALID")
+    private_home = output / "home"
+    authority = output / "authority"
+    nsc_store = output / "nsc"
+    render_input = output / "render-input"
+    clients = output / "nats-clients"
+    for directory in (private_home, authority, nsc_store, render_input, clients):
+        directory.mkdir(parents=True, mode=0o700)
+
+    ca_key = authority / "ca.key"
+    ca_certificate = authority / "ca.crt"
+    _run(openssl, ["genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:4096", "-out", str(ca_key)], private_home)
+    _run(
+        openssl,
+        [
+            "req", "-x509", "-new", "-key", str(ca_key), "-sha256", "-days", str(days),
+            "-subj", "/CN=LabWeaver Sprint 2 Internal CA", "-out", str(ca_certificate),
+        ],
+        private_home,
+    )
+
+    for service in ("postgres", "nats", "minio"):
+        material = authority / f"issued-{service}"
+        material.mkdir(mode=0o700)
+        _, certificate = _certificate(
+            openssl,
+            private_home,
+            authority,
+            material,
+            service,
+            (
+                f"DNS:{service}",
+                f"DNS:{service}.labweaver-data",
+                f"DNS:{service}.labweaver-data.svc",
+            ),
+            "serverAuth",
+            days,
+        )
+        secret_root = render_input / "secrets" / (
+            "minio-secrets" if service == "minio" else f"{service}-server-secrets" if service == "nats" else "postgres-secrets"
+        )
+        if service == "minio":
+            _copy(material / "key", secret_root / "private.key")
+            _copy(certificate, secret_root / "public.crt")
+            _copy(ca_certificate, secret_root / "ca.crt")
+            _write(secret_root / "root-user", b"labweaver-root")
+            _write(secret_root / "root-password", secrets.token_urlsafe(48).encode())
+        else:
+            _copy(material / "key", secret_root / "tls.key")
+            _copy(certificate, secret_root / "tls.crt")
+            _copy(ca_certificate, secret_root / "ca.crt")
+            if service == "postgres":
+                _write(secret_root / "postgres-password", secrets.token_urlsafe(48).encode())
+
+    _nsc(nsc, nsc_store, ["add", "operator", "--name", "LABWEAVER", "--sys", "--generate-signing-key", "--expiry", f"{days}d"], private_home)
+    _nsc(nsc, nsc_store, ["add", "account", "--name", "WORKLOADS", "--expiry", f"{days}d"], private_home)
+    for name, (publish, subscribe, response) in NATS_USERS.items():
+        arguments = ["add", "user", "--account", "WORKLOADS", "--name", name, "--expiry", f"{days}d"]
+        for subject in publish:
+            arguments.extend(["--allow-pub", subject])
+        for subject in subscribe:
+            arguments.extend(["--allow-sub", subject])
+        if response:
+            arguments.append("--allow-pub-response")
+        _nsc(nsc, nsc_store, arguments, private_home)
+        credentials = clients / name / "nats.creds"
+        credentials.parent.mkdir(mode=0o700)
+        _nsc(nsc, nsc_store, ["generate", "creds", "--account", "WORKLOADS", "--name", name, "--output-file", str(credentials)], private_home)
+        os.chmod(credentials, 0o600)
+        client_material = authority / f"issued-{name}"
+        client_material.mkdir(mode=0o700)
+        _, client_certificate = _certificate(
+            openssl,
+            private_home,
+            authority,
+            client_material,
+            name,
+            (f"URI:spiffe://labweaver/{name}",),
+            "clientAuth",
+            days,
+        )
+        _copy(client_material / "key", clients / name / "nats-client.key")
+        _copy(client_certificate, clients / name / "nats-client.crt")
+        _copy(ca_certificate, clients / name / "nats-ca.pem")
+
+    generated_config = authority / "nats-generated.conf"
+    _nsc(
+        nsc,
+        nsc_store,
+        ["generate", "config", "--mem-resolver", "--sys-account", "SYS", "--config-file", str(generated_config)],
+        private_home,
+    )
+    nats_config = generated_config.read_text(encoding="utf-8") + """
+server_name: sprint2-nats
+listen: 0.0.0.0:4222
+http: 0.0.0.0:8222
+jetstream {
+  store_dir: "/data"
+  max_file_store: 8GB
+  max_memory_store: 256MB
+}
+tls {
+  cert_file: "/etc/nats/tls/tls.crt"
+  key_file: "/etc/nats/tls/tls.key"
+  ca_file: "/etc/nats/tls/ca.crt"
+  verify: true
+  timeout: 2
+}
+"""
+    _write(render_input / "configmaps" / "nats-config" / "nats-server.conf", nats_config.encode())
+
+    return {
+        "ca_sha256": hashlib.sha256(ca_certificate.read_bytes()).hexdigest(),
+        "nats_config_sha256": hashlib.sha256(nats_config.encode()).hexdigest(),
+        "nats_clients": len(NATS_USERS),
+        "render_input": "render-input",
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--openssl", type=Path, default=Path("/usr/bin/openssl"))
+    parser.add_argument("--nsc", type=Path, default=Path("/usr/local/bin/nsc"))
+    parser.add_argument("--valid-days", type=int, default=365)
+    arguments = parser.parse_args()
+    output: Path | None = None
+    try:
+        output = _private_output(arguments.output)
+        openssl = _trusted_binary(arguments.openssl, "openssl")
+        nsc = _trusted_binary(arguments.nsc, "nsc")
+        output.mkdir(mode=0o700)
+        result = prepare(output, openssl, nsc, arguments.valid_days)
+    except (FoundationError, OSError, UnicodeError) as error:
+        if output is not None and output.is_dir():
+            shutil.rmtree(output)
+        diagnostic = str(error) if isinstance(error, FoundationError) else "LW_SPRINT2_FOUNDATION_AUTHORING_FAILED"
+        print(diagnostic, file=sys.stderr)
+        return 1
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

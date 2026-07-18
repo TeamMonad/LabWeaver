@@ -85,6 +85,24 @@ Keycloak administration client are installed on the control plane for the
 allowlisted reset role. Downloads are versioned in `deploy/versions.lock.yml`;
 the role neither discovers a latest release nor executes an arbitrary shell.
 
+On the approved router, create a new root-owned private authoring directory and
+render its exact Kubernetes input bundle without printing credential values:
+
+```sh
+python3 tools/prepare_sprint2_foundation.py \
+  --output .private/sprint2-foundation-<run-id>
+python3 tools/render_sprint2_bundle.py \
+  --manifest deploy/config/sprint2-foundation-bundle-manifest.json \
+  --input .private/sprint2-foundation-<run-id>/render-input \
+  --output .private/sprint2-foundation-<run-id>/bundle.yml
+```
+
+The authoring command creates one internal CA, separate server certificates,
+seven workload-specific NATS users and mTLS clients, the static operator/account
+resolver config, and random PostgreSQL/MinIO bootstrap credentials. It accepts
+only a new private path and fixed non-world-writable OpenSSL/NSC binaries. The
+checked-in renderer then enforces the exact foundation ConfigMap/Secret key set.
+
 ```sh
 cargo xtask sprint2-foundation --infra --env demo --yes
 ```
