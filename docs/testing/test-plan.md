@@ -33,6 +33,9 @@ baseline migration to a disposable PostgreSQL instance.
   product contract;
 - Critical Trivy findings reject publication and High findings remain visible;
 - candidate kind, course, approval, digest and scanner identity cannot drift;
+- a Container build context must resolve to a verified object in a completed
+  upload for the same course; cross-course or pending uploads fail before the
+  approval and outbox transaction commits;
 - invalid state transitions, duplicate IDs, illegal paths, over-limit content,
   timeout, cancellation and dependency failure return stable diagnostics;
 - LLM output cannot approve, execute, publish or score a candidate.
@@ -47,6 +50,8 @@ baseline migration to a disposable PostgreSQL instance.
 - Kubernetes/KubeVirt executor apply, observe, restart, deletion tombstone,
   deadline, RBAC denial and cleanup tests;
 - Access/Environment mTLS authority and OpenSSH Gateway negative tests.
+- destructive reset dependency and configuration-bundle probes complete before
+  the first namespace, trust-plane, schema, stream, bucket or realm mutation.
 
 ## Connected Sprint 2 verification
 
