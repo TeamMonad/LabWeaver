@@ -95,6 +95,11 @@ class AnsibleFixtureTests(unittest.TestCase):
         documents = list(yaml.safe_load_all(rendered))
         self.assertEqual(len(documents), 8)
         self.assertEqual(sum(document["kind"] == "StatefulSet" for document in documents), 3)
+        minio = next(
+            document for document in documents
+            if document["kind"] == "StatefulSet" and document["metadata"]["name"] == "minio"
+        )
+        self.assertEqual(minio["spec"]["template"]["spec"]["securityContext"]["runAsUser"], 65534)
         self.assertIn("pod-security.kubernetes.io/enforce: restricted", tasks)
         reset_namespaces = reset.split("sprint2_reset_domains:", maxsplit=1)[0]
         self.assertNotIn("labweaver-data", reset_namespaces)

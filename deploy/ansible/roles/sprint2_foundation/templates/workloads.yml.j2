@@ -170,9 +170,12 @@ spec:
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
-        fsGroup: 1000
+        # The root-squashed NFS provisioner creates each dynamic subdirectory
+        # as nobody:nobody. Bind MinIO to that non-root identity rather than
+        # attempting a privileged chown that the export correctly rejects.
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: minio
