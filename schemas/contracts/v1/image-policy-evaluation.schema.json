@@ -64,7 +64,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Deterministic scan and trust-policy evaluation.",
+  "description": "Deterministic digest-bound Trivy evaluation.",
   "properties": {
     "artifactId": {
       "$ref": "#/$defs/ImageArtifactId"
@@ -74,12 +74,6 @@
     },
     "evaluatedAt": {
       "$ref": "#/$defs/UtcTimestamp"
-    },
-    "expectedCertificateSubject": {
-      "type": "string"
-    },
-    "expectedFulcioIssuer": {
-      "type": "string"
     },
     "maxEvidenceAgeMilliseconds": {
       "format": "uint64",
@@ -95,12 +89,6 @@
     "policyRevision": {
       "$ref": "#/$defs/Revision"
     },
-    "requireCtSct": {
-      "type": "boolean"
-    },
-    "requireRekorInclusion": {
-      "type": "boolean"
-    },
     "scannerDatabaseSha256": {
       "$ref": "#/$defs/Sha256Digest"
     },
@@ -109,9 +97,6 @@
     },
     "scannerVersion": {
       "type": "string"
-    },
-    "trustBundleSha256": {
-      "$ref": "#/$defs/Sha256Digest"
     },
     "validUntil": {
       "$ref": "#/$defs/UtcTimestamp"
@@ -129,11 +114,6 @@
     "scannerVersion",
     "scannerDatabaseSha256",
     "vulnerabilities",
-    "trustBundleSha256",
-    "expectedFulcioIssuer",
-    "expectedCertificateSubject",
-    "requireRekorInclusion",
-    "requireCtSct",
     "evaluatedAt",
     "maxEvidenceAgeMilliseconds",
     "validUntil",

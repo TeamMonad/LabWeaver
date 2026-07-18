@@ -31,20 +31,16 @@ worker_environment_files:
   ANTHROPIC_API_KEY: "secrets/anthropic-api-key"
 build:
   # Served by the deployment-owned executor binding immutable ArtifactRef inputs
-  # to restricted BuildKit, private Harbor/Trivy, and Private Sigstore.
+  # to restricted BuildKit and private Harbor/Trivy.
   provider_subject: "labweaver.provider.container_build.execute.v2"
   builder_binding: "buildkit-primary-v1"
   scanner_binding: "trivy-primary-v1"
-  signer_binding: "sigstore-private-v1"
   registry_binding: "harbor-primary-v1"
   policy_id: "00000000-0000-7000-8000-000000000002"
   policy_revision: 1
   scanner_name: "trivy"
   scanner_version: "0.72.0"
   scanner_database_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-  trust_bundle_sha256: "d58414fc98a5de1ad8c269290835b407ff258b3f567dab3399fbc2911454a981"
-  expected_fulcio_issuer: "https://keycloak.internal/realms/workloads"
-  expected_certificate_subject: "spiffe://labweaver/image-builder"
   registry_robot_name: "runtime-puller"
   evidence_ttl_milliseconds: 3600000
   stage_timeout_milliseconds: 120000

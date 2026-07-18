@@ -90,26 +90,6 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::supply_chain::EnvironmentTemplateReleaseView
     );
     document!(
-        "schemas/contracts/v1/private-sigstore-workload-identity.schema.json",
-        crate::supply_chain::WorkloadIdentityPolicy
-    );
-    document!(
-        "schemas/contracts/v1/private-sigstore-trust-bundle.schema.json",
-        crate::supply_chain::PrivateSigstoreTrustBundle
-    );
-    document!(
-        "schemas/contracts/v1/private-sigstore-testflight-report.schema.json",
-        crate::supply_chain::PrivateSigstoreTestFlightReport
-    );
-    document!(
-        "schemas/contracts/v1/private-sigstore-backup-manifest.schema.json",
-        crate::supply_chain::PrivateSigstoreBackupIdentity
-    );
-    document!(
-        "schemas/contracts/v1/private-sigstore-lifecycle-report.schema.json",
-        crate::supply_chain::PrivateSigstoreLifecycleReport
-    );
-    document!(
         "schemas/contracts/v1/environment-instance.schema.json",
         crate::environment::EnvironmentInstance
     );

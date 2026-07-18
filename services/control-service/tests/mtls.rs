@@ -469,9 +469,6 @@ fn config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
         trust_revision: Revision::new(1)?,
         image_policy_id: PolicyId::new(),
         image_policy_revision: Revision::new(1)?,
-        trust_bundle_sha256: Sha256Digest::of_bytes(b"trust-bundle"),
-        fulcio_issuer: "https://issuer.invalid".to_owned(),
-        certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
         environment_schema_sha256: Sha256Digest::of_bytes(b"environment"),
         evaluation_schema_sha256: Sha256Digest::of_bytes(b"evaluation"),
         container_build: ContainerBuildPolicy {

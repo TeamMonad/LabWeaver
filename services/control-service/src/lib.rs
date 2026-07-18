@@ -82,12 +82,6 @@ pub struct ControlConfig {
     pub image_policy_id: PolicyId,
     /// Exact active image-policy revision accepted for publication.
     pub image_policy_revision: Revision,
-    /// Exact active private trust-bundle identity accepted for publication.
-    pub trust_bundle_sha256: Sha256Digest,
-    /// Exact Fulcio issuer accepted for publication.
-    pub fulcio_issuer: String,
-    /// Exact workload certificate subject accepted for publication.
-    pub certificate_subject: String,
     /// Frozen Environment candidate schema identity.
     pub environment_schema_sha256: Sha256Digest,
     /// Frozen Evaluation candidate schema identity.
@@ -129,8 +123,6 @@ impl ControlConfig {
             || self.max_package_bytes == 0
             || self.retention_seconds == 0
             || self.sse_retention_seconds == 0
-            || self.fulcio_issuer.trim().is_empty()
-            || self.certificate_subject.trim().is_empty()
             || !self.container_build.validate()
         {
             return Err(ControlError::ConfigurationInvalid);
@@ -1465,15 +1457,8 @@ impl ControlService {
             return Err(ControlError::ReleaseEvidenceStale);
         }
         let evaluation = &request.image_policy_evaluation;
-        let signature = request.artifact.signature_evidence();
         if evaluation.policy_id != self.config.image_policy_id
             || evaluation.policy_revision != self.config.image_policy_revision
-            || evaluation.trust_bundle_sha256 != self.config.trust_bundle_sha256
-            || signature.trust_bundle_sha256 != self.config.trust_bundle_sha256
-            || evaluation.expected_fulcio_issuer != self.config.fulcio_issuer
-            || signature.fulcio_issuer != self.config.fulcio_issuer
-            || evaluation.expected_certificate_subject != self.config.certificate_subject
-            || signature.certificate_subject != self.config.certificate_subject
         {
             return Err(ControlError::ReleaseEvidenceInvalid);
         }
@@ -2866,9 +2851,6 @@ mod tests {
             trust_revision: Revision::new(1)?,
             image_policy_id: PolicyId::new(),
             image_policy_revision: Revision::new(1)?,
-            trust_bundle_sha256: Sha256Digest::of_bytes(b"trust-bundle"),
-            fulcio_issuer: "https://issuer.invalid".to_owned(),
-            certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
             environment_schema_sha256: Sha256Digest::of_bytes(b"environment-schema"),
             evaluation_schema_sha256: Sha256Digest::of_bytes(b"evaluation-schema"),
             container_build: ContainerBuildPolicy {

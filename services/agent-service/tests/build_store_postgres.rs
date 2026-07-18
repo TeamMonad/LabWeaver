@@ -33,9 +33,7 @@ use contracts::http::{
     IdempotencyKey, InternalAgentBuildCancellationRequest, InternalAgentBuildState,
     InternalAgentBuildStatusQuery,
 };
-use contracts::supply_chain::{
-    BuildNetworkPolicy, BuildRequest, SigstoreEvidence, VulnerabilitySummary,
-};
+use contracts::supply_chain::{BuildNetworkPolicy, BuildRequest, VulnerabilitySummary};
 use contracts::{
     ActorId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId, CourseId, EventId,
     PolicyId, Revision, Sequence, Sha256Digest, UtcTimestamp,
@@ -59,10 +57,6 @@ impl BuildSupplyChainProvider for SlowProvider {
 
     fn scanner_binding(&self) -> &'static str {
         "trivy-primary-v1"
-    }
-
-    fn signer_binding(&self) -> &'static str {
-        "sigstore-private-v1"
     }
 
     fn registry_binding(&self) -> &'static str {
@@ -105,8 +99,6 @@ impl BuildSupplyChainProvider for SlowProvider {
             build_identity: identity,
             repository: command.request.output_repository.clone(),
             digest: digest(),
-            sbom: artifact_ref("application/spdx+json"),
-            provenance: artifact_ref("application/vnd.in-toto+json"),
         })
     }
 
@@ -131,32 +123,6 @@ impl BuildSupplyChainProvider for SlowProvider {
         })
     }
 
-    async fn sign_and_verify(
-        &self,
-        _context: &BuildProviderRequestContext,
-        candidate: &BuiltCandidate,
-    ) -> Result<SigstoreEvidence, BuildProviderFailure> {
-        Ok(SigstoreEvidence {
-            trust_bundle_sha256: Sha256Digest::of_bytes(b"trust-bundle"),
-            fulcio_issuer: "https://fulcio.internal".to_owned(),
-            certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
-            subject_digest: candidate
-                .digest
-                .strip_prefix("sha256:")
-                .expect("sha256 digest")
-                .parse()
-                .expect("valid digest"),
-            certificate_sha256: Sha256Digest::of_bytes(b"certificate"),
-            signature_sha256: Sha256Digest::of_bytes(b"signature"),
-            rekor_log_id: "rekor-private-v1".to_owned(),
-            rekor_log_index: 7,
-            rekor_inclusion_proof_sha256: Sha256Digest::of_bytes(b"rekor-proof"),
-            ct_log_id: "ct-private-v1".to_owned(),
-            sct_sha256: Sha256Digest::of_bytes(b"sct"),
-            verified_at: now(),
-        })
-    }
-
     async fn publish_immutable(
         &self,
         _context: &BuildProviderRequestContext,
@@ -165,7 +131,6 @@ impl BuildSupplyChainProvider for SlowProvider {
         Ok(PublishedImage {
             build_identity: candidate.build_identity,
             digest: candidate.digest.clone(),
-            immutable_tag: "build-cancel-test".to_owned(),
         })
     }
 
@@ -766,16 +731,12 @@ fn policy() -> Result<BuildPipelinePolicy, Box<dyn std::error::Error>> {
     Ok(BuildPipelinePolicy {
         builder_binding: "buildkit-primary-v1".to_owned(),
         scanner_binding: "trivy-primary-v1".to_owned(),
-        signer_binding: "sigstore-private-v1".to_owned(),
         registry_binding: "harbor-primary-v1".to_owned(),
         policy_id: PolicyId::new(),
         policy_revision: revision(1)?,
         scanner_name: "trivy".to_owned(),
         scanner_version: "0.58.0".to_owned(),
         scanner_database_sha256: Sha256Digest::of_bytes(b"trivy-db"),
-        trust_bundle_sha256: Sha256Digest::of_bytes(b"trust-bundle"),
-        expected_fulcio_issuer: "https://fulcio.internal".to_owned(),
-        expected_certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
         registry_robot_name: "runtime-puller".to_owned(),
         evidence_ttl_milliseconds: 3_600_000,
         stage_timeout: Duration::from_secs(1),

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use async_nats::connection::State as NatsConnectionState;
 use contracts::environment::EnvironmentOperationKind;
-use contracts::{ActorId, PolicyId, Revision, Sha256Digest, UtcTimestamp};
+use contracts::{ActorId, PolicyId, Revision, UtcTimestamp};
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::watch;
@@ -602,7 +602,6 @@ struct ProviderBindingConfiguration {
     active_image_policy_id: Option<String>,
     active_image_policy_revision: Option<u64>,
     active_trust_revision: Option<u64>,
-    active_trust_bundle_sha256: Option<String>,
     storage_class_binding: Option<String>,
     storage_class_name: Option<String>,
     data_source_namespace: Option<String>,
@@ -634,12 +633,6 @@ impl ProviderBindingConfiguration {
             .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)?,
             Revision::new(
                 self.active_trust_revision
-                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
-            )
-            .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)?,
-            Sha256Digest::from_str(
-                self.active_trust_bundle_sha256
-                    .as_deref()
                     .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
             )
             .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)?,
@@ -687,7 +680,6 @@ impl ProviderBindingConfiguration {
             && self.active_image_policy_id.is_some()
             && self.active_image_policy_revision.is_some()
             && self.active_trust_revision.is_some()
-            && self.active_trust_bundle_sha256.is_some()
     }
 
     fn has_provider_specific_fields(&self) -> bool {
@@ -697,7 +689,6 @@ impl ProviderBindingConfiguration {
             || self.active_image_policy_id.is_some()
             || self.active_image_policy_revision.is_some()
             || self.active_trust_revision.is_some()
-            || self.active_trust_bundle_sha256.is_some()
     }
 }
 

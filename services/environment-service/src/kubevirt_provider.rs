@@ -1279,9 +1279,6 @@ where
         if release.image_policy_evaluation.policy_id != policy.image_policy_id
             || release.image_policy_evaluation.policy_revision != policy.image_policy_revision
             || release.approval.trust_revision != policy.trust_revision
-            || release.image_policy_evaluation.trust_bundle_sha256 != policy.trust_bundle_sha256
-            || release.artifact.signature_evidence().trust_bundle_sha256
-                != policy.trust_bundle_sha256
         {
             return Err(ReleaseProjectionError::TrustRevisionMismatch);
         }

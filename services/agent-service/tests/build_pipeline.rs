@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use contracts::authoring::{CandidateApproval, CandidateDecision};
 use contracts::events::AgentBuildRequestedV2;
 use contracts::supply_chain::{
-    BuildNetworkPolicy, BuildRequest, ImageArtifact, SigstoreEvidence, VulnerabilitySummary,
+    BuildNetworkPolicy, BuildRequest, ImageArtifact, VulnerabilitySummary,
 };
 use contracts::{
     ActorId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId, CourseId, PolicyId,
@@ -34,7 +34,6 @@ enum Call {
     EnsurePrivate,
     Build,
     Scan,
-    Sign,
     Publish,
     Cleanup,
 }
@@ -48,14 +47,9 @@ struct FakeProvider {
     project_private: bool,
     project_quota_bytes: u64,
     robot_name: String,
-    signature_issuer: String,
-    signature_verified_at: UtcTimestamp,
     published_digest: String,
     build_delay: Duration,
     cleanup_fails: bool,
-    subject_digest: Option<Sha256Digest>,
-    certificate_sha256: Sha256Digest,
-    signature_sha256: Sha256Digest,
 }
 
 impl Default for FakeProvider {
@@ -68,14 +62,9 @@ impl Default for FakeProvider {
             project_private: true,
             project_quota_bytes: 10 * 1024 * 1024 * 1024,
             robot_name: "runtime-puller".to_owned(),
-            signature_issuer: "https://fulcio.internal".to_owned(),
-            signature_verified_at: timestamp("2026-07-16T08:00:30.000Z"),
             published_digest: digest(),
             build_delay: Duration::ZERO,
             cleanup_fails: false,
-            subject_digest: None,
-            certificate_sha256: Sha256Digest::of_bytes(b"certificate"),
-            signature_sha256: Sha256Digest::of_bytes(b"signature"),
         }
     }
 }
@@ -103,10 +92,6 @@ impl BuildSupplyChainProvider for FakeProvider {
 
     fn scanner_binding(&self) -> &'static str {
         "trivy-primary-v1"
-    }
-
-    fn signer_binding(&self) -> &'static str {
-        "sigstore-private-v1"
     }
 
     fn registry_binding(&self) -> &'static str {
@@ -148,8 +133,6 @@ impl BuildSupplyChainProvider for FakeProvider {
             build_identity: identity,
             repository: command.request.output_repository.clone(),
             digest: digest(),
-            sbom: artifact_ref("application/spdx+json"),
-            provenance: artifact_ref("application/vnd.in-toto+json"),
         })
     }
 
@@ -175,34 +158,6 @@ impl BuildSupplyChainProvider for FakeProvider {
         })
     }
 
-    async fn sign_and_verify(
-        &self,
-        context: &BuildProviderRequestContext,
-        candidate: &BuiltCandidate,
-    ) -> Result<SigstoreEvidence, BuildProviderFailure> {
-        self.record(Call::Sign, context);
-        let candidate_digest = candidate
-            .digest
-            .strip_prefix("sha256:")
-            .expect("sha256 digest")
-            .parse()
-            .expect("valid digest");
-        Ok(SigstoreEvidence {
-            trust_bundle_sha256: Sha256Digest::of_bytes(b"trust-bundle"),
-            fulcio_issuer: self.signature_issuer.clone(),
-            certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
-            subject_digest: self.subject_digest.unwrap_or(candidate_digest),
-            certificate_sha256: self.certificate_sha256,
-            signature_sha256: self.signature_sha256,
-            rekor_log_id: "rekor-private-v1".to_owned(),
-            rekor_log_index: 7,
-            rekor_inclusion_proof_sha256: Sha256Digest::of_bytes(b"rekor-proof"),
-            ct_log_id: "ct-private-v1".to_owned(),
-            sct_sha256: Sha256Digest::of_bytes(b"sct"),
-            verified_at: self.signature_verified_at,
-        })
-    }
-
     async fn publish_immutable(
         &self,
         context: &BuildProviderRequestContext,
@@ -212,7 +167,6 @@ impl BuildSupplyChainProvider for FakeProvider {
         Ok(PublishedImage {
             build_identity: candidate.build_identity,
             digest: self.published_digest.clone(),
-            immutable_tag: "build-aabbccdd".to_owned(),
         })
     }
 
@@ -273,11 +227,11 @@ async fn successful_build_preserves_digest_identity_and_high_warning() {
     assert_eq!(
         contexts
             .iter()
-            .take(5)
+            .take(4)
             .map(|context| context.stage_request_id)
             .collect::<std::collections::HashSet<_>>()
             .len(),
-        5
+        4
     );
 }
 
@@ -307,8 +261,8 @@ async fn retry_generation_changes_every_remote_stage_identity() {
         .expect("second generation succeeds");
 
     let contexts = recorded.contexts();
-    assert_eq!(contexts.len(), 10);
-    for (first, second) in contexts.iter().take(5).zip(contexts.iter().skip(5)) {
+    assert_eq!(contexts.len(), 8);
+    for (first, second) in contexts.iter().take(4).zip(contexts.iter().skip(4)) {
         assert_eq!(first.stage, second.stage);
         assert_eq!(first.build_request_id, second.build_request_id);
         assert_ne!(first.fence_generation, second.fence_generation);
@@ -318,7 +272,7 @@ async fn retry_generation_changes_every_remote_stage_identity() {
 }
 
 #[tokio::test]
-async fn critical_vulnerability_blocks_signing_and_publication_then_cleans_up() {
+async fn critical_vulnerability_blocks_publication_then_cleans_up() {
     let provider = FakeProvider {
         critical: 1,
         ..FakeProvider::default()
@@ -375,84 +329,6 @@ async fn private_project_quota_and_robot_are_mandatory() {
             "project admission must fail before BuildKit"
         );
     }
-}
-
-#[tokio::test]
-async fn issuer_mismatch_blocks_publication_and_cleans_up() {
-    let provider = FakeProvider {
-        signature_issuer: "https://unexpected.invalid".to_owned(),
-        ..FakeProvider::default()
-    };
-    let calls = provider.clone();
-    let error = pipeline(provider)
-        .execute(
-            &command(60_000),
-            now(),
-            fence(60_000),
-            &BuildCancellation::new(),
-        )
-        .await
-        .expect_err("issuer mismatch must block");
-
-    assert_eq!(error.code, BuildFailureCode::SignatureInvalid);
-    assert!(error.cleanup_verified);
-    assert!(!calls.calls().contains(&Call::Publish));
-    assert_eq!(calls.calls().last(), Some(&Call::Cleanup));
-}
-
-#[tokio::test]
-async fn incomplete_or_wrongly_bound_signature_evidence_is_rejected() {
-    for provider in [
-        FakeProvider {
-            subject_digest: Some(Sha256Digest::of_bytes(b"other-image")),
-            ..FakeProvider::default()
-        },
-        FakeProvider {
-            certificate_sha256: Sha256Digest::of_bytes(&[]),
-            ..FakeProvider::default()
-        },
-        FakeProvider {
-            signature_sha256: Sha256Digest::of_bytes(&[]),
-            ..FakeProvider::default()
-        },
-    ] {
-        let calls = provider.clone();
-        let error = pipeline(provider)
-            .execute(
-                &command(60_000),
-                now(),
-                fence(60_000),
-                &BuildCancellation::new(),
-            )
-            .await
-            .expect_err(
-                "signature evidence must bind non-empty certificate, signature and subject",
-            );
-        assert_eq!(error.code, BuildFailureCode::SignatureInvalid);
-        assert_eq!(calls.calls().last(), Some(&Call::Cleanup));
-        assert!(!calls.calls().contains(&Call::Publish));
-    }
-}
-
-#[tokio::test]
-async fn signature_time_outside_the_build_window_is_rejected() {
-    let provider = FakeProvider {
-        signature_verified_at: timestamp("2026-07-16T08:01:01.000Z"),
-        ..FakeProvider::default()
-    };
-    let calls = provider.clone();
-    let error = pipeline(provider)
-        .execute(
-            &command(60_000),
-            now(),
-            fence(60_000),
-            &BuildCancellation::new(),
-        )
-        .await
-        .expect_err("future-dated signature outside the build window must block");
-
-    assert_eq!(error.code, BuildFailureCode::SignatureInvalid);
-    assert_eq!(calls.calls().last(), Some(&Call::Cleanup));
 }
 
 #[tokio::test]
@@ -518,16 +394,12 @@ fn pipeline(provider: FakeProvider) -> BuildPipeline<FakeProvider> {
         BuildPipelinePolicy {
             builder_binding: "buildkit-primary-v1".to_owned(),
             scanner_binding: "trivy-primary-v1".to_owned(),
-            signer_binding: "sigstore-private-v1".to_owned(),
             registry_binding: "harbor-primary-v1".to_owned(),
             policy_id: PolicyId::new(),
             policy_revision: revision(1),
             scanner_name: "trivy".to_owned(),
             scanner_version: "0.58.0".to_owned(),
             scanner_database_sha256: Sha256Digest::of_bytes(b"trivy-db"),
-            trust_bundle_sha256: Sha256Digest::of_bytes(b"trust-bundle"),
-            expected_fulcio_issuer: "https://fulcio.internal".to_owned(),
-            expected_certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
             registry_robot_name: "runtime-puller".to_owned(),
             evidence_ttl_milliseconds: 3_600_000,
             stage_timeout: Duration::from_millis(250),

@@ -15,8 +15,7 @@ use contracts::http::{
 };
 use contracts::supply_chain::BuildNetworkPolicy;
 use contracts::supply_chain::{
-    EnvironmentTemplateRelease, ImageArtifact, ImagePolicyEvaluation, SigstoreEvidence,
-    VulnerabilitySummary,
+    EnvironmentTemplateRelease, ImageArtifact, ImagePolicyEvaluation, VulnerabilitySummary,
 };
 use contracts::{
     ActorId, AgentRunId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId,
@@ -567,32 +566,9 @@ fn release_fixture(
     let published_at = "2026-07-16T08:00:00.000Z".parse::<UtcTimestamp>()?;
     let valid_until = "2026-07-16T10:00:00.000Z".parse::<UtcTimestamp>()?;
     let artifact_sha256 = Sha256Digest::of_bytes(b"container-image");
-    let trust_bundle_sha256 = Sha256Digest::of_bytes(b"trust-bundle");
     let candidate_id = CandidateId::new();
     let candidate_sha256 = Sha256Digest::of_bytes(b"environment-spec");
     let artifact_id = ImageArtifactId::new();
-    let artifact_ref = |media_type: &str| ArtifactRef {
-        artifact_id: ArtifactId::new(),
-        store_binding: "artifact-store-v1".to_owned(),
-        object_version: "version-1".to_owned(),
-        sha256: Sha256Digest::of_bytes(media_type.as_bytes()),
-        size_bytes: 1,
-        media_type: media_type.to_owned(),
-    };
-    let signature = SigstoreEvidence {
-        trust_bundle_sha256,
-        fulcio_issuer: "https://issuer.invalid".to_owned(),
-        certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
-        subject_digest: artifact_sha256,
-        certificate_sha256: Sha256Digest::of_bytes(b"certificate"),
-        signature_sha256: Sha256Digest::of_bytes(b"signature"),
-        rekor_log_id: "rekor-v1".to_owned(),
-        rekor_log_index: 1,
-        rekor_inclusion_proof_sha256: Sha256Digest::of_bytes(b"rekor-proof"),
-        ct_log_id: "ct-v1".to_owned(),
-        sct_sha256: Sha256Digest::of_bytes(b"sct"),
-        verified_at: published_at,
-    };
     Ok(EnvironmentTemplateRelease {
         id: ReleaseId::new(),
         course_id,
@@ -618,11 +594,7 @@ fn release_fixture(
             id: artifact_id,
             build_request_id: BuildRequestId::new(),
             repository: "registry.invalid/course/environment".to_owned(),
-            immutable_tag: "release-1".to_owned(),
             digest: format!("sha256:{artifact_sha256}"),
-            sbom: artifact_ref("application/spdx+json"),
-            provenance: artifact_ref("application/vnd.in-toto+json"),
-            signature,
         },
         image_policy_evaluation: ImagePolicyEvaluation {
             artifact_id,
@@ -639,11 +611,6 @@ fn release_fixture(
                 high: 1,
                 critical: 0,
             },
-            trust_bundle_sha256,
-            expected_fulcio_issuer: "https://issuer.invalid".to_owned(),
-            expected_certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
-            require_rekor_inclusion: true,
-            require_ct_sct: true,
             evaluated_at: published_at,
             max_evidence_age_milliseconds: 7_200_000,
             valid_until,
@@ -687,9 +654,6 @@ fn control_config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
         trust_revision: Revision::new(1)?,
         image_policy_id: PolicyId::new(),
         image_policy_revision: Revision::new(1)?,
-        trust_bundle_sha256: Sha256Digest::of_bytes(b"trust-bundle"),
-        fulcio_issuer: "https://issuer.invalid".to_owned(),
-        certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
         environment_schema_sha256: Sha256Digest::of_bytes(b"environment"),
         evaluation_schema_sha256: Sha256Digest::of_bytes(b"evaluation"),
         container_build: ContainerBuildPolicy {

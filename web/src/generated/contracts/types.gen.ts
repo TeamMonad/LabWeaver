@@ -2044,20 +2044,13 @@ export type ImageArtifact = {
     build_request_id: CreateEnvironmentTemplateReleaseRequestSchemaBuildRequestId;
     digest: string;
     id: ImageArtifactId;
-    immutable_tag: string;
     kind: 'container';
-    provenance: CreateEnvironmentTemplateReleaseRequestSchemaArtifactRef;
     repository: string;
-    sbom: CreateEnvironmentTemplateReleaseRequestSchemaArtifactRef;
-    signature: SigstoreEvidence;
 } | {
     base_disk: CreateEnvironmentTemplateReleaseRequestSchemaArtifactRef;
     format: VirtualMachineDiskFormat;
     id: ImageArtifactId;
     kind: 'virtual_machine';
-    provenance: CreateEnvironmentTemplateReleaseRequestSchemaArtifactRef;
-    sbom: CreateEnvironmentTemplateReleaseRequestSchemaArtifactRef;
-    signature: SigstoreEvidence;
 };
 
 /**
@@ -2066,24 +2059,19 @@ export type ImageArtifact = {
 export type ImageArtifactId = string;
 
 /**
- * Deterministic scan and trust-policy evaluation.
+ * Deterministic digest-bound Trivy evaluation.
  */
 export type ImagePolicyEvaluation = {
     artifactId: ImageArtifactId;
     artifactSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
     evaluatedAt: CreateEnvironmentTemplateReleaseRequestSchemaUtcTimestamp;
-    expectedCertificateSubject: string;
-    expectedFulcioIssuer: string;
     maxEvidenceAgeMilliseconds: number;
     passed: boolean;
     policyId: CreateEnvironmentTemplateReleaseRequestSchemaPolicyId;
     policyRevision: CreateEnvironmentTemplateReleaseRequestSchemaRevision;
-    requireCtSct: boolean;
-    requireRekorInclusion: boolean;
     scannerDatabaseSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
     scannerName: string;
     scannerVersion: string;
-    trustBundleSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
     validUntil: CreateEnvironmentTemplateReleaseRequestSchemaUtcTimestamp;
     vulnerabilities: VulnerabilitySummary;
 };
@@ -2107,27 +2095,6 @@ export type CreateEnvironmentTemplateReleaseRequestSchemaRuntimeKind = 'containe
  * Canonical lowercase SHA-256 digest.
  */
 export type CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest = string;
-
-/**
- * Private Sigstore identity and transparency evidence.
- */
-export type SigstoreEvidence = {
-    certificateSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
-    certificateSubject: string;
-    ctLogId: string;
-    fulcioIssuer: string;
-    rekorInclusionProofSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
-    rekorLogId: string;
-    rekorLogIndex: number;
-    sctSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
-    signatureSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
-    /**
-     * Immutable artifact digest covered by the verified signature.
-     */
-    subjectDigest: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
-    trustBundleSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
-    verifiedAt: CreateEnvironmentTemplateReleaseRequestSchemaUtcTimestamp;
-};
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
@@ -2787,20 +2754,13 @@ export type EnvironmentTemplateReleaseViewSchemaImageArtifact = {
     build_request_id: EnvironmentTemplateReleaseViewSchemaBuildRequestId;
     digest: string;
     id: EnvironmentTemplateReleaseViewSchemaImageArtifactId;
-    immutable_tag: string;
     kind: 'container';
-    provenance: EnvironmentTemplateReleaseViewSchemaArtifactRef;
     repository: string;
-    sbom: EnvironmentTemplateReleaseViewSchemaArtifactRef;
-    signature: EnvironmentTemplateReleaseViewSchemaSigstoreEvidence;
 } | {
     base_disk: EnvironmentTemplateReleaseViewSchemaArtifactRef;
     format: EnvironmentTemplateReleaseViewSchemaVirtualMachineDiskFormat;
     id: EnvironmentTemplateReleaseViewSchemaImageArtifactId;
     kind: 'virtual_machine';
-    provenance: EnvironmentTemplateReleaseViewSchemaArtifactRef;
-    sbom: EnvironmentTemplateReleaseViewSchemaArtifactRef;
-    signature: EnvironmentTemplateReleaseViewSchemaSigstoreEvidence;
 };
 
 /**
@@ -2809,24 +2769,19 @@ export type EnvironmentTemplateReleaseViewSchemaImageArtifact = {
 export type EnvironmentTemplateReleaseViewSchemaImageArtifactId = string;
 
 /**
- * Deterministic scan and trust-policy evaluation.
+ * Deterministic digest-bound Trivy evaluation.
  */
 export type EnvironmentTemplateReleaseViewSchemaImagePolicyEvaluation = {
     artifactId: EnvironmentTemplateReleaseViewSchemaImageArtifactId;
     artifactSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
     evaluatedAt: EnvironmentTemplateReleaseViewSchemaUtcTimestamp;
-    expectedCertificateSubject: string;
-    expectedFulcioIssuer: string;
     maxEvidenceAgeMilliseconds: number;
     passed: boolean;
     policyId: EnvironmentTemplateReleaseViewSchemaPolicyId;
     policyRevision: EnvironmentTemplateReleaseViewSchemaRevision;
-    requireCtSct: boolean;
-    requireRekorInclusion: boolean;
     scannerDatabaseSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
     scannerName: string;
     scannerVersion: string;
-    trustBundleSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
     validUntil: EnvironmentTemplateReleaseViewSchemaUtcTimestamp;
     vulnerabilities: EnvironmentTemplateReleaseViewSchemaVulnerabilitySummary;
 };
@@ -2866,27 +2821,6 @@ export type EnvironmentTemplateReleaseViewSchemaRuntimeKind = 'container' | 'vir
  * Canonical lowercase SHA-256 digest.
  */
 export type EnvironmentTemplateReleaseViewSchemaSha256Digest = string;
-
-/**
- * Private Sigstore identity and transparency evidence.
- */
-export type EnvironmentTemplateReleaseViewSchemaSigstoreEvidence = {
-    certificateSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
-    certificateSubject: string;
-    ctLogId: string;
-    fulcioIssuer: string;
-    rekorInclusionProofSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
-    rekorLogId: string;
-    rekorLogIndex: number;
-    sctSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
-    signatureSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
-    /**
-     * Immutable artifact digest covered by the verified signature.
-     */
-    subjectDigest: EnvironmentTemplateReleaseViewSchemaSha256Digest;
-    trustBundleSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
-    verifiedAt: EnvironmentTemplateReleaseViewSchemaUtcTimestamp;
-};
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
@@ -4022,20 +3956,13 @@ export type InternalImageArtifactResolutionSchemaImageArtifact = {
     build_request_id: InternalImageArtifactResolutionSchemaBuildRequestId;
     digest: string;
     id: InternalImageArtifactResolutionSchemaImageArtifactId;
-    immutable_tag: string;
     kind: 'container';
-    provenance: InternalImageArtifactResolutionSchemaArtifactRef;
     repository: string;
-    sbom: InternalImageArtifactResolutionSchemaArtifactRef;
-    signature: InternalImageArtifactResolutionSchemaSigstoreEvidence;
 } | {
     base_disk: InternalImageArtifactResolutionSchemaArtifactRef;
     format: InternalImageArtifactResolutionSchemaVirtualMachineDiskFormat;
     id: InternalImageArtifactResolutionSchemaImageArtifactId;
     kind: 'virtual_machine';
-    provenance: InternalImageArtifactResolutionSchemaArtifactRef;
-    sbom: InternalImageArtifactResolutionSchemaArtifactRef;
-    signature: InternalImageArtifactResolutionSchemaSigstoreEvidence;
 };
 
 /**
@@ -4044,24 +3971,19 @@ export type InternalImageArtifactResolutionSchemaImageArtifact = {
 export type InternalImageArtifactResolutionSchemaImageArtifactId = string;
 
 /**
- * Deterministic scan and trust-policy evaluation.
+ * Deterministic digest-bound Trivy evaluation.
  */
 export type InternalImageArtifactResolutionSchemaImagePolicyEvaluation = {
     artifactId: InternalImageArtifactResolutionSchemaImageArtifactId;
     artifactSha256: InternalImageArtifactResolutionSchemaSha256Digest;
     evaluatedAt: InternalImageArtifactResolutionSchemaUtcTimestamp;
-    expectedCertificateSubject: string;
-    expectedFulcioIssuer: string;
     maxEvidenceAgeMilliseconds: number;
     passed: boolean;
     policyId: InternalImageArtifactResolutionSchemaPolicyId;
     policyRevision: InternalImageArtifactResolutionSchemaRevision;
-    requireCtSct: boolean;
-    requireRekorInclusion: boolean;
     scannerDatabaseSha256: InternalImageArtifactResolutionSchemaSha256Digest;
     scannerName: string;
     scannerVersion: string;
-    trustBundleSha256: InternalImageArtifactResolutionSchemaSha256Digest;
     validUntil: InternalImageArtifactResolutionSchemaUtcTimestamp;
     vulnerabilities: InternalImageArtifactResolutionSchemaVulnerabilitySummary;
 };
@@ -4080,27 +4002,6 @@ export type InternalImageArtifactResolutionSchemaRevision = number;
  * Canonical lowercase SHA-256 digest.
  */
 export type InternalImageArtifactResolutionSchemaSha256Digest = string;
-
-/**
- * Private Sigstore identity and transparency evidence.
- */
-export type InternalImageArtifactResolutionSchemaSigstoreEvidence = {
-    certificateSha256: InternalImageArtifactResolutionSchemaSha256Digest;
-    certificateSubject: string;
-    ctLogId: string;
-    fulcioIssuer: string;
-    rekorInclusionProofSha256: InternalImageArtifactResolutionSchemaSha256Digest;
-    rekorLogId: string;
-    rekorLogIndex: number;
-    sctSha256: InternalImageArtifactResolutionSchemaSha256Digest;
-    signatureSha256: InternalImageArtifactResolutionSchemaSha256Digest;
-    /**
-     * Immutable artifact digest covered by the verified signature.
-     */
-    subjectDigest: InternalImageArtifactResolutionSchemaSha256Digest;
-    trustBundleSha256: InternalImageArtifactResolutionSchemaSha256Digest;
-    verifiedAt: InternalImageArtifactResolutionSchemaUtcTimestamp;
-};
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.

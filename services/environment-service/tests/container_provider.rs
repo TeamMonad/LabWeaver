@@ -15,8 +15,7 @@ use contracts::authoring::{CandidateApproval, CandidateDecision, EnvironmentSpec
 use contracts::environment::{DesiredEnvironmentState, EndpointProtocol, ObservedEnvironmentState};
 use contracts::events::ReleasePublishedV2;
 use contracts::supply_chain::{
-    EnvironmentTemplateRelease, ImageArtifact, ImagePolicyEvaluation, SigstoreEvidence,
-    VulnerabilitySummary,
+    EnvironmentTemplateRelease, ImageArtifact, ImagePolicyEvaluation, VulnerabilitySummary,
 };
 use contracts::{
     ActorId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId, ImageArtifactId,
@@ -351,7 +350,6 @@ fn withdrawn_expired_or_rotated_release_is_rejected_before_apply() {
         PolicyId::new(),
         revision(2),
         revision(2),
-        Sha256Digest::of_bytes(b"rotated-trust-bundle"),
     );
     assert!(matches!(
         rotated.plan(&instance, &resolved(projection), ReconcileAction::Provision),
@@ -386,10 +384,6 @@ fn same_revision_different_image_policy_id_is_rejected() {
         PolicyId::new(),
         projection.release.image_policy_evaluation.policy_revision,
         projection.release.approval.trust_revision,
-        projection
-            .release
-            .image_policy_evaluation
-            .trust_bundle_sha256,
     );
 
     assert!(matches!(
@@ -413,7 +407,6 @@ async fn withdrawal_blocks_new_use_but_still_allows_stop() {
         projection.release.image_policy_evaluation.policy_id,
         projection.release.image_policy_evaluation.policy_revision,
         projection.release.approval.trust_revision,
-        Sha256Digest::of_bytes(b"trust-bundle"),
     );
 
     let observation = provider
@@ -438,10 +431,6 @@ fn provider(
     let image_policy_id = projection.release.image_policy_evaluation.policy_id;
     let image_policy_revision = projection.release.image_policy_evaluation.policy_revision;
     let trust_revision = projection.release.approval.trust_revision;
-    let trust_bundle_sha256 = projection
-        .release
-        .image_policy_evaluation
-        .trust_bundle_sha256;
     provider_with_state(
         projection,
         backend,
@@ -450,7 +439,6 @@ fn provider(
         image_policy_id,
         image_policy_revision,
         trust_revision,
-        trust_bundle_sha256,
     )
 }
 
@@ -466,7 +454,6 @@ fn provider_with_state(
     image_policy_id: PolicyId,
     image_policy_revision: Revision,
     trust_revision: Revision,
-    trust_bundle_sha256: Sha256Digest,
 ) -> ContainerProvider<FixtureBackend, FixtureResolver> {
     ContainerProvider::new(
         "container-primary-v1".to_owned(),
@@ -477,13 +464,8 @@ fn provider_with_state(
             withdrawn_at,
         }),
         ContainerProviderConfiguration::new(
-            ContainerReleasePolicy::new(
-                image_policy_id,
-                image_policy_revision,
-                trust_revision,
-                trust_bundle_sha256,
-            )
-            .expect("release policy"),
+            ContainerReleasePolicy::new(image_policy_id, image_policy_revision, trust_revision)
+                .expect("release policy"),
             "access-system".to_owned(),
             "protected-gateway".to_owned(),
             "protected-https".to_owned(),
@@ -556,7 +538,6 @@ fn projection() -> ReleasePublishedV2 {
     .expect("valid EnvironmentSpec");
     let environment_spec_sha256 = Sha256Digest::of_canonical(&environment_spec).expect("spec hash");
     let artifact_sha256 = Sha256Digest::of_bytes(b"container-image");
-    let trust_bundle_sha256 = Sha256Digest::of_bytes(b"trust-bundle");
     let artifact_id = ImageArtifactId::new();
     let course_id = contracts::CourseId::new();
     let candidate_id = CandidateId::new();
@@ -586,24 +567,7 @@ fn projection() -> ReleasePublishedV2 {
             id: artifact_id,
             build_request_id: BuildRequestId::new(),
             repository: format!("harbor.internal/course-{course_id}/{candidate_id}"),
-            immutable_tag: "build-aabbccdd".to_owned(),
             digest: format!("sha256:{artifact_sha256}"),
-            sbom: artifact_ref("application/spdx+json"),
-            provenance: artifact_ref("application/vnd.in-toto+json"),
-            signature: SigstoreEvidence {
-                trust_bundle_sha256,
-                fulcio_issuer: "https://fulcio.internal".to_owned(),
-                certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
-                subject_digest: artifact_sha256,
-                certificate_sha256: Sha256Digest::of_bytes(b"certificate"),
-                signature_sha256: Sha256Digest::of_bytes(b"signature"),
-                rekor_log_id: "rekor-private-v1".to_owned(),
-                rekor_log_index: 1,
-                rekor_inclusion_proof_sha256: Sha256Digest::of_bytes(b"rekor-proof"),
-                ct_log_id: "ct-private-v1".to_owned(),
-                sct_sha256: Sha256Digest::of_bytes(b"sct"),
-                verified_at: published_at,
-            },
         },
         image_policy_evaluation: ImagePolicyEvaluation {
             artifact_id,
@@ -620,11 +584,6 @@ fn projection() -> ReleasePublishedV2 {
                 high: 1,
                 critical: 0,
             },
-            trust_bundle_sha256,
-            expected_fulcio_issuer: "https://fulcio.internal".to_owned(),
-            expected_certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
-            require_rekor_inclusion: true,
-            require_ct_sct: true,
             evaluated_at: published_at,
             max_evidence_age_milliseconds: 3_600_000,
             valid_until: timestamp("2026-07-16T09:00:00.000Z"),

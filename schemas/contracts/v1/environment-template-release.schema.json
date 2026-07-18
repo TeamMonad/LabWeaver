@@ -142,24 +142,12 @@
             "id": {
               "$ref": "#/$defs/ImageArtifactId"
             },
-            "immutable_tag": {
-              "type": "string"
-            },
             "kind": {
               "const": "container",
               "type": "string"
             },
-            "provenance": {
-              "$ref": "#/$defs/ArtifactRef"
-            },
             "repository": {
               "type": "string"
-            },
-            "sbom": {
-              "$ref": "#/$defs/ArtifactRef"
-            },
-            "signature": {
-              "$ref": "#/$defs/SigstoreEvidence"
             }
           },
           "required": [
@@ -167,11 +155,7 @@
             "id",
             "build_request_id",
             "repository",
-            "immutable_tag",
-            "digest",
-            "sbom",
-            "provenance",
-            "signature"
+            "digest"
           ],
           "type": "object"
         },
@@ -190,25 +174,13 @@
             "kind": {
               "const": "virtual_machine",
               "type": "string"
-            },
-            "provenance": {
-              "$ref": "#/$defs/ArtifactRef"
-            },
-            "sbom": {
-              "$ref": "#/$defs/ArtifactRef"
-            },
-            "signature": {
-              "$ref": "#/$defs/SigstoreEvidence"
             }
           },
           "required": [
             "kind",
             "id",
             "base_disk",
-            "format",
-            "sbom",
-            "provenance",
-            "signature"
+            "format"
           ],
           "type": "object"
         }
@@ -220,7 +192,7 @@
     },
     "ImagePolicyEvaluation": {
       "additionalProperties": false,
-      "description": "Deterministic scan and trust-policy evaluation.",
+      "description": "Deterministic digest-bound Trivy evaluation.",
       "properties": {
         "artifactId": {
           "$ref": "#/$defs/ImageArtifactId"
@@ -230,12 +202,6 @@
         },
         "evaluatedAt": {
           "$ref": "#/$defs/UtcTimestamp"
-        },
-        "expectedCertificateSubject": {
-          "type": "string"
-        },
-        "expectedFulcioIssuer": {
-          "type": "string"
         },
         "maxEvidenceAgeMilliseconds": {
           "format": "uint64",
@@ -251,12 +217,6 @@
         "policyRevision": {
           "$ref": "#/$defs/Revision"
         },
-        "requireCtSct": {
-          "type": "boolean"
-        },
-        "requireRekorInclusion": {
-          "type": "boolean"
-        },
         "scannerDatabaseSha256": {
           "$ref": "#/$defs/Sha256Digest"
         },
@@ -265,9 +225,6 @@
         },
         "scannerVersion": {
           "type": "string"
-        },
-        "trustBundleSha256": {
-          "$ref": "#/$defs/Sha256Digest"
         },
         "validUntil": {
           "$ref": "#/$defs/UtcTimestamp"
@@ -285,11 +242,6 @@
         "scannerVersion",
         "scannerDatabaseSha256",
         "vulnerabilities",
-        "trustBundleSha256",
-        "expectedFulcioIssuer",
-        "expectedCertificateSubject",
-        "requireRekorInclusion",
-        "requireCtSct",
         "evaluatedAt",
         "maxEvidenceAgeMilliseconds",
         "validUntil",
@@ -322,66 +274,6 @@
     "Sha256Digest": {
       "description": "Canonical lowercase SHA-256 digest.",
       "type": "string"
-    },
-    "SigstoreEvidence": {
-      "additionalProperties": false,
-      "description": "Private Sigstore identity and transparency evidence.",
-      "properties": {
-        "certificateSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
-        "certificateSubject": {
-          "type": "string"
-        },
-        "ctLogId": {
-          "type": "string"
-        },
-        "fulcioIssuer": {
-          "type": "string"
-        },
-        "rekorInclusionProofSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
-        "rekorLogId": {
-          "type": "string"
-        },
-        "rekorLogIndex": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "sctSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
-        "signatureSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
-        "subjectDigest": {
-          "$ref": "#/$defs/Sha256Digest",
-          "description": "Immutable artifact digest covered by the verified signature."
-        },
-        "trustBundleSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
-        "verifiedAt": {
-          "$ref": "#/$defs/UtcTimestamp"
-        }
-      },
-      "required": [
-        "trustBundleSha256",
-        "fulcioIssuer",
-        "certificateSubject",
-        "subjectDigest",
-        "certificateSha256",
-        "signatureSha256",
-        "rekorLogId",
-        "rekorLogIndex",
-        "rekorInclusionProofSha256",
-        "ctLogId",
-        "sctSha256",
-        "verifiedAt"
-      ],
-      "type": "object"
     },
     "UtcTimestamp": {
       "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",

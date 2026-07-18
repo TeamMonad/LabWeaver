@@ -1,4 +1,4 @@
-//! Typed NATS adapter for the deployment-owned BuildKit/Harbor/Trivy/Sigstore executor.
+//! Typed NATS adapter for the deployment-owned BuildKit/Harbor/Trivy executor.
 #![allow(
     missing_docs,
     reason = "the build pipeline trait and v2 event contracts document the integration semantics"
@@ -7,7 +7,6 @@
 use async_trait::async_trait;
 use contracts::BuildRequestId;
 use contracts::events::AgentBuildRequestedV2;
-use contracts::supply_chain::SigstoreEvidence;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -27,7 +26,6 @@ pub struct NatsBuildSupplyChainProvider {
     subject: String,
     builder_binding: String,
     scanner_binding: String,
-    signer_binding: String,
     registry_binding: String,
 }
 
@@ -37,14 +35,12 @@ impl NatsBuildSupplyChainProvider {
         subject: String,
         builder_binding: String,
         scanner_binding: String,
-        signer_binding: String,
         registry_binding: String,
     ) -> Result<Self, BuildProviderFailure> {
         if !valid_subject(&subject)
             || [
                 builder_binding.as_str(),
                 scanner_binding.as_str(),
-                signer_binding.as_str(),
                 registry_binding.as_str(),
             ]
             .iter()
@@ -57,7 +53,6 @@ impl NatsBuildSupplyChainProvider {
             subject,
             builder_binding,
             scanner_binding,
-            signer_binding,
             registry_binding,
         })
     }
@@ -103,10 +98,6 @@ impl BuildSupplyChainProvider for NatsBuildSupplyChainProvider {
 
     fn scanner_binding(&self) -> &str {
         &self.scanner_binding
-    }
-
-    fn signer_binding(&self) -> &str {
-        &self.signer_binding
     }
 
     fn registry_binding(&self) -> &str {
@@ -192,32 +183,6 @@ impl BuildSupplyChainProvider for NatsBuildSupplyChainProvider {
         }
     }
 
-    async fn sign_and_verify(
-        &self,
-        context: &BuildProviderRequestContext,
-        candidate: &BuiltCandidate,
-    ) -> Result<SigstoreEvidence, BuildProviderFailure> {
-        match self
-            .request(
-                context,
-                BuildExecutorRequest::Sign {
-                    candidate: candidate.clone(),
-                },
-            )
-            .await?
-        {
-            BuildExecutorResponse::Signed {
-                build_identity,
-                digest,
-                evidence,
-            } if build_identity == candidate.build_identity && digest == candidate.digest => {
-                Ok(evidence)
-            }
-            BuildExecutorResponse::Failed { failure } => Err(failure),
-            _ => Err(identity_mismatch()),
-        }
-    }
-
     async fn publish_immutable(
         &self,
         context: &BuildProviderRequestContext,
@@ -296,9 +261,6 @@ pub enum BuildExecutorRequest {
     Scan {
         candidate: BuiltCandidate,
     },
-    Sign {
-        candidate: BuiltCandidate,
-    },
     Publish {
         candidate: BuiltCandidate,
     },
@@ -314,7 +276,6 @@ impl BuildExecutorRequest {
             Self::EnsurePrivateProject { .. } => BuildProviderStage::EnsurePrivateProject,
             Self::Build { .. } => BuildProviderStage::Build,
             Self::Scan { .. } => BuildProviderStage::Scan,
-            Self::Sign { .. } => BuildProviderStage::Sign,
             Self::Publish { .. } => BuildProviderStage::Publish,
             Self::Cleanup { .. } => BuildProviderStage::Cleanup,
         }
@@ -348,11 +309,6 @@ pub enum BuildExecutorResponse {
     },
     Scanned {
         evidence: ScanEvidence,
-    },
-    Signed {
-        build_identity: BuildIdentity,
-        digest: String,
-        evidence: SigstoreEvidence,
     },
     Published {
         image: PublishedImage,
@@ -718,9 +674,7 @@ fn executor_request_identity_valid(request: &BuildExecutorRequest) -> bool {
         | BuildExecutorRequest::Build { command, identity } => {
             command.validate().is_ok() && *identity == BuildIdentity(command.command_sha256)
         }
-        BuildExecutorRequest::Scan { candidate }
-        | BuildExecutorRequest::Sign { candidate }
-        | BuildExecutorRequest::Publish { candidate } => {
+        BuildExecutorRequest::Scan { candidate } | BuildExecutorRequest::Publish { candidate } => {
             candidate.digest.starts_with("sha256:")
                 && candidate.digest.len() == 71
                 && candidate
@@ -761,9 +715,9 @@ const fn executor_request_build_id(request: &BuildExecutorRequest) -> BuildReque
     match request {
         BuildExecutorRequest::EnsurePrivateProject { command, .. }
         | BuildExecutorRequest::Build { command, .. } => command.request.id,
-        BuildExecutorRequest::Scan { candidate }
-        | BuildExecutorRequest::Sign { candidate }
-        | BuildExecutorRequest::Publish { candidate } => candidate.build_request_id,
+        BuildExecutorRequest::Scan { candidate } | BuildExecutorRequest::Publish { candidate } => {
+            candidate.build_request_id
+        }
         BuildExecutorRequest::Cleanup {
             build_request_id, ..
         } => *build_request_id,
@@ -775,9 +729,8 @@ const fn build_stage_rank(stage: BuildProviderStage) -> i16 {
         BuildProviderStage::EnsurePrivateProject => 1,
         BuildProviderStage::Build => 2,
         BuildProviderStage::Scan => 3,
-        BuildProviderStage::Sign => 4,
-        BuildProviderStage::Publish => 5,
-        BuildProviderStage::Cleanup => 6,
+        BuildProviderStage::Publish => 4,
+        BuildProviderStage::Cleanup => 5,
     }
 }
 
@@ -786,7 +739,6 @@ const fn build_stage_name(stage: BuildProviderStage) -> &'static str {
         BuildProviderStage::EnsurePrivateProject => "ensure_private_project",
         BuildProviderStage::Build => "build",
         BuildProviderStage::Scan => "scan",
-        BuildProviderStage::Sign => "sign",
         BuildProviderStage::Publish => "publish",
         BuildProviderStage::Cleanup => "cleanup",
     }

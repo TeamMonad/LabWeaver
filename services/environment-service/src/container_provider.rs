@@ -832,13 +832,12 @@ pub struct ResolvedContainerRelease {
     pub withdrawn_at: Option<UtcTimestamp>,
 }
 
-/// Deployment authority for the currently accepted scan policy and private trust bundle.
+/// Deployment authority for the currently accepted scan policy and approval revision.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ContainerReleasePolicy {
     pub image_policy_id: PolicyId,
     pub image_policy_revision: Revision,
     pub trust_revision: Revision,
-    pub trust_bundle_sha256: Sha256Digest,
 }
 
 impl ContainerReleasePolicy {
@@ -846,16 +845,11 @@ impl ContainerReleasePolicy {
         image_policy_id: PolicyId,
         image_policy_revision: Revision,
         trust_revision: Revision,
-        trust_bundle_sha256: Sha256Digest,
     ) -> Result<Self, ReleaseProjectionError> {
-        if trust_bundle_sha256 == Sha256Digest::of_bytes(&[]) {
-            return Err(ReleaseProjectionError::ConfigurationInvalid);
-        }
         Ok(Self {
             image_policy_id,
             image_policy_revision,
             trust_revision,
-            trust_bundle_sha256,
         })
     }
 }
@@ -1402,10 +1396,6 @@ where
             || release.image_policy_evaluation.policy_revision
                 != self.release_policy.image_policy_revision
             || release.approval.trust_revision != self.release_policy.trust_revision
-            || release.image_policy_evaluation.trust_bundle_sha256
-                != self.release_policy.trust_bundle_sha256
-            || release.artifact.signature_evidence().trust_bundle_sha256
-                != self.release_policy.trust_bundle_sha256
         {
             return Err(ReleaseProjectionError::TrustRevisionMismatch);
         }
