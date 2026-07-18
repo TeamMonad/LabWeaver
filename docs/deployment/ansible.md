@@ -70,16 +70,23 @@ are completed.
 
 `demo reset` runs only the allowlisted `93-sprint2-reset.yml` playbook. It is a
 pre-release destructive operation: there is no upgrade or restore guarantee for
-the deleted LabWeaver business data. Before it changes the cluster it inventories
-the cluster UID, Helm releases and all Kyverno policies. Any ClusterPolicy or any
+the deleted LabWeaver business data. Before it changes the cluster it verifies
+PostgreSQL, JetStream, MinIO, BuildKit, Harbor and Keycloak connectivity, then
+inventories the cluster UID, Helm releases and all Kyverno policies. A missing
+dependency fails before any namespace, webhook, realm, bucket or schema is
+deleted. Any ClusterPolicy or any
 Policy outside the exact LabWeaver reset namespaces stops the run with
 `KYVERNO_EXTERNAL_DEPENDENCY_DETECTED`.
 
 The ignored environment inventory must supply reviewed paths and credentials for
-PostgreSQL (`PGSERVICEFILE`), NATS, MinIO, Harbor and Keycloak, the Sprint 2 Helm
-values, and a separate rollback-probe values file whose only purpose is to make
-readiness fail. Secrets remain in Vault or root-owned controller files and are
-never copied into the report. The operator must first read the target UID and set:
+PostgreSQL (`PGSERVICEFILE`), NATS, MinIO, BuildKit, Harbor and Keycloak, the
+Sprint 2 Helm values, and a separate rollback-probe values file whose only purpose
+is to make readiness fail. It must also provide one reviewed multi-document
+Kubernetes YAML bundle containing exactly the eight required ConfigMaps and eight
+required Secrets in `labweaver-system`. The role rejects extra kinds, names or
+namespaces, applies the bundle only after namespace recreation, and records only
+its SHA-256. Secrets remain in Vault or root-owned controller files and are never
+copied into the report. The operator must first read the target UID and set:
 
 ```sh
 export LABWEAVER_RUN_ID=sprint2-reset-20260719

@@ -175,6 +175,16 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("destroy-pre-release-data:", tasks)
         self.assertIn("sprint2_reset_cluster_uid", tasks)
         self.assertIn("KYVERNO_EXTERNAL_DEPENDENCY_DETECTED", tasks)
+        destructive_action = tasks.index("Uninstall the historical Private Sigstore release")
+        for dependency_probe in (
+            "Probe PostgreSQL before any destructive action",
+            "Probe JetStream before any destructive action",
+            "Probe MinIO before any destructive action",
+            "Probe BuildKit before any destructive action",
+            "Probe Harbor before any destructive action",
+            "Authenticate Keycloak administration before any destructive action",
+        ):
+            self.assertLess(tasks.index(dependency_probe), destructive_action)
         self.assertLess(
             tasks.index("KYVERNO_EXTERNAL_DEPENDENCY_DETECTED"),
             tasks.index("Uninstall the Kyverno release"),
@@ -187,6 +197,10 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("Require the exact Sprint 2 deployment set", tasks)
         self.assertIn("sprint2_reset_migration_catalog_stat", tasks)
         self.assertIn("sprint2_reset_inventory_stat", tasks)
+        self.assertIn("SPRINT2_CONFIGURATION_BUNDLE_INVALID", tasks)
+        self.assertIn("Apply the reviewed workload configuration bundle", tasks)
+        self.assertIn("kubernetes.core.k8s", tasks)
+        self.assertNotIn("configuration_bundle", baseline)
         self.assertIn("DROP SCHEMA IF EXISTS", baseline)
         self.assertIn("0001_sprint2_baseline.sql", baseline)
         self.assertEqual(baseline.count("0001_roles_and_schemas.sql"), 2)

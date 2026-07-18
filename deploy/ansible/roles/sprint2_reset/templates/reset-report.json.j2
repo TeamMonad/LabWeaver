@@ -4,6 +4,7 @@
   "source_commit": {{ sprint2_reset_source_commit | to_json }},
   "cluster_uid": {{ sprint2_reset_cluster_uid.stdout | trim | to_json }},
   "migration_catalog_sha256": {{ ('sha256:' + sprint2_reset_migration_catalog_stat.stat.checksum) | to_json }},
+  "configuration_bundle_sha256": {{ ('sha256:' + sprint2_reset_configuration_bundle_stat.stat.checksum) | to_json }},
   "inventory_sha256": {{ ('sha256:' + sprint2_reset_inventory_stat.stat.checksum) | to_json }},
   "destructive_reset": true,
   "removed": {

@@ -39,13 +39,16 @@ identity. Historical Issue evidence is not a current completion claim.
 
 - The repository now contains one Sprint 2 baseline migration per domain, a
   nine-workload Helm profile and a cluster/run-bound destructive reset role.
-- Blocker: the read-only inventory, non-LabWeaver Kyverno dependency check,
-  approved destructive reset, second idempotent deploy, rollback drill and
-  cleanup readback have not completed for the target cluster. The ignored
-  controller inventory/values and service credentials required by the role are
-  not present in the repository and must be supplied by the deployment owner.
-- Exit: the reset report binds cluster UID, source commit, migration catalog,
-  image set and deletion hashes without Secret material.
+- Blocker: read-only target inventory confirms Kubernetes/KubeVirt, Harbor and
+  Keycloak exist, but no LabWeaver PostgreSQL, NATS, MinIO or BuildKit service
+  body or reviewed private workload-configuration bundle is available on the
+  approved controller. The reset therefore remains intentionally unexecuted.
+  The role probes all six dependencies before its first destructive task and
+  rejects a missing or malformed eight-ConfigMap/eight-Secret bundle.
+- Exit: the deployment owner supplies the missing service bodies and ignored
+  reviewed inputs; the reset report binds cluster UID, source commit, migration
+  catalog, configuration-bundle hash, image set and deletion hashes without
+  Secret material after dependency guard, double deploy and rollback readback.
 - Owner: A reset approval and execution; D independent Verify.
 
 ## Browser replay and Release Gate

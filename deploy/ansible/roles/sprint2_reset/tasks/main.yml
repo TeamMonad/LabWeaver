@@ -8,6 +8,7 @@
       - sprint2_reset_nats_server | length > 0
       - sprint2_reset_nats_credentials_file | length > 0
       - sprint2_reset_minio_alias | length > 0
+      - sprint2_reset_buildkit_address | length > 0
       - sprint2_reset_harbor_api | length > 0
       - sprint2_reset_harbor_username | length > 0
       - sprint2_reset_harbor_password | length > 0
@@ -18,6 +19,7 @@
       - sprint2_reset_keycloak_realm_file | length > 0
       - sprint2_reset_values_files | length > 0
       - sprint2_reset_rollback_probe_values_file | length > 0
+      - sprint2_reset_configuration_bundle | length > 0
     fail_msg: SPRINT2_RESET_INPUT_INVALID
 
 - name: Validate reset tools and controlled inputs
@@ -31,6 +33,7 @@
     - "{{ sprint2_reset_nats }}"
     - "{{ sprint2_reset_mc }}"
     - "{{ sprint2_reset_kcadm }}"
+    - "{{ sprint2_reset_buildctl }}"
     - "{{ sprint2_reset_postgres_service_file }}"
     - "{{ sprint2_reset_nats_credentials_file }}"
     - "{{ sprint2_reset_keycloak_config }}"
@@ -42,7 +45,8 @@
   loop: >-
     {{ [sprint2_reset_chart_source, sprint2_reset_migration_catalog,
         sprint2_reset_keycloak_realm_file,
-        sprint2_reset_rollback_probe_values_file] + sprint2_reset_values_files }}
+        sprint2_reset_rollback_probe_values_file,
+        sprint2_reset_configuration_bundle] + sprint2_reset_values_files }}
   register: sprint2_reset_controller_required_paths
   delegate_to: localhost
   become: false
@@ -61,6 +65,33 @@
   register: sprint2_reset_migration_catalog_stat
   delegate_to: localhost
   become: false
+
+- name: Hash the reviewed workload configuration bundle
+  ansible.builtin.stat:
+    path: "{{ sprint2_reset_configuration_bundle }}"
+    checksum_algorithm: sha256
+  register: sprint2_reset_configuration_bundle_stat
+  delegate_to: localhost
+  become: false
+
+- name: Parse the reviewed workload configuration bundle
+  ansible.builtin.set_fact:
+    sprint2_reset_configuration_objects: >-
+      {{ lookup('ansible.builtin.file', sprint2_reset_configuration_bundle)
+         | from_yaml_all | list }}
+  no_log: true
+
+- name: Validate the workload configuration bundle boundary
+  ansible.builtin.assert:
+    that:
+      - sprint2_reset_configuration_objects | length == (sprint2_reset_required_configmaps | length + sprint2_reset_required_secrets | length)
+      - sprint2_reset_configuration_objects | map(attribute='apiVersion') | unique | list == ['v1']
+      - sprint2_reset_configuration_objects | map(attribute='kind') | difference(['ConfigMap', 'Secret']) | length == 0
+      - sprint2_reset_configuration_objects | map(attribute='metadata.namespace') | unique | list == [sprint2_reset_namespace]
+      - sprint2_reset_configuration_objects | selectattr('kind', 'equalto', 'ConfigMap') | map(attribute='metadata.name') | sort == sprint2_reset_required_configmaps | sort
+      - sprint2_reset_configuration_objects | selectattr('kind', 'equalto', 'Secret') | map(attribute='metadata.name') | sort == sprint2_reset_required_secrets | sort
+    fail_msg: SPRINT2_CONFIGURATION_BUNDLE_INVALID
+  no_log: true
 
 - name: Read target cluster UID
   ansible.builtin.command:
@@ -82,6 +113,83 @@
       - sprint2_reset_cluster_uid.stdout | trim | length > 0
       - sprint2_reset_confirmation == 'destroy-pre-release-data:' + (sprint2_reset_cluster_uid.stdout | trim) + ':' + sprint2_reset_run_id
     fail_msg: SPRINT2_RESET_CONFIRMATION_MISMATCH
+
+- name: Probe PostgreSQL before any destructive action
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_reset_psql }}"
+      - service={{ sprint2_reset_postgres_service }}
+      - --no-psqlrc
+      - --tuples-only
+      - --command
+      - SELECT 1
+  environment:
+    PGSERVICEFILE: "{{ sprint2_reset_postgres_service_file }}"
+  changed_when: false
+  no_log: true
+
+- name: Probe JetStream before any destructive action
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_reset_nats }}"
+      - --server
+      - "{{ sprint2_reset_nats_server }}"
+      - --creds
+      - "{{ sprint2_reset_nats_credentials_file }}"
+      - account
+      - info
+      - --json
+  changed_when: false
+  no_log: true
+
+- name: Probe MinIO before any destructive action
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_reset_mc }}"
+      - ls
+      - "{{ sprint2_reset_minio_alias }}"
+      - --json
+  changed_when: false
+  no_log: true
+
+- name: Probe BuildKit before any destructive action
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_reset_buildctl }}"
+      - --addr
+      - "{{ sprint2_reset_buildkit_address }}"
+      - debug
+      - workers
+  changed_when: false
+
+- name: Probe Harbor before any destructive action
+  ansible.builtin.uri:
+    url: "{{ sprint2_reset_harbor_api }}/api/v2.0/systeminfo"
+    user: "{{ sprint2_reset_harbor_username }}"
+    password: "{{ sprint2_reset_harbor_password }}"
+    force_basic_auth: true
+    status_code: 200
+    return_content: false
+  no_log: true
+
+- name: Authenticate Keycloak administration before any destructive action
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_reset_kcadm }}"
+      - config
+      - credentials
+      - --server
+      - "{{ sprint2_reset_keycloak_server }}"
+      - --realm
+      - "{{ sprint2_reset_keycloak_admin_realm }}"
+      - --user
+      - "{{ sprint2_reset_keycloak_username }}"
+      - --password
+      - "{{ sprint2_reset_keycloak_password }}"
+      - --config
+      - "{{ sprint2_reset_keycloak_config }}"
+  changed_when: false
+  no_log: true
 
 - name: Create protected reset report directory
   ansible.builtin.file:
@@ -308,6 +416,15 @@
       - --overwrite
   loop: "{{ sprint2_reset_namespaces }}"
   changed_when: true
+
+- name: Apply the reviewed workload configuration bundle
+  kubernetes.core.k8s:
+    kubeconfig: "{{ sprint2_reset_kubeconfig }}"
+    state: present
+    apply: true
+    definition: "{{ item }}"
+  loop: "{{ sprint2_reset_configuration_objects }}"
+  no_log: true
 
 - name: Render the six-domain destructive database baseline
   ansible.builtin.template:

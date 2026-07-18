@@ -10,6 +10,7 @@ sprint2_reset_psql: /usr/bin/psql
 sprint2_reset_nats: /usr/local/bin/nats
 sprint2_reset_mc: /usr/local/bin/mc
 sprint2_reset_kcadm: /usr/local/bin/kcadm.sh
+sprint2_reset_buildctl: /usr/local/bin/buildctl
 sprint2_reset_report_root: /var/lib/labweaver/sprint2-reset
 sprint2_reset_namespaces:
   - access-system
@@ -32,6 +33,7 @@ sprint2_reset_nats_streams:
   - {name: LABWEAVER_SUBMISSION, subjects: "labweaver.evaluation.submission.>", max_age: 168h}
 sprint2_reset_minio_alias: ""
 sprint2_reset_minio_bucket: labweaver-artifacts
+sprint2_reset_buildkit_address: ""
 sprint2_reset_harbor_api: ""
 sprint2_reset_harbor_username: ""
 sprint2_reset_harbor_password: ""
@@ -46,6 +48,25 @@ sprint2_reset_keycloak_realm_file: ""
 sprint2_reset_chart_source: "{{ playbook_dir }}/../../helm/labweaver"
 sprint2_reset_values_files: []
 sprint2_reset_rollback_probe_values_file: ""
+sprint2_reset_configuration_bundle: ""
+sprint2_reset_required_configmaps:
+  - control-service-config
+  - access-service-config
+  - agent-service-config
+  - build-executor-config
+  - environment-service-config
+  - container-executor-config
+  - kubevirt-executor-config
+  - web-config
+sprint2_reset_required_secrets:
+  - control-service-secrets
+  - access-service-secrets
+  - agent-service-secrets
+  - build-executor-secrets
+  - environment-service-secrets
+  - container-executor-secrets
+  - kubevirt-executor-secrets
+  - openssh-gateway-secrets
 sprint2_reset_release_name: labweaver
 sprint2_reset_namespace: labweaver-system
 sprint2_reset_rollout_timeout: 10m
