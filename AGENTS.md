@@ -64,7 +64,7 @@ status:
 
 ## 2. 产品与架构硬约束
 
-- 技术基线为 Rust + Axum、Vue 3、PostgreSQL/SQLx、NATS JetStream、MinIO、Keycloak/OIDC、Kubernetes、KubeVirt、Headscale/Tailscale、Kyverno、BuildKit、Ansible 与 Playwright。
+- 技术基线为 Rust + Axum、Vue 3、PostgreSQL/SQLx、NATS JetStream、MinIO、Keycloak/OIDC、Kubernetes、KubeVirt、Harbor、Trivy、BuildKit、Ansible、Helm 与 Playwright。Sprint 2 不包含 Headscale/Tailscale、Guacamole、Private Sigstore、Kyverno 或 Packer；不得让这些已删除能力重新进入默认部署或 Release Gate。
 - Agent 只生成候选方案；确定性工具负责验证；教师负责最终批准。未经批准的 EnvironmentSpec、SubmissionSpec、EvaluationSpec、脚本和镜像不得进入生产执行路径。
 - LLM 输出只能提供 advisory feedback，永远不得写入确定性分数、改变 Gate 结果或绕过审批。服务端必须拒绝包含受保护评分字段的 LLM 输出。
 - 真实 KubeVirt VM 是 P0 硬验收，不得用 Mock、容器或静态报告冒充。GPU 与云扩容在课程切片中使用显式标识的 Mock Capacity Provider。
@@ -133,18 +133,11 @@ status:
 
 任何失败、超时、依赖缺失、报告无效或构建身份不匹配都必须保留为明确 blocker。不得用局部通过、旧缓存、重命名报告或人工口头确认替代。
 
-## 9. 测试与证据等级
+## 9. 测试与证据
 
-| 等级 | 可证明内容 |
-| --- | --- |
-| E0 | 文件、类型、配置或接口存在，不证明行为完成 |
-| E1 | 单元、属性、fixture 或静态契约验证通过 |
-| E2 | 跨模块、数据库/消息、构建、快照、恢复或 package 链路通过 |
-| E3 | 真实主服务、真实 Kubernetes/KubeVirt 输入输出与同一运行身份闭合 |
-| E4 | 多角色 E2E、部署/回滚、故障恢复、性能、安全与连续演示重放闭合 |
-
-- 能力状态必须记录 Owner、主入口、证据等级、测试/报告 ID、构建身份、限制和阻断条件。
-- P0 产品能力原则上至少达到 E3；发布与三条黄金路径必须达到计划要求的 E4。未达到不得标记 `done`。
+- 日常状态不再为每项能力维护 E0-E4 标签。状态只写清 `planned`、`implemented`、`verified` 或 `blocked`，并附当前构建身份、实际测试或报告和限制。
+- Fixture、静态检查和单元测试不能证明真实集群行为；集成、浏览器和真实部署证据必须分别表述。
+- Sprint 2 发布判断必须在同一 commit、deployment manifest、Migration catalog、镜像 digest 集合和 Run ID 下闭合 Container 与真实 KubeVirt 两条路径。
 - 重要功能必须覆盖正常、空、边界、超大、非法、重复、冲突、越权、版本不兼容、Provider 不可用、IO/网络失败、超时、取消、重试、并发、乱序、恢复和资源清理。
 - 失败路径必须验证无部分提交、无错误评分、无越权访问、无可发布产物和无敏感信息泄露。
 - Playwright 禁止固定 sleep；等待可观察的业务状态或 SSE 事件。失败必须保留 Trace、截图和录像。

@@ -1,5 +1,12 @@
 # ADR 0006: Trusted Runtime Artifact Supply Chain
 
+Status: Superseded by ADR 0011
+
+The Private Sigstore, transparency, attestation, and Kyverno admission design
+below is retained only as historical context. It is not part of the current
+Sprint 2 product or deployment contract. ADR 0011 defines the active
+Harbor/digest/Trivy policy.
+
 Status: proposed Issue #52 extension; requires A+B human approval, D Verify and
 connected E3 evidence.
 

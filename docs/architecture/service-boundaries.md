@@ -1,5 +1,21 @@
 # Service Boundaries
 
+## Sprint 2 deployment profile
+
+The six logical service and PostgreSQL ownership boundaries remain. The Sprint 2
+runtime enables Control, Access, Agent, Environment and Web. Evaluation and
+Resource remain disabled until they own a real product path; a health-only
+Deployment is not evidence of a capability.
+
+Agent and Environment each own a separate executor process built from their
+existing image. API processes do not hold BuildKit/Harbor/Trivy or
+Kubernetes/KubeVirt credentials. The executor processes communicate through
+the explicitly bound NATS subjects and keep domain-specific credentials and
+fencing state separate.
+
+Private Sigstore, Kyverno, Packer, Headscale/Tailnet and Guacamole are not
+Sprint 2 deployment units. See ADR 0011.
+
 | Owner | Authoritative responsibility | Explicit non-responsibility |
 | --- | --- | --- |
 | Control Service | courses, projects, lab packages, template versions, publication approvals | workload creation, scoring, device policy |
