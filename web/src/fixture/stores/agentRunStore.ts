@@ -3,6 +3,7 @@ import { nextUuid7 } from '../utils/identity'
 import { nextRevision } from '../utils/sequence'
 import { getActivePolicy } from './llmPolicyStore'
 import { getProblemPackage } from './problemPackageStore'
+import * as candidateStore from './candidateStore'
 
 /** Polls required before a running fixture run reaches its terminal state. */
 const POLLS_TO_TERMINAL = 2
@@ -69,6 +70,9 @@ export function createAgentRun(
   // whose path includes `__run-fail__`, the run fails once and can be retried.
   const failsOnce = pkg.files.some((f) => f.path.includes('__run-fail__'))
 
+  const environmentCandidateId = nextUuid7('candidate')
+  const evaluationCandidateId = nextUuid7('candidate')
+
   const run: AgentRunSchema = {
     id: nextUuid7('run'),
     courseId,
@@ -78,7 +82,10 @@ export function createAgentRun(
     requestedRuntime: request.requestedRuntime,
     revision: nextRevision(),
     state: 'running',
-    tracks: [buildTrack('environment', 'running'), buildTrack('evaluation', 'running')],
+    tracks: [
+      { ...buildTrack('environment', 'running'), candidateId: environmentCandidateId },
+      { ...buildTrack('evaluation', 'running'), candidateId: evaluationCandidateId },
+    ],
   }
   runs.set(run.id, { run, polls: 0, failsOnce })
   createIdempotency.set(idempotencyKey, run)
@@ -100,11 +107,35 @@ function advance(stored: StoredAgentRun): void {
       run.state = 'failed'
       run.revision = nextRevision()
       run.tracks = [buildTrack('environment', 'failed'), buildTrack('evaluation', 'failed')]
-    } else {
-      run.state = 'succeeded'
-      run.revision = nextRevision()
-      run.tracks = [buildTrack('environment', 'succeeded'), buildTrack('evaluation', 'succeeded')]
+      return
     }
+    run.state = 'succeeded'
+    run.revision = nextRevision()
+    const envTrack = run.tracks.find((t) => t.kind === 'environment')
+    const evalTrack = run.tracks.find((t) => t.kind === 'evaluation')
+    if (envTrack?.candidateId && !candidateStore.getEnvironmentCandidate(envTrack.candidateId)) {
+      candidateStore.createEnvironmentCandidate(
+        run.id,
+        run.courseId,
+        run.requestedRuntime,
+        run.policyRevision,
+        'sha256:' + 's'.repeat(64),
+        envTrack.candidateId,
+      )
+    }
+    if (evalTrack?.candidateId && !candidateStore.getEvaluationCandidate(evalTrack.candidateId)) {
+      candidateStore.createEvaluationCandidate(
+        run.id,
+        run.courseId,
+        run.policyRevision,
+        'sha256:' + 's'.repeat(64),
+        evalTrack.candidateId,
+      )
+    }
+    run.tracks = [
+      { ...buildTrack('environment', 'succeeded'), candidateId: envTrack?.candidateId ?? null },
+      { ...buildTrack('evaluation', 'succeeded'), candidateId: evalTrack?.candidateId ?? null },
+    ]
   }
 }
 

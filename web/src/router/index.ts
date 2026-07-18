@@ -55,7 +55,7 @@ const routes: RouteRecordRaw[] = [
     { path: 'evaluations', component: () => import('@/views/teacher/WorkbenchModuleView.vue'), meta: { title: '评测' }, props: { title: '评测', description: '在此查看评测队列、结果与需要教师处理的事项。' } },
     { path: 'resources', component: () => import('@/views/teacher/WorkbenchModuleView.vue'), meta: { title: '资源' }, props: { title: '资源', description: '在此管理实验材料、共享资源和关联版本。' } },
     { path: 'materials', component: () => import('@/views/teacher/MaterialUploadView.vue'), meta: { title: '材料' } },
-    { path: 'approvals', component: () => import('@/views/teacher/ApprovalListView.vue'), meta: { title: '审批' } },
+    { path: 'approvals', component: () => import('@/views/teacher/CandidateApprovalView.vue'), meta: { title: '审批' } },
   ]),
   roleRoute('student', '/student', '学生工作台', () => import('@/views/StudentView.vue'), [
     { path: 'labs', component: () => import('@/views/student/MyLabsView.vue'), meta: { title: '我的实验' } },

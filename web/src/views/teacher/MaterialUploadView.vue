@@ -206,6 +206,13 @@
                 <button type="button" class="text-button" @click="agent.retryTrack('environment')">重试环境轨道</button>
                 <button type="button" class="text-button" @click="agent.retryTrack('evaluation')">重试评测轨道</button>
               </template>
+              <RouterLink
+                v-if="data.state === 'succeeded'"
+                class="filled-button approval-link"
+                :to="`/teacher/approvals?runId=${data.id}`"
+              >
+                进入候选审批
+              </RouterLink>
             </div>
           </div>
         </template>
@@ -235,6 +242,7 @@
 
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
+import { RouterLink } from 'vue-router'
 import { useCourseContext } from '@/composables/useCourseContext'
 import { useActiveCourseLlmPolicy } from '@/composables/useActiveCourseLlmPolicy'
 import { useProblemPackageUpload } from '@/composables/useProblemPackageUpload'
@@ -485,6 +493,13 @@ onUnmounted(() => {
 .filled-button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.approval-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
 }
 
 .text-button {

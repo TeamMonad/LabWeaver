@@ -3,6 +3,7 @@ import { can, parseActor, type FixtureActor } from '../stores/actorStore'
 import type { FixtureHandler, FixtureHandlerResult, FixtureRequest, FixtureResponse } from '../types'
 import * as accessGrants from './accessGrants'
 import * as agentRuns from './agentRuns'
+import * as candidates from './candidates'
 import * as environmentAccessGrants from './environmentAccessGrants'
 import * as environmentEndpoints from './environmentEndpoints'
 import * as environmentOperations from './environmentOperations'
@@ -22,6 +23,13 @@ interface RouteEntry {
 const routes: RouteEntry[] = [
   // Environment template releases
   { method: 'GET', match: (url) => /^\/api\/v1\/courses\/[^/]+\/environment-template-releases$/.test(url), handler: templateReleases.listEnvironmentTemplateReleases },
+  { method: 'POST', match: (url) => /^\/api\/v1\/courses\/[^/]+\/environment-template-releases$/.test(url), handler: templateReleases.createEnvironmentTemplateRelease },
+
+  // Candidates
+  { method: 'GET', match: (url) => /^\/api\/v1\/courses\/[^/]+\/environment-candidates\/[^/]+$/.test(url), handler: candidates.getEnvironmentCandidateHandler },
+  { method: 'POST', match: (url) => /^\/api\/v1\/courses\/[^/]+\/environment-candidates\/[^/]+\/decisions$/.test(url), handler: candidates.appendEnvironmentCandidateDecision },
+  { method: 'GET', match: (url) => /^\/api\/v1\/courses\/[^/]+\/evaluation-candidates\/[^/]+$/.test(url), handler: candidates.getEvaluationCandidateHandler },
+  { method: 'POST', match: (url) => /^\/api\/v1\/courses\/[^/]+\/evaluation-candidates\/[^/]+\/decisions$/.test(url), handler: candidates.appendEvaluationCandidateDecision },
 
   // Course LLM egress policy
   { method: 'GET', match: (url) => /^\/api\/v1\/courses\/[^/]+\/llm-egress-policies\/active$/.test(url), handler: llmPolicy.getActiveCourseLlmPolicy },
