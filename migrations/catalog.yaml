@@ -66,6 +66,9 @@ domains:
       - id: 1
         file: evaluation/0001_initial.sql
         sha256: a95e8c3a51ebfb0623af9b2213b2bad84aced6de6b243d41d49ca3bda685f6e0
+      - id: 2
+        file: evaluation/0002_submission_freezes.sql
+        sha256: 89c1c9ca5bededb8560da15d304065ddc6adf649e43e27c22e31cc3ce989ae93
   - name: resource
     migrations:
       - id: 1

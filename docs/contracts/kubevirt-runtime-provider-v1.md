@@ -87,6 +87,14 @@ exactly one of each owned runtime object unless noted:
 | VirtualMachine | `runStrategy: Always`, hardware-KVM node selector, no graphics, virtio root PVC and cloud-init disk, pod network and SSH readiness probe. |
 | Service | ClusterIP only, port 22, deterministic selector and access-controlled annotation. |
 
+The guest principal file admits `labweaver-gateway` and
+`labweaver-collector`. The Collector principal is usable only with a
+single-Environment user certificate that expires within five minutes and has
+critical `force-command = internal-sftp -R`; Evaluation pins the observed host
+key and exposes only SFTP reads. Principal enrollment is not credential
+issuance. A deployment-owned short-lived issuer and ephemeral Secret cleanup
+remain mandatory for VM Collector E3.
+
 The executor uses server-side apply with deterministic field ownership. Before
 creating or starting the VM it resolves the private artifact reference and
 verifies the CDI source and resulting PVC match the exact base-disk object

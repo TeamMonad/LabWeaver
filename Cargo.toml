@@ -30,6 +30,8 @@ aws-credential-types = "=1.2.1"
 aws-sdk-s3 = { version = "=1.70.0", default-features = false, features = ["behavior-version-latest", "rt-tokio", "rustls"] }
 axum = "0.8.4"
 base64 = "0.22.1"
+cap-std = "4.0.2"
+cap-fs-ext = "4.0.2"
 chacha20poly1305 = "0.10.1"
 http = "1.3.1"
 hyper = { version = "1.10.1", features = ["server", "http1", "http2"] }
@@ -42,6 +44,8 @@ metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest"] }
 rand = "0.9.1"
 reqwest = { version = "0.12.28", default-features = false, features = ["cookies", "json", "rustls-tls"] }
+russh = { version = "0.62.2", default-features = false, features = ["ring"] }
+russh-sftp = "2.3.0"
 scraper = "0.24.0"
 rcgen = "0.14.8"
 rustls = "0.23.42"

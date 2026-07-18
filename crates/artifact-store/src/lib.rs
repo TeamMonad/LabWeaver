@@ -1,4 +1,4 @@
-//! Immutable S3-compatible object storage used for teacher material packages.
+//! Immutable S3-compatible object storage used for versioned platform artifacts.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -9,6 +9,8 @@ use aws_credential_types::Credentials;
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::{Builder as S3ConfigBuilder, Region};
 use aws_sdk_s3::presigning::PresigningConfig;
+use aws_sdk_s3::primitives::{ByteStream, DateTime};
+use aws_sdk_s3::types::ObjectLockMode;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use contracts::{ArtifactId, ArtifactRef, Sha256Digest, UtcTimestamp};
@@ -28,7 +30,7 @@ pub struct S3StoreConfig {
     pub bucket: String,
     /// Signing region.
     pub region: String,
-    /// Prefix reserved for immutable `ProblemPackage` objects.
+    /// Prefix reserved for one explicitly bound immutable artifact class.
     pub object_prefix: String,
     /// Maximum presigned upload lifetime.
     pub upload_ttl_seconds: u64,
@@ -129,6 +131,19 @@ pub trait ImmutableObjectStore: Send + Sync {
         expected_sha256: Sha256Digest,
         media_type: &str,
     ) -> Result<VerifiedObject, ObjectStoreError>;
+
+    /// Writes bytes once under Governance Object Lock and verifies the exact retained version.
+    async fn put_governance_locked(
+        &self,
+        _key: &str,
+        _bytes: &[u8],
+        _sha256: Sha256Digest,
+        _media_type: &str,
+        _now: UtcTimestamp,
+        _retain_until: UtcTimestamp,
+    ) -> Result<VerifiedObject, ObjectStoreError> {
+        Err(ObjectStoreError::ObjectLockRequired)
+    }
 
     /// Deletes only a named orphan version; completed package versions are never passed here.
     async fn delete_orphan(&self, key: &str, version: &str) -> Result<(), ObjectStoreError>;
@@ -335,6 +350,85 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
             .await
     }
 
+    async fn put_governance_locked(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        sha256: Sha256Digest,
+        media_type: &str,
+        now: UtcTimestamp,
+        retain_until: UtcTimestamp,
+    ) -> Result<VerifiedObject, ObjectStoreError> {
+        self.validate_key(key)?;
+        let size_bytes =
+            u64::try_from(bytes.len()).map_err(|_| ObjectStoreError::ObjectTooLarge)?;
+        if bytes.is_empty()
+            || size_bytes > self.config.max_object_bytes
+            || Sha256Digest::of_bytes(bytes) != sha256
+            || media_type.trim().is_empty()
+            || retain_until.get() <= now.get()
+        {
+            return Err(ObjectStoreError::ObjectIdentityInvalid);
+        }
+        let checksum = STANDARD
+            .encode(hex_bytes(&sha256.to_string()).ok_or(ObjectStoreError::ObjectIdentityInvalid)?);
+        let retention = DateTime::from_nanos(retain_until.get().unix_timestamp_nanos())
+            .map_err(|_| ObjectStoreError::ObjectIdentityInvalid)?;
+        let response = self
+            .client
+            .put_object()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .content_length(
+                i64::try_from(size_bytes).map_err(|_| ObjectStoreError::ObjectTooLarge)?,
+            )
+            .content_type(media_type)
+            .checksum_sha256(checksum)
+            .if_none_match("*")
+            .metadata("sha256", sha256.to_string())
+            .object_lock_mode(ObjectLockMode::Governance)
+            .object_lock_retain_until_date(retention)
+            .body(ByteStream::from(bytes.to_vec()))
+            .send()
+            .await
+            .map_err(|_| ObjectStoreError::UploadFailed)?;
+        let version = response
+            .version_id()
+            .filter(|value| !value.is_empty() && *value != "null")
+            .ok_or(ObjectStoreError::VersioningRequired)?
+            .to_owned();
+        let head = self
+            .client
+            .head_object()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .version_id(&version)
+            .send()
+            .await
+            .map_err(|_| ObjectStoreError::ObjectUnavailable)?;
+        let observed_size = head
+            .content_length()
+            .and_then(|observed| u64::try_from(observed).ok());
+        if head.version_id().is_none_or(|observed| observed != version)
+            || observed_size != Some(size_bytes)
+            || head
+                .content_type()
+                .is_none_or(|observed| observed != media_type)
+            || head.object_lock_mode() != Some(&ObjectLockMode::Governance)
+            || head
+                .object_lock_retain_until_date()
+                .is_none_or(|observed| observed.as_nanos() != retention.as_nanos())
+            || head
+                .metadata()
+                .and_then(|metadata| metadata.get("sha256"))
+                .is_none_or(|observed| observed != &sha256.to_string())
+        {
+            return Err(ObjectStoreError::ObjectLockIdentityMismatch);
+        }
+        self.read_verified(key, &version, size_bytes, sha256, media_type)
+            .await
+    }
+
     async fn delete_orphan(&self, key: &str, version: &str) -> Result<(), ObjectStoreError> {
         self.validate_key(key)?;
         if version.trim().is_empty() {
@@ -381,6 +475,9 @@ pub enum ObjectStoreError {
     /// Presigning failed.
     #[error("LW_OBJECT_UPLOAD_SIGNING_FAILED")]
     SigningFailed,
+    /// Immutable upload failed before an object version was established.
+    #[error("LW_OBJECT_UPLOAD_FAILED")]
+    UploadFailed,
     /// Object could not be read.
     #[error("LW_OBJECT_UNAVAILABLE")]
     ObjectUnavailable,
@@ -393,6 +490,32 @@ pub enum ObjectStoreError {
     /// Bucket versioning is disabled, so immutable package identity cannot be established.
     #[error("LW_OBJECT_VERSIONING_REQUIRED")]
     VersioningRequired,
+    /// Governance Object Lock is unavailable or not implemented by the binding.
+    #[error("LW_OBJECT_LOCK_REQUIRED")]
+    ObjectLockRequired,
+    /// Stored retention mode, deadline, metadata, or version differs from the request.
+    #[error("LW_OBJECT_LOCK_IDENTITY_MISMATCH")]
+    ObjectLockIdentityMismatch,
+}
+
+impl ObjectStoreError {
+    /// Returns a stable diagnostic without object keys, payloads, or credentials.
+    #[must_use]
+    pub const fn diagnostic_code(&self) -> &'static str {
+        match self {
+            Self::ConfigurationInvalid => "LW_OBJECT_STORE_CONFIG_INVALID",
+            Self::ObjectIdentityInvalid => "LW_OBJECT_IDENTITY_INVALID",
+            Self::ObjectTooLarge => "LW_OBJECT_TOO_LARGE",
+            Self::SigningFailed => "LW_OBJECT_UPLOAD_SIGNING_FAILED",
+            Self::UploadFailed => "LW_OBJECT_UPLOAD_FAILED",
+            Self::ObjectUnavailable => "LW_OBJECT_UNAVAILABLE",
+            Self::ObjectIdentityMismatch => "LW_OBJECT_IDENTITY_MISMATCH",
+            Self::DeleteFailed => "LW_OBJECT_CLEANUP_FAILED",
+            Self::VersioningRequired => "LW_OBJECT_VERSIONING_REQUIRED",
+            Self::ObjectLockRequired => "LW_OBJECT_LOCK_REQUIRED",
+            Self::ObjectLockIdentityMismatch => "LW_OBJECT_LOCK_IDENTITY_MISMATCH",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -438,7 +561,7 @@ mod tests {
         clippy::too_many_lines,
         reason = "one MinIO lifecycle preserves a single exact bucket and object-version identity"
     )]
-    async fn minio_presign_freeze_exact_version_and_cleanup_are_fail_closed()
+    async fn minio_versioning_object_lock_and_cleanup_are_fail_closed()
     -> Result<(), Box<dyn std::error::Error>> {
         let minio = GenericImage::new("minio/minio", "RELEASE.2025-04-22T22-12-26Z")
             .with_exposed_port(9000.tcp())
@@ -477,7 +600,12 @@ mod tests {
                 .force_path_style(true)
                 .build(),
         );
-        client.create_bucket().bucket(&config.bucket).send().await?;
+        client
+            .create_bucket()
+            .bucket(&config.bucket)
+            .object_lock_enabled_for_bucket(true)
+            .send()
+            .await?;
         client
             .put_bucket_versioning()
             .bucket(&config.bucket)
@@ -563,6 +691,40 @@ mod tests {
                     u64::try_from(bytes.len())?,
                     digest,
                     "text/plain",
+                )
+                .await
+                .is_err()
+        );
+        let observed_now = time::OffsetDateTime::now_utc();
+        let observed_now =
+            observed_now.replace_nanosecond(observed_now.nanosecond() / 1_000_000 * 1_000_000)?;
+        let now = UtcTimestamp::from_utc(observed_now)?;
+        let retain_until = UtcTimestamp::from_utc(observed_now + time::Duration::seconds(60))?;
+        let locked_bytes = b"immutable frozen submission";
+        let locked_digest = Sha256Digest::of_bytes(locked_bytes);
+        let locked_key = "problem-packages/course/submissions/frozen";
+        let locked = store
+            .put_governance_locked(
+                locked_key,
+                locked_bytes,
+                locked_digest,
+                "application/vnd.labweaver.frozen-submission.v1+json",
+                now,
+                retain_until,
+            )
+            .await?;
+        assert_eq!(locked.bytes, locked_bytes);
+        assert_eq!(locked.reference.sha256, locked_digest);
+        assert!(!locked.reference.object_version.is_empty());
+        assert!(
+            store
+                .put_governance_locked(
+                    locked_key,
+                    locked_bytes,
+                    locked_digest,
+                    "application/vnd.labweaver.frozen-submission.v1+json",
+                    now,
+                    retain_until,
                 )
                 .await
                 .is_err()
