@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "access-gateway",
   "crates/agent-core",
   "crates/artifact-store",
   "crates/auth",

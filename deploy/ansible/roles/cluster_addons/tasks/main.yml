@@ -18,21 +18,6 @@
       metadata: { name: dev-selfsigned }
       spec: { selfSigned: {} }
 
-- name: Install Kyverno using server-side apply compatible manifest
-  ansible.builtin.command: >-
-    kubectl apply --server-side -f
-    https://github.com/kyverno/kyverno/releases/download/{{ kyverno_version }}/install.yaml
-  changed_when: false
-
-- name: Wait for all Kyverno controllers
-  ansible.builtin.command: "kubectl -n kyverno rollout status deployment/{{ item }} --timeout=5m"
-  changed_when: false
-  loop:
-    - kyverno-admission-controller
-    - kyverno-background-controller
-    - kyverno-cleanup-controller
-    - kyverno-reports-controller
-
 - name: Apply namespaces, quota, Gateway, and HTTPRoute
   kubernetes.core.k8s:
     state: present

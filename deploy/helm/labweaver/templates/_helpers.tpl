@@ -5,8 +5,8 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 
 {{- define "labweaver.image" -}}
 {{- $image := required (printf "images.%s is required" .key) .value -}}
-{{- if not (regexMatch "^ghcr\\.io/teammonad/labweaver-system/[a-z0-9-]+@sha256:[0-9a-f]{64}$" $image) -}}
-{{- fail (printf "images.%s must be a GHCR teammonad/labweaver-system digest reference" .key) -}}
+{{- if not (regexMatch "^[a-z0-9.-]+(?::[0-9]+)?/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$" $image) -}}
+{{- fail (printf "images.%s must be an immutable Harbor digest reference" .key) -}}
 {{- end -}}
 {{- $image -}}
 {{- end -}}

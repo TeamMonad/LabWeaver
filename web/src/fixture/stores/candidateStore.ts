@@ -6,7 +6,6 @@ import type {
   ImageArtifact,
   ImagePolicyEvaluation,
   RuntimeKind,
-  SigstoreEvidence,
   VulnerabilitySummary,
 } from '@/generated/contracts'
 import { nowIso } from '../utils/clock'
@@ -129,28 +128,10 @@ function createEvaluationSpec(courseId: string): EvaluationSpec {
   }
 }
 
-function createSigstoreEvidence(prefix: string): SigstoreEvidence {
-  return {
-    certificateSha256: sha256(`${prefix}cert`),
-    certificateSubject: 'spiffe://labweaver/image-builder',
-    ctLogId: 'fixture-ct-log',
-    fulcioIssuer: 'https://fixture.fulcio.dev',
-    rekorInclusionProofSha256: sha256(`${prefix}proof`),
-    rekorLogId: 'fixture-rekor-log',
-    rekorLogIndex: 1,
-    sctSha256: sha256(`${prefix}sct`),
-    signatureSha256: sha256(`${prefix}sig`),
-    subjectDigest: sha256('e'),
-    trustBundleSha256: sha256('trust'),
-    verifiedAt: nowIso(),
-  }
-}
-
 function createImageArtifact(runtimeKind: RuntimeKind, candidateId: string): ImageArtifact {
   const artifactId = nextUuid7('image')
   const buildRequestId = nextUuid7('build')
   const digest = sha256('e')
-  const signature = createSigstoreEvidence('i')
 
   if (runtimeKind === 'container') {
     return {
@@ -158,11 +139,7 @@ function createImageArtifact(runtimeKind: RuntimeKind, candidateId: string): Ima
       id: artifactId,
       build_request_id: buildRequestId,
       repository: `registry.labweaver.local/${candidateId}`,
-      immutable_tag: `release-${nextRevision()}`,
       digest,
-      provenance: artifactRef('application/vnd.in-toto+json', 'p'),
-      sbom: artifactRef('application/spdx+json', 's'),
-      signature,
     }
   }
 
@@ -171,9 +148,6 @@ function createImageArtifact(runtimeKind: RuntimeKind, candidateId: string): Ima
     id: artifactId,
     format: 'qcow2',
     base_disk: artifactRef('application/vnd.qemu.qcow2', 'd'),
-    provenance: artifactRef('application/vnd.in-toto+json', 'p'),
-    sbom: artifactRef('application/spdx+json', 's'),
-    signature,
   }
 }
 
@@ -186,18 +160,13 @@ function createImagePolicyEvaluation(artifact: ImageArtifact): ImagePolicyEvalua
     artifactId,
     artifactSha256,
     evaluatedAt: now,
-    expectedCertificateSubject: 'spiffe://labweaver/image-builder',
-    expectedFulcioIssuer: 'https://fixture.fulcio.dev',
     maxEvidenceAgeMilliseconds: 3600000,
     passed: true,
     policyId: 'image-policy-1',
     policyRevision: 1,
-    requireCtSct: true,
-    requireRekorInclusion: true,
     scannerDatabaseSha256: sha256('scanner-db'),
     scannerName: 'trivy',
     scannerVersion: '1.0.0',
-    trustBundleSha256: sha256('trust'),
     validUntil: now,
     vulnerabilities,
   }

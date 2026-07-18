@@ -3,6 +3,24 @@
 version = 4
 
 [[package]]
+name = "access-gateway"
+version = "0.1.0"
+dependencies = [
+ "contracts",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "ssh-key 0.6.7",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "access-service"
 version = "0.1.0"
 dependencies = [

@@ -65,14 +65,6 @@ export const getEnvironmentCandidateHandler: FixtureHandler = (req) => {
       case 'high':
         imagePolicyEvaluation.vulnerabilities.high = 1
         break
-      case 'unsigned':
-        delete (imageArtifact as { signature?: unknown }).signature
-        imagePolicyEvaluation.passed = false
-        break
-      case 'wrong-issuer':
-        imageArtifact.signature.fulcioIssuer = 'https://wrong-issuer.example.com'
-        imagePolicyEvaluation.passed = false
-        break
       case 'wrong-digest':
         if (imageArtifact.kind === 'container') {
           imageArtifact.digest = 'sha256:' + 'f'.repeat(64)

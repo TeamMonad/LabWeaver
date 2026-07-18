@@ -96,21 +96,14 @@ export const createEnvironmentTemplateRelease: FixtureHandler = (req) => {
 
   const evaluation = body.imagePolicyEvaluation
   const artifact = body.artifact
-  const signature = artifact.signature
-  if (!signature) {
-    return conflict('镜像缺少 Sigstore 签名证据，禁止发布')
-  }
-  if (
-    evaluation.expectedFulcioIssuer !== signature.fulcioIssuer ||
-    evaluation.expectedCertificateSubject !== signature.certificateSubject
-  ) {
-    return conflict('签名 issuer 或 subject 与策略不符，禁止发布')
-  }
   if (artifact.kind === 'container' && artifact.digest !== evaluation.artifactSha256) {
     return conflict('镜像 digest 与扫描结果不匹配，禁止发布')
   }
   if (evaluation.vulnerabilities.critical > 0) {
     return conflict('镜像存在 Critical 漏洞，禁止发布')
+  }
+  if (!evaluation.passed) {
+    return conflict('Trivy Gate 未通过，禁止发布')
   }
 
   const release: EnvironmentTemplateReleaseViewSchema = {

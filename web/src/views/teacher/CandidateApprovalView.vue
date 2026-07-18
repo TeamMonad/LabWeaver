@@ -119,16 +119,8 @@
                     <code class="evidence-value">{{ candidate.imageArtifact?.digest ?? '—' }}</code>
                   </div>
                   <div class="evidence-row">
-                    <span class="evidence-label">Immutable Tag</span>
-                    <code class="evidence-value">{{ candidate.imageArtifact?.kind === 'container' ? candidate.imageArtifact.immutable_tag : '—' }}</code>
-                  </div>
-                  <div class="evidence-row">
                     <span class="evidence-label">Repository</span>
                     <code class="evidence-value">{{ candidate.imageArtifact?.kind === 'container' ? candidate.imageArtifact.repository : '—' }}</code>
-                  </div>
-                  <div class="evidence-row">
-                    <span class="evidence-label">SBOM</span>
-                    <code class="evidence-value">{{ candidate.imageArtifact?.sbom.sha256 ?? '—' }}</code>
                   </div>
                   <div class="evidence-row">
                     <span class="evidence-label">Trivy</span>
@@ -138,14 +130,6 @@
                       Medium {{ candidate.imagePolicyEvaluation?.vulnerabilities.medium ?? 0 }},
                       Low {{ candidate.imagePolicyEvaluation?.vulnerabilities.low ?? 0 }}
                     </span>
-                  </div>
-                  <div class="evidence-row">
-                    <span class="evidence-label">Sigstore</span>
-                    <code class="evidence-value">{{ candidate.imageArtifact?.signature?.fulcioIssuer ?? '—' }} / {{ candidate.imageArtifact?.signature?.certificateSubject ?? '—' }}</code>
-                  </div>
-                  <div class="evidence-row">
-                    <span class="evidence-label">Rekor Proof</span>
-                    <code class="evidence-value">{{ truncateSha256(candidate.imageArtifact?.signature?.rekorInclusionProofSha256 ?? '') }}</code>
                   </div>
                   <div class="evidence-row">
                     <span class="evidence-label">CT SCT</span>

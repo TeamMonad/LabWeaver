@@ -6,7 +6,7 @@ import type {
   ImagePolicyEvaluation,
 } from '@/generated/contracts'
 
-/** Environment candidate response may include backend-provided release evidence
+/** Environment candidate response may include backend-provided scan evidence
  * as additive optional fields. The UI only consumes these values; it never
  * fabricates them. */
 export type EnvironmentCandidateWithEvidence = EnvironmentCandidateSchema & {
@@ -40,24 +40,16 @@ export function evaluateImageGate(
   }
 
   const reasons: string[] = []
-  const signature = artifact.signature
-
-  if (!signature) {
-    reasons.push('镜像缺少 Sigstore 签名证据')
-  } else {
-    if (signature.fulcioIssuer !== evaluation.expectedFulcioIssuer) {
-      reasons.push('签名 Fulcio issuer 与策略不符')
-    }
-    if (signature.certificateSubject !== evaluation.expectedCertificateSubject) {
-      reasons.push('签名证书 subject 与策略不符')
-    }
-    if (signature.subjectDigest !== (artifact.kind === 'container' ? artifact.digest : evaluation.artifactSha256)) {
-      reasons.push('签名覆盖的 digest 与镜像 digest 不一致')
-    }
+  if (artifact.kind === 'container' && artifact.digest !== evaluation.artifactSha256) {
+    reasons.push('镜像 digest 与扫描结果不一致')
   }
 
   if (evaluation.vulnerabilities.critical > 0) {
     reasons.push(`存在 ${evaluation.vulnerabilities.critical} 个 Critical 漏洞`)
+  }
+
+  if (!evaluation.passed) {
+    reasons.push('Trivy Gate 未通过')
   }
 
   if (reasons.length > 0) {

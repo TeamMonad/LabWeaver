@@ -3,39 +3,74 @@ images:
   agent_service: ""
   control_service: ""
   environment_service: ""
-  evaluation_service: ""
-  resource_service: ""
   web: ""
+  openssh_gateway: ""
+
+imagePullSecrets: []
 
 workloads:
-  access-service:
-    configMap: ""
-    configSecret: ""
-    replicas: 2
-  agent-service:
-    configMap: ""
-    configSecret: ""
-    replicas: 2
   control-service:
-    configMap: ""
-    configSecret: ""
-    replicas: 2
+    enabled: true
+    imageKey: control_service
+    mode: control-service
+    port: 8080
+    configMap: control-service-config
+    configSecret: control-service-secrets
+  access-service:
+    enabled: true
+    imageKey: access_service
+    mode: access-service
+    port: 8081
+    configMap: access-service-config
+    configSecret: access-service-secrets
+  agent-service:
+    enabled: true
+    imageKey: agent_service
+    mode: agent-service
+    port: 8082
+    configMap: agent-service-config
+    configSecret: agent-service-secrets
+  build-executor:
+    enabled: true
+    imageKey: agent_service
+    mode: build-executor
+    port: 0
+    configMap: build-executor-config
+    configSecret: build-executor-secrets
   environment-service:
-    configMap: ""
-    configSecret: ""
-    replicas: 2
-  evaluation-service:
-    configMap: ""
-    configSecret: ""
-    replicas: 2
-  resource-service:
-    configMap: ""
-    configSecret: ""
-    replicas: 2
+    enabled: true
+    imageKey: environment_service
+    mode: environment-service
+    port: 8083
+    configMap: environment-service-config
+    configSecret: environment-service-secrets
+  runtime-executor:
+    enabled: true
+    imageKey: environment_service
+    mode: runtime-executor
+    port: 0
+    kubernetesApi: true
+    configMap: runtime-executor-config
+    configSecret: runtime-executor-secrets
+  openssh-gateway:
+    enabled: true
+    imageKey: openssh_gateway
+    mode: openssh-gateway
+    port: 2222
+    probe: tcp
+    configMap: openssh-gateway-config
+    configSecret: openssh-gateway-secrets
   web:
-    configMap: ""
-    configSecret: ""
-    replicas: 2
+    enabled: true
+    imageKey: web
+    mode: web
+    port: 8080
+    configMap: web-config
+    configSecret: web-secrets
+  evaluation-service:
+    enabled: false
+  resource-service:
+    enabled: false
 
 resources:
   requests:
@@ -47,16 +82,7 @@ resources:
     memory: 512Mi
     ephemeral-storage: 256Mi
 
-trust:
-  registry: ""
-  revision: ""
-  issuer: ""
-  subject: ""
-  fulcioRoots: ""
-  rekorUrl: ""
-  previous:
-    revision: ""
-    issuer: ""
-    subject: ""
-    fulcioRoots: ""
-    rekorUrl: ""
+network:
+  infrastructureNamespaceSelector:
+    matchLabels:
+      labweaver.io/infrastructure: "true"
