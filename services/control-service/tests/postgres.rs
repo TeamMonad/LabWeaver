@@ -344,6 +344,40 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     );
 
     let environment_candidate = environment_candidate(environment_schema)?;
+    let build_context = match &environment_candidate.spec.runtime {
+        contracts::authoring::EnvironmentRuntimeSpec::Container { build_context, .. } => {
+            build_context
+        }
+        contracts::authoring::EnvironmentRuntimeSpec::VirtualMachine { .. } => {
+            return Err("fixture must be Container".into());
+        }
+    };
+    let upload_id = Uuid::now_v7();
+    let foreign_course_id = CourseId::new();
+    sqlx::query(
+        "INSERT INTO control.problem_package_upload_sessions \
+         (upload_id,course_id,revision,state,retention_policy_revision,expires_at,completed_package_id) \
+         VALUES ($1,$2,1,'completed',1,now()+interval '1 hour',$3)",
+    )
+    .bind(upload_id)
+    .bind(foreign_course_id.as_uuid())
+    .bind(Uuid::now_v7())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO control.problem_package_upload_files \
+         (upload_id,ordinal,path,object_key,artifact_id,object_version,size_bytes,sha256,media_type,verified_at) \
+         VALUES ($1,0,'context.tar.gz',$2,$3,$4,$5,$6,$7,now())",
+    )
+    .bind(upload_id)
+    .bind(format!("courses/{course_id}/uploads/{upload_id}/context.tar.gz"))
+    .bind(build_context.artifact_id.as_uuid())
+    .bind(&build_context.object_version)
+    .bind(i64::try_from(build_context.size_bytes)?)
+    .bind(build_context.sha256.to_string())
+    .bind(&build_context.media_type)
+    .execute(&pool)
+    .await?;
     sqlx::query(
         "INSERT INTO control.candidates \
          (candidate_id,candidate_kind,course_id,revision,state,content_sha256,contract, \
@@ -358,20 +392,50 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     .bind(Uuid::now_v7())
     .execute(&pool)
     .await?;
+    let environment_decision = CandidateDecisionRequest {
+        candidate_revision: environment_candidate.revision,
+        candidate_sha256: environment_candidate.spec_sha256,
+        policy_revision: environment_candidate.policy_revision,
+        schema_sha256: environment_candidate.schema_sha256,
+        trust_revision: Revision::new(1)?,
+        decision: CandidateDecision::Approved,
+        reason: "reviewed container candidate".to_owned(),
+    };
+    let cross_course_context = service
+        .decide_candidate(
+            course_id,
+            environment_candidate.id,
+            AgentTrackKind::Environment,
+            &environment_decision,
+            ActorId::new(),
+            Revision::new(1)?,
+            &IdempotencyKey::parse("reject-cross-course-build-context")?,
+            "2026-07-16T08:00:00.000Z".parse()?,
+        )
+        .await;
+    assert!(matches!(
+        cross_course_context,
+        Err(ControlError::PersistenceIdentityMismatch)
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM control.candidate_approvals")
+            .fetch_one(&pool)
+            .await?,
+        0
+    );
+    sqlx::query(
+        "UPDATE control.problem_package_upload_sessions SET course_id=$1 WHERE upload_id=$2",
+    )
+    .bind(course_id.as_uuid())
+    .bind(upload_id)
+    .execute(&pool)
+    .await?;
     let approval = service
         .decide_candidate(
             course_id,
             environment_candidate.id,
             AgentTrackKind::Environment,
-            &CandidateDecisionRequest {
-                candidate_revision: environment_candidate.revision,
-                candidate_sha256: environment_candidate.spec_sha256,
-                policy_revision: environment_candidate.policy_revision,
-                schema_sha256: environment_candidate.schema_sha256,
-                trust_revision: Revision::new(1)?,
-                decision: CandidateDecision::Approved,
-                reason: "reviewed container candidate".to_owned(),
-            },
+            &environment_decision,
             ActorId::new(),
             Revision::new(1)?,
             &IdempotencyKey::parse("approve-container-candidate")?,

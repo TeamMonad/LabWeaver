@@ -1306,11 +1306,15 @@ impl ControlService {
             } = &candidate.spec.runtime
             {
                 let context_object_key = sqlx::query_scalar::<_, String>(
-                    "SELECT object_key FROM control.problem_package_upload_files \
-                     WHERE artifact_id=$1 AND object_version=$2",
+                    "SELECT f.object_key \
+                     FROM control.problem_package_upload_files f \
+                     JOIN control.problem_package_upload_sessions s ON s.upload_id=f.upload_id \
+                     WHERE f.artifact_id=$1 AND f.object_version=$2 AND s.course_id=$3 \
+                       AND s.state='completed' AND f.verified_at IS NOT NULL",
                 )
                 .bind(build_context.artifact_id.as_uuid())
                 .bind(&build_context.object_version)
+                .bind(course_id.as_uuid())
                 .fetch_optional(&mut *transaction)
                 .await
                 .map_err(db)?
