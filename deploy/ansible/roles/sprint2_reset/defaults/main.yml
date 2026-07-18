@@ -26,9 +26,18 @@ sprint2_reset_postgres_service: sprint2-admin
 sprint2_reset_nats_server: ""
 sprint2_reset_nats_credentials_file: ""
 sprint2_reset_nats_streams:
-  - {name: LABWEAVER_AGENT, subjects: "labweaver.agent.>", max_age: 24h}
-  - {name: LABWEAVER_BUILD, subjects: "labweaver.build.>", max_age: 24h}
-  - {name: LABWEAVER_ENVIRONMENT, subjects: "labweaver.environment.>", max_age: 24h}
+  - name: LABWEAVER_AGENT_EVENTS
+    subjects: labweaver.agent.>
+    max_age: 24h
+  - name: LABWEAVER_CONTROL_COMMANDS
+    subjects: labweaver.control.agent_build.requested.v1
+    max_age: 24h
+  - name: LABWEAVER_ENVIRONMENT_COMMANDS
+    subjects: labweaver.environment.instance.lifecycle_requested.v1
+    max_age: 24h
+  - name: LABWEAVER_RELEASES
+    subjects: labweaver.control.environment_template_release.>
+    max_age: 168h
   - {name: LABWEAVER_ACCESS, subjects: "labweaver.access.>", max_age: 24h}
   - {name: LABWEAVER_SUBMISSION, subjects: "labweaver.evaluation.submission.>", max_age: 168h}
 sprint2_reset_minio_alias: ""
@@ -78,6 +87,6 @@ sprint2_reset_workloads:
   - environment-service
   - container-executor
   - kubevirt-executor
-  - access-gateway
+  - openssh-gateway
   - web
 sprint2_reset_runtime_probe_namespace: labweaver-demo

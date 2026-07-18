@@ -704,6 +704,27 @@ fn load_provider_bindings(
     Ok(bindings)
 }
 
+#[cfg(test)]
+mod deployment_contract_tests {
+    use super::ProviderBindingConfiguration;
+
+    #[test]
+    fn checked_in_sprint2_provider_example_has_no_legacy_contract() {
+        let example = include_str!("../../../deploy/config/environment-providers.json.example");
+        let bindings: Vec<ProviderBindingConfiguration> =
+            serde_json::from_str(example).expect("provider example must deserialize");
+
+        assert_eq!(bindings.len(), 2);
+        assert!(
+            bindings
+                .iter()
+                .all(|binding| binding.subject.ends_with(".v1"))
+        );
+        assert!(!example.contains(".v2"));
+        assert!(!example.contains("activeTrustBundleSha256"));
+    }
+}
+
 fn add_time(
     timestamp: UtcTimestamp,
     duration: time::Duration,

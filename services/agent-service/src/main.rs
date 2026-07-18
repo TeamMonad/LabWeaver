@@ -567,3 +567,20 @@ enum StartupError {
     #[error(transparent)]
     Service(#[from] service_runtime::StartupError),
 }
+
+#[cfg(test)]
+mod deployment_contract_tests {
+    use super::DeploymentFile;
+
+    #[test]
+    fn checked_in_sprint2_example_matches_the_runtime_contract() {
+        let example = include_str!("../../../deploy/config/agent-control-plane.yaml.example");
+        let deployment: DeploymentFile =
+            serde_yaml::from_str(example).expect("agent deployment example must deserialize");
+
+        assert!(deployment.database_url_file.starts_with('/'));
+        assert!(deployment.nats.server.starts_with("tls://"));
+        assert!(deployment.build.provider_subject.ends_with(".v1"));
+        assert!(!example.contains(".v2"));
+    }
+}

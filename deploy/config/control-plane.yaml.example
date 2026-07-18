@@ -1,37 +1,37 @@
 # Non-secret Issue #48 Control deployment contract. Every credential value is a mounted
 # file locator; no ambient credential chain, proxy, endpoint, or fallback is consulted.
-database_url_file: "secrets/control-runtime-url"
+database_url_file: "/etc/labweaver/secrets/database-url"
 database_max_connections: 20
 gateway_mtls:
-  bind_addr: "127.0.0.1:9444"
-  server_certificate_file: "secrets/control-server-cert.pem"
-  server_key_file: "secrets/control-server-key.pem"
-  client_ca_file: "secrets/internal-client-ca.pem"
+  bind_addr: "0.0.0.0:9444"
+  server_certificate_file: "/etc/labweaver/secrets/tls.crt"
+  server_key_file: "/etc/labweaver/secrets/tls.key"
+  client_ca_file: "/etc/labweaver/secrets/mtls-ca.pem"
   allowed_san_uris: ["spiffe://labweaver/gateway"]
   required_eku: "clientAuth"
 access_service:
-  base_url: "https://access-service.internal:9443/"
-  ca_certificate_file: "secrets/internal-server-ca.pem"
-  client_certificate_file: "secrets/control-client-cert.pem"
-  client_private_key_file: "secrets/control-client-key.pem"
+  base_url: "https://access-service:9443/"
+  ca_certificate_file: "/etc/labweaver/secrets/mtls-ca.pem"
+  client_certificate_file: "/etc/labweaver/secrets/mtls.crt"
+  client_private_key_file: "/etc/labweaver/secrets/mtls.key"
   timeout_milliseconds: 2000
 agent_service:
-  base_url: "https://agent-service.internal:9445/"
-  ca_certificate_file: "secrets/internal-server-ca.pem"
-  client_certificate_file: "secrets/control-client-cert.pem"
-  client_private_key_file: "secrets/control-client-key.pem"
+  base_url: "https://agent-service:9445/"
+  ca_certificate_file: "/etc/labweaver/secrets/mtls-ca.pem"
+  client_certificate_file: "/etc/labweaver/secrets/mtls.crt"
+  client_private_key_file: "/etc/labweaver/secrets/mtls.key"
   timeout_milliseconds: 5000
 object_store:
   binding: "problem-package-minio-v1"
-  endpoint: "https://minio.internal:9000/"
+  endpoint: "https://minio.labweaver-data.svc:9000/"
   bucket: "labweaver-problem-packages"
   region: "labweaver-internal-1"
   objectPrefix: "problem-packages"
   uploadTtlSeconds: 900
   maxObjectBytes: 67108864
   forcePathStyle: true
-object_store_access_key_file: "secrets/minio-access-key"
-object_store_secret_key_file: "secrets/minio-secret-key"
+object_store_access_key_file: "/etc/labweaver/secrets/minio-access-key"
+object_store_secret_key_file: "/etc/labweaver/secrets/minio-secret-key"
 object_store_session_token_file: null
 control:
   packageObjectPrefix: "problem-packages"
@@ -60,18 +60,18 @@ control:
     maxMemoryBytes: 2147483648
 cleanup_interval_seconds: 30
 nats:
-  server: "tls://nats.internal:4222"
-  ca_file: "secrets/nats-ca.pem"
-  client_certificate_file: "secrets/control-nats-client-cert.pem"
-  client_private_key_file: "secrets/control-nats-client-key.pem"
-  credentials_file: "secrets/control-nats.creds"
+  server: "tls://nats.labweaver-data.svc:4222"
+  ca_file: "/etc/labweaver/secrets/nats-ca.pem"
+  client_certificate_file: "/etc/labweaver/secrets/nats-client.crt"
+  client_private_key_file: "/etc/labweaver/secrets/nats-client.key"
+  credentials_file: "/etc/labweaver/secrets/nats.creds"
   stream_name: "LABWEAVER_AGENT_EVENTS"
   consumer_name: "control-agent-run-projection-v1"
   quarantine_subject: "labweaver.control.quarantine.agent_run.v1"
   # Deployment-owned durable consumer filter_subjects:
-  # - labweaver.agent.build.completed.v2
-  # - labweaver.agent.build.failed.v2
-  build_consumer_name: "control-agent-build-projection-v2"
-  build_quarantine_subject: "labweaver.control.quarantine.agent_build.v2"
+  # - labweaver.agent.build.completed.v1
+  # - labweaver.agent.build.failed.v1
+  build_consumer_name: "control-agent-build-projection-v1"
+  build_quarantine_subject: "labweaver.control.quarantine.agent_build.v1"
   publish_timeout_milliseconds: 5000
   outbox_poll_milliseconds: 250

@@ -1,7 +1,7 @@
 [
   {
     "binding": "container-primary-v1",
-    "subject": "labweaver.provider.kubernetes.container.v2",
+    "subject": "labweaver.provider.kubernetes.container.v1",
     "providerKind": "container",
     "gatewayNamespace": "access-system",
     "gatewayName": "protected-gateway",
@@ -9,8 +9,7 @@
     "imagePullSecretName": "harbor-course-pull",
     "activeImagePolicyId": "01900000-0000-7000-8000-000000000001",
     "activeImagePolicyRevision": 1,
-    "activeTrustRevision": 1,
-    "activeTrustBundleSha256": "d58414fc98a5de1ad8c269290835b407ff258b3f567dab3399fbc2911454a981"
+    "activeTrustRevision": 1
   },
   {
     "binding": "kubevirt-primary-v1",
@@ -32,7 +31,6 @@
     "cdiScratchStorageBytes": 10737418240,
     "activeImagePolicyId": "01900000-0000-7000-8000-000000000001",
     "activeImagePolicyRevision": 1,
-    "activeTrustRevision": 1,
-    "activeTrustBundleSha256": "d58414fc98a5de1ad8c269290835b407ff258b3f567dab3399fbc2911454a981"
+    "activeTrustRevision": 1
   }
 ]

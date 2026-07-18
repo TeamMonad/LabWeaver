@@ -276,3 +276,20 @@ enum StartupError {
     #[error(transparent)]
     Messaging(#[from] control_service::messaging::MessagingError),
 }
+
+#[cfg(test)]
+mod deployment_contract_tests {
+    use super::DeploymentFile;
+
+    #[test]
+    fn checked_in_sprint2_example_matches_the_runtime_contract() {
+        let example = include_str!("../../../deploy/config/control-plane.yaml.example");
+        let deployment: DeploymentFile =
+            serde_yaml::from_str(example).expect("control deployment example must deserialize");
+
+        assert!(deployment.database_url_file.starts_with('/'));
+        assert!(deployment.nats.server.starts_with("tls://"));
+        assert!(deployment.nats.build_consumer_name.ends_with("-v1"));
+        assert!(!example.contains(".v2"));
+    }
+}
