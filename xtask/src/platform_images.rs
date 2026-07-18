@@ -1171,4 +1171,29 @@ mod tests {
         assert!(validate_registry("https://harbor.internal.example").is_err());
         assert!(validate_registry("harbor.internal.example/project").is_err());
     }
+
+    #[test]
+    fn rust_container_build_context_includes_every_workspace_member() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let Ok(dockerignore) = std::fs::read_to_string(root.join(".dockerignore")) else {
+            panic!(".dockerignore must be readable");
+        };
+        let Ok(containerfile) =
+            std::fs::read_to_string(root.join("containers").join("Containerfile.rust"))
+        else {
+            panic!("Rust Containerfile must be readable");
+        };
+        for directory in ["access-gateway", "crates", "services", "xtask"] {
+            assert!(
+                dockerignore
+                    .lines()
+                    .any(|line| line == format!("!{directory}/**")),
+                "{directory} must be included in the Docker build context"
+            );
+            assert!(
+                containerfile.contains(&format!("COPY {directory} {directory}")),
+                "{directory} must be copied by the Rust Containerfile"
+            );
+        }
+    }
 }

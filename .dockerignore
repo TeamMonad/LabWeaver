@@ -4,6 +4,7 @@
 !rust-toolchain.toml
 !rustfmt.toml
 !.cargo/**
+!access-gateway/**
 !containers/**
 !crates/**
 !migrations/**
