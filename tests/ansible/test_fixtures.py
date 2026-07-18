@@ -78,6 +78,23 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("SPRINT2_FOUNDATION_BUNDLE_KEYS_INVALID", tasks)
         self.assertIn("kind: StatefulSet", workloads)
         self.assertEqual(workloads.count("kind: StatefulSet"), 3)
+        replacements = {
+            "{{ sprint2_foundation_namespace }}": "labweaver-data",
+            "{{ sprint2_foundation_storage_class }}": "local-path",
+            "{{ sprint2_foundation_minio_storage_class }}": "nfs-rwx",
+            "{{ sprint2_foundation_postgres_storage }}": "20Gi",
+            "{{ sprint2_foundation_nats_storage }}": "10Gi",
+            "{{ sprint2_foundation_minio_storage }}": "100Gi",
+            "{{ sprint2_foundation_lock.postgresql.image }}": "registry.invalid/postgres@sha256:" + "a" * 64,
+            "{{ sprint2_foundation_lock.sprint2_foundation.nats }}": "registry.invalid/nats@sha256:" + "b" * 64,
+            "{{ sprint2_foundation_lock.sprint2_foundation.minio }}": "registry.invalid/minio@sha256:" + "c" * 64,
+        }
+        rendered = workloads
+        for source, value in replacements.items():
+            rendered = rendered.replace(source, value)
+        documents = list(yaml.safe_load_all(rendered))
+        self.assertEqual(len(documents), 8)
+        self.assertEqual(sum(document["kind"] == "StatefulSet" for document in documents), 3)
         self.assertIn("pod-security.kubernetes.io/enforce: restricted", tasks)
         reset_namespaces = reset.split("sprint2_reset_domains:", maxsplit=1)[0]
         self.assertNotIn("labweaver-data", reset_namespaces)

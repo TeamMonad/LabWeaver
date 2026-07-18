@@ -177,7 +177,7 @@ spec:
       containers:
         - name: minio
           image: {{ sprint2_foundation_lock.sprint2_foundation.minio }}
-          args: [server, /data, --certs-dir, /etc/minio/certs, --console-address, :9001]
+          args: [server, /data, --certs-dir, /etc/minio/certs, --console-address, ":9001"]
           env:
             - name: MINIO_ROOT_USER
               valueFrom: {secretKeyRef: {name: minio-secrets, key: root-user}}
