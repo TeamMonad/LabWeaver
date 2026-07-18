@@ -827,16 +827,6 @@ fn required_environment_value(variable: &str, role: &'static str) -> Result<Stri
 }
 
 #[cfg(target_os = "linux")]
-fn is_sha256_identity(value: &str) -> bool {
-    value.strip_prefix("sha256:").is_some_and(|digest| {
-        digest.len() == 64
-            && digest
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    })
-}
-
-#[cfg(target_os = "linux")]
 fn infrastructure_root() -> Result<std::path::PathBuf, AppError> {
     std::env::current_dir().map_err(|error| AppError::ExternalCommand {
         role: "infrastructure controller working directory",

@@ -6,6 +6,7 @@ FROM ${RUST_BUILDER} AS builder
 ARG SOURCE_COMMIT
 ARG SOURCE_DATE_EPOCH
 ENV CARGO_INCREMENTAL=0 SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+RUN apk add --no-cache musl-dev=1.2.5-r9
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml ./
 COPY .cargo .cargo
