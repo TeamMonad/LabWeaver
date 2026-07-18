@@ -443,6 +443,65 @@
   changed_when: false
   register: harbor_trivy_pv
 
+- name: Read the Harbor registry PVC binding
+  ansible.builtin.command:
+    argv:
+      - "{{ harbor_kubectl_path }}"
+      - --kubeconfig
+      - "{{ harbor_kubeconfig_path }}"
+      - -n
+      - "{{ harbor_namespace }}"
+      - get
+      - pvc
+      - harbor-registry
+      - -o
+      - jsonpath={.spec.volumeName}
+  check_mode: false
+  changed_when: false
+  register: harbor_registry_pv
+
+- name: Read the Harbor registry NFS dynamic subdirectory
+  ansible.builtin.command:
+    argv:
+      - "{{ harbor_kubectl_path }}"
+      - --kubeconfig
+      - "{{ harbor_kubeconfig_path }}"
+      - get
+      - pv
+      - "{{ harbor_registry_pv.stdout }}"
+      - -o
+      - jsonpath={.spec.csi.volumeAttributes.subdir}
+  check_mode: false
+  changed_when: false
+  register: harbor_registry_subdir
+
+- name: Reject an unsafe registry NFS subdirectory
+  ansible.builtin.assert:
+    that:
+      - harbor_registry_subdir.stdout is match('^[a-z0-9][a-z0-9-]+$')
+    fail_msg: HARBOR_REGISTRY_SUBDIR_UNSAFE
+
+- name: Repair ownership of the Harbor registry storage directory
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/chown
+      - 10000:10000
+      - "{{ harbor_nfs_dynamic_root }}/{{ harbor_registry_subdir.stdout }}"
+  delegate_to: "{{ groups['nfs_servers'][0] }}"
+  become: true
+  when: not ansible_check_mode
+  changed_when: false
+
+- name: Repair permissions of the Harbor registry storage directory
+  ansible.builtin.file:
+    path: "{{ harbor_nfs_dynamic_root }}/{{ harbor_registry_subdir.stdout }}"
+    owner: 10000
+    group: 10000
+    mode: '2770'
+  delegate_to: "{{ groups['nfs_servers'][0] }}"
+  become: true
+  when: not ansible_check_mode
+
 - name: Read the Harbor Trivy NFS dynamic subdirectory
   ansible.builtin.command:
     argv:
