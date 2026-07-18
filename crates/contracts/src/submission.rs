@@ -202,7 +202,21 @@ pub struct FrozenSubmission {
 impl FrozenSubmission {
     /// Validates file ordering, individual identity, canonical manifest hash, and immutable object.
     pub fn validate(&self) -> Result<(), SubmissionError> {
-        if self.attempt == 0 || self.files.is_empty() || self.object.size_bytes == 0 {
+        if self.attempt == 0
+            || self.files.is_empty()
+            || self.object.size_bytes == 0
+            || self.object.store_binding.trim().is_empty()
+            || self.object.object_version.trim().is_empty()
+            || self.object.media_type.trim().is_empty()
+            || self.environment.release_version == 0
+            || self.retention.class != crate::RetentionClass::StudentSubmission
+            || self.derived_archive.as_ref().is_some_and(|archive| {
+                archive.store_binding.trim().is_empty()
+                    || archive.object_version.trim().is_empty()
+                    || archive.media_type.trim().is_empty()
+                    || archive.size_bytes == 0
+            })
+        {
             return Err(SubmissionError::IncompleteFreeze);
         }
         let mut previous: Option<&str> = None;
@@ -210,7 +224,7 @@ impl FrozenSubmission {
         for file in &self.files {
             crate::validate_relative_path(&file.path)
                 .map_err(|error| SubmissionError::UnsafePath(error.to_string()))?;
-            if file.size_bytes == 0 || file.media_type.trim().is_empty() {
+            if file.media_type.trim().is_empty() {
                 return Err(SubmissionError::IncompleteFreeze);
             }
             if previous.is_some_and(|path| path >= file.path.as_str())

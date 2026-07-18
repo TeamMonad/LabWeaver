@@ -92,6 +92,15 @@ through the configured Access Gateway pod selector and namespace. Raw guest
 content, private keys, tokens, Kubernetes objects and executor credentials are
 not stored in Environment state or logs.
 
+The guest principal file admits `labweaver-gateway` for Access and
+`labweaver-collector` for Evaluation. Collector admission does not authorize a
+shell: its user certificate must expire within five minutes and carry critical
+`force-command = internal-sftp -R`; Evaluation additionally pins the observed
+host-key SHA-256 and opens only SFTP. A deployment-owned, single-Environment
+certificate issuer and ephemeral Secret cleanup are required before connected
+VM Collector evidence can pass. Static keys or a certificate without the
+forced read-only command are invalid.
+
 The observation table contains only UUIDs, IP addresses, hashes, state and
 sanitized cleanup evidence. Database errors are retryable; stale fences,
 identity drift, invalid readiness and tombstoned operations fail closed without
