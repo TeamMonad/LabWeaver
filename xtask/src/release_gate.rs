@@ -184,6 +184,7 @@ fn validate_input(root: &Path, input: &GateInput) -> Result<(), AppError> {
             "migrationCatalog must bind migrations/catalog.yaml",
         ));
     }
+    super::migration_catalog::validate(root)?;
     unique_nonempty(
         input
             .platform_images
@@ -520,7 +521,10 @@ mod tests {
             "schemas/results/platform-image-deployment-manifest.v1.schema.json",
             DEPLOYMENT_SCHEMA,
         )?;
-        write(root, "migrations/catalog.yaml", "catalogVersion: 1\n")?;
+        copy_tree(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../migrations"),
+            &root.join("migrations"),
+        )?;
         git(root, &["init"])?;
         git(root, &["config", "user.email", "gate@example.invalid"])?;
         git(root, &["config", "user.name", "Release Gate"])?;
@@ -619,6 +623,20 @@ mod tests {
         })?;
         fs::create_dir_all(parent)?;
         fs::write(path, value)
+    }
+
+    fn copy_tree(source: &Path, target: &Path) -> std::io::Result<()> {
+        fs::create_dir_all(target)?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            let destination = target.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                copy_tree(&entry.path(), &destination)?;
+            } else {
+                fs::copy(entry.path(), destination)?;
+            }
+        }
+        Ok(())
     }
 
     fn file_hash(root: &Path, relative: &str) -> std::io::Result<String> {

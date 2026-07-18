@@ -1,7 +1,10 @@
 {
   "schema_version": "labweaver.sprint2-reset-report.v1",
   "run_id": {{ sprint2_reset_run_id | to_json }},
+  "source_commit": {{ sprint2_reset_source_commit | to_json }},
   "cluster_uid": {{ sprint2_reset_cluster_uid.stdout | trim | to_json }},
+  "migration_catalog_sha256": {{ ('sha256:' + sprint2_reset_migration_catalog_stat.stat.checksum) | to_json }},
+  "inventory_sha256": {{ ('sha256:' + sprint2_reset_inventory_stat.stat.checksum) | to_json }},
   "destructive_reset": true,
   "removed": {
     "private_sigstore": true,
@@ -17,6 +20,7 @@
     "release": {{ sprint2_reset_release_name | to_json }},
     "namespace": {{ sprint2_reset_namespace | to_json }},
     "workloads": {{ sprint2_reset_workloads | to_json }},
+    "platform_images": [{% for deployment in (sprint2_reset_deployment_readback.stdout | from_json).items %}{{ deployment.spec.template.spec.containers[0].image | to_json }}{% if not loop.last %}, {% endif %}{% endfor %}],
     "first_revision": {{ sprint2_reset_first_revision.stdout | trim | to_json }},
     "second_revision": {{ sprint2_reset_second_revision.stdout | trim | to_json }}
   },

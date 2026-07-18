@@ -4,11 +4,14 @@
   "title": "Sprint 2 Reset Report v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "run_id", "cluster_uid", "destructive_reset", "removed", "deployment", "readback"],
+  "required": ["schema_version", "run_id", "source_commit", "cluster_uid", "migration_catalog_sha256", "inventory_sha256", "destructive_reset", "removed", "deployment", "readback"],
   "properties": {
     "schema_version": {"const": "labweaver.sprint2-reset-report.v1"},
     "run_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,62}$"},
+    "source_commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
     "cluster_uid": {"type": "string", "minLength": 1},
+    "migration_catalog_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "inventory_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
     "destructive_reset": {"const": true},
     "removed": {
       "type": "object",
@@ -28,11 +31,12 @@
     "deployment": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["release", "namespace", "workloads", "first_revision", "second_revision"],
+      "required": ["release", "namespace", "workloads", "platform_images", "first_revision", "second_revision"],
       "properties": {
         "release": {"type": "string", "minLength": 1},
         "namespace": {"type": "string", "minLength": 1},
         "workloads": {"type": "array", "minItems": 9, "maxItems": 9, "uniqueItems": true, "items": {"type": "string"}},
+        "platform_images": {"type": "array", "minItems": 9, "maxItems": 9, "items": {"type": "string", "pattern": "^[^@]+@sha256:[0-9a-f]{64}$"}},
         "first_revision": {"type": ["integer", "string"]},
         "second_revision": {"type": ["integer", "string"]}
       }

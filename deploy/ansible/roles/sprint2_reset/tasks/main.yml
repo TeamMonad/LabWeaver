@@ -3,6 +3,7 @@
   ansible.builtin.assert:
     that:
       - sprint2_reset_run_id is match('^[a-z0-9][a-z0-9-]{2,62}$')
+      - sprint2_reset_source_commit is match('^[0-9a-f]{40,64}$')
       - sprint2_reset_postgres_service_file | length > 0
       - sprint2_reset_nats_server | length > 0
       - sprint2_reset_nats_credentials_file | length > 0
@@ -39,7 +40,8 @@
   ansible.builtin.stat:
     path: "{{ item }}"
   loop: >-
-    {{ [sprint2_reset_chart_source, sprint2_reset_keycloak_realm_file,
+    {{ [sprint2_reset_chart_source, sprint2_reset_migration_catalog,
+        sprint2_reset_keycloak_realm_file,
         sprint2_reset_rollback_probe_values_file] + sprint2_reset_values_files }}
   register: sprint2_reset_controller_required_paths
   delegate_to: localhost
@@ -51,6 +53,14 @@
       - sprint2_reset_remote_required_paths.results | map(attribute='stat.exists') | min
       - sprint2_reset_controller_required_paths.results | map(attribute='stat.exists') | min
     fail_msg: SPRINT2_RESET_REQUIRED_PATH_MISSING
+
+- name: Hash the reviewed migration catalog
+  ansible.builtin.stat:
+    path: "{{ sprint2_reset_migration_catalog }}"
+    checksum_algorithm: sha256
+  register: sprint2_reset_migration_catalog_stat
+  delegate_to: localhost
+  become: false
 
 - name: Read target cluster UID
   ansible.builtin.command:
@@ -686,6 +696,12 @@
         == sprint2_reset_workloads | sort
       - (sprint2_reset_first_status.stdout | from_json).info.status == 'deployed'
     fail_msg: SPRINT2_DEPLOYMENT_READBACK_FAILED
+
+- name: Hash the pre-destruction inventory
+  ansible.builtin.stat:
+    path: "{{ sprint2_reset_report_root }}/{{ sprint2_reset_run_id }}/inventory.json"
+    checksum_algorithm: sha256
+  register: sprint2_reset_inventory_stat
 
 - name: Persist the sanitized reset and deployment report
   ansible.builtin.template:

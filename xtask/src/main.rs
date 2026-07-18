@@ -10,6 +10,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use sha2::{Digest, Sha256};
 
 mod acceptance_assets;
+mod migration_catalog;
 mod platform_images;
 mod release_gate;
 

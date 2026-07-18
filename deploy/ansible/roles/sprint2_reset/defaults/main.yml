@@ -1,6 +1,8 @@
 ---
 sprint2_reset_confirmation: "{{ lookup('ansible.builtin.env', 'LABWEAVER_SPRINT2_RESET_CONFIRMATION') }}"
 sprint2_reset_run_id: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RUN_ID') }}"
+sprint2_reset_source_commit: "{{ lookup('ansible.builtin.env', 'LABWEAVER_COMMIT_SHA') }}"
+sprint2_reset_migration_catalog: "{{ playbook_dir }}/../../../migrations/catalog.yaml"
 sprint2_reset_kubeconfig: /etc/kubernetes/admin.conf
 sprint2_reset_kubectl: /usr/bin/kubectl
 sprint2_reset_helm: /usr/local/bin/helm
