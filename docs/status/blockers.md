@@ -51,6 +51,14 @@ identity. Historical Issue evidence is not a current completion claim.
   Secret material after dependency guard, double deploy and rollback readback.
 - Owner: A reset approval and execution; D independent Verify.
 
+The repository now has a separate `sprint2-foundation` reconciliation for the
+retained PostgreSQL, NATS and MinIO service bodies. Its Linux syntax/lint and
+fixture evidence is static deployment evidence only. The target cluster still
+lacks these workloads and the private TLS/JWT bundle, so reset remains blocked
+before mutation. `labweaver-data` and `labweaver-build` are intentionally not
+namespace-reset targets; their LabWeaver data is cleared through owner APIs and
+administrative clients after dependency probes pass.
+
 ## Browser replay and Release Gate
 
 - Web SDK and local browser fixtures exist.

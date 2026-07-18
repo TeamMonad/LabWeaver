@@ -71,6 +71,20 @@ class Sprint2BundleTests(unittest.TestCase):
         self.assertIn("buildkit-client.crt", manifest["secrets"]["build-executor-secrets"])
         self.assertEqual(manifest["namespace"], "labweaver-system")
 
+        foundation_path = (
+            MODULE_PATH.parents[1]
+            / "deploy"
+            / "config"
+            / "sprint2-foundation-bundle-manifest.json"
+        )
+        foundation = MODULE._load_manifest(foundation_path)
+        self.assertEqual(set(foundation["configMaps"]), {"nats-config"})
+        self.assertEqual(
+            set(foundation["secrets"]),
+            {"postgres-secrets", "nats-server-secrets", "minio-secrets"},
+        )
+        self.assertEqual(foundation["namespace"], "labweaver-data")
+
     def test_public_output_path_is_rejected(self) -> None:
         with self.assertRaisesRegex(MODULE.BundleError, "LW_SPRINT2_BUNDLE_PRIVATE_PATH_REQUIRED"):
             MODULE._require_private_path(self.root / "bundle.yaml")

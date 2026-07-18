@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import sys
 import unittest
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -20,6 +21,41 @@ SPEC.loader.exec_module(SAFETY)
 
 
 class AnsibleFixtureTests(unittest.TestCase):
+    def test_sprint2_foundation_images_are_immutable(self) -> None:
+        lock = yaml.safe_load((ROOT / "deploy/versions.lock.yml").read_text(encoding="utf-8"))
+        images = lock["sprint2_foundation"]
+
+        self.assertEqual(set(images), {"nats", "nats_box", "minio", "buildkit_rootless"})
+        for reference in images.values():
+            self.assertRegex(reference, r"^[^\s]+@sha256:[0-9a-f]{64}$")
+        self.assertRegex(lock["postgresql"]["image"], r"^[^\s]+@sha256:[0-9a-f]{64}$")
+
+    def test_sprint2_foundation_is_persistent_and_reset_preserves_it(self) -> None:
+        playbook = (ROOT / "deploy/ansible/playbooks/92-sprint2-foundation.yml").read_text(
+            encoding="utf-8"
+        )
+        tasks = (ROOT / "deploy/ansible/roles/sprint2_foundation/tasks/main.yml").read_text(
+            encoding="utf-8"
+        )
+        workloads = (
+            ROOT / "deploy/ansible/roles/sprint2_foundation/templates/workloads.yml.j2"
+        ).read_text(encoding="utf-8")
+        reset = (ROOT / "deploy/ansible/roles/sprint2_reset/defaults/main.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("labweaver_preflight_scope: sprint2-foundation", playbook)
+        self.assertIn("sprint2-foundation --infra", (
+            ROOT / "docs/deployment/ansible.md"
+        ).read_text(encoding="utf-8"))
+        self.assertIn("SPRINT2_FOUNDATION_BUNDLE_KEYS_INVALID", tasks)
+        self.assertIn("kind: StatefulSet", workloads)
+        self.assertEqual(workloads.count("kind: StatefulSet"), 3)
+        self.assertIn("pod-security.kubernetes.io/enforce: restricted", tasks)
+        reset_namespaces = reset.split("sprint2_reset_domains:", maxsplit=1)[0]
+        self.assertNotIn("labweaver-data", reset_namespaces)
+        self.assertNotIn("labweaver-build", reset_namespaces)
+
     def test_controller_execution_is_router_owned(self) -> None:
         docs = (ROOT / "docs/deployment/ansible.md").read_text(encoding="utf-8")
         controller_lock = (ROOT / "deploy/ansible/controller.lock.yml").read_text(encoding="utf-8")

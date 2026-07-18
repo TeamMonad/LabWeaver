@@ -35,6 +35,7 @@ jobs:
           ansible-playbook --syntax-check -i /tmp/labweaver-hosts.yml deploy/ansible/playbooks/site.yml
           ansible-playbook --syntax-check -i /tmp/labweaver-hosts.yml deploy/ansible/playbooks/95-harbor.yml
           ansible-playbook --syntax-check -i /tmp/labweaver-hosts.yml deploy/ansible/playbooks/90-verify.yml
+          ansible-playbook --syntax-check -i /tmp/labweaver-hosts.yml deploy/ansible/playbooks/92-sprint2-foundation.yml
           ansible-playbook --syntax-check -i /tmp/labweaver-hosts.yml deploy/ansible/playbooks/93-sprint2-reset.yml
       - name: Run fictional Vault and storage-safety fixtures
         run: python -m unittest discover -s tests/ansible

@@ -15,8 +15,6 @@ sprint2_reset_report_root: /var/lib/labweaver/sprint2-reset
 sprint2_reset_namespaces:
   - access-system
   - environment-system
-  - labweaver-build
-  - labweaver-data
   - labweaver-demo
   - labweaver-evaluation
   - labweaver-system

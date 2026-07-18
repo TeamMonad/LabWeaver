@@ -39,6 +39,8 @@ enum Command {
     Backup(EnvironmentArgs),
     /// Reconcile or verify the private Keycloak identity foundation.
     IdentityFoundation(IdentityFoundationArgs),
+    /// Reconcile the persistent `PostgreSQL`, NATS, and `MinIO` Sprint 2 foundation.
+    Sprint2Foundation(EnvironmentArgs),
     Upgrade(UpgradeArgs),
     Rollback(RollbackArgs),
     Restore(RestoreArgs),
@@ -380,6 +382,7 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::Verify(args) => verify(&args),
         Command::Backup(args) => backup(&args),
         Command::IdentityFoundation(args) => identity_foundation(&args),
+        Command::Sprint2Foundation(args) => sprint2_foundation(&args),
         Command::AcceptanceAssets(args) => match args.action {
             AcceptanceAssetsAction::Validate => acceptance_assets::validate(&repository_root()),
             AcceptanceAssetsAction::List => {
@@ -561,6 +564,25 @@ fn identity_foundation(args: &IdentityFoundationArgs) -> Result<(), AppError> {
         &args.environment.env,
         args.action.playbook(),
         "identity-foundation --infra",
+    )
+}
+
+fn sprint2_foundation(args: &EnvironmentArgs) -> Result<(), AppError> {
+    if !args.yes {
+        return Err(AppError::ConfirmationRequired {
+            command: "sprint2-foundation",
+        });
+    }
+    require_infrastructure(args, "sprint2-foundation --infra")?;
+    if args.package_manifest.is_some() {
+        return Err(AppError::InvalidArgument {
+            role: "Sprint 2 foundation does not accept --package-manifest",
+        });
+    }
+    run_infrastructure(
+        &args.env,
+        "92-sprint2-foundation.yml",
+        "sprint2-foundation --infra",
     )
 }
 
@@ -1195,7 +1217,7 @@ fn not_implemented(command: impl Into<String>) -> Result<(), AppError> {
 mod tests {
     use super::{
         EnvironmentArgs, IdentityFoundationAction, IdentityFoundationArgs, deploy,
-        identity_foundation,
+        identity_foundation, sprint2_foundation,
     };
 
     fn identity_args(env: &str, infra: bool, yes: bool) -> IdentityFoundationArgs {
@@ -1306,6 +1328,20 @@ mod tests {
             IdentityFoundationAction::Verify.playbook(),
             "92-identity-foundation-verify.yml"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn sprint2_foundation_requires_confirmation() -> Result<(), String> {
+        let Err(error) = sprint2_foundation(&EnvironmentArgs {
+            env: "demo".into(),
+            infra: true,
+            yes: false,
+            package_manifest: None,
+        }) else {
+            return Err("Sprint 2 foundation without --yes must fail".into());
+        };
+        assert_eq!(error.diagnostic_code(), "XTASK_CONFIRMATION_REQUIRED");
         Ok(())
     }
 }

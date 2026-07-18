@@ -4,7 +4,8 @@ The only deployment controller entry points are `cargo xtask preflight --infra
 --env <environment>`, `cargo xtask deploy --infra --env <environment> --yes`,
 `cargo xtask verify --infra --env <environment> --yes`, and `cargo xtask backup
 --infra --env <environment> --yes`. The destructive Sprint 2 rebuild additionally
-uses `cargo xtask demo reset --infra --env <environment> --yes`. They run only on the approved Linux router
+uses `cargo xtask sprint2-foundation --infra --env <environment> --yes` followed by
+`cargo xtask demo reset --infra --env <environment> --yes`. They run only on the approved Linux router
 worktree through `ansible-rs`; Windows fails with a stable unsupported-platform
 diagnostic. The removed Python launcher is not a deployment fallback.
 The router invocation must export explicit lowercase `LABWEAVER_RUN_ID` and
@@ -67,6 +68,22 @@ remains blocked until OIDC, Harbor policy/recovery, and Release Gate evidence
 are completed.
 
 ## Sprint 2 destructive reset
+
+The foundation command reconciles the retained PostgreSQL, NATS JetStream and
+MinIO service bodies in `labweaver-data` before reset. All images are digest
+locked, all three workloads use TLS, persistent volumes, restricted Pod Security
+and default-deny NetworkPolicy. Its private bundle uses
+`sprint2-foundation-bundle-manifest.json`; the same renderer and strict key
+validation used for the workload bundle apply. The reset deliberately excludes
+`labweaver-data` and `labweaver-build` from namespace deletion and clears only
+their LabWeaver schemas, streams and buckets.
+
+```sh
+cargo xtask sprint2-foundation --infra --env demo --yes
+```
+
+This step does not deploy BuildKit. The rootless BuildKit security context is a
+separate high-risk decision and remains fail-closed until approved.
 
 `demo reset` runs only the allowlisted `93-sprint2-reset.yml` playbook. It is a
 pre-release destructive operation: there is no upgrade or restore guarantee for

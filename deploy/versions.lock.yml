@@ -20,7 +20,12 @@ platform_images:
     gateway_builder: docker.io/library/rust:1.85.1-alpine3.21@sha256:4333721398de61f53ccbe53b0b855bcc4bb49e55828e8f652d7a8ac33dd0c118
     gateway_runtime: docker.io/library/alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
 postgresql:
-  image: postgres:17.5-alpine
+  image: docker.io/library/postgres:17.6-alpine@sha256:747d5ed1fdeeb124b880fbe3d7c6557d2c4064ae41d6b6297d417882effce4be
+sprint2_foundation:
+  nats: docker.io/library/nats:2.11.9-scratch@sha256:ee3312f4e9d4b67ff197b0ed1e98756596f0d7db872e7fe30d9bf64fccddf92c
+  nats_box: docker.io/natsio/nats-box:0.18.0@sha256:abdc9f9f0120bb8adfbf674eb037d1551db55356eb198b7bd4ffed377f6950a6
+  minio: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+  buildkit_rootless: docker.io/moby/buildkit:v0.31.1-rootless@sha256:946cf909534b789c9b84af75e6d4f8cb23c3b9cb387daec5ba0f4878a3e4647c
 kubernetes:
   minor: v1.35
   patch: v1.35.6
