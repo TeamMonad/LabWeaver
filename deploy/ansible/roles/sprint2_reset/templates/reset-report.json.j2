@@ -1,0 +1,28 @@
+{
+  "schema_version": "labweaver.sprint2-reset-report.v1",
+  "run_id": {{ sprint2_reset_run_id | to_json }},
+  "cluster_uid": {{ sprint2_reset_cluster_uid.stdout | trim | to_json }},
+  "destructive_reset": true,
+  "removed": {
+    "private_sigstore": true,
+    "kyverno": true,
+    "namespaces": {{ sprint2_reset_namespaces | to_json }},
+    "postgres_schemas": {{ sprint2_reset_domains | to_json }},
+    "nats_streams": {{ sprint2_reset_nats_streams | map(attribute='name') | list | to_json }},
+    "minio_bucket": {{ sprint2_reset_minio_bucket | to_json }},
+    "harbor_project": {{ sprint2_reset_harbor_project | to_json }},
+    "keycloak_realm": {{ sprint2_reset_keycloak_realm | to_json }}
+  },
+  "deployment": {
+    "release": {{ sprint2_reset_release_name | to_json }},
+    "namespace": {{ sprint2_reset_namespace | to_json }},
+    "workloads": {{ sprint2_reset_workloads | to_json }},
+    "first_revision": {{ sprint2_reset_first_revision.stdout | trim | to_json }},
+    "second_revision": {{ sprint2_reset_second_revision.stdout | trim | to_json }}
+  },
+  "readback": {
+    "kyverno_webhooks_remaining": 0,
+    "private_sigstore_namespace_removed": true,
+    "runtime_probe_namespace": {{ sprint2_reset_runtime_probe_namespace | to_json }}
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://labweaver.local/schemas/results/sprint2-reset-report.v1.schema.json",
+  "title": "Sprint 2 Reset Report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "cluster_uid", "destructive_reset", "removed", "deployment", "readback"],
+  "properties": {
+    "schema_version": {"const": "labweaver.sprint2-reset-report.v1"},
+    "run_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,62}$"},
+    "cluster_uid": {"type": "string", "minLength": 1},
+    "destructive_reset": {"const": true},
+    "removed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["private_sigstore", "kyverno", "namespaces", "postgres_schemas", "nats_streams", "minio_bucket", "harbor_project", "keycloak_realm"],
+      "properties": {
+        "private_sigstore": {"const": true},
+        "kyverno": {"const": true},
+        "namespaces": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+        "postgres_schemas": {"type": "array", "minItems": 6, "maxItems": 6, "uniqueItems": true, "items": {"enum": ["control", "access", "environment", "agent", "evaluation", "resource"]}},
+        "nats_streams": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+        "minio_bucket": {"type": "string", "minLength": 1},
+        "harbor_project": {"type": "string", "minLength": 1},
+        "keycloak_realm": {"type": "string", "minLength": 1}
+      }
+    },
+    "deployment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["release", "namespace", "workloads", "first_revision", "second_revision"],
+      "properties": {
+        "release": {"type": "string", "minLength": 1},
+        "namespace": {"type": "string", "minLength": 1},
+        "workloads": {"type": "array", "minItems": 9, "maxItems": 9, "uniqueItems": true, "items": {"type": "string"}},
+        "first_revision": {"type": ["integer", "string"]},
+        "second_revision": {"type": ["integer", "string"]}
+      }
+    },
+    "readback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kyverno_webhooks_remaining", "private_sigstore_namespace_removed", "runtime_probe_namespace"],
+      "properties": {
+        "kyverno_webhooks_remaining": {"const": 0},
+        "private_sigstore_namespace_removed": {"const": true},
+        "runtime_probe_namespace": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

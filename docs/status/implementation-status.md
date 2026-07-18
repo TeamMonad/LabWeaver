@@ -25,7 +25,8 @@ Current source baseline: `release/sprint2` created from
 | Web teacher/student journeys | C | implemented against SDK and fixture modes | component, SDK and fixture Playwright tests | real Keycloak and same-build backend Playwright remain pending |
 | Sprint 2 Helm deployment | A/D | implemented locally | nine-workload render, per-process config/Secret mounts, health probes, independent Container/KubeVirt RBAC and fail-closed API CIDR test | connected rollout, RBAC denial checks and Gateway startup remain pending |
 | Demo replay and Release Gate | A/D | implemented locally | exact connected check set, evidence rehash, clean-HEAD/deployment/catalog/image/Run binding, tamper test and stable missing-input diagnostics | Linux infrastructure Verify, real Keycloak Playwright and same-build passing report remain pending |
-| Private Sigstore, Kyverno and Packer | A/D | removed from active source | ADR 0006 is Superseded; active contracts, Chart and CI contain no trust-plane gate | adopted-cluster inventory and guarded uninstall remain pending |
+| Private Sigstore, Kyverno and Packer | A/D | removed from active source | ADR 0006 is Superseded; active contracts, Chart and CI contain no trust-plane gate; guarded reset role inventories policy dependencies before uninstall | adopted-cluster execution and sanitized reset report remain pending |
+| Sprint 2 destructive reset | A/D | implemented locally | cluster/run-bound confirmation, read-only inventory, Kyverno dependency guard, exact data reset, baseline apply, double deploy, atomic rollback drill and schema-defined report | private controller inputs are not present in the repository; connected execution remains blocked |
 
 ## Release decision
 

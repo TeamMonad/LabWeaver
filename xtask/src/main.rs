@@ -199,7 +199,7 @@ struct RestoreArgs {
 enum DemoCommand {
     Seed(EnvironmentArgs),
     Replay,
-    Reset(ConfirmArgs),
+    Reset(EnvironmentArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -407,7 +407,7 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::Demo(command) => match command {
             DemoCommand::Seed(args) => not_implemented(format!("demo seed --env {}", args.env)),
             DemoCommand::Replay => demo_replay(),
-            DemoCommand::Reset(args) => destructive_not_implemented("demo reset", args.yes),
+            DemoCommand::Reset(args) => sprint2_reset(&args),
         },
         Command::Playwright(PlaywrightCommand::Install) => not_implemented("playwright install"),
         Command::Docs(DocsCommand::Serve) => not_implemented("docs serve"),
@@ -622,6 +622,21 @@ fn demo_replay() -> Result<(), AppError> {
     release_gate::run(&repository_root())
 }
 
+fn sprint2_reset(args: &EnvironmentArgs) -> Result<(), AppError> {
+    if !args.yes {
+        return Err(AppError::ConfirmationRequired {
+            command: "demo reset",
+        });
+    }
+    require_infrastructure(args, "demo reset --infra")?;
+    if args.package_manifest.is_some() {
+        return Err(AppError::InvalidArgument {
+            role: "Sprint 2 reset does not accept --package-manifest",
+        });
+    }
+    run_infrastructure(&args.env, "93-sprint2-reset.yml", "demo reset --infra")
+}
+
 #[cfg(target_os = "linux")]
 fn run_infrastructure(
     environment: &str,
@@ -670,6 +685,10 @@ fn run_infrastructure(
             harbor_data_backup_locator,
         )
         .add_env("LABWEAVER_TESTFLIGHT_RUN_ID", testflight_run_id)
+        .add_env(
+            "LABWEAVER_SPRINT2_RESET_CONFIRMATION",
+            std::env::var("LABWEAVER_SPRINT2_RESET_CONFIRMATION").unwrap_or_default(),
+        )
         .add_env("LABWEAVER_IDENTITY_SECRET_LOCATOR", identity_secret_locator)
         .set_inventory(&inventory);
     // ansible-rs 1.1.0 appends configured arguments twice in `run`; all

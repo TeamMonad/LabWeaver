@@ -37,11 +37,13 @@ identity. Historical Issue evidence is not a current completion claim.
 
 ## Destructive reset and idempotent deployment
 
-- The repository now contains one Sprint 2 baseline migration per domain and a
-  nine-workload Helm profile.
+- The repository now contains one Sprint 2 baseline migration per domain, a
+  nine-workload Helm profile and a cluster/run-bound destructive reset role.
 - Blocker: the read-only inventory, non-LabWeaver Kyverno dependency check,
   approved destructive reset, second idempotent deploy, rollback drill and
-  cleanup readback have not completed for the target cluster.
+  cleanup readback have not completed for the target cluster. The ignored
+  controller inventory/values and service credentials required by the role are
+  not present in the repository and must be supplied by the deployment owner.
 - Exit: the reset report binds cluster UID, source commit, migration catalog,
   image set and deletion hashes without Secret material.
 - Owner: A reset approval and execution; D independent Verify.

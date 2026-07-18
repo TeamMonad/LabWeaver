@@ -1,0 +1,7 @@
+\set ON_ERROR_STOP on
+{% for domain in sprint2_reset_domains %}
+DROP SCHEMA IF EXISTS {{ domain }} CASCADE;
+CREATE SCHEMA {{ domain }} AUTHORIZATION lw_{{ domain }}_owner;
+SET search_path TO {{ domain }};
+{{ lookup('ansible.builtin.file', playbook_dir + '/../../../migrations/' + domain + '/0001_sprint2_baseline.sql') }}
+{% endfor %}

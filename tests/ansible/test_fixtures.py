@@ -159,6 +159,37 @@ class AnsibleFixtureTests(unittest.TestCase):
         with self.assertRaises(SAFETY.UnsafeStorage):
             SAFETY.validate([safe], "/dev/test", "fixture-wwn", 1073741824, "/dev/root", ["holder"])
 
+    def test_sprint2_reset_is_identity_bound_and_fail_closed(self) -> None:
+        playbook = (ROOT / "deploy/ansible/playbooks/93-sprint2-reset.yml").read_text(
+            encoding="utf-8"
+        )
+        tasks = (ROOT / "deploy/ansible/roles/sprint2_reset/tasks/main.yml").read_text(
+            encoding="utf-8"
+        )
+        baseline = (
+            ROOT / "deploy/ansible/roles/sprint2_reset/templates/baseline.sql.j2"
+        ).read_text(encoding="utf-8")
+        xtask = (ROOT / "xtask/src/main.rs").read_text(encoding="utf-8")
+        self.assertEqual(playbook.splitlines()[1], "- import_playbook: 00-preflight.yml")
+        self.assertIn("labweaver_preflight_scope: sprint2-reset", playbook)
+        self.assertIn("destroy-pre-release-data:", tasks)
+        self.assertIn("sprint2_reset_cluster_uid", tasks)
+        self.assertIn("KYVERNO_EXTERNAL_DEPENDENCY_DETECTED", tasks)
+        self.assertLess(
+            tasks.index("KYVERNO_EXTERNAL_DEPENDENCY_DETECTED"),
+            tasks.index("Uninstall the Kyverno release"),
+        )
+        self.assertIn("KYVERNO_ADMISSION_WEBHOOK_REMAINS", tasks)
+        self.assertIn("Deploy the identical Sprint 2 profile a second time", tasks)
+        self.assertIn("Exercise atomic rollback with reviewed invalid readiness values", tasks)
+        self.assertIn("SPRINT2_ATOMIC_ROLLBACK_FAILED", tasks)
+        self.assertIn("Delete exact residual Kyverno CRDs", tasks)
+        self.assertIn("Require the exact Sprint 2 deployment set", tasks)
+        self.assertIn("DROP SCHEMA IF EXISTS", baseline)
+        self.assertIn("0001_sprint2_baseline.sql", baseline)
+        self.assertIn('run_infrastructure(&args.env, "93-sprint2-reset.yml"', xtask)
+        self.assertNotIn("ansible.builtin.shell", tasks)
+
 
 if __name__ == "__main__":
     unittest.main()

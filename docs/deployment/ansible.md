@@ -3,7 +3,8 @@
 The only deployment controller entry points are `cargo xtask preflight --infra
 --env <environment>`, `cargo xtask deploy --infra --env <environment> --yes`,
 `cargo xtask verify --infra --env <environment> --yes`, and `cargo xtask backup
---infra --env <environment> --yes`. They run only on the approved Linux router
+--infra --env <environment> --yes`. The destructive Sprint 2 rebuild additionally
+uses `cargo xtask demo reset --infra --env <environment> --yes`. They run only on the approved Linux router
 worktree through `ansible-rs`; Windows fails with a stable unsupported-platform
 diagnostic. The removed Python launcher is not a deployment fallback.
 The router invocation must export explicit lowercase `LABWEAVER_RUN_ID` and
@@ -64,3 +65,37 @@ provides the real deploy, backup, isolated VM/storage/Gateway/Cilium probes,
 schema-validated TestFlight report, and second idempotent replay. The report
 remains blocked until OIDC, Harbor policy/recovery, and Release Gate evidence
 are completed.
+
+## Sprint 2 destructive reset
+
+`demo reset` runs only the allowlisted `93-sprint2-reset.yml` playbook. It is a
+pre-release destructive operation: there is no upgrade or restore guarantee for
+the deleted LabWeaver business data. Before it changes the cluster it inventories
+the cluster UID, Helm releases and all Kyverno policies. Any ClusterPolicy or any
+Policy outside the exact LabWeaver reset namespaces stops the run with
+`KYVERNO_EXTERNAL_DEPENDENCY_DETECTED`.
+
+The ignored environment inventory must supply reviewed paths and credentials for
+PostgreSQL (`PGSERVICEFILE`), NATS, MinIO, Harbor and Keycloak, the Sprint 2 Helm
+values, and a separate rollback-probe values file whose only purpose is to make
+readiness fail. Secrets remain in Vault or root-owned controller files and are
+never copied into the report. The operator must first read the target UID and set:
+
+```sh
+export LABWEAVER_RUN_ID=sprint2-reset-20260719
+export LABWEAVER_SPRINT2_RESET_CONFIRMATION="destroy-pre-release-data:<cluster-uid>:${LABWEAVER_RUN_ID}"
+cargo xtask demo reset --infra --env demo --yes
+```
+
+The role removes the historical Private Sigstore namespace and, only after the
+dependency guard passes, Kyverno and its residual CRDs/webhooks. It then resets
+the exact LabWeaver namespaces, six PostgreSQL schemas, declared NATS streams,
+artifact bucket, Harbor project/images and Keycloak realm. It applies the single
+Sprint 2 baseline migration for each domain, deploys the nine-workload profile
+twice, exercises Helm atomic rollback with the reviewed failing values, verifies
+all rollouts, and writes a sanitized report conforming to
+`schemas/results/sprint2-reset-report.v1.schema.json`.
+
+The reset report is deployment evidence, not Sprint 2 acceptance. Real Container,
+KubeVirt, Gateway, Keycloak Playwright, freeze/cleanup and Release Gate checks
+must still close under the same source/deployment identity.
