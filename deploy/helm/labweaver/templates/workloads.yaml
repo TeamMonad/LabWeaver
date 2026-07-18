@@ -3,8 +3,6 @@
 {{- if $configuration.enabled }}
 {{- $imageKey := required (printf "workloads.%s.imageKey is required" $name) $configuration.imageKey }}
 {{- $image := index $root.Values.images $imageKey }}
-{{- $configMap := required (printf "workloads.%s.configMap is required" $name) $configuration.configMap }}
-{{- $configSecret := required (printf "workloads.%s.configSecret is required" $name) $configuration.configSecret }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -18,8 +16,7 @@ spec:
   replicas: {{ default 1 $configuration.replicas }}
   revisionHistoryLimit: 3
   selector:
-    matchLabels:
-      app.kubernetes.io/name: {{ $name }}
+    matchLabels: {app.kubernetes.io/name: {{ $name }}}
   template:
     metadata:
       labels:
@@ -33,64 +30,134 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       securityContext:
-        runAsNonRoot: true
+        runAsNonRoot: {{ not (default false $configuration.gateway) }}
+        runAsUser: {{ ternary 0 (default 65532 $configuration.runAsUser) (default false $configuration.gateway) }}
+        runAsGroup: {{ ternary 0 (default 65532 $configuration.runAsUser) (default false $configuration.gateway) }}
+        fsGroup: {{ ternary 0 (default 65532 $configuration.runAsUser) (default false $configuration.gateway) }}
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: {{ $name }}
           image: {{ include "labweaver.image" (dict "key" $imageKey "value" $image) | quote }}
           imagePullPolicy: IfNotPresent
-          args: ["--mode", {{ $configuration.mode | quote }}]
-          env:
-            - name: LABWEAVER_CONFIG
-              value: /etc/labweaver/config/config.yaml
-            - name: LABWEAVER_SECRETS
-              value: /etc/labweaver/secrets/secrets.yaml
-          {{- if gt (int $configuration.port) 0 }}
-          ports:
-            - name: service
-              containerPort: {{ $configuration.port }}
-          {{- if eq (default "http" $configuration.probe) "tcp" }}
-          readinessProbe:
-            tcpSocket: {port: service}
-          livenessProbe:
-            tcpSocket: {port: service}
-          {{- else }}
-          readinessProbe:
-            httpGet: {path: /health/ready, port: service}
-          livenessProbe:
-            httpGet: {path: /health/live, port: service}
+          {{- with $configuration.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
           {{- end }}
+          {{- if or $configuration.env $configuration.secretEnv }}
+          env:
+            {{- range $key, $value := $configuration.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- range $key, $reference := $configuration.secretEnv }}
+            - name: {{ $key }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default $configuration.secret $reference.secret }}
+                  key: {{ required (printf "workloads.%s.secretEnv.%s.key is required" $name $key) $reference.key }}
+            {{- end }}
+          {{- end }}
+          {{- with $configuration.ports }}
+          ports:
+            {{- range . }}
+            - name: {{ .name }}
+              containerPort: {{ .containerPort }}
+              protocol: TCP
+            {{- end }}
+          {{- end }}
+          {{- with $configuration.readiness }}
+          readinessProbe:
+            {{- if eq .type "http" }}
+            httpGet: {path: {{ default "/health/ready" .path }}, port: {{ .port }}}
+            {{- else if eq .type "tcp" }}
+            tcpSocket: {port: {{ .port }}}
+            {{- else }}
+            {{- fail (printf "workloads.%s.readiness.type must be http or tcp" $name) }}
+            {{- end }}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            {{- if eq .type "http" }}
+            httpGet: {path: {{ default "/health/live" .livenessPath }}, port: {{ .port }}}
+            {{- else }}
+            tcpSocket: {port: {{ .port }}}
+            {{- end }}
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
           {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
+            {{- if $configuration.gateway }}
+            runAsUser: 0
+            runAsGroup: 0
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID", "SYS_CHROOT"]
+            {{- else }}
+            runAsNonRoot: true
             capabilities: {drop: ["ALL"]}
+            {{- end }}
           resources:
             {{- toYaml $root.Values.resources | nindent 12 }}
           volumeMounts:
+            {{- if $configuration.configMap }}
             - {name: config, mountPath: /etc/labweaver/config, readOnly: true}
+            {{- end }}
+            {{- if and $configuration.secret (not $configuration.gateway) }}
             - {name: secrets, mountPath: /etc/labweaver/secrets, readOnly: true}
+            {{- end }}
             - {name: tmp, mountPath: /tmp}
+            {{- if $configuration.gateway }}
+            - {name: sshd-run, mountPath: /run/sshd}
+            - {name: secret-source, mountPath: /var/run/labweaver-secrets-src, readOnly: true}
+            - {name: gateway-secrets, mountPath: /etc/labweaver/secrets}
+            {{- end }}
       volumes:
+        {{- if $configuration.configMap }}
         - name: config
-          configMap: {name: {{ $configMap }}}
+          configMap: {name: {{ $configuration.configMap }}}
+        {{- end }}
+        {{- if and $configuration.secret (not $configuration.gateway) }}
         - name: secrets
-          secret: {secretName: {{ $configSecret }}}
+          secret:
+            secretName: {{ $configuration.secret }}
+            defaultMode: 0440
+        {{- end }}
         - name: tmp
           emptyDir: {sizeLimit: 64Mi}
-{{- if gt (int $configuration.port) 0 }}
+        {{- if $configuration.gateway }}
+        - name: sshd-run
+          emptyDir: {sizeLimit: 8Mi}
+        - name: secret-source
+          secret:
+            secretName: {{ required (printf "workloads.%s.secret is required" $name) $configuration.secret }}
+            defaultMode: 0400
+        - name: gateway-secrets
+          emptyDir: {sizeLimit: 8Mi}
+        {{- end }}
+{{- with $configuration.ports }}
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: {{ $name }}
   namespace: {{ $root.Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ $name }}
+    {{- include "labweaver.labels" $root | nindent 4 }}
 spec:
   selector: {app.kubernetes.io/name: {{ $name }}}
   ports:
-    - name: service
-      port: {{ $configuration.port }}
-      targetPort: service
+    {{- range . }}
+    - name: {{ .name }}
+      port: {{ .servicePort }}
+      targetPort: {{ .name }}
+      protocol: TCP
+    {{- end }}
 {{- end }}
 {{- end }}
 {{- end }}

@@ -27,12 +27,14 @@ RUN apk add --no-cache \
       openssh-server=9.9_p2-r0 \
     && adduser -D -H -s /sbin/nologin gateway-auth \
     && adduser -D -H -s /bin/sh gateway \
+    && addgroup gateway gateway-auth \
     && mkdir -p /run/sshd /etc/labweaver
 COPY --from=builder /out/labweaver-gateway /usr/local/bin/labweaver-gateway
 COPY access-gateway/sshd_config /etc/ssh/sshd_config
 COPY access-gateway/target-ssh.conf /etc/labweaver/target-ssh.conf
+COPY --chmod=0555 access-gateway/entrypoint.sh /usr/local/bin/labweaver-gateway-entrypoint
 LABEL org.opencontainers.image.source="https://github.com/TeamMonad/LabWeaver" \
       org.opencontainers.image.revision="${SOURCE_COMMIT}" \
       org.opencontainers.image.title="openssh-gateway"
 EXPOSE 2222
-ENTRYPOINT ["/usr/sbin/sshd", "-D", "-e", "-f", "/etc/ssh/sshd_config"]
+ENTRYPOINT ["/usr/local/bin/labweaver-gateway-entrypoint"]

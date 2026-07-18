@@ -31,6 +31,9 @@ use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 use time::OffsetDateTime;
 
+#[path = "../../service_runtime.rs"]
+mod service_runtime;
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DeploymentFile {
@@ -113,7 +116,6 @@ struct BuildExecutorNatsFileConfig {
 
 #[tokio::main]
 async fn main() -> Result<(), StartupError> {
-    telemetry::init(env!("CARGO_PKG_NAME"))?;
     let mut arguments = std::env::args().skip(1);
     if arguments.next().as_deref() != Some("--mode") || arguments.size_hint().0 != 1 {
         return Err(StartupError::Configuration);
@@ -130,6 +132,7 @@ async fn main() -> Result<(), StartupError> {
     reason = "startup keeps every fail-closed Agent dependency binding in one auditable boundary"
 )]
 async fn run_agent_service() -> Result<(), StartupError> {
+    telemetry::init(env!("CARGO_PKG_NAME"))?;
     let deployment = load_deployment()?;
     validate_deployment(&deployment)?;
     let pool = PgPoolOptions::new()
@@ -294,9 +297,15 @@ async fn run_build_executor() -> Result<(), StartupError> {
     let backend = ProductionBuildExecutor::new(deployment.executor, pool.clone(), objects)
         .map_err(|_| StartupError::Configuration)?;
     let executor = FencedBuildExecutor::new(PgBuildExecutorFenceStore::new(pool), backend);
-    NatsBuildExecutorServer::new(nats, deployment.nats.request_subject, executor)?
-        .serve()
-        .await?;
+    let server = NatsBuildExecutorServer::new(nats, deployment.nats.request_subject, executor)?;
+    tokio::try_join!(
+        async { server.serve().await.map_err(StartupError::BuildExecutor) },
+        async {
+            service_runtime::run("build-executor")
+                .await
+                .map_err(StartupError::Service)
+        }
+    )?;
     Ok(())
 }
 
@@ -555,4 +564,6 @@ enum StartupError {
     Messaging(#[from] agent_service::messaging::AgentMessagingError),
     #[error(transparent)]
     BuildExecutor(#[from] agent_service::build_provider::BuildExecutorFenceError),
+    #[error(transparent)]
+    Service(#[from] service_runtime::StartupError),
 }

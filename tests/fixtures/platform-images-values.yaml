@@ -5,3 +5,5 @@ images:
   environment_service: harbor.internal.example/labweaver-system/environment-service@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
   openssh_gateway: harbor.internal.example/labweaver-system/openssh-gateway@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
   web: harbor.internal.example/labweaver-system/web@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+network:
+  kubernetesApiCidrs: [10.96.0.1/32]

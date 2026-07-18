@@ -7,7 +7,8 @@ Sprint 2 packages the enabled platform workloads into Harbor and deploys only im
 - `control-service`
 - `access-service`
 - `agent-service` (also runs `build-executor`)
-- `environment-service` (also runs `runtime-executor`)
+- `environment-service` (also runs separate `container-executor` and
+  `kubevirt-executor` processes with independent identities)
 - `openssh-gateway`
 - `web`
 

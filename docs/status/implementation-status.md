@@ -23,7 +23,7 @@ Current source baseline: `release/sprint2` created from
 | AccessGrant and session authorization | A | implemented locally | fixed local OpenSSH account, post-auth alias redemption, one-time token and session contracts | built Gateway image and connected expiry/revocation replay are pending |
 | Dual-runtime submission freeze | B | implemented locally | bounded PVC/SFTP collection and immutable MinIO tests | deployment certificate issuer and real PVC/VM replay are pending |
 | Web teacher/student journeys | C | implemented against SDK and fixture modes | component, SDK and fixture Playwright tests | real Keycloak and same-build backend Playwright remain pending |
-| Sprint 2 Helm deployment | A/D | blocked | generic chart exists | current chart does not match per-process config, ports, identity or worker topology |
+| Sprint 2 Helm deployment | A/D | implemented locally | nine-workload render, per-process config/Secret mounts, health probes, independent Container/KubeVirt RBAC and fail-closed API CIDR test | connected rollout, RBAC denial checks and Gateway startup remain pending |
 | Demo replay and Release Gate | A/D | blocked | schemas and partial validators exist | `demo replay` and `release-gate` still return `XTASK_NOT_IMPLEMENTED` |
 | Private Sigstore, Kyverno and Packer | A/D | removing | historical implementation and deployment evidence | ADR 0011 removes these from source and the adopted cluster |
 

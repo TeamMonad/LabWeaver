@@ -6,28 +6,77 @@ metadata:
 spec:
   podSelector: {}
   policyTypes: [Ingress, Egress]
+{{- $root := . -}}
+{{- range $name, $configuration := .Values.workloads }}
+{{- if $configuration.enabled }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: platform-allow
-  namespace: {{ .Release.Namespace }}
+  name: {{ $name }}
+  namespace: {{ $root.Release.Namespace }}
 spec:
   podSelector:
-    matchLabels:
-      app.kubernetes.io/part-of: labweaver
+    matchLabels: {app.kubernetes.io/name: {{ $name }}}
   policyTypes: [Ingress, Egress]
   ingress:
     - from:
-        - namespaceSelector: {}
+        - podSelector:
+            matchLabels: {app.kubernetes.io/part-of: labweaver}
+      {{- with $configuration.ports }}
+      ports:
+        {{- range . }}
+        - {protocol: TCP, port: {{ .containerPort }}}
+        {{- end }}
+      {{- end }}
+    {{- if or (eq $name "web") (eq $name "access-service") (eq $name "openssh-gateway") }}
+    - from:
+        - namespaceSelector:
+            {{- toYaml $root.Values.network.edgeNamespaceSelector | nindent 12 }}
+      {{- with $configuration.ports }}
+      ports:
+        {{- range . }}
+        - {protocol: TCP, port: {{ .containerPort }}}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+    {{- if eq $name "openssh-gateway" }}
+    {{- range $cidr := $root.Values.network.gatewayIngressCidrs }}
+    - from:
+        - ipBlock: {cidr: {{ $cidr | quote }}}
+      ports: [{protocol: TCP, port: 2222}]
+    {{- end }}
+    {{- end }}
   egress:
     - to:
-        - namespaceSelector:
-            {{- toYaml .Values.network.infrastructureNamespaceSelector | nindent 12 }}
+        - podSelector:
+            matchLabels: {app.kubernetes.io/part-of: labweaver}
     - to:
-        - namespaceSelector: {}
+        - namespaceSelector:
+            {{- toYaml $root.Values.network.infrastructureNamespaceSelector | nindent 12 }}
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
           podSelector:
             matchLabels: {k8s-app: kube-dns}
       ports:
         - {protocol: UDP, port: 53}
         - {protocol: TCP, port: 53}
+    {{- if $configuration.kubernetesApi }}
+    {{- if empty $root.Values.network.kubernetesApiCidrs }}
+    {{- fail "network.kubernetesApiCidrs must identify the adopted API endpoint when runtime executors are enabled" }}
+    {{- end }}
+    {{- range $cidr := $root.Values.network.kubernetesApiCidrs }}
+    - to:
+        - ipBlock: {cidr: {{ $cidr | quote }}}
+      ports: [{protocol: TCP, port: 443}]
+    {{- end }}
+    {{- end }}
+    {{- if eq $name "openssh-gateway" }}
+    - to:
+        - namespaceSelector:
+            {{- toYaml $root.Values.network.environmentNamespaceSelector | nindent 12 }}
+      ports: [{protocol: TCP, port: 22}]
+    {{- end }}
+{{- end }}
+{{- end }}

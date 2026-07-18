@@ -72,7 +72,8 @@ BuildKit, Harbor, and Trivy credentials must not be held by the API processes.
 It is completed by two deployments built from existing service images:
 
 - `build-executor`, owned by Agent Service;
-- `runtime-executor`, owned by Environment Service.
+- separate `container-executor` and `kubevirt-executor` processes from the
+  Environment Service image, each with its own ServiceAccount and RBAC.
 
 They have separate identities and least-privilege credentials. They preserve
 the existing generation, deadline, replay, cancellation, and cleanup fences.

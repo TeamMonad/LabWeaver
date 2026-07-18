@@ -47,9 +47,16 @@ async fn main() -> Result<(), MainError> {
     }
     match arguments.next().as_deref() {
         Some("environment-service") => run_environment_service().await,
-        Some("runtime-executor") => run_runtime_executor().await,
+        Some("container-executor") => run_runtime_executor(RuntimeKind::Container).await,
+        Some("kubevirt-executor") => run_runtime_executor(RuntimeKind::KubeVirt).await,
         _ => Err(MainError::Configuration),
     }
+}
+
+#[derive(Clone, Copy)]
+enum RuntimeKind {
+    Container,
+    KubeVirt,
 }
 
 async fn run_environment_service() -> Result<(), MainError> {
@@ -68,7 +75,7 @@ async fn run_environment_service() -> Result<(), MainError> {
     Ok(())
 }
 
-async fn run_runtime_executor() -> Result<(), MainError> {
+async fn run_runtime_executor(kind: RuntimeKind) -> Result<(), MainError> {
     let deployment = load_runtime_executor_deployment()?;
     if deployment.database_max_connections == 0 || deployment.database_max_connections > 32 {
         return Err(MainError::Configuration);
@@ -77,12 +84,14 @@ async fn run_runtime_executor() -> Result<(), MainError> {
         .max_connections(deployment.database_max_connections)
         .connect(&read_secret(&deployment.database_url_file)?)
         .await?;
-    let schema_ready: bool = sqlx::query_scalar(
-        "SELECT to_regclass('environment.container_executor_fences') IS NOT NULL \
-         AND to_regclass('environment.kubevirt_executor_fences') IS NOT NULL",
-    )
-    .fetch_one(&pool)
-    .await?;
+    let required_table = match kind {
+        RuntimeKind::Container => "environment.container_executor_fences",
+        RuntimeKind::KubeVirt => "environment.kubevirt_executor_fences",
+    };
+    let schema_ready: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+        .bind(required_table)
+        .fetch_one(&pool)
+        .await?;
     if !schema_ready {
         return Err(MainError::SchemaUnavailable);
     }
@@ -111,31 +120,42 @@ async fn run_runtime_executor() -> Result<(), MainError> {
     .await?;
     let backend = KubernetesContainerExecutor::new(deployment.executor, objects)
         .map_err(|_| MainError::Configuration)?;
-    let container_executor = FencedContainerExecutor::new(
-        PgContainerExecutorFenceStore::new(pool.clone()),
-        backend.clone(),
-    );
-    let kubevirt_executor =
-        FencedKubeVirtExecutor::new(PgKubeVirtExecutorFenceStore::new(pool), backend);
-    let container_server = NatsContainerExecutorServer::new(
-        nats.clone(),
-        deployment.nats.container_request_subject,
-        container_executor,
-    )?;
-    let kubevirt_server = NatsKubeVirtExecutorServer::new(
-        nats,
-        deployment.nats.kubevirt_request_subject,
-        kubevirt_executor,
-    )?;
-    tokio::try_join!(
-        async { container_server.serve().await.map_err(MainError::Executor) },
-        async {
-            kubevirt_server
-                .serve()
-                .await
-                .map_err(MainError::KubeVirtExecutor)
-        },
-    )?;
+    match kind {
+        RuntimeKind::Container => {
+            let executor =
+                FencedContainerExecutor::new(PgContainerExecutorFenceStore::new(pool), backend);
+            let server = NatsContainerExecutorServer::new(
+                nats,
+                deployment.nats.container_request_subject,
+                executor,
+            )?;
+            tokio::try_join!(
+                async { server.serve().await.map_err(MainError::Executor) },
+                async {
+                    service_runtime::run("container-executor")
+                        .await
+                        .map_err(MainError::Service)
+                }
+            )?;
+        }
+        RuntimeKind::KubeVirt => {
+            let executor =
+                FencedKubeVirtExecutor::new(PgKubeVirtExecutorFenceStore::new(pool), backend);
+            let server = NatsKubeVirtExecutorServer::new(
+                nats,
+                deployment.nats.kubevirt_request_subject,
+                executor,
+            )?;
+            tokio::try_join!(
+                async { server.serve().await.map_err(MainError::KubeVirtExecutor) },
+                async {
+                    service_runtime::run("kubevirt-executor")
+                        .await
+                        .map_err(MainError::Service)
+                }
+            )?;
+        }
+    }
     Ok(())
 }
 

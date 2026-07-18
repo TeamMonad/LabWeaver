@@ -14,7 +14,8 @@ the root disk and SSH host identity, while reset is the only operation allowed
 to replace them.
 
 The Environment service owns lifecycle state and the sanitized VM observation.
-The deployment-owned `runtime-executor` owns Kubernetes/CDI API calls. Access
+The deployment-owned `kubevirt-executor` process owns Kubernetes/CDI API calls
+under a KubeVirt-specific ServiceAccount. Access
 owns grants and the Gateway connection boundary. No component may infer another
 owner's authoritative state from object existence or message order.
 
