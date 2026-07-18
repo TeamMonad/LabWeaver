@@ -89,8 +89,10 @@ for (const theme of themes) {
       await issueGrant(page)
       await expect(page.locator('.ssh-command__text')).toBeVisible()
 
-      await expect(page).toHaveScreenshot(`vm-ssh-access-${theme}-${viewport.name}.png`, {
-        fullPage: true,
+      // Scope the snapshot to the runtime-access card so async page sections
+      // (operations timeline, freeze area) and generated IDs elsewhere on the
+      // page cannot destabilise it.
+      await expect(page.locator('.runtime-access')).toHaveScreenshot(`vm-ssh-access-${theme}-${viewport.name}.png`, {
         animations: 'disabled',
       })
     })
@@ -102,8 +104,7 @@ for (const theme of themes) {
       await issueGrant(page)
       await expect(page.locator('button:has-text("打开 code-server")')).toBeVisible()
 
-      await expect(page).toHaveScreenshot(`container-codeserver-entry-${theme}-${viewport.name}.png`, {
-        fullPage: true,
+      await expect(page.locator('.runtime-access')).toHaveScreenshot(`container-codeserver-entry-${theme}-${viewport.name}.png`, {
         animations: 'disabled',
       })
     })
