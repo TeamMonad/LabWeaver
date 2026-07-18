@@ -143,7 +143,7 @@ non-secret routing configuration. The formal Container Provider uses:
 [
   {
     "binding": "container-primary-v1",
-    "subject": "labweaver.provider.kubernetes.container.v2",
+    "subject": "labweaver.provider.kubernetes.container.v1",
     "providerKind": "container",
     "gatewayNamespace": "access-system",
     "gatewayName": "protected-gateway",
@@ -163,7 +163,7 @@ must not contain Gateway, image-pull or trust-policy fields. Container entries
 require every Gateway field, the exact same-namespace Harbor pull Secret name,
 and the active image-policy ID/revision, trust revision and trust-bundle SHA-256. They use
 the immutable publication plus append-only withdrawal projection described in
-`docs/contracts/container-supply-chain-v2.md`.
+`docs/contracts/container-supply-chain-v1.md`.
 
 ## Desired and observed state
 

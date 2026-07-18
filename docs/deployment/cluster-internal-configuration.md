@@ -11,7 +11,7 @@
 | Worker | 至少 2 | 容器工作负载、Runner/Job、具备 KVM 的 KubeVirt VM | 路由、NAT、手工常驻业务进程 |
 | NFS server | 1 | Kubernetes RWX 卷的 NFSv4 导出 | LabWeaver 业务服务与数据库 |
 
-PVE、NetworkManager 连接、接口/IP、WAN/LAN 地址分配、Tailnet 地址分配和公网 DNAT 都不属于 Ansible 管理范围。Ansible 只验证并消费这些已存在的网络前提；外部访问必须经过获批的 Headscale/Tailscale 与内部 Gateway 路径。
+PVE、NetworkManager 连接、接口/IP、WAN/LAN 地址分配和公网 DNAT 都不属于 Ansible 管理范围。Ansible 只验证并消费这些已存在的网络前提；Sprint 2 的 SSH 访问必须经过 OpenSSH Gateway 与 AccessGrant，Tailnet 不在本轮部署范围内。
 
 ## 2. 网络、入口与策略
 
@@ -25,7 +25,7 @@ PVE、NetworkManager 连接、接口/IP、WAN/LAN 地址分配、Tailnet 地址�
 - Cilium 启用 kube-proxy replacement、Hubble 和 Gateway API；Gateway API 使用 Standard CRD channel `v1.6.0`。
 - MetalLB 使用经 private inventory 声明的地址池与 L2 Advertisement。固定 VIP 通过 Gateway 的 `metallb.io/loadBalancerIPs` 基础设施注解分配，不使用 Cilium LB-IPAM 专用的 `spec.addresses`。
 - 当前内部 Gateway 为 `labweaver-demo/public-gateway`，仅监听 HTTP；HTTPRoute、后端 Service 与 Host 请求必须在 verify 的隔离命名空间中真实验证。
-- 不配置外网 DNAT、开放公网端口或绕过 Access/Headscale 的路径。网络可达性不等于授权；未来业务端点仍须由 AccessGrant 与 Access Service 共同约束。
+- 不配置外网 DNAT、开放公网端口或绕过 OpenSSH Gateway 的路径。网络可达性不等于授权；业务端点必须由 AccessGrant 与 Access Service 共同约束。
 
 ## 3. 存储与虚拟化
 
@@ -46,18 +46,17 @@ PVE、NetworkManager 连接、接口/IP、WAN/LAN 地址分配、Tailnet 地址�
 | Local Path / NFS CSI | `v0.0.36` / `4.13.4` |
 | cert-manager | `v1.21.0` |
 | KubeVirt / CDI | `v1.8.4` / `v1.65.0` |
-| Kyverno | `v1.18.2` |
 | etcd 工具 | `3.6.6` |
 
 完整版本锁和测试镜像 digest 以 [`deploy/versions.lock.yml`](../../deploy/versions.lock.yml) 为准。变更组件版本、Chart 或镜像 digest 时，必须更新锁文件、部署报告和相应验收证据，不得使用 `latest`。
 
 ## 5. 命名空间、部署入口与证据
 
-基础命名空间为 `labweaver-system`、`labweaver-data`、`labweaver-build`、`labweaver-evaluation` 和 `labweaver-demo`；demo namespace 有受控 ResourceQuota。平台数据服务和六个 LabWeaver 业务服务尚不由这套基础设施 playbook 部署。
+基础命名空间为 `labweaver-system`、`labweaver-data`、`labweaver-build`、`labweaver-evaluation` 和 `labweaver-demo`；demo namespace 有受控 ResourceQuota。Sprint 2 profile 部署 Control、Access、Agent、Environment、Web、Build Executor、Container Executor、KubeVirt Executor 和 OpenSSH Gateway；Evaluation 与 Resource 保留代码边界但默认关闭。
 
-当前已实现的 Ansible 控制器入口是 `python tools/ansible.py <preflight|deploy|verify|backup>`；目标中的 `cargo xtask deploy --env <environment>` 仍须以实际实现与验证为准。Ansible 是部署执行层。private deployment input 使用受忽略的 inventory、`group_vars/all/main.yml`、加密的 `group_vars/all/vault.yml` 和 Vault 密码文件。缺任一输入、存在 `REPLACE_*` 占位符或 preflight 失败时必须中止，不得以旧报告或已存在资源伪装成功。
+受控入口是 `cargo xtask <preflight|deploy|verify|backup> --infra --env <environment>`；Ansible 是其部署执行层。private deployment input 使用受忽略的 inventory、`group_vars/all/main.yml`、加密的 `group_vars/all/vault.yml` 和 Vault 密码文件。缺任一输入、存在未解析占位符或 preflight 失败时必须中止，不得以旧报告或已存在资源伪装成功。
 
-当前可提交的证据包括 Ansible lint、syntax、虚构加密 Vault fixture、存储安全负向 fixture，以及 VM-01a 的受限 E3 基础设施证据。后者证明了限定范围内的 RWO/RWX、硬件 KVM VM 生命周期、内部 Gateway 请求和清理；它不证明 Ansible 首次部署、第二次幂等 replay、Access/Headscale、业务服务或 E4 发布条件。完整状态和 blocker 以 [`docs/status/implementation-status.md`](../status/implementation-status.md) 与 [`docs/testing/evidence/vm-01a-e3-20260713.md`](../testing/evidence/vm-01a-e3-20260713.md) 为准。
+当前可提交的证据包括 Ansible lint、syntax、虚构加密 Vault fixture、存储安全负向 fixture，以及 VM-01a 的受限基础设施证据。后者不证明当前应用首次部署、第二次幂等 replay、Access Gateway 或 Sprint 2 发布条件。完整状态和 blocker 以 [`docs/status/implementation-status.md`](../status/implementation-status.md) 与 [`docs/status/blockers.md`](../status/blockers.md) 为准。
 
 ## 6. 交接与排障规则
 

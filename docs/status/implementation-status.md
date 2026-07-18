@@ -25,7 +25,7 @@ Current source baseline: `release/sprint2` created from
 | Web teacher/student journeys | C | implemented against SDK and fixture modes | component, SDK and fixture Playwright tests | real Keycloak and same-build backend Playwright remain pending |
 | Sprint 2 Helm deployment | A/D | implemented locally | nine-workload render, per-process config/Secret mounts, health probes, independent Container/KubeVirt RBAC and fail-closed API CIDR test | connected rollout, RBAC denial checks and Gateway startup remain pending |
 | Demo replay and Release Gate | A/D | blocked | schemas and partial validators exist | `demo replay` and `release-gate` still return `XTASK_NOT_IMPLEMENTED` |
-| Private Sigstore, Kyverno and Packer | A/D | removing | historical implementation and deployment evidence | ADR 0011 removes these from source and the adopted cluster |
+| Private Sigstore, Kyverno and Packer | A/D | removed from active source | ADR 0006 is Superseded; active contracts, Chart and CI contain no trust-plane gate | adopted-cluster inventory and guarded uninstall remain pending |
 
 ## Release decision
 

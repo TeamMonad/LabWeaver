@@ -7,8 +7,8 @@ below is retained only as historical context. It is not part of the current
 Sprint 2 product or deployment contract. ADR 0011 defines the active
 Harbor/digest/Trivy policy.
 
-Status: proposed Issue #52 extension; requires A+B human approval, D Verify and
-connected E3 evidence.
+The remainder of this file records the superseded proposal and must not be used
+as an active implementation or deployment requirement.
 
 ## Context
 
@@ -24,7 +24,9 @@ Critical findings block publication. High findings remain explicit warnings for 
 
 ## Consequences and rollback
 
-Runtime implementations must revalidate expired evidence and trust revisions before use and must not reconstruct identity from tags or filenames. Issue #52 adds the v2 Control-to-Agent build command, Agent-owned durable build pipeline, authoritative artifact projection and Environment Container Provider described in `docs/contracts/container-supply-chain-v2.md`. The provider seams are wired into production service processes, but the deployment-owned BuildKit/Harbor/Trivy/Private Sigstore and Kubernetes executors still require connected E3 replay.
+This historical decision was replaced before release. The current v1 contract
+is documented in `docs/contracts/container-supply-chain-v1.md`; it retains
+Harbor digest identity and Trivy policy while removing the private trust plane.
 
 Remote executor calls carry the database attempt or Environment operation generation together with an exact stage/step request ID and deadline. Executors persist the highest accepted generation and cleanup/delete tombstones; an older completion cannot recreate or remove resources owned by a newer generation.
 

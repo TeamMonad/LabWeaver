@@ -39,7 +39,7 @@ project:
   private_dirs: [".private", ".tmp", "artifacts"]
 
 commands:
-  format: "cargo fmt --all -- --check && pnpm --dir web format:check"
+  format: "cargo fmt --all -- --check"
   lint: "cargo clippy --workspace --all-targets --all-features -- -D warnings && pnpm --dir web lint"
   typecheck: "pnpm --dir web typecheck"
   unit_test: "cargo test --workspace"

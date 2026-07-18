@@ -45,7 +45,7 @@ stable ID and attempt. Evaluation uploads the exact archive with `If-None-Match:
 version and exact HEAD/read-back match for size, media type, SHA-256, retention
 mode and deadline. Only after that verification does one PostgreSQL transaction
 write `frozen_submissions`, complete the attempt and enqueue
-`labweaver.evaluation.submission.frozen.v2` containing the same object version,
+`labweaver.evaluation.submission.frozen.v1` containing the same object version,
 hash and full immutable contract.
 
 An upload error, ambiguous retained orphan, database failure or lost fence does

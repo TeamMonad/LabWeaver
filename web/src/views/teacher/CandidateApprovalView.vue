@@ -131,10 +131,6 @@
                       Low {{ candidate.imagePolicyEvaluation?.vulnerabilities.low ?? 0 }}
                     </span>
                   </div>
-                  <div class="evidence-row">
-                    <span class="evidence-label">CT SCT</span>
-                    <code class="evidence-value">{{ truncateSha256(candidate.imageArtifact?.signature?.sctSha256 ?? '') }}</code>
-                  </div>
                 </div>
 
                 <DiagnosticBanner
