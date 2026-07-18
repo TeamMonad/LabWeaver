@@ -569,8 +569,9 @@ enum StartupError {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::case_sensitive_file_extension_comparisons)]
 mod deployment_contract_tests {
-    use super::DeploymentFile;
+    use super::{BuildExecutorDeploymentFile, DeploymentFile};
 
     #[test]
     fn checked_in_sprint2_example_matches_the_runtime_contract() {
@@ -582,5 +583,22 @@ mod deployment_contract_tests {
         assert!(deployment.nats.server.starts_with("tls://"));
         assert!(deployment.build.provider_subject.ends_with(".v1"));
         assert!(!example.contains(".v2"));
+    }
+
+    #[test]
+    fn checked_in_build_executor_example_requires_mtls_buildkit() {
+        let example = include_str!("../../../deploy/config/build-executor.yaml.example");
+        let deployment: BuildExecutorDeploymentFile = serde_yaml::from_str(example)
+            .expect("build executor deployment example must deserialize");
+
+        assert!(deployment.executor.buildkit_address.starts_with("tcp://"));
+        for path in [
+            &deployment.executor.buildkit_ca_file,
+            &deployment.executor.buildkit_client_certificate_file,
+            &deployment.executor.buildkit_client_private_key_file,
+        ] {
+            assert!(path.to_string_lossy().starts_with('/'));
+        }
+        assert!(deployment.nats.request_subject.ends_with(".v1"));
     }
 }

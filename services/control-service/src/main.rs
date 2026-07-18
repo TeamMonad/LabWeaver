@@ -278,6 +278,7 @@ enum StartupError {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::case_sensitive_file_extension_comparisons)]
 mod deployment_contract_tests {
     use super::DeploymentFile;
 

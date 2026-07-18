@@ -58,6 +58,7 @@ sprint2_reset_chart_source: "{{ playbook_dir }}/../../helm/labweaver"
 sprint2_reset_values_files: []
 sprint2_reset_rollback_probe_values_file: ""
 sprint2_reset_configuration_bundle: ""
+sprint2_reset_configuration_manifest: "{{ playbook_dir }}/../../config/sprint2-bundle-manifest.json"
 sprint2_reset_required_configmaps:
   - control-service-config
   - access-service-config

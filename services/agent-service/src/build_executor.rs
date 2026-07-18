@@ -37,6 +37,9 @@ const MAX_CONTEXT_ENTRIES: usize = 10_000;
 pub struct ProductionBuildExecutorConfig {
     pub buildctl_path: PathBuf,
     pub buildkit_address: String,
+    pub buildkit_ca_file: PathBuf,
+    pub buildkit_client_certificate_file: PathBuf,
+    pub buildkit_client_private_key_file: PathBuf,
     pub trivy_path: PathBuf,
     pub trivy_cache_directory: PathBuf,
     pub docker_config_directory: PathBuf,
@@ -57,11 +60,18 @@ impl ProductionBuildExecutorConfig {
     fn validate(&self) -> Result<(), BuildProviderFailure> {
         if !self.buildctl_path.is_absolute()
             || !self.trivy_path.is_absolute()
+            || !self.buildkit_ca_file.is_absolute()
+            || !self.buildkit_client_certificate_file.is_absolute()
+            || !self.buildkit_client_private_key_file.is_absolute()
             || !self.trivy_cache_directory.is_absolute()
             || !self.docker_config_directory.is_absolute()
             || !self.work_directory.is_absolute()
             || self.max_unpacked_context_bytes == 0
-            || self.buildkit_address.trim().is_empty()
+            || !self.buildkit_address.starts_with("tcp://")
+            || self
+                .buildkit_address
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace())
             || self.harbor_api.scheme() != "https"
             || self.harbor_api.host_str().is_none()
             || self.harbor_registry.contains('/')
@@ -95,6 +105,13 @@ impl ProductionBuildExecutor {
         objects: Arc<S3ImmutableObjectStore>,
     ) -> Result<Self, BuildProviderFailure> {
         config.validate()?;
+        for path in [
+            &config.buildkit_ca_file,
+            &config.buildkit_client_certificate_file,
+            &config.buildkit_client_private_key_file,
+        ] {
+            read_secret(path)?;
+        }
         let harbor_username = read_secret(&config.harbor_username_file)?;
         let harbor_password = read_secret(&config.harbor_password_file)?;
         let client = Client::builder()
@@ -263,33 +280,13 @@ impl ProductionBuildExecutor {
         let tag = candidate_tag(identity);
         let tagged = format!("{}:{tag}", command.request.output_repository);
         let metadata = workspace.path().join("build-metadata.json");
-        let status = Command::new(&self.config.buildctl_path)
-            .args([
-                "--addr",
-                &self.config.buildkit_address,
-                "build",
-                "--frontend",
-                "dockerfile.v0",
-                "--local",
-            ])
-            .arg(format!("context={}", workspace.path().display()))
-            .arg("--local")
-            .arg(format!("dockerfile={}", workspace.path().display()))
-            .arg("--opt")
-            .arg(format!("filename={}", command.request.dockerfile_path))
-            .args(["--opt", "platform=linux/amd64", "--output"])
-            .arg(format!("type=image,name={tagged},push=true"))
-            .args(["--metadata-file"])
-            .arg(&metadata)
-            .env("DOCKER_CONFIG", &self.config.docker_config_directory)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await
-            .map_err(network)?;
-        if !status.success() {
-            return Err(unavailable());
-        }
+        self.run_buildctl(
+            workspace.path(),
+            &command.request.dockerfile_path,
+            &tagged,
+            &metadata,
+        )
+        .await?;
         let metadata: Value = serde_json::from_slice(
             &tokio::fs::read(&metadata)
                 .await
@@ -328,6 +325,55 @@ impl ProductionBuildExecutor {
             repository: command.request.output_repository.clone(),
             digest,
         })
+    }
+
+    async fn run_buildctl(
+        &self,
+        workspace: &Path,
+        dockerfile_path: &str,
+        tagged: &str,
+        metadata: &Path,
+    ) -> Result<(), BuildProviderFailure> {
+        let status = Command::new(&self.config.buildctl_path)
+            .args([
+                "--addr",
+                &self.config.buildkit_address,
+                "--tlscacert",
+                self.config.buildkit_ca_file.to_str().ok_or_else(rejected)?,
+                "--tlscert",
+                self.config
+                    .buildkit_client_certificate_file
+                    .to_str()
+                    .ok_or_else(rejected)?,
+                "--tlskey",
+                self.config
+                    .buildkit_client_private_key_file
+                    .to_str()
+                    .ok_or_else(rejected)?,
+                "build",
+                "--frontend",
+                "dockerfile.v0",
+                "--local",
+            ])
+            .arg(format!("context={}", workspace.display()))
+            .arg("--local")
+            .arg(format!("dockerfile={}", workspace.display()))
+            .arg("--opt")
+            .arg(format!("filename={dockerfile_path}"))
+            .args(["--opt", "platform=linux/amd64", "--output"])
+            .arg(format!("type=image,name={tagged},push=true"))
+            .args(["--metadata-file"])
+            .arg(metadata)
+            .env("DOCKER_CONFIG", &self.config.docker_config_directory)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .map_err(network)?;
+        if !status.success() {
+            return Err(unavailable());
+        }
+        Ok(())
     }
 
     async fn scan(&self, candidate: &BuiltCandidate) -> Result<ScanEvidence, BuildProviderFailure> {

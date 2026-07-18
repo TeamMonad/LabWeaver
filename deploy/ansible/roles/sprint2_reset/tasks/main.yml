@@ -44,6 +44,7 @@
     path: "{{ item }}"
   loop: >-
     {{ [sprint2_reset_chart_source, sprint2_reset_migration_catalog,
+        sprint2_reset_configuration_manifest,
         sprint2_reset_keycloak_realm_file,
         sprint2_reset_rollback_probe_values_file,
         sprint2_reset_configuration_bundle] + sprint2_reset_values_files }}
@@ -74,6 +75,20 @@
   delegate_to: localhost
   become: false
 
+- name: Hash the reviewed workload configuration manifest
+  ansible.builtin.stat:
+    path: "{{ sprint2_reset_configuration_manifest }}"
+    checksum_algorithm: sha256
+  register: sprint2_reset_configuration_manifest_stat
+  delegate_to: localhost
+  become: false
+
+- name: Parse the reviewed workload configuration manifest
+  ansible.builtin.set_fact:
+    sprint2_reset_configuration_manifest_value: >-
+      {{ lookup('ansible.builtin.file', sprint2_reset_configuration_manifest)
+         | from_json }}
+
 - name: Parse the reviewed workload configuration bundle
   ansible.builtin.set_fact:
     sprint2_reset_configuration_objects: >-
@@ -88,6 +103,10 @@
       - sprint2_reset_configuration_objects | map(attribute='apiVersion') | unique | list == ['v1']
       - sprint2_reset_configuration_objects | map(attribute='kind') | difference(['ConfigMap', 'Secret']) | length == 0
       - sprint2_reset_configuration_objects | map(attribute='metadata.namespace') | unique | list == [sprint2_reset_namespace]
+      - sprint2_reset_configuration_manifest_value.apiVersion == 'deploy.labweaver.io/sprint2-bundle-manifest/v1'
+      - sprint2_reset_configuration_manifest_value.namespace == sprint2_reset_namespace
+      - sprint2_reset_configuration_manifest_value.configMaps.keys() | sort == sprint2_reset_required_configmaps | sort
+      - sprint2_reset_configuration_manifest_value.secrets.keys() | sort == sprint2_reset_required_secrets | sort
       - >-
         sprint2_reset_configuration_objects
         | selectattr('kind', 'equalto', 'ConfigMap')
@@ -99,6 +118,23 @@
         | map(attribute='metadata.name') | sort
         == sprint2_reset_required_secrets | sort
     fail_msg: SPRINT2_CONFIGURATION_BUNDLE_INVALID
+  no_log: true
+
+- name: Validate every workload configuration key against the manifest
+  ansible.builtin.assert:
+    that:
+      - item.data is defined
+      - item.stringData is not defined
+      - item.binaryData is not defined
+      - item.data.keys() | sort == sprint2_reset_expected_configuration_keys | sort
+      - item.kind != 'Secret' or item.type == 'Opaque'
+    fail_msg: SPRINT2_CONFIGURATION_BUNDLE_KEYS_INVALID
+  vars:
+    sprint2_reset_expected_configuration_keys: >-
+      {{ (sprint2_reset_configuration_manifest_value.configMaps
+          if item.kind == 'ConfigMap'
+          else sprint2_reset_configuration_manifest_value.secrets)[item.metadata.name] }}
+  loop: "{{ sprint2_reset_configuration_objects }}"
   no_log: true
 
 - name: Read target cluster UID

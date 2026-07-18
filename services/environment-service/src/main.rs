@@ -199,3 +199,21 @@ enum MainError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::case_sensitive_file_extension_comparisons)]
+mod deployment_contract_tests {
+    use super::RuntimeExecutorDeployment;
+
+    #[test]
+    fn checked_in_runtime_executor_example_matches_the_v1_contract() {
+        let example = include_str!("../../../deploy/config/runtime-executor.yaml.example");
+        let deployment: RuntimeExecutorDeployment = serde_yaml::from_str(example)
+            .expect("runtime executor deployment example must deserialize");
+
+        assert!(deployment.database_url_file.starts_with('/'));
+        assert!(deployment.nats.server.starts_with("tls://"));
+        assert!(deployment.nats.container_request_subject.ends_with(".v1"));
+        assert!(deployment.nats.kubevirt_request_subject.ends_with(".v1"));
+    }
+}

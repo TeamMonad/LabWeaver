@@ -1,0 +1,106 @@
+{
+  "apiVersion": "deploy.labweaver.io/sprint2-bundle-manifest/v1",
+  "namespace": "labweaver-system",
+  "configMaps": {
+    "access-service-config": ["config.yaml"],
+    "agent-service-config": ["config.yaml"],
+    "build-executor-config": ["config.yaml"],
+    "container-executor-config": ["config.yaml"],
+    "control-service-config": ["config.yaml"],
+    "environment-service-config": ["providers.json"],
+    "kubevirt-executor-config": ["config.yaml"],
+    "web-config": ["deployment.json"]
+  },
+  "secrets": {
+    "access-service-secrets": [
+      "database-url",
+      "mtls-ca.pem",
+      "nats-ca.pem",
+      "nats-client.crt",
+      "nats-client.key",
+      "nats.creds",
+      "oidc-ca.pem",
+      "oidc-client-secret",
+      "session-keyring.json",
+      "tls.crt",
+      "tls.key"
+    ],
+    "agent-service-secrets": [
+      "anthropic-api-key",
+      "database-url",
+      "minio-access-key",
+      "minio-secret-key",
+      "mtls-ca.pem",
+      "nats-ca.pem",
+      "nats-client.crt",
+      "nats-client.key",
+      "nats.creds",
+      "tls.crt",
+      "tls.key"
+    ],
+    "build-executor-secrets": [
+      "buildkit-ca.pem",
+      "buildkit-client.crt",
+      "buildkit-client.key",
+      "database-url",
+      "harbor-password",
+      "harbor-username",
+      "minio-access-key",
+      "minio-secret-key",
+      "nats-ca.pem",
+      "nats-client.crt",
+      "nats-client.key",
+      "nats.creds"
+    ],
+    "container-executor-secrets": [
+      "database-url",
+      "minio-access-key",
+      "minio-secret-key",
+      "nats-ca.pem",
+      "nats-client.crt",
+      "nats-client.key",
+      "nats.creds"
+    ],
+    "control-service-secrets": [
+      "database-url",
+      "minio-access-key",
+      "minio-secret-key",
+      "mtls-ca.pem",
+      "nats-ca.pem",
+      "nats-client.crt",
+      "nats-client.key",
+      "nats.creds",
+      "tls.crt",
+      "tls.key"
+    ],
+    "environment-service-secrets": [
+      "database-url",
+      "mtls-ca.pem",
+      "nats-ca.pem",
+      "nats-client.crt",
+      "nats-client.key",
+      "nats-server",
+      "nats.creds",
+      "system-actor-id",
+      "tls.crt",
+      "tls.key"
+    ],
+    "kubevirt-executor-secrets": [
+      "database-url",
+      "minio-access-key",
+      "minio-secret-key",
+      "nats-ca.pem",
+      "nats-client.crt",
+      "nats-client.key",
+      "nats.creds"
+    ],
+    "openssh-gateway-secrets": [
+      "known_hosts",
+      "mtls-ca.pem",
+      "mtls.crt",
+      "mtls.key",
+      "ssh_host_ed25519_key",
+      "target_key"
+    ]
+  }
+}

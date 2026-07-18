@@ -1,0 +1,30 @@
+databaseUrlFile: "/etc/labweaver/secrets/database-url"
+databaseMaxConnections: 8
+objectStore:
+  binding: "runtime-artifact-minio-v1"
+  endpoint: "https://minio.labweaver-data.svc:9000/"
+  bucket: "labweaver-artifacts"
+  region: "labweaver-internal-1"
+  objectPrefix: "runtime"
+  uploadTtlSeconds: 900
+  maxObjectBytes: 1073741824
+  forcePathStyle: true
+objectStoreAccessKeyFile: "/etc/labweaver/secrets/minio-access-key"
+objectStoreSecretKeyFile: "/etc/labweaver/secrets/minio-secret-key"
+objectStoreSessionTokenFile: null
+nats:
+  server: "tls://nats.labweaver-data.svc:4222"
+  caFile: "/etc/labweaver/secrets/nats-ca.pem"
+  clientCertificateFile: "/etc/labweaver/secrets/nats-client.crt"
+  clientPrivateKeyFile: "/etc/labweaver/secrets/nats-client.key"
+  credentialsFile: "/etc/labweaver/secrets/nats.creds"
+  containerRequestSubject: "labweaver.provider.kubernetes.container.v1"
+  kubevirtRequestSubject: "labweaver.provider.kubevirt.vm.v1"
+executor:
+  apiServer: "https://kubernetes.default.svc/"
+  bearerTokenFile: "/var/run/secrets/kubernetes.io/serviceaccount/token"
+  clusterCaFile: "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+  requestTimeoutMilliseconds: 10000
+  cleanupPollMilliseconds: 500
+  cleanupRetentionSeconds: 86400
+  sshHandshakeTimeoutMilliseconds: 5000

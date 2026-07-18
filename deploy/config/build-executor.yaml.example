@@ -1,0 +1,41 @@
+database_url_file: "/etc/labweaver/secrets/database-url"
+database_max_connections: 8
+object_store:
+  binding: "problem-package-minio-v1"
+  endpoint: "https://minio.labweaver-data.svc:9000/"
+  bucket: "labweaver-problem-packages"
+  region: "labweaver-internal-1"
+  objectPrefix: "problem-packages"
+  uploadTtlSeconds: 900
+  maxObjectBytes: 67108864
+  forcePathStyle: true
+object_store_access_key_file: "/etc/labweaver/secrets/minio-access-key"
+object_store_secret_key_file: "/etc/labweaver/secrets/minio-secret-key"
+object_store_session_token_file: null
+nats:
+  server: "tls://nats.labweaver-data.svc:4222"
+  ca_file: "/etc/labweaver/secrets/nats-ca.pem"
+  client_certificate_file: "/etc/labweaver/secrets/nats-client.crt"
+  client_private_key_file: "/etc/labweaver/secrets/nats-client.key"
+  credentials_file: "/etc/labweaver/secrets/nats.creds"
+  request_subject: "labweaver.provider.container_build.execute.v1"
+executor:
+  buildctlPath: "/usr/local/bin/buildctl"
+  buildkitAddress: "tcp://buildkit.labweaver-build.svc:1234"
+  buildkitCaFile: "/etc/labweaver/secrets/buildkit-ca.pem"
+  buildkitClientCertificateFile: "/etc/labweaver/secrets/buildkit-client.crt"
+  buildkitClientPrivateKeyFile: "/etc/labweaver/secrets/buildkit-client.key"
+  trivyPath: "/usr/local/bin/trivy"
+  trivyCacheDirectory: "/tmp/trivy-cache"
+  dockerConfigDirectory: "/tmp/docker"
+  workDirectory: "/tmp/builds"
+  maxUnpackedContextBytes: 536870912
+  harborApi: "https://harbor.example.invalid/"
+  harborRegistry: "harbor.example.invalid"
+  harborUsernameFile: "/etc/labweaver/secrets/harbor-username"
+  harborPasswordFile: "/etc/labweaver/secrets/harbor-password"
+  projectStorageQuotaBytes: 10737418240
+  robotSubject: "sprint2-build-executor"
+  scannerName: "trivy"
+  scannerVersion: "0.72.0"
+  scannerDatabaseSha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
