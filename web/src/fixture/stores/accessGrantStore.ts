@@ -62,20 +62,37 @@ interface GrantSeedOptions {
   revokedAt?: string | null
 }
 
-function createGrantInternal(options: GrantSeedOptions): AccessGrantSchema {
-  const env = getEnvironment(options.environmentId)
-  const endpoints = listEndpoints(options.environmentId)
-  const endpointGrants = endpoints.map((ep) => ({
-    id: nextUuid7('epgrant'),
-    accessGrantId: options.id,
+const GATEWAY_HOSTNAME = 'gateway.labweaver.local'
+const GATEWAY_FINGERPRINT_SHA256 = 'sha256:' + '9'.repeat(64)
+
+function sshAlias(id: string): string {
+  // Mirror services/access-service/src/grants.rs `ssh_alias`: `lw-` + 20 hex chars.
+  const hex = id.replace(/[^a-f0-9]/gi, '').toLowerCase().padEnd(20, '0').slice(0, 20)
+  return `lw-${hex}`
+}
+
+function buildEndpointGrant(ep: { id: string; revision: number; protocol: 'http' | 'https' | 'ssh'; health: 'pending' | 'healthy' | 'unhealthy' | 'removed' }, accessGrantId: string, expiresAt: string) {
+  const id = nextUuid7('epgrant')
+  const alias = ep.protocol === 'ssh' ? sshAlias(id) : null
+  const connectUrl = ep.protocol === 'https' ? `https://${GATEWAY_HOSTNAME}/connect/${ep.id}` : null
+  return {
+    id,
+    accessGrantId,
     endpointId: ep.id,
     endpointRevision: ep.revision,
     action: 'connect' as const,
     protocol: ep.protocol,
-    expiresAt: options.expiresAt,
+    expiresAt,
     health: ep.health,
-    alias: null,
-  }))
+    alias,
+    connectUrl,
+  }
+}
+
+function createGrantInternal(options: GrantSeedOptions): AccessGrantSchema {
+  const env = getEnvironment(options.environmentId)
+  const endpoints = listEndpoints(options.environmentId)
+  const endpointGrants = endpoints.map((ep) => buildEndpointGrant(ep, options.id, options.expiresAt))
 
   return {
     id: options.id,
@@ -90,7 +107,9 @@ function createGrantInternal(options: GrantSeedOptions): AccessGrantSchema {
     reasonCode: null,
     revision: nextRevision(),
     endpointGrants,
-  }
+    gatewayHostname: GATEWAY_HOSTNAME,
+    gatewayFingerprintSha256: GATEWAY_FINGERPRINT_SHA256,
+  } as AccessGrantSchema
 }
 
 export function createAccessGrant(
@@ -116,17 +135,7 @@ export function createAccessGrant(
   // fixture 环境资格时间基于固定时钟，clamp 后授权输出保持确定性。
   const expiresAt =
     request.expiresAt <= env.eligibilityExpiresAt ? request.expiresAt : env.eligibilityExpiresAt
-  const endpointGrants: AccessGrantSchema['endpointGrants'] = endpoints.map((ep) => ({
-    id: nextUuid7('epgrant'),
-    accessGrantId: id,
-    endpointId: ep.id,
-    endpointRevision: ep.revision,
-    action: 'connect',
-    protocol: ep.protocol,
-    expiresAt,
-    health: ep.health,
-    alias: null,
-  }))
+  const endpointGrants = endpoints.map((ep) => buildEndpointGrant(ep, id, expiresAt))
 
   const grant: AccessGrantSchema = {
     id,
@@ -141,7 +150,9 @@ export function createAccessGrant(
     reasonCode: null,
     revision: nextRevision(),
     endpointGrants,
-  }
+    gatewayHostname: GATEWAY_HOSTNAME,
+    gatewayFingerprintSha256: GATEWAY_FINGERPRINT_SHA256,
+  } as AccessGrantSchema
 
   grants.set(id, grant)
   idempotencyMap.set(idempotencyKey, grant)

@@ -12,6 +12,7 @@ import { nextStreamSequence, nextUuid7 } from '../utils/identity'
 import { nextRevision } from '../utils/sequence'
 import { appendEvent } from './eventLog'
 import { listEndpoints, seedEndpointsFor, toEnvironmentEndpoints } from './endpointStore'
+import { listTemplateReleases } from './templateReleaseStore'
 import {
   createOperation,
   findOperation,
@@ -173,18 +174,32 @@ export function createEnvironment(
   const cached = idempotencyMap.get(idempotencyKey)
   if (cached) return cached
 
+  // Resolve the runtime kind from the referenced release so created
+  // environments expose the correct endpoints (ssh for VM, https for
+  // container code-server).
+  const release = listTemplateReleases(request.courseId).find(
+    (r) => r.id === request.releaseId && r.version === request.releaseVersion,
+  )
+  const runtimeKind = release?.runtimeKind ?? 'virtual_machine'
+
   const stored = createEnvironmentInternal({
     courseId: request.courseId,
     ownerId: actor.actorId,
     displayLabel: request.displayLabel ?? 'Untitled Environment',
     class: 'experiment',
-    runtimeKind: 'virtual_machine',
+    runtimeKind,
     desiredState: 'running',
     observedState: 'requested',
   })
-  seedEndpointsFor(stored.instance.id, [
-    { id: `ep-${stored.instance.id}-ssh`, protocol: 'ssh' },
-  ])
+  if (runtimeKind === 'container') {
+    seedEndpointsFor(stored.instance.id, [
+      { id: `ep-${stored.instance.id}-https`, protocol: 'https' },
+    ])
+  } else {
+    seedEndpointsFor(stored.instance.id, [
+      { id: `ep-${stored.instance.id}-ssh`, protocol: 'ssh' },
+    ])
+  }
   stored.instance.endpoints = toEnvironmentEndpoints(stored.instance.id)
 
   const op = createOperation(stored.instance.id, 'create')
@@ -367,6 +382,21 @@ export function freezeEnvironment(
   }
   idempotencyMap.set(idempotencyKey, accepted)
   transitionOperationToCompleted(stored, op, 'stopped')
+
+  // Freeze evidence: the frozen submission is archived to the object store with
+  // an immutable version and digest. Exposed as an additive optional field on
+  // the instance view so the UI can render it without fabricating it.
+  const instance = stored.instance as EnvironmentInstanceSchema & {
+    freezeEvidence?: EnvironmentInstanceSchema['cleanupEvidence']
+  }
+  instance.freezeEvidence = {
+    artifactId: nextUuid7('artifact'),
+    mediaType: 'application/vnd.labweaver.submission+tar',
+    objectVersion: `freeze-${op.operationId}`,
+    sha256: 'sha256:' + 'f'.repeat(64),
+    sizeBytes: 4096,
+    storeBinding: 'fixture-store',
+  }
   return accepted
 }
 
