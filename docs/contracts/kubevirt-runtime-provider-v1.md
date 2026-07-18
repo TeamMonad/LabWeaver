@@ -48,6 +48,12 @@ The deployment binding requires:
   "gatewayPodLabel": "openssh-gateway",
   "guestUser": "lab",
   "sshUserCaPublicKey": "ssh-ed25519 ...",
+  "vmiMemoryOverheadBytes": 536870912,
+  "cdiImporterCpuRequestMillicores": 1000,
+  "cdiImporterCpuLimitMillicores": 4000,
+  "cdiImporterMemoryRequestBytes": 262144000,
+  "cdiImporterMemoryLimitBytes": 1073741824,
+  "cdiScratchStorageBytes": 10737418240,
   "activeImagePolicyId": "01900000-0000-7000-8000-000000000001",
   "activeImagePolicyRevision": 1,
   "activeTrustRevision": 1,
@@ -55,8 +61,16 @@ The deployment binding requires:
 }
 ```
 
-The path is deployment-owned and must be absolute. A wildcard subject, partial
-binding, private key, invalid public key or Container-only field fails startup.
+The path is deployment-owned and must be absolute. The six resource-budget
+values must be non-zero, each CDI limit must be at least its request, and the
+values must match or conservatively exceed the deployed KubeVirt VMI memory
+overhead and CDI workload requests/limits. The scratch budget must be at least
+the approved root-disk request. A wildcard subject, partial binding, private
+key, invalid public key or Container-only field fails startup.
+
+VM v1 accepts exactly one entry and it must be SSH port 22. Any additional
+HTTP, HTTPS or SSH entry is rejected instead of being silently omitted from the
+immutable approved spec.
 
 ## Deterministic resource plan
 
@@ -66,9 +80,9 @@ exactly one of each owned runtime object unless noted:
 | Object | Required behavior |
 | --- | --- |
 | Namespace | Deterministic name, Environment/course labels and controlled cleanup finalizer. |
-| ResourceQuota | Exact CPU, memory, storage, one PVC and one VM pod budget. |
+| ResourceQuota | Guest resources plus explicit VMI-memory and CDI-importer request/limit budgets, one CDI scratch PVC, at most two PVCs and two transient/runtime pods. The VM memory limit is guest memory plus the reviewed VMI overhead, so KubeVirt's derived request cannot exceed the limit when the observed overhead remains within the binding. |
 | NetworkPolicy | Default-deny ingress and egress; one additional SSH ingress rule from the exact Gateway namespace and pod label; optional reviewed restricted-egress rule. |
-| Secret | Fixed cloud-init with public user CA only; locked non-root user; no password, root login, forwarding, tunnel, X11, private key or `authorized_keys`. |
+| Secret | Fixed base64 `data.userdata` cloud-init with public user CA only; locked non-root user; no password, root login, forwarding, tunnel, X11, private key or `authorized_keys`. |
 | DataVolume | Exact configured CDI `DataSource` and `StorageClass`, RWO root disk, immutable release/object/hash annotations. |
 | VirtualMachine | `runStrategy: Always`, hardware-KVM node selector, no graphics, virtio root PVC and cloud-init disk, pod network and SSH readiness probe. |
 | Service | ClusterIP only, port 22, deterministic selector and access-controlled annotation. |

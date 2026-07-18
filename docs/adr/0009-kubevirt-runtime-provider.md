@@ -35,6 +35,15 @@ The plan carries the immutable base-disk `ArtifactRef`, expected SHA-256 and
 plan SHA-256. It never emits NodePort, LoadBalancer, Ingress, VNC, a private key,
 `authorized_keys`, user-supplied shell or arbitrary cloud-init content.
 
+VM v1 admits exactly one approved `ssh:22` entry. Cloud-init is stored under
+the KubeVirt-required Secret key `data.userdata`, not `stringData`. Guest CPU
+and memory remain VM requests; the memory limit includes the reviewed VMI
+overhead instead of equalling guest memory. The namespace quota adds explicit
+CDI importer CPU/memory request and limit budgets plus a bounded scratch-PVC
+budget, and allows the importer/runtime pod and target/scratch PVC pairs.
+Startup rejects missing, zero or inverted budget bindings; plan creation rejects
+a root disk larger than the reviewed CDI scratch budget.
+
 Every executor request carries protocol version, environment and operation IDs,
 provider step, environment generation, attempt, action, deterministic request
 ID and deadline. The executor must persist the highest accepted fence per

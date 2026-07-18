@@ -1776,6 +1776,7 @@ dependencies = [
  "async-nats",
  "async-trait",
  "axum 0.8.9",
+ "base64 0.22.1",
  "contracts",
  "futures-util",
  "hyper 1.10.1",

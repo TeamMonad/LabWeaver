@@ -12,7 +12,10 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use contracts::authoring::{CandidateApproval, CandidateDecision, EnvironmentSpec, RuntimeKind};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use contracts::authoring::{
+    CandidateApproval, CandidateDecision, EnvironmentEntrySpec, EnvironmentSpec, RuntimeKind,
+};
 use contracts::environment::{DesiredEnvironmentState, EndpointProtocol, ObservedEnvironmentState};
 use contracts::events::ReleasePublishedV2;
 use contracts::supply_chain::{
@@ -27,10 +30,10 @@ use environment_service::{
     ContainerReleasePolicy, ContainerReleaseResolver, EnvironmentProvider,
     KUBEVIRT_BACKEND_PROTOCOL_VERSION, KubeVirtBackendFence, KubeVirtCleanupPlan,
     KubeVirtObservationStore, KubeVirtObservationStoreError, KubeVirtProvider,
-    KubeVirtProviderBackend, KubeVirtProviderConfiguration, KubeVirtResourcePlan,
-    KubeVirtRunningObservation, KubeVirtSshBootstrap, KubeVirtStoppedObservation,
-    KubeVirtStorageBinding, ProviderFailure, ReconcileAction, ReleaseProjectionError,
-    ResolvedContainerRelease,
+    KubeVirtProviderBackend, KubeVirtProviderConfiguration, KubeVirtResourceBudget,
+    KubeVirtResourcePlan, KubeVirtRunningObservation, KubeVirtSshBootstrap,
+    KubeVirtStoppedObservation, KubeVirtStorageBinding, ProviderFailure, ReconcileAction,
+    ReleaseProjectionError, ResolvedContainerRelease,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -335,12 +338,75 @@ fn plan_is_deterministic_private_and_digest_bound() {
             .pointer("/spec/template/spec/volumes/0/persistentVolumeClaim/claimName"),
         Some(&json!("rootdisk"))
     );
+    assert_eq!(
+        virtual_machine
+            .document
+            .pointer("/spec/template/spec/domain/resources/requests/memory"),
+        Some(&json!("2147483648"))
+    );
+    assert_eq!(
+        virtual_machine
+            .document
+            .pointer("/spec/template/spec/domain/resources/limits/cpu"),
+        Some(&json!("2000m"))
+    );
+    assert_eq!(
+        virtual_machine
+            .document
+            .pointer("/spec/template/spec/domain/resources/limits/memory"),
+        Some(&json!("2684354560"))
+    );
 
-    let cloud_init = resource(&first, "Secret")
+    let quota = resource(&first, "ResourceQuota");
+    assert_eq!(
+        quota.document.pointer("/spec/hard/requests.cpu"),
+        Some(&json!("3000m"))
+    );
+    assert_eq!(
+        quota.document.pointer("/spec/hard/limits.cpu"),
+        Some(&json!("6000m"))
+    );
+    assert_eq!(
+        quota.document.pointer("/spec/hard/requests.memory"),
+        Some(&json!("2946498560"))
+    );
+    assert_eq!(
+        quota.document.pointer("/spec/hard/limits.memory"),
+        Some(&json!("3758096384"))
+    );
+    assert_eq!(
+        quota.document.pointer("/spec/hard/requests.storage"),
+        Some(&json!("21474836480"))
+    );
+    assert_eq!(
+        quota.document.pointer("/spec/hard/persistentvolumeclaims"),
+        Some(&json!("2"))
+    );
+    assert_eq!(quota.document.pointer("/spec/hard/pods"), Some(&json!("2")));
+    assert_eq!(
+        quota
+            .document
+            .pointer("/metadata/annotations/labweaver.io~1vmi-memory-overhead-bytes"),
+        Some(&json!("536870912"))
+    );
+    assert_eq!(
+        quota
+            .document
+            .pointer("/metadata/annotations/labweaver.io~1cdi-scratch-storage-bytes"),
+        Some(&json!("10737418240"))
+    );
+
+    let cloud_init_secret = resource(&first, "Secret");
+    assert!(cloud_init_secret.document.pointer("/stringData").is_none());
+    let cloud_init_encoded = cloud_init_secret
         .document
-        .pointer("/stringData/userData")
+        .pointer("/data/userdata")
         .and_then(serde_json::Value::as_str)
-        .expect("cloud-init userData");
+        .expect("cloud-init data.userdata");
+    let cloud_init_bytes = BASE64_STANDARD
+        .decode(cloud_init_encoded)
+        .expect("base64 cloud-init userdata");
+    let cloud_init = std::str::from_utf8(&cloud_init_bytes).expect("UTF-8 cloud-init userdata");
     assert!(cloud_init.contains("TrustedUserCAKeys /etc/ssh/labweaver_user_ca.pub"));
     assert!(cloud_init.contains("AuthorizedKeysFile none"));
     assert!(cloud_init.contains("AuthenticationMethods publickey"));
@@ -549,18 +615,18 @@ fn invalid_release_storage_or_ssh_bootstrap_fails_closed() {
     let projection = projection();
     let instance = instance_for(&projection);
     let backend = Arc::new(FixtureBackend::default());
-    let provider = provider(projection.clone(), backend);
+    let vm_provider = provider(projection.clone(), backend);
 
     let mut expired = resolved(projection.clone());
     expired.authority_now = projection.release.image_policy_evaluation.valid_until;
     assert!(matches!(
-        provider.plan(&instance, &expired, ReconcileAction::Provision),
+        vm_provider.plan(&instance, &expired, ReconcileAction::Provision),
         Err(ReleaseProjectionError::EvidenceExpired)
     ));
     let mut withdrawn = resolved(projection.clone());
     withdrawn.withdrawn_at = Some(timestamp("2026-07-16T08:20:00.000Z"));
     assert!(matches!(
-        provider.plan(&instance, &withdrawn, ReconcileAction::Provision),
+        vm_provider.plan(&instance, &withdrawn, ReconcileAction::Provision),
         Err(ReleaseProjectionError::Withdrawn)
     ));
 
@@ -582,11 +648,84 @@ fn invalid_release_storage_or_ssh_bootstrap_fails_closed() {
         )
         .is_err()
     );
+
+    for extra_entry in [
+        EnvironmentEntrySpec {
+            name: "web".to_owned(),
+            protocol: EndpointProtocol::Http,
+            service_port: 80,
+        },
+        EnvironmentEntrySpec {
+            name: "secure-web".to_owned(),
+            protocol: EndpointProtocol::Https,
+            service_port: 443,
+        },
+        EnvironmentEntrySpec {
+            name: "admin-ssh".to_owned(),
+            protocol: EndpointProtocol::Ssh,
+            service_port: 22,
+        },
+    ] {
+        let mut partial_projection = projection.clone();
+        partial_projection
+            .environment_spec
+            .entries
+            .push(extra_entry);
+        rebind_projection(&mut partial_projection);
+        let partial_instance = instance_for(&partial_projection);
+        let partial_provider = provider(
+            partial_projection.clone(),
+            Arc::new(FixtureBackend::default()),
+        );
+        assert!(matches!(
+            partial_provider.plan(
+                &partial_instance,
+                &resolved(partial_projection),
+                ReconcileAction::Provision,
+            ),
+            Err(ReleaseProjectionError::SecurityPostureInvalid)
+        ));
+    }
+
+    assert!(
+        KubeVirtResourceBudget::new(0, 1_000, 4_000, 262_144_000, 1_073_741_824, 10_737_418_240)
+            .is_err()
+    );
+    let insufficient_scratch = provider_with_budget(
+        projection.clone(),
+        Arc::new(FixtureBackend::default()),
+        KubeVirtResourceBudget::new(536_870_912, 1_000, 4_000, 262_144_000, 1_073_741_824, 1)
+            .expect("non-zero resource budget"),
+    );
+    assert!(matches!(
+        insufficient_scratch.plan(&instance, &resolved(projection), ReconcileAction::Provision,),
+        Err(ReleaseProjectionError::SecurityPostureInvalid)
+    ));
 }
 
 fn provider(
     projection: ReleasePublishedV2,
     backend: Arc<FixtureBackend>,
+) -> KubeVirtProvider<FixtureBackend, FixtureResolver, FixtureObservationStore> {
+    provider_with_budget(
+        projection,
+        backend,
+        KubeVirtResourceBudget::new(
+            536_870_912,
+            1_000,
+            4_000,
+            262_144_000,
+            1_073_741_824,
+            10_737_418_240,
+        )
+        .expect("KubeVirt resource budget"),
+    )
+}
+
+fn provider_with_budget(
+    projection: ReleasePublishedV2,
+    backend: Arc<FixtureBackend>,
+    resource_budget: KubeVirtResourceBudget,
 ) -> KubeVirtProvider<FixtureBackend, FixtureResolver, FixtureObservationStore> {
     let image_policy_id = projection.release.image_policy_evaluation.policy_id;
     KubeVirtProvider::new(
@@ -620,6 +759,7 @@ fn provider(
                 "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDIhz2GK/XCUj4i6Q5yQJNL1MKDXETe1aM1lHYMGt2SQ",
             )
             .expect("SSH bootstrap"),
+            resource_budget,
         ),
     )
     .expect("provider configuration")
@@ -805,6 +945,19 @@ fn artifact_ref(media_type: &str) -> ArtifactRef {
         size_bytes: 128,
         media_type: media_type.to_owned(),
     }
+}
+
+fn rebind_projection(projection: &mut ReleasePublishedV2) {
+    let environment_spec_sha256 =
+        Sha256Digest::of_canonical(&projection.environment_spec).expect("environment spec hash");
+    projection.release.environment_spec_sha256 = environment_spec_sha256;
+    projection.release.approval.candidate_sha256 = environment_spec_sha256;
+    projection.projection_sha256 = Sha256Digest::of_canonical(&json!({
+        "release": &projection.release,
+        "environmentSpec": &projection.environment_spec,
+    }))
+    .expect("release projection hash");
+    projection.validate().expect("valid rebound projection");
 }
 
 fn revision(value: u64) -> Revision {

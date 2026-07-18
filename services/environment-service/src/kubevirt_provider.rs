@@ -3,6 +3,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use contracts::access::validate_ssh_public_key;
 use contracts::authoring::{
     EnvironmentRuntimeSpec, NetworkPolicySpec, PrivilegeEscalationPolicy, PublicExposurePolicy,
@@ -491,6 +492,47 @@ pub struct KubeVirtProviderConfiguration {
     pub release_policy: ContainerReleasePolicy,
     pub storage: KubeVirtStorageBinding,
     pub ssh: KubeVirtSshBootstrap,
+    pub resource_budget: KubeVirtResourceBudget,
+}
+
+/// Deployment-owned capacity reserved beyond the approved guest resources.
+#[derive(Clone, Copy, Debug)]
+pub struct KubeVirtResourceBudget {
+    vmi_memory_overhead_bytes: u64,
+    cdi_importer_cpu_request_millicores: u32,
+    cdi_importer_cpu_limit_millicores: u32,
+    cdi_importer_memory_request_bytes: u64,
+    cdi_importer_memory_limit_bytes: u64,
+    cdi_scratch_storage_bytes: u64,
+}
+
+impl KubeVirtResourceBudget {
+    pub const fn new(
+        vmi_memory_overhead_bytes: u64,
+        cdi_importer_cpu_request_millicores: u32,
+        cdi_importer_cpu_limit_millicores: u32,
+        cdi_importer_memory_request_bytes: u64,
+        cdi_importer_memory_limit_bytes: u64,
+        cdi_scratch_storage_bytes: u64,
+    ) -> Result<Self, ReleaseProjectionError> {
+        if vmi_memory_overhead_bytes == 0
+            || cdi_importer_cpu_request_millicores == 0
+            || cdi_importer_cpu_limit_millicores < cdi_importer_cpu_request_millicores
+            || cdi_importer_memory_request_bytes == 0
+            || cdi_importer_memory_limit_bytes < cdi_importer_memory_request_bytes
+            || cdi_scratch_storage_bytes == 0
+        {
+            return Err(ReleaseProjectionError::ConfigurationInvalid);
+        }
+        Ok(Self {
+            vmi_memory_overhead_bytes,
+            cdi_importer_cpu_request_millicores,
+            cdi_importer_cpu_limit_millicores,
+            cdi_importer_memory_request_bytes,
+            cdi_importer_memory_limit_bytes,
+            cdi_scratch_storage_bytes,
+        })
+    }
 }
 
 impl KubeVirtProviderConfiguration {
@@ -499,11 +541,13 @@ impl KubeVirtProviderConfiguration {
         release_policy: ContainerReleasePolicy,
         storage: KubeVirtStorageBinding,
         ssh: KubeVirtSshBootstrap,
+        resource_budget: KubeVirtResourceBudget,
     ) -> Self {
         Self {
             release_policy,
             storage,
             ssh,
+            resource_budget,
         }
     }
 }
@@ -997,10 +1041,12 @@ where
         {
             return Err(ReleaseProjectionError::SecurityPostureInvalid);
         }
-        if !projection.environment_spec.entries.iter().any(|entry| {
-            entry.protocol == contracts::environment::EndpointProtocol::Ssh
-                && entry.service_port == *ssh_port
-        }) {
+        let [entry] = projection.environment_spec.entries.as_slice() else {
+            return Err(ReleaseProjectionError::SecurityPostureInvalid);
+        };
+        if entry.protocol != contracts::environment::EndpointProtocol::Ssh
+            || entry.service_port != *ssh_port
+        {
             return Err(ReleaseProjectionError::SecurityPostureInvalid);
         }
 
@@ -1025,7 +1071,48 @@ where
         let cpu = format!("{}m", resources.cpu_millicores);
         let memory = resources.memory_bytes.to_string();
         let storage = resources.storage_bytes.to_string();
+        let budget = self.configuration.resource_budget;
+        if resources.storage_bytes > budget.cdi_scratch_storage_bytes {
+            return Err(ReleaseProjectionError::SecurityPostureInvalid);
+        }
+        let quota_cpu_request_millicores = resources
+            .cpu_millicores
+            .checked_add(budget.cdi_importer_cpu_request_millicores)
+            .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
+        let quota_cpu_limit_millicores = resources
+            .cpu_millicores
+            .checked_add(budget.cdi_importer_cpu_limit_millicores)
+            .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
+        let vmi_memory_limit_bytes = resources
+            .memory_bytes
+            .checked_add(budget.vmi_memory_overhead_bytes)
+            .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
+        let quota_memory_request_bytes = vmi_memory_limit_bytes
+            .checked_add(budget.cdi_importer_memory_request_bytes)
+            .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
+        let quota_memory_limit_bytes = vmi_memory_limit_bytes
+            .checked_add(budget.cdi_importer_memory_limit_bytes)
+            .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
+        let quota_storage_bytes = resources
+            .storage_bytes
+            .checked_add(budget.cdi_scratch_storage_bytes)
+            .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
+        let quota_cpu_request = format!("{quota_cpu_request_millicores}m");
+        let quota_cpu_limit = format!("{quota_cpu_limit_millicores}m");
+        let quota_memory_request = quota_memory_request_bytes.to_string();
+        let quota_memory_limit = quota_memory_limit_bytes.to_string();
+        let quota_storage = quota_storage_bytes.to_string();
+        let vmi_memory_limit = vmi_memory_limit_bytes.to_string();
+        let quota_annotations = json!({
+            "labweaver.io/vmi-memory-overhead-bytes": budget.vmi_memory_overhead_bytes.to_string(),
+            "labweaver.io/cdi-importer-cpu-request-millicores": budget.cdi_importer_cpu_request_millicores.to_string(),
+            "labweaver.io/cdi-importer-cpu-limit-millicores": budget.cdi_importer_cpu_limit_millicores.to_string(),
+            "labweaver.io/cdi-importer-memory-request-bytes": budget.cdi_importer_memory_request_bytes.to_string(),
+            "labweaver.io/cdi-importer-memory-limit-bytes": budget.cdi_importer_memory_limit_bytes.to_string(),
+            "labweaver.io/cdi-scratch-storage-bytes": budget.cdi_scratch_storage_bytes.to_string(),
+        });
         let cloud_init = self.cloud_init_user_data();
+        let cloud_init_data = BASE64_STANDARD.encode(cloud_init.as_bytes());
         let mut documents = vec![
             resource(
                 "Namespace",
@@ -1042,8 +1129,8 @@ where
                 "runtime-quota",
                 json!({
                     "apiVersion":"v1","kind":"ResourceQuota",
-                    "metadata":{"name":"runtime-quota","namespace":namespace,"labels":labels},
-                    "spec":{"hard":{"requests.cpu":cpu,"limits.cpu":cpu,"requests.memory":memory,"limits.memory":memory,"requests.storage":storage,"persistentvolumeclaims":"1","pods":"1"}}
+                    "metadata":{"name":"runtime-quota","namespace":namespace,"labels":labels,"annotations":quota_annotations},
+                    "spec":{"hard":{"requests.cpu":quota_cpu_request,"limits.cpu":quota_cpu_limit,"requests.memory":quota_memory_request,"limits.memory":quota_memory_limit,"requests.storage":quota_storage,"persistentvolumeclaims":"2","pods":"2"}}
                 }),
             ),
             resource(
@@ -1073,7 +1160,7 @@ where
                 json!({
                     "apiVersion":"v1","kind":"Secret","type":"Opaque",
                     "metadata":{"name":"cloud-init","namespace":namespace,"labels":labels,"annotations":annotations},
-                    "stringData":{"userData":cloud_init}
+                    "data":{"userdata":cloud_init_data}
                 }),
             ),
             resource(
@@ -1104,7 +1191,7 @@ where
                                 "terminationGracePeriodSeconds":30,
                                 "nodeSelector":{KUBEVIRT_NODE_LABEL_KEY:KUBEVIRT_NODE_LABEL_VALUE},
                                 "domain":{
-                                    "resources":{"requests":{"cpu":cpu,"memory":memory},"limits":{"cpu":cpu,"memory":memory}},
+                                    "resources":{"requests":{"cpu":cpu,"memory":memory},"limits":{"cpu":cpu,"memory":vmi_memory_limit}},
                                     "devices":{
                                         "autoattachGraphicsDevice":false,
                                         "autoattachSerialConsole":true,

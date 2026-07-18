@@ -15,11 +15,12 @@ use crate::{
     ContainerProvider, ContainerProviderConfiguration, ContainerReleasePolicy,
     EnvironmentStoreError, JetStreamCommandConsumer, JetStreamEventPublisher,
     JetStreamReleaseConsumer, KubeVirtProvider, KubeVirtProviderConfiguration,
-    KubeVirtSshBootstrap, KubeVirtStorageBinding, LifecycleCommand, NatsAccessRevoker,
-    NatsContainerProviderBackend, NatsEnvironmentProvider, NatsKubeVirtProviderBackend,
-    NatsMessagingError, NatsResourceLeaseVerifier, OutboxDispatchError, OutboxDispatcher,
-    PgEnvironmentStore, PgKubeVirtObservationStore, PgReleaseProjectionStore, ProviderRegistry,
-    ReconcileError, ReconcileWorker, ReconcileWorkerError, Reconciler, connect_nats_mtls,
+    KubeVirtResourceBudget, KubeVirtSshBootstrap, KubeVirtStorageBinding, LifecycleCommand,
+    NatsAccessRevoker, NatsContainerProviderBackend, NatsEnvironmentProvider,
+    NatsKubeVirtProviderBackend, NatsMessagingError, NatsResourceLeaseVerifier,
+    OutboxDispatchError, OutboxDispatcher, PgEnvironmentStore, PgKubeVirtObservationStore,
+    PgReleaseProjectionStore, ProviderRegistry, ReconcileError, ReconcileWorker,
+    ReconcileWorkerError, Reconciler, connect_nats_mtls,
 };
 
 const DATABASE_URL: &str = "LABWEAVER_DATABASE_URL";
@@ -209,6 +210,26 @@ impl EnvironmentProcessRuntime {
                                 configuration
                                     .ssh_user_ca_public_key
                                     .as_deref()
+                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                            )?,
+                            KubeVirtResourceBudget::new(
+                                configuration
+                                    .vmi_memory_overhead_bytes
+                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                                configuration
+                                    .cdi_importer_cpu_request_millicores
+                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                                configuration
+                                    .cdi_importer_cpu_limit_millicores
+                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                                configuration
+                                    .cdi_importer_memory_request_bytes
+                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                                configuration
+                                    .cdi_importer_memory_limit_bytes
+                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                                configuration
+                                    .cdi_scratch_storage_bytes
                                     .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
                             )?,
                         ),
@@ -589,6 +610,12 @@ struct ProviderBindingConfiguration {
     gateway_pod_label: Option<String>,
     guest_user: Option<String>,
     ssh_user_ca_public_key: Option<String>,
+    vmi_memory_overhead_bytes: Option<u64>,
+    cdi_importer_cpu_request_millicores: Option<u32>,
+    cdi_importer_cpu_limit_millicores: Option<u32>,
+    cdi_importer_memory_request_bytes: Option<u64>,
+    cdi_importer_memory_limit_bytes: Option<u64>,
+    cdi_scratch_storage_bytes: Option<u64>,
 }
 
 impl ProviderBindingConfiguration {
@@ -634,6 +661,12 @@ impl ProviderBindingConfiguration {
             || self.gateway_pod_label.is_some()
             || self.guest_user.is_some()
             || self.ssh_user_ca_public_key.is_some()
+            || self.vmi_memory_overhead_bytes.is_some()
+            || self.cdi_importer_cpu_request_millicores.is_some()
+            || self.cdi_importer_cpu_limit_millicores.is_some()
+            || self.cdi_importer_memory_request_bytes.is_some()
+            || self.cdi_importer_memory_limit_bytes.is_some()
+            || self.cdi_scratch_storage_bytes.is_some()
     }
 
     fn has_complete_kubevirt_fields(&self) -> bool {
@@ -645,6 +678,12 @@ impl ProviderBindingConfiguration {
             && self.gateway_pod_label.is_some()
             && self.guest_user.is_some()
             && self.ssh_user_ca_public_key.is_some()
+            && self.vmi_memory_overhead_bytes.is_some()
+            && self.cdi_importer_cpu_request_millicores.is_some()
+            && self.cdi_importer_cpu_limit_millicores.is_some()
+            && self.cdi_importer_memory_request_bytes.is_some()
+            && self.cdi_importer_memory_limit_bytes.is_some()
+            && self.cdi_scratch_storage_bytes.is_some()
             && self.active_image_policy_id.is_some()
             && self.active_image_policy_revision.is_some()
             && self.active_trust_revision.is_some()

@@ -384,8 +384,10 @@ idempotency and sanitized `Deleted` tombstone evidence. The current slice proves
 the transport and state-owner boundaries. #52 and #53 now add formal local
 Container and KubeVirt Providers; the KubeVirt suite verifies deterministic
 VM/CDI resources, default-deny plus Gateway-only SSH ingress, safe fixed
-cloud-init, guest/SSH readiness gating, duplicate fence identity, stop-start
-identity preservation and cleanup. A real PostgreSQL 17 test applies Migration
+base64 `data.userdata` cloud-init, strict one-entry `ssh:22` projection,
+VMI/CDI/scratch-aware quota without unsafe equal guest limits, guest/SSH
+readiness gating, duplicate fence identity, stop-start identity preservation
+and cleanup. A real PostgreSQL 17 test applies Migration
 0004 and proves exact replay, stale-fence rejection, disk/host-key preservation
 and deletion tombstones. Access-owned revocation responder, Resource-owned Lease
 responder and connected E3 deployment evidence remain required. #47 now
@@ -413,7 +415,9 @@ disk and proves it survives start-stop-start; attempts non-Gateway network
 access and proves denial; and injects apply, readiness, cancellation, restart,
 observation and delete failures. Every terminal cleanup case must show Access
 revocation plus absence of Namespace, VM, VMI, DataVolume, PVC, Secret, Service
-and NetworkPolicy. A Fixture result or the pre-existing infrastructure VM
+and NetworkPolicy. The same report records the actual VMI memory overhead and
+CDI default pod requests and proves they do not exceed the deployment binding's
+explicit budgets. A Fixture result or the pre-existing infrastructure VM
 TestFlight cannot satisfy this gate.
 ## Infrastructure automation
 

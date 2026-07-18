@@ -30,9 +30,10 @@ pub use container_provider::{
 pub use kubevirt_provider::{
     KUBEVIRT_BACKEND_PROTOCOL_VERSION, KubeVirtBackendFence, KubeVirtCleanupPlan,
     KubeVirtObservationStore, KubeVirtObservationStoreError, KubeVirtProvider,
-    KubeVirtProviderBackend, KubeVirtProviderConfiguration, KubeVirtResource, KubeVirtResourcePlan,
-    KubeVirtRunningObservation, KubeVirtSshBootstrap, KubeVirtStoppedObservation,
-    KubeVirtStorageBinding, NatsKubeVirtProviderBackend, PgKubeVirtObservationStore,
+    KubeVirtProviderBackend, KubeVirtProviderConfiguration, KubeVirtResource,
+    KubeVirtResourceBudget, KubeVirtResourcePlan, KubeVirtRunningObservation, KubeVirtSshBootstrap,
+    KubeVirtStoppedObservation, KubeVirtStorageBinding, NatsKubeVirtProviderBackend,
+    PgKubeVirtObservationStore,
 };
 pub use lifecycle::{
     LifecycleCommand, LifecycleError, apply_provider_failure, apply_provider_observation,
