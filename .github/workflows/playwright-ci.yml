@@ -91,29 +91,27 @@ jobs:
     needs: playwright-gate
     runs-on: ubuntu-latest
     if: needs.playwright-gate.outputs.playwright_changed == 'true'
+    # Run inside the exact Playwright image used to generate the Linux visual
+    # baselines so Chromium version and system fonts match; installing a
+    # separate Chromium on ubuntu-latest produces different anti-aliasing and
+    # fails every screenshot comparison.
+    container:
+      image: mcr.microsoft.com/playwright:v1.61.1-noble
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22.18.0'
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v3
-        with:
-          version: 9
+      - name: Enable corepack pnpm
+        shell: bash
+        run: |
+          corepack enable
+          corepack prepare pnpm@9.15.4 --activate
 
       - name: Install dependencies
         working-directory: ./web
         run: pnpm install --frozen-lockfile
-
-      - name: Install Playwright browsers
-        working-directory: ./web
-        run: pnpm exec playwright install --with-deps chromium
 
       - name: Run fixture browser matrix
         working-directory: ./web
