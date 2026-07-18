@@ -28,3 +28,6 @@ No ADR is accepted in ARC-01a; this directory establishes the review process wit
 - [ADR 0009: Fenced KubeVirt Runtime Provider and Private SSH Endpoint](0009-kubevirt-runtime-provider.md)
   defines immutable VM/storage binding, executor fencing, guest/SSH readiness,
   identity persistence and deletion tombstones for Issue #53.
+- [ADR 0010: Immutable PVC and Certificate-bound SSH Collector](0010-immutable-dual-runtime-collector.md)
+  defines bounded dual-runtime snapshots, read-only short-lived SFTP,
+  Object Lock publication and durable freeze-attempt fencing for Issue #54.

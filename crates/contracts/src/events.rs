@@ -6,6 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::authoring::{CandidateApproval, CandidateDecision, EnvironmentSpec};
+use crate::submission::FrozenSubmission;
 use crate::supply_chain::{BuildRequest, EnvironmentTemplateRelease};
 use crate::{
     AccessGrantId, ActorId, AgentRunId, BuildRequestId, CourseId, EnvironmentId, EventId,
@@ -51,6 +52,7 @@ pub mod subjects {
     pub const SUBMISSION_FREEZE_REQUESTED: &str =
         "labweaver.evaluation.submission.freeze_requested.v1";
     pub const SUBMISSION_FROZEN: &str = "labweaver.evaluation.submission.frozen.v1";
+    pub const SUBMISSION_FROZEN_V2: &str = "labweaver.evaluation.submission.frozen.v2";
     pub const LAB_RELEASE_APPROVED: &str = "labweaver.control.lab_release.approved.v1";
     pub const ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED: &str =
         "labweaver.control.environment_template_release.published.v1";
@@ -272,6 +274,11 @@ pub const EVENT_CONTRACTS: &[EventContract] = &[
         schema_name: "submission-frozen",
     },
     EventContract {
+        subject: subjects::SUBMISSION_FROZEN_V2,
+        event_type: subjects::SUBMISSION_FROZEN_V2,
+        schema_name: "submission-frozen",
+    },
+    EventContract {
         subject: subjects::LAB_RELEASE_APPROVED,
         event_type: subjects::LAB_RELEASE_APPROVED,
         schema_name: "lab-release-approved",
@@ -442,6 +449,25 @@ pub struct SubmissionFrozen {
     pub environment_id: EnvironmentId,
     pub manifest_sha256: Sha256Digest,
     pub frozen_by: ActorId,
+}
+
+/// Complete immutable submission identity emitted only after database and Object Lock verification.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SubmissionFrozenV2 {
+    /// Authoritative frozen submission contract, including object version and digest.
+    pub submission: FrozenSubmission,
+    /// Environment-owned PVC or VM source identity used for both preflight and freeze.
+    pub source_identity_sha256: Sha256Digest,
+}
+
+impl SubmissionFrozenV2 {
+    /// Verifies the embedded immutable contract before publication.
+    pub fn validate(&self) -> Result<(), EventError> {
+        self.submission
+            .validate()
+            .map_err(|_| EventError::PayloadIdentityMismatch)
+    }
 }
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

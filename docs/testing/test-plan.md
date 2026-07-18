@@ -419,6 +419,42 @@ and NetworkPolicy. The same report records the actual VMI memory overhead and
 CDI default pod requests and proves they do not exceed the deployment binding's
 explicit budgets. A Fixture result or the pre-existing infrastructure VM
 TestFlight cannot satisfy this gate.
+
+### Dual-runtime Submission Collector gates (#54)
+
+Local deterministic and contract entry points are:
+
+```sh
+cargo test -p evaluation-service --lib --test collector
+cargo test -p evaluation-service --test freeze_postgres
+cargo test -p artifact-store minio_versioning_object_lock_and_cleanup_are_fail_closed
+cargo xtask contracts check
+cargo test -p persistence-sqlx
+```
+
+The first command proves bounded PVC selection, empty-file identity,
+preflight/freeze consistency, source mutation, excludes, required paths,
+symlink rejection and raw/file/output limits. The SSH unit guard rejects public
+targets, unsafe roots and credentials outside the five-minute binding. The
+PostgreSQL test proves exact idempotent replay, request conflict, retained
+failed attempt, retry attempt, one authoritative row and one matching v2
+Outbox event. The MinIO test must use a versioned Object-Lock-enabled bucket and
+prove Governance mode, deadline, non-null version, metadata, checksum and exact
+read-back. Docker absence is a blocker, not a skipped pass.
+
+E3 mounts a real Container PVC read-only and freezes an approved manifest
+through the production source resolver. It then issues a single-Environment VM
+certificate with principal `labweaver-collector`, maximum five-minute validity
+and critical `force-command = internal-sftp -R`, connects over the private
+path with a pinned host key and freezes the same manifest shape. Negative runs
+cover missing and changed files, symlink/traversal, all three limits, wrong host
+key, certificate expiry, shell/write denial, SSH refusal/timeout, MinIO outage,
+version/retention mismatch and database failure after upload. The report must
+bind commit, deployment, Environment/runtime/source, manifest, actor, file
+manifest, object version/hash, database contract and Outbox payload. It must
+also identify any retained but non-publishable orphan and prove no failed run
+produced a `FrozenSubmission` or event.
+
 ## Infrastructure automation
 
 | Layer | Required evidence | Failure condition |

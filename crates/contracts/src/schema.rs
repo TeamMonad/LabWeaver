@@ -455,6 +455,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         CloudEvent<events::SubmissionFrozen>
     );
     document!(
+        "schemas/contracts/v2/events/submission-frozen.schema.json",
+        CloudEvent<events::SubmissionFrozenV2>
+    );
+    document!(
         "schemas/contracts/v1/events/lab-release-approved.schema.json",
         CloudEvent<events::ReleasePublished>
     );
