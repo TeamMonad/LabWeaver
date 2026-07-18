@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+artifact-store = { path = "../../crates/artifact-store" }
 async-nats = { version = "=0.45.0", default-features = false, features = ["ring", "server_2_10", "server_2_11"] }
 axum.workspace = true
 base64.workspace = true
@@ -16,10 +17,12 @@ hyper = { version = "1.10.1", features = ["http1", "server"] }
 hyper-util = { version = "0.1.20", features = ["server", "service", "tokio"] }
 futures-util = "0.3.31"
 persistence-sqlx = { path = "../../crates/persistence-sqlx" }
+reqwest.workspace = true
 rustls = { version = "0.23.42", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2.2.0"
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 sqlx.workspace = true
 telemetry = { path = "../../crates/telemetry" }
 thiserror.workspace = true

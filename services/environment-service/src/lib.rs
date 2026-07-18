@@ -14,6 +14,7 @@ mod process;
 mod reconciler;
 mod resolver;
 mod runtime;
+mod runtime_executor;
 mod store;
 mod tls;
 
@@ -59,6 +60,7 @@ pub use resolver::{
     authorize_endpoint_eligibility, authorize_owner_resolution, owner_resolver_router,
 };
 pub use runtime::{OwnerResolverRuntime, OwnerResolverRuntimeError};
+pub use runtime_executor::{KubernetesContainerExecutor, RuntimeExecutorConfiguration};
 pub use store::{
     EnvironmentStoreError, InboundCommandDecision, InboundLifecycleCommand, LeasedEnvironment,
     PgEnvironmentStore,
