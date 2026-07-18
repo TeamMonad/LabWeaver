@@ -41,6 +41,9 @@ domains:
       - id: 4
         file: environment/0004_container_executor_fence.sql
         sha256: 90541f85a13423b416759f77a34d3c44c3becd65cda7847ec8a38d1396c4accd
+      - id: 5
+        file: environment/0005_kubevirt_runtime_observations.sql
+        sha256: 4b4d9ead61e7fee8ba25fb95fa4d59ae8e77f1fb6650efee0405c4e6510a1457
   - name: agent
     migrations:
       - id: 1
@@ -63,6 +66,9 @@ domains:
       - id: 1
         file: evaluation/0001_initial.sql
         sha256: a95e8c3a51ebfb0623af9b2213b2bad84aced6de6b243d41d49ca3bda685f6e0
+      - id: 2
+        file: evaluation/0002_submission_freezes.sql
+        sha256: 89c1c9ca5bededb8560da15d304065ddc6adf649e43e27c22e31cc3ce989ae93
   - name: resource
     migrations:
       - id: 1

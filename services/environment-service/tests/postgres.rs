@@ -20,6 +20,7 @@ use contracts::environment::{
     ObservedEnvironmentState, OperationState,
 };
 use contracts::events::{CloudEvent, EVENT_CONTRACTS, ReleaseWithdrawn, SPEC_VERSION, subjects};
+use contracts::supply_chain::VirtualMachineDiskFormat;
 use contracts::{
     ActorId, ArtifactId, ArtifactRef, CourseId, EndpointId, EnvironmentId, EventId, OperationId,
     ReleaseId, Revision, Sequence, Sha256Digest, UtcTimestamp,
@@ -29,11 +30,14 @@ use environment_service::{
     ContainerExecutorBackend, ContainerExecutorFenceError, ContainerExecutorRequest,
     ContainerExecutorRequestEnvelope, ContainerExecutorResponse, ContainerResourcePlan,
     EnvironmentEventPublisher, EnvironmentProvider, EnvironmentStoreError, FencedContainerExecutor,
-    InboundCommandDecision, InboundLifecycleCommand, LifecycleCommand, LifecycleError,
+    InboundCommandDecision, InboundLifecycleCommand, KubeVirtBackendFence, KubeVirtCleanupPlan,
+    KubeVirtObservationStore, KubeVirtObservationStoreError, KubeVirtResourcePlan,
+    KubeVirtRunningObservation, KubeVirtStoppedObservation, LifecycleCommand, LifecycleError,
     OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher, PgContainerExecutorFenceStore,
-    PgEnvironmentStore, PgReleaseProjectionStore, ProviderFailure, ProviderFailureCode,
-    ProviderObservation, ProviderRegistry, PublishFailure, ReconcileAction, ReconcileWorker,
-    ReconcileWorkerOutcome, Reconciler, ReleaseProjectionDecision, apply_provider_observation,
+    PgEnvironmentStore, PgKubeVirtObservationStore, PgReleaseProjectionStore, ProviderFailure,
+    ProviderFailureCode, ProviderObservation, ProviderRegistry, PublishFailure, ReconcileAction,
+    ReconcileWorker, ReconcileWorkerOutcome, Reconciler, ReleaseProjectionDecision,
+    apply_provider_observation,
 };
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::{ImageExt, runners::AsyncRunner};
@@ -1223,6 +1227,184 @@ fn container_add_time(
     duration: time::Duration,
 ) -> Result<UtcTimestamp, Box<dyn std::error::Error>> {
     Ok(UtcTimestamp::from_utc(timestamp.get() + duration)?)
+}
+
+#[tokio::test]
+async fn kubevirt_observation_identity_is_durable_fenced_and_tombstoned()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        container.get_host_port_ipv4(5432).await?
+    );
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await?;
+    let migration = format!(
+        "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
+        include_str!("../../../migrations/environment/0005_kubevirt_runtime_observations.sql")
+    );
+    sqlx::raw_sql(&migration).execute(&pool).await?;
+    let store = PgKubeVirtObservationStore::new(pool.clone());
+    let environment_id = EnvironmentId::new();
+    let plan = KubeVirtResourcePlan {
+        environment_id,
+        namespace: format!("lw-env-{environment_id}"),
+        virtual_machine_name: "runtime".to_owned(),
+        data_volume_name: "rootdisk".to_owned(),
+        base_disk: ArtifactRef {
+            artifact_id: ArtifactId::new(),
+            store_binding: "artifact-store-v1".to_owned(),
+            object_version: "version-1".to_owned(),
+            sha256: Sha256Digest::of_bytes(b"vm-base-disk"),
+            size_bytes: 1024,
+            media_type: "application/x-qemu-disk".to_owned(),
+        },
+        base_disk_format: VirtualMachineDiskFormat::Qcow2,
+        storage_class_name: "local-path".to_owned(),
+        resources: Vec::new(),
+        plan_sha256: Sha256Digest::of_bytes(b"vm-plan"),
+    };
+    let vm_uid = uuid::Uuid::new_v4();
+    let root_disk_uid = uuid::Uuid::new_v4();
+    let running = KubeVirtRunningObservation {
+        observed_environment_generation: 1,
+        vm_resource_generation: 2,
+        observed_vm_resource_generation: 2,
+        vm_uid,
+        vmi_uid: uuid::Uuid::new_v4(),
+        root_disk_uid,
+        guest_ip: "10.42.0.10".parse()?,
+        service_cluster_ip: "10.96.0.10".parse()?,
+        ssh_host_key_sha256: Sha256Digest::of_bytes(b"stable-host-key"),
+        guest_agent_connected: true,
+        ssh_ready: true,
+        observed_at: timestamp("2026-07-16T08:00:00.000Z"),
+    };
+    let provision = kubevirt_fence(environment_id, 1, ReconcileAction::Provision);
+    store.record_running(&provision, &plan, &running).await?;
+    store.record_running(&provision, &plan, &running).await?;
+
+    let mut stale = provision;
+    stale.request_id = Sha256Digest::of_bytes(b"stale-replay");
+    assert!(matches!(
+        store.record_running(&stale, &plan, &running).await,
+        Err(KubeVirtObservationStoreError::StaleFence)
+    ));
+
+    let stop = kubevirt_fence(environment_id, 2, ReconcileAction::Stop);
+    let stopped = KubeVirtStoppedObservation {
+        observed_environment_generation: 2,
+        vm_uid,
+        root_disk_uid,
+        vmi_absent: true,
+        observed_at: timestamp("2026-07-16T08:05:00.000Z"),
+    };
+    store.record_stopped(&stop, &plan, &stopped).await?;
+    let persisted_host_key: String = sqlx::query_scalar(
+        "SELECT ssh_host_key_sha256 FROM environment.kubevirt_runtime_observations \
+         WHERE environment_id=$1",
+    )
+    .bind(environment_id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(persisted_host_key, running.ssh_host_key_sha256.to_string());
+
+    let start = kubevirt_fence(environment_id, 3, ReconcileAction::Start);
+    let mut restarted = running;
+    restarted.observed_environment_generation = 3;
+    restarted.vmi_uid = uuid::Uuid::new_v4();
+    restarted.guest_ip = "10.42.0.11".parse()?;
+    store.record_running(&start, &plan, &restarted).await?;
+
+    let changed_identity = kubevirt_fence(environment_id, 4, ReconcileAction::Start);
+    let mut changed = restarted;
+    changed.observed_environment_generation = 4;
+    changed.root_disk_uid = uuid::Uuid::new_v4();
+    assert!(matches!(
+        store
+            .record_running(&changed_identity, &plan, &changed)
+            .await,
+        Err(KubeVirtObservationStoreError::IdentityMismatch)
+    ));
+
+    let cleanup = kubevirt_fence(environment_id, 4, ReconcileAction::Cleanup);
+    let cleanup_plan = KubeVirtCleanupPlan {
+        environment_id,
+        namespace: plan.namespace.clone(),
+        virtual_machine_name: plan.virtual_machine_name.clone(),
+        plan_sha256: Sha256Digest::of_bytes(b"cleanup-plan"),
+    };
+    let cleanup_evidence = ArtifactRef {
+        artifact_id: ArtifactId::new(),
+        store_binding: "environment-cleanup-evidence-v1".to_owned(),
+        object_version: "cleanup-1".to_owned(),
+        sha256: Sha256Digest::of_bytes(b"cleanup-evidence"),
+        size_bytes: 1,
+        media_type: "application/json".to_owned(),
+    };
+    store
+        .record_deleted(&cleanup, &cleanup_plan, &cleanup_evidence)
+        .await?;
+    let late_start = kubevirt_fence(environment_id, 5, ReconcileAction::Start);
+    let mut late_observation = restarted;
+    late_observation.observed_environment_generation = 5;
+    assert!(matches!(
+        store
+            .record_running(&late_start, &plan, &late_observation)
+            .await,
+        Err(KubeVirtObservationStoreError::Tombstoned)
+    ));
+
+    let raced_environment_id = EnvironmentId::new();
+    let mut raced_plan = plan.clone();
+    raced_plan.environment_id = raced_environment_id;
+    raced_plan.namespace = format!("lw-env-{raced_environment_id}");
+    let older_fence = kubevirt_fence(raced_environment_id, 1, ReconcileAction::Provision);
+    let newer_fence = kubevirt_fence(raced_environment_id, 2, ReconcileAction::Provision);
+    let mut older_observation = running;
+    older_observation.observed_environment_generation = 1;
+    let mut newer_observation = running;
+    newer_observation.observed_environment_generation = 2;
+    let (older_result, newer_result) = tokio::join!(
+        store.record_running(&older_fence, &raced_plan, &older_observation),
+        store.record_running(&newer_fence, &raced_plan, &newer_observation),
+    );
+    assert!(
+        older_result.is_ok()
+            || matches!(older_result, Err(KubeVirtObservationStoreError::StaleFence))
+    );
+    newer_result?;
+    let persisted_generation: i64 = sqlx::query_scalar(
+        "SELECT environment_generation FROM environment.kubevirt_runtime_observations \
+         WHERE environment_id=$1",
+    )
+    .bind(raced_environment_id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(persisted_generation, 2);
+    Ok(())
+}
+
+fn kubevirt_fence(
+    environment_id: EnvironmentId,
+    generation: u64,
+    action: ReconcileAction,
+) -> KubeVirtBackendFence {
+    KubeVirtBackendFence {
+        protocol_version: 1,
+        environment_id,
+        operation_id: OperationId::new(),
+        provider_step: 1,
+        environment_generation: generation,
+        attempt: 1,
+        action,
+        request_id: Sha256Digest::of_bytes(
+            format!("{environment_id}:{generation}:{action:?}").as_bytes(),
+        ),
+        deadline_at: timestamp("2026-07-16T09:00:00.000Z"),
+    }
 }
 
 fn success_worker(

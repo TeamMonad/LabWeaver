@@ -128,6 +128,14 @@ export function listTemplateReleases(courseId: string): EnvironmentTemplateRelea
   return releasesByCourse.get(courseId) ?? []
 }
 
+export function publishRelease(
+  release: EnvironmentTemplateReleaseViewSchema,
+): EnvironmentTemplateReleaseViewSchema {
+  const existing = releasesByCourse.get(release.courseId) ?? []
+  releasesByCourse.set(release.courseId, [...existing, release])
+  return release
+}
+
 export function resetTemplateReleaseStore(): void {
   releasesByCourse.clear()
 }

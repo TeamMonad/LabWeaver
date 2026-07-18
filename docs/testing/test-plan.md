@@ -1,5 +1,28 @@
 # Test Plan
 
+## TEST-03a Sprint 3 acceptance asset gate
+
+Issue #94 adds a static E1 gate that freezes three future E4 golden paths, six deterministic C++17
+samples, the complete security/error matrix, frontend acceptance inventory, evidence schema and
+Feature Complete reference contract:
+
+```sh
+cargo test -p xtask --locked
+cargo xtask acceptance-assets validate
+cargo xtask acceptance-assets list
+cargo xtask acceptance-assets validate-fixtures
+cargo xtask acceptance-assets validate-report --report tests/fixtures/acceptance/reports/valid/planned-e1.json
+cargo xtask acceptance-assets validate-report --report tests/fixtures/acceptance/reports/valid/local-e2.json
+```
+
+Negative fixtures must exit non-zero with the exact diagnostic recorded in
+`tests/fixtures/acceptance/fixture-expectations.json`. The suite covers evidence-level escalation,
+Mock/fixture E3/E4 claims, missing and cross-bound identity, cleanup, rollback, blockers, skipped
+steps, unknown scenario/gate, all report-reference path classes, incomplete negative/frontend/sample
+inventories and Feature Complete prerequisites. C++ timeout, memory and output samples are never
+executed by this static gate. See `docs/testing/sprint3-acceptance-assets.md` for the evidence
+boundary and future E4 prerequisites.
+
 ## Requirements-baseline traceability
 
 `docs/requirements/acceptance-criteria.md` assigns AC-01 through AC-10-P1 to
@@ -71,10 +94,11 @@ Aggregate E2 is recorded only when the same worktree passes real MinIO versioned
 JetStream publish-ACK/duplicate/gap/restart tests, and ephemeral-CA Gateway-to-Control,
 Control-to-Access and Control-to-Agent SAN/rotation/outage tests. Issue #48's local suite now
 supplies that composition; it remains distinct from deployed owner-service or Kubernetes evidence.
-Issue #52 now provides the local authoritative Container artifact/evaluation projection; #53 is
-still required for VM artifacts. The positive Container Release path is expected to return a
-stable blocking diagnostic until the v2 build completion has been durably projected. Connected E3
-requires the deployment-owned BuildKit/Harbor/Trivy/Private Sigstore and Kubernetes executors.
+Issue #52 now provides the local authoritative Container artifact/evaluation projection. Issue #53
+adds the VM release consumer path and exact KubeVirt/CDI artifact, storage and SSH readiness
+binding. The positive release path is expected to return a stable blocking diagnostic until the
+v2 build completion has been durably projected. Connected E3 requires the deployment-owned
+BuildKit/Harbor/Trivy/Private Sigstore and Kubernetes/KubeVirt executors.
 
 Issue #52 local regression gates additionally run the ten-stage Agent pipeline suite, six
 Container Provider tests and the Agent/Environment PostgreSQL tests. They reject empty
@@ -357,11 +381,80 @@ target convergence, serialized Work configuration, configuration-failure
 transition to `Failed`, access denial for any non-Ready or unhealthy endpoint,
 grant revocation before reset/expiry/failure/delete cleanup, deletion
 idempotency and sanitized `Deleted` tombstone evidence. The current slice proves
-the transport and state-owner boundaries; concrete Container/KubeVirt Provider,
-Access-owned revocation responder, Resource-owned Lease responder and E3
-deployment evidence remain planned. #47 now consumes the merged #51 resolver
-contract through mTLS, but the combined build identity still requires A+B
-review and D Verify before Issue closure.
+the transport and state-owner boundaries. #52 and #53 now add formal local
+Container and KubeVirt Providers; the KubeVirt suite verifies deterministic
+VM/CDI resources, default-deny plus Gateway-only SSH ingress, safe fixed
+base64 `data.userdata` cloud-init, strict one-entry `ssh:22` projection,
+VMI/CDI/scratch-aware quota without unsafe equal guest limits, guest/SSH
+readiness gating, duplicate fence identity, stop-start identity preservation
+and cleanup. A real PostgreSQL 17 test applies Migration
+0004 and proves exact replay, stale-fence rejection, disk/host-key preservation
+and deletion tombstones. Access-owned revocation responder, Resource-owned Lease
+responder and connected E3 deployment evidence remain required. #47 now
+consumes the merged #51 resolver contract through mTLS, but the combined build
+identity still requires A+B review and D Verify before Issue closure.
+
+### KubeVirt RuntimeProvider local and E3 gates (#53)
+
+The local regression entry points are:
+
+```sh
+cargo test -p environment-service --test kubevirt_provider
+cargo test -p environment-service --test postgres \
+  kubevirt_observation_identity_is_durable_fenced_and_tombstoned
+```
+
+The first command is E1 Provider/fake-executor evidence; the second is local E2
+PostgreSQL evidence and uses the caller's configured Docker-compatible runtime.
+
+E3 uses the reviewed deployment binding and same commit to import the exact VM
+artifact through CDI, wait for current KubeVirt observed generation, guest agent
+and SSH host-key handshake, then record one private SSH endpoint. It repeats the
+same reconcile and proves one VM/DataVolume/PVC; writes a marker to the guest
+disk and proves it survives start-stop-start; attempts non-Gateway network
+access and proves denial; and injects apply, readiness, cancellation, restart,
+observation and delete failures. Every terminal cleanup case must show Access
+revocation plus absence of Namespace, VM, VMI, DataVolume, PVC, Secret, Service
+and NetworkPolicy. The same report records the actual VMI memory overhead and
+CDI default pod requests and proves they do not exceed the deployment binding's
+explicit budgets. A Fixture result or the pre-existing infrastructure VM
+TestFlight cannot satisfy this gate.
+
+### Dual-runtime Submission Collector gates (#54)
+
+Local deterministic and contract entry points are:
+
+```sh
+cargo test -p evaluation-service --lib --test collector
+cargo test -p evaluation-service --test freeze_postgres
+cargo test -p artifact-store minio_versioning_object_lock_and_cleanup_are_fail_closed
+cargo xtask contracts check
+cargo test -p persistence-sqlx
+```
+
+The first command proves bounded PVC selection, empty-file identity,
+preflight/freeze consistency, source mutation, excludes, required paths,
+symlink rejection and raw/file/output limits. The SSH unit guard rejects public
+targets, unsafe roots and credentials outside the five-minute binding. The
+PostgreSQL test proves exact idempotent replay, request conflict, retained
+failed attempt, retry attempt, one authoritative row and one matching v2
+Outbox event. The MinIO test must use a versioned Object-Lock-enabled bucket and
+prove Governance mode, deadline, non-null version, metadata, checksum and exact
+read-back. Docker absence is a blocker, not a skipped pass.
+
+E3 mounts a real Container PVC read-only and freezes an approved manifest
+through the production source resolver. It then issues a single-Environment VM
+certificate with principal `labweaver-collector`, maximum five-minute validity
+and critical `force-command = internal-sftp -R`, connects over the private
+path with a pinned host key and freezes the same manifest shape. Negative runs
+cover missing and changed files, symlink/traversal, all three limits, wrong host
+key, certificate expiry, shell/write denial, SSH refusal/timeout, MinIO outage,
+version/retention mismatch and database failure after upload. The report must
+bind commit, deployment, Environment/runtime/source, manifest, actor, file
+manifest, object version/hash, database contract and Outbox payload. It must
+also identify any retained but non-publishable orphan and prove no failed run
+produced a `FrozenSubmission` or event.
+
 ## Infrastructure automation
 
 | Layer | Required evidence | Failure condition |

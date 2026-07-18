@@ -15,6 +15,7 @@
       <nav class="module-nav" aria-label="工作台模块">
         <RouterLink to="/teacher/overview" active-class="module-active">实验总览</RouterLink>
         <RouterLink to="/teacher/labs" active-class="module-active">实验</RouterLink>
+        <RouterLink to="/teacher/materials" active-class="module-active">材料</RouterLink>
         <RouterLink to="/teacher/environments" active-class="module-active">环境</RouterLink>
         <RouterLink to="/teacher/evaluations" active-class="module-active">评测</RouterLink>
         <RouterLink to="/teacher/resources" active-class="module-active">资源</RouterLink>
@@ -28,7 +29,7 @@
       <header class="workspace-header">
         <div>
           <p class="breadcrumb">教师 / 实验工作台</p>
-          <h1>实验总览</h1>
+          <h1>{{ workspaceTitle }}</h1>
         </div>
         <button class="primary-action" type="button" @click="showCreateNotice = true">+ 新建实验</button>
       </header>
@@ -39,9 +40,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
-import { RouterLink, RouterView } from 'vue-router'
+import { computed, ref } from 'vue'
+import { RouterLink, RouterView, useRoute } from 'vue-router'
 import SvgIcon from '@/components/common/SvgIcon.vue'
+
+const route = useRoute()
+const workspaceTitle = computed(() => (route.meta.title as string | undefined) ?? '实验总览')
 
 const drawerOpen = ref(false)
 const showCreateNotice = ref(false)
@@ -166,7 +170,7 @@ h1 {
     align-items: center;
     justify-content: center;
     position: fixed;
-    left: 12px;
+    right: 12px;
     bottom: 16px;
     z-index: 20;
     width: 44px;
@@ -193,7 +197,9 @@ h1 {
   }
 
   .workspace {
-    padding: 24px 16px 56px;
+    /* Leave room for the fixed mobile module-nav toggle so it never overlaps
+       the last lines of content on small screens. */
+    padding: 24px 16px 88px;
   }
 
   .workspace-header {

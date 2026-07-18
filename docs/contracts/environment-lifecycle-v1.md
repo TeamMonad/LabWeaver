@@ -356,7 +356,11 @@ outage as retryable 503 and resolver network outage.
 
 Human A review and D Verify remain required before Issue #51 is accepted. Issue
 #52 now supplies a formal local Container Provider with deterministic protected
-Gateway resources and cleanup evidence, but connected E3 verification must
-still cover its Kubernetes executor, the KubeVirt Provider, Resource- and
-Access-owned responders, deployed mTLS NATS and the Access consumer under the
-same build identity.
+Gateway resources and cleanup evidence. Issue #53 adds a formal local KubeVirt
+Provider with an immutable VM/CDI plan, operation-generation fencing, guest and
+SSH readiness, durable VM/disk/host-key identity and namespace deletion
+tombstones. Its contract is `docs/contracts/kubevirt-runtime-provider-v1.md` and
+its decision record is ADR 0009. Connected E3 verification must still cover
+both deployment-owned Kubernetes executors, a real KubeVirt/CDI guest and SSH
+handshake, Resource- and Access-owned responders, deployed mTLS NATS and the
+Access consumer under the same build identity.

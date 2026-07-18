@@ -10,6 +10,7 @@ rust-version.workspace = true
 async-trait.workspace = true
 async-nats = { version = "=0.45.0", default-features = false, features = ["ring", "server_2_10", "server_2_11"] }
 axum.workspace = true
+base64.workspace = true
 contracts = { path = "../../crates/contracts" }
 hyper = { version = "1.10.1", features = ["http1", "server"] }
 hyper-util = { version = "0.1.20", features = ["server", "service", "tokio"] }
