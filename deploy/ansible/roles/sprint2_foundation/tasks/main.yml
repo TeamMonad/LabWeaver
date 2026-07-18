@@ -134,6 +134,33 @@
   loop: >-
     {{ lookup('ansible.builtin.template', 'workloads.yml.j2') | from_yaml_all | list }}
 
+- name: Read foundation revisions before bounded rollout recovery
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ sprint2_foundation_kubeconfig }}"
+    api_version: apps/v1
+    kind: StatefulSet
+    namespace: "{{ sprint2_foundation_namespace }}"
+  register: sprint2_foundation_revisions
+
+- name: Delete exact pod blocked on a superseded failed revision
+  kubernetes.core.k8s:
+    kubeconfig: "{{ sprint2_foundation_kubeconfig }}"
+    state: absent
+    api_version: v1
+    kind: Pod
+    namespace: "{{ sprint2_foundation_namespace }}"
+    name: "{{ item.metadata.name }}-0"
+    wait: true
+    wait_timeout: 60
+  loop: "{{ sprint2_foundation_revisions.resources }}"
+  loop_control:
+    label: "{{ item.metadata.name }}"
+  when:
+    - item.status.currentRevision | default('') | length > 0
+    - item.status.updateRevision | default('') | length > 0
+    - item.status.currentRevision != item.status.updateRevision
+    - item.status.readyReplicas | default(0, true) | int < item.spec.replicas | int
+
 - name: Read foundation StatefulSets
   kubernetes.core.k8s_info:
     kubeconfig: "{{ sprint2_foundation_kubeconfig }}"

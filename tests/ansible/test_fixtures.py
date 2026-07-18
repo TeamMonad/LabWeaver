@@ -76,6 +76,8 @@ class AnsibleFixtureTests(unittest.TestCase):
             ROOT / "docs/deployment/ansible.md"
         ).read_text(encoding="utf-8"))
         self.assertIn("SPRINT2_FOUNDATION_BUNDLE_KEYS_INVALID", tasks)
+        self.assertIn("Delete exact pod blocked on a superseded failed revision", tasks)
+        self.assertIn("item.status.currentRevision != item.status.updateRevision", tasks)
         self.assertIn("kind: StatefulSet", workloads)
         self.assertEqual(workloads.count("kind: StatefulSet"), 3)
         replacements = {
