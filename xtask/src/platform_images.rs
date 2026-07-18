@@ -1192,4 +1192,18 @@ mod tests {
         }
         Ok(())
     }
+
+    #[test]
+    fn image_ci_scans_the_extracted_oci_layout() -> std::io::Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let workflow = std::fs::read_to_string(
+            root.join(".github")
+                .join("workflows")
+                .join("platform-images.yml"),
+        )?;
+        assert!(workflow.contains("tar -xf \"$RUNNER_TEMP/$COMPONENT-first.tar\""));
+        assert!(workflow.contains("image --input \"/evidence/$COMPONENT-oci\""));
+        assert!(workflow.contains("LW_PACKAGE_OCI_LAYOUT_INVALID"));
+        Ok(())
+    }
 }

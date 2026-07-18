@@ -120,9 +120,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/$COMPONENT-oci"
+          tar -xf "$RUNNER_TEMP/$COMPONENT-first.tar" -C "$RUNNER_TEMP/$COMPONENT-oci"
+          test -f "$RUNNER_TEMP/$COMPONENT-oci/index.json" || {
+            echo "LW_PACKAGE_OCI_LAYOUT_INVALID:$COMPONENT" >&2
+            exit 1
+          }
           docker run --rm -v "$RUNNER_TEMP:/evidence" \
             docker.io/aquasec/trivy:0.72.0@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f \
-            image --input "/evidence/$COMPONENT-first.tar" --scanners vuln,secret \
+            image --input "/evidence/$COMPONENT-oci" --scanners vuln,secret \
             --severity HIGH,CRITICAL --exit-code 0 --format json \
             --output "/evidence/$COMPONENT-trivy.json"
           critical="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' "$RUNNER_TEMP/$COMPONENT-trivy.json")"
