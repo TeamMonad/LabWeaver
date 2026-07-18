@@ -17,7 +17,7 @@ use contracts::authoring::{
     CandidateApproval, CandidateDecision, EnvironmentEntrySpec, EnvironmentSpec, RuntimeKind,
 };
 use contracts::environment::{DesiredEnvironmentState, EndpointProtocol, ObservedEnvironmentState};
-use contracts::events::ReleasePublishedV2;
+use contracts::events::ReleasePublished;
 use contracts::supply_chain::{
     EnvironmentTemplateRelease, ImageArtifact, ImagePolicyEvaluation, VirtualMachineDiskFormat,
     VulnerabilitySummary,
@@ -44,7 +44,7 @@ const ROOT_DISK_UID: Uuid = Uuid::from_u128(3);
 
 #[derive(Clone)]
 struct FixtureResolver {
-    projection: ReleasePublishedV2,
+    projection: ReleasePublished,
     authority_now: UtcTimestamp,
     withdrawn_at: Option<UtcTimestamp>,
 }
@@ -705,7 +705,7 @@ fn invalid_release_storage_or_ssh_bootstrap_fails_closed() {
 }
 
 fn provider(
-    projection: ReleasePublishedV2,
+    projection: ReleasePublished,
     backend: Arc<FixtureBackend>,
 ) -> KubeVirtProvider<FixtureBackend, FixtureResolver, FixtureObservationStore> {
     provider_with_budget(
@@ -724,7 +724,7 @@ fn provider(
 }
 
 fn provider_with_budget(
-    projection: ReleasePublishedV2,
+    projection: ReleasePublished,
     backend: Arc<FixtureBackend>,
     resource_budget: KubeVirtResourceBudget,
 ) -> KubeVirtProvider<FixtureBackend, FixtureResolver, FixtureObservationStore> {
@@ -761,7 +761,7 @@ fn provider_with_budget(
     .expect("provider configuration")
 }
 
-fn resolved(projection: ReleasePublishedV2) -> ResolvedContainerRelease {
+fn resolved(projection: ReleasePublished) -> ResolvedContainerRelease {
     ResolvedContainerRelease {
         projection,
         authority_now: timestamp("2026-07-16T08:30:00.000Z"),
@@ -797,7 +797,7 @@ fn count_resource(plan: &KubeVirtResourcePlan, kind: &str) -> usize {
         .count()
 }
 
-fn instance_for(projection: &ReleasePublishedV2) -> contracts::environment::EnvironmentInstance {
+fn instance_for(projection: &ReleasePublished) -> contracts::environment::EnvironmentInstance {
     let mut instance = support::requested_instance();
     instance.course_id = projection.release.course_id;
     instance.release_id = projection.release.id;
@@ -811,7 +811,7 @@ fn instance_for(projection: &ReleasePublishedV2) -> contracts::environment::Envi
     clippy::too_many_lines,
     reason = "the fixture deliberately constructs the complete immutable VM release identity"
 )]
-fn projection() -> ReleasePublishedV2 {
+fn projection() -> ReleasePublished {
     let base_disk = artifact_ref("application/x-qemu-disk");
     let environment_spec: EnvironmentSpec = serde_json::from_value(json!({
         "apiVersion":"environment.labweaver.io/v1",
@@ -901,7 +901,7 @@ fn projection() -> ReleasePublishedV2 {
         "environmentSpec": &environment_spec,
     }))
     .expect("projection hash");
-    let projection = ReleasePublishedV2 {
+    let projection = ReleasePublished {
         release,
         environment_spec,
         projection_sha256,
@@ -921,7 +921,7 @@ fn artifact_ref(media_type: &str) -> ArtifactRef {
     }
 }
 
-fn rebind_projection(projection: &mut ReleasePublishedV2) {
+fn rebind_projection(projection: &mut ReleasePublished) {
     let environment_spec_sha256 =
         Sha256Digest::of_canonical(&projection.environment_spec).expect("environment spec hash");
     projection.release.environment_spec_sha256 = environment_spec_sha256;

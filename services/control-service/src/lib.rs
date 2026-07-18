@@ -19,8 +19,8 @@ use contracts::authoring::{
     EnvironmentCandidate, EvaluationCandidate, PackageFile, ProblemPackage, RuntimeKind,
 };
 use contracts::events::{
-    AgentBuildFailedV2, AgentBuildRequestedV2, AgentRunEvent, CloudEvent, EVENT_CONTRACTS,
-    ReleasePublishedV2, ReleaseWithdrawn, SPEC_VERSION, subjects,
+    AgentBuildFailed, AgentBuildRequested, AgentRunEvent, CloudEvent, EVENT_CONTRACTS,
+    ReleasePublished, ReleaseWithdrawn, SPEC_VERSION, subjects,
 };
 use contracts::http::{
     CandidateDecisionRequest, CreateEnvironmentTemplateReleaseRequest,
@@ -52,8 +52,8 @@ const CREATE_POLICY: &str = "control_create_llm_policy_v1";
 const DECIDE_CANDIDATE: &str = "control_decide_candidate_v1";
 const CREATE_RELEASE: &str = "control_create_environment_template_release_v1";
 const WITHDRAW_RELEASE: &str = "control_withdraw_environment_template_release_v1";
-const BUILD_REQUEST_SUBJECT: &str = subjects::AGENT_BUILD_REQUESTED_V2;
-const RELEASE_SUBJECT: &str = subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED_V2;
+const BUILD_REQUEST_SUBJECT: &str = subjects::AGENT_BUILD_REQUESTED;
+const RELEASE_SUBJECT: &str = subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED;
 const WITHDRAWAL_SUBJECT: &str = subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN;
 
 /// Non-secret Control behavior configuration.
@@ -1098,7 +1098,7 @@ impl ControlService {
         &self,
         event_id: EventId,
         course_id: CourseId,
-        failure: &AgentBuildFailedV2,
+        failure: &AgentBuildFailed,
     ) -> Result<(), ControlError> {
         failure
             .validate()
@@ -1341,7 +1341,7 @@ impl ControlService {
                     "approval": approval,
                     "idempotencyKey": build_idempotency_key,
                 }))?;
-                let command = AgentBuildRequestedV2 {
+                let command = AgentBuildRequested {
                     request: build_request,
                     approval: approval.clone(),
                     idempotency_key: build_idempotency_key,
@@ -1653,7 +1653,7 @@ impl ControlService {
                 .map_err(|_| ControlError::ContractInvalid)?,
             aggregate_sequence: Sequence(1),
             trace_id: trace_id.to_owned(),
-            data: ReleasePublishedV2 {
+            data: ReleasePublished {
                 release: release.clone(),
                 environment_spec: environment_candidate.spec,
                 projection_sha256,

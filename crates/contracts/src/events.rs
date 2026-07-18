@@ -21,12 +21,9 @@ pub mod subjects {
     pub const AGENT_RUN_REQUESTED: &str = "labweaver.agent.run.requested.v1";
     pub const AGENT_RUN_COMPLETED: &str = "labweaver.agent.run.completed.v1";
     pub const AGENT_RUN_FAILED: &str = "labweaver.agent.run.failed.v1";
-    pub const AGENT_BUILD_REQUESTED: &str = "labweaver.agent.build.requested.v1";
-    pub const AGENT_BUILD_REQUESTED_V2: &str = "labweaver.control.agent_build.requested.v2";
+    pub const AGENT_BUILD_REQUESTED: &str = "labweaver.control.agent_build.requested.v1";
     pub const AGENT_BUILD_COMPLETED: &str = "labweaver.agent.build.completed.v1";
-    pub const AGENT_BUILD_COMPLETED_V2: &str = "labweaver.agent.build.completed.v2";
     pub const AGENT_BUILD_FAILED: &str = "labweaver.agent.build.failed.v1";
-    pub const AGENT_BUILD_FAILED_V2: &str = "labweaver.agent.build.failed.v2";
     pub const ENVIRONMENT_PROVISION_REQUESTED: &str =
         "labweaver.environment.instance.provision_requested.v1";
     pub const ENVIRONMENT_READY: &str = "labweaver.environment.instance.ready.v1";
@@ -52,12 +49,9 @@ pub mod subjects {
     pub const SUBMISSION_FREEZE_REQUESTED: &str =
         "labweaver.evaluation.submission.freeze_requested.v1";
     pub const SUBMISSION_FROZEN: &str = "labweaver.evaluation.submission.frozen.v1";
-    pub const SUBMISSION_FROZEN_V2: &str = "labweaver.evaluation.submission.frozen.v2";
     pub const LAB_RELEASE_APPROVED: &str = "labweaver.control.lab_release.approved.v1";
     pub const ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED: &str =
         "labweaver.control.environment_template_release.published.v1";
-    pub const ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED_V2: &str =
-        "labweaver.control.environment_template_release.published.v2";
     pub const ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN: &str =
         "labweaver.control.environment_template_release.withdrawn.v1";
 }
@@ -112,12 +106,7 @@ pub struct EventContract {
 impl EventContract {
     #[must_use]
     pub fn data_schema(self) -> String {
-        let base = if self.subject.ends_with(".v2") {
-            "https://schemas.labweaver.io/contracts/v2/events"
-        } else {
-            DATA_SCHEMA_BASE
-        };
-        format!("{base}/{}.schema.json", self.schema_name)
+        format!("{DATA_SCHEMA_BASE}/{}.schema.json", self.schema_name)
     }
 
     /// Returns the authoritative owner identity encoded by the registered subject.
@@ -159,28 +148,13 @@ pub const EVENT_CONTRACTS: &[EventContract] = &[
         schema_name: "agent-build-requested",
     },
     EventContract {
-        subject: subjects::AGENT_BUILD_REQUESTED_V2,
-        event_type: subjects::AGENT_BUILD_REQUESTED_V2,
-        schema_name: "agent-build-requested",
-    },
-    EventContract {
         subject: subjects::AGENT_BUILD_COMPLETED,
         event_type: subjects::AGENT_BUILD_COMPLETED,
         schema_name: "agent-build-completed",
     },
     EventContract {
-        subject: subjects::AGENT_BUILD_COMPLETED_V2,
-        event_type: subjects::AGENT_BUILD_COMPLETED_V2,
-        schema_name: "agent-build-completed",
-    },
-    EventContract {
         subject: subjects::AGENT_BUILD_FAILED,
         event_type: subjects::AGENT_BUILD_FAILED,
-        schema_name: "agent-build-failed",
-    },
-    EventContract {
-        subject: subjects::AGENT_BUILD_FAILED_V2,
-        event_type: subjects::AGENT_BUILD_FAILED_V2,
         schema_name: "agent-build-failed",
     },
     EventContract {
@@ -274,11 +248,6 @@ pub const EVENT_CONTRACTS: &[EventContract] = &[
         schema_name: "submission-frozen",
     },
     EventContract {
-        subject: subjects::SUBMISSION_FROZEN_V2,
-        event_type: subjects::SUBMISSION_FROZEN_V2,
-        schema_name: "submission-frozen",
-    },
-    EventContract {
         subject: subjects::LAB_RELEASE_APPROVED,
         event_type: subjects::LAB_RELEASE_APPROVED,
         schema_name: "lab-release-approved",
@@ -286,11 +255,6 @@ pub const EVENT_CONTRACTS: &[EventContract] = &[
     EventContract {
         subject: subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED,
         event_type: subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED,
-        schema_name: "environment-template-release-published",
-    },
-    EventContract {
-        subject: subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED_V2,
-        event_type: subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED_V2,
         schema_name: "environment-template-release-published",
     },
     EventContract {
@@ -304,7 +268,7 @@ pub fn validate_registry() -> Result<(), EventError> {
     let mut subjects = BTreeSet::new();
     let mut event_types = BTreeSet::new();
     for contract in EVENT_CONTRACTS {
-        if !(contract.subject.ends_with(".v1") || contract.subject.ends_with(".v2"))
+        if !contract.subject.ends_with(".v1")
             || contract.event_type != contract.subject
             || !subjects.insert(contract.subject)
             || !event_types.insert(contract.event_type)
@@ -323,24 +287,17 @@ pub struct AgentRunEvent {
     pub state: String,
     pub diagnostic_code: Option<String>,
 }
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AgentBuildRequested {
-    pub build_request_id: BuildRequestId,
-    pub candidate_sha256: Sha256Digest,
-}
-
 /// Complete, approved, immutable command consumed by the Agent build executor.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AgentBuildRequestedV2 {
+pub struct AgentBuildRequested {
     pub request: BuildRequest,
     pub approval: CandidateApproval,
     pub idempotency_key: String,
     pub command_sha256: Sha256Digest,
 }
 
-impl AgentBuildRequestedV2 {
+impl AgentBuildRequested {
     /// Verifies approval, build-input and canonical command identities before execution.
     pub fn validate(&self) -> Result<(), EventError> {
         self.request
@@ -376,7 +333,7 @@ impl AgentBuildRequestedV2 {
 /// Safe terminal identity emitted after artifact and policy evidence commit atomically.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AgentBuildCompletedV2 {
+pub struct AgentBuildCompleted {
     pub build_request_id: BuildRequestId,
     pub artifact_id: crate::ImageArtifactId,
     pub artifact_sha256: Sha256Digest,
@@ -386,7 +343,7 @@ pub struct AgentBuildCompletedV2 {
 /// Safe terminal failure emitted only after candidate-resource cleanup was attempted.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AgentBuildFailedV2 {
+pub struct AgentBuildFailed {
     pub build_request_id: BuildRequestId,
     pub command_sha256: Sha256Digest,
     pub diagnostic_code: String,
@@ -394,7 +351,7 @@ pub struct AgentBuildFailedV2 {
     pub cleanup_verified: bool,
 }
 
-impl AgentBuildFailedV2 {
+impl AgentBuildFailed {
     pub fn validate(&self) -> Result<(), EventError> {
         crate::DiagnosticCode::parse(&self.diagnostic_code)
             .map_err(|_| EventError::PayloadIdentityMismatch)?;
@@ -444,7 +401,7 @@ pub struct GatewaySessionChanged {
 }
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SubmissionFrozen {
+pub struct SubmissionFreezeRequested {
     pub frozen_submission_id: FrozenSubmissionId,
     pub environment_id: EnvironmentId,
     pub manifest_sha256: Sha256Digest,
@@ -454,14 +411,14 @@ pub struct SubmissionFrozen {
 /// Complete immutable submission identity emitted only after database and Object Lock verification.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SubmissionFrozenV2 {
+pub struct SubmissionFrozen {
     /// Authoritative frozen submission contract, including object version and digest.
     pub submission: FrozenSubmission,
     /// Environment-owned PVC or VM source identity used for both preflight and freeze.
     pub source_identity_sha256: Sha256Digest,
 }
 
-impl SubmissionFrozenV2 {
+impl SubmissionFrozen {
     /// Verifies the embedded immutable contract before publication.
     pub fn validate(&self) -> Result<(), EventError> {
         self.submission
@@ -471,7 +428,7 @@ impl SubmissionFrozenV2 {
 }
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ReleasePublished {
+pub struct LabReleaseApproved {
     pub release_id: ReleaseId,
     pub version: u64,
     pub environment_spec_sha256: Sha256Digest,
@@ -481,13 +438,13 @@ pub struct ReleasePublished {
 /// Complete immutable runtime projection consumed by the Environment state owner.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ReleasePublishedV2 {
+pub struct ReleasePublished {
     pub release: EnvironmentTemplateRelease,
     pub environment_spec: EnvironmentSpec,
     pub projection_sha256: Sha256Digest,
 }
 
-impl ReleasePublishedV2 {
+impl ReleasePublished {
     /// Verifies the exact approved spec, artifact and projection identity.
     pub fn validate(&self) -> Result<(), EventError> {
         self.release
@@ -654,7 +611,7 @@ mod tests {
     fn build_failure_retry_requires_verified_cleanup() {
         let build_request_id = BuildRequestId::new();
         let command_sha256 = Sha256Digest::of_bytes(b"command");
-        let unsafe_retry = AgentBuildFailedV2 {
+        let unsafe_retry = AgentBuildFailed {
             build_request_id,
             command_sha256,
             diagnostic_code: "LW_AGENT_BUILD_CLEANUP_FAILED".to_owned(),
@@ -665,7 +622,7 @@ mod tests {
             unsafe_retry.validate(),
             Err(EventError::PayloadIdentityMismatch)
         ));
-        let cleaned_failure = AgentBuildFailedV2 {
+        let cleaned_failure = AgentBuildFailed {
             build_request_id,
             command_sha256,
             diagnostic_code: "LW_AGENT_BUILD_TIMEOUT".to_owned(),

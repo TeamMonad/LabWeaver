@@ -7,7 +7,7 @@
 use std::str::FromStr;
 use std::time::Duration;
 
-use contracts::events::{CloudEvent, EVENT_CONTRACTS, SPEC_VERSION, SubmissionFrozenV2, subjects};
+use contracts::events::{CloudEvent, EVENT_CONTRACTS, SPEC_VERSION, SubmissionFrozen, subjects};
 use contracts::submission::FrozenSubmission;
 use contracts::{
     CourseId, EnvironmentId, EventId, FrozenSubmissionId, Revision, Sequence, Sha256Digest,
@@ -465,9 +465,9 @@ async fn enqueue_frozen_event(
     let contract = EVENT_CONTRACTS
         .iter()
         .copied()
-        .find(|contract| contract.subject == subjects::SUBMISSION_FROZEN_V2)
+        .find(|contract| contract.subject == subjects::SUBMISSION_FROZEN)
         .ok_or(FreezeStoreError::ContractInvalid)?;
-    let data = SubmissionFrozenV2 {
+    let data = SubmissionFrozen {
         submission: submission.clone(),
         source_identity_sha256: lease.source_identity_sha256,
     };
@@ -478,8 +478,8 @@ async fn enqueue_frozen_event(
         specversion: SPEC_VERSION.to_owned(),
         id: event_id,
         source: contract.source().to_owned(),
-        event_type: subjects::SUBMISSION_FROZEN_V2.to_owned(),
-        subject: subjects::SUBMISSION_FROZEN_V2.to_owned(),
+        event_type: subjects::SUBMISSION_FROZEN.to_owned(),
+        subject: subjects::SUBMISSION_FROZEN.to_owned(),
         time: submission.frozen_at,
         datacontenttype: "application/json".to_owned(),
         dataschema: contract.data_schema(),
@@ -499,8 +499,8 @@ async fn enqueue_frozen_event(
         transaction,
         Domain::Evaluation,
         event_id.as_uuid(),
-        subjects::SUBMISSION_FROZEN_V2,
-        subjects::SUBMISSION_FROZEN_V2,
+        subjects::SUBMISSION_FROZEN,
+        subjects::SUBMISSION_FROZEN,
         submission.id.as_uuid(),
         1,
         &payload,

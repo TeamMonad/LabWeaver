@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use contracts::authoring::{
     AgentTrackKind, CandidateDecision, EnvironmentCandidate, EnvironmentSpec,
 };
-use contracts::events::{AgentBuildRequestedV2, CloudEvent};
+use contracts::events::{AgentBuildRequested, CloudEvent};
 use contracts::http::{
     CandidateDecisionRequest, CreateEnvironmentTemplateReleaseRequest,
     CreateProblemPackageUploadRequest, IdempotencyKey, ProblemPackageUploadFile,
@@ -387,11 +387,11 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     let payload: serde_json::Value = sqlx::query_scalar(
         "SELECT payload FROM control.outbox_events WHERE subject=$1 AND aggregate_id<>$2",
     )
-    .bind(contracts::events::subjects::AGENT_BUILD_REQUESTED_V2)
+    .bind(contracts::events::subjects::AGENT_BUILD_REQUESTED)
     .bind(approval.id.as_uuid())
     .fetch_one(&pool)
     .await?;
-    let build_event: CloudEvent<AgentBuildRequestedV2> = serde_json::from_value(payload)?;
+    let build_event: CloudEvent<AgentBuildRequested> = serde_json::from_value(payload)?;
     build_event.data.validate()?;
     assert_eq!(
         build_event.data.request.candidate_id,
@@ -487,7 +487,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].withdrawal, Some(withdrawal));
     for subject in [
-        contracts::events::subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED_V2,
+        contracts::events::subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED,
         contracts::events::subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN,
     ] {
         assert!(

@@ -26,9 +26,7 @@ use agent_service::build_store::{
 };
 use async_trait::async_trait;
 use contracts::authoring::{CandidateApproval, CandidateDecision};
-use contracts::events::{
-    AgentBuildRequestedV2, CloudEvent, EVENT_CONTRACTS, SPEC_VERSION, subjects,
-};
+use contracts::events::{AgentBuildRequested, CloudEvent, EVENT_CONTRACTS, SPEC_VERSION, subjects};
 use contracts::http::{
     IdempotencyKey, InternalAgentBuildCancellationRequest, InternalAgentBuildState,
     InternalAgentBuildStatusQuery,
@@ -66,7 +64,7 @@ impl BuildSupplyChainProvider for SlowProvider {
     async fn ensure_private_project(
         &self,
         _context: &BuildProviderRequestContext,
-        command: &AgentBuildRequestedV2,
+        command: &AgentBuildRequested,
         identity: BuildIdentity,
     ) -> Result<PrivateRegistryProject, BuildProviderFailure> {
         Ok(PrivateRegistryProject {
@@ -82,7 +80,7 @@ impl BuildSupplyChainProvider for SlowProvider {
     async fn build_candidate(
         &self,
         _context: &BuildProviderRequestContext,
-        command: &AgentBuildRequestedV2,
+        command: &AgentBuildRequested,
         identity: BuildIdentity,
     ) -> Result<BuiltCandidate, BuildProviderFailure> {
         if !self.build_delay.is_zero() {
@@ -289,7 +287,7 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
         "SELECT count(*) FROM agent.outbox_events WHERE aggregate_id=$1 AND subject=$2",
     )
     .bind(command.request.id.as_uuid())
-    .bind(subjects::AGENT_BUILD_FAILED_V2)
+    .bind(subjects::AGENT_BUILD_FAILED)
     .fetch_one(&pool)
     .await?;
     assert_eq!(terminal_events, 1);
@@ -331,7 +329,7 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
          WHERE c.build_request_id=$1",
     )
     .bind(successful_command.request.id.as_uuid())
-    .bind(subjects::AGENT_BUILD_COMPLETED_V2)
+    .bind(subjects::AGENT_BUILD_COMPLETED)
     .fetch_one(&pool)
     .await?;
     assert_eq!(state, "succeeded");
@@ -570,7 +568,7 @@ async fn executor_fence_survives_restart_and_cleanup_dominates_its_generation()
 }
 
 fn build_executor_envelope(
-    command: &AgentBuildRequestedV2,
+    command: &AgentBuildRequested,
     generation: u32,
     lease_token: uuid::Uuid,
     stage: BuildProviderStage,
@@ -652,7 +650,7 @@ async fn database_now(pool: &sqlx::PgPool) -> Result<UtcTimestamp, Box<dyn std::
     Ok(UtcTimestamp::from_utc(value)?)
 }
 
-fn build_command() -> Result<AgentBuildRequestedV2, Box<dyn std::error::Error>> {
+fn build_command() -> Result<AgentBuildRequested, Box<dyn std::error::Error>> {
     let course_id = CourseId::new();
     let candidate_id = CandidateId::new();
     let candidate_sha256 = Sha256Digest::of_bytes(b"environment-spec");
@@ -694,7 +692,7 @@ fn build_command() -> Result<AgentBuildRequestedV2, Box<dyn std::error::Error>> 
         "approval":approval,
         "idempotencyKey":idempotency_key,
     }))?;
-    Ok(AgentBuildRequestedV2 {
+    Ok(AgentBuildRequested {
         request,
         approval,
         idempotency_key,
@@ -703,12 +701,12 @@ fn build_command() -> Result<AgentBuildRequestedV2, Box<dyn std::error::Error>> 
 }
 
 fn command_event(
-    command: AgentBuildRequestedV2,
-) -> Result<CloudEvent<AgentBuildRequestedV2>, Box<dyn std::error::Error>> {
+    command: AgentBuildRequested,
+) -> Result<CloudEvent<AgentBuildRequested>, Box<dyn std::error::Error>> {
     let contract = EVENT_CONTRACTS
         .iter()
         .copied()
-        .find(|contract| contract.subject == subjects::AGENT_BUILD_REQUESTED_V2)
+        .find(|contract| contract.subject == subjects::AGENT_BUILD_REQUESTED)
         .ok_or("missing v2 build contract")?;
     Ok(CloudEvent {
         specversion: SPEC_VERSION.to_owned(),

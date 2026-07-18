@@ -11,7 +11,7 @@ use contracts::environment::{
     EndpointHealth, EnvironmentEndpoint, EnvironmentInstance, ObservedEnvironmentState,
 };
 use contracts::events::{
-    CloudEvent, EVENT_CONTRACTS, ReleasePublishedV2, ReleaseWithdrawn, subjects,
+    CloudEvent, EVENT_CONTRACTS, ReleasePublished, ReleaseWithdrawn, subjects,
 };
 use contracts::supply_chain::ImageArtifact;
 use contracts::{
@@ -827,7 +827,7 @@ pub trait ContainerReleaseResolver: Send + Sync {
 /// Release projection paired with Environment's authority clock and append-only withdrawal state.
 #[derive(Clone, Debug)]
 pub struct ResolvedContainerRelease {
-    pub projection: ReleasePublishedV2,
+    pub projection: ReleasePublished,
     pub authority_now: UtcTimestamp,
     pub withdrawn_at: Option<UtcTimestamp>,
 }
@@ -913,14 +913,12 @@ impl PgReleaseProjectionStore {
     pub async fn accept(
         &self,
         consumer: &str,
-        event: &CloudEvent<ReleasePublishedV2>,
+        event: &CloudEvent<ReleasePublished>,
     ) -> Result<ReleaseProjectionDecision, ReleaseProjectionError> {
         let contract = EVENT_CONTRACTS
             .iter()
             .copied()
-            .find(|contract| {
-                contract.subject == subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED_V2
-            })
+            .find(|contract| contract.subject == subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED)
             .ok_or(ReleaseProjectionError::ContractInvalid)?;
         event
             .validate(contract)
@@ -929,7 +927,7 @@ impl PgReleaseProjectionStore {
             .data
             .validate()
             .map_err(|_| ReleaseProjectionError::ContractInvalid)?;
-        if event.subject != subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED_V2
+        if event.subject != subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED
             || event.course_id != event.data.release.course_id
             || event.aggregate_sequence.0 != 1
             || event.aggregate_revision
@@ -1089,7 +1087,7 @@ impl ContainerReleaseResolver for PgReleaseProjectionStore {
         if u64::try_from(stored_version).ok() != Some(release_version) {
             return Err(ReleaseProjectionError::IdentityMismatch);
         }
-        let projection: ReleasePublishedV2 = serde_json::from_value(row.try_get("contract")?)
+        let projection: ReleasePublished = serde_json::from_value(row.try_get("contract")?)
             .map_err(|_| ReleaseProjectionError::ContractInvalid)?;
         projection
             .validate()
@@ -1578,7 +1576,7 @@ fn resource(kind: &str, namespace: Option<&str>, name: &str, document: Value) ->
 }
 
 fn container_provider_binding(
-    projection: &ReleasePublishedV2,
+    projection: &ReleasePublished,
 ) -> Result<&str, ReleaseProjectionError> {
     match &projection.environment_spec.runtime {
         EnvironmentRuntimeSpec::Container {

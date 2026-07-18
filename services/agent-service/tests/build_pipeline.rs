@@ -17,7 +17,7 @@ use agent_service::build_pipeline::{
 };
 use async_trait::async_trait;
 use contracts::authoring::{CandidateApproval, CandidateDecision};
-use contracts::events::AgentBuildRequestedV2;
+use contracts::events::AgentBuildRequested;
 use contracts::supply_chain::{
     BuildNetworkPolicy, BuildRequest, ImageArtifact, VulnerabilitySummary,
 };
@@ -101,7 +101,7 @@ impl BuildSupplyChainProvider for FakeProvider {
     async fn ensure_private_project(
         &self,
         context: &BuildProviderRequestContext,
-        command: &AgentBuildRequestedV2,
+        command: &AgentBuildRequested,
         identity: BuildIdentity,
     ) -> Result<PrivateRegistryProject, BuildProviderFailure> {
         self.record(Call::EnsurePrivate, context);
@@ -121,7 +121,7 @@ impl BuildSupplyChainProvider for FakeProvider {
     async fn build_candidate(
         &self,
         context: &BuildProviderRequestContext,
-        command: &AgentBuildRequestedV2,
+        command: &AgentBuildRequested,
         identity: BuildIdentity,
     ) -> Result<BuiltCandidate, BuildProviderFailure> {
         self.record(Call::Build, context);
@@ -428,7 +428,7 @@ fn fence_with(
     BuildExecutionFence::new(generation, lease_token, deadline_at).expect("valid fence")
 }
 
-fn command(max_duration_milliseconds: u64) -> AgentBuildRequestedV2 {
+fn command(max_duration_milliseconds: u64) -> AgentBuildRequested {
     let course_id = CourseId::new();
     let candidate_id = CandidateId::new();
     let candidate_sha256 = Sha256Digest::of_bytes(b"environment-spec");
@@ -473,7 +473,7 @@ fn command(max_duration_milliseconds: u64) -> AgentBuildRequestedV2 {
         "idempotencyKey": &idempotency_key,
     }))
     .expect("canonical command");
-    AgentBuildRequestedV2 {
+    AgentBuildRequested {
         request,
         approval,
         idempotency_key,

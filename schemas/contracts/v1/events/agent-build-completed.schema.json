@@ -1,18 +1,27 @@
 {
   "$defs": {
-    "AgentBuildRequested": {
+    "AgentBuildCompleted": {
       "additionalProperties": false,
+      "description": "Safe terminal identity emitted after artifact and policy evidence commit atomically.",
       "properties": {
+        "artifactId": {
+          "$ref": "#/$defs/ImageArtifactId"
+        },
+        "artifactSha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
         "buildRequestId": {
           "$ref": "#/$defs/BuildRequestId"
         },
-        "candidateSha256": {
+        "policyEvaluationSha256": {
           "$ref": "#/$defs/Sha256Digest"
         }
       },
       "required": [
         "buildRequestId",
-        "candidateSha256"
+        "artifactId",
+        "artifactSha256",
+        "policyEvaluationSha256"
       ],
       "type": "object"
     },
@@ -26,6 +35,10 @@
     },
     "EventId": {
       "description": "Strongly typed UUIDv7 identifier for `EventId`.",
+      "type": "string"
+    },
+    "ImageArtifactId": {
+      "description": "Strongly typed UUIDv7 identifier for `ImageArtifactId`.",
       "type": "string"
     },
     "Revision": {
@@ -63,7 +76,7 @@
       "$ref": "#/$defs/CourseId"
     },
     "data": {
-      "$ref": "#/$defs/AgentBuildRequested"
+      "$ref": "#/$defs/AgentBuildCompleted"
     },
     "datacontenttype": {
       "type": "string"

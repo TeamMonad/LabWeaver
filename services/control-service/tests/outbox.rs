@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use contracts::events::{
-    CloudEvent, DATA_SCHEMA_BASE, ReleasePublished, ReleaseWithdrawn, SPEC_VERSION, subjects,
+    CloudEvent, DATA_SCHEMA_BASE, LabReleaseApproved, ReleaseWithdrawn, SPEC_VERSION, subjects,
 };
 use contracts::{
     ActorId, CourseId, EventId, ReleaseId, Revision, Sequence, Sha256Digest, UtcTimestamp,
@@ -68,7 +68,7 @@ async fn release_and_withdrawal_are_marked_published_only_after_jetstream_ack()
         aggregate_revision: Revision::new(1)?,
         aggregate_sequence: Sequence(1),
         trace_id: "issue-48-control-outbox".to_owned(),
-        data: ReleasePublished {
+        data: LabReleaseApproved {
             release_id,
             version: 1,
             environment_spec_sha256: digest,

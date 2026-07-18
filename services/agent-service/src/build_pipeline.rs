@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use contracts::events::AgentBuildRequestedV2;
+use contracts::events::AgentBuildRequested;
 use contracts::supply_chain::{ImageArtifact, ImagePolicyEvaluation, VulnerabilitySummary};
 use contracts::{BuildRequestId, ImageArtifactId, PolicyId, Revision, Sha256Digest, UtcTimestamp};
 use serde::{Deserialize, Serialize};
@@ -225,14 +225,14 @@ pub trait BuildSupplyChainProvider: Send + Sync {
     async fn ensure_private_project(
         &self,
         context: &BuildProviderRequestContext,
-        command: &AgentBuildRequestedV2,
+        command: &AgentBuildRequested,
         identity: BuildIdentity,
     ) -> Result<PrivateRegistryProject, BuildProviderFailure>;
 
     async fn build_candidate(
         &self,
         context: &BuildProviderRequestContext,
-        command: &AgentBuildRequestedV2,
+        command: &AgentBuildRequested,
         identity: BuildIdentity,
     ) -> Result<BuiltCandidate, BuildProviderFailure>;
 
@@ -318,7 +318,7 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
     /// Executes a complete candidate build. Any failure after admission invokes cleanup.
     pub async fn execute(
         &self,
-        command: &AgentBuildRequestedV2,
+        command: &AgentBuildRequested,
         started_at: UtcTimestamp,
         fence: BuildExecutionFence,
         cancellation: &BuildCancellation,
@@ -368,7 +368,7 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
     )]
     async fn execute_inner(
         &self,
-        command: &AgentBuildRequestedV2,
+        command: &AgentBuildRequested,
         started_at: UtcTimestamp,
         fence: BuildExecutionFence,
         cancellation: &BuildCancellation,
@@ -636,7 +636,7 @@ fn validate_digest(value: &str) -> Result<Sha256Digest, BuildPipelineError> {
 }
 
 fn expected_course_repository_prefix(
-    command: &AgentBuildRequestedV2,
+    command: &AgentBuildRequested,
 ) -> Result<String, BuildPipelineError> {
     let mut parts = command.request.output_repository.split('/');
     let registry = parts.next().unwrap_or_default();

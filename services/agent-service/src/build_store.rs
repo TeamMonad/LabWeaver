@@ -8,7 +8,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use contracts::events::{
-    AgentBuildCompletedV2, AgentBuildFailedV2, AgentBuildRequestedV2, CloudEvent, EVENT_CONTRACTS,
+    AgentBuildCompleted, AgentBuildFailed, AgentBuildRequested, CloudEvent, EVENT_CONTRACTS,
     SPEC_VERSION, subjects,
 };
 use contracts::http::{
@@ -47,7 +47,7 @@ pub enum BuildCommandDecision {
 /// Fenced command owned by exactly one build worker.
 #[derive(Clone, Debug)]
 pub struct BuildCommandLease {
-    pub command: AgentBuildRequestedV2,
+    pub command: AgentBuildRequested,
     pub attempt: u32,
     pub cancellation_requested: bool,
     worker_id: String,
@@ -69,9 +69,9 @@ impl PgBuildStore {
     pub async fn accept_command(
         &self,
         consumer: &str,
-        event: &CloudEvent<AgentBuildRequestedV2>,
+        event: &CloudEvent<AgentBuildRequested>,
     ) -> Result<BuildCommandDecision, BuildStoreError> {
-        let contract = event_contract(subjects::AGENT_BUILD_REQUESTED_V2)?;
+        let contract = event_contract(subjects::AGENT_BUILD_REQUESTED)?;
         event
             .validate(contract)
             .map_err(|_| BuildStoreError::ContractInvalid)?;
@@ -79,7 +79,7 @@ impl PgBuildStore {
             .data
             .validate()
             .map_err(|_| BuildStoreError::ContractInvalid)?;
-        if event.subject != subjects::AGENT_BUILD_REQUESTED_V2
+        if event.subject != subjects::AGENT_BUILD_REQUESTED
             || event.course_id != event.data.request.course_id
             || event.aggregate_revision
                 != Revision::new(1).map_err(|_| BuildStoreError::ContractInvalid)?
@@ -187,7 +187,7 @@ impl PgBuildStore {
         if updated.rows_affected() != 1 {
             return Err(BuildStoreError::FenceLost);
         }
-        let command: AgentBuildRequestedV2 = serde_json::from_value(row.try_get("command")?)
+        let command: AgentBuildRequested = serde_json::from_value(row.try_get("command")?)
             .map_err(|_| BuildStoreError::ContractInvalid)?;
         command
             .validate()
@@ -294,7 +294,7 @@ impl PgBuildStore {
         .execute(&mut *transaction)
         .await?;
         terminal_update(&mut transaction, lease, "succeeded", None, None, None).await?;
-        let data = AgentBuildCompletedV2 {
+        let data = AgentBuildCompleted {
             build_request_id,
             artifact_id,
             artifact_sha256: output.policy_evaluation.artifact_sha256,
@@ -303,7 +303,7 @@ impl PgBuildStore {
         enqueue_terminal_event(
             &mut transaction,
             lease,
-            subjects::AGENT_BUILD_COMPLETED_V2,
+            subjects::AGENT_BUILD_COMPLETED,
             authority_now,
             trace_id,
             &data,
@@ -319,7 +319,7 @@ impl PgBuildStore {
         error: BuildPipelineError,
         trace_id: &str,
     ) -> Result<(), BuildStoreError> {
-        let data = AgentBuildFailedV2 {
+        let data = AgentBuildFailed {
             build_request_id: lease.command.request.id,
             command_sha256: lease.command.command_sha256,
             diagnostic_code: error.diagnostic_code().to_owned(),
@@ -348,7 +348,7 @@ impl PgBuildStore {
         enqueue_terminal_event(
             &mut transaction,
             lease,
-            subjects::AGENT_BUILD_FAILED_V2,
+            subjects::AGENT_BUILD_FAILED,
             authority_now,
             trace_id,
             &data,

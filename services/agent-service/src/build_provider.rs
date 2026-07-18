@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 use contracts::BuildRequestId;
-use contracts::events::AgentBuildRequestedV2;
+use contracts::events::AgentBuildRequested;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -107,7 +107,7 @@ impl BuildSupplyChainProvider for NatsBuildSupplyChainProvider {
     async fn ensure_private_project(
         &self,
         context: &BuildProviderRequestContext,
-        command: &AgentBuildRequestedV2,
+        command: &AgentBuildRequested,
         identity: BuildIdentity,
     ) -> Result<PrivateRegistryProject, BuildProviderFailure> {
         match self
@@ -134,7 +134,7 @@ impl BuildSupplyChainProvider for NatsBuildSupplyChainProvider {
     async fn build_candidate(
         &self,
         context: &BuildProviderRequestContext,
-        command: &AgentBuildRequestedV2,
+        command: &AgentBuildRequested,
         identity: BuildIdentity,
     ) -> Result<BuiltCandidate, BuildProviderFailure> {
         match self
@@ -251,11 +251,11 @@ pub struct BuildExecutorRequestEnvelope {
 )]
 pub enum BuildExecutorRequest {
     EnsurePrivateProject {
-        command: AgentBuildRequestedV2,
+        command: AgentBuildRequested,
         identity: BuildIdentity,
     },
     Build {
-        command: AgentBuildRequestedV2,
+        command: AgentBuildRequested,
         identity: BuildIdentity,
     },
     Scan {

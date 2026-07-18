@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use contracts::authoring::{CandidateApproval, CandidateDecision, EnvironmentSpec, RuntimeKind};
 use contracts::environment::{DesiredEnvironmentState, EndpointProtocol, ObservedEnvironmentState};
-use contracts::events::ReleasePublishedV2;
+use contracts::events::ReleasePublished;
 use contracts::supply_chain::{
     EnvironmentTemplateRelease, ImageArtifact, ImagePolicyEvaluation, VulnerabilitySummary,
 };
@@ -31,7 +31,7 @@ use serde_json::json;
 
 #[derive(Clone)]
 struct FixtureResolver {
-    projection: ReleasePublishedV2,
+    projection: ReleasePublished,
     authority_now: UtcTimestamp,
     withdrawn_at: Option<UtcTimestamp>,
 }
@@ -425,7 +425,7 @@ async fn withdrawal_blocks_new_use_but_still_allows_stop() {
 }
 
 fn provider(
-    projection: ReleasePublishedV2,
+    projection: ReleasePublished,
     backend: Arc<FixtureBackend>,
 ) -> ContainerProvider<FixtureBackend, FixtureResolver> {
     let image_policy_id = projection.release.image_policy_evaluation.policy_id;
@@ -447,7 +447,7 @@ fn provider(
     reason = "negative tests vary each trust authority independently"
 )]
 fn provider_with_state(
-    projection: ReleasePublishedV2,
+    projection: ReleasePublished,
     backend: Arc<FixtureBackend>,
     authority_now: UtcTimestamp,
     withdrawn_at: Option<UtcTimestamp>,
@@ -476,7 +476,7 @@ fn provider_with_state(
     .expect("provider configuration")
 }
 
-fn resolved(projection: ReleasePublishedV2) -> ResolvedContainerRelease {
+fn resolved(projection: ReleasePublished) -> ResolvedContainerRelease {
     ResolvedContainerRelease {
         projection,
         authority_now: timestamp("2026-07-16T08:30:00.000Z"),
@@ -494,7 +494,7 @@ fn resource<'a>(
         .unwrap_or_else(|| panic!("missing {kind}"))
 }
 
-fn instance_for(projection: &ReleasePublishedV2) -> contracts::environment::EnvironmentInstance {
+fn instance_for(projection: &ReleasePublished) -> contracts::environment::EnvironmentInstance {
     let mut instance = support::requested_instance();
     instance.course_id = projection.release.course_id;
     instance.release_id = projection.release.id;
@@ -507,7 +507,7 @@ fn instance_for(projection: &ReleasePublishedV2) -> contracts::environment::Envi
     clippy::too_many_lines,
     reason = "the fixture deliberately constructs the complete immutable release identity"
 )]
-fn projection() -> ReleasePublishedV2 {
+fn projection() -> ReleasePublished {
     let environment_spec: EnvironmentSpec = serde_json::from_value(json!({
         "apiVersion":"environment.labweaver.io/v1",
         "kind":"EnvironmentSpec",
@@ -597,7 +597,7 @@ fn projection() -> ReleasePublishedV2 {
         "environmentSpec": &environment_spec,
     }))
     .expect("projection hash");
-    let projection = ReleasePublishedV2 {
+    let projection = ReleasePublished {
         release,
         environment_spec,
         projection_sha256,
