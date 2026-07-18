@@ -88,8 +88,16 @@
       - sprint2_reset_configuration_objects | map(attribute='apiVersion') | unique | list == ['v1']
       - sprint2_reset_configuration_objects | map(attribute='kind') | difference(['ConfigMap', 'Secret']) | length == 0
       - sprint2_reset_configuration_objects | map(attribute='metadata.namespace') | unique | list == [sprint2_reset_namespace]
-      - sprint2_reset_configuration_objects | selectattr('kind', 'equalto', 'ConfigMap') | map(attribute='metadata.name') | sort == sprint2_reset_required_configmaps | sort
-      - sprint2_reset_configuration_objects | selectattr('kind', 'equalto', 'Secret') | map(attribute='metadata.name') | sort == sprint2_reset_required_secrets | sort
+      - >-
+        sprint2_reset_configuration_objects
+        | selectattr('kind', 'equalto', 'ConfigMap')
+        | map(attribute='metadata.name') | sort
+        == sprint2_reset_required_configmaps | sort
+      - >-
+        sprint2_reset_configuration_objects
+        | selectattr('kind', 'equalto', 'Secret')
+        | map(attribute='metadata.name') | sort
+        == sprint2_reset_required_secrets | sort
     fail_msg: SPRINT2_CONFIGURATION_BUNDLE_INVALID
   no_log: true
 
