@@ -22,10 +22,34 @@ platform_images:
 postgresql:
   image: docker.io/library/postgres:17.6-alpine@sha256:747d5ed1fdeeb124b880fbe3d7c6557d2c4064ae41d6b6297d417882effce4be
 sprint2_foundation:
-  nats: docker.io/library/nats:2.11.9-scratch@sha256:ee3312f4e9d4b67ff197b0ed1e98756596f0d7db872e7fe30d9bf64fccddf92c
+  nats: docker.io/library/nats:2.14.1-scratch@sha256:4223c8fa116891628611e154fb66570cad599d8f8b3b131b82caf10f378e9dcf
   nats_box: docker.io/natsio/nats-box:0.18.0@sha256:abdc9f9f0120bb8adfbf674eb037d1551db55356eb198b7bd4ffed377f6950a6
   minio: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
   buildkit_rootless: docker.io/moby/buildkit:v0.31.1-rootless@sha256:946cf909534b789c9b84af75e6d4f8cb23c3b9cb387daec5ba0f4878a3e4647c
+  admin_tools:
+    nats_cli:
+      version: v0.4.0
+      linux_amd64_url: https://github.com/nats-io/natscli/releases/download/v0.4.0/nats-0.4.0-linux-amd64.zip
+      linux_amd64_sha256: 8dbd437c826b953dbd7432cf890ef22ba3c33dccc3dce5e71b3e8d055427849c
+    nsc:
+      version: v2.15.0
+      linux_amd64_url: https://github.com/nats-io/nsc/releases/download/v2.15.0/nsc-linux-amd64.zip
+      linux_amd64_sha256: 7d55eda757dc9f233675a3038fcf8779bcda99753b1603f7009fc8537e126b7e
+    minio_client:
+      version: RELEASE.2025-08-13T08-35-41Z
+      linux_amd64_url: https://github.com/minio/mc/releases/download/RELEASE.2025-08-13T08-35-41Z/mc.linux-amd64.RELEASE.2025-08-13T08-35-41Z
+      linux_amd64_sha256: 01f866e9c5f9b87c2b09116fa5d7c06695b106242d829a8bb32990c00312e891
+    buildctl:
+      version: v0.31.1
+      linux_amd64_url: https://github.com/moby/buildkit/releases/download/v0.31.1/buildkit-v0.31.1.linux-amd64.tar.gz
+      linux_amd64_sha256: 1fc78750d0c96bdc18799a3c0b551d6807bd4939e8cd79e357823e467451e16e
+    keycloak_admin:
+      version: 26.7.0
+      linux_amd64_url: https://github.com/keycloak/keycloak/releases/download/26.7.0/keycloak-26.7.0.tar.gz
+      linux_amd64_sha256: f771df0aa1e4820f57d56f7d6d015beb6415487b43f8de7e5a6d48f8a7fe118a
+    system_packages:
+      postgresql: postgresql-0:16.14-1.el10_2.x86_64
+      java: java-21-openjdk-headless-1:21.0.11.0.10-2.el10_1.x86_64
 kubernetes:
   minor: v1.35
   patch: v1.35.6

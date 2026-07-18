@@ -23,12 +23,33 @@ SPEC.loader.exec_module(SAFETY)
 class AnsibleFixtureTests(unittest.TestCase):
     def test_sprint2_foundation_images_are_immutable(self) -> None:
         lock = yaml.safe_load((ROOT / "deploy/versions.lock.yml").read_text(encoding="utf-8"))
-        images = lock["sprint2_foundation"]
+        foundation = lock["sprint2_foundation"]
+        images = {key: foundation[key] for key in ("nats", "nats_box", "minio", "buildkit_rootless")}
 
-        self.assertEqual(set(images), {"nats", "nats_box", "minio", "buildkit_rootless"})
         for reference in images.values():
             self.assertRegex(reference, r"^[^\s]+@sha256:[0-9a-f]{64}$")
         self.assertRegex(lock["postgresql"]["image"], r"^[^\s]+@sha256:[0-9a-f]{64}$")
+
+    def test_sprint2_administration_tools_are_locked_and_installed_before_foundation(self) -> None:
+        lock = yaml.safe_load((ROOT / "deploy/versions.lock.yml").read_text(encoding="utf-8"))
+        tools = lock["sprint2_foundation"]["admin_tools"]
+        playbook = (ROOT / "deploy/ansible/playbooks/92-sprint2-foundation.yml").read_text(
+            encoding="utf-8"
+        )
+        tasks = (ROOT / "deploy/ansible/roles/sprint2_admin_tools/tasks/main.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertEqual(
+            set(tools),
+            {"nats_cli", "nsc", "minio_client", "buildctl", "keycloak_admin", "system_packages"},
+        )
+        for name in ("nats_cli", "nsc", "minio_client", "buildctl", "keycloak_admin"):
+            self.assertRegex(tools[name]["linux_amd64_sha256"], r"^[0-9a-f]{64}$")
+            self.assertTrue(tools[name]["linux_amd64_url"].startswith("https://github.com/"))
+        self.assertLess(playbook.index("role: sprint2_admin_tools"), playbook.index("roles: [sprint2_foundation]"))
+        self.assertIn("checksum: \"sha256:", tasks)
+        self.assertNotIn("ansible.builtin.shell", tasks)
 
     def test_sprint2_foundation_is_persistent_and_reset_preserves_it(self) -> None:
         playbook = (ROOT / "deploy/ansible/playbooks/92-sprint2-foundation.yml").read_text(
@@ -45,6 +66,8 @@ class AnsibleFixtureTests(unittest.TestCase):
         )
 
         self.assertIn("labweaver_preflight_scope: sprint2-foundation", playbook)
+        self.assertIn("sprint2_admin_tools_profile: authoring", playbook)
+        self.assertIn("sprint2_admin_tools_profile: execution", playbook)
         self.assertIn("sprint2-foundation --infra", (
             ROOT / "docs/deployment/ansible.md"
         ).read_text(encoding="utf-8"))

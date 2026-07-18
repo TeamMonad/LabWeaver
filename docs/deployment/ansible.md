@@ -78,6 +78,13 @@ validation used for the workload bundle apply. The reset deliberately excludes
 `labweaver-data` and `labweaver-build` from namespace deletion and clears only
 their LabWeaver schemas, streams and buckets.
 
+The same playbook first installs checksum-locked administration clients. NSC is
+installed on the approved router only for private NATS operator/account/user
+authoring; NATS CLI, PostgreSQL client, MinIO client, BuildKit client and the
+Keycloak administration client are installed on the control plane for the
+allowlisted reset role. Downloads are versioned in `deploy/versions.lock.yml`;
+the role neither discovers a latest release nor executes an arbitrary shell.
+
 ```sh
 cargo xtask sprint2-foundation --infra --env demo --yes
 ```
