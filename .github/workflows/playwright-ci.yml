@@ -12,6 +12,8 @@ permissions:
 jobs:
   playwright-gate:
     runs-on: ubuntu-latest
+    outputs:
+      playwright_changed: ${{ steps.changes.outputs.playwright_changed }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
