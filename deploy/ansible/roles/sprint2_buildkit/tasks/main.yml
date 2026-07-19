@@ -116,8 +116,10 @@
   ansible.builtin.assert:
     that:
       - sprint2_buildkit_harbor_tls.resources | length == 1
-      - sprint2_buildkit_harbor_tls.resources[0].type == 'kubernetes.io/tls'
+      - sprint2_buildkit_harbor_tls.resources[0].type == 'Opaque'
       - sprint2_buildkit_harbor_tls.resources[0].data['ca.crt'] | default('') | length > 0
+      - sprint2_buildkit_harbor_tls.resources[0].data['tls.crt'] | default('') | length > 0
+      - sprint2_buildkit_harbor_tls.resources[0].data['tls.key'] | default('') | length > 0
       - sprint2_buildkit_harbor_tls.resources[0].data['ca.crt'] == sprint2_buildkit_registry_ca_b64
     fail_msg: SPRINT2_BUILDKIT_HARBOR_CA_MISMATCH
   no_log: true
