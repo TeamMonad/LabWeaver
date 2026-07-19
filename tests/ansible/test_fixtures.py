@@ -153,6 +153,13 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("buildctl", workloads)
         self.assertIn("sprint2_buildkit_registry_cidr", tasks)
         self.assertIn("/etc/buildkit/tls/registry-ca.crt", tasks)
+        self.assertIn("SPRINT2_BUILDKIT_HARBOR_CA_MISMATCH", tasks)
+        self.assertIn("harbor-gateway-tls", (
+            ROOT / "deploy/ansible/roles/sprint2_buildkit/defaults/main.yml"
+        ).read_text(encoding="utf-8"))
+        self.assertIn("harbor-public/registry-ca.crt", (
+            ROOT / "docs/deployment/ansible.md"
+        ).read_text(encoding="utf-8"))
         self.assertIn("sprint2-buildkit --infra", (
             ROOT / "docs/deployment/ansible.md"
         ).read_text(encoding="utf-8"))

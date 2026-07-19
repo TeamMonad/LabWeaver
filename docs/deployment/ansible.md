@@ -155,7 +155,7 @@ the reviewed Harbor endpoint CIDR in the ignored inventory:
 python3 tools/prepare_sprint2_buildkit.py \
   --registry-host harbor.lab.lan \
   --dns-nameserver 10.96.0.10 \
-  --registry-ca .private/harbor-gateway-ca.crt \
+  --registry-ca /var/lib/labweaver/.private/harbor-public/registry-ca.crt \
   --output .private/sprint2-buildkit-<run-id>
 python3 tools/render_sprint2_bundle.py \
   --manifest deploy/config/sprint2-buildkit-bundle-manifest.json \
@@ -163,6 +163,11 @@ python3 tools/render_sprint2_bundle.py \
   --output .private/sprint2-buildkit-<run-id>/bundle.yml
 cargo xtask sprint2-buildkit --infra --env demo --yes
 ```
+
+`--registry-ca` 必须指向当前 Harbor 公网入口证书的签发 CA，不能使用
+Harbor 集群内部 CA。部署角色会在修改 BuildKit 前把 bundle 中的 CA 与
+保留的 `harbor-gateway-tls` Secret 做精确比对；不一致时以
+`SPRINT2_BUILDKIT_HARBOR_CA_MISMATCH` 阻断。
 
 The BuildKit namespace is the sole approved Sprint 2 exception for
 `Unconfined` seccomp/AppArmor, container-scoped SELinux `spc_t`, and

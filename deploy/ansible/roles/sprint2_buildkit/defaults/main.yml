@@ -11,6 +11,7 @@ sprint2_buildkit_dns_nameserver: ""
 sprint2_buildkit_coredns_namespace: kube-system
 sprint2_buildkit_coredns_configmap: coredns
 sprint2_buildkit_harbor_hostname: harbor.lab.lan
+sprint2_buildkit_harbor_tls_secret: harbor-gateway-tls
 sprint2_buildkit_operator_client_path: /home/rocky/.config/labweaver/buildkit
 sprint2_buildkit_rollout_retries: 60
 sprint2_buildkit_rollout_delay: 5

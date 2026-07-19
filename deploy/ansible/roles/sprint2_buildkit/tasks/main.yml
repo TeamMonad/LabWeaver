@@ -79,6 +79,10 @@
       {{ (sprint2_buildkit_objects
           | selectattr('kind', 'equalto', 'ConfigMap')
           | first).data['buildkitd.toml'] }}
+    sprint2_buildkit_registry_ca_b64: >-
+      {{ (sprint2_buildkit_objects
+          | selectattr('kind', 'equalto', 'Secret')
+          | first).data['registry-ca.crt'] }}
   no_log: true
 
 - name: Require the approved rootless BuildKit boundary
@@ -96,6 +100,26 @@
         ('nameservers = ["' ~ sprint2_buildkit_dns_nameserver ~ '"]')
         in sprint2_buildkit_configuration
     fail_msg: SPRINT2_BUILDKIT_CONFIGURATION_INVALID
+  no_log: true
+
+- name: Read the retained Harbor public TLS authority
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ sprint2_buildkit_kubeconfig }}"
+    api_version: v1
+    kind: Secret
+    namespace: harbor
+    name: "{{ sprint2_buildkit_harbor_tls_secret }}"
+  register: sprint2_buildkit_harbor_tls
+  no_log: true
+
+- name: Reject a BuildKit bundle that trusts a different Harbor authority
+  ansible.builtin.assert:
+    that:
+      - sprint2_buildkit_harbor_tls.resources | length == 1
+      - sprint2_buildkit_harbor_tls.resources[0].type == 'kubernetes.io/tls'
+      - sprint2_buildkit_harbor_tls.resources[0].data['ca.crt'] | default('') | length > 0
+      - sprint2_buildkit_harbor_tls.resources[0].data['ca.crt'] == sprint2_buildkit_registry_ca_b64
+    fail_msg: SPRINT2_BUILDKIT_HARBOR_CA_MISMATCH
   no_log: true
 
 - name: Read the retained Harbor nginx service for cluster-local access
