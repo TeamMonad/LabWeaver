@@ -25,6 +25,12 @@ export LABWEAVER_TRIVY_DATABASE_DIGEST=sha256:<digest>
 cargo xtask package --env demo --release sprint2 --yes
 ```
 
+The packaging host uses the checksum-verified standalone `docker-buildx`
+v0.35.0 executable. A Docker daemon is not required: configure a named Buildx
+`remote` driver against the mTLS BuildKit endpoint and make it current before
+running the command. This keeps build storage on the reviewed BuildKit PVC
+instead of the infrastructure controller.
+
 The command fails unless the source tree is clean, BuildKit/Buildx/Trivy match `deploy/versions.lock.yml`, the Trivy database is digest pinned, both reproducibility builds resolve to the same `linux/amd64` manifest digest, no secret or critical vulnerability is found, and every image is recorded as a Harbor digest reference. When Buildx uses the cluster-owned remote driver, `LABWEAVER_KUBECONFIG` is mandatory and packaging also reads back the `labweaver-build/buildkit` Deployment: its rootless image must match the locked digest, exactly one replica must be ready and updated, and its reviewed configuration hash annotation must be present. High vulnerabilities remain visible in the report but do not silently alter the gate.
 
 The package manifest records the source commit, component lock hash, builder versions, Harbor host, image digests, Trivy version/database identity, vulnerability counts, and content hash of each retained scan report. Sprint 2 intentionally does not generate or validate Sigstore, Fulcio, Rekor, CT, TUF, SBOM, provenance, or Kyverno evidence.

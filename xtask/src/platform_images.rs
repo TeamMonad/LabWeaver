@@ -642,9 +642,8 @@ fn build_image(
         "openssh-gateway" => "access-gateway/Dockerfile",
         _ => "containers/Containerfile.rust",
     };
-    let mut command = Command::new("docker");
+    let mut command = Command::new("docker-buildx");
     command.current_dir(root).args([
-        "buildx",
         "build",
         "--file",
         file,
@@ -675,7 +674,7 @@ fn build_image(
 #[cfg(target_os = "linux")]
 fn inspect_digest(reference: &str) -> Result<String, AppError> {
     let output = run_checked(
-        Command::new("docker").args(["buildx", "imagetools", "inspect", reference]),
+        Command::new("docker-buildx").args(["imagetools", "inspect", reference]),
         "inspect OCI image",
     )?;
     let digest = output
@@ -695,8 +694,7 @@ fn inspect_digest(reference: &str) -> Result<String, AppError> {
 #[cfg(target_os = "linux")]
 fn inspect_platform_digest(reference: &str) -> Result<String, AppError> {
     let output = run_checked(
-        Command::new("docker").args([
-            "buildx",
+        Command::new("docker-buildx").args([
             "imagetools",
             "inspect",
             reference,
@@ -809,11 +807,7 @@ fn vulnerability_counts(bytes: &[u8]) -> Result<(u64, u64, u64), AppError> {
 fn verify_tools(lock: &VersionLock) -> Result<(), AppError> {
     let platform = &lock.platform_images;
     let checks = [
-        (
-            "docker",
-            vec!["buildx", "version"],
-            platform.buildx.as_str(),
-        ),
+        ("docker-buildx", vec!["version"], platform.buildx.as_str()),
         ("trivy", vec!["--version"], platform.trivy.as_str()),
         ("helm", vec!["version", "--short"], platform.helm.as_str()),
     ];
@@ -830,7 +824,7 @@ fn verify_tools(lock: &VersionLock) -> Result<(), AppError> {
         }
     }
     let buildkit = run_checked(
-        Command::new("docker").args(["buildx", "inspect", "--bootstrap"]),
+        Command::new("docker-buildx").args(["inspect", "--bootstrap"]),
         "verify BuildKit daemon identity",
     )?;
     if !buildkit.contains(&platform.buildkit) {
