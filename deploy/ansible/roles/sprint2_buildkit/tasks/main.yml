@@ -12,6 +12,7 @@
       - sprint2_buildkit_bundle | length > 0
       - sprint2_buildkit_storage_class | length > 0
       - sprint2_buildkit_registry_cidr is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}/(?:[0-9]|[12][0-9]|3[0-2])$')
+      - sprint2_buildkit_operator_client_path == '/home/rocky/.config/labweaver/buildkit'
       - sprint2_buildkit_lock.sprint2_foundation.buildkit_rootless is match('^[^\s]+@sha256:[0-9a-f]{64}$')
     fail_msg: SPRINT2_BUILDKIT_INPUT_INVALID
 
@@ -89,6 +90,41 @@
       - "'/etc/buildkit/tls/ca.crt' in sprint2_buildkit_configuration"
       - "'/etc/buildkit/tls/registry-ca.crt' in sprint2_buildkit_configuration"
     fail_msg: SPRINT2_BUILDKIT_CONFIGURATION_INVALID
+  no_log: true
+
+- name: Inspect the generated BuildKit operator client inputs
+  ansible.builtin.stat:
+    path: "{{ sprint2_buildkit_bundle | dirname }}/build-executor-client/{{ item }}"
+  loop: [ca.crt, tls.crt, tls.key]
+  register: sprint2_buildkit_operator_client_inputs
+  delegate_to: localhost
+  become: false
+
+- name: Reject missing BuildKit operator client inputs
+  ansible.builtin.assert:
+    that:
+      - sprint2_buildkit_operator_client_inputs.results | map(attribute='stat.exists') | min
+      - sprint2_buildkit_operator_client_inputs.results | map(attribute='stat.isreg') | min
+      - sprint2_buildkit_operator_client_inputs.results | map(attribute='stat.mode') | select('match', '^0?600$') | list | length == 3
+    fail_msg: SPRINT2_BUILDKIT_OPERATOR_CLIENT_INVALID
+  no_log: true
+
+- name: Create the protected BuildKit operator client directory
+  ansible.builtin.file:
+    path: "{{ sprint2_buildkit_operator_client_path }}"
+    state: directory
+    owner: rocky
+    group: rocky
+    mode: '0700'
+
+- name: Install the current BuildKit operator mTLS client
+  ansible.builtin.copy:
+    src: "{{ sprint2_buildkit_bundle | dirname }}/build-executor-client/{{ item }}"
+    dest: "{{ sprint2_buildkit_operator_client_path }}/{{ item }}"
+    owner: rocky
+    group: rocky
+    mode: '0600'
+  loop: [ca.crt, tls.crt, tls.key]
   no_log: true
 
 - name: Reconcile the dedicated BuildKit namespace

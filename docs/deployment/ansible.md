@@ -162,7 +162,9 @@ without Kubernetes API credentials. The container permits only the `SETUID` and
 `SETGID` capabilities plus the setuid transition required by RootlessKit's
 `newuidmap`/`newgidmap`; every other capability remains dropped. Its gRPC endpoint requires mTLS; the
 generated `build-executor-client` material is injected only into the
-`build-executor` Secret. Default-deny NetworkPolicy admits that workload and
+`build-executor` Secret. The same authoring run installs a mode-0600 operator
+client in the fixed control-plane packaging directory; an older client is
+replaced whenever the BuildKit authority rotates. Default-deny NetworkPolicy admits that workload and
 the reviewed Harbor CIDR only.
 
 The following legacy reset description documents an out-of-scope maintenance
