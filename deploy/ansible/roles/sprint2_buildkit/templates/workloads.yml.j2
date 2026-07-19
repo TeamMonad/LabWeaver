@@ -80,6 +80,12 @@ spec:
             capabilities: {drop: [ALL], add: [SETUID, SETGID]}
             seccompProfile: {type: Unconfined}
             appArmorProfile: {type: Unconfined}
+            # Rootless BuildKit launches an inner runc worker. On SELinux
+            # enforcing hosts container_t cannot mount a fresh devpts or
+            # relabel snapshot content, so keep this exception on the one
+            # tokenless, non-privileged builder container rather than changing
+            # node policy for every workload.
+            seLinuxOptions: {type: spc_t}
           resources:
             requests: {cpu: 500m, memory: 1Gi}
             limits: {cpu: "4", memory: 4Gi}

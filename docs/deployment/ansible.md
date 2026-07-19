@@ -163,7 +163,11 @@ cargo xtask sprint2-buildkit --infra --env demo --yes
 ```
 
 The BuildKit namespace is the sole approved Sprint 2 exception for
-`Unconfined` seccomp/AppArmor and `--oci-worker-no-process-sandbox`. The
+`Unconfined` seccomp/AppArmor, container-scoped SELinux `spc_t`, and
+`--oci-worker-no-process-sandbox`. The SELinux exception permits rootless
+BuildKit's inner `runc` to mount a new `devpts` instance and relabel snapshot
+content on enforcing hosts; it is applied to the builder container rather than
+installing a node-wide policy. The
 workload remains non-root, non-privileged, without HostPath or hostNetwork, and
 without Kubernetes API credentials. The container permits only the `SETUID` and
 `SETGID` capabilities plus the setuid transition required by RootlessKit's

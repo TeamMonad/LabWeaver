@@ -81,7 +81,8 @@ It is completed by two deployments built from existing service images:
 They have separate identities. The BuildKit daemon runs rootless in the
 dedicated `labweaver-build` namespace. Sprint 2 explicitly permits only the
 rootless BuildKit requirements `Unconfined` seccomp/AppArmor and
-`--oci-worker-no-process-sandbox`; privileged containers, HostPath and
+container-scoped SELinux `spc_t` with `--oci-worker-no-process-sandbox`;
+privileged containers, HostPath and
 hostNetwork remain prohibited. BuildKit uses mTLS, default-deny network policy,
 a dedicated ServiceAccount without Kubernetes API access, and no shared API
 process credentials.

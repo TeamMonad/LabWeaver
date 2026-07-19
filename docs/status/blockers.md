@@ -15,7 +15,8 @@ identity. Historical Issue evidence is not a current completion claim.
 - Owner: B implementation review; D connected Verify; A release judgment.
 
 The owner approved rootless BuildKit for Sprint 2 with the narrowly scoped
-`Unconfined` seccomp/AppArmor and `--oci-worker-no-process-sandbox` exception.
+`Unconfined` seccomp/AppArmor, container-scoped SELinux `spc_t`, and
+`--oci-worker-no-process-sandbox` exception.
 Privileged containers, HostPath and hostNetwork remain prohibited. This removes
 the design-decision blocker, but not the missing deployment or connected replay.
 

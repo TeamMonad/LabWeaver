@@ -31,8 +31,9 @@ is read from Git/PR metadata rather than duplicated as a stale status value.
 
 ## Accepted Sprint 2 security exceptions
 
-- The rootless BuildKit namespace may use `Unconfined` seccomp/AppArmor and
-  `--oci-worker-no-process-sandbox`. It must remain non-privileged and may not
+- The rootless BuildKit namespace may use `Unconfined` seccomp/AppArmor,
+  container-scoped SELinux `spc_t`, and `--oci-worker-no-process-sandbox`. It
+  must remain non-privileged and may not
   use HostPath or hostNetwork. This exception is limited to the pinned BuildKit
   workload and is not a general Pod Security relaxation.
 - Container and KubeVirt executor ClusterRoles retain broad namespace CRUD for

@@ -209,4 +209,5 @@
       - sprint2_buildkit_deployment.resources[0].spec.template.spec.volumes | selectattr('hostPath', 'defined') | list | length == 0
       - sprint2_buildkit_deployment.resources[0].spec.template.spec.securityContext.seccompProfile.type == 'Unconfined'
       - sprint2_buildkit_deployment.resources[0].spec.template.spec.containers[0].securityContext.appArmorProfile.type == 'Unconfined'
+      - sprint2_buildkit_deployment.resources[0].spec.template.spec.containers[0].securityContext.seLinuxOptions.type == 'spc_t'
     fail_msg: SPRINT2_BUILDKIT_READBACK_INVALID

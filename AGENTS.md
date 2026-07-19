@@ -66,7 +66,7 @@ status:
 
 - 技术基线为 Rust + Axum、Vue 3、PostgreSQL/SQLx、NATS JetStream、MinIO、Keycloak/OIDC、Kubernetes、KubeVirt、Harbor、Trivy、BuildKit、Ansible、Helm 与 Playwright。Sprint 2 不包含 Headscale/Tailscale、Guacamole、Private Sigstore、Kyverno 或 Packer；不得让这些已删除能力重新进入默认部署或 Release Gate。
 - Sprint 2 部署 Evaluation Service，但仅负责 `FrozenSubmission` 的双运行时冻结协调与不可变发布；不得启用 Runner、Checker、Aggregator、Evaluation 执行或评分。Resource Service 保持独立边界且默认不部署。
-- Sprint 2 的 rootless BuildKit 仅允许在 `labweaver-build` 使用 `Unconfined` seccomp/AppArmor 与 `--oci-worker-no-process-sandbox`；仍禁止 privileged、HostPath、hostNetwork 和 Kubernetes API token。Container/KubeVirt executor 当前宽 ClusterRole 是明确的阶段性风险，不得描述为最小权限或生产安全验证通过。
+- Sprint 2 的 rootless BuildKit 仅允许在 `labweaver-build` 使用 `Unconfined` seccomp/AppArmor、container-scoped SELinux `spc_t` 与 `--oci-worker-no-process-sandbox`；仍禁止 privileged、HostPath、hostNetwork 和 Kubernetes API token。该 SELinux 例外只解决内层 `runc` 的 `devpts` mount 与 snapshot relabel，不得扩展到其他 workload 或改为节点全局策略。Container/KubeVirt executor 当前宽 ClusterRole 是明确的阶段性风险，不得描述为最小权限或生产安全验证通过。
 - Agent 只生成候选方案；确定性工具负责验证；教师负责最终批准。未经批准的 EnvironmentSpec、SubmissionSpec、EvaluationSpec、脚本和镜像不得进入生产执行路径。
 - LLM 输出只能提供 advisory feedback，永远不得写入确定性分数、改变 Gate 结果或绕过审批。服务端必须拒绝包含受保护评分字段的 LLM 输出。
 - 真实 KubeVirt VM 是 P0 硬验收，不得用 Mock、容器或静态报告冒充。GPU 与云扩容在课程切片中使用显式标识的 Mock Capacity Provider。
