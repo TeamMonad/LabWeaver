@@ -833,8 +833,14 @@
       - sprint2_application_vm_base_source_readback.resources | length == 1
       - sprint2_application_vm_base_source_readback.resources[0].spec.source.pvc.name == sprint2_application_lock.sprint2_vm_base.seed_data_volume_name
       - sprint2_application_vm_base_source_readback.resources[0].spec.source.pvc.namespace == sprint2_application_namespace
-      - sprint2_application_vm_base_source_readback.resources[0].metadata.annotations['labweaver.io/source-registry'] == sprint2_application_lock.sprint2_vm_base.registry_url
-      - sprint2_application_vm_base_source_readback.resources[0].metadata.annotations['labweaver.io/disk-sha256'] == sprint2_application_lock.sprint2_vm_base.disk_sha256
+      - >-
+        sprint2_application_vm_base_source_readback.resources[0]
+        .metadata.annotations['labweaver.io/source-registry'] ==
+        sprint2_application_lock.sprint2_vm_base.registry_url
+      - >-
+        sprint2_application_vm_base_source_readback.resources[0]
+        .metadata.annotations['labweaver.io/disk-sha256'] ==
+        sprint2_application_lock.sprint2_vm_base.disk_sha256
     fail_msg: SPRINT2_VM_BASE_IDENTITY_INVALID
 
 - name: Reconcile the application Harbor pull credential
