@@ -454,6 +454,7 @@
   become: true
   become_user: rocky
   delegate_to: "{{ sprint2_buildkit_controller_host }}"
+  changed_when: true
   when:
     - sprint2_buildkit_controller_enabled | bool
     - sprint2_buildkit_controller_context.rc != 0
