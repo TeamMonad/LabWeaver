@@ -30,6 +30,13 @@ const DEPLOYMENT_SCHEMA: &str = "platform-image-deployment-manifest.v1";
 #[derive(Debug, Deserialize)]
 struct VersionLock {
     platform_images: PlatformImageLock,
+    sprint2_foundation: Sprint2FoundationLock,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Deserialize)]
+struct Sprint2FoundationLock {
+    buildkit_rootless: String,
 }
 
 #[cfg(target_os = "linux")]
@@ -402,7 +409,7 @@ fn package_linux(environment: &str, release: &str, root: &Path) -> Result<(), Ap
         role: "parse component lock",
         detail: error.to_string(),
     })?;
-    verify_tools(&lock.platform_images)?;
+    verify_tools(&lock)?;
     let registry = required_env("LABWEAVER_PLATFORM_REGISTRY")?;
     validate_registry(&registry)?;
     let database_digest = verified_trivy_database()?;
@@ -799,11 +806,16 @@ fn vulnerability_counts(bytes: &[u8]) -> Result<(u64, u64, u64), AppError> {
 }
 
 #[cfg(target_os = "linux")]
-fn verify_tools(lock: &PlatformImageLock) -> Result<(), AppError> {
+fn verify_tools(lock: &VersionLock) -> Result<(), AppError> {
+    let platform = &lock.platform_images;
     let checks = [
-        ("docker", vec!["buildx", "version"], lock.buildx.as_str()),
-        ("trivy", vec!["--version"], lock.trivy.as_str()),
-        ("helm", vec!["version", "--short"], lock.helm.as_str()),
+        (
+            "docker",
+            vec!["buildx", "version"],
+            platform.buildx.as_str(),
+        ),
+        ("trivy", vec!["--version"], platform.trivy.as_str()),
+        ("helm", vec!["version", "--short"], platform.helm.as_str()),
     ];
     for (program, arguments, expected) in checks {
         let output = run_checked(
@@ -821,16 +833,66 @@ fn verify_tools(lock: &PlatformImageLock) -> Result<(), AppError> {
         Command::new("docker").args(["buildx", "inspect", "--bootstrap"]),
         "verify BuildKit daemon identity",
     )?;
-    if !buildkit.contains(&lock.buildkit) {
+    if !buildkit.contains(&platform.buildkit) {
         return Err(AppError::PlatformImage {
             code: "LW_PACKAGE_TOOL_IDENTITY_MISMATCH",
-            detail: format!("BuildKit does not match {}", lock.buildkit),
+            detail: format!("BuildKit does not match {}", platform.buildkit),
         });
     }
-    if !buildkit.contains(&lock.buildkit_image) {
+    if buildkit.contains(&platform.buildkit_image) {
+        return Ok(());
+    }
+
+    verify_remote_buildkit_deployment(&lock.sprint2_foundation.buildkit_rootless)
+}
+
+#[cfg(target_os = "linux")]
+fn verify_remote_buildkit_deployment(expected_image: &str) -> Result<(), AppError> {
+    let kubeconfig = required_env("LABWEAVER_KUBECONFIG")?;
+    let output = run_checked(
+        Command::new("kubectl").args([
+            "--kubeconfig",
+            &kubeconfig,
+            "--namespace",
+            "labweaver-build",
+            "get",
+            "deployment",
+            "buildkit",
+            "--output",
+            "json",
+        ]),
+        "read remote BuildKit deployment identity",
+    )?;
+    let value: serde_json::Value = serde_json::from_str(&output).map_err(|error| AppError::Io {
+        role: "parse remote BuildKit deployment identity",
+        detail: error.to_string(),
+    })?;
+    let image = value
+        .pointer("/spec/template/spec/containers/0/image")
+        .and_then(serde_json::Value::as_str);
+    let configured = value
+        .pointer("/spec/template/metadata/annotations/labweaver.io~1configuration-sha256")
+        .and_then(serde_json::Value::as_str);
+    let ready = value
+        .pointer("/status/readyReplicas")
+        .and_then(serde_json::Value::as_u64);
+    let updated = value
+        .pointer("/status/updatedReplicas")
+        .and_then(serde_json::Value::as_u64);
+    let configuration_is_sha256 = configured.is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    });
+    if image != Some(expected_image)
+        || ready != Some(1)
+        || updated != Some(1)
+        || !configuration_is_sha256
+    {
         return Err(AppError::PlatformImage {
             code: "LW_PACKAGE_TOOL_IDENTITY_MISMATCH",
-            detail: "BuildKit driver image digest differs from the component lock".to_owned(),
+            detail: "remote BuildKit deployment image, configuration, or readiness differs from the component lock".to_owned(),
         });
     }
     Ok(())
@@ -844,7 +906,7 @@ fn connected_validate(manifest: &PackageManifest, root: &Path) -> Result<(), App
         role: "parse component lock",
         detail: error.to_string(),
     })?;
-    verify_tools(&lock.platform_images)?;
+    verify_tools(&lock)?;
     if sha256(&lock_bytes) != manifest.component_lock_hash {
         return manifest_invalid("component lock identity changed");
     }
