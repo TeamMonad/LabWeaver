@@ -700,6 +700,12 @@ fn build_image(
             },
         ]);
     }
+    if component != "web" {
+        command.args([
+            "--build-arg",
+            &format!("RUST_TOOLCHAIN={}", lock.rust_toolchain),
+        ]);
+    }
     command.args(["--tag", tag]);
     for (name, source) in build_base_images(component, lock) {
         command.args([
@@ -1368,6 +1374,11 @@ mod tests {
                 "{directory} must be copied by the Rust Containerfile"
             );
         }
+        assert!(containerfile.contains("RUSTUP_TOOLCHAIN=${RUST_TOOLCHAIN}"));
+        assert!(
+            std::fs::read_to_string(root.join("access-gateway/Dockerfile"))?
+                .contains("RUSTUP_TOOLCHAIN=${RUST_TOOLCHAIN}")
+        );
         Ok(())
     }
 
