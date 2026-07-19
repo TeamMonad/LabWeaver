@@ -905,6 +905,9 @@ pub async fn create_gateway_session(
     {
         return Err(ApiError::forbidden("LW_ACCESS_SSH_DENIED"));
     }
+    let target_ssh_host_key_identity_sha256 = resolved
+        .ssh_host_key_identity_sha256
+        .ok_or_else(|| ApiError::forbidden("LW_ACCESS_SSH_DENIED"))?;
     let expires_at = [
         auth.get::<OffsetDateTime, _>("expires_at"),
         candidate.get::<OffsetDateTime, _>("expires_at"),
@@ -924,7 +927,11 @@ pub async fn create_gateway_session(
     ).bind(session_id.as_uuid()).bind(candidate.get::<Uuid,_>("grant_id")).bind(candidate.get::<i64,_>("grant_revision"))
       .bind(auth.get::<Uuid,_>("actor_id")).bind(candidate.get::<Uuid,_>("endpoint_id"))
       .bind(candidate.get::<Uuid,_>("endpoint_grant_id")).bind(auth.get::<Uuid,_>("key_id"))
-      .bind(now).bind(expires_at).bind(json!({"authorizationId": authorization_id, "alias": request.alias}))
+      .bind(now).bind(expires_at).bind(json!({
+          "authorizationId": authorization_id,
+          "alias": request.alias,
+          "sshHostKeyIdentitySha256": target_ssh_host_key_identity_sha256,
+      }))
       .bind(&principal.san_uri).bind(&request.connection_id)
       .execute(&mut *tx).await.map_err(|_| ApiError::conflict("LW_ACCESS_SESSION_CONFLICT"))?;
     sqlx::query("UPDATE access.ssh_authorizations SET consumed_at=$2,session_id=$3 WHERE authorization_id=$1 AND consumed_at IS NULL")
@@ -1565,15 +1572,29 @@ async fn load_session_tx(
     tx: &mut Transaction<'_, Postgres>,
     id: GatewaySessionId,
 ) -> Result<GatewaySession, ApiError> {
-    let row = sqlx::query("SELECT grant_id,grant_revision,endpoint_grant_id,key_id,gateway_identity,connection_id,revision,state,started_at,last_heartbeat_at,termination_requested_at,terminate_by,terminated_at,close_reason_code FROM access.gateway_sessions WHERE session_id=$1")
+    let row = sqlx::query("SELECT grant_id,grant_revision,endpoint_grant_id,key_id,contract,gateway_identity,connection_id,revision,state,started_at,last_heartbeat_at,termination_requested_at,terminate_by,terminated_at,close_reason_code FROM access.gateway_sessions WHERE session_id=$1")
         .bind(id.as_uuid()).fetch_optional(&mut **tx).await.map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?
         .ok_or_else(|| ApiError::not_found("LW_ACCESS_SESSION_NOT_FOUND"))?;
+    let contract = row.get::<Value, _>("contract");
+    let target_alias = contract
+        .get("alias")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?
+        .to_owned();
+    let target_ssh_host_key_identity_sha256 = contract
+        .get("sshHostKeyIdentitySha256")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?
+        .parse::<Sha256Digest>()
+        .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?;
     let session = GatewaySession {
         id,
         access_grant_id: typed_id(row.get("grant_id"))?,
         access_grant_revision: revision(row.get("grant_revision"))?,
         endpoint_grant_id: typed_id(row.get("endpoint_grant_id"))?,
         ssh_public_key_id: typed_id(row.get("key_id"))?,
+        target_alias,
+        target_ssh_host_key_identity_sha256,
         gateway_identity: row.get("gateway_identity"),
         connection_id: row.get("connection_id"),
         revision: revision(row.get("revision"))?,

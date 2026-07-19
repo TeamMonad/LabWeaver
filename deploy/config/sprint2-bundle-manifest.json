@@ -123,7 +123,6 @@
       "postgres-ca.pem"
     ],
     "openssh-gateway-secrets": [
-      "known_hosts",
       "mtls-ca.pem",
       "mtls.crt",
       "mtls.key",

@@ -70,6 +70,13 @@ flowchart LR
 
 The current P0 authenticates the fixed `gateway` Unix account, then accepts only `connect <server-alias>` as `SSH_ORIGINAL_COMMAND`. This ordering is required because OpenSSH rejects an unknown Unix account before `AuthorizedKeysCommand` can run. The alias is a strict database lookup key and never contains or derives host/port. The first phase binds a short-lived one-time token to Gateway, connection, actor and key; redemption binds it to the exact grant revision and endpoint after a fresh Environment eligibility decision. Route resolution stays in #53/#63.
 
+The same redemption returns only the selected alias and the digest of the
+Environment-observed host-key fingerprint. The Gateway's local
+`KnownHostsCommand` validates the key offered by the target against that digest
+before OpenSSH can start the terminal. This closes the dynamic VM host-key
+boundary without copying target addresses into Access or maintaining a stale
+cluster-wide `known_hosts` file.
+
 The following `DirectAccessGrant` and Guacamole sections are retained only as a deferred future proposal and are not requirements or completion evidence for #49/#53/#63.
 
 Browser SSH and VNC use Guacamole. The portal completes Authorization Code plus PKCE with Keycloak, then receives a one-time, short-lived handoff token from Access Service. The custom Guacamole extension validates that token over an internal mutually authenticated channel, loads only the current authorized connection, and does not expose the token or endpoint credential to the browser. Code-server, Jupyter and other HTTP endpoints remain Access Gateway paths.

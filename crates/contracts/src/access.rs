@@ -445,6 +445,11 @@ pub struct GatewaySession {
     pub access_grant_revision: Revision,
     pub endpoint_grant_id: EndpointGrantId,
     pub ssh_public_key_id: SshPublicKeyId,
+    /// Server-generated DNS alias selected by the fixed `connect` command.
+    pub target_alias: String,
+    /// Environment-authoritative digest of the exact OpenSSH host-key
+    /// fingerprint expected from the selected target.
+    pub target_ssh_host_key_identity_sha256: crate::Sha256Digest,
     pub gateway_identity: String,
     pub connection_id: String,
     pub revision: Revision,
@@ -462,6 +467,13 @@ impl GatewaySession {
     pub fn validate(&self) -> Result<(), AccessError> {
         if self.gateway_identity.trim().is_empty()
             || self.connection_id.trim().is_empty()
+            || self.target_alias.len() != 23
+            || !self.target_alias.starts_with("lw-")
+            || !self
+                .target_alias
+                .bytes()
+                .skip(3)
+                .all(|byte| byte.is_ascii_lowercase() || matches!(byte, b'2'..=b'7'))
             || self.last_heartbeat_at < self.opened_at
         {
             return Err(AccessError::InvalidSession);
@@ -609,6 +621,10 @@ mod tests {
             access_grant_revision: revision(2),
             endpoint_grant_id: EndpointGrantId::new(),
             ssh_public_key_id: SshPublicKeyId::new(),
+            target_alias: "lw-abcdefghijklmnopqrst".to_owned(),
+            target_ssh_host_key_identity_sha256: crate::Sha256Digest::of_bytes(
+                b"SHA256:target-host-key",
+            ),
             gateway_identity: "spiffe://labweaver/gateway".to_owned(),
             connection_id: "connection-1".to_owned(),
             revision: revision(3),

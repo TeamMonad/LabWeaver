@@ -31,6 +31,14 @@ SSE uses `GET /api/v1/events?courseId=...`. `Last-Event-ID` and `after` are equi
 
 OpenSSH authenticates only the fixed local account `gateway`. `AuthorizedKeysCommand` accepts the presented key and Gateway identity but deliberately has no target field because OpenSSH resolves the local account before running the helper. The client selects one server-generated alias only through the exact forced-command grammar `connect lw-<id>`. Access Service revalidates that alias, key, actor, grant, membership and Environment endpoint before consuming the one-time token. Neither phase accepts a target host/port, generic shell, forwarding, SCP or SFTP semantics.
 
+The redeemed `GatewaySession` carries the server-generated alias and the
+Environment-authoritative SHA-256 identity of the observed OpenSSH host-key
+fingerprint. The Gateway supplies a per-connection `KnownHostsCommand`: it
+recomputes the fingerprint from the key offered during the handshake, hashes
+that exact fingerprint string, and emits a host-key line only when both the
+alias and identity match the session. A static `known_hosts` file, trust-on-first-use,
+and `StrictHostKeyChecking=no` are not valid deployment fallbacks.
+
 The Gateway creates, heartbeats and closes sessions through dedicated request types. A one-time opaque token is bound to Gateway identity, connection, key, grant revision and endpoint; only its SHA-256 digest is stored and consumption is atomic. A session records the key and grant revision. Revocation creates an explicit `terminating` deadline, and a missing close receipt becomes `terminationOverdue` rather than a successful close.
 
 Environment exposes a read-only mTLS endpoint-eligibility decision bound to environment/course/subject/revision, eligibility/Lease expiry and the exact requested endpoint protocol, health and revision. The response never contains host, port, credentials or Provider internals, and Access never reads the Environment schema directly.

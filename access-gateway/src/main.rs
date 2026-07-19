@@ -128,6 +128,15 @@ async fn run() -> Result<(), GatewayError> {
             )
             .await
         }
+        Some("known-host") => {
+            let host = args.next().ok_or(GatewayError::InvalidInput)?;
+            let fingerprint = args.next().ok_or(GatewayError::InvalidInput)?;
+            let encoded_key = args.next().ok_or(GatewayError::InvalidInput)?;
+            if args.next().is_some() {
+                return Err(GatewayError::InvalidInput);
+            }
+            known_host(&host, &fingerprint, &encoded_key)
+        }
         _ => Err(GatewayError::InvalidInput),
     }
 }
@@ -207,6 +216,11 @@ async fn force_command(
             "/etc/labweaver/target-ssh.conf",
             &format!("lab@{alias}"),
         ])
+        .env("LABWEAVER_TARGET_ALIAS", &session.target_alias)
+        .env(
+            "LABWEAVER_TARGET_HOST_KEY_IDENTITY_SHA256",
+            session.target_ssh_host_key_identity_sha256.to_string(),
+        )
         .kill_on_drop(true)
         .spawn()
         .map_err(|_| GatewayError::Target)?;
@@ -243,6 +257,44 @@ async fn force_command(
     };
     close_session(config, &session, connection_id, result.is_ok()).await?;
     result
+}
+
+fn known_host(host: &str, fingerprint: &str, encoded_key: &str) -> Result<(), GatewayError> {
+    let expected_host = required_env("LABWEAVER_TARGET_ALIAS")?;
+    let expected_identity = required_env("LABWEAVER_TARGET_HOST_KEY_IDENTITY_SHA256")?;
+    let line = verified_known_host_line(
+        host,
+        fingerprint,
+        encoded_key,
+        &expected_host,
+        &expected_identity,
+    )?;
+    println!("{line}");
+    Ok(())
+}
+
+fn verified_known_host_line(
+    host: &str,
+    fingerprint: &str,
+    encoded_key: &str,
+    expected_host: &str,
+    expected_identity: &str,
+) -> Result<String, GatewayError> {
+    validate_alias(host)?;
+    if expected_host != host {
+        return Err(GatewayError::Authority);
+    }
+    let key = PublicKey::from_openssh(&format!("ssh-ed25519 {encoded_key}"))
+        .map_err(|_| GatewayError::InvalidInput)?;
+    let observed_fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
+    if observed_fingerprint != fingerprint {
+        return Err(GatewayError::Authority);
+    }
+    let observed_identity = format!("{:x}", Sha256::digest(fingerprint.as_bytes()));
+    if observed_identity != expected_identity {
+        return Err(GatewayError::Authority);
+    }
+    Ok(format!("{host} ssh-ed25519 {encoded_key}"))
 }
 
 async fn close_session(
@@ -310,7 +362,7 @@ fn validate_alias(value: &str) -> Result<(), GatewayError> {
         && value
             .bytes()
             .skip(3)
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
+            .all(|byte| byte.is_ascii_lowercase() || matches!(byte, b'2'..=b'7'));
     valid.then_some(()).ok_or(GatewayError::InvalidInput)
 }
 
@@ -370,5 +422,35 @@ mod tests {
         ] {
             assert!(parse_connect_command(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn known_host_requires_the_authoritative_alias_and_fingerprint_identity() {
+        let key = PublicKey::from_openssh(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFuGX5eSWJQm3kb+Jv4H0jHnI9I8FvkCcP9p3u3Cz5yz",
+        )
+        .expect("key");
+        let fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
+        let identity = format!("{:x}", Sha256::digest(fingerprint.as_bytes()));
+        assert!(
+            verified_known_host_line(
+                "lw-abcdefghijklmnopqrst",
+                &fingerprint,
+                "AAAAC3NzaC1lZDI1NTE5AAAAIFuGX5eSWJQm3kb+Jv4H0jHnI9I8FvkCcP9p3u3Cz5yz",
+                "lw-abcdefghijklmnopqrst",
+                &identity,
+            )
+            .is_ok()
+        );
+        assert!(
+            verified_known_host_line(
+                "lw-bbcdefghijklmnopqrst",
+                &fingerprint,
+                "AAAAC3NzaC1lZDI1NTE5AAAAIFuGX5eSWJQm3kb+Jv4H0jHnI9I8FvkCcP9p3u3Cz5yz",
+                "lw-abcdefghijklmnopqrst",
+                &identity,
+            )
+            .is_err()
+        );
     }
 }

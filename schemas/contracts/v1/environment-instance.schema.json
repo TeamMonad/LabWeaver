@@ -111,6 +111,17 @@
         },
         "revision": {
           "$ref": "#/$defs/Revision"
+        },
+        "sshHostKeyIdentitySha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256Digest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "SHA-256 of the OpenSSH host-key fingerprint string observed by the\nruntime executor. Required for SSH and absent for non-SSH endpoints."
         }
       },
       "required": [

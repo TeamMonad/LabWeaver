@@ -1596,6 +1596,7 @@ impl EnvironmentProvider for LifecycleSuccessProvider {
                         protocol: EndpointProtocol::Https,
                         revision: next_revision,
                         health: EndpointHealth::Healthy,
+                        ssh_host_key_identity_sha256: None,
                         observed_at: timestamp("2026-07-14T00:01:00.000Z"),
                     }],
                     cleanup_evidence: None,

@@ -28,6 +28,10 @@
       "minimum": 0,
       "type": "integer"
     },
+    "Sha256Digest": {
+      "description": "Canonical lowercase SHA-256 digest.",
+      "type": "string"
+    },
     "SshPublicKeyId": {
       "description": "Strongly typed UUIDv7 identifier for `SshPublicKeyId`.",
       "type": "string"
@@ -90,6 +94,14 @@
     "state": {
       "$ref": "#/$defs/GatewaySessionState"
     },
+    "targetAlias": {
+      "description": "Server-generated DNS alias selected by the fixed `connect` command.",
+      "type": "string"
+    },
+    "targetSshHostKeyIdentitySha256": {
+      "$ref": "#/$defs/Sha256Digest",
+      "description": "Environment-authoritative digest of the exact OpenSSH host-key\nfingerprint expected from the selected target."
+    },
     "terminateBy": {
       "anyOf": [
         {
@@ -117,6 +129,8 @@
     "accessGrantRevision",
     "endpointGrantId",
     "sshPublicKeyId",
+    "targetAlias",
+    "targetSshHostKeyIdentitySha256",
     "gatewayIdentity",
     "connectionId",
     "revision",

@@ -252,6 +252,9 @@ async fn resolve_endpoint_eligibility(
             protocol: EndpointProtocol::Ssh,
             revision: request.expected_revision,
             health,
+            ssh_host_key_identity_sha256: Some(contracts::Sha256Digest::of_bytes(
+                b"SHA256:test-host-key",
+            )),
             observed_at: "2026-07-15T00:00:00.000Z"
                 .parse()
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,

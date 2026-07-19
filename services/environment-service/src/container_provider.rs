@@ -1556,6 +1556,7 @@ fn ready_observation(
             protocol: contracts::environment::EndpointProtocol::Https,
             revision,
             health: EndpointHealth::Healthy,
+            ssh_host_key_identity_sha256: None,
             observed_at: observed.observed_at,
         }],
         cleanup_evidence: None,

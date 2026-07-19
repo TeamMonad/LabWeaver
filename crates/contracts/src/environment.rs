@@ -410,6 +410,9 @@ pub struct EnvironmentEndpoint {
     pub protocol: EndpointProtocol,
     pub revision: Revision,
     pub health: EndpointHealth,
+    /// SHA-256 of the OpenSSH host-key fingerprint string observed by the
+    /// runtime executor. Required for SSH and absent for non-SSH endpoints.
+    pub ssh_host_key_identity_sha256: Option<crate::Sha256Digest>,
     pub observed_at: UtcTimestamp,
 }
 
@@ -574,7 +577,10 @@ impl EnvironmentInstance {
             && (self.observed_generation != self.generation
                 || self.endpoints.is_empty()
                 || self.endpoints.iter().any(|endpoint| {
-                    endpoint.health != EndpointHealth::Healthy || endpoint.revision != self.revision
+                    endpoint.health != EndpointHealth::Healthy
+                        || endpoint.revision != self.revision
+                        || (endpoint.protocol == EndpointProtocol::Ssh)
+                            != endpoint.ssh_host_key_identity_sha256.is_some()
                 }))
         {
             return Err(EnvironmentError::ReadyWithoutHealthyEndpoint);
@@ -834,10 +840,11 @@ impl EnvironmentEndpointEligibility {
             || self.environment_revision != request.expected_revision
             || self.eligibility_expires_at <= now
             || requested != returned
-            || self
-                .endpoints
-                .iter()
-                .any(|endpoint| endpoint.health != EndpointHealth::Healthy)
+            || self.endpoints.iter().any(|endpoint| {
+                endpoint.health != EndpointHealth::Healthy
+                    || (endpoint.protocol == EndpointProtocol::Ssh)
+                        != endpoint.ssh_host_key_identity_sha256.is_some()
+            })
         {
             return Err(EnvironmentError::EndpointEligibilityInvalid);
         }
