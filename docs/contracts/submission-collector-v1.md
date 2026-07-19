@@ -21,6 +21,13 @@ The current collector accepts `source: workspace`. It does not execute an
 identity selects PVC; VirtualMachine identity selects SSH/SFTP. A cross-kind
 binding is rejected.
 
+The same Evaluation image exposes only the fixed `--mode freeze-worker`
+process for a Job. It reads one deployment-owned configuration file and one
+strict immutable command file from absolute mounted paths. PVC collection is
+hard-bound to the read-only `/workspace` mount; VM collection accepts only the
+bounded SFTP fields below. This mode contains no shell runner, Kubernetes
+client, Evaluation Runner, Checker, Aggregator, or scoring entry point.
+
 ## PVC source
 
 The collector receives a deployment-mounted read-only workspace root and opens

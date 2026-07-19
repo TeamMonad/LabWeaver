@@ -1,0 +1,20 @@
+databaseUrlFile: /etc/labweaver/secrets/database-url
+databaseMaxConnections: 2
+objectStore:
+  binding: minio-submissions-v1
+  endpoint: https://minio.labweaver-infra.svc:9000
+  bucket: labweaver-submissions
+  region: us-east-1
+  objectPrefix: frozen-submissions
+  uploadTtlSeconds: 300
+  maxObjectBytes: 100663296
+  forcePathStyle: true
+objectStoreAccessKeyFile: /etc/labweaver/secrets/minio-access-key
+objectStoreSecretKeyFile: /etc/labweaver/secrets/minio-secret-key
+objectStoreSessionTokenFile: null
+objectPrefix: frozen-submissions
+workerId: replaced-by-freeze-job-identity
+collectorLimits:
+  maxSourceBytes: 67108864
+  maxArchiveBytes: 100663296
+  maxFiles: 10000
