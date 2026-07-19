@@ -29,6 +29,10 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with $root.Values.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       securityContext:
         runAsNonRoot: {{ not (default false $configuration.gateway) }}
         runAsUser: {{ ternary 0 (default 65532 $configuration.runAsUser) (default false $configuration.gateway) }}

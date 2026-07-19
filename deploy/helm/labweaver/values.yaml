@@ -9,6 +9,11 @@ images:
 
 imagePullSecrets: []
 
+# Static aliases are only for adopted, stable infrastructure VIPs whose names
+# are already part of the reviewed Sprint 2 configuration. They do not replace
+# service discovery for LabWeaver workloads.
+hostAliases: []
+
 workloads:
   control-service:
     enabled: true
@@ -172,3 +177,4 @@ network:
     matchLabels: {labweaver.io/environment: "true"}
   kubernetesApiCidrs: []
   gatewayIngressCidrs: []
+  externalServiceEndpoints: []

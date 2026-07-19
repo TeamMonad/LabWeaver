@@ -62,6 +62,14 @@ spec:
       ports:
         - {protocol: UDP, port: 53}
         - {protocol: TCP, port: 53}
+    {{- range $endpoint := $root.Values.network.externalServiceEndpoints }}
+    - to:
+        - ipBlock: {cidr: {{ required "network.externalServiceEndpoints[].cidr is required" $endpoint.cidr | quote }}}
+      ports:
+        {{- range $port := required "network.externalServiceEndpoints[].ports is required" $endpoint.ports }}
+        - {protocol: TCP, port: {{ $port }}}
+        {{- end }}
+    {{- end }}
     {{- if $configuration.kubernetesApi }}
     {{- if empty $root.Values.network.kubernetesApiCidrs }}
     {{- fail "network.kubernetesApiCidrs must identify the adopted API endpoint when runtime executors are enabled" }}

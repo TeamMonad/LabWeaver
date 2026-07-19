@@ -808,8 +808,10 @@ fn platform_digest_from_manifest(
 ) -> Result<String, AppError> {
     let single_manifest = matches!(
         value.get("mediaType").and_then(serde_json::Value::as_str),
-        Some("application/vnd.oci.image.manifest.v1+json")
-            | Some("application/vnd.docker.distribution.manifest.v2+json")
+        Some(
+            "application/vnd.oci.image.manifest.v1+json"
+                | "application/vnd.docker.distribution.manifest.v2+json"
+        )
     );
     if single_manifest {
         let digest = value
