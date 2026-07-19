@@ -126,6 +126,39 @@
   become: true
   no_log: true
 
+- name: Install the adopted Harbor CA in the control-plane system trust
+  ansible.builtin.copy:
+    dest: /etc/pki/ca-trust/source/anchors/labweaver-harbor-nginx.crt
+    owner: root
+    group: root
+    mode: '0644'
+    content: "{{ sprint2_harbor_nginx_secret_read.resources[0].data['ca.crt'] | b64decode }}"
+  register: sprint2_harbor_system_ca
+  no_log: true
+
+- name: Refresh control-plane system trust after a Harbor CA change
+  ansible.builtin.command:
+    argv: [/usr/bin/update-ca-trust, extract]
+  when: sprint2_harbor_system_ca.changed
+  changed_when: true
+
+- name: Ensure the container-client Harbor trust directory exists
+  ansible.builtin.file:
+    path: "/etc/containers/certs.d/{{ harbor_hostname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Install the adopted Harbor CA for container clients
+  ansible.builtin.copy:
+    dest: "/etc/containers/certs.d/{{ harbor_hostname }}/ca.crt"
+    owner: root
+    group: root
+    mode: '0644'
+    content: "{{ sprint2_harbor_nginx_secret_read.resources[0].data['ca.crt'] | b64decode }}"
+  no_log: true
+
 - name: Adopt the existing Harbor Gateway as TLS passthrough
   kubernetes.core.k8s:
     kubeconfig: "{{ harbor_kubeconfig_path }}"

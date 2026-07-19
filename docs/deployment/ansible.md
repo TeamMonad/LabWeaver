@@ -74,8 +74,9 @@ is left in place but no longer attaches to the TLS-only listener. TestFlight tem
 named and selected by its run ID, so cleanup cannot target another run.
 The command also publishes the public nginx CA to the fixed root-controlled
 operator locator. BuildKit and packaging inputs must consume that CA after the
-route changes; retaining the previous Gateway-termination CA is a blocking TLS
-identity mismatch.
+route changes; it installs the same public CA in the control-plane system and
+container-client trust stores. Retaining the previous Gateway-termination CA is
+a blocking TLS identity mismatch.
 
 `ansible-lint`, syntax checks, encrypted fictional-Vault loading, and storage
 safety fixtures run on Linux CI. The approved router or A-owned WSL controller worktree additionally
