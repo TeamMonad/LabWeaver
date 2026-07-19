@@ -12,7 +12,7 @@
     "runId": {"$ref": "#/$defs/uuid"},
     "deploymentManifest": {"$ref": "#/$defs/evidence"},
     "migrationCatalog": {"$ref": "#/$defs/evidence"},
-    "platformImages": {"type": "array", "minItems": 6, "maxItems": 6, "items": {"$ref": "#/$defs/image"}},
+    "platformImages": {"type": "array", "minItems": 7, "maxItems": 7, "items": {"$ref": "#/$defs/image"}},
     "runtimeArtifacts": {"type": "array", "minItems": 2, "items": {"$ref": "#/$defs/artifact"}},
     "checks": {"type": "array", "minItems": 10, "maxItems": 10, "items": {"$ref": "#/$defs/check"}}
   },

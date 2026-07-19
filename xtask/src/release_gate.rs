@@ -11,11 +11,12 @@ use super::AppError;
 const INPUT_SCHEMA: &str = "schemas/results/sprint2-release-gate-input.v1.schema.json";
 const REPORT_SCHEMA: &str = "schemas/results/release-gate-report.schema.json";
 const DEPLOYMENT_SCHEMA: &str = "schemas/results/platform-image-deployment-manifest.v1.schema.json";
-const PLATFORM_COMPONENTS: [&str; 6] = [
+const PLATFORM_COMPONENTS: [&str; 7] = [
     "access-service",
     "agent-service",
     "control-service",
     "environment-service",
+    "evaluation-service",
     "openssh-gateway",
     "web",
 ];
@@ -197,7 +198,7 @@ fn validate_input(root: &Path, input: &GateInput) -> Result<(), AppError> {
         .iter()
         .map(|item| item.component.as_str())
         .collect::<BTreeSet<_>>();
-    if input.platform_images.len() != 6
+    if input.platform_images.len() != 7
         || platform_components != PLATFORM_COMPONENTS.into_iter().collect()
         || input
             .platform_images
@@ -206,7 +207,7 @@ fn validate_input(root: &Path, input: &GateInput) -> Result<(), AppError> {
     {
         return Err(gate(
             "LW_RELEASE_GATE_IMAGE_IDENTITY_INVALID",
-            "six immutable platform image identities are required",
+            "seven immutable platform image identities are required",
         ));
     }
     unique_nonempty(
@@ -547,7 +548,7 @@ mod tests {
                 "evidence": {"path": path, "sha256": file_hash(root, &path)?}
             }));
         }
-        let images = ["control-service", "access-service", "agent-service", "environment-service", "openssh-gateway", "web"]
+        let images = ["control-service", "access-service", "agent-service", "environment-service", "evaluation-service", "openssh-gateway", "web"]
             .into_iter()
             .enumerate()
             .map(|(index, component)| json!({
