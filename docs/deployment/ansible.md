@@ -221,6 +221,11 @@ Ubuntu 24.04 VM base。Registry manifest digest 与磁盘 SHA-256 固定在
 StorageClass 或 hash 不一致就会阻断，不会被覆盖。导入成功后发布
 `ubuntu-lab-base-v1`，供 KubeVirt executor 通过 CDI `sourceRef` 克隆。
 
+门户与 OpenSSH Gateway 复用现有 public Gateway，但只做有界的增量采用：缺失时分别
+增加 HTTPS/443 与 TCP/2222 listener，并创建独立 HTTPRoute/TCPRoute 和
+ReferenceGrant；已存在但协议、端口、hostname 或路由范围不一致时立即阻断。门户 CA
+仅写入保留路由器的系统 trust store，验证过程不使用 `-k` 或其他跳过 TLS 校验的参数。
+
 This command is fail-closed and non-destructive. It applies a baseline only to
 a domain with no existing business relations and an empty migration ledger;
 otherwise it requires the exact catalog and migration hashes. Access seed rows

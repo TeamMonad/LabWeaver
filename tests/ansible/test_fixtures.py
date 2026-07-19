@@ -207,6 +207,25 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("data_source_name: ubuntu-lab-base-v1", lock)
         self.assertNotIn("state: absent", tasks)
 
+    def test_sprint2_application_adopts_bounded_portal_and_ssh_routes(self) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        portal = (ROOT / "deploy/helm/labweaver/templates/portal-route.yaml").read_text(
+            encoding="utf-8"
+        )
+        ssh_route = (
+            ROOT / "deploy/helm/labweaver/templates/ssh-gateway-route.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("SPRINT2_APPLICATION_PORTAL_GATEWAY_CONFLICT", tasks)
+        self.assertIn("SPRINT2_APPLICATION_SSH_GATEWAY_CONFLICT", tasks)
+        self.assertIn("SPRINT2_APPLICATION_SSH_ROUTE_INVALID", tasks)
+        self.assertIn("Refresh retained router trust", tasks)
+        self.assertIn("kind: HTTPRoute", portal)
+        self.assertIn("kind: TCPRoute", ssh_route)
+        self.assertIn("name: openssh-gateway", ssh_route)
+        self.assertNotIn("state: absent", tasks)
+
     def test_deploy_starts_with_preflight(self) -> None:
         site = (ROOT / "deploy/ansible/playbooks/site.yml").read_text(encoding="utf-8")
         self.assertEqual(site.splitlines()[1], "- import_playbook: 00-preflight.yml")

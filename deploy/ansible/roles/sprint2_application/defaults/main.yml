@@ -92,6 +92,12 @@ sprint2_application_portal_hostname: ""
 sprint2_application_portal_tls_secret_name: labweaver-sprint2-tls
 sprint2_application_portal_tls_certificate_file: ""
 sprint2_application_portal_tls_key_file: ""
+sprint2_application_portal_tls_ca_file: ""
+sprint2_application_ssh_route_namespace: ""
+sprint2_application_ssh_route_name: ""
+sprint2_application_ssh_gateway_name: ""
+sprint2_application_ssh_gateway_listener_name: ssh
+sprint2_application_ssh_gateway_port: 2222
 sprint2_application_workloads:
   - control-service
   - access-service

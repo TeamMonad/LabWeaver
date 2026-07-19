@@ -1,0 +1,38 @@
+{{- if .Values.sshGatewayRoute.enabled }}
+{{- $routeNamespace := required "sshGatewayRoute.namespace is required" .Values.sshGatewayRoute.namespace }}
+{{- $routeName := required "sshGatewayRoute.name is required" .Values.sshGatewayRoute.name }}
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: {{ $routeName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "labweaver.labels" . | nindent 4 }}
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: TCPRoute
+      namespace: {{ $routeNamespace }}
+  to:
+    - group: ""
+      kind: Service
+      name: openssh-gateway
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: TCPRoute
+metadata:
+  name: {{ $routeName }}
+  namespace: {{ $routeNamespace }}
+  labels:
+    {{- include "labweaver.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - name: {{ required "sshGatewayRoute.gatewayName is required" .Values.sshGatewayRoute.gatewayName }}
+      sectionName: {{ required "sshGatewayRoute.gatewaySectionName is required" .Values.sshGatewayRoute.gatewaySectionName }}
+  rules:
+    - backendRefs:
+        - name: openssh-gateway
+          namespace: {{ .Release.Namespace }}
+          port: 2222
+{{- end }}

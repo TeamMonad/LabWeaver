@@ -41,9 +41,13 @@ Copy and specialize the examples as follows:
 
 Environment-specific Helm values must explicitly bind adopted infrastructure names and VIPs. This
 includes reviewed `hostAliases`, matching `/32` entries under
-`network.externalServiceEndpoints`, and an opt-in `portalRoute`. The route creates a new
-application HTTPRoute and ReferenceGrant; it does not replace a retained Gateway or existing
-route. `sprint2-application` fails unless that route is both `Accepted` and `ResolvedRefs`.
+`network.externalServiceEndpoints`, an opt-in `portalRoute`, and an opt-in
+`sshGatewayRoute`. The routes create new application HTTPRoute/TCPRoute and ReferenceGrant
+objects; they do not replace a retained Gateway or existing route. The application role may add
+only the exact reviewed HTTPS and TCP/2222 listeners when they are absent and rejects a conflicting
+listener. `sprint2-application` fails unless both enabled routes are `Accepted` and `ResolvedRefs`.
+The portal authority is installed only in the retained router system trust so controller-side
+verification never disables TLS validation.
 
 The private Keycloak representation is imported when the realm is absent. For a retained realm,
 the role uses `partialImport` with `ifResourceExists=SKIP`, then reads back the required client,
