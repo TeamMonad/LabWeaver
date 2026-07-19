@@ -11,7 +11,7 @@ Current source baseline: `release/sprint2` created from
 
 | Capability | Owner | State | Current evidence | Blocker or limitation |
 | --- | --- | --- | --- | --- |
-| Six service and six PostgreSQL domain boundaries | A | implemented | Cargo workspace, service crates, deterministic catalog and one `0001_sprint2_baseline.sql` per domain | destructive reset only; no pre-reset business-data upgrade path; Evaluation and Resource have no Sprint 2 production path |
+| Six service and six PostgreSQL domain boundaries | A | implemented | Cargo workspace, service crates, deterministic catalog and one `0001_sprint2_baseline.sql` per domain | destructive reset only; no pre-reset business-data upgrade path; Resource has no Sprint 2 production path |
 | Contracts, OpenAPI and Web SDK | A/C | implemented, simplifying | Rust contract tests and generated projections | v1/v2 event duplication and removed trust fields must be collapsed to the ADR 0011 v1 contract |
 | Keycloak/OIDC and course-scoped authorization | A | implemented locally | Access BFF, bearer/mTLS checks, PostgreSQL tests | same-build deployed Keycloak/browser/Gateway verification is pending |
 | Control material, AgentRun, candidate approval and release | A/B | implemented locally | PostgreSQL, MinIO, JetStream and mTLS integration tests | deployment configuration and connected executors are pending |
@@ -21,13 +21,25 @@ Current source baseline: `release/sprint2` created from
 | Container runtime | B | implemented locally | deterministic plan, persistent fence and restricted Kubernetes SSA/observe/scale/restart/delete backend | connected Kubernetes apply, object-lock cleanup and access replay are pending |
 | KubeVirt runtime | B | implemented locally | deterministic VM/CDI plan, independent persistent fence, restricted API/subresource backend and SSH host-key probe | real KubeVirt/CDI/guest-agent/SSH/cleanup replay is pending |
 | AccessGrant and session authorization | A | implemented locally | fixed local OpenSSH account, post-auth alias redemption, one-time token and session contracts | built Gateway image and connected expiry/revocation replay are pending |
-| Dual-runtime submission freeze | B | implemented locally | bounded PVC/SFTP collection and immutable MinIO tests | deployment certificate issuer and real PVC/VM replay are pending |
+| Freeze-only Evaluation Service | B | implemented locally | Evaluation-owned bounded PVC/SFTP collection, immutable MinIO object lock, PostgreSQL fence/outbox and integration tests | production consumer/API wiring, deployment identity and real PVC/VM replay are pending; Runner, Checker, Aggregator and scoring are excluded |
 | Web teacher/student journeys | C | implemented against SDK and fixture modes | component, SDK and fixture Playwright tests | real Keycloak and same-build backend Playwright remain pending |
 | Sprint 2 Helm deployment | A/D | implemented locally | nine-workload render, per-process config/Secret mounts, health probes, independent Container/KubeVirt RBAC and fail-closed API CIDR test | connected rollout, RBAC denial checks and Gateway startup remain pending |
-| Sprint 2 data foundation | A/D | implemented locally | digest-locked PostgreSQL, NATS JetStream and MinIO StatefulSets; TLS, persistent storage, restricted Pod Security, default-deny NetworkPolicy, strict private bundle and Linux Ansible syntax/lint | target deployment, NATS operator/JWT configuration, TLS identities and second idempotent replay remain pending |
+| Sprint 2 data foundation | A/D | verified on adopted target | digest-locked PostgreSQL, NATS JetStream and MinIO StatefulSets; TLS, persistent storage, restricted Pod Security, default-deny NetworkPolicy, strict private bundle; a second reconciliation at source identity `4ced06d` changed nothing | this is retained-foundation evidence only, not application deployment or Sprint 2 E3 |
 | Demo replay and Release Gate | A/D | implemented locally | exact connected check set, evidence rehash, clean-HEAD/deployment/catalog/image/Run binding, tamper test and stable missing-input diagnostics | Linux infrastructure Verify, real Keycloak Playwright and same-build passing report remain pending |
 | Private Sigstore, Kyverno and Packer | A/D | removed from active source | ADR 0006 is Superseded; active contracts, Chart and CI contain no trust-plane gate; guarded reset role inventories policy dependencies before uninstall | adopted-cluster execution and sanitized reset report remain pending |
-| Sprint 2 destructive reset | A/D | implemented locally | cluster/run-bound confirmation, six dependency probes before mutation, reviewed ConfigMap/Secret bundle boundary, Kyverno dependency guard, exact data reset, baseline apply, double deploy, atomic rollback drill and schema-defined report | retained data foundation is not deployed, BuildKit is absent and private controller inputs are incomplete; connected execution is fail-fast blocked before deletion |
+| Sprint 2 destructive reset | A/D | implemented locally | cluster/run-bound confirmation, six dependency probes before mutation, reviewed ConfigMap/Secret bundle boundary, Kyverno dependency guard, exact data reset, baseline apply, double deploy, atomic rollback drill and schema-defined report | BuildKit and the complete private application bundle are absent; connected execution remains fail-fast blocked before deletion |
+
+## Accepted Sprint 2 security exceptions
+
+- The rootless BuildKit namespace may use `Unconfined` seccomp/AppArmor and
+  `--oci-worker-no-process-sandbox`. It must remain non-privileged and may not
+  use HostPath or hostNetwork. This exception is limited to the pinned BuildKit
+  workload and is not a general Pod Security relaxation.
+- Container and KubeVirt executor ClusterRoles retain broad namespace CRUD for
+  Sprint 2. Separate ServiceAccounts and application ownership checks are
+  compensating controls, not proof of least privilege. Production release is
+  blocked until the RBAC is narrowed or enforced by a native admission
+  boundary.
 
 ## Release decision
 

@@ -22,11 +22,14 @@ record of the previous design.
 
 ### Product boundary
 
-Sprint 2 ships Control, Access, Agent, Environment, Web, two owner-scoped
-executor workers, and the OpenSSH Access Gateway. Evaluation and Resource keep
-their service and schema ownership but are disabled in the Sprint 2 deployment.
-Evaluation execution, scoring, WorkConfig, resource approval, Tailnet,
-Guacamole, and additional Agent runtimes are out of scope.
+Sprint 2 ships Control, Access, Agent, Environment, Web, a freeze-only
+Evaluation Service, two owner-scoped executor workers, and the OpenSSH Access
+Gateway. Evaluation retains ownership of `FrozenSubmission` and consumes only
+the Submission freeze lifecycle; it does not run EvaluationSpec steps, a
+Runner, a Checker, an Aggregator, or scoring. Resource keeps its service and
+schema ownership but is disabled in the Sprint 2 deployment. Evaluation
+execution, scoring, WorkConfig, resource approval, Tailnet, Guacamole, and
+additional Agent runtimes are out of scope.
 
 The required journey is:
 
@@ -75,10 +78,25 @@ It is completed by two deployments built from existing service images:
 - separate `container-executor` and `kubevirt-executor` processes from the
   Environment Service image, each with its own ServiceAccount and RBAC.
 
-They have separate identities and least-privilege credentials. They preserve
-the existing generation, deadline, replay, cancellation, and cleanup fences.
-No generic plugin loader, runtime discovery, provider ordering, or fallback is
-introduced.
+They have separate identities. The BuildKit daemon runs rootless in the
+dedicated `labweaver-build` namespace. Sprint 2 explicitly permits only the
+rootless BuildKit requirements `Unconfined` seccomp/AppArmor and
+`--oci-worker-no-process-sandbox`; privileged containers, HostPath and
+hostNetwork remain prohibited. BuildKit uses mTLS, default-deny network policy,
+a dedicated ServiceAccount without Kubernetes API access, and no shared API
+process credentials.
+
+The Container and KubeVirt executors retain their current broad namespace CRUD
+ClusterRoles for Sprint 2. This is an owner-accepted, time-bounded risk, not a
+least-privilege or production-security verification. Compensating controls are
+separate ServiceAccounts, fixed executor binaries without arbitrary shell or
+`kubectl`, managed-namespace ownership checks, NetworkPolicy, generation
+fences, and structured audit events. The roles must be narrowed or protected by
+a native admission boundary before a production release.
+
+The executors preserve the existing generation, deadline, replay,
+cancellation, and cleanup fences. No generic plugin loader, runtime discovery,
+provider ordering, or fallback is introduced.
 
 ### Evidence and release
 
@@ -97,6 +115,8 @@ deployment manifest, migration catalog, image set, and run ID.
 - Kyverno itself is removed only after read-only inventory proves there are no
   non-LabWeaver consumers. Otherwise deployment stops with a blocking report.
 - The Sprint 2 Release Gate requires both Container and real KubeVirt paths.
+- Release evidence must expose the accepted broad-runtime-RBAC risk and must
+  not report least-privilege verification while the exception remains.
 - ADR 0006 is superseded for signing, transparency, attestation, and admission
   policy. Its digest, scanning, and immutable publication rationale survives in
   this ADR.

@@ -14,6 +14,11 @@ identity. Historical Issue evidence is not a current completion claim.
   cleanup and private-pull negatives pass in the adopted environment.
 - Owner: B implementation review; D connected Verify; A release judgment.
 
+The owner approved rootless BuildKit for Sprint 2 with the narrowly scoped
+`Unconfined` seccomp/AppArmor and `--oci-worker-no-process-sandbox` exception.
+Privileged containers, HostPath and hostNetwork remain prohibited. This removes
+the design-decision blocker, but not the missing deployment or connected replay.
+
 ## Container and KubeVirt runtime replay
 
 - Local restricted Kubernetes API executors, independent ServiceAccounts/RBAC,
@@ -23,6 +28,11 @@ identity. Historical Issue evidence is not a current completion claim.
 - Exit: both runtimes pass lifecycle, identity drift, stale generation,
   namespace ownership, network isolation, disk preservation and cleanup tests.
 - Owner: B implementation review; D connected Verify.
+
+The current broad Container/KubeVirt namespace CRUD ClusterRoles are an
+explicit Sprint 2 accepted risk. They are not described as least-privilege
+evidence. Production use remains blocked until RBAC is narrowed or a native
+admission boundary enforces the executor namespace/ServiceAccount fence.
 
 ## Access Gateway deployment
 
@@ -39,10 +49,11 @@ identity. Historical Issue evidence is not a current completion claim.
 
 - The repository now contains one Sprint 2 baseline migration per domain, a
   nine-workload Helm profile and a cluster/run-bound destructive reset role.
-- Blocker: read-only target inventory confirms Kubernetes/KubeVirt, Harbor and
-  Keycloak exist, but no LabWeaver PostgreSQL, NATS, MinIO or BuildKit service
-  body or reviewed private workload-configuration bundle is available on the
-  approved controller. The reset therefore remains intentionally unexecuted.
+- Blocker: read-only target inventory and the retained-foundation replay confirm
+  Kubernetes/KubeVirt, Harbor, Keycloak, PostgreSQL, NATS and MinIO, but no
+  BuildKit service body or complete reviewed private workload-configuration
+  bundle is available on the approved controller. The reset therefore remains
+  intentionally unexecuted.
   The role probes all six dependencies before its first destructive task and
   rejects a missing or malformed eight-ConfigMap/eight-Secret bundle.
 - Exit: the deployment owner supplies the missing service bodies and ignored
