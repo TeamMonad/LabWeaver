@@ -49,6 +49,7 @@ class FoundationAuthoringTests(unittest.TestCase):
                 "agent-service",
                 "build-executor",
                 "environment-service",
+                "evaluation-service",
                 "container-executor",
                 "kubevirt-executor",
             },

@@ -4,7 +4,8 @@ The only deployment controller entry points are `cargo xtask preflight --infra
 --env <environment>`, `cargo xtask deploy --infra --env <environment> --yes`,
 `cargo xtask verify --infra --env <environment> --yes`, and `cargo xtask backup
 --infra --env <environment> --yes`. The destructive Sprint 2 rebuild additionally
-uses `cargo xtask sprint2-foundation --infra --env <environment> --yes` followed by
+uses `cargo xtask sprint2-foundation --infra --env <environment> --yes`,
+`cargo xtask sprint2-buildkit --infra --env <environment> --yes`, and then
 `cargo xtask demo reset --infra --env <environment> --yes`. They run only on the approved Linux router
 worktree through `ansible-rs`; Windows fails with a stable unsupported-platform
 diagnostic. The removed Python launcher is not a deployment fallback.
@@ -98,7 +99,7 @@ python3 tools/render_sprint2_bundle.py \
 ```
 
 The authoring command creates one internal CA, separate server certificates,
-seven workload-specific NATS users and mTLS clients, the static operator/account
+eight workload-specific NATS users and mTLS clients, the static operator/account
 resolver config, and random PostgreSQL/MinIO bootstrap credentials. It accepts
 only a new private path and fixed non-world-writable OpenSSL/NSC binaries. The
 checked-in renderer then enforces the exact foundation ConfigMap/Secret key set.
@@ -107,8 +108,27 @@ checked-in renderer then enforces the exact foundation ConfigMap/Secret key set.
 cargo xtask sprint2-foundation --infra --env demo --yes
 ```
 
-This step does not deploy BuildKit. The rootless BuildKit security context is a
-separate high-risk decision and remains fail-closed until approved.
+BuildKit is reconciled separately in `labweaver-build`. Generate a distinct
+mTLS authority and exact two-object private bundle, then provide the reviewed
+Harbor endpoint CIDR in the ignored inventory:
+
+```sh
+python3 tools/prepare_sprint2_buildkit.py \
+  --output .private/sprint2-buildkit-<run-id>
+python3 tools/render_sprint2_bundle.py \
+  --manifest deploy/config/sprint2-buildkit-bundle-manifest.json \
+  --input .private/sprint2-buildkit-<run-id>/render-input \
+  --output .private/sprint2-buildkit-<run-id>/bundle.yml
+cargo xtask sprint2-buildkit --infra --env demo --yes
+```
+
+The BuildKit namespace is the sole approved Sprint 2 exception for
+`Unconfined` seccomp/AppArmor and `--oci-worker-no-process-sandbox`. The
+workload remains non-root, non-privileged, without HostPath or hostNetwork, and
+without Kubernetes API credentials. Its gRPC endpoint requires mTLS; the
+generated `build-executor-client` material is injected only into the
+`build-executor` Secret. Default-deny NetworkPolicy admits that workload and
+the reviewed Harbor CIDR only.
 
 `demo reset` runs only the allowlisted `93-sprint2-reset.yml` playbook. It is a
 pre-release destructive operation: there is no upgrade or restore guarantee for

@@ -68,11 +68,13 @@ fixture evidence is static deployment evidence only. At source identity
 `4ced06d`, the approved target also completed a real reconciliation and a second
 zero-change replay: PostgreSQL, NATS and MinIO each reported one ready replica,
 with bound persistent claims, digest-locked images, TLS and default-deny policy.
-The private four-object bundle and seven workload NATS identities remain outside
-Git. This closes the retained data-foundation dependency, but it is not Sprint 2
-E3 evidence and does not authorize reset. `labweaver-data` and `labweaver-build`
-remain outside namespace reset; LabWeaver data is cleared only after all reset
-dependency probes pass.
+The private four-object bundle and seven currently deployed workload NATS
+identities remain outside Git. The next foundation reconciliation must rotate
+that private authority to the eight-identity contract that includes the
+freeze-only Evaluation Service. The existing replay closes the retained service
+body dependency, but it is not Sprint 2 E3 evidence and does not authorize
+reset. `labweaver-data` and `labweaver-build` remain outside namespace reset;
+LabWeaver data is cleared only after all reset dependency probes pass.
 
 ## Browser replay and Release Gate
 

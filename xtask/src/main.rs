@@ -41,6 +41,8 @@ enum Command {
     IdentityFoundation(IdentityFoundationArgs),
     /// Reconcile the persistent `PostgreSQL`, NATS, and `MinIO` Sprint 2 foundation.
     Sprint2Foundation(EnvironmentArgs),
+    /// Reconcile the dedicated rootless BuildKit Sprint 2 foundation.
+    Sprint2Buildkit(EnvironmentArgs),
     Upgrade(UpgradeArgs),
     Rollback(RollbackArgs),
     Restore(RestoreArgs),
@@ -383,6 +385,7 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::Backup(args) => backup(&args),
         Command::IdentityFoundation(args) => identity_foundation(&args),
         Command::Sprint2Foundation(args) => sprint2_foundation(&args),
+        Command::Sprint2Buildkit(args) => sprint2_buildkit(&args),
         Command::AcceptanceAssets(args) => match args.action {
             AcceptanceAssetsAction::Validate => acceptance_assets::validate(&repository_root()),
             AcceptanceAssetsAction::List => {
@@ -583,6 +586,25 @@ fn sprint2_foundation(args: &EnvironmentArgs) -> Result<(), AppError> {
         &args.env,
         "92-sprint2-foundation.yml",
         "sprint2-foundation --infra",
+    )
+}
+
+fn sprint2_buildkit(args: &EnvironmentArgs) -> Result<(), AppError> {
+    if !args.yes {
+        return Err(AppError::ConfirmationRequired {
+            command: "sprint2-buildkit",
+        });
+    }
+    require_infrastructure(args, "sprint2-buildkit --infra")?;
+    if args.package_manifest.is_some() {
+        return Err(AppError::InvalidArgument {
+            role: "Sprint 2 BuildKit does not accept --package-manifest",
+        });
+    }
+    run_infrastructure(
+        &args.env,
+        "92-sprint2-buildkit.yml",
+        "sprint2-buildkit --infra",
     )
 }
 

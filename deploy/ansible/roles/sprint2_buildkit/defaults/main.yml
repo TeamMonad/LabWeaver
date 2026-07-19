@@ -1,0 +1,11 @@
+---
+sprint2_buildkit_enabled: false
+sprint2_buildkit_kubeconfig: /etc/kubernetes/admin.conf
+sprint2_buildkit_namespace: labweaver-build
+sprint2_buildkit_bundle: ""
+sprint2_buildkit_manifest: "{{ playbook_dir }}/../../config/sprint2-buildkit-bundle-manifest.json"
+sprint2_buildkit_storage_class: local-path
+sprint2_buildkit_storage: 40Gi
+sprint2_buildkit_registry_cidr: ""
+sprint2_buildkit_rollout_retries: 60
+sprint2_buildkit_rollout_delay: 5

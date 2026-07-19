@@ -107,6 +107,39 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertNotIn("labweaver-data", reset_namespaces)
         self.assertNotIn("labweaver-build", reset_namespaces)
 
+    def test_sprint2_buildkit_is_rootless_isolated_and_explicitly_exception_bound(self) -> None:
+        playbook = (ROOT / "deploy/ansible/playbooks/92-sprint2-buildkit.yml").read_text(
+            encoding="utf-8"
+        )
+        tasks = (ROOT / "deploy/ansible/roles/sprint2_buildkit/tasks/main.yml").read_text(
+            encoding="utf-8"
+        )
+        workloads = (
+            ROOT / "deploy/ansible/roles/sprint2_buildkit/templates/workloads.yml.j2"
+        ).read_text(encoding="utf-8")
+        self.assertIn("labweaver_preflight_scope: sprint2-buildkit", playbook)
+        self.assertIn("SPRINT2_BUILDKIT_BUNDLE_KEYS_INVALID", tasks)
+        self.assertIn("SPRINT2_BUILDKIT_READBACK_INVALID", tasks)
+        self.assertIn("pod-security.kubernetes.io/enforce: privileged", tasks)
+        self.assertIn("runAsNonRoot: true", workloads)
+        self.assertIn("privileged: false", workloads)
+        self.assertIn("allowPrivilegeEscalation: false", workloads)
+        self.assertIn("seccompProfile: {type: Unconfined}", workloads)
+        self.assertIn("appArmorProfile: {type: Unconfined}", workloads)
+        self.assertIn("automountServiceAccountToken: false", workloads)
+        self.assertNotIn("hostPath:", workloads)
+        self.assertNotIn("hostNetwork: true", workloads)
+        self.assertIn("--oci-worker-no-process-sandbox", workloads)
+        self.assertIn("default-deny", workloads)
+        self.assertIn("buildctl", workloads)
+        self.assertIn("sprint2_buildkit_registry_cidr", tasks)
+        self.assertIn("sprint2-buildkit --infra", (
+            ROOT / "docs/deployment/ansible.md"
+        ).read_text(encoding="utf-8"))
+        self.assertIn("Sprint2Buildkit", (
+            ROOT / "xtask/src/main.rs"
+        ).read_text(encoding="utf-8"))
+
     def test_controller_execution_is_router_owned(self) -> None:
         docs = (ROOT / "docs/deployment/ansible.md").read_text(encoding="utf-8")
         controller_lock = (ROOT / "deploy/ansible/controller.lock.yml").read_text(encoding="utf-8")
