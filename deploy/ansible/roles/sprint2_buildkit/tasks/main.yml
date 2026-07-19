@@ -89,7 +89,9 @@
       - "'tcp://0.0.0.0:1234' in sprint2_buildkit_configuration"
       - "'/etc/buildkit/tls/ca.crt' in sprint2_buildkit_configuration"
       - "'/etc/buildkit/tls/registry-ca.crt' in sprint2_buildkit_configuration"
-      - sprint2_buildkit_dns_nameserver is ansible.utils.ipaddr
+      - >-
+        (sprint2_buildkit_dns_nameserver | ansible.utils.ipaddr)
+        == sprint2_buildkit_dns_nameserver
       - >-
         ('nameservers = ["' ~ sprint2_buildkit_dns_nameserver ~ '"]')
         in sprint2_buildkit_configuration
