@@ -795,14 +795,35 @@ fn inspect_platform_digest(reference: &str) -> Result<String, AppError> {
             code: "LW_PACKAGE_DIGEST_MISSING",
             detail: error.to_string(),
         })?;
-    platform_digest_from_index(&value, reference)
+    platform_digest_from_manifest(&value, reference)
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn platform_digest_from_index(
+fn platform_digest_from_manifest(
     value: &serde_json::Value,
     reference: &str,
 ) -> Result<String, AppError> {
+    let single_manifest = matches!(
+        value.get("mediaType").and_then(serde_json::Value::as_str),
+        Some("application/vnd.oci.image.manifest.v1+json")
+            | Some("application/vnd.docker.distribution.manifest.v2+json")
+    );
+    if single_manifest {
+        let digest = value
+            .get("digest")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(AppError::PlatformImage {
+                code: "LW_PACKAGE_DIGEST_MISSING",
+                detail: format!("{reference} single-platform manifest has no digest"),
+            })?;
+        if is_digest(digest) {
+            return Ok(digest.to_owned());
+        }
+        return Err(AppError::PlatformImage {
+            code: "LW_PACKAGE_DIGEST_MISSING",
+            detail: "single-platform manifest digest is invalid".to_owned(),
+        });
+    }
     let digest = value
         .get("manifests")
         .and_then(serde_json::Value::as_array)
@@ -1324,10 +1345,24 @@ mod tests {
                     }
                 ]
             });
-            let actual =
-                platform_digest_from_index(&index, "fixture").map_err(|error| error.to_string())?;
+            let actual = platform_digest_from_manifest(&index, "fixture")
+                .map_err(|error| error.to_string())?;
             assert_eq!(actual, subject);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn platform_digest_accepts_single_platform_manifest_descriptor() -> Result<(), String> {
+        let expected = digest('a');
+        let manifest = serde_json::json!({
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": expected,
+            "size": 3978
+        });
+        let actual = platform_digest_from_manifest(&manifest, "fixture")
+            .map_err(|error| error.to_string())?;
+        assert_eq!(actual, expected);
         Ok(())
     }
 
