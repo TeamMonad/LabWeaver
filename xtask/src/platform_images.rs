@@ -14,11 +14,12 @@ use sha2::{Digest, Sha256};
 
 use super::AppError;
 
-const COMPONENTS: [&str; 6] = [
+const COMPONENTS: [&str; 7] = [
     "access-service",
     "agent-service",
     "control-service",
     "environment-service",
+    "evaluation-service",
     "openssh-gateway",
     "web",
 ];
@@ -264,7 +265,7 @@ fn validate_manifest(manifest: &PackageManifest) -> Result<(), AppError> {
         }
     }
     if names.len() != COMPONENTS.len() || COMPONENTS.iter().any(|name| !names.contains(name)) {
-        return manifest_invalid("manifest must contain exactly the six Sprint 2 platform images");
+        return manifest_invalid("manifest must contain exactly the seven Sprint 2 platform images");
     }
     Ok(())
 }
@@ -1267,7 +1268,7 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(index, component)| {
-                    let digest_char = ['3', '4', '5', '6', '7', '8'][index];
+                    let digest_char = ['3', '4', '5', '6', '7', '8', '9'][index];
                     let image_digest = digest(digest_char);
                     let reference = format!(
                         "harbor.internal.example/labweaver-system/{component}@{image_digest}"
