@@ -78,6 +78,9 @@ operator locator. BuildKit and packaging inputs must consume that CA after the
 route changes; it installs the same public CA in the control-plane system and
 container-client trust stores. Retaining the previous Gateway-termination CA is
 a blocking TLS identity mismatch.
+The same role adds one marked, exact `harbor.lab.lan` binding to the router
+controller hosts database so `buildx` can complete the Registry token exchange
+against the retained VIP. It does not replace DNS or any unrelated host entry.
 The same bounded adoption reads the existing private `labweaver-system` project
 and aligns only its project metadata to automatic scanning without pull-time
 vulnerability prevention. Pull prevention is deliberately disabled because it

@@ -162,6 +162,27 @@
     content: "{{ sprint2_harbor_nginx_secret_read.resources[0].data['ca.crt'] | b64decode }}"
   no_log: true
 
+- name: Bind the retained Harbor endpoint on the router controller
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} LABWEAVER SPRINT2 HARBOR"
+    block: "{{ harbor_gateway_vip }} {{ harbor_hostname }}"
+  delegate_to: "{{ groups['routers'][0] }}"
+
+- name: Resolve the retained Harbor endpoint from the router controller
+  ansible.builtin.command:
+    argv: [getent, ahostsv4, "{{ harbor_hostname }}"]
+  delegate_to: "{{ groups['routers'][0] }}"
+  changed_when: false
+  register: sprint2_harbor_router_resolution
+
+- name: Reject a router Harbor binding that does not target the retained VIP
+  ansible.builtin.assert:
+    that:
+      - sprint2_harbor_router_resolution.stdout_lines | length > 0
+      - sprint2_harbor_router_resolution.stdout_lines[0].split()[0] == harbor_gateway_vip
+    fail_msg: SPRINT2_HARBOR_ROUTER_RESOLUTION_INVALID
+
 - name: Adopt the existing Harbor Gateway as TLS passthrough
   kubernetes.core.k8s:
     kubeconfig: "{{ harbor_kubeconfig_path }}"

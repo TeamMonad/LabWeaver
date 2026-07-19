@@ -185,9 +185,14 @@ class AnsibleFixtureTests(unittest.TestCase):
         gateway = (
             ROOT / "deploy/ansible/roles/harbor/templates/gateway.yml.j2"
         ).read_text(encoding="utf-8")
+        sprint2_route = (
+            ROOT / "deploy/ansible/roles/sprint2_harbor_route/tasks/main.yml"
+        ).read_text(encoding="utf-8")
         self.assertIn("name: {{ harbor_release_name }}\n          port: 80", gateway)
         self.assertNotIn("{{ harbor_release_name }}-core", gateway)
         self.assertNotIn("{{ harbor_release_name }}-portal", gateway)
+        self.assertIn("LABWEAVER SPRINT2 HARBOR", sprint2_route)
+        self.assertIn("SPRINT2_HARBOR_ROUTER_RESOLUTION_INVALID", sprint2_route)
 
     def test_deploy_starts_with_preflight(self) -> None:
         site = (ROOT / "deploy/ansible/playbooks/site.yml").read_text(encoding="utf-8")
