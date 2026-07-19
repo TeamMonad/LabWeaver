@@ -206,11 +206,30 @@ impl NatsAccessRevoker {
         &self,
         instance: &EnvironmentInstance,
     ) -> Result<Revision, NatsMessagingError> {
+        self.revoke(instance, "environment_expired").await
+    }
+
+    /// Revokes all grants before an actor-requested lifecycle mutation.
+    pub async fn revoke(
+        &self,
+        instance: &EnvironmentInstance,
+        reason: &'static str,
+    ) -> Result<Revision, NatsMessagingError> {
+        if !matches!(
+            reason,
+            "environment_stopped"
+                | "environment_restarted"
+                | "environment_deleted"
+                | "environment_cancelled"
+                | "environment_expired"
+        ) {
+            return Err(NatsMessagingError::Configuration);
+        }
         let request = AccessRevocationRequest {
             version: 1,
             environment_id: instance.id,
             environment_revision: instance.revision,
-            reason: "environment_expired",
+            reason,
         };
         let payload =
             serde_json::to_vec(&request).map_err(|_| NatsMessagingError::Serialization)?;

@@ -94,30 +94,72 @@ pub(super) async fn forward_control(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    if !matches!(method, Method::GET | Method::POST) {
+    forward(
+        &state,
+        &state.control_proxy,
+        method,
+        uri,
+        headers,
+        body,
+        valid_control_path,
+    )
+    .await
+}
+
+pub(super) async fn forward_environment(
+    State(state): State<std::sync::Arc<AppState>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    if method == Method::POST && uri.path() == "/api/v1/environments" {
+        authorize_environment_create(&state, &headers, &body).await?;
+    }
+    forward(
+        &state,
+        &state.environment_proxy,
+        method,
+        uri,
+        headers,
+        body,
+        valid_environment_path,
+    )
+    .await
+}
+
+async fn forward(
+    state: &AppState,
+    proxy: &ControlGatewayProxy,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+    valid_path: fn(&str) -> bool,
+) -> Result<Response, ApiError> {
+    if !matches!(method, Method::GET | Method::POST | Method::DELETE) {
         return Err(ApiError::bad_request("LW_AUTH_CONTROL_METHOD_REJECTED"));
     }
     let path = uri.path();
-    if !valid_control_path(path) {
+    if !valid_path(path) {
         return Err(ApiError::bad_request("LW_AUTH_CONTROL_PATH_REJECTED"));
     }
-    if body.len() > state.control_proxy.max_request_bytes {
+    if body.len() > proxy.max_request_bytes {
         return Err(ApiError::bad_request("LW_AUTH_CONTROL_REQUEST_TOO_LARGE"));
     }
-    let session = authenticated_session(&state, &headers).await?;
-    if method == Method::POST {
-        require_browser_origin(&state, &headers)?;
+    let session = authenticated_session(state, &headers).await?;
+    if method != Method::GET {
+        require_browser_origin(state, &headers)?;
         let supplied = headers
             .get(state.deployment.browser.csrf_header_name.as_str())
             .and_then(|value| value.to_str().ok());
         auth::verify_csrf_token(&session.csrf_token, supplied).map_err(ApiError::from)?;
     }
 
-    let mut upstream = state.control_proxy.base_uri.clone();
+    let mut upstream = proxy.base_uri.clone();
     upstream.set_path(path);
     upstream.set_query(uri.query());
-    let request = state
-        .control_proxy
+    let request = proxy
         .client
         .request(method.clone(), upstream)
         .header(ACTOR_HEADER, session.actor_id.to_string())
@@ -134,9 +176,9 @@ pub(super) async fn forward_control(
     })?;
     let status = response.status();
     let content_length = response.content_length();
-    if content_length.is_some_and(|length| {
-        length > u64::try_from(state.control_proxy.max_response_bytes).unwrap_or(u64::MAX)
-    }) {
+    if content_length
+        .is_some_and(|length| length > u64::try_from(proxy.max_response_bytes).unwrap_or(u64::MAX))
+    {
         return Err(ApiError::unavailable("LW_AUTH_CONTROL_RESPONSE_TOO_LARGE"));
     }
     let response_headers = response.headers().clone();
@@ -151,7 +193,7 @@ pub(super) async fn forward_control(
             .bytes()
             .await
             .map_err(|_| ApiError::unavailable("LW_AUTH_CONTROL_UNAVAILABLE"))?;
-        if bytes.len() > state.control_proxy.max_response_bytes {
+        if bytes.len() > proxy.max_response_bytes {
             return Err(ApiError::unavailable("LW_AUTH_CONTROL_RESPONSE_TOO_LARGE"));
         }
         Body::from(bytes)
@@ -179,6 +221,36 @@ pub(super) async fn forward_control(
         .map_err(|_| ApiError::internal("LW_AUTH_CONTROL_RESPONSE_INVALID"))
 }
 
+async fn authorize_environment_create(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Result<(), ApiError> {
+    let request = contracts::parse_strict_json::<contracts::http::CreateEnvironmentRequest>(body)
+        .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+    let session = authenticated_session(state, headers).await?;
+    let actor = super::actor_from_session(&session)?;
+    let memberships = auth::load_membership_snapshot(&state.pool, session.actor_id)
+        .await
+        .map_err(ApiError::from)?;
+    let policy = contracts::operation_authorization("createEnvironment")
+        .ok_or_else(|| ApiError::forbidden("LW_AUTH_SCOPE_DENIED"))?;
+    auth::authorize(
+        &auth::AuthorizationContext {
+            actor,
+            course_memberships: memberships.course_memberships,
+            project_memberships: memberships.project_memberships,
+            now: time::OffsetDateTime::now_utc(),
+        },
+        contracts::AuthorizationScope::Course {
+            course_id: request.course_id,
+        },
+        &policy.allowed_roles.iter().copied().collect(),
+    )
+    .map_err(ApiError::from)?;
+    Ok(())
+}
+
 fn copy_request_headers(
     mut request: reqwest::RequestBuilder,
     headers: &HeaderMap,
@@ -204,6 +276,21 @@ fn valid_control_path(path: &str) -> bool {
     let lowercase = path.to_ascii_lowercase();
     path.starts_with("/api/v1/courses/")
         && !path.contains("//")
+        && !path.contains('\\')
+        && !lowercase.contains("%2f")
+        && !lowercase.contains("%5c")
+        && path
+            .split('/')
+            .all(|segment| segment != "." && segment != "..")
+}
+
+fn valid_environment_path(path: &str) -> bool {
+    path == "/api/v1/environments" || (path.starts_with("/api/v1/environments/") && safe_path(path))
+}
+
+fn safe_path(path: &str) -> bool {
+    let lowercase = path.to_ascii_lowercase();
+    !path.contains("//")
         && !path.contains('\\')
         && !lowercase.contains("%2f")
         && !lowercase.contains("%5c")

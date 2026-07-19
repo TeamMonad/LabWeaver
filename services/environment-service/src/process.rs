@@ -286,6 +286,16 @@ impl EnvironmentProcessRuntime {
         Arc::clone(&self.readiness)
     }
 
+    /// Clones only the owner dependencies required by the authenticated public API.
+    #[must_use]
+    pub fn api_state(&self) -> crate::EnvironmentApiState {
+        crate::EnvironmentApiState::new(
+            self.store.clone(),
+            self.release_store.clone(),
+            self.access_revoker.clone(),
+        )
+    }
+
     /// Runs all durable loops until SIGINT/SIGTERM; any unhandled loop failure stops the process.
     pub async fn serve(self) -> Result<(), EnvironmentProcessRuntimeError> {
         let Self {

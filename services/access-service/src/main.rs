@@ -49,6 +49,7 @@ struct AppState {
     key_ring: KeyRing,
     owner_resolver: EnvironmentOwnerResolverClient,
     control_proxy: proxy::ControlGatewayProxy,
+    environment_proxy: proxy::ControlGatewayProxy,
     metrics: telemetry::PrometheusHandle,
     nats: async_nats::Client,
 }
@@ -102,6 +103,14 @@ async fn main() -> Result<(), StartupError> {
         .route(
             "/api/v1/courses/{*control_path}",
             axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/environments",
+            axum::routing::any(proxy::forward_environment),
+        )
+        .route(
+            "/api/v1/environments/{*environment_path}",
+            axum::routing::any(proxy::forward_environment),
         )
         .with_state(Arc::clone(&state));
     let internal_router = Router::new()
@@ -212,6 +221,7 @@ async fn build_app_state(
         deployment.transport_security,
     )?;
     let control_proxy = build_control_proxy(&deployment)?;
+    let environment_proxy = build_service_proxy(&deployment, &deployment.environment_gateway)?;
     let nats = grants::connect_nats(&deployment.nats).await?;
     Ok(Arc::new(AppState {
         config,
@@ -225,6 +235,7 @@ async fn build_app_state(
         key_ring,
         owner_resolver,
         control_proxy,
+        environment_proxy,
         metrics,
         nats,
     }))
@@ -233,7 +244,13 @@ async fn build_app_state(
 fn build_control_proxy(
     deployment: &AccessAuthFile,
 ) -> Result<proxy::ControlGatewayProxy, StartupError> {
-    let config = &deployment.control_gateway;
+    build_service_proxy(deployment, &deployment.control_gateway)
+}
+
+fn build_service_proxy(
+    deployment: &AccessAuthFile,
+    config: &auth::ControlGatewayFileConfig,
+) -> Result<proxy::ControlGatewayProxy, StartupError> {
     let ca = resolver_secret(deployment, &config.ca_certificate_locator)?;
     let certificate = resolver_secret(deployment, &config.client_certificate_locator)?;
     let key = resolver_secret(deployment, &config.client_private_key_locator)?;

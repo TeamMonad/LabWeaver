@@ -57,6 +57,8 @@ pub struct AccessAuthFile {
     pub environment_owner_resolver: OwnerResolverFileConfig,
     /// Authenticated browser gateway for the Control public API.
     pub control_gateway: ControlGatewayFileConfig,
+    /// Authenticated browser gateway for the Environment public API.
+    pub environment_gateway: ControlGatewayFileConfig,
     /// `AccessGrant`, worker, and one-time authorization limits.
     pub grants: GrantRuntimeFileConfig,
     /// Mandatory mTLS `JetStream` connection.
@@ -306,7 +308,8 @@ impl AccessAuthFile {
             || parsed.internal_mtls.required_eku != "clientAuth"
             || !(1..=5_000).contains(&parsed.environment_owner_resolver.retry_backoff_milliseconds)
             || !(1..=60).contains(&parsed.environment_owner_resolver.decision_ttl_seconds)
-            || !parsed.control_gateway_is_valid()
+            || !parsed.service_gateway_is_valid(&parsed.control_gateway)
+            || !parsed.service_gateway_is_valid(&parsed.environment_gateway)
             || !parsed.access_runtime_is_valid()
             || required_resolver_locators.iter().any(|locator| {
                 parsed
@@ -355,28 +358,27 @@ impl AccessAuthFile {
             .all(|path| !invalid_secret_file_path(path))
     }
 
-    fn control_gateway_is_valid(&self) -> bool {
-        let Ok(uri) = Url::parse(&self.control_gateway.base_uri) else {
+    fn service_gateway_is_valid(&self, gateway: &ControlGatewayFileConfig) -> bool {
+        let Ok(uri) = Url::parse(&gateway.base_uri) else {
             return false;
         };
         let locators = [
-            self.control_gateway.ca_certificate_locator.as_str(),
-            self.control_gateway.client_certificate_locator.as_str(),
-            self.control_gateway.client_private_key_locator.as_str(),
+            gateway.ca_certificate_locator.as_str(),
+            gateway.client_certificate_locator.as_str(),
+            gateway.client_private_key_locator.as_str(),
         ];
         uri.scheme() == "https"
             && uri.host_str().is_some()
             && uri.path() == "/"
             && uri.query().is_none()
             && uri.fragment().is_none()
-            && self
-                .control_gateway
+            && gateway
                 .allowed_server_sans
                 .iter()
                 .any(|san| Some(san.as_str()) == uri.host_str())
-            && (100..=30_000).contains(&self.control_gateway.timeout_milliseconds)
-            && (1..=16 * 1024 * 1024).contains(&self.control_gateway.max_request_bytes)
-            && (1..=32 * 1024 * 1024).contains(&self.control_gateway.max_response_bytes)
+            && (100..=30_000).contains(&gateway.timeout_milliseconds)
+            && (1..=16 * 1024 * 1024).contains(&gateway.max_request_bytes)
+            && (1..=32 * 1024 * 1024).contains(&gateway.max_response_bytes)
             && locators.iter().all(|locator| {
                 self.secrets
                     .file_bindings
@@ -390,10 +392,12 @@ impl AccessAuthFile {
         let internal_bind = self.internal_mtls.bind_addr.parse::<std::net::SocketAddr>();
         let resolver = Url::parse(&self.environment_owner_resolver.resolver_uri);
         let control = Url::parse(&self.control_gateway.base_uri);
+        let environment = Url::parse(&self.environment_gateway.base_uri);
         browser_bind.is_ok_and(|address| address.ip().is_loopback())
             && internal_bind.is_ok_and(|address| address.ip().is_loopback())
             && resolver.is_ok_and(|url| url_host_is_loopback(&url))
             && control.is_ok_and(|url| url_host_is_loopback(&url))
+            && environment.is_ok_and(|url| url_host_is_loopback(&url))
     }
 }
 
@@ -645,6 +649,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one complete deployment fixture exercises deny-unknown-fields parsing"
+    )]
     fn deployment_file_rejects_unpinned_browser_security_values() {
         let valid = r#"
 oidc:
@@ -705,6 +713,15 @@ control_gateway:
   client_certificate_locator: secret://access-service/control-client-cert
   client_private_key_locator: secret://access-service/control-client-key
   allowed_server_sans: [control-service.example.test]
+  timeout_milliseconds: 5000
+  max_request_bytes: 1048576
+  max_response_bytes: 8388608
+environment_gateway:
+  base_uri: https://environment-service.example.test:9446/
+  ca_certificate_locator: secret://control-gateway/ca
+  client_certificate_locator: secret://access-service/control-client-cert
+  client_private_key_locator: secret://access-service/control-client-key
+  allowed_server_sans: [environment-service.example.test]
   timeout_milliseconds: 5000
   max_request_bytes: 1048576
   max_response_bytes: 8388608

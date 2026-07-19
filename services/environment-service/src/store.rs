@@ -108,6 +108,28 @@ impl PgEnvironmentStore {
         Ok(accepted)
     }
 
+    /// Accepts an authenticated public API command through the same transaction used by NATS.
+    pub async fn accept_api_command(
+        &self,
+        idempotency_key: &str,
+        command: &LifecycleCommand,
+        create: Option<&EnvironmentCreateSpec>,
+        course_id: CourseId,
+    ) -> Result<OperationAccepted, EnvironmentStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let accepted = accept_command_in_transaction(
+            &mut transaction,
+            idempotency_key,
+            command,
+            create,
+            None,
+            Some(course_id),
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(accepted)
+    }
+
     /// Applies the next durable event and its lifecycle mutation in one transaction.
     pub async fn accept_inbound_command(
         &self,

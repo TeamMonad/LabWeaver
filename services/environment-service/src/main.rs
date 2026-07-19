@@ -62,7 +62,8 @@ enum RuntimeKind {
 async fn run_environment_service() -> Result<(), MainError> {
     let process = environment_service::EnvironmentProcessRuntime::from_env().await?;
     let readiness = process.readiness();
-    let owner_resolver = environment_service::OwnerResolverRuntime::from_env().await?;
+    let owner_resolver =
+        environment_service::OwnerResolverRuntime::from_env(process.api_state()).await?;
     tokio::try_join!(
         async {
             service_runtime::run_with_readiness(env!("CARGO_PKG_NAME"), readiness)

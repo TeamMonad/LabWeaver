@@ -5,6 +5,7 @@
     reason = "the public contract crate and focused contract document own field-level wire documentation"
 )]
 
+mod api;
 mod container_provider;
 mod kubevirt_provider;
 mod lifecycle;
@@ -18,6 +19,7 @@ mod runtime_executor;
 mod store;
 mod tls;
 
+pub use api::{EnvironmentApiState, environment_api_router};
 pub use container_provider::{
     CONTAINER_BACKEND_PROTOCOL_VERSION, ContainerApplyObservation, ContainerBackendFence,
     ContainerExecutorBackend, ContainerExecutorFenceError, ContainerExecutorRequest,

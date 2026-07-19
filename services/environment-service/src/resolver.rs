@@ -36,6 +36,12 @@ impl VerifiedCallerIdentity {
         }
         Ok(Self { sans })
     }
+
+    /// Returns whether the verified peer certificate carried one exact URI SAN.
+    #[must_use]
+    pub fn contains_san(&self, san: &str) -> bool {
+        self.sans.contains(san)
+    }
 }
 
 /// Exact caller SAN policy; wildcard and empty policies are not supported.
