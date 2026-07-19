@@ -62,8 +62,9 @@ Harbor data-backup evidence locator through
 blocks reconciliation. Sprint 2 adoption does not use this broad entry point for
 a route-only change. `sprint2-harbor-route` verifies that the namespace,
 Gateway, nginx Service, ready EndpointSlice and existing HTTPRoute are managed
-LabWeaver objects, then server-side-applies only the HTTPRoute backend to the
-Harbor nginx Service. It verifies Gateway `Accepted`/`ResolvedRefs` conditions
+LabWeaver objects, then publishes the existing nginx public CA in a managed
+ConfigMap, applies a `BackendTLSPolicy`, and server-side-applies only the
+HTTPRoute backend to the Harbor nginx HTTPS Service. It verifies Gateway `Accepted`/`ResolvedRefs` conditions
 and the authenticated Docker Registry `/v2/` response. It does not invoke Helm,
 write a Secret, restart a Harbor Pod, or mutate Harbor database, registry, PVC,
 project, or image state. A route previously owned by kubectl client-side apply

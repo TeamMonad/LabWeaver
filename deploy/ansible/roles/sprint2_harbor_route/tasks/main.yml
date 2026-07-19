@@ -74,6 +74,74 @@
       - sprint2_harbor_route_object.metadata.labels['app.kubernetes.io/part-of'] | default('') == 'labweaver-infrastructure'
     fail_msg: SPRINT2_HARBOR_ADOPTION_BOUNDARY_INVALID
 
+- name: Read the existing Harbor nginx public CA
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ harbor_kubeconfig_path }}"
+    api_version: v1
+    kind: Secret
+    namespace: "{{ harbor_namespace }}"
+    name: harbor-nginx
+  register: sprint2_harbor_nginx_secret_read
+  no_log: true
+
+- name: Reject missing Harbor nginx TLS material
+  ansible.builtin.assert:
+    that:
+      - sprint2_harbor_nginx_secret_read.resources | length == 1
+      - sprint2_harbor_nginx_secret_read.resources[0].metadata.labels['app.kubernetes.io/managed-by'] | default('') == 'Helm'
+      - sprint2_harbor_nginx_secret_read.resources[0].data['ca.crt'] | default('') | length > 0
+    fail_msg: SPRINT2_HARBOR_BACKEND_CA_INVALID
+  no_log: true
+
+- name: Publish only the Harbor nginx public CA for Gateway validation
+  kubernetes.core.k8s:
+    kubeconfig: "{{ harbor_kubeconfig_path }}"
+    state: present
+    apply: true
+    server_side_apply:
+      field_manager: labweaver-sprint2-adoption
+      force_conflicts: false
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: harbor-backend-ca
+        namespace: "{{ harbor_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver-infrastructure
+      data:
+        ca.crt: "{{ sprint2_harbor_nginx_secret_read.resources[0].data['ca.crt'] | b64decode }}"
+  no_log: true
+
+- name: Require TLS validation for the Harbor nginx backend
+  kubernetes.core.k8s:
+    kubeconfig: "{{ harbor_kubeconfig_path }}"
+    state: present
+    apply: true
+    server_side_apply:
+      field_manager: labweaver-sprint2-adoption
+      force_conflicts: false
+    definition:
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: BackendTLSPolicy
+      metadata:
+        name: harbor
+        namespace: "{{ harbor_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver-infrastructure
+      spec:
+        targetRefs:
+          - group: ''
+            kind: Service
+            name: "{{ harbor_release_name }}"
+            sectionName: https
+        validation:
+          hostname: "{{ harbor_hostname }}"
+          caCertificateRefs:
+            - group: ''
+              kind: ConfigMap
+              name: harbor-backend-ca
+
 - name: Adopt only the existing Harbor HTTPRoute backend
   kubernetes.core.k8s:
     kubeconfig: "{{ harbor_kubeconfig_path }}"
@@ -101,7 +169,7 @@
         rules:
           - backendRefs:
               - name: "{{ harbor_release_name }}"
-                port: 80
+                port: 443
   register: sprint2_harbor_route_apply
 
 - name: Read adopted Harbor HTTPRoute status
@@ -118,7 +186,7 @@
     that:
       - sprint2_harbor_route_readback.resources | length == 1
       - sprint2_harbor_route_readback.resources[0].spec.rules[0].backendRefs[0].name == harbor_release_name
-      - sprint2_harbor_route_readback.resources[0].spec.rules[0].backendRefs[0].port == 80
+      - sprint2_harbor_route_readback.resources[0].spec.rules[0].backendRefs[0].port == 443
       - sprint2_harbor_route_readback.resources[0].status.parents | default([]) | map(attribute='conditions') | flatten | selectattr('type', 'equalto', 'Accepted') | selectattr('status', 'equalto', 'True') | list | length > 0
       - sprint2_harbor_route_readback.resources[0].status.parents | default([]) | map(attribute='conditions') | flatten | selectattr('type', 'equalto', 'ResolvedRefs') | selectattr('status', 'equalto', 'True') | list | length > 0
     fail_msg: SPRINT2_HARBOR_ROUTE_NOT_READY
