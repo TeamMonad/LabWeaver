@@ -135,6 +135,36 @@ pub(super) async fn forward_environment(
     .await
 }
 
+pub(super) async fn forward_evaluation(
+    State(state): State<std::sync::Arc<AppState>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    if method == Method::POST {
+        let request =
+            contracts::parse_strict_json::<contracts::http::FreezeSubmissionRequest>(&body)
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+        request
+            .manifest
+            .validate()
+            .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+        authorize_environment_course(&state, &headers, request.course_id, "freezeSubmission")
+            .await?;
+    }
+    forward(
+        &state,
+        &state.evaluation_proxy,
+        method,
+        uri,
+        headers,
+        body,
+        valid_evaluation_path,
+    )
+    .await
+}
+
 async fn forward(
     state: &AppState,
     proxy: &ControlGatewayProxy,
@@ -302,6 +332,18 @@ fn valid_environment_path(path: &str) -> bool {
     path == "/api/v1/environments" || (path.starts_with("/api/v1/environments/") && safe_path(path))
 }
 
+fn valid_evaluation_path(path: &str) -> bool {
+    let segments = path.split('/').collect::<Vec<_>>();
+    safe_path(path)
+        && (matches!(
+            segments.as_slice(),
+            ["", "api", "v1", "environments", _, "freeze"]
+        ) || matches!(
+            segments.as_slice(),
+            ["", "api", "v1", "frozen-submissions", _]
+        ))
+}
+
 fn safe_path(path: &str) -> bool {
     let lowercase = path.to_ascii_lowercase();
     !path.contains("//")
@@ -324,7 +366,7 @@ pub(super) enum ControlGatewayError {
 
 #[cfg(test)]
 mod tests {
-    use super::valid_control_path;
+    use super::{valid_control_path, valid_evaluation_path};
 
     #[test]
     fn control_paths_are_bounded_to_the_course_api() {
@@ -333,5 +375,19 @@ mod tests {
         assert!(!valid_control_path("/api/v1/courses/../internal"));
         assert!(!valid_control_path("/api/v1/courses/a%2Finternal"));
         assert!(!valid_control_path("/api/v1/courses//agent-runs"));
+    }
+
+    #[test]
+    fn evaluation_paths_are_exact_and_injection_safe() {
+        assert!(valid_evaluation_path(
+            "/api/v1/environments/01900000-0000-7000-8000-000000000001/freeze"
+        ));
+        assert!(valid_evaluation_path(
+            "/api/v1/frozen-submissions/01900000-0000-7000-8000-000000000001"
+        ));
+        assert!(!valid_evaluation_path("/api/v1/environments/a/freeze/more"));
+        assert!(!valid_evaluation_path(
+            "/api/v1/frozen-submissions/../internal"
+        ));
     }
 }

@@ -59,6 +59,8 @@ pub struct AccessAuthFile {
     pub control_gateway: ControlGatewayFileConfig,
     /// Authenticated browser gateway for the Environment public API.
     pub environment_gateway: ControlGatewayFileConfig,
+    /// Authenticated browser gateway for the freeze-only Evaluation API.
+    pub evaluation_gateway: ControlGatewayFileConfig,
     /// `AccessGrant`, worker, and one-time authorization limits.
     pub grants: GrantRuntimeFileConfig,
     /// Mandatory mTLS `JetStream` connection.
@@ -310,6 +312,7 @@ impl AccessAuthFile {
             || !(1..=60).contains(&parsed.environment_owner_resolver.decision_ttl_seconds)
             || !parsed.service_gateway_is_valid(&parsed.control_gateway)
             || !parsed.service_gateway_is_valid(&parsed.environment_gateway)
+            || !parsed.service_gateway_is_valid(&parsed.evaluation_gateway)
             || !parsed.access_runtime_is_valid()
             || required_resolver_locators.iter().any(|locator| {
                 parsed
@@ -393,11 +396,13 @@ impl AccessAuthFile {
         let resolver = Url::parse(&self.environment_owner_resolver.resolver_uri);
         let control = Url::parse(&self.control_gateway.base_uri);
         let environment = Url::parse(&self.environment_gateway.base_uri);
+        let evaluation = Url::parse(&self.evaluation_gateway.base_uri);
         browser_bind.is_ok_and(|address| address.ip().is_loopback())
             && internal_bind.is_ok_and(|address| address.ip().is_loopback())
             && resolver.is_ok_and(|url| url_host_is_loopback(&url))
             && control.is_ok_and(|url| url_host_is_loopback(&url))
             && environment.is_ok_and(|url| url_host_is_loopback(&url))
+            && evaluation.is_ok_and(|url| url_host_is_loopback(&url))
     }
 }
 
@@ -722,6 +727,15 @@ environment_gateway:
   client_certificate_locator: secret://access-service/control-client-cert
   client_private_key_locator: secret://access-service/control-client-key
   allowed_server_sans: [environment-service.example.test]
+  timeout_milliseconds: 5000
+  max_request_bytes: 1048576
+  max_response_bytes: 8388608
+evaluation_gateway:
+  base_uri: https://evaluation-service.example.test:9447/
+  ca_certificate_locator: secret://control-gateway/ca
+  client_certificate_locator: secret://access-service/control-client-cert
+  client_private_key_locator: secret://access-service/control-client-key
+  allowed_server_sans: [evaluation-service.example.test]
   timeout_milliseconds: 5000
   max_request_bytes: 1048576
   max_response_bytes: 8388608

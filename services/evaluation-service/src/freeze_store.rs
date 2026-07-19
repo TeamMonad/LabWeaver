@@ -72,6 +72,35 @@ impl PgFreezeStore {
         UtcTimestamp::from_utc(value).map_err(|_| FreezeStoreError::ClockInvalid)
     }
 
+    /// Loads one completed immutable submission without exposing incomplete attempts.
+    /// Loads a completed immutable submission only for its owning actor.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NotFound` for absent, incomplete, or differently owned submissions and a stable
+    /// persistence error when the authority cannot be queried.
+    pub async fn load_completed(
+        &self,
+        frozen_submission_id: FrozenSubmissionId,
+        actor_id: contracts::ActorId,
+    ) -> Result<FrozenSubmission, FreezeStoreError> {
+        let value: Value = sqlx::query_scalar(
+            "SELECT contract FROM evaluation.frozen_submissions \
+             WHERE frozen_submission_id=$1 AND contract->>'actorId'=$2",
+        )
+        .bind(frozen_submission_id.as_uuid())
+        .bind(actor_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(FreezeStoreError::NotFound)?;
+        let submission: FrozenSubmission =
+            serde_json::from_value(value).map_err(|_| FreezeStoreError::ContractInvalid)?;
+        submission
+            .validate()
+            .map_err(|_| FreezeStoreError::ContractInvalid)?;
+        Ok(submission)
+    }
+
     /// Acquires a new attempt, reclaims an expired attempt, or returns the durable replay.
     ///
     /// # Errors
@@ -587,6 +616,8 @@ pub enum FreezeStoreError {
     DatabaseBoundary,
     #[error("LW_COLLECT_CONTRACT_INVALID")]
     ContractInvalid,
+    #[error("LW_COLLECT_SUBMISSION_NOT_FOUND")]
+    NotFound,
     #[error("LW_COLLECT_IDENTITY_MISMATCH")]
     IdentityMismatch,
     #[error("LW_COLLECT_FENCE_LOST")]
@@ -617,6 +648,7 @@ impl FreezeStoreError {
         match self {
             Self::Database(_) | Self::DatabaseBoundary => "LW_COLLECT_DATABASE_FAILED",
             Self::ContractInvalid => "LW_COLLECT_CONTRACT_INVALID",
+            Self::NotFound => "LW_COLLECT_SUBMISSION_NOT_FOUND",
             Self::IdentityMismatch => "LW_COLLECT_IDENTITY_MISMATCH",
             Self::FenceLost => "LW_COLLECT_FENCE_LOST",
             Self::LeaseInvalid => "LW_COLLECT_LEASE_INVALID",

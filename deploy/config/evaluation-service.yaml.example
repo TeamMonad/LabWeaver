@@ -1,0 +1,20 @@
+# Freeze-only Evaluation owner process. Secret values are mounted files; this
+# document contains no credentials and is parsed with deny_unknown_fields.
+databaseUrlFile: /etc/labweaver/secrets/database-url
+databaseMaxConnections: 10
+apiMtls:
+  bind_addr: 0.0.0.0:9447
+  server_certificate_file: /etc/labweaver/secrets/tls.crt
+  server_key_file: /etc/labweaver/secrets/tls.key
+  client_ca_file: /etc/labweaver/secrets/mtls-ca.pem
+  allowed_san_uris:
+    - spiffe://labweaver/access-service
+  required_eku: clientAuth
+nats:
+  server: tls://nats.labweaver-data.svc:4222
+  caFile: /etc/labweaver/secrets/nats-ca.pem
+  clientCertificateFile: /etc/labweaver/secrets/nats-client.crt
+  clientPrivateKeyFile: /etc/labweaver/secrets/nats-client.key
+  credentialsFile: /etc/labweaver/secrets/nats.creds
+outboxPublishTimeoutMilliseconds: 5000
+outboxPollIntervalMilliseconds: 100

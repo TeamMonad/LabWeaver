@@ -2265,12 +2265,15 @@ name = "evaluation-service"
 version = "0.1.0"
 dependencies = [
  "artifact-store",
+ "async-nats",
  "async-trait",
+ "auth",
  "axum 0.8.9",
  "base64 0.22.1",
  "cap-fs-ext",
  "cap-std",
  "contracts",
+ "hyper-util",
  "persistence-sqlx",
  "russh",
  "russh-sftp",
@@ -2286,6 +2289,7 @@ dependencies = [
  "thiserror 2.0.18",
  "time",
  "tokio",
+ "tokio-rustls 0.26.4",
  "tracing",
  "uuid",
 ]

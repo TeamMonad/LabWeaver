@@ -50,6 +50,7 @@ struct AppState {
     owner_resolver: EnvironmentOwnerResolverClient,
     control_proxy: proxy::ControlGatewayProxy,
     environment_proxy: proxy::ControlGatewayProxy,
+    evaluation_proxy: proxy::ControlGatewayProxy,
     metrics: telemetry::PrometheusHandle,
     nats: async_nats::Client,
 }
@@ -107,6 +108,14 @@ async fn main() -> Result<(), StartupError> {
         .route(
             "/api/v1/environments",
             axum::routing::any(proxy::forward_environment),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/freeze",
+            post(proxy::forward_evaluation),
+        )
+        .route(
+            "/api/v1/frozen-submissions/{submission_id}",
+            get(proxy::forward_evaluation),
         )
         .route(
             "/api/v1/environments/{*environment_path}",
@@ -222,6 +231,7 @@ async fn build_app_state(
     )?;
     let control_proxy = build_control_proxy(&deployment)?;
     let environment_proxy = build_service_proxy(&deployment, &deployment.environment_gateway)?;
+    let evaluation_proxy = build_service_proxy(&deployment, &deployment.evaluation_gateway)?;
     let nats = grants::connect_nats(&deployment.nats).await?;
     Ok(Arc::new(AppState {
         config,
@@ -236,6 +246,7 @@ async fn build_app_state(
         owner_resolver,
         control_proxy,
         environment_proxy,
+        evaluation_proxy,
         metrics,
         nats,
     }))

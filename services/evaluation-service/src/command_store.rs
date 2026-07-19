@@ -76,6 +76,14 @@ impl PgFreezeCommandStore {
         Self { pool }
     }
 
+    pub async fn authority_now(&self) -> Result<UtcTimestamp, FreezeCommandStoreError> {
+        let value: time::OffsetDateTime =
+            sqlx::query_scalar("SELECT date_trunc('milliseconds', clock_timestamp())")
+                .fetch_one(&self.pool)
+                .await?;
+        UtcTimestamp::from_utc(value).map_err(|_| FreezeCommandStoreError::ContractInvalid)
+    }
+
     pub async fn accept(
         &self,
         command: &SubmissionFreezeCommand,
