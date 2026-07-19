@@ -8,7 +8,7 @@
     "gatewaySection": "protected-https",
     "imagePullSecretName": "harbor-course-pull",
     "workspaceStorageClassName": "nfs-rwx",
-    "activeImagePolicyId": "01900000-0000-7000-8000-000000000001",
+    "activeImagePolicyId": "00000000-0000-7000-8000-000000000002",
     "activeImagePolicyRevision": 1,
     "activeTrustRevision": 1
   },
@@ -32,7 +32,7 @@
     "cdiImporterMemoryRequestBytes": 262144000,
     "cdiImporterMemoryLimitBytes": 1073741824,
     "cdiScratchStorageBytes": 10737418240,
-    "activeImagePolicyId": "01900000-0000-7000-8000-000000000001",
+    "activeImagePolicyId": "00000000-0000-7000-8000-000000000002",
     "activeImagePolicyRevision": 1,
     "activeTrustRevision": 1
   }

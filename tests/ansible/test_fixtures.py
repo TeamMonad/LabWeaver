@@ -240,6 +240,19 @@ class AnsibleFixtureTests(unittest.TestCase):
             for locator in re.findall(r"/etc/labweaver/secrets/([a-z0-9.-]+)", configuration):
                 self.assertIn(locator, manifest["secrets"][service])
 
+    def test_sprint2_environment_provider_matches_control_image_policy(self) -> None:
+        control = (ROOT / "deploy/config/control-plane.yaml.example").read_text(encoding="utf-8")
+        providers = json.loads(
+            (ROOT / "deploy/config/environment-providers.json.example").read_text(
+                encoding="utf-8"
+            )
+        )
+        policy_id = re.search(r'imagePolicyId: "([0-9a-f-]+)"', control)
+        self.assertIsNotNone(policy_id)
+        self.assertTrue(
+            all(provider["activeImagePolicyId"] == policy_id.group(1) for provider in providers)
+        )
+
     def test_deploy_starts_with_preflight(self) -> None:
         site = (ROOT / "deploy/ansible/playbooks/site.yml").read_text(encoding="utf-8")
         self.assertEqual(site.splitlines()[1], "- import_playbook: 00-preflight.yml")
