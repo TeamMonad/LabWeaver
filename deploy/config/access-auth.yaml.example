@@ -40,6 +40,9 @@ secrets:
     "secret://environment-owner-resolver/ca": "/etc/labweaver/secrets/mtls-ca.pem"
     "secret://access-service/owner-resolver-client-cert": "/etc/labweaver/secrets/mtls.crt"
     "secret://access-service/owner-resolver-client-key": "/etc/labweaver/secrets/mtls.key"
+    "secret://control-gateway/ca": "/etc/labweaver/secrets/mtls-ca.pem"
+    "secret://access-service/control-client-cert": "/etc/labweaver/secrets/mtls.crt"
+    "secret://access-service/control-client-key": "/etc/labweaver/secrets/mtls.key"
 internal_mtls:
   bind_addr: "0.0.0.0:9443"
   server_certificate_file: "/etc/labweaver/secrets/tls.crt"
@@ -61,6 +64,15 @@ environment_owner_resolver:
   max_retries: 1
   retry_backoff_milliseconds: 100
   decision_ttl_seconds: 5
+control_gateway:
+  base_uri: "https://control-service:9444/"
+  ca_certificate_locator: "secret://control-gateway/ca"
+  client_certificate_locator: "secret://access-service/control-client-cert"
+  client_private_key_locator: "secret://access-service/control-client-key"
+  allowed_server_sans: ["control-service"]
+  timeout_milliseconds: 5000
+  max_request_bytes: 1048576
+  max_response_bytes: 8388608
 grants:
   gateway_san_uris:
     - spiffe://labweaver/gateway

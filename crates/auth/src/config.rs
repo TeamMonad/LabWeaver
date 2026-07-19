@@ -55,6 +55,8 @@ pub struct AccessAuthFile {
     pub internal_mtls: MtlsFileConfig,
     /// Environment-authoritative owner resolver client configuration.
     pub environment_owner_resolver: OwnerResolverFileConfig,
+    /// Authenticated browser gateway for the Control public API.
+    pub control_gateway: ControlGatewayFileConfig,
     /// `AccessGrant`, worker, and one-time authorization limits.
     pub grants: GrantRuntimeFileConfig,
     /// Mandatory mTLS `JetStream` connection.
@@ -189,6 +191,24 @@ pub struct OwnerResolverFileConfig {
     pub decision_ttl_seconds: u64,
 }
 
+/// Fail-closed mTLS forwarding boundary from the browser BFF to Control.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[allow(
+    missing_docs,
+    reason = "YAML keys are documented by deploy/config/access-auth.yaml.example"
+)]
+#[serde(deny_unknown_fields)]
+pub struct ControlGatewayFileConfig {
+    pub base_uri: String,
+    pub ca_certificate_locator: String,
+    pub client_certificate_locator: String,
+    pub client_private_key_locator: String,
+    pub allowed_server_sans: Vec<String>,
+    pub timeout_milliseconds: u64,
+    pub max_request_bytes: usize,
+    pub max_response_bytes: usize,
+}
+
 impl OwnerResolverFileConfig {
     /// Converts deployment YAML into the contract-owned resolver settings.
     #[must_use]
@@ -286,6 +306,7 @@ impl AccessAuthFile {
             || parsed.internal_mtls.required_eku != "clientAuth"
             || !(1..=5_000).contains(&parsed.environment_owner_resolver.retry_backoff_milliseconds)
             || !(1..=60).contains(&parsed.environment_owner_resolver.decision_ttl_seconds)
+            || !parsed.control_gateway_is_valid()
             || !parsed.access_runtime_is_valid()
             || required_resolver_locators.iter().any(|locator| {
                 parsed
@@ -334,13 +355,45 @@ impl AccessAuthFile {
             .all(|path| !invalid_secret_file_path(path))
     }
 
+    fn control_gateway_is_valid(&self) -> bool {
+        let Ok(uri) = Url::parse(&self.control_gateway.base_uri) else {
+            return false;
+        };
+        let locators = [
+            self.control_gateway.ca_certificate_locator.as_str(),
+            self.control_gateway.client_certificate_locator.as_str(),
+            self.control_gateway.client_private_key_locator.as_str(),
+        ];
+        uri.scheme() == "https"
+            && uri.host_str().is_some()
+            && uri.path() == "/"
+            && uri.query().is_none()
+            && uri.fragment().is_none()
+            && self
+                .control_gateway
+                .allowed_server_sans
+                .iter()
+                .any(|san| Some(san.as_str()) == uri.host_str())
+            && (100..=30_000).contains(&self.control_gateway.timeout_milliseconds)
+            && (1..=16 * 1024 * 1024).contains(&self.control_gateway.max_request_bytes)
+            && (1..=32 * 1024 * 1024).contains(&self.control_gateway.max_response_bytes)
+            && locators.iter().all(|locator| {
+                self.secrets
+                    .file_bindings
+                    .get(*locator)
+                    .is_some_and(|path| !invalid_secret_file_path(path))
+            })
+    }
+
     fn insecure_mode_is_loopback_only(&self) -> bool {
         let browser_bind = self.browser.bind_addr.parse::<std::net::SocketAddr>();
         let internal_bind = self.internal_mtls.bind_addr.parse::<std::net::SocketAddr>();
         let resolver = Url::parse(&self.environment_owner_resolver.resolver_uri);
+        let control = Url::parse(&self.control_gateway.base_uri);
         browser_bind.is_ok_and(|address| address.ip().is_loopback())
             && internal_bind.is_ok_and(|address| address.ip().is_loopback())
             && resolver.is_ok_and(|url| url_host_is_loopback(&url))
+            && control.is_ok_and(|url| url_host_is_loopback(&url))
     }
 }
 
@@ -626,6 +679,9 @@ secrets:
     "secret://environment-owner-resolver/ca": resolver-ca
     "secret://access-service/resolver-cert": resolver-cert
     "secret://access-service/resolver-key": resolver-key
+    "secret://control-gateway/ca": control-ca
+    "secret://access-service/control-client-cert": control-cert
+    "secret://access-service/control-client-key": control-key
 internal_mtls:
   bind_addr: 127.0.0.1:9443
   server_certificate_file: server-cert
@@ -643,6 +699,15 @@ environment_owner_resolver:
   max_retries: 1
   retry_backoff_milliseconds: 100
   decision_ttl_seconds: 5
+control_gateway:
+  base_uri: https://control-service.example.test:9444/
+  ca_certificate_locator: secret://control-gateway/ca
+  client_certificate_locator: secret://access-service/control-client-cert
+  client_private_key_locator: secret://access-service/control-client-key
+  allowed_server_sans: [control-service.example.test]
+  timeout_milliseconds: 5000
+  max_request_bytes: 1048576
+  max_response_bytes: 8388608
 grants:
   gateway_san_uris: [spiffe://labweaver/gateway]
   default_ttl_seconds: 1800

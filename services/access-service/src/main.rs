@@ -1,6 +1,7 @@
 //! Access Service browser BFF entry points.
 
 mod grants;
+mod proxy;
 
 use std::{collections::BTreeSet, net::SocketAddr, str::FromStr, sync::Arc};
 
@@ -47,6 +48,7 @@ struct AppState {
     pool: PgPool,
     key_ring: KeyRing,
     owner_resolver: EnvironmentOwnerResolverClient,
+    control_proxy: proxy::ControlGatewayProxy,
     metrics: telemetry::PrometheusHandle,
     nats: async_nats::Client,
 }
@@ -96,6 +98,10 @@ async fn main() -> Result<(), StartupError> {
         .route(
             "/api/v1/access-grants/{grant_id}/revoke",
             post(grants::revoke_access_grant),
+        )
+        .route(
+            "/api/v1/courses/{*control_path}",
+            axum::routing::any(proxy::forward_control),
         )
         .with_state(Arc::clone(&state));
     let internal_router = Router::new()
@@ -205,6 +211,7 @@ async fn build_app_state(
         ),
         deployment.transport_security,
     )?;
+    let control_proxy = build_control_proxy(&deployment)?;
     let nats = grants::connect_nats(&deployment.nats).await?;
     Ok(Arc::new(AppState {
         config,
@@ -217,9 +224,26 @@ async fn build_app_state(
         pool,
         key_ring,
         owner_resolver,
+        control_proxy,
         metrics,
         nats,
     }))
+}
+
+fn build_control_proxy(
+    deployment: &AccessAuthFile,
+) -> Result<proxy::ControlGatewayProxy, StartupError> {
+    let config = &deployment.control_gateway;
+    let ca = resolver_secret(deployment, &config.ca_certificate_locator)?;
+    let certificate = resolver_secret(deployment, &config.client_certificate_locator)?;
+    let key = resolver_secret(deployment, &config.client_private_key_locator)?;
+    Ok(proxy::ControlGatewayProxy::new(
+        config,
+        &ca,
+        &certificate,
+        &key,
+        deployment.transport_security,
+    )?)
 }
 
 async fn auth_cleanup_loop(state: Arc<AppState>) -> Result<(), StartupError> {
@@ -1099,6 +1123,8 @@ enum StartupError {
     Mtls(#[from] auth::MtlsError),
     #[error("LW_AUTH_STARTUP_FAILED")]
     OwnerResolver(#[from] auth::OwnerResolverClientError),
+    #[error("LW_AUTH_STARTUP_FAILED")]
+    ControlGateway(#[from] proxy::ControlGatewayError),
     #[error("LW_AUTH_STARTUP_FAILED")]
     GrantRuntime(#[from] grants::GrantRuntimeError),
     #[error("LW_AUTH_STARTUP_FAILED")]

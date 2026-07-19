@@ -44,7 +44,7 @@ metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest"] }
 rand = "0.9.1"
-reqwest = { version = "0.12.28", default-features = false, features = ["cookies", "json", "rustls-tls"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["cookies", "json", "rustls-tls", "stream"] }
 russh = { version = "0.62.2", default-features = false, features = ["ring"] }
 russh-sftp = "2.3.0"
 scraper = "0.24.0"
