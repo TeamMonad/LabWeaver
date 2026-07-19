@@ -8,9 +8,16 @@
       - sprint2_application_postgres_service_file | length > 0
       - sprint2_application_nats_server | length > 0
       - sprint2_application_nats_credentials_file | length > 0
+      - sprint2_application_nats_ca_file | length > 0
       - sprint2_application_minio_alias | length > 0
+      - sprint2_application_minio_endpoint is match('^https://[^/]+(?::[0-9]+)?/?$')
+      - sprint2_application_minio_username | length > 0
+      - sprint2_application_minio_password | length > 0
+      - sprint2_application_minio_ca_file | length > 0
       - sprint2_application_harbor_api | length > 0
       - sprint2_application_harbor_registry is match('^[a-z0-9][a-z0-9.-]+(?::[0-9]+)?$')
+      - sprint2_application_harbor_endpoint_address | ansible.utils.ipaddr
+      - sprint2_application_harbor_ca_file | length > 0
       - sprint2_application_keycloak_config | length > 0
       - sprint2_application_keycloak_server | length > 0
       - sprint2_application_keycloak_username | length > 0
@@ -42,8 +49,11 @@
     - "{{ sprint2_application_keytool }}"
     - "{{ sprint2_application_postgres_service_file }}"
     - "{{ sprint2_application_nats_credentials_file }}"
+    - "{{ sprint2_application_nats_ca_file }}"
     - "{{ sprint2_application_keycloak_config }}"
     - "{{ sprint2_application_keycloak_ca_file }}"
+    - "{{ sprint2_application_minio_ca_file }}"
+    - "{{ sprint2_application_harbor_ca_file }}"
   register: sprint2_application_remote_inputs
 
 - name: Validate controller-owned reviewed inputs
@@ -162,6 +172,72 @@
     group: root
     mode: "0700"
 
+- name: Resolve retained headless data-service endpoints
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_kubectl }}"
+      - --kubeconfig
+      - "{{ sprint2_application_kubeconfig }}"
+      - --namespace
+      - "{{ sprint2_application_data_namespace }}"
+      - get
+      - endpointslice
+      - --selector
+      - "kubernetes.io/service-name={{ item }}"
+      - --output=jsonpath={.items[0].endpoints[0].addresses[0]}
+  loop: "{{ sprint2_application_data_services }}"
+  register: sprint2_application_data_endpoints
+  changed_when: false
+
+- name: Require one valid retained endpoint per data service
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_data_endpoints.results | length == sprint2_application_data_services | length
+      - >-
+        sprint2_application_data_endpoints.results | map(attribute='stdout')
+        | map('ansible.utils.ipaddr') | select | list | length
+        == sprint2_application_data_services | length
+    fail_msg: SPRINT2_APPLICATION_DATA_ENDPOINT_INVALID
+
+- name: Bind controller tools to retained service identities
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} LABWEAVER SPRINT2 ADOPTED SERVICES"
+    block: |
+      {% for result in sprint2_application_data_endpoints.results %}
+      {{ result.stdout }} {{ result.item }}.{{ sprint2_application_data_namespace }}.svc
+      {% endfor %}
+      {{ sprint2_application_harbor_endpoint_address }} {{ sprint2_application_harbor_registry }}
+      {{ sprint2_application_keycloak_endpoint_address }} {{ sprint2_application_keycloak_hostname }}
+
+- name: Create isolated MinIO administration configuration
+  ansible.builtin.file:
+    path: "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/mc"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Authenticate retained MinIO administration
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_mc }}"
+      - alias
+      - set
+      - "{{ sprint2_application_minio_alias }}"
+      - "{{ sprint2_application_minio_endpoint }}"
+      - "{{ sprint2_application_minio_username }}"
+      - "{{ sprint2_application_minio_password }}"
+      - --api
+      - S3v4
+      - --path
+      - on
+  environment:
+    MC_CONFIG_DIR: "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/mc"
+    SSL_CERT_FILE: "{{ sprint2_application_minio_ca_file }}"
+  changed_when: false
+  no_log: true
+
 - name: Probe retained PostgreSQL
   ansible.builtin.command:
     argv:
@@ -233,6 +309,8 @@
       - "{{ sprint2_application_nats_server }}"
       - --creds
       - "{{ sprint2_application_nats_credentials_file }}"
+      - --tlsca
+      - "{{ sprint2_application_nats_ca_file }}"
       - account
       - info
       - --json
@@ -247,6 +325,8 @@
       - "{{ sprint2_application_nats_server }}"
       - --creds
       - "{{ sprint2_application_nats_credentials_file }}"
+      - --tlsca
+      - "{{ sprint2_application_nats_ca_file }}"
       - stream
       - info
       - "{{ item.name }}"
@@ -265,6 +345,8 @@
       - "{{ sprint2_application_nats_server }}"
       - --creds
       - "{{ sprint2_application_nats_credentials_file }}"
+      - --tlsca
+      - "{{ sprint2_application_nats_ca_file }}"
       - stream
       - add
       - "{{ item.item.name }}"
@@ -292,6 +374,8 @@
       - "{{ sprint2_application_nats_server }}"
       - --creds
       - "{{ sprint2_application_nats_credentials_file }}"
+      - --tlsca
+      - "{{ sprint2_application_nats_ca_file }}"
       - stream
       - info
       - "{{ item.name }}"
@@ -321,6 +405,9 @@
       - --ignore-existing
       - "{{ sprint2_application_minio_alias }}/{{ sprint2_application_minio_bucket }}"
   changed_when: false
+  environment:
+    MC_CONFIG_DIR: "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/mc"
+    SSL_CERT_FILE: "{{ sprint2_application_minio_ca_file }}"
   no_log: true
 
 - name: Enable versioning without removing existing objects
@@ -331,6 +418,9 @@
       - enable
       - "{{ sprint2_application_minio_alias }}/{{ sprint2_application_minio_bucket }}"
   changed_when: false
+  environment:
+    MC_CONFIG_DIR: "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/mc"
+    SSL_CERT_FILE: "{{ sprint2_application_minio_ca_file }}"
   no_log: true
 
 - name: Verify immutable artifact bucket versioning
@@ -342,6 +432,9 @@
       - "{{ sprint2_application_minio_alias }}/{{ sprint2_application_minio_bucket }}"
       - --json
   register: sprint2_application_minio_version
+  environment:
+    MC_CONFIG_DIR: "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/mc"
+    SSL_CERT_FILE: "{{ sprint2_application_minio_ca_file }}"
   changed_when: false
   failed_when: >-
     sprint2_application_minio_version.rc != 0 or
@@ -355,6 +448,7 @@
     password: "{{ sprint2_application_harbor_password }}"
     force_basic_auth: true
     validate_certs: true
+    ca_path: "{{ sprint2_application_harbor_ca_file }}"
     return_content: true
   register: sprint2_application_harbor_project_info
   failed_when: >-

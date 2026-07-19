@@ -18,6 +18,7 @@ sprint2_application_postgres_service_file: ""
 sprint2_application_postgres_service: sprint2-admin
 sprint2_application_nats_server: ""
 sprint2_application_nats_credentials_file: ""
+sprint2_application_nats_ca_file: ""
 sprint2_application_nats_streams:
   - {name: LABWEAVER_AGENT_EVENTS, subjects: "labweaver.agent.>", max_age: 24h}
   - {name: LABWEAVER_CONTROL_COMMANDS, subjects: "labweaver.control.agent_build.requested.v1", max_age: 24h}
@@ -26,13 +27,21 @@ sprint2_application_nats_streams:
   - {name: LABWEAVER_ACCESS, subjects: "labweaver.access.>", max_age: 24h}
   - {name: LABWEAVER_SUBMISSION, subjects: "labweaver.evaluation.submission.>", max_age: 168h}
 sprint2_application_minio_alias: ""
+sprint2_application_minio_endpoint: ""
+sprint2_application_minio_username: ""
+sprint2_application_minio_password: ""
+sprint2_application_minio_ca_file: ""
 sprint2_application_minio_bucket: labweaver-artifacts
 sprint2_application_harbor_api: ""
 sprint2_application_harbor_registry: ""
+sprint2_application_harbor_endpoint_address: ""
+sprint2_application_harbor_ca_file: ""
 sprint2_application_harbor_username: ""
 sprint2_application_harbor_password: ""
 sprint2_application_harbor_project: labweaver-system
 sprint2_application_image_pull_secret_name: harbor-labweaver-system-pull
+sprint2_application_data_namespace: labweaver-data
+sprint2_application_data_services: [postgres, nats, minio]
 sprint2_application_keycloak_realm: workloads
 sprint2_application_keycloak_config: ""
 sprint2_application_keycloak_server: ""

@@ -48,3 +48,8 @@ route. `sprint2-application` fails unless that route is both `Accepted` and `Res
 The private Keycloak representation is imported when the realm is absent. For a retained realm,
 the role uses `partialImport` with `ifResourceExists=SKIP`, then reads back the required client,
 roles and users. Existing identities are not overwritten or deleted.
+
+The controller resolves retained headless PostgreSQL, NATS and MinIO endpoints from EndpointSlice
+objects on every run and owns one bounded `/etc/hosts` block for those service DNS names plus the
+reviewed Harbor and Keycloak VIPs. Administrative clients use explicit CA files and isolated
+configuration directories; they do not disable TLS verification or depend on ambient credentials.
