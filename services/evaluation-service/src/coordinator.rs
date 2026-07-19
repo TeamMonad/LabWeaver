@@ -41,6 +41,7 @@ pub struct FreezeCoordinatorConfiguration {
     pub vm_job_namespace: String,
     pub worker_configuration_file: PathBuf,
     pub worker_secret_files: BTreeMap<String, PathBuf>,
+    pub worker_tls_ca_file: PathBuf,
     pub infrastructure_namespace_labels: BTreeMap<String, String>,
     pub dns_namespace_labels: BTreeMap<String, String>,
     pub dns_pod_labels: BTreeMap<String, String>,
@@ -384,7 +385,8 @@ impl FreezeCoordinator {
                     "containers":[{"name":"freeze","image":self.configuration.worker_image,"imagePullPolicy":"IfNotPresent",
                         "args":["--mode","freeze-worker"],"env":[
                             {"name":"LABWEAVER_EVALUATION_CONFIG_FILE","value":"/etc/labweaver/worker/worker.yaml"},
-                            {"name":"LABWEAVER_FREEZE_COMMAND_FILE","value":"/etc/labweaver/worker/command.json"}],
+                            {"name":"LABWEAVER_FREEZE_COMMAND_FILE","value":"/etc/labweaver/worker/command.json"},
+                            {"name":"SSL_CERT_FILE","value":self.configuration.worker_tls_ca_file}],
                         "securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}},
                         "resources":{"requests":{"cpu":"100m","memory":"128Mi"},"limits":{"cpu":"1","memory":"1Gi"}},"volumeMounts":mounts}],"volumes":volumes}}}
         });
@@ -556,6 +558,11 @@ fn validate_configuration(
         || !(100..=30_000).contains(&configuration.request_timeout_milliseconds)
         || !(1..=3650).contains(&configuration.retention_days)
         || configuration.worker_secret_files.is_empty()
+        || !configuration.worker_tls_ca_file.is_absolute()
+        || !configuration
+            .worker_secret_files
+            .values()
+            .any(|path| path == &configuration.worker_tls_ca_file)
         || configuration.infrastructure_namespace_labels.is_empty()
         || configuration.dns_namespace_labels.is_empty()
         || configuration.dns_pod_labels.is_empty()

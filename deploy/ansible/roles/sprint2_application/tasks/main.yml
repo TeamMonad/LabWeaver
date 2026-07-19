@@ -33,6 +33,12 @@
       - sprint2_application_runtime_passwords.keys() | sort == sprint2_application_domains | sort
       - sprint2_application_runtime_passwords.values() | map('length') | min >= 24
       - (sprint2_application_portal_route_namespace | length == 0) == (sprint2_application_portal_route_name | length == 0)
+      - >-
+        sprint2_application_portal_route_name | length == 0 or
+        (sprint2_application_portal_gateway_name | length > 0 and
+         sprint2_application_portal_hostname is match('^[a-z0-9][a-z0-9.-]+$') and
+         sprint2_application_portal_tls_certificate_file | length > 0 and
+         sprint2_application_portal_tls_key_file | length > 0)
     fail_msg: SPRINT2_APPLICATION_INPUT_INVALID
 
 - name: Validate remote application tools and credentials
@@ -65,7 +71,10 @@
         sprint2_application_configuration_manifest,
         sprint2_application_configuration_bundle,
         sprint2_application_keycloak_realm_file,
-        sprint2_application_access_seed_file] + sprint2_application_values_files }}
+        sprint2_application_access_seed_file] + sprint2_application_values_files
+       + ([sprint2_application_portal_tls_certificate_file,
+           sprint2_application_portal_tls_key_file]
+          if sprint2_application_portal_route_name | length > 0 else []) }}
   register: sprint2_application_controller_inputs
   delegate_to: localhost
   become: false
@@ -706,6 +715,109 @@
                'auth': (sprint2_application_harbor_username + ':' + sprint2_application_harbor_password)
                  | b64encode}}} | to_json | b64encode }}
   no_log: true
+
+- name: Reconcile the application portal TLS credential
+  kubernetes.core.k8s:
+    kubeconfig: "{{ sprint2_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{ sprint2_application_portal_tls_secret_name }}"
+        namespace: "{{ sprint2_application_portal_route_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver
+          labweaver.io/sprint: sprint2
+      type: kubernetes.io/tls
+      data:
+        tls.crt: "{{ lookup('ansible.builtin.file', sprint2_application_portal_tls_certificate_file) | b64encode }}"
+        tls.key: "{{ lookup('ansible.builtin.file', sprint2_application_portal_tls_key_file) | b64encode }}"
+  when: sprint2_application_portal_route_name | length > 0
+  no_log: true
+
+- name: Inspect the retained application Gateway
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ sprint2_application_kubeconfig }}"
+    api_version: gateway.networking.k8s.io/v1
+    kind: Gateway
+    namespace: "{{ sprint2_application_portal_route_namespace }}"
+    name: "{{ sprint2_application_portal_gateway_name }}"
+  register: sprint2_application_portal_gateway
+  when: sprint2_application_portal_route_name | length > 0
+
+- name: Require exactly one retained application Gateway
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_portal_gateway.resources | length == 1
+    fail_msg: SPRINT2_APPLICATION_PORTAL_GATEWAY_MISSING
+  when: sprint2_application_portal_route_name | length > 0
+
+- name: Select an existing Sprint 2 HTTPS listener
+  ansible.builtin.set_fact:
+    sprint2_application_portal_gateway_listener: >-
+      {{ sprint2_application_portal_gateway.resources[0].spec.listeners
+         | selectattr('name', 'equalto', sprint2_application_portal_gateway_listener_name)
+         | list }}
+  when: sprint2_application_portal_route_name | length > 0
+
+- name: Add the bounded Sprint 2 HTTPS listener when absent
+  kubernetes.core.k8s_json_patch:
+    kubeconfig: "{{ sprint2_application_kubeconfig }}"
+    api_version: gateway.networking.k8s.io/v1
+    kind: Gateway
+    namespace: "{{ sprint2_application_portal_route_namespace }}"
+    name: "{{ sprint2_application_portal_gateway_name }}"
+    patch:
+      - op: add
+        path: /spec/listeners/-
+        value:
+          name: "{{ sprint2_application_portal_gateway_listener_name }}"
+          protocol: HTTPS
+          port: 443
+          hostname: "{{ sprint2_application_portal_hostname }}"
+          tls:
+            mode: Terminate
+            certificateRefs:
+              - group: ""
+                kind: Secret
+                name: "{{ sprint2_application_portal_tls_secret_name }}"
+          allowedRoutes:
+            namespaces:
+              from: Same
+  when:
+    - sprint2_application_portal_route_name | length > 0
+    - sprint2_application_portal_gateway_listener | length == 0
+
+- name: Read back the retained application Gateway after listener adoption
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ sprint2_application_kubeconfig }}"
+    api_version: gateway.networking.k8s.io/v1
+    kind: Gateway
+    namespace: "{{ sprint2_application_portal_route_namespace }}"
+    name: "{{ sprint2_application_portal_gateway_name }}"
+  register: sprint2_application_portal_gateway_after
+  when: sprint2_application_portal_route_name | length > 0
+
+- name: Require the exact bounded Sprint 2 HTTPS listener
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_portal_gateway_listener_after | length == 1
+      - sprint2_application_portal_gateway_listener_after[0].protocol == 'HTTPS'
+      - sprint2_application_portal_gateway_listener_after[0].port | int == 443
+      - sprint2_application_portal_gateway_listener_after[0].hostname == sprint2_application_portal_hostname
+      - sprint2_application_portal_gateway_listener_after[0].tls.mode == 'Terminate'
+      - sprint2_application_portal_gateway_listener_after[0].tls.certificateRefs | length == 1
+      - sprint2_application_portal_gateway_listener_after[0].tls.certificateRefs[0].name == sprint2_application_portal_tls_secret_name
+      - sprint2_application_portal_gateway_listener_after[0].allowedRoutes.namespaces.from == 'Same'
+    fail_msg: SPRINT2_APPLICATION_PORTAL_GATEWAY_CONFLICT
+  vars:
+    sprint2_application_portal_gateway_listener_after: >-
+      {{ sprint2_application_portal_gateway_after.resources[0].spec.listeners
+         | selectattr('name', 'equalto', sprint2_application_portal_gateway_listener_name)
+         | list }}
+  when: sprint2_application_portal_route_name | length > 0
 
 - name: Apply reviewed application configuration without namespace reset
   kubernetes.core.k8s:

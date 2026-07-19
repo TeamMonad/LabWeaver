@@ -35,7 +35,9 @@ coordinator:
   workerSecretFiles:
     database-url: /etc/labweaver/secrets/database-url
     minio-access-key: /etc/labweaver/secrets/minio-access-key
+    minio-ca.pem: /etc/labweaver/secrets/minio-ca.pem
     minio-secret-key: /etc/labweaver/secrets/minio-secret-key
+  workerTlsCaFile: /etc/labweaver/secrets/minio-ca.pem
   infrastructureNamespaceLabels:
     labweaver.io/infrastructure: "true"
   dnsNamespaceLabels:

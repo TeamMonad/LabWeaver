@@ -15,6 +15,7 @@
   "secrets": {
     "access-service-secrets": [
       "database-url",
+      "postgres-ca.pem",
       "mtls-ca.pem",
       "nats-ca.pem",
       "nats-client.crt",
@@ -30,7 +31,9 @@
       "anthropic-api-key",
       "database-url",
       "minio-access-key",
+      "minio-ca.pem",
       "minio-secret-key",
+      "postgres-ca.pem",
       "mtls-ca.pem",
       "nats-ca.pem",
       "nats-client.crt",
@@ -47,30 +50,36 @@
       "harbor-password",
       "harbor-username",
       "minio-access-key",
+      "minio-ca.pem",
       "minio-secret-key",
       "nats-ca.pem",
       "nats-client.crt",
       "nats-client.key",
-      "nats.creds"
+      "nats.creds",
+      "postgres-ca.pem"
     ],
     "container-executor-secrets": [
       "database-url",
       "minio-access-key",
+      "minio-ca.pem",
       "minio-secret-key",
       "nats-ca.pem",
       "nats-client.crt",
       "nats-client.key",
-      "nats.creds"
+      "nats.creds",
+      "postgres-ca.pem"
     ],
     "control-service-secrets": [
       "database-url",
       "minio-access-key",
+      "minio-ca.pem",
       "minio-secret-key",
       "mtls-ca.pem",
       "nats-ca.pem",
       "nats-client.crt",
       "nats-client.key",
       "nats.creds",
+      "postgres-ca.pem",
       "tls.crt",
       "tls.key"
     ],
@@ -83,6 +92,7 @@
       "nats-client.key",
       "nats-server",
       "nats.creds",
+      "postgres-ca.pem",
       "system-actor-id",
       "tls.crt",
       "tls.key"
@@ -90,23 +100,27 @@
     "evaluation-service-secrets": [
       "database-url",
       "minio-access-key",
+      "minio-ca.pem",
       "minio-secret-key",
       "mtls-ca.pem",
       "nats-ca.pem",
       "nats-client.crt",
       "nats-client.key",
       "nats.creds",
+      "postgres-ca.pem",
       "tls.crt",
       "tls.key"
     ],
     "kubevirt-executor-secrets": [
       "database-url",
       "minio-access-key",
+      "minio-ca.pem",
       "minio-secret-key",
       "nats-ca.pem",
       "nats-client.crt",
       "nats-client.key",
-      "nats.creds"
+      "nats.creds",
+      "postgres-ca.pem"
     ],
     "openssh-gateway-secrets": [
       "known_hosts",

@@ -86,6 +86,12 @@ sprint2_application_namespace: labweaver-system
 sprint2_application_rollout_timeout: 10m
 sprint2_application_portal_route_namespace: ""
 sprint2_application_portal_route_name: ""
+sprint2_application_portal_gateway_name: ""
+sprint2_application_portal_gateway_listener_name: https
+sprint2_application_portal_hostname: ""
+sprint2_application_portal_tls_secret_name: labweaver-sprint2-tls
+sprint2_application_portal_tls_certificate_file: ""
+sprint2_application_portal_tls_key_file: ""
 sprint2_application_workloads:
   - control-service
   - access-service
