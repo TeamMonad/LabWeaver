@@ -819,12 +819,10 @@ fn run_infrastructure_with_package(
     runner
         .run(Play::from_file(playbook))
         .map(|_| ())
-        .map_err(|_| AppError::ExternalCommand {
+        .map_err(|error| AppError::ExternalCommand {
             role: "allowlisted infrastructure playbook",
             code: None,
-            detail: Some(
-                "ansible-rs returned a non-zero result; inspect the controller event log".into(),
-            ),
+            detail: Some(format!("ansible-rs returned a non-zero result: {error}")),
         })
 }
 
