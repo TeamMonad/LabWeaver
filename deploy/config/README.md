@@ -48,6 +48,9 @@ only the exact reviewed HTTPS and TCP/2222 listeners when they are absent and re
 listener. `sprint2-application` fails unless both enabled routes are `Accepted` and `ResolvedRefs`.
 The portal authority is installed only in the retained router system trust so controller-side
 verification never disables TLS validation.
+The HTTPS listener accepts routes only from namespaces labeled
+`labweaver.io/gateway-routes=allowed`; the role adds that label to the reviewed portal namespace,
+and the Container provider adds it to Environment-owned namespaces as part of the immutable plan.
 
 The private Keycloak representation is imported when the realm is absent. For a retained realm,
 the role uses `partialImport` with `ifResourceExists=SKIP`, then reads back the required client,

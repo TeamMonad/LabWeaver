@@ -222,6 +222,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("SPRINT2_APPLICATION_SSH_GATEWAY_CONFLICT", tasks)
         self.assertIn("SPRINT2_APPLICATION_SSH_ROUTE_INVALID", tasks)
         self.assertIn("Refresh retained router trust", tasks)
+        self.assertIn("labweaver.io/gateway-routes: allowed", tasks)
         self.assertIn("kind: HTTPRoute", portal)
         self.assertIn("kind: TCPRoute", ssh_route)
         self.assertIn("name: openssh-gateway", ssh_route)

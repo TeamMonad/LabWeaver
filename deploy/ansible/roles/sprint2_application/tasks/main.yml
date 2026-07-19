@@ -922,6 +922,20 @@
   register: sprint2_application_portal_gateway
   when: sprint2_application_portal_route_name | length > 0
 
+- name: Label the reviewed portal namespace for bounded Gateway routes
+  kubernetes.core.k8s:
+    kubeconfig: "{{ sprint2_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ sprint2_application_portal_route_namespace }}"
+        labels:
+          labweaver.io/gateway-routes: allowed
+  when: sprint2_application_portal_route_name | length > 0
+
 - name: Require exactly one retained application Gateway
   ansible.builtin.assert:
     that:
@@ -960,7 +974,10 @@
                 name: "{{ sprint2_application_portal_tls_secret_name }}"
           allowedRoutes:
             namespaces:
-              from: Same
+              from: Selector
+              selector:
+                matchLabels:
+                  labweaver.io/gateway-routes: allowed
   when:
     - sprint2_application_portal_route_name | length > 0
     - sprint2_application_portal_gateway_listener | length == 0
@@ -985,7 +1002,10 @@
       - sprint2_application_portal_gateway_listener_after[0].tls.mode == 'Terminate'
       - sprint2_application_portal_gateway_listener_after[0].tls.certificateRefs | length == 1
       - sprint2_application_portal_gateway_listener_after[0].tls.certificateRefs[0].name == sprint2_application_portal_tls_secret_name
-      - sprint2_application_portal_gateway_listener_after[0].allowedRoutes.namespaces.from == 'Same'
+      - sprint2_application_portal_gateway_listener_after[0].allowedRoutes.namespaces.from == 'Selector'
+      - >-
+        sprint2_application_portal_gateway_listener_after[0].allowedRoutes.namespaces.selector.matchLabels['labweaver.io/gateway-routes']
+        == 'allowed'
     fail_msg: SPRINT2_APPLICATION_PORTAL_GATEWAY_CONFLICT
   vars:
     sprint2_application_portal_gateway_listener_after: >-
