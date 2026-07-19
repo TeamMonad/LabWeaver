@@ -1115,6 +1115,7 @@ const fn invalid_observation() -> ProviderFailure {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
