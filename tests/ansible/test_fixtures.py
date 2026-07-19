@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import re
 import sys
 import unittest
 import yaml
@@ -225,6 +226,18 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("kind: TCPRoute", ssh_route)
         self.assertIn("name: openssh-gateway", ssh_route)
         self.assertNotIn("state: absent", tasks)
+
+    def test_sprint2_service_configs_use_declared_tls_secret_keys(self) -> None:
+        manifest = json.loads(
+            (ROOT / "deploy/config/sprint2-bundle-manifest.json").read_text(encoding="utf-8")
+        )
+        for service, example in (
+            ("control-service-secrets", "control-plane.yaml.example"),
+            ("access-service-secrets", "access-auth.yaml.example"),
+        ):
+            configuration = (ROOT / "deploy/config" / example).read_text(encoding="utf-8")
+            for locator in re.findall(r"/etc/labweaver/secrets/([a-z0-9.-]+)", configuration):
+                self.assertIn(locator, manifest["secrets"][service])
 
     def test_deploy_starts_with_preflight(self) -> None:
         site = (ROOT / "deploy/ansible/playbooks/site.yml").read_text(encoding="utf-8")

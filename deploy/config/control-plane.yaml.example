@@ -12,14 +12,14 @@ gateway_mtls:
 access_service:
   base_url: "https://access-service:9443/"
   ca_certificate_file: "/etc/labweaver/secrets/mtls-ca.pem"
-  client_certificate_file: "/etc/labweaver/secrets/mtls.crt"
-  client_private_key_file: "/etc/labweaver/secrets/mtls.key"
+  client_certificate_file: "/etc/labweaver/secrets/tls.crt"
+  client_private_key_file: "/etc/labweaver/secrets/tls.key"
   timeout_milliseconds: 2000
 agent_service:
   base_url: "https://agent-service:9445/"
   ca_certificate_file: "/etc/labweaver/secrets/mtls-ca.pem"
-  client_certificate_file: "/etc/labweaver/secrets/mtls.crt"
-  client_private_key_file: "/etc/labweaver/secrets/mtls.key"
+  client_certificate_file: "/etc/labweaver/secrets/tls.crt"
+  client_private_key_file: "/etc/labweaver/secrets/tls.key"
   timeout_milliseconds: 5000
 object_store:
   binding: "problem-package-minio-v1"
