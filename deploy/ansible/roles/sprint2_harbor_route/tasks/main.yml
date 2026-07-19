@@ -10,7 +10,7 @@
       - harbor_kubeconfig_path | length > 0
       - harbor_public_ca_path == '/var/lib/labweaver/.private/harbor-public/registry-ca.crt'
       - harbor_project_name == 'labweaver-system'
-      - harbor_admin_password | length > 0
+      - harbor_secret_locator_path == '/etc/labweaver/harbor/bootstrap.env'
     fail_msg: SPRINT2_HARBOR_ROUTE_INPUT_INVALID
 
 - name: Read the existing Harbor namespace
@@ -263,6 +263,22 @@
       - sprint2_harbor_registry_probe.docker_distribution_api_version | default('') == 'registry/2.0'
       - sprint2_harbor_registry_probe.www_authenticate | default('') is search('/service/token')
     fail_msg: SPRINT2_HARBOR_REGISTRY_ROUTE_INVALID
+
+- name: Read the protected Harbor credential locator
+  ansible.builtin.command:
+    argv: [sudo, -n, cat, "{{ harbor_secret_locator_path }}"]
+  delegate_to: "{{ groups['routers'][0] }}"
+  become: false
+  changed_when: false
+  register: sprint2_harbor_secret_locator
+  no_log: true
+
+- name: Extract only the Harbor administration credential
+  ansible.builtin.set_fact:
+    harbor_admin_password: >-
+      {{ sprint2_harbor_secret_locator.stdout
+         | regex_findall('(?m)^HARBOR_ADMIN_PASSWORD=(.+)$') | first }}
+  no_log: true
 
 - name: Read the retained Harbor Sprint 2 project policy
   ansible.builtin.uri:

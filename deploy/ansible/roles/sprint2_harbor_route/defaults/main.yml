@@ -7,3 +7,4 @@ harbor_hostname: harbor.lab.lan
 harbor_kubeconfig_path: /etc/kubernetes/admin.conf
 harbor_public_ca_path: /var/lib/labweaver/.private/harbor-public/registry-ca.crt
 harbor_project_name: labweaver-system
+harbor_secret_locator_path: /etc/labweaver/harbor/bootstrap.env
