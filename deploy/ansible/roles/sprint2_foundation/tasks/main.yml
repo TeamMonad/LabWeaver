@@ -150,8 +150,10 @@
     kind: Pod
     namespace: "{{ sprint2_foundation_namespace }}"
     name: "{{ item.metadata.name }}-0"
-    wait: true
-    wait_timeout: 60
+    # The StatefulSet immediately recreates the same pod name; waiting for
+    # name absence races the controller. The readiness readback below is the
+    # bounded authority for the replacement revision.
+    wait: false
   loop: "{{ sprint2_foundation_revisions.resources }}"
   loop_control:
     label: "{{ item.metadata.name }}"
