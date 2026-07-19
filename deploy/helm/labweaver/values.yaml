@@ -3,6 +3,7 @@ images:
   agent_service: ""
   control_service: ""
   environment_service: ""
+  evaluation_service: ""
   web: ""
   openssh_gateway: ""
 
@@ -143,7 +144,18 @@ workloads:
       - {name: http, containerPort: 8080, servicePort: 8080}
     readiness: {type: http, port: http, path: /, livenessPath: /}
   evaluation-service:
-    enabled: false
+    enabled: true
+    imageKey: evaluation_service
+    args: ["--mode", "evaluation-service"]
+    configMap: evaluation-service-config
+    secret: evaluation-service-secrets
+    rbacProfile: evaluation
+    kubernetesApi: true
+    env:
+      LABWEAVER_EVALUATION_CONFIG_FILE: /etc/labweaver/config/config.yaml
+    ports:
+      - {name: mtls, containerPort: 9447, servicePort: 9447}
+    readiness: {type: tcp, port: mtls}
   resource-service:
     enabled: false
 

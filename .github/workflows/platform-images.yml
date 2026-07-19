@@ -74,6 +74,7 @@ jobs:
           - agent-service
           - control-service
           - environment-service
+          - evaluation-service
           - openssh-gateway
           - web
     steps:

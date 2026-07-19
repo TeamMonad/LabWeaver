@@ -31,11 +31,17 @@ coordinator:
   workerImage: harbor.example.invalid/labweaver/evaluation-service@sha256:0000000000000000000000000000000000000000000000000000000000000000
   workerServiceAccountName: evaluation-freeze-worker
   vmJobNamespace: labweaver-evaluation
-  workerConfigurationFile: /etc/labweaver/evaluation-worker.yaml
+  workerConfigurationFile: /etc/labweaver/config/worker.yaml
   workerSecretFiles:
     database-url: /etc/labweaver/secrets/database-url
     minio-access-key: /etc/labweaver/secrets/minio-access-key
     minio-secret-key: /etc/labweaver/secrets/minio-secret-key
+  infrastructureNamespaceLabels:
+    labweaver.io/infrastructure: "true"
+  dnsNamespaceLabels:
+    kubernetes.io/metadata.name: kube-system
+  dnsPodLabels:
+    k8s-app: kube-dns
   retentionPolicyId: 01900000-0000-7000-8000-000000000001
   retentionPolicyRevision: 1
   retentionDays: 90

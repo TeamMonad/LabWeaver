@@ -8,6 +8,7 @@
     "container-executor-config": ["config.yaml"],
     "control-service-config": ["config.yaml"],
     "environment-service-config": ["providers.json"],
+    "evaluation-service-config": ["config.yaml", "worker.yaml"],
     "kubevirt-executor-config": ["config.yaml"],
     "web-config": ["deployment.json"]
   },
@@ -83,6 +84,18 @@
       "nats-server",
       "nats.creds",
       "system-actor-id",
+      "tls.crt",
+      "tls.key"
+    ],
+    "evaluation-service-secrets": [
+      "database-url",
+      "minio-access-key",
+      "minio-secret-key",
+      "mtls-ca.pem",
+      "nats-ca.pem",
+      "nats-client.crt",
+      "nats-client.key",
+      "nats.creds",
       "tls.crt",
       "tls.key"
     ],

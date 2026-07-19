@@ -64,6 +64,7 @@ sprint2_reset_required_configmaps:
   - agent-service-config
   - build-executor-config
   - environment-service-config
+  - evaluation-service-config
   - container-executor-config
   - kubevirt-executor-config
   - web-config
@@ -73,6 +74,7 @@ sprint2_reset_required_secrets:
   - agent-service-secrets
   - build-executor-secrets
   - environment-service-secrets
+  - evaluation-service-secrets
   - container-executor-secrets
   - kubevirt-executor-secrets
   - openssh-gateway-secrets
@@ -85,6 +87,7 @@ sprint2_reset_workloads:
   - agent-service
   - build-executor
   - environment-service
+  - evaluation-service
   - container-executor
   - kubevirt-executor
   - openssh-gateway

@@ -41,6 +41,9 @@ pub struct FreezeCoordinatorConfiguration {
     pub vm_job_namespace: String,
     pub worker_configuration_file: PathBuf,
     pub worker_secret_files: BTreeMap<String, PathBuf>,
+    pub infrastructure_namespace_labels: BTreeMap<String, String>,
+    pub dns_namespace_labels: BTreeMap<String, String>,
+    pub dns_pod_labels: BTreeMap<String, String>,
     pub retention_policy_id: PolicyId,
     pub retention_policy_revision: Revision,
     pub retention_days: i64,
@@ -238,7 +241,7 @@ impl FreezeCoordinator {
             } => Some(collector_certificate_openssh.clone()),
             EnvironmentFreezeSourceBinding::Container { .. } => None,
         };
-        let (source, volume) = match binding.source {
+        let (source, volume, vm_egress_cidr) = match binding.source {
             EnvironmentFreezeSourceBinding::Container {
                 namespace: source_namespace,
                 persistent_volume_claim,
@@ -257,6 +260,7 @@ impl FreezeCoordinator {
                     Some(
                         json!({"name":"workspace","persistentVolumeClaim":{"claimName":persistent_volume_claim,"readOnly":true}}),
                     ),
+                    None,
                 )
             }
             EnvironmentFreezeSourceBinding::VirtualMachine {
@@ -268,8 +272,16 @@ impl FreezeCoordinator {
                 source_identity,
                 collector_certificate_openssh: _,
                 expires_at,
-            } => (
-                json!({
+            } => {
+                let address: std::net::IpAddr = host
+                    .parse()
+                    .map_err(|_| FreezeCoordinatorError::BindingInvalid)?;
+                let cidr = match address {
+                    std::net::IpAddr::V4(_) => format!("{address}/32"),
+                    std::net::IpAddr::V6(_) => format!("{address}/128"),
+                };
+                (
+                    json!({
                     "kind":"ssh","host":host,"port":port,"username":username,
                     "workspaceRoot":workspace_root,
                     "privateKeyPath":"/run/secrets/collector/key",
@@ -277,9 +289,11 @@ impl FreezeCoordinator {
                     "expectedHostKeySha256":expected_host_key_sha256,
                     "sourceIdentity":source_identity,"expiresAt":expires_at,
                     "connectTimeoutMilliseconds":5000,"operationTimeoutMilliseconds":30000
-                }),
-                None,
-            ),
+                    }),
+                    None,
+                    Some((cidr, port)),
+                )
+            }
         };
         let command_document = serde_json::to_string(&json!({"request":request,"source":source}))?;
         let labels = resource_labels(command);
@@ -312,6 +326,37 @@ impl FreezeCoordinator {
         if !existing_bundle {
             self.apply(namespace, "v1", "secrets", job_name, json!({"apiVersion":"v1","kind":"Secret","metadata":{"name":job_name,"namespace":namespace,"labels":labels},"immutable":true,"type":"Opaque","data":secret_data})).await?;
         }
+        self.apply(
+            namespace,
+            "v1",
+            "serviceaccounts",
+            &self.configuration.worker_service_account_name,
+            json!({"apiVersion":"v1","kind":"ServiceAccount","metadata":{"name":self.configuration.worker_service_account_name,
+                "namespace":namespace,"labels":{"app.kubernetes.io/managed-by":FIELD_MANAGER,"app.kubernetes.io/name":"evaluation-freeze-worker"}},
+                "automountServiceAccountToken":false}),
+        )
+        .await?;
+        let mut egress = vec![
+            json!({"to":[{"namespaceSelector":{"matchLabels":self.configuration.infrastructure_namespace_labels}}]}),
+            json!({"to":[{"namespaceSelector":{"matchLabels":self.configuration.dns_namespace_labels},
+                "podSelector":{"matchLabels":self.configuration.dns_pod_labels}}],
+                "ports":[{"protocol":"UDP","port":53},{"protocol":"TCP","port":53}]}),
+        ];
+        if let Some((cidr, port)) = vm_egress_cidr {
+            egress.push(
+                json!({"to":[{"ipBlock":{"cidr":cidr}}],"ports":[{"protocol":"TCP","port":port}]}),
+            );
+        }
+        self.apply(
+            namespace,
+            "networking.k8s.io/v1",
+            "networkpolicies",
+            job_name,
+            json!({"apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy","metadata":{"name":job_name,"namespace":namespace,"labels":labels},
+                "spec":{"podSelector":{"matchLabels":{"labweaver.io/frozen-submission-id":command.frozen_submission_id.to_string()}},
+                "policyTypes":["Ingress","Egress"],"ingress":[],"egress":egress}}),
+        )
+        .await?;
         let mut volumes = vec![
             json!({"name":"command","configMap":{"name":job_name}}),
             json!({"name":"secrets","secret":{"secretName":job_name,"defaultMode":256}}),
@@ -430,6 +475,7 @@ impl FreezeCoordinator {
             ("batch/v1", "jobs"),
             ("v1", "configmaps"),
             ("v1", "secrets"),
+            ("networking.k8s.io/v1", "networkpolicies"),
         ] {
             let response = self
                 .authorized(self.kubernetes.delete(self.resource_url(
@@ -449,6 +495,7 @@ impl FreezeCoordinator {
             ("batch/v1", "jobs"),
             ("v1", "configmaps"),
             ("v1", "secrets"),
+            ("networking.k8s.io/v1", "networkpolicies"),
         ] {
             if self
                 .get(namespace, api_version, plural, name)
@@ -509,6 +556,9 @@ fn validate_configuration(
         || !(100..=30_000).contains(&configuration.request_timeout_milliseconds)
         || !(1..=3650).contains(&configuration.retention_days)
         || configuration.worker_secret_files.is_empty()
+        || configuration.infrastructure_namespace_labels.is_empty()
+        || configuration.dns_namespace_labels.is_empty()
+        || configuration.dns_pod_labels.is_empty()
     {
         return Err(FreezeCoordinatorError::ConfigurationInvalid);
     }

@@ -52,7 +52,11 @@ NATS_USERS: dict[str, tuple[tuple[str, ...], tuple[str, ...], bool]] = {
         False,
     ),
     "evaluation-service": (
-        ("$JS.API.>", "labweaver.evaluation.submission.frozen.v1"),
+        (
+            "$JS.API.>",
+            "labweaver.evaluation.submission.freeze_requested.v1",
+            "labweaver.evaluation.submission.frozen.v1",
+        ),
         ("_INBOX.>", "labweaver.evaluation.submission.freeze_requested.v1"),
         False,
     ),
