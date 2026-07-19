@@ -90,6 +90,7 @@ class AnsibleFixtureTests(unittest.TestCase):
             "{{ sprint2_foundation_lock.postgresql.image }}": "registry.invalid/postgres@sha256:" + "a" * 64,
             "{{ sprint2_foundation_lock.sprint2_foundation.nats }}": "registry.invalid/nats@sha256:" + "b" * 64,
             "{{ sprint2_foundation_lock.sprint2_foundation.minio }}": "registry.invalid/minio@sha256:" + "c" * 64,
+            "{{ sprint2_foundation_bundle_sha256 }}": "d" * 64,
         }
         rendered = workloads
         for source, value in replacements.items():
@@ -97,6 +98,13 @@ class AnsibleFixtureTests(unittest.TestCase):
         documents = list(yaml.safe_load_all(rendered))
         self.assertEqual(len(documents), 8)
         self.assertEqual(sum(document["kind"] == "StatefulSet" for document in documents), 3)
+        for document in documents:
+            if document["kind"] == "StatefulSet":
+                self.assertEqual(
+                    document["spec"]["template"]["metadata"]["annotations"]
+                    ["labweaver.io/configuration-sha256"],
+                    "d" * 64,
+                )
         minio = next(
             document for document in documents
             if document["kind"] == "StatefulSet" and document["metadata"]["name"] == "minio"

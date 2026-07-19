@@ -40,6 +40,8 @@
       {{ lookup('ansible.builtin.file', sprint2_foundation_bundle) | from_yaml_all | list }}
     sprint2_foundation_manifest_value: >-
       {{ lookup('ansible.builtin.file', sprint2_foundation_manifest) | from_json }}
+    sprint2_foundation_bundle_sha256: >-
+      {{ lookup('ansible.builtin.file', sprint2_foundation_bundle) | hash('sha256') }}
   no_log: true
 
 - name: Validate foundation object boundary

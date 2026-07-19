@@ -73,7 +73,9 @@ are completed.
 The foundation command reconciles the retained PostgreSQL, NATS JetStream and
 MinIO service bodies in `labweaver-data` before reset. All images are digest
 locked, all three workloads use TLS, persistent volumes, restricted Pod Security
-and default-deny NetworkPolicy. Its private bundle uses
+and default-deny NetworkPolicy. Each StatefulSet Pod template binds the exact
+private bundle SHA-256 so an identity or configuration rotation cannot be
+mistaken for a completed rollout while an old process remains Ready. Its private bundle uses
 `sprint2-foundation-bundle-manifest.json`; the same renderer and strict key
 validation used for the workload bundle apply. The reset deliberately excludes
 `labweaver-data` and `labweaver-build` from namespace deletion and clears only
@@ -148,7 +150,7 @@ The ignored environment inventory must supply reviewed paths and credentials for
 PostgreSQL (`PGSERVICEFILE`), NATS, MinIO, BuildKit, Harbor and Keycloak, the
 Sprint 2 Helm values, and a separate rollback-probe values file whose only purpose
 is to make readiness fail. It must also provide one reviewed multi-document
-Kubernetes YAML bundle containing exactly the eight required ConfigMaps and eight
+Kubernetes YAML bundle containing exactly the nine required ConfigMaps and nine
 required Secrets in `labweaver-system`. The role rejects extra kinds, names or
 namespaces, applies the bundle only after namespace recreation, and records only
 its SHA-256. Secrets remain in Vault or root-owned controller files and are never
