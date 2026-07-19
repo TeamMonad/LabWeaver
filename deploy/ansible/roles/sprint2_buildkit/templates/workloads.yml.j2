@@ -66,9 +66,13 @@ spec:
             timeoutSeconds: 3
           securityContext:
             privileged: false
-            allowPrivilegeEscalation: false
+            # RootlessKit's reviewed newuidmap/newgidmap helpers require their
+            # setuid transition to create the subordinate user namespace. The
+            # exception remains bounded to these two capabilities and this
+            # dedicated, tokenless workload.
+            allowPrivilegeEscalation: true
             readOnlyRootFilesystem: true
-            capabilities: {drop: [ALL]}
+            capabilities: {drop: [ALL], add: [SETUID, SETGID]}
             seccompProfile: {type: Unconfined}
             appArmorProfile: {type: Unconfined}
           resources:

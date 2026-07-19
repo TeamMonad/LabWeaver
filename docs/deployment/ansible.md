@@ -131,7 +131,9 @@ cargo xtask sprint2-buildkit --infra --env demo --yes
 The BuildKit namespace is the sole approved Sprint 2 exception for
 `Unconfined` seccomp/AppArmor and `--oci-worker-no-process-sandbox`. The
 workload remains non-root, non-privileged, without HostPath or hostNetwork, and
-without Kubernetes API credentials. Its gRPC endpoint requires mTLS; the
+without Kubernetes API credentials. The container permits only the `SETUID` and
+`SETGID` capabilities plus the setuid transition required by RootlessKit's
+`newuidmap`/`newgidmap`; every other capability remains dropped. Its gRPC endpoint requires mTLS; the
 generated `build-executor-client` material is injected only into the
 `build-executor` Secret. Default-deny NetworkPolicy admits that workload and
 the reviewed Harbor CIDR only.
