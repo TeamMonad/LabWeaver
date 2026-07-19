@@ -7,6 +7,7 @@
 
 mod api;
 mod container_provider;
+mod freeze_binding;
 mod kubevirt_provider;
 mod lifecycle;
 mod messaging;
@@ -30,6 +31,7 @@ pub use container_provider::{
     PgContainerExecutorFenceStore, PgReleaseProjectionStore, ReleaseProjectionDecision,
     ReleaseProjectionError, ResolvedContainerRelease,
 };
+pub use freeze_binding::{FreezeBindingConfiguration, FreezeBindingError, FreezeBindingService};
 pub use kubevirt_provider::{
     FencedKubeVirtExecutor, KUBEVIRT_BACKEND_PROTOCOL_VERSION, KubeVirtBackendFence,
     KubeVirtCleanupPlan, KubeVirtExecutorBackend, KubeVirtExecutorFenceError,

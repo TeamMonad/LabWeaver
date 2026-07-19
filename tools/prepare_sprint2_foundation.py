@@ -85,6 +85,14 @@ PLATFORM_IDENTITIES: dict[str, tuple[tuple[str, ...], str]] = {
         ("DNS:environment-service", "DNS:environment-service.labweaver-system.svc"),
         "serverAuth",
     ),
+    "evaluation-service": (
+        (
+            "DNS:evaluation-service",
+            "DNS:evaluation-service.labweaver-system.svc",
+            "URI:spiffe://labweaver/evaluation-service",
+        ),
+        "serverAuth,clientAuth",
+    ),
     "openssh-gateway": (("URI:spiffe://labweaver/openssh-gateway",), "clientAuth"),
 }
 
@@ -194,7 +202,7 @@ def _nsc(nsc: Path, store: Path, arguments: list[str], private_home: Path) -> No
     _run(nsc, ["--all-dirs", str(store), *arguments], private_home)
 
 
-def prepare(output: Path, openssl: Path, nsc: Path, days: int) -> dict[str, object]:
+def prepare(output: Path, openssl: Path, ssh_keygen: Path, nsc: Path, days: int) -> dict[str, object]:
     if not 30 <= days <= 825:
         raise FoundationError("LW_SPRINT2_FOUNDATION_VALIDITY_INVALID")
     private_home = output / "home"
@@ -204,6 +212,7 @@ def prepare(output: Path, openssl: Path, nsc: Path, days: int) -> dict[str, obje
     clients = output / "nats-clients"
     platform_authority = output / "platform-authority"
     platform_identities = output / "platform-identities"
+    ssh_authority = output / "ssh-authority"
     for directory in (
         private_home,
         authority,
@@ -212,6 +221,7 @@ def prepare(output: Path, openssl: Path, nsc: Path, days: int) -> dict[str, obje
         clients,
         platform_authority,
         platform_identities,
+        ssh_authority,
     ):
         directory.mkdir(parents=True, mode=0o700)
 
@@ -258,6 +268,13 @@ def prepare(output: Path, openssl: Path, nsc: Path, days: int) -> dict[str, obje
         _copy(key, platform_identities / name / "key.pem")
         _copy(certificate, platform_identities / name / "certificate.pem")
         _copy(platform_ca_certificate, platform_identities / name / "ca.pem")
+
+    collector_ca_key = ssh_authority / "collector-ca"
+    _run(
+        ssh_keygen,
+        ["-q", "-t", "ed25519", "-N", "", "-C", "labweaver-collector-ca", "-f", str(collector_ca_key)],
+        private_home,
+    )
 
     for service in ("postgres", "nats", "minio"):
         material = authority / f"issued-{service}"
@@ -355,6 +372,7 @@ tls {
         "nats_clients": len(NATS_USERS),
         "platform_ca_sha256": hashlib.sha256(platform_ca_certificate.read_bytes()).hexdigest(),
         "platform_identities": len(PLATFORM_IDENTITIES),
+        "collector_ssh_ca_public_sha256": hashlib.sha256((ssh_authority / "collector-ca.pub").read_bytes()).hexdigest(),
         "render_input": "render-input",
     }
 
@@ -363,6 +381,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--openssl", type=Path, default=Path("/usr/bin/openssl"))
+    parser.add_argument("--ssh-keygen", type=Path, default=Path("/usr/bin/ssh-keygen"))
     parser.add_argument("--nsc", type=Path, default=Path("/usr/local/bin/nsc"))
     parser.add_argument("--valid-days", type=int, default=365)
     arguments = parser.parse_args()
@@ -370,9 +389,10 @@ def main() -> int:
     try:
         output = _private_output(arguments.output)
         openssl = _trusted_binary(arguments.openssl, "openssl")
+        ssh_keygen = _trusted_binary(arguments.ssh_keygen, "ssh-keygen")
         nsc = _trusted_binary(arguments.nsc, "nsc")
         output.mkdir(mode=0o700)
-        result = prepare(output, openssl, nsc, arguments.valid_days)
+        result = prepare(output, openssl, ssh_keygen, nsc, arguments.valid_days)
     except (FoundationError, OSError, UnicodeError) as error:
         if output is not None and output.is_dir():
             shutil.rmtree(output)

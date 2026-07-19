@@ -70,6 +70,14 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::submission::FrozenSubmission
     );
     document!(
+        "schemas/contracts/v1/internal/environment-freeze-binding-request.schema.json",
+        crate::submission::EnvironmentFreezeBindingRequest
+    );
+    document!(
+        "schemas/contracts/v1/internal/environment-freeze-binding.schema.json",
+        crate::submission::EnvironmentFreezeBinding
+    );
+    document!(
         "schemas/contracts/v1/build-request.schema.json",
         crate::supply_chain::BuildRequest
     );

@@ -67,7 +67,7 @@ workloads:
       LABWEAVER_OWNER_RESOLVER_CLIENT_CA_PATH: /etc/labweaver/secrets/mtls-ca.pem
       LABWEAVER_OWNER_RESOLVER_SERVER_CERT_PATH: /etc/labweaver/secrets/tls.crt
       LABWEAVER_OWNER_RESOLVER_SERVER_KEY_PATH: /etc/labweaver/secrets/tls.key
-      LABWEAVER_OWNER_RESOLVER_ALLOWED_CALLER_SANS: spiffe://labweaver/access-service
+      LABWEAVER_OWNER_RESOLVER_ALLOWED_CALLER_SANS: spiffe://labweaver/access-service,spiffe://labweaver/evaluation-service
       LABWEAVER_NATS_CA_PATH: /etc/labweaver/secrets/nats-ca.pem
       LABWEAVER_NATS_CLIENT_CERT_PATH: /etc/labweaver/secrets/nats-client.crt
       LABWEAVER_NATS_CLIENT_KEY_PATH: /etc/labweaver/secrets/nats-client.key

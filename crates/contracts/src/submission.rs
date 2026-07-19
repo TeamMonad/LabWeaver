@@ -178,6 +178,51 @@ pub struct FrozenEnvironmentIdentity {
     pub build_request_id: Option<BuildRequestId>,
 }
 
+/// Evaluation-authenticated request for one current Environment freeze binding.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentFreezeBindingRequest {
+    pub course_id: CourseId,
+    pub actor_id: ActorId,
+    pub expected_revision: Revision,
+    pub collector_public_key_openssh: Option<String>,
+}
+
+/// Environment-owned source locator safe for one bounded freeze Job.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum EnvironmentFreezeSourceBinding {
+    Container {
+        namespace: String,
+        persistent_volume_claim: String,
+        storage_class_name: String,
+    },
+    VirtualMachine {
+        host: String,
+        port: u16,
+        username: String,
+        workspace_root: String,
+        expected_host_key_sha256: Sha256Digest,
+        source_identity: Sha256Digest,
+        collector_certificate_openssh: String,
+        expires_at: UtcTimestamp,
+    },
+}
+
+/// Exact immutable and runtime source identity returned only to Evaluation over mTLS.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentFreezeBinding {
+    pub environment: FrozenEnvironmentIdentity,
+    pub agent_run_id: AgentRunId,
+    pub source: EnvironmentFreezeSourceBinding,
+}
+
 /// Manifest-authoritative immutable collection result.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

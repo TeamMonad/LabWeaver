@@ -23,15 +23,18 @@ use contracts::{
         CreateEnvironmentRequest, DEFAULT_PAGE_LIMIT, EnvironmentInventoryQuery, IdempotencyKey,
         OperationAccepted, SnapshotPage, StrongEtag,
     },
+    submission::{EnvironmentFreezeBinding, EnvironmentFreezeBindingRequest},
 };
 use uuid::Uuid;
 
 use crate::{
-    ContainerReleaseResolver, EnvironmentStoreError, NatsAccessRevoker, NatsMessagingError,
-    PgEnvironmentStore, PgReleaseProjectionStore, ReleaseProjectionError, VerifiedCallerIdentity,
+    ContainerReleaseResolver, EnvironmentStoreError, FreezeBindingError, FreezeBindingService,
+    NatsAccessRevoker, NatsMessagingError, PgEnvironmentStore, PgReleaseProjectionStore,
+    ReleaseProjectionError, VerifiedCallerIdentity,
 };
 
 const ACCESS_SERVICE_SAN: &str = "spiffe://labweaver/access-service";
+const EVALUATION_SERVICE_SAN: &str = "spiffe://labweaver/evaluation-service";
 const ACTOR_HEADER: &str = "x-labweaver-actor-id";
 const SESSION_HEADER: &str = "x-labweaver-session-id";
 const OPERATION_DEADLINE: Duration = Duration::from_secs(15 * 60);
@@ -42,6 +45,7 @@ pub struct EnvironmentApiState {
     store: PgEnvironmentStore,
     releases: PgReleaseProjectionStore,
     access_revoker: NatsAccessRevoker,
+    freeze_bindings: FreezeBindingService,
 }
 
 impl EnvironmentApiState {
@@ -50,11 +54,13 @@ impl EnvironmentApiState {
         store: PgEnvironmentStore,
         releases: PgReleaseProjectionStore,
         access_revoker: NatsAccessRevoker,
+        freeze_bindings: FreezeBindingService,
     ) -> Self {
         Self {
             store,
             releases,
             access_revoker,
+            freeze_bindings,
         }
     }
 }
@@ -90,7 +96,30 @@ pub fn environment_api_router(state: EnvironmentApiState) -> Router {
             "/api/v1/environments/{environment_id}/endpoints",
             get(list_endpoints),
         )
+        .route(
+            "/internal/v1/environments/{environment_id}/freeze-binding",
+            post(resolve_freeze_binding),
+        )
         .with_state(state)
+}
+
+async fn resolve_freeze_binding(
+    State(state): State<EnvironmentApiState>,
+    caller: Option<Extension<VerifiedCallerIdentity>>,
+    Path(environment_id): Path<EnvironmentId>,
+    body: Bytes,
+) -> Result<Json<EnvironmentFreezeBinding>, EnvironmentApiError> {
+    if !caller.is_some_and(|Extension(identity)| identity.contains_san(EVALUATION_SERVICE_SAN)) {
+        return Err(EnvironmentApiError::CallerDenied);
+    }
+    let request = contracts::parse_strict_json::<EnvironmentFreezeBindingRequest>(&body)
+        .map_err(|_| EnvironmentApiError::RequestInvalid)?;
+    Ok(Json(
+        state
+            .freeze_bindings
+            .resolve(environment_id, &request)
+            .await?,
+    ))
 }
 
 async fn list_environments(
@@ -502,6 +531,8 @@ pub enum EnvironmentApiError {
     Release(#[from] ReleaseProjectionError),
     #[error(transparent)]
     Messaging(#[from] NatsMessagingError),
+    #[error(transparent)]
+    FreezeBinding(#[from] FreezeBindingError),
 }
 
 impl IntoResponse for EnvironmentApiError {
@@ -518,6 +549,9 @@ impl IntoResponse for EnvironmentApiError {
             Self::ReleaseDenied => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Store(EnvironmentStoreError::EnvironmentNotFound)
             | Self::Release(ReleaseProjectionError::NotFound) => StatusCode::NOT_FOUND,
+            Self::FreezeBinding(FreezeBindingError::EnvironmentNotEligible) => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
             Self::Store(
                 EnvironmentStoreError::IdempotencyConflict
                 | EnvironmentStoreError::IdempotencyInProgress,

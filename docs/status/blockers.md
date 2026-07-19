@@ -42,9 +42,10 @@ admission boundary enforces the executor namespace/ServiceAccount fence.
   same-image freeze Jobs in `labweaver-system`; Container collection uses an
   exact read-only NFS-backed PVC/PV binding, while VM collection uses a
   five-minute Environment-issued read-only SFTP certificate.
-- Blocker: the coordinator, Environment certificate issuer, freeze-worker mode,
-  namespace-local Job RBAC and connected PVC/SFTP cleanup replay are not yet
-  implemented and reviewed.
+- Blocker: the coordinator and namespace-local Job RBAC are not yet
+  implemented. The same-image bounded freeze-worker and Environment-owned
+  short-lived certificate issuer are implemented locally but still require B
+  review and connected PVC/SFTP cleanup replay.
 - Exit: duplicate/reordered commands, expired leases/certificates, PV identity
   mismatch, host-key mismatch, partial upload, worker restart and all residue
   checks fail closed under B review and D connected Verify.

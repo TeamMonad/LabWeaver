@@ -58,6 +58,15 @@ CA. The short-lived certificate issuer and ephemeral Secret cleanup are
 deployment dependencies, not static repository credentials. Their absence
 blocks VM E3.
 
+Environment Service now owns the internal mTLS binding endpoint. It accepts
+only the exact Evaluation Service URI identity, requires the current owner,
+course and Environment revision, and rejects anything except a running,
+current-generation, eligible Environment with a healthy endpoint. VM bindings
+are derived from the persisted running KubeVirt observation and receive a
+299-second certificate with principal `labweaver-collector` and critical
+`force-command=internal-sftp -R`; the configured CA private key must match the
+public CA embedded in the reviewed VM provider configuration.
+
 ## Selection and limits
 
 `SubmissionManifest.validate` is authoritative for normalized `include`,

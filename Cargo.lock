@@ -2199,6 +2199,7 @@ dependencies = [
  "hyper 1.10.1",
  "hyper-util",
  "persistence-sqlx",
+ "rand 0.9.5",
  "rcgen",
  "reqwest",
  "russh",

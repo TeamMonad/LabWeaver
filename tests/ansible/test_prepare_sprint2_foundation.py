@@ -69,6 +69,7 @@ class FoundationAuthoringTests(unittest.TestCase):
                 "access-service",
                 "agent-service",
                 "environment-service",
+                "evaluation-service",
                 "openssh-gateway",
             },
         )

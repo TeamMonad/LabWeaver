@@ -75,6 +75,7 @@
     ],
     "environment-service-secrets": [
       "database-url",
+      "collector-ssh-user-ca-key",
       "mtls-ca.pem",
       "nats-ca.pem",
       "nats-client.crt",

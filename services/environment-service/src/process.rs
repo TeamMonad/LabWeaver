@@ -13,14 +13,14 @@ use tokio::sync::watch;
 
 use crate::{
     ContainerProvider, ContainerProviderConfiguration, ContainerReleasePolicy,
-    EnvironmentStoreError, JetStreamCommandConsumer, JetStreamEventPublisher,
-    JetStreamReleaseConsumer, KubeVirtProvider, KubeVirtProviderConfiguration,
-    KubeVirtResourceBudget, KubeVirtSshBootstrap, KubeVirtStorageBinding, LifecycleCommand,
-    NatsAccessRevoker, NatsContainerProviderBackend, NatsEnvironmentProvider,
-    NatsKubeVirtProviderBackend, NatsMessagingError, NatsResourceLeaseVerifier,
-    OutboxDispatchError, OutboxDispatcher, PgEnvironmentStore, PgKubeVirtObservationStore,
-    PgReleaseProjectionStore, ProviderRegistry, ReconcileError, ReconcileWorker,
-    ReconcileWorkerError, Reconciler, connect_nats_mtls,
+    EnvironmentStoreError, FreezeBindingConfiguration, FreezeBindingService,
+    JetStreamCommandConsumer, JetStreamEventPublisher, JetStreamReleaseConsumer, KubeVirtProvider,
+    KubeVirtProviderConfiguration, KubeVirtResourceBudget, KubeVirtSshBootstrap,
+    KubeVirtStorageBinding, LifecycleCommand, NatsAccessRevoker, NatsContainerProviderBackend,
+    NatsEnvironmentProvider, NatsKubeVirtProviderBackend, NatsMessagingError,
+    NatsResourceLeaseVerifier, OutboxDispatchError, OutboxDispatcher, PgEnvironmentStore,
+    PgKubeVirtObservationStore, PgReleaseProjectionStore, ProviderRegistry, ReconcileError,
+    ReconcileWorker, ReconcileWorkerError, Reconciler, connect_nats_mtls,
 };
 
 const DATABASE_URL: &str = "LABWEAVER_DATABASE_URL";
@@ -67,6 +67,7 @@ pub struct EnvironmentProcessRuntime {
     system_actor_id: ActorId,
     readiness: Arc<AtomicBool>,
     expiry_ready: Arc<AtomicBool>,
+    freeze_bindings: FreezeBindingService,
 }
 
 impl EnvironmentProcessRuntime {
@@ -109,6 +110,36 @@ impl EnvironmentProcessRuntime {
         .await?;
 
         let provider_bindings = load_provider_bindings(&required_path(PROVIDER_BINDINGS_PATH)?)?;
+        let container_freeze_configuration =
+            single_provider_configuration(&provider_bindings, "container")?;
+        let vm_freeze_configuration =
+            single_provider_configuration(&provider_bindings, "kubevirt")?;
+        let freeze_bindings = FreezeBindingService::new(
+            pool.clone(),
+            release_store.clone(),
+            FreezeBindingConfiguration {
+                container_workspace_storage_class: container_freeze_configuration
+                    .workspace_storage_class_name
+                    .clone()
+                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                vm_username: vm_freeze_configuration
+                    .guest_user
+                    .clone()
+                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                vm_workspace_root: vm_freeze_configuration
+                    .collector_workspace_root
+                    .clone()
+                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                ssh_user_ca_public_key: vm_freeze_configuration
+                    .ssh_user_ca_public_key
+                    .clone()
+                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                ssh_user_ca_private_key_path: vm_freeze_configuration
+                    .ssh_user_ca_private_key_path
+                    .clone()
+                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+            },
+        )?;
         let mut registry = ProviderRegistry::default();
         for configuration in provider_bindings {
             match configuration.provider_kind.as_deref().unwrap_or("remote") {
@@ -282,6 +313,7 @@ impl EnvironmentProcessRuntime {
             system_actor_id,
             readiness: Arc::new(AtomicBool::new(true)),
             expiry_ready: Arc::new(AtomicBool::new(true)),
+            freeze_bindings,
         })
     }
 
@@ -297,6 +329,7 @@ impl EnvironmentProcessRuntime {
             self.store.clone(),
             self.release_store.clone(),
             self.access_revoker.clone(),
+            self.freeze_bindings.clone(),
         )
     }
 
@@ -316,6 +349,7 @@ impl EnvironmentProcessRuntime {
             system_actor_id,
             readiness,
             expiry_ready,
+            freeze_bindings: _,
         } = self;
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         tokio::try_join!(
@@ -624,6 +658,8 @@ struct ProviderBindingConfiguration {
     gateway_pod_label: Option<String>,
     guest_user: Option<String>,
     ssh_user_ca_public_key: Option<String>,
+    ssh_user_ca_private_key_path: Option<PathBuf>,
+    collector_workspace_root: Option<String>,
     vmi_memory_overhead_bytes: Option<u64>,
     cdi_importer_cpu_request_millicores: Option<u32>,
     cdi_importer_cpu_limit_millicores: Option<u32>,
@@ -670,6 +706,8 @@ impl ProviderBindingConfiguration {
             || self.gateway_pod_label.is_some()
             || self.guest_user.is_some()
             || self.ssh_user_ca_public_key.is_some()
+            || self.ssh_user_ca_private_key_path.is_some()
+            || self.collector_workspace_root.is_some()
             || self.vmi_memory_overhead_bytes.is_some()
             || self.cdi_importer_cpu_request_millicores.is_some()
             || self.cdi_importer_cpu_limit_millicores.is_some()
@@ -687,6 +725,8 @@ impl ProviderBindingConfiguration {
             && self.gateway_pod_label.is_some()
             && self.guest_user.is_some()
             && self.ssh_user_ca_public_key.is_some()
+            && self.ssh_user_ca_private_key_path.is_some()
+            && self.collector_workspace_root.is_some()
             && self.vmi_memory_overhead_bytes.is_some()
             && self.cdi_importer_cpu_request_millicores.is_some()
             && self.cdi_importer_cpu_limit_millicores.is_some()
@@ -718,6 +758,20 @@ fn load_provider_bindings(
         return Err(EnvironmentProcessRuntimeError::ConfigParse);
     }
     Ok(bindings)
+}
+
+fn single_provider_configuration<'a>(
+    bindings: &'a [ProviderBindingConfiguration],
+    provider_kind: &str,
+) -> Result<&'a ProviderBindingConfiguration, EnvironmentProcessRuntimeError> {
+    let matches = bindings
+        .iter()
+        .filter(|binding| binding.provider_kind.as_deref() == Some(provider_kind))
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [configuration] => Ok(configuration),
+        _ => Err(EnvironmentProcessRuntimeError::ConfigParse),
+    }
 }
 
 #[cfg(test)]
@@ -786,4 +840,6 @@ pub enum EnvironmentProcessRuntimeError {
     Outbox(#[from] OutboxDispatchError),
     #[error(transparent)]
     ReleaseProjection(#[from] crate::ReleaseProjectionError),
+    #[error(transparent)]
+    FreezeBinding(#[from] crate::FreezeBindingError),
 }
