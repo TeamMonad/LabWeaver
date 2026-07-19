@@ -178,9 +178,12 @@ generated `build-executor-client` material is injected only into the
 client in the fixed control-plane packaging directory; an older client is
 replaced whenever the BuildKit authority rotates. Default-deny NetworkPolicy admits that workload and
 the reviewed Harbor CIDR only. For in-cluster builds, the role reads the
-retained Harbor nginx Service identity and pins `harbor.lab.lan` to that
-ClusterIP inside the BuildKit Pod, avoiding unsupported same-cluster
-LoadBalancer hairpinning. Egress is additionally limited to the `harbor`
+retained Harbor nginx Service identity and adds an exact, idempotent
+`harbor.lab.lan -> ClusterIP` record to the retained CoreDNS Corefile. This is
+required because registry resolution also occurs inside BuildKit worker
+namespaces, where a Pod-only `hostAliases` entry is insufficient. The role
+rejects an existing ambiguous record and does not replace other CoreDNS data.
+This avoids unsupported same-cluster LoadBalancer hairpinning. Egress is additionally limited to the `harbor`
 namespace's exact nginx labels and TLS target port.
 Dependency-fetch steps use a separate Cilium policy bound only to the BuildKit
 Pod. DNS is intercepted through the cluster `kube-dns` endpoint so Cilium can

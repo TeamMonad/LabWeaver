@@ -116,6 +116,59 @@
       - sprint2_buildkit_harbor_service_ip is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
     fail_msg: SPRINT2_BUILDKIT_HARBOR_SERVICE_INVALID
 
+- name: Read retained cluster DNS configuration
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ sprint2_buildkit_kubeconfig }}"
+    api_version: v1
+    kind: ConfigMap
+    namespace: "{{ sprint2_buildkit_coredns_namespace }}"
+    name: "{{ sprint2_buildkit_coredns_configmap }}"
+  register: sprint2_buildkit_coredns
+
+- name: Bind the additive Harbor DNS block
+  ansible.builtin.set_fact:
+    sprint2_buildkit_coredns_corefile: >-
+      {{ sprint2_buildkit_coredns.resources[0].data.Corefile
+         if sprint2_buildkit_coredns.resources | length == 1 else '' }}
+    sprint2_buildkit_coredns_harbor_block: |2
+              hosts {
+                  {{ sprint2_buildkit_harbor_service_ip }} {{ sprint2_buildkit_harbor_hostname }}
+                  fallthrough
+              }
+
+- name: Reject ambiguous cluster DNS ownership
+  ansible.builtin.assert:
+    that:
+      - sprint2_buildkit_coredns.resources | length == 1
+      - >-
+        sprint2_buildkit_coredns_corefile.count('        prometheus :9153') == 1
+      - >-
+        sprint2_buildkit_harbor_hostname not in sprint2_buildkit_coredns_corefile or
+        sprint2_buildkit_coredns_harbor_block in sprint2_buildkit_coredns_corefile
+    fail_msg: SPRINT2_BUILDKIT_CLUSTER_DNS_AMBIGUOUS
+
+- name: Render additive Harbor cluster DNS resolution
+  ansible.builtin.set_fact:
+    sprint2_buildkit_coredns_desired: >-
+      {{ sprint2_buildkit_coredns_corefile
+         if sprint2_buildkit_coredns_harbor_block in sprint2_buildkit_coredns_corefile
+         else sprint2_buildkit_coredns_corefile.replace(
+           '        prometheus :9153',
+           sprint2_buildkit_coredns_harbor_block ~ '        prometheus :9153') }}
+
+- name: Reconcile additive Harbor cluster DNS resolution
+  kubernetes.core.k8s:
+    kubeconfig: "{{ sprint2_buildkit_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        namespace: "{{ sprint2_buildkit_coredns_namespace }}"
+        name: "{{ sprint2_buildkit_coredns_configmap }}"
+      data:
+        Corefile: "{{ sprint2_buildkit_coredns_desired }}"
+
 - name: Inspect the generated BuildKit operator client inputs
   ansible.builtin.stat:
     path: "{{ sprint2_buildkit_bundle | dirname }}/build-executor-client/{{ item }}"
