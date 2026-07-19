@@ -177,6 +177,14 @@ request fails with `LW_ACCESS_RUNTIME_UPGRADE_UNSUPPORTED`. Interactive
 code-server and WorkConfig remain outside this slice instead of weakening the
 Access boundary with an unauthenticated direct route.
 
+SSH clients likewise use only the public Gateway binding copied by Access
+Service into the active `EndpointGrant`: the reviewed DNS name, fixed port
+`2222`, server-generated alias and OpenSSH `SHA256:` Gateway host-key
+fingerprint. The Web portal renders a command only from these authoritative
+fields and never derives a private VM host, port or Gateway identity from UI
+configuration. Runtime target resolution and authorization remain inside the
+OpenSSH Gateway and Access Service path.
+
 ## Desired and observed state
 
 `desiredState` is one of `Running`, `Stopped` or `Deleted`. The service accepts

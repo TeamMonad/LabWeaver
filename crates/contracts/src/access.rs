@@ -213,6 +213,20 @@ pub enum EndpointAction {
     Connect,
 }
 
+fn valid_dns_name(value: &str) -> bool {
+    value.len() <= 253
+        && value.contains('.')
+        && value.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        })
+}
+
 /// Child grant for one exact endpoint revision.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -228,6 +242,12 @@ pub struct EndpointGrant {
     /// Same-origin, Access Service-authorized browser entry point. Present only
     /// for HTTP(S) grants and derived from this immutable endpoint grant ID.
     pub connect_url: Option<String>,
+    /// Public OpenSSH Gateway DNS name for SSH grants. Never a runtime target.
+    pub ssh_gateway_hostname: Option<String>,
+    /// Public OpenSSH Gateway listener port for SSH grants.
+    pub ssh_gateway_port: Option<u16>,
+    /// OpenSSH SHA-256 host-key fingerprint for the public Gateway.
+    pub ssh_gateway_host_key_fingerprint: Option<String>,
     pub expires_at: UtcTimestamp,
 }
 
@@ -242,6 +262,25 @@ impl EndpointGrant {
                 if self.connect_url.is_some() {
                     return Err(AccessError::InvalidConnectUrl);
                 }
+                let hostname = self
+                    .ssh_gateway_hostname
+                    .as_deref()
+                    .ok_or(AccessError::InvalidGatewayEndpoint)?;
+                if !valid_dns_name(hostname)
+                    || self.ssh_gateway_port != Some(2222)
+                    || self
+                        .ssh_gateway_host_key_fingerprint
+                        .as_deref()
+                        .is_none_or(|value| {
+                            value.len() != 50
+                                || !value.starts_with("SHA256:")
+                                || !value.bytes().skip(7).all(|byte| {
+                                    byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/')
+                                })
+                        })
+                {
+                    return Err(AccessError::InvalidGatewayEndpoint);
+                }
                 let alias = self.alias.as_deref().ok_or(AccessError::InvalidAlias)?;
                 if alias.len() != 23
                     || !alias.starts_with("lw-")
@@ -255,6 +294,12 @@ impl EndpointGrant {
             EndpointProtocol::Http | EndpointProtocol::Https => {
                 if self.alias.is_some() {
                     return Err(AccessError::InvalidAlias);
+                }
+                if self.ssh_gateway_hostname.is_some()
+                    || self.ssh_gateway_port.is_some()
+                    || self.ssh_gateway_host_key_fingerprint.is_some()
+                {
+                    return Err(AccessError::InvalidGatewayEndpoint);
                 }
                 let expected = format!("/connect/{}/", self.id);
                 if self.connect_url.as_deref() != Some(expected.as_str()) {
@@ -553,6 +598,8 @@ pub enum AccessError {
     InvalidAlias,
     #[error("HTTP endpoint connect URL is not the server-generated v1 path")]
     InvalidConnectUrl,
+    #[error("SSH Gateway endpoint is not the reviewed Sprint 2 binding")]
+    InvalidGatewayEndpoint,
     #[error("GatewaySession is internally inconsistent")]
     InvalidSession,
     #[error("GatewaySession termination deadline exceeds 60 seconds")]
@@ -636,11 +683,28 @@ mod tests {
             health: EndpointHealth::Healthy,
             alias: None,
             connect_url: Some(format!("/connect/{id}/")),
+            ssh_gateway_hostname: None,
+            ssh_gateway_port: None,
+            ssh_gateway_host_key_fingerprint: None,
             expires_at: timestamp("2026-07-16T00:30:00.000Z"),
         };
         assert!(endpoint.validate().is_ok());
         endpoint.connect_url = Some("https://runtime.invalid/".to_owned());
         assert_eq!(endpoint.validate(), Err(AccessError::InvalidConnectUrl));
+
+        endpoint.protocol = EndpointProtocol::Ssh;
+        endpoint.alias = Some("lw-abcdefghijklmnopqrst".to_owned());
+        endpoint.connect_url = None;
+        endpoint.ssh_gateway_hostname = Some("demo.lab.lan".to_owned());
+        endpoint.ssh_gateway_port = Some(2222);
+        endpoint.ssh_gateway_host_key_fingerprint =
+            Some("SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned());
+        assert!(endpoint.validate().is_ok());
+        endpoint.ssh_gateway_port = Some(22);
+        assert_eq!(
+            endpoint.validate(),
+            Err(AccessError::InvalidGatewayEndpoint)
+        );
     }
 
     #[test]

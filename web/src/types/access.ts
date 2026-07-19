@@ -1,11 +1,6 @@
 import type { AccessGrantSchema, EndpointGrant, EnvironmentInstanceSchema } from '@/generated/contracts'
 
-/** SSH gateway metadata is deployment-specific while browser connect URLs are
- * part of the generated EndpointGrant contract. */
-export type AccessGrantWithGateway = AccessGrantSchema & {
-  gatewayHostname?: string
-  gatewayFingerprintSha256?: string
-}
+export type AccessGrantWithGateway = AccessGrantSchema
 
 export type EnvironmentInstanceWithFreeze = EnvironmentInstanceSchema & {
   freezeEvidence?: EnvironmentInstanceSchema['cleanupEvidence']
@@ -13,10 +8,10 @@ export type EnvironmentInstanceWithFreeze = EnvironmentInstanceSchema & {
 
 /** Single-line SSH command for a VM endpoint grant. Returns null when the
  * identity is incomplete (fail closed). */
-export function buildSshCommand(grant: AccessGrantWithGateway, endpointGrant: EndpointGrant): string | null {
+export function buildSshCommand(endpointGrant: EndpointGrant): string | null {
   if (!endpointGrant.alias) return null
-  if (!grant.gatewayHostname) return null
-  return `ssh ${endpointGrant.alias}@${grant.gatewayHostname}`
+  if (!endpointGrant.sshGatewayHostname || endpointGrant.sshGatewayPort !== 2222) return null
+  return `ssh -p ${endpointGrant.sshGatewayPort} ${endpointGrant.alias}@${endpointGrant.sshGatewayHostname}`
 }
 
 /** Code-server connect URL for an https endpoint grant. Returns null when the

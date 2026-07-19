@@ -1158,7 +1158,27 @@ async fn activate_grant(
         let endpoint_grant_id = EndpointGrantId::new();
         let alias =
             (endpoint.protocol == EndpointProtocol::Ssh).then(|| ssh_alias(endpoint_grant_id));
-        let contract = json!({"endpointId": endpoint.id, "endpointRevision": endpoint.revision, "protocol": endpoint.protocol, "health": endpoint.health});
+        let ssh_gateway_hostname = (endpoint.protocol == EndpointProtocol::Ssh)
+            .then(|| state.deployment.grants.public_ssh_gateway_hostname.clone());
+        let ssh_gateway_port = (endpoint.protocol == EndpointProtocol::Ssh)
+            .then_some(state.deployment.grants.public_ssh_gateway_port);
+        let ssh_gateway_host_key_fingerprint =
+            (endpoint.protocol == EndpointProtocol::Ssh).then(|| {
+                state
+                    .deployment
+                    .grants
+                    .public_ssh_gateway_host_key_fingerprint
+                    .clone()
+            });
+        let contract = json!({
+            "endpointId": endpoint.id,
+            "endpointRevision": endpoint.revision,
+            "protocol": endpoint.protocol,
+            "health": endpoint.health,
+            "sshGatewayHostname": ssh_gateway_hostname,
+            "sshGatewayPort": ssh_gateway_port,
+            "sshGatewayHostKeyFingerprint": ssh_gateway_host_key_fingerprint,
+        });
         sqlx::query("INSERT INTO access.endpoint_grants (endpoint_grant_id,grant_id,endpoint_id,endpoint_revision,protocol,health,alias,expires_at,contract) VALUES ($1,$2,$3,$4,$5,'healthy',$6,$7,$8)")
             .bind(endpoint_grant_id.as_uuid()).bind(grant_id).bind(endpoint.id.as_uuid())
             .bind(i64::try_from(endpoint.revision.get()).map_err(|_| GrantRuntimeError::Contract)?)
@@ -1512,12 +1532,17 @@ async fn endpoint_grants(
     tx: &mut Transaction<'_, Postgres>,
     grant_id: AccessGrantId,
 ) -> Result<Vec<EndpointGrant>, ApiError> {
-    let rows = sqlx::query("SELECT endpoint_grant_id,endpoint_id,endpoint_revision,protocol,health,alias,expires_at FROM access.endpoint_grants WHERE grant_id=$1 ORDER BY endpoint_grant_id")
+    let rows = sqlx::query("SELECT endpoint_grant_id,endpoint_id,endpoint_revision,protocol,health,alias,expires_at,contract FROM access.endpoint_grants WHERE grant_id=$1 ORDER BY endpoint_grant_id")
         .bind(grant_id.as_uuid()).fetch_all(&mut **tx).await.map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
     rows.into_iter()
         .map(|row| {
             let id = typed_id(row.get("endpoint_grant_id"))?;
             let protocol = parse_protocol(&row.get::<String, _>("protocol"))?;
+            let contract: Value = row.get("contract");
+            let ssh_gateway_hostname = optional_contract_string(&contract, "sshGatewayHostname")?;
+            let ssh_gateway_port = optional_contract_u16(&contract, "sshGatewayPort")?;
+            let ssh_gateway_host_key_fingerprint =
+                optional_contract_string(&contract, "sshGatewayHostKeyFingerprint")?;
             Ok(EndpointGrant {
                 id,
                 access_grant_id: grant_id,
@@ -1529,6 +1554,9 @@ async fn endpoint_grants(
                 alias: row.get("alias"),
                 connect_url: matches!(protocol, EndpointProtocol::Http | EndpointProtocol::Https)
                     .then(|| format!("/connect/{id}/")),
+                ssh_gateway_hostname,
+                ssh_gateway_port,
+                ssh_gateway_host_key_fingerprint,
                 expires_at: utc_timestamp(row.get("expires_at"))?,
             })
         })
@@ -1990,6 +2018,26 @@ fn parse_health(v: &str) -> Result<EndpointHealth, ApiError> {
         "healthy" => Ok(EndpointHealth::Healthy),
         "unhealthy" => Ok(EndpointHealth::Unhealthy),
         "removed" => Ok(EndpointHealth::Removed),
+        _ => Err(ApiError::internal("LW_ACCESS_STORE_CORRUPT")),
+    }
+}
+
+fn optional_contract_string(contract: &Value, field: &str) -> Result<Option<String>, ApiError> {
+    match contract.get(field) {
+        Some(Value::String(value)) if !value.is_empty() => Ok(Some(value.clone())),
+        Some(Value::Null) | None => Ok(None),
+        _ => Err(ApiError::internal("LW_ACCESS_STORE_CORRUPT")),
+    }
+}
+
+fn optional_contract_u16(contract: &Value, field: &str) -> Result<Option<u16>, ApiError> {
+    match contract.get(field) {
+        Some(Value::Number(value)) => value
+            .as_u64()
+            .and_then(|value| u16::try_from(value).ok())
+            .map(Some)
+            .ok_or_else(|| ApiError::internal("LW_ACCESS_STORE_CORRUPT")),
+        Some(Value::Null) | None => Ok(None),
         _ => Err(ApiError::internal("LW_ACCESS_STORE_CORRUPT")),
     }
 }

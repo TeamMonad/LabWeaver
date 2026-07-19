@@ -77,6 +77,9 @@ pub struct AccessAuthFile {
 #[serde(deny_unknown_fields)]
 pub struct GrantRuntimeFileConfig {
     pub gateway_san_uris: Vec<String>,
+    pub public_ssh_gateway_hostname: String,
+    pub public_ssh_gateway_port: u16,
+    pub public_ssh_gateway_host_key_fingerprint: String,
     pub default_ttl_seconds: u64,
     pub max_ttl_seconds: u64,
     pub authorization_token_ttl_seconds: u64,
@@ -339,6 +342,24 @@ impl AccessAuthFile {
                 .collect::<BTreeSet<_>>()
                 .len()
                 == self.grants.gateway_san_uris.len()
+            && matches!(
+                url::Host::parse(&self.grants.public_ssh_gateway_hostname),
+                Ok(url::Host::Domain(hostname))
+                    if hostname == self.grants.public_ssh_gateway_hostname
+                        && hostname.contains('.')
+            )
+            && self.grants.public_ssh_gateway_port == 2222
+            && self.grants.public_ssh_gateway_host_key_fingerprint.len() == 50
+            && self
+                .grants
+                .public_ssh_gateway_host_key_fingerprint
+                .starts_with("SHA256:")
+            && self
+                .grants
+                .public_ssh_gateway_host_key_fingerprint
+                .bytes()
+                .skip(7)
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/'))
             && self.grants.default_ttl_seconds > 0
             && self.grants.default_ttl_seconds <= self.grants.max_ttl_seconds
             && self.grants.max_ttl_seconds == 3_600
@@ -741,6 +762,9 @@ evaluation_gateway:
   max_response_bytes: 8388608
 grants:
   gateway_san_uris: [spiffe://labweaver/gateway]
+  public_ssh_gateway_hostname: demo.lab.lan
+  public_ssh_gateway_port: 2222
+  public_ssh_gateway_host_key_fingerprint: SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
   default_ttl_seconds: 1800
   max_ttl_seconds: 3600
   authorization_token_ttl_seconds: 30

@@ -99,6 +99,9 @@ evaluation_gateway:
 grants:
   gateway_san_uris:
     - spiffe://labweaver/openssh-gateway
+  public_ssh_gateway_hostname: demo.lab.lan
+  public_ssh_gateway_port: 2222
+  public_ssh_gateway_host_key_fingerprint: SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
   default_ttl_seconds: 1800
   max_ttl_seconds: 3600
   authorization_token_ttl_seconds: 30

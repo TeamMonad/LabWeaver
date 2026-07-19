@@ -63,7 +63,7 @@ interface GrantSeedOptions {
 }
 
 const GATEWAY_HOSTNAME = 'gateway.labweaver.local'
-const GATEWAY_FINGERPRINT_SHA256 = 'sha256:' + '9'.repeat(64)
+const GATEWAY_FINGERPRINT_SHA256 = `SHA256:${'A'.repeat(43)}`
 
 function sshAlias(id: string): string {
   // Mirror services/access-service/src/grants.rs `ssh_alias`: `lw-` + 20 hex chars.
@@ -86,6 +86,9 @@ function buildEndpointGrant(ep: { id: string; revision: number; protocol: 'http'
     health: ep.health,
     alias,
     connectUrl,
+    sshGatewayHostname: ep.protocol === 'ssh' ? GATEWAY_HOSTNAME : null,
+    sshGatewayPort: ep.protocol === 'ssh' ? 2222 : null,
+    sshGatewayHostKeyFingerprint: ep.protocol === 'ssh' ? GATEWAY_FINGERPRINT_SHA256 : null,
   }
 }
 
@@ -107,8 +110,6 @@ function createGrantInternal(options: GrantSeedOptions): AccessGrantSchema {
     reasonCode: null,
     revision: nextRevision(),
     endpointGrants,
-    gatewayHostname: GATEWAY_HOSTNAME,
-    gatewayFingerprintSha256: GATEWAY_FINGERPRINT_SHA256,
   } as AccessGrantSchema
 }
 
@@ -150,8 +151,6 @@ export function createAccessGrant(
     reasonCode: null,
     revision: nextRevision(),
     endpointGrants,
-    gatewayHostname: GATEWAY_HOSTNAME,
-    gatewayFingerprintSha256: GATEWAY_FINGERPRINT_SHA256,
   } as AccessGrantSchema
 
   grants.set(id, grant)

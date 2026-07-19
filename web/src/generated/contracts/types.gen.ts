@@ -112,6 +112,18 @@ export type EndpointGrant = {
     health: EndpointHealth;
     id: EndpointGrantId;
     protocol: EndpointProtocol;
+    /**
+     * OpenSSH SHA-256 host-key fingerprint for the public Gateway.
+     */
+    sshGatewayHostKeyFingerprint?: string | null;
+    /**
+     * Public OpenSSH Gateway DNS name for SSH grants. Never a runtime target.
+     */
+    sshGatewayHostname?: string | null;
+    /**
+     * Public OpenSSH Gateway listener port for SSH grants.
+     */
+    sshGatewayPort?: number | null;
 };
 
 /**

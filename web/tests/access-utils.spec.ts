@@ -1,27 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { buildSshCommand, formatExpiry, resolveConnectUrl } from '@/types/access'
-import type { AccessGrantWithGateway } from '@/types/access'
 import type { EndpointGrant } from '@/generated/contracts'
-
-function makeGrant(overrides: Partial<AccessGrantWithGateway> = {}): AccessGrantWithGateway {
-  return {
-    id: 'grant-1',
-    environmentId: 'env-1',
-    courseId: 'course-1',
-    actorId: 'student',
-    environmentRevision: 1,
-    state: 'active',
-    issuedAt: '2026-07-16T08:00:00.000Z',
-    expiresAt: '2026-07-16T09:00:00.000Z',
-    revokedAt: null,
-    reasonCode: null,
-    revision: 1,
-    endpointGrants: [],
-    gatewayHostname: 'gateway.labweaver.local',
-    gatewayFingerprintSha256: 'sha256:' + '9'.repeat(64),
-    ...overrides,
-  }
-}
 
 function makeEndpointGrant(overrides: Partial<EndpointGrant> = {}): EndpointGrant {
   return {
@@ -34,22 +13,26 @@ function makeEndpointGrant(overrides: Partial<EndpointGrant> = {}): EndpointGran
     expiresAt: '2026-07-16T09:00:00.000Z',
     health: 'healthy',
     alias: 'lw-0123456789abcdef0123',
+    sshGatewayHostname: 'gateway.labweaver.local',
+    sshGatewayPort: 2222,
+    sshGatewayHostKeyFingerprint: `SHA256:${'A'.repeat(43)}`,
     ...overrides,
   }
 }
 
 describe('buildSshCommand', () => {
   it('builds the single-line command', () => {
-    const command = buildSshCommand(makeGrant(), makeEndpointGrant())
-    expect(command).toBe('ssh lw-0123456789abcdef0123@gateway.labweaver.local')
+    const command = buildSshCommand(makeEndpointGrant())
+    expect(command).toBe('ssh -p 2222 lw-0123456789abcdef0123@gateway.labweaver.local')
   })
 
   it('returns null when alias is missing', () => {
-    expect(buildSshCommand(makeGrant(), makeEndpointGrant({ alias: null }))).toBeNull()
+    expect(buildSshCommand(makeEndpointGrant({ alias: null }))).toBeNull()
   })
 
-  it('returns null when gateway hostname is missing', () => {
-    expect(buildSshCommand(makeGrant({ gatewayHostname: undefined }), makeEndpointGrant())).toBeNull()
+  it('returns null when the reviewed gateway binding is missing', () => {
+    expect(buildSshCommand(makeEndpointGrant({ sshGatewayHostname: null }))).toBeNull()
+    expect(buildSshCommand(makeEndpointGrant({ sshGatewayPort: 22 }))).toBeNull()
   })
 })
 

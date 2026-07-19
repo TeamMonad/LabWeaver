@@ -260,7 +260,7 @@
                             <CopyButton :text="sshCommand(g) ?? ''" aria-label="复制 SSH 命令" />
                           </div>
                           <div v-if="sshCommand(g)" class="ssh-meta">
-                            <span>Gateway fingerprint：<code>{{ truncateSha256(g.gatewayFingerprintSha256 ?? '') }}</code></span>
+                            <span>Gateway fingerprint：<code>{{ sshFingerprint(g) ?? 'unavailable' }}</code></span>
                             <span>Grant：{{ formatExpiry(g.expiresAt) }}</span>
                           </div>
                           <p v-else class="access-card__hint">SSH 别名或 Gateway 缺失，无法生成命令。</p>
@@ -352,7 +352,7 @@ import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import EventTimeline from '@/components/common/EventTimeline.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
-import { formatTimestamp, idempotencyKey, ifMatch, truncateSha256 } from '@/utils/format'
+import { formatTimestamp, idempotencyKey, ifMatch } from '@/utils/format'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import type { DataTableColumn } from '@/components/common/DataTable.vue'
 import type {
@@ -489,7 +489,11 @@ function openContainerRuntime(g: AccessGrantWithGateway) {
 
 function sshCommand(g: AccessGrantWithGateway): string | null {
   const eg = sshGrant(g)
-  return eg ? buildSshCommand(g, eg) : null
+  return eg ? buildSshCommand(eg) : null
+}
+
+function sshFingerprint(g: AccessGrantWithGateway): string | null {
+  return sshGrant(g)?.sshGatewayHostKeyFingerprint ?? null
 }
 
 function canFreeze(data: EnvironmentInstanceSchema): boolean {
