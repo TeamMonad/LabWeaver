@@ -139,6 +139,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("privileged: false", workloads)
         self.assertIn("allowPrivilegeEscalation: true", workloads)
         self.assertIn("capabilities: {drop: [ALL], add: [SETUID, SETGID]}", workloads)
+        self.assertIn("- --tlsservername\n                - buildkit", workloads)
         self.assertIn("seccompProfile: {type: Unconfined}", workloads)
         self.assertIn("appArmorProfile: {type: Unconfined}", workloads)
         self.assertIn("automountServiceAccountToken: false", workloads)
