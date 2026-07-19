@@ -559,8 +559,16 @@
       - sprint2_application_keycloak_client.stdout | from_json | length == 1
       - (sprint2_application_keycloak_client.stdout | from_json | first).clientId == sprint2_application_keycloak_client_id
       - (sprint2_application_keycloak_client.stdout | from_json | first).enabled | bool
-      - sprint2_application_keycloak_required_roles | difference(sprint2_application_keycloak_roles.stdout | from_json | map(attribute='name') | list) | length == 0
-      - sprint2_application_keycloak_required_users | difference(sprint2_application_keycloak_users.stdout | from_json | selectattr('enabled') | map(attribute='username') | list) | length == 0
+      - >-
+        sprint2_application_keycloak_required_roles
+        | difference(sprint2_application_keycloak_roles.stdout
+          | from_json | map(attribute='name') | list)
+        | length == 0
+      - >-
+        sprint2_application_keycloak_required_users
+        | difference(sprint2_application_keycloak_users.stdout
+          | from_json | selectattr('enabled') | map(attribute='username') | list)
+        | length == 0
     fail_msg: SPRINT2_APPLICATION_KEYCLOAK_SURFACE_INVALID
   no_log: true
 
