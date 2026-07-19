@@ -72,6 +72,10 @@ has its Gateway fields transferred to the dedicated `labweaver-sprint2-adoption`
 field manager only after all managed-object checks pass. The retained HTTPRoute
 is left in place but no longer attaches to the TLS-only listener. TestFlight temporary resources in `labweaver-demo` are
 named and selected by its run ID, so cleanup cannot target another run.
+The command also publishes the public nginx CA to the fixed root-controlled
+operator locator. BuildKit and packaging inputs must consume that CA after the
+route changes; retaining the previous Gateway-termination CA is a blocking TLS
+identity mismatch.
 
 `ansible-lint`, syntax checks, encrypted fictional-Vault loading, and storage
 safety fixtures run on Linux CI. The approved router or A-owned WSL controller worktree additionally
