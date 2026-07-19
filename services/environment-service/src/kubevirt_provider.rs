@@ -1479,6 +1479,7 @@ where
             "labweaver.io/environment-id": instance.id.to_string(),
             "labweaver.io/course-id": instance.course_id.to_string(),
             "labweaver.io/managed": "true",
+            "labweaver.io/environment": "true",
         });
         let annotations = json!({
             "labweaver.io/release-id": projection.release.id.to_string(),

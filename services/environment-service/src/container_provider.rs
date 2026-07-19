@@ -1206,6 +1206,7 @@ where
             "labweaver.io/environment-id": instance.id.to_string(),
             "labweaver.io/course-id": instance.course_id.to_string(),
             "labweaver.io/managed": "true",
+            "labweaver.io/environment": "true",
         });
         let resources = &projection.environment_spec.resources;
         let service_port = match &projection.environment_spec.runtime {

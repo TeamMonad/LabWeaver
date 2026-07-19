@@ -290,6 +290,12 @@ fn plan_is_deterministic_private_and_digest_bound() {
     assert_eq!(count_resource(&first, "DataVolume"), 1);
     assert_eq!(count_resource(&first, "VirtualMachine"), 1);
     assert_eq!(count_resource(&first, "Service"), 1);
+    assert_eq!(
+        resource(&first, "Namespace")
+            .document
+            .pointer("/metadata/labels/labweaver.io~1environment"),
+        Some(&json!("true"))
+    );
 
     let data_volume = resource(&first, "DataVolume");
     assert_eq!(

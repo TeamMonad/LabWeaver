@@ -151,6 +151,12 @@ fn plan_uses_digest_only_image_and_only_the_access_proxy() {
             .pointer("/metadata/finalizers/0"),
         Some(&json!("labweaver.io/environment-cleanup"))
     );
+    assert_eq!(
+        resource(&first, "Namespace")
+            .document
+            .pointer("/metadata/labels/labweaver.io~1environment"),
+        Some(&json!("true"))
+    );
 
     let deployment = resource(&first, "Deployment");
     assert_eq!(
