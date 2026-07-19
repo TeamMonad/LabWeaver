@@ -195,6 +195,18 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("SPRINT2_HARBOR_ROUTER_RESOLUTION_INVALID", sprint2_route)
         self.assertIn("Refresh router system trust", sprint2_route)
 
+    def test_sprint2_application_pins_and_adopts_the_vm_base(self) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        lock = (ROOT / "deploy/versions.lock.yml").read_text(encoding="utf-8")
+        self.assertIn("SPRINT2_VM_BASE_DATAVOLUME_CONFLICT", tasks)
+        self.assertIn("SPRINT2_VM_BASE_DATASOURCE_CONFLICT", tasks)
+        self.assertIn("SPRINT2_VM_BASE_IDENTITY_INVALID", tasks)
+        self.assertIn("docker://quay.io/containerdisks/ubuntu@sha256:", lock)
+        self.assertIn("data_source_name: ubuntu-lab-base-v1", lock)
+        self.assertNotIn("state: absent", tasks)
+
     def test_deploy_starts_with_preflight(self) -> None:
         site = (ROOT / "deploy/ansible/playbooks/site.yml").read_text(encoding="utf-8")
         self.assertEqual(site.splitlines()[1], "- import_playbook: 00-preflight.yml")

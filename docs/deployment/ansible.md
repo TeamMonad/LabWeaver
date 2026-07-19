@@ -215,6 +215,12 @@ cargo xtask sprint2-application \
   --yes
 ```
 
+应用部署会在 `labweaver-system` 中非破坏性地采用或首次导入锁定的
+Ubuntu 24.04 VM base。Registry manifest digest 与磁盘 SHA-256 固定在
+`deploy/versions.lock.yml`；已有 `DataVolume` 或 `DataSource` 只要来源、
+StorageClass 或 hash 不一致就会阻断，不会被覆盖。导入成功后发布
+`ubuntu-lab-base-v1`，供 KubeVirt executor 通过 CDI `sourceRef` 克隆。
+
 This command is fail-closed and non-destructive. It applies a baseline only to
 a domain with no existing business relations and an empty migration ledger;
 otherwise it requires the exact catalog and migration hashes. Access seed rows

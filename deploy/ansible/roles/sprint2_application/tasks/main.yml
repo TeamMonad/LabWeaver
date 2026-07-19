@@ -1,4 +1,9 @@
 ---
+- name: Load the immutable Sprint 2 application identities
+  ansible.builtin.set_fact:
+    sprint2_application_lock: >-
+      {{ lookup('ansible.builtin.file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml }}
+
 - name: Validate non-destructive application inputs
   ansible.builtin.assert:
     that:
@@ -16,7 +21,7 @@
       - sprint2_application_minio_ca_file | length > 0
       - sprint2_application_harbor_api | length > 0
       - sprint2_application_harbor_registry is match('^[a-z0-9][a-z0-9.-]+(?::[0-9]+)?$')
-      - sprint2_application_harbor_endpoint_address | ansible.utils.ipaddr
+      - sprint2_application_harbor_endpoint_address is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
       - sprint2_application_harbor_ca_file | length > 0
       - sprint2_application_keycloak_config | length > 0
       - sprint2_application_keycloak_server | length > 0
@@ -25,7 +30,11 @@
       - sprint2_application_keycloak_realm_file | length > 0
       - sprint2_application_keycloak_ca_file | length > 0
       - sprint2_application_keycloak_hostname is match('^[a-z0-9][a-z0-9.-]+$')
-      - sprint2_application_keycloak_endpoint_address | ansible.utils.ipaddr
+      - sprint2_application_keycloak_endpoint_address is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
+      - sprint2_application_lock.sprint2_vm_base.registry_url is match('^docker://[^@]+@sha256:[0-9a-f]{64}$')
+      - sprint2_application_lock.sprint2_vm_base.disk_sha256 is match('^[0-9a-f]{64}$')
+      - sprint2_application_lock.sprint2_vm_base.data_source_name == 'ubuntu-lab-base-v1'
+      - sprint2_application_lock.sprint2_vm_base.storage_class_name == 'local-path'
       - sprint2_application_keycloak_truststore_password | length >= 16
       - sprint2_application_access_seed_file | length > 0
       - sprint2_application_values_files | length > 0
@@ -692,6 +701,141 @@
           pod-security.kubernetes.io/enforce: restricted
           pod-security.kubernetes.io/audit: restricted
           pod-security.kubernetes.io/warn: restricted
+
+- name: Read the immutable Sprint 2 VM base DataVolume
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ sprint2_application_kubeconfig }}"
+    api_version: cdi.kubevirt.io/v1beta1
+    kind: DataVolume
+    namespace: "{{ sprint2_application_namespace }}"
+    name: "{{ sprint2_application_lock.sprint2_vm_base.seed_data_volume_name }}"
+  register: sprint2_application_vm_base_dv
+
+- name: Reject a conflicting Sprint 2 VM base DataVolume
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_vm_base_dv.resources | length <= 1
+      - >-
+        sprint2_application_vm_base_dv.resources | length == 0 or
+        sprint2_application_vm_base_dv.resources[0].spec.source.registry.url ==
+        sprint2_application_lock.sprint2_vm_base.registry_url
+      - >-
+        sprint2_application_vm_base_dv.resources | length == 0 or
+        sprint2_application_vm_base_dv.resources[0].spec.storage.storageClassName ==
+        sprint2_application_lock.sprint2_vm_base.storage_class_name
+      - >-
+        sprint2_application_vm_base_dv.resources | length == 0 or
+        sprint2_application_vm_base_dv.resources[0].metadata.annotations['labweaver.io/disk-sha256'] ==
+        sprint2_application_lock.sprint2_vm_base.disk_sha256
+    fail_msg: SPRINT2_VM_BASE_DATAVOLUME_CONFLICT
+
+- name: Import the immutable Sprint 2 VM base disk when absent
+  kubernetes.core.k8s:
+    kubeconfig: "{{ sprint2_application_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: cdi.kubevirt.io/v1beta1
+      kind: DataVolume
+      metadata:
+        name: "{{ sprint2_application_lock.sprint2_vm_base.seed_data_volume_name }}"
+        namespace: "{{ sprint2_application_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver
+          labweaver.io/sprint: sprint2
+        annotations:
+          labweaver.io/source-release: "{{ sprint2_application_lock.sprint2_vm_base.release }}"
+          labweaver.io/source-registry: "{{ sprint2_application_lock.sprint2_vm_base.registry_url }}"
+          labweaver.io/disk-sha256: "{{ sprint2_application_lock.sprint2_vm_base.disk_sha256 }}"
+      spec:
+        source:
+          registry:
+            url: "{{ sprint2_application_lock.sprint2_vm_base.registry_url }}"
+            pullMethod: node
+        storage:
+          storageClassName: "{{ sprint2_application_lock.sprint2_vm_base.storage_class_name }}"
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: "{{ sprint2_application_lock.sprint2_vm_base.storage_request }}"
+  when: sprint2_application_vm_base_dv.resources | length == 0
+
+- name: Wait for the immutable Sprint 2 VM base import
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ sprint2_application_kubeconfig }}"
+    api_version: cdi.kubevirt.io/v1beta1
+    kind: DataVolume
+    namespace: "{{ sprint2_application_namespace }}"
+    name: "{{ sprint2_application_lock.sprint2_vm_base.seed_data_volume_name }}"
+  register: sprint2_application_vm_base_ready
+  until: >-
+    sprint2_application_vm_base_ready.resources | length == 1 and
+    sprint2_application_vm_base_ready.resources[0].status.phase | default('') == 'Succeeded'
+  retries: 120
+  delay: 5
+
+- name: Read the immutable Sprint 2 VM base DataSource
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ sprint2_application_kubeconfig }}"
+    api_version: cdi.kubevirt.io/v1beta1
+    kind: DataSource
+    namespace: "{{ sprint2_application_namespace }}"
+    name: "{{ sprint2_application_lock.sprint2_vm_base.data_source_name }}"
+  register: sprint2_application_vm_base_source
+
+- name: Reject a conflicting Sprint 2 VM base DataSource
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_vm_base_source.resources | length <= 1
+      - >-
+        sprint2_application_vm_base_source.resources | length == 0 or
+        (sprint2_application_vm_base_source.resources[0].spec.source.pvc.name ==
+         sprint2_application_lock.sprint2_vm_base.seed_data_volume_name and
+         sprint2_application_vm_base_source.resources[0].spec.source.pvc.namespace ==
+         sprint2_application_namespace)
+    fail_msg: SPRINT2_VM_BASE_DATASOURCE_CONFLICT
+
+- name: Publish the immutable Sprint 2 VM base DataSource when absent
+  kubernetes.core.k8s:
+    kubeconfig: "{{ sprint2_application_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: cdi.kubevirt.io/v1beta1
+      kind: DataSource
+      metadata:
+        name: "{{ sprint2_application_lock.sprint2_vm_base.data_source_name }}"
+        namespace: "{{ sprint2_application_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver
+          labweaver.io/sprint: sprint2
+        annotations:
+          labweaver.io/source-release: "{{ sprint2_application_lock.sprint2_vm_base.release }}"
+          labweaver.io/source-registry: "{{ sprint2_application_lock.sprint2_vm_base.registry_url }}"
+          labweaver.io/disk-sha256: "{{ sprint2_application_lock.sprint2_vm_base.disk_sha256 }}"
+      spec:
+        source:
+          pvc:
+            name: "{{ sprint2_application_lock.sprint2_vm_base.seed_data_volume_name }}"
+            namespace: "{{ sprint2_application_namespace }}"
+  when: sprint2_application_vm_base_source.resources | length == 0
+
+- name: Read back the immutable Sprint 2 VM base DataSource
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ sprint2_application_kubeconfig }}"
+    api_version: cdi.kubevirt.io/v1beta1
+    kind: DataSource
+    namespace: "{{ sprint2_application_namespace }}"
+    name: "{{ sprint2_application_lock.sprint2_vm_base.data_source_name }}"
+  register: sprint2_application_vm_base_source_readback
+
+- name: Require the immutable Sprint 2 VM base identity
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_vm_base_source_readback.resources | length == 1
+      - sprint2_application_vm_base_source_readback.resources[0].spec.source.pvc.name == sprint2_application_lock.sprint2_vm_base.seed_data_volume_name
+      - sprint2_application_vm_base_source_readback.resources[0].spec.source.pvc.namespace == sprint2_application_namespace
+      - sprint2_application_vm_base_source_readback.resources[0].metadata.annotations['labweaver.io/source-registry'] == sprint2_application_lock.sprint2_vm_base.registry_url
+      - sprint2_application_vm_base_source_readback.resources[0].metadata.annotations['labweaver.io/disk-sha256'] == sprint2_application_lock.sprint2_vm_base.disk_sha256
+    fail_msg: SPRINT2_VM_BASE_IDENTITY_INVALID
 
 - name: Reconcile the application Harbor pull credential
   kubernetes.core.k8s:
