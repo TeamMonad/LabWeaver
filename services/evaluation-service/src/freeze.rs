@@ -14,7 +14,8 @@ use contracts::submission::{
     FrozenEnvironmentIdentity, FrozenSubmission, SubmissionManifest, SubmissionSource,
 };
 use contracts::{
-    ActorId, AgentRunId, CourseId, RetentionClass, RetentionSnapshot, Revision, Sha256Digest,
+    ActorId, AgentRunId, CourseId, FrozenSubmissionId, RetentionClass, RetentionSnapshot, Revision,
+    Sha256Digest,
 };
 use serde::Serialize;
 
@@ -26,6 +27,7 @@ const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(15 * 60);
 /// Internal authenticated command produced from an approved `SubmissionManifest` projection.
 #[derive(Clone, Debug)]
 pub struct FreezeRequest {
+    pub frozen_submission_id: FrozenSubmissionId,
     pub course_id: CourseId,
     pub actor_id: ActorId,
     pub agent_run_id: AgentRunId,
@@ -114,6 +116,7 @@ impl FreezeService {
         let lease = match self
             .store
             .begin(
+                request.frozen_submission_id,
                 request.course_id,
                 request.environment.environment_id,
                 &request.idempotency_key,
@@ -274,6 +277,7 @@ fn request_hash(
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
     struct RequestIdentity<'a> {
+        frozen_submission_id: FrozenSubmissionId,
         course_id: CourseId,
         actor_id: ActorId,
         agent_run_id: AgentRunId,
@@ -289,6 +293,7 @@ fn request_hash(
         SnapshotTransport::Ssh => "ssh_sftp",
     };
     Sha256Digest::of_canonical(&RequestIdentity {
+        frozen_submission_id: request.frozen_submission_id,
         course_id: request.course_id,
         actor_id: request.actor_id,
         agent_run_id: request.agent_run_id,

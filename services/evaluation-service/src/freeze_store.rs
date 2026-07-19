@@ -84,6 +84,7 @@ impl PgFreezeStore {
     )]
     pub async fn begin(
         &self,
+        frozen_submission_id: FrozenSubmissionId,
         course_id: CourseId,
         environment_id: EnvironmentId,
         idempotency_key: &str,
@@ -104,7 +105,6 @@ impl PgFreezeStore {
                 .fetch_one(&mut *transaction)
                 .await?;
         let lease_expires_at = authority_now + time::Duration::seconds(lease_seconds);
-        let frozen_submission_id = FrozenSubmissionId::new();
         let inserted = sqlx::query(
             "INSERT INTO evaluation.submission_freeze_requests \
              (frozen_submission_id,course_id,environment_id,idempotency_key,request_sha256,source_identity_sha256,state,current_attempt) \
@@ -162,6 +162,10 @@ impl PgFreezeStore {
         }
         let persisted_id =
             parse_id::<FrozenSubmissionId>(request.try_get::<Uuid, _>("frozen_submission_id")?)?;
+        if persisted_id != frozen_submission_id {
+            transaction.rollback().await?;
+            return Ok(BeginFreeze::Conflict);
+        }
         let state: String = request.try_get("state")?;
         if state == "completed" {
             let contract: Value = request.try_get("contract")?;

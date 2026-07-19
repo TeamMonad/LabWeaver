@@ -74,8 +74,8 @@ impl SshSnapshotConfig {
                 .bytes()
                 .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
             || !safe_remote_root(&self.workspace_root)
-            || !self.private_key_path.is_absolute()
-            || !self.certificate_path.is_absolute()
+            || !safe_secret_path(&self.private_key_path)
+            || !safe_secret_path(&self.certificate_path)
             || ttl <= 0
             || ttl > MAX_CREDENTIAL_TTL_SECONDS
             || self.connect_timeout.is_zero()
@@ -433,6 +433,14 @@ fn safe_remote_root(value: &str) -> bool {
         && value != "/"
         && !value.ends_with('/')
         && !value.contains("//")
+        && value.split('/').skip(1).all(safe_component)
+}
+
+fn safe_secret_path(path: &std::path::Path) -> bool {
+    let value = path.to_string_lossy();
+    value.starts_with('/')
+        && !value.contains("//")
+        && !value.contains('\\')
         && value.split('/').skip(1).all(safe_component)
 }
 

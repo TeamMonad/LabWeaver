@@ -240,6 +240,7 @@ impl TestContext {
         let course_id = CourseId::new();
         let environment_id = contracts::EnvironmentId::new();
         let request = FreezeRequest {
+            frozen_submission_id: contracts::FrozenSubmissionId::new(),
             course_id,
             actor_id: ActorId::new(),
             agent_run_id: AgentRunId::new(),
