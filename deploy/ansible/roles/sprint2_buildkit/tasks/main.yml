@@ -38,6 +38,8 @@
       {{ lookup('ansible.builtin.file', sprint2_buildkit_bundle) | from_yaml_all | list }}
     sprint2_buildkit_manifest_value: >-
       {{ lookup('ansible.builtin.file', sprint2_buildkit_manifest) | from_json }}
+    sprint2_buildkit_bundle_sha256: >-
+      {{ lookup('ansible.builtin.file', sprint2_buildkit_bundle) | hash('sha256') }}
   no_log: true
 
 - name: Validate BuildKit object boundary
