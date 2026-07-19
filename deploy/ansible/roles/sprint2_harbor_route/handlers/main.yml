@@ -1,0 +1,5 @@
+---
+- name: Refresh control-plane system trust after a Harbor CA change
+  ansible.builtin.command:
+    argv: [/usr/bin/update-ca-trust, extract]
+  changed_when: true

@@ -1,7 +1,10 @@
 ---
 - name: Require an approved preflight scope
   ansible.builtin.assert:
-    that: (labweaver_preflight_scope | default('cluster')) in ['cluster', 'identity-foundation', 'sprint2-foundation', 'sprint2-buildkit', 'sprint2-harbor-route', 'sprint2-reset']
+    that: >-
+      (labweaver_preflight_scope | default('cluster')) in
+      ['cluster', 'identity-foundation', 'sprint2-foundation',
+       'sprint2-buildkit', 'sprint2-harbor-route', 'sprint2-reset']
     fail_msg: PREFLIGHT_SCOPE_INVALID
   run_once: true
   delegate_to: localhost

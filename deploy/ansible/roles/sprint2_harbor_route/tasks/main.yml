@@ -74,7 +74,10 @@
       - sprint2_harbor_service_object.spec.ports | selectattr('port', 'equalto', 80) | list | length == 1
       - sprint2_harbor_service_object.spec.ports | selectattr('port', 'equalto', 443) | list | length == 1
       - sprint2_harbor_endpoint_slices | length > 0
-      - sprint2_harbor_endpoint_slices | map(attribute='endpoints') | flatten | selectattr('conditions.ready', 'defined') | selectattr('conditions.ready', 'equalto', true) | list | length > 0
+      - >-
+        sprint2_harbor_endpoint_slices | map(attribute='endpoints') | flatten |
+        selectattr('conditions.ready', 'defined') |
+        selectattr('conditions.ready', 'equalto', true) | list | length > 0
       - sprint2_harbor_gateway_object.metadata.labels['app.kubernetes.io/part-of'] | default('') == 'labweaver-infrastructure'
       - sprint2_harbor_route_object.metadata.labels['app.kubernetes.io/part-of'] | default('') == 'labweaver-infrastructure'
     fail_msg: SPRINT2_HARBOR_ADOPTION_BOUNDARY_INVALID
@@ -136,13 +139,11 @@
     mode: '0644'
     content: "{{ sprint2_harbor_nginx_secret_read.resources[0].data['ca.crt'] | b64decode }}"
   register: sprint2_harbor_system_ca
+  notify: Refresh control-plane system trust after a Harbor CA change
   no_log: true
 
-- name: Refresh control-plane system trust after a Harbor CA change
-  ansible.builtin.command:
-    argv: [/usr/bin/update-ca-trust, extract]
-  when: sprint2_harbor_system_ca.changed
-  changed_when: true
+- name: Apply the Harbor CA trust handler before connected probes
+  ansible.builtin.meta: flush_handlers
 
 - name: Ensure the container-client Harbor trust directory exists
   ansible.builtin.file:
@@ -243,8 +244,16 @@
       - sprint2_harbor_route_readback.resources | length == 1
       - sprint2_harbor_route_readback.resources[0].spec.rules[0].backendRefs[0].name == harbor_release_name
       - sprint2_harbor_route_readback.resources[0].spec.rules[0].backendRefs[0].port == 443
-      - sprint2_harbor_route_readback.resources[0].status.parents | default([]) | map(attribute='conditions') | flatten | selectattr('type', 'equalto', 'Accepted') | selectattr('status', 'equalto', 'True') | list | length > 0
-      - sprint2_harbor_route_readback.resources[0].status.parents | default([]) | map(attribute='conditions') | flatten | selectattr('type', 'equalto', 'ResolvedRefs') | selectattr('status', 'equalto', 'True') | list | length > 0
+      - >-
+        sprint2_harbor_route_readback.resources[0].status.parents | default([]) |
+        map(attribute='conditions') | flatten |
+        selectattr('type', 'equalto', 'Accepted') |
+        selectattr('status', 'equalto', 'True') | list | length > 0
+      - >-
+        sprint2_harbor_route_readback.resources[0].status.parents | default([]) |
+        map(attribute='conditions') | flatten |
+        selectattr('type', 'equalto', 'ResolvedRefs') |
+        selectattr('status', 'equalto', 'True') | list | length > 0
     fail_msg: SPRINT2_HARBOR_ROUTE_NOT_READY
 
 - name: Verify the adopted Docker Registry endpoint contract
