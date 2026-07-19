@@ -148,7 +148,24 @@ Kubernetes YAML bundle containing exactly the eight required ConfigMaps and eigh
 required Secrets in `labweaver-system`. The role rejects extra kinds, names or
 namespaces, applies the bundle only after namespace recreation, and records only
 its SHA-256. Secrets remain in Vault or root-owned controller files and are never
-copied into the report. The operator must first read the target UID and set:
+copied into the report. A private Access seed is derived from the reviewed
+Keycloak realm so the OIDC `sub` hashes, durable Actor IDs and teacher/student
+course memberships are bound before either browser session is created:
+
+```sh
+python3 tools/prepare_sprint2_access_seed.py \
+  --realm-file .private/keycloak-realm.json \
+  --issuer https://keycloak.example.invalid/realms/workloads \
+  --course-id 00000000-0000-7000-8000-000000000301 \
+  --teacher-username teacher \
+  --student-username student \
+  --output .private/sprint2-access-seed.json
+```
+
+The reset inventory supplies that file as `sprint2_reset_access_seed_file`.
+The role validates all identities before destruction, seeds only Control and
+OpenSSH Gateway service identities, and checks the exact membership count after
+the baseline migration. The operator must first read the target UID and set:
 
 ```sh
 export LABWEAVER_RUN_ID=sprint2-reset-20260719

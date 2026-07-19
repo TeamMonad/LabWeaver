@@ -17,6 +17,7 @@
       - sprint2_reset_keycloak_username | length > 0
       - sprint2_reset_keycloak_password | length > 0
       - sprint2_reset_keycloak_realm_file | length > 0
+      - sprint2_reset_access_seed_file | length > 0
       - sprint2_reset_values_files | length > 0
       - sprint2_reset_rollback_probe_values_file | length > 0
       - sprint2_reset_configuration_bundle | length > 0
@@ -46,6 +47,7 @@
     {{ [sprint2_reset_chart_source, sprint2_reset_migration_catalog,
         sprint2_reset_configuration_manifest,
         sprint2_reset_keycloak_realm_file,
+        sprint2_reset_access_seed_file,
         sprint2_reset_rollback_probe_values_file,
         sprint2_reset_configuration_bundle] + sprint2_reset_values_files }}
   register: sprint2_reset_controller_required_paths
@@ -82,6 +84,34 @@
   register: sprint2_reset_configuration_manifest_stat
   delegate_to: localhost
   become: false
+
+- name: Parse the private Access identity seed
+  ansible.builtin.set_fact:
+    sprint2_reset_access_seed: >-
+      {{ lookup('ansible.builtin.file', sprint2_reset_access_seed_file) | from_json }}
+  no_log: true
+
+- name: Validate the private Access identity seed boundary
+  ansible.builtin.assert:
+    that:
+      - sprint2_reset_access_seed.apiVersion == 'deploy.labweaver.io/sprint2-access-seed/v1'
+      - sprint2_reset_access_seed.courseMemberships | length >= 2
+      - sprint2_reset_access_seed.courseMemberships | map(attribute='actorId') | unique | list | length == sprint2_reset_access_seed.courseMemberships | map(attribute='actorId') | list | length
+      - sprint2_reset_access_seed.courseMemberships | map(attribute='subjectSha256') | unique | list | length == sprint2_reset_access_seed.courseMemberships | map(attribute='subjectSha256') | list | length
+    fail_msg: SPRINT2_ACCESS_SEED_INVALID
+  no_log: true
+
+- name: Validate every private Access membership seed
+  ansible.builtin.assert:
+    that:
+      - item.actorId is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+      - item.courseId is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+      - item.subjectSha256 is match('^[0-9a-f]{64}$')
+      - item.issuer is match('^https://[A-Za-z0-9._:/-]{1,512}$')
+      - item.role in ['teacher', 'student', 'platform_admin']
+    fail_msg: SPRINT2_ACCESS_MEMBERSHIP_INVALID
+  loop: "{{ sprint2_reset_access_seed.courseMemberships }}"
+  no_log: true
 
 - name: Parse the reviewed workload configuration manifest
   ansible.builtin.set_fact:
@@ -489,6 +519,49 @@
     PGSERVICEFILE: "{{ sprint2_reset_postgres_service_file }}"
   register: sprint2_reset_postgres_apply
   changed_when: true
+  no_log: true
+
+- name: Render reviewed Access service identities and demo memberships
+  ansible.builtin.template:
+    src: access-seed.sql.j2
+    dest: "{{ sprint2_reset_report_root }}/{{ sprint2_reset_run_id }}/access-seed.sql"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Apply reviewed Access service identities and demo memberships
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_reset_psql }}"
+      - service={{ sprint2_reset_postgres_service }}
+      - --no-psqlrc
+      - --file
+      - "{{ sprint2_reset_report_root }}/{{ sprint2_reset_run_id }}/access-seed.sql"
+  environment:
+    PGSERVICEFILE: "{{ sprint2_reset_postgres_service_file }}"
+  changed_when: true
+  no_log: true
+
+- name: Verify exact Access service and course identity counts
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_reset_psql }}"
+      - service={{ sprint2_reset_postgres_service }}
+      - --no-psqlrc
+      - --tuples-only
+      - --no-align
+      - --command
+      - >-
+        SELECT (SELECT count(*) FROM access.service_identities WHERE state='active'),
+               (SELECT count(*) FROM access.course_memberships WHERE state='active');
+  environment:
+    PGSERVICEFILE: "{{ sprint2_reset_postgres_service_file }}"
+  register: sprint2_reset_access_seed_verify
+  changed_when: false
+  failed_when: >-
+    sprint2_reset_access_seed_verify.stdout | trim
+    != '2|' + (sprint2_reset_access_seed.courseMemberships | length | string)
   no_log: true
 
 - name: Delete exact LabWeaver NATS streams

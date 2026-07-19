@@ -52,6 +52,7 @@ sprint2_reset_keycloak_admin_realm: master
 sprint2_reset_keycloak_username: ""
 sprint2_reset_keycloak_password: ""
 sprint2_reset_keycloak_realm_file: ""
+sprint2_reset_access_seed_file: ""
 sprint2_reset_chart_source: "{{ playbook_dir }}/../../helm/labweaver"
 sprint2_reset_values_files: []
 sprint2_reset_rollback_probe_values_file: ""
