@@ -149,15 +149,7 @@ fn read_configuration() -> Result<EvaluationConfiguration, EvaluationProcessErro
     if !path.is_absolute() {
         return Err(EvaluationProcessError::ConfigurationInvalid);
     }
-    let metadata = fs::symlink_metadata(&path)?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.len() == 0
-        || metadata.len() > MAX_CONFIG_BYTES
-    {
-        return Err(EvaluationProcessError::ConfigurationInvalid);
-    }
-    serde_yaml::from_slice(&fs::read(path)?)
+    serde_yaml::from_slice(&read_mounted_file(&path, MAX_CONFIG_BYTES)?)
         .map_err(|_| EvaluationProcessError::ConfigurationInvalid)
 }
 
@@ -187,19 +179,31 @@ fn read_secret(path: &Path) -> Result<String, EvaluationProcessError> {
     if !path.is_absolute() {
         return Err(EvaluationProcessError::ConfigurationInvalid);
     }
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.len() == 0
-        || metadata.len() > 16 * 1024
-    {
-        return Err(EvaluationProcessError::ConfigurationInvalid);
-    }
-    let value = fs::read_to_string(path)?.trim().to_owned();
+    let value = String::from_utf8(read_mounted_file(path, 16 * 1024)?)
+        .map_err(|_| EvaluationProcessError::ConfigurationInvalid)?
+        .trim()
+        .to_owned();
     if value.is_empty() || value.chars().any(char::is_control) {
         return Err(EvaluationProcessError::ConfigurationInvalid);
     }
     Ok(value)
+}
+
+fn read_mounted_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, EvaluationProcessError> {
+    let parent = path
+        .parent()
+        .ok_or(EvaluationProcessError::ConfigurationInvalid)?;
+    let canonical_parent = fs::canonicalize(parent)?;
+    let canonical = fs::canonicalize(path)?;
+    let metadata = fs::metadata(&canonical)?;
+    if !canonical.starts_with(canonical_parent)
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > max_bytes
+    {
+        return Err(EvaluationProcessError::ConfigurationInvalid);
+    }
+    Ok(fs::read(canonical)?)
 }
 
 async fn require_schema(pool: &sqlx::PgPool) -> Result<(), EvaluationProcessError> {

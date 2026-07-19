@@ -589,15 +589,20 @@ fn read_bound_file(path: &PathBuf) -> Result<Vec<u8>, FreezeCoordinatorError> {
     if !path.is_absolute() {
         return Err(FreezeCoordinatorError::ConfigurationInvalid);
     }
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink()
+    let parent = path
+        .parent()
+        .ok_or(FreezeCoordinatorError::ConfigurationInvalid)?;
+    let canonical_parent = fs::canonicalize(parent)?;
+    let canonical = fs::canonicalize(path)?;
+    let metadata = fs::metadata(&canonical)?;
+    if !canonical.starts_with(canonical_parent)
         || !metadata.is_file()
         || metadata.len() == 0
         || metadata.len() > MAX_BOUND_FILE_BYTES
     {
         return Err(FreezeCoordinatorError::ConfigurationInvalid);
     }
-    Ok(fs::read(path)?)
+    Ok(fs::read(canonical)?)
 }
 
 fn read_bound_text(path: &PathBuf) -> Result<String, FreezeCoordinatorError> {

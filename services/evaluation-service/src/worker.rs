@@ -195,34 +195,39 @@ fn required_absolute_path(name: &'static str) -> Result<PathBuf, FreezeWorkerErr
 }
 
 fn read_yaml<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, FreezeWorkerError> {
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.len() == 0
-        || metadata.len() > MAX_CONFIGURATION_BYTES
-    {
-        return Err(FreezeWorkerError::ConfigurationInvalid);
-    }
-    serde_yaml::from_slice(&fs::read(path)?).map_err(|_| FreezeWorkerError::ConfigurationInvalid)
+    serde_yaml::from_slice(&read_mounted_file(path, MAX_CONFIGURATION_BYTES)?)
+        .map_err(|_| FreezeWorkerError::ConfigurationInvalid)
 }
 
 fn read_secret(path: &Path) -> Result<String, FreezeWorkerError> {
     if !path.is_absolute() {
         return Err(FreezeWorkerError::ConfigurationInvalid);
     }
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.len() == 0
-        || metadata.len() > 16 * 1024
-    {
-        return Err(FreezeWorkerError::ConfigurationInvalid);
-    }
-    let value = fs::read_to_string(path)?.trim().to_owned();
+    let value = String::from_utf8(read_mounted_file(path, 16 * 1024)?)
+        .map_err(|_| FreezeWorkerError::ConfigurationInvalid)?
+        .trim()
+        .to_owned();
     if value.is_empty() || value.chars().any(char::is_control) {
         return Err(FreezeWorkerError::ConfigurationInvalid);
     }
     Ok(value)
+}
+
+fn read_mounted_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, FreezeWorkerError> {
+    let parent = path
+        .parent()
+        .ok_or(FreezeWorkerError::ConfigurationInvalid)?;
+    let canonical_parent = fs::canonicalize(parent)?;
+    let canonical = fs::canonicalize(path)?;
+    let metadata = fs::metadata(&canonical)?;
+    if !canonical.starts_with(canonical_parent)
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > max_bytes
+    {
+        return Err(FreezeWorkerError::ConfigurationInvalid);
+    }
+    Ok(fs::read(canonical)?)
 }
 
 /// Stable worker startup and execution failures.
@@ -266,5 +271,32 @@ mod tests {
             bounded_duration(30_001),
             Err(FreezeWorkerError::SourceBindingInvalid)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mounted_symlink_must_resolve_inside_its_binding_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir()?;
+        let mount = temporary.path().join("mount");
+        std::fs::create_dir(&mount)?;
+        let data = mount.join("..data");
+        std::fs::create_dir(&data)?;
+        std::fs::write(data.join("value"), b"bound")?;
+        symlink("..data/value", mount.join("value"))?;
+        assert_eq!(
+            super::read_mounted_file(&mount.join("value"), 16)?,
+            b"bound"
+        );
+
+        std::fs::write(temporary.path().join("outside"), b"escape")?;
+        symlink("../outside", mount.join("escape"))?;
+        assert!(matches!(
+            super::read_mounted_file(&mount.join("escape"), 16),
+            Err(FreezeWorkerError::ConfigurationInvalid)
+        ));
+        Ok(())
     }
 }
