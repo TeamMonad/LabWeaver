@@ -144,7 +144,7 @@ workloads:
       - {name: http, containerPort: 8080, servicePort: 8080}
     readiness: {type: http, port: http, path: /, livenessPath: /}
   evaluation-service:
-    enabled: false
+    enabled: true
     imageKey: evaluation_service
     args: ["--mode", "evaluation-service"]
     configMap: evaluation-service-config

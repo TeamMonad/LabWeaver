@@ -51,8 +51,8 @@ jobs:
             exit 1
           fi
           count="$(grep -Ec 'image: "?harbor\.internal\.example/labweaver-system/[a-z0-9-]+@sha256:[0-9a-f]{64}"?' "$RUNNER_TEMP/platform-images.yaml")"
-          test "$count" -eq 9 || {
-            echo "LW_PACKAGE_HELM_IMAGE_COUNT_INVALID:expected=9 actual=$count" >&2
+          test "$count" -eq 10 || {
+            echo "LW_PACKAGE_HELM_IMAGE_COUNT_INVALID:expected=10 actual=$count" >&2
             exit 1
           }
           if docker run --rm -v "$PWD:/workspace" -w /workspace \
