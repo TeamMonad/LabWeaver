@@ -38,6 +38,11 @@ recomputes the fingerprint from the key offered during the handshake, hashes
 that exact fingerprint string, and emits a host-key line only when both the
 alias and identity match the session. A static `known_hosts` file, trust-on-first-use,
 and `StrictHostKeyChecking=no` are not valid deployment fallbacks.
+The Gateway target identity is an Ed25519 private key paired with an OpenSSH
+user certificate issued by the deployment-owned SSH user CA for the exact
+`labweaver-gateway` principal. Shipping a bare key while guests use
+`TrustedUserCAKeys` is an invalid configuration and must fail at container
+startup.
 
 The Gateway creates, heartbeats and closes sessions through dedicated request types. A one-time opaque token is bound to Gateway identity, connection, key, grant revision and endpoint; only its SHA-256 digest is stored and consumption is atomic. A session records the key and grant revision. Revocation creates an explicit `terminating` deadline, and a missing close receipt becomes `terminationOverdue` rather than a successful close.
 

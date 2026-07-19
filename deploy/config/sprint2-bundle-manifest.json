@@ -127,7 +127,8 @@
       "mtls.crt",
       "mtls.key",
       "ssh_host_ed25519_key",
-      "target_key"
+      "target_key",
+      "target_key-cert.pub"
     ]
   }
 }
