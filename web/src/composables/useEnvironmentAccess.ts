@@ -1,5 +1,5 @@
 import { reactive, ref, type Ref } from 'vue'
-import { listEnvironmentEndpoints, createAccessGrant, revokeAccessGrant } from '@/generated/contracts'
+import { listEnvironmentEndpoints, createAccessGrant, getAccessGrant, revokeAccessGrant } from '@/generated/contracts'
 import type { AccessGrantSchema, EnvironmentEndpointSchema } from '@/generated/contracts'
 import { extractProblemDetails, makeDiagnostic, type AsyncState } from '@/types/async'
 import { idempotencyKey, ifMatch } from '@/utils/format'
@@ -8,6 +8,9 @@ function addHours(date: Date, hours: number): string {
   const d = new Date(date.getTime() + hours * 60 * 60 * 1000)
   return d.toISOString()
 }
+
+const ACTIVATION_TIMEOUT_MS = 30_000
+const ACTIVATION_POLL_MS = 500
 
 export function useEnvironmentAccess(
   environmentId: Ref<string | undefined>,
@@ -85,10 +88,39 @@ export function useEnvironmentAccess(
         return { ok: false }
       }
       grant.value = { kind: 'success', data: result.data }
-      return { ok: true }
+      return await waitForActivation(result.data)
     } finally {
       creating.value = false
     }
+  }
+
+  async function waitForActivation(initial: AccessGrantSchema) {
+    let current = initial
+    const deadline = Date.now() + ACTIVATION_TIMEOUT_MS
+    while (current.state === 'requested' && Date.now() < deadline) {
+      await new Promise<void>((resolve) => window.setTimeout(resolve, ACTIVATION_POLL_MS))
+      const result = await getAccessGrant({ path: { grantId: current.id } })
+      if (result.error) {
+        const problem = extractProblemDetails(result.error)
+        const diagnostic = makeDiagnostic(
+          problem?.diagnosticCode ?? 'ACCESS_GRANT_ACTIVATION_FAILED',
+          problem?.detail ?? '访问授权激活状态读取失败',
+          problem?.retryable ?? true,
+        )
+        grant.value = { kind: 'error', diagnostic }
+        return { ok: false, diagnostic }
+      }
+      current = result.data
+      grant.value = { kind: 'success', data: current }
+    }
+    if (current.state === 'active') return { ok: true }
+    const diagnostic = makeDiagnostic(
+      current.state === 'requested' ? 'ACCESS_GRANT_ACTIVATION_TIMEOUT' : 'ACCESS_GRANT_ACTIVATION_DENIED',
+      current.state === 'requested' ? '访问授权激活超时，请稍后重试。' : `访问授权未激活：${current.state}`,
+      current.state === 'requested',
+    )
+    grant.value = { kind: 'error', diagnostic }
+    return { ok: false, diagnostic }
   }
 
   async function revokeGrant() {

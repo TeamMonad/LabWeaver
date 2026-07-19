@@ -55,9 +55,7 @@ describe('buildSshCommand', () => {
 
 describe('resolveConnectUrl', () => {
   it('returns the connect url when present', () => {
-    expect(resolveConnectUrl(makeEndpointGrant({ connectUrl: 'https://gateway.labweaver.local/connect/ep-1' }))).toBe(
-      'https://gateway.labweaver.local/connect/ep-1',
-    )
+    expect(resolveConnectUrl(makeEndpointGrant({ connectUrl: '/connect/eg-1/' }))).toBe('/connect/eg-1/')
   })
 
   it('returns null when absent', () => {

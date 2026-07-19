@@ -1,15 +1,10 @@
 import type { AccessGrantSchema, EndpointGrant, EnvironmentInstanceSchema } from '@/generated/contracts'
 
-/** Additive optional gateway fields the backend may attach to an AccessGrant
- * response. The UI only consumes these values; it never fabricates them. */
+/** SSH gateway metadata is deployment-specific while browser connect URLs are
+ * part of the generated EndpointGrant contract. */
 export type AccessGrantWithGateway = AccessGrantSchema & {
   gatewayHostname?: string
   gatewayFingerprintSha256?: string
-  endpointGrants: Array<
-    EndpointGrant & {
-      connectUrl?: string | null
-    }
-  >
 }
 
 export type EnvironmentInstanceWithFreeze = EnvironmentInstanceSchema & {
@@ -26,7 +21,7 @@ export function buildSshCommand(grant: AccessGrantWithGateway, endpointGrant: En
 
 /** Code-server connect URL for an https endpoint grant. Returns null when the
  * backend did not provide one (fail closed). */
-export function resolveConnectUrl(endpointGrant: EndpointGrant & { connectUrl?: string | null }): string | null {
+export function resolveConnectUrl(endpointGrant: EndpointGrant): string | null {
   return endpointGrant.connectUrl ?? null
 }
 

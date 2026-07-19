@@ -235,16 +235,16 @@
                         <div v-if="httpsGrant(g)" class="access-card">
                           <h5 class="access-card__title">
                             <SvgIcon name="code" size="sm" aria-hidden="true" />
-                            code-server
+                            容器实验入口
                           </h5>
-                          <p class="access-card__desc">通过 OIDC 与 AccessGrant 经受保护 Gateway 打开 code-server。</p>
+                          <p class="access-card__desc">通过当前登录会话与 AccessGrant 打开受保护的容器实验页面。</p>
                           <button
                             type="button"
                             class="filled-button"
                             :disabled="!connectUrl(g)"
-                            @click="openCodeServer(g)"
+                            @click="openContainerRuntime(g)"
                           >
-                            打开 code-server
+                            打开容器实验
                           </button>
                           <p v-if="!connectUrl(g)" class="access-card__hint">连接地址缺失，无法打开。</p>
                         </div>
@@ -482,7 +482,7 @@ function connectUrl(g: AccessGrantWithGateway): string | null {
   return eg ? resolveConnectUrl(eg) : null
 }
 
-function openCodeServer(g: AccessGrantWithGateway) {
+function openContainerRuntime(g: AccessGrantWithGateway) {
   const url = connectUrl(g)
   if (url) window.open(url, '_blank', 'noopener,noreferrer')
 }

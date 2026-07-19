@@ -74,7 +74,7 @@ function sshAlias(id: string): string {
 function buildEndpointGrant(ep: { id: string; revision: number; protocol: 'http' | 'https' | 'ssh'; health: 'pending' | 'healthy' | 'unhealthy' | 'removed' }, accessGrantId: string, expiresAt: string) {
   const id = nextUuid7('epgrant')
   const alias = ep.protocol === 'ssh' ? sshAlias(id) : null
-  const connectUrl = ep.protocol === 'https' ? `https://${GATEWAY_HOSTNAME}/connect/${ep.id}` : null
+  const connectUrl = ep.protocol !== 'ssh' ? `/connect/${id}/` : null
   return {
     id,
     accessGrantId,
