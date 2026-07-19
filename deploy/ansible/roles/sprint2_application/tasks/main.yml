@@ -10,6 +10,7 @@
       - sprint2_application_nats_credentials_file | length > 0
       - sprint2_application_minio_alias | length > 0
       - sprint2_application_harbor_api | length > 0
+      - sprint2_application_harbor_registry is match('^[a-z0-9][a-z0-9.-]+(?::[0-9]+)?$')
       - sprint2_application_keycloak_config | length > 0
       - sprint2_application_keycloak_server | length > 0
       - sprint2_application_keycloak_username | length > 0
@@ -587,6 +588,30 @@
           pod-security.kubernetes.io/enforce: restricted
           pod-security.kubernetes.io/audit: restricted
           pod-security.kubernetes.io/warn: restricted
+
+- name: Reconcile the application Harbor pull credential
+  kubernetes.core.k8s:
+    kubeconfig: "{{ sprint2_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{ sprint2_application_image_pull_secret_name }}"
+        namespace: "{{ sprint2_application_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver
+          labweaver.io/sprint: sprint2
+      type: kubernetes.io/dockerconfigjson
+      data:
+        .dockerconfigjson: >-
+          {{ {'auths': {sprint2_application_harbor_registry: {
+               'username': sprint2_application_harbor_username,
+               'password': sprint2_application_harbor_password,
+               'auth': (sprint2_application_harbor_username + ':' + sprint2_application_harbor_password)
+                 | b64encode}}} | to_json | b64encode }}
+  no_log: true
 
 - name: Apply reviewed application configuration without namespace reset
   kubernetes.core.k8s:

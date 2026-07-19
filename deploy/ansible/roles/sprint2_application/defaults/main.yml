@@ -28,9 +28,11 @@ sprint2_application_nats_streams:
 sprint2_application_minio_alias: ""
 sprint2_application_minio_bucket: labweaver-artifacts
 sprint2_application_harbor_api: ""
+sprint2_application_harbor_registry: ""
 sprint2_application_harbor_username: ""
 sprint2_application_harbor_password: ""
 sprint2_application_harbor_project: labweaver-system
+sprint2_application_image_pull_secret_name: harbor-labweaver-system-pull
 sprint2_application_keycloak_realm: workloads
 sprint2_application_keycloak_config: ""
 sprint2_application_keycloak_server: ""
