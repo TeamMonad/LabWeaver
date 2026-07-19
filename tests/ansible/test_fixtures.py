@@ -143,6 +143,8 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("seccompProfile: {type: Unconfined}", workloads)
         self.assertIn("appArmorProfile: {type: Unconfined}", workloads)
         self.assertIn("automountServiceAccountToken: false", workloads)
+        self.assertIn("dnsPolicy: None", workloads)
+        self.assertIn("nameservers: [{{ sprint2_buildkit_dns_nameserver }}]", workloads)
         self.assertNotIn("hostPath:", workloads)
         self.assertNotIn("hostNetwork: true", workloads)
         self.assertIn("--oci-worker-no-process-sandbox", workloads)

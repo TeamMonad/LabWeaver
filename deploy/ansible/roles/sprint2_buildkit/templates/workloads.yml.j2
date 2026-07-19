@@ -34,6 +34,11 @@ spec:
       serviceAccountName: buildkit
       automountServiceAccountToken: false
       hostNetwork: false
+      dnsPolicy: None
+      dnsConfig:
+        nameservers: [{{ sprint2_buildkit_dns_nameserver }}]
+        searches: [labweaver-build.svc.cluster.local, svc.cluster.local, cluster.local]
+        options: [{name: ndots, value: "5"}]
       hostAliases:
         - ip: {{ sprint2_buildkit_harbor_service_ip }}
           hostnames: [harbor.lab.lan]

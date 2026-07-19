@@ -300,6 +300,8 @@
     that:
       - sprint2_buildkit_deployment.resources[0].spec.template.spec.containers | length == 1
       - sprint2_buildkit_deployment.resources[0].spec.template.spec.containers[0].image == sprint2_buildkit_lock.sprint2_foundation.buildkit_rootless
+      - sprint2_buildkit_deployment.resources[0].spec.template.spec.dnsPolicy == 'None'
+      - sprint2_buildkit_deployment.resources[0].spec.template.spec.dnsConfig.nameservers == [sprint2_buildkit_dns_nameserver]
       - not (sprint2_buildkit_deployment.resources[0].spec.template.spec.containers[0].securityContext.privileged | default(false))
       - (sprint2_buildkit_deployment.resources[0].spec.template.spec.hostNetwork | default(false)) == false
       - sprint2_buildkit_deployment.resources[0].spec.template.spec.volumes | selectattr('hostPath', 'defined') | list | length == 0
