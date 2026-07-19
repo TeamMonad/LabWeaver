@@ -7,7 +7,7 @@ gateway_mtls:
   server_certificate_file: "/etc/labweaver/secrets/tls.crt"
   server_key_file: "/etc/labweaver/secrets/tls.key"
   client_ca_file: "/etc/labweaver/secrets/mtls-ca.pem"
-  allowed_san_uris: ["spiffe://labweaver/gateway"]
+  allowed_san_uris: ["spiffe://labweaver/access-service"]
   required_eku: "clientAuth"
 access_service:
   base_url: "https://access-service:9443/"
