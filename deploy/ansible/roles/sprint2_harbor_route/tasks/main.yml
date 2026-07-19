@@ -134,6 +134,9 @@
             hostname: "{{ harbor_hostname }}"
             tls:
               mode: Passthrough
+              # Explicitly clear the retained termination certificate. An
+              # omitted field remains owned by the previous field manager.
+              certificateRefs: []
             allowedRoutes:
               namespaces:
                 from: Same
