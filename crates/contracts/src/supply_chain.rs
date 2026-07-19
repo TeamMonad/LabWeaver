@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::authoring::{CandidateApproval, CandidateDecision, RuntimeKind};
 use crate::{
-    ActorId, ArtifactRef, BuildRequestId, CandidateId, CourseId, ImageArtifactId, PolicyId,
-    ReleaseId, Revision, Sha256Digest, UtcTimestamp,
+    ActorId, AgentRunId, ArtifactRef, BuildRequestId, CandidateId, CourseId, ImageArtifactId,
+    PolicyId, ReleaseId, Revision, Sha256Digest, UtcTimestamp,
 };
 
 /// Explicit BuildKit network posture.
@@ -215,6 +215,7 @@ pub struct EnvironmentTemplateRelease {
     pub course_id: CourseId,
     pub version: u64,
     pub candidate_id: CandidateId,
+    pub agent_run_id: AgentRunId,
     pub candidate_revision: Revision,
     pub environment_spec_sha256: Sha256Digest,
     pub runtime_kind: RuntimeKind,

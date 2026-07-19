@@ -152,6 +152,10 @@ impl EnvironmentProcessRuntime {
                                 .image_pull_secret_name
                                 .clone()
                                 .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                            configuration
+                                .workspace_storage_class_name
+                                .clone()
+                                .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
                         )?,
                     )?;
                     registry.register(Arc::new(provider))?;
@@ -609,6 +613,7 @@ struct ProviderBindingConfiguration {
     gateway_name: Option<String>,
     gateway_section: Option<String>,
     image_pull_secret_name: Option<String>,
+    workspace_storage_class_name: Option<String>,
     active_image_policy_id: Option<String>,
     active_image_policy_revision: Option<u64>,
     active_trust_revision: Option<u64>,
@@ -654,6 +659,7 @@ impl ProviderBindingConfiguration {
         self.gateway_name.is_some()
             || self.gateway_section.is_some()
             || self.image_pull_secret_name.is_some()
+            || self.workspace_storage_class_name.is_some()
     }
 
     fn has_kubevirt_fields(&self) -> bool {

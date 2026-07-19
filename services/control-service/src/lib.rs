@@ -1618,6 +1618,7 @@ impl ControlService {
             version: u64::try_from(next_version)
                 .map_err(|_| ControlError::PersistenceIdentityMismatch)?,
             candidate_id: request.candidate_id,
+            agent_run_id: environment_candidate.run_id,
             candidate_revision: request.candidate_revision,
             environment_spec_sha256: request.environment_spec_sha256,
             runtime_kind: request.runtime_kind,

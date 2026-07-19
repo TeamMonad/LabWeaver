@@ -4,6 +4,10 @@
       "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
       "type": "string"
     },
+    "AgentRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `AgentRunId`.",
+      "type": "string"
+    },
     "ApprovalId": {
       "description": "Strongly typed UUIDv7 identifier for `ApprovalId`.",
       "type": "string"
@@ -331,6 +335,9 @@
   "additionalProperties": false,
   "description": "Immutable environment-first release.",
   "properties": {
+    "agentRunId": {
+      "$ref": "#/$defs/AgentRunId"
+    },
     "approval": {
       "$ref": "#/$defs/CandidateApproval"
     },
@@ -375,6 +382,7 @@
     "courseId",
     "version",
     "candidateId",
+    "agentRunId",
     "candidateRevision",
     "environmentSpecSha256",
     "runtimeKind",

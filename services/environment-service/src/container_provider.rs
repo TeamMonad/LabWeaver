@@ -862,6 +862,7 @@ pub struct ContainerProviderConfiguration {
     pub gateway_name: String,
     pub gateway_section: String,
     pub image_pull_secret_name: String,
+    pub workspace_storage_class_name: String,
 }
 
 impl ContainerProviderConfiguration {
@@ -871,11 +872,13 @@ impl ContainerProviderConfiguration {
         gateway_name: String,
         gateway_section: String,
         image_pull_secret_name: String,
+        workspace_storage_class_name: String,
     ) -> Result<Self, ReleaseProjectionError> {
         if !valid_dns_label(&gateway_namespace)
             || !valid_dns_label(&gateway_name)
             || !valid_dns_label(&gateway_section)
             || !valid_dns_label(&image_pull_secret_name)
+            || !valid_dns_label(&workspace_storage_class_name)
         {
             return Err(ReleaseProjectionError::ConfigurationInvalid);
         }
@@ -885,6 +888,7 @@ impl ContainerProviderConfiguration {
             gateway_name,
             gateway_section,
             image_pull_secret_name,
+            workspace_storage_class_name,
         })
     }
 }
@@ -1123,6 +1127,7 @@ pub struct ContainerProvider<B, R> {
     gateway_name: String,
     gateway_section: String,
     image_pull_secret_name: String,
+    workspace_storage_class_name: String,
 }
 
 impl<B, R> ContainerProvider<B, R>
@@ -1148,6 +1153,7 @@ where
             gateway_name: configuration.gateway_name,
             gateway_section: configuration.gateway_section,
             image_pull_secret_name: configuration.image_pull_secret_name,
+            workspace_storage_class_name: configuration.workspace_storage_class_name,
         })
     }
 
@@ -1276,7 +1282,7 @@ where
                 json!({
                     "apiVersion":"v1","kind":"PersistentVolumeClaim",
                     "metadata":{"name":"workspace","namespace":namespace,"labels":labels},
-                    "spec":{"accessModes":["ReadWriteOnce"],"resources":{"requests":{"storage":storage}}}
+                    "spec":{"accessModes":["ReadWriteMany"],"storageClassName":self.workspace_storage_class_name,"resources":{"requests":{"storage":storage}}}
                 }),
             ),
             resource(

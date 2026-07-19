@@ -7,6 +7,7 @@
     "gatewayName": "protected-gateway",
     "gatewaySection": "protected-https",
     "imagePullSecretName": "harbor-course-pull",
+    "workspaceStorageClassName": "nfs-rwx",
     "activeImagePolicyId": "01900000-0000-7000-8000-000000000001",
     "activeImagePolicyRevision": 1,
     "activeTrustRevision": 1

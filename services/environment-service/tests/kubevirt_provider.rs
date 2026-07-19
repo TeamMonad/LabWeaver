@@ -852,6 +852,7 @@ fn projection() -> ReleasePublished {
         course_id,
         version: 1,
         candidate_id,
+        agent_run_id: contracts::AgentRunId::new(),
         candidate_revision: revision(1),
         environment_spec_sha256,
         runtime_kind: RuntimeKind::VirtualMachine,

@@ -632,6 +632,7 @@ fn release_fixture(
         course_id,
         version: 1,
         candidate_id,
+        agent_run_id: AgentRunId::new(),
         candidate_revision: Revision::new(1)?,
         environment_spec_sha256: candidate_sha256,
         runtime_kind: contracts::authoring::RuntimeKind::Container,

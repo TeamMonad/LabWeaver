@@ -149,10 +149,10 @@ non-secret routing configuration. The formal Container Provider uses:
     "gatewayName": "protected-gateway",
     "gatewaySection": "protected-https",
     "imagePullSecretName": "harbor-course-pull",
+    "workspaceStorageClassName": "nfs-rwx",
     "activeImagePolicyId": "01900000-0000-7000-8000-000000000001",
     "activeImagePolicyRevision": 1,
-    "activeTrustRevision": 1,
-    "activeTrustBundleSha256": "d58414fc98a5de1ad8c269290835b407ff258b3f567dab3399fbc2911454a981"
+    "activeTrustRevision": 1
   }
 ]
 ```
@@ -161,8 +161,10 @@ The complete example is `deploy/config/environment-providers.json.example`.
 Omitting `providerKind` selects the existing remote provider; remote entries
 must not contain Gateway, image-pull or trust-policy fields. Container entries
 require every Gateway field, the exact same-namespace Harbor pull Secret name,
-and the active image-policy ID/revision, trust revision and trust-bundle SHA-256. They use
-the immutable publication plus append-only withdrawal projection described in
+the reviewed `nfs-rwx` workspace StorageClass, and the active image-policy
+ID/revision and trust revision. Container workspaces are provisioned as RWX so
+the same PVC can be mounted read-only by the bounded freeze Job. They use the
+immutable publication plus append-only withdrawal projection described in
 `docs/contracts/container-supply-chain-v1.md`.
 
 ## Desired and observed state

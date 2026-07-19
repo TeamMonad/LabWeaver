@@ -187,6 +187,15 @@ fn plan_uses_digest_only_image_and_only_the_protected_gateway() {
             .pointer("/imagePullSecrets/0/name"),
         Some(&json!("harbor-course-pull"))
     );
+    let workspace = resource(&first, "PersistentVolumeClaim");
+    assert_eq!(
+        workspace.document.pointer("/spec/storageClassName"),
+        Some(&json!("nfs-rwx"))
+    );
+    assert_eq!(
+        workspace.document.pointer("/spec/accessModes/0"),
+        Some(&json!("ReadWriteMany"))
+    );
     assert!(
         first
             .resources
@@ -470,6 +479,7 @@ fn provider_with_state(
             "protected-gateway".to_owned(),
             "protected-https".to_owned(),
             "harbor-course-pull".to_owned(),
+            "nfs-rwx".to_owned(),
         )
         .expect("container configuration"),
     )
@@ -547,6 +557,7 @@ fn projection() -> ReleasePublished {
         course_id,
         version: 1,
         candidate_id,
+        agent_run_id: contracts::AgentRunId::new(),
         candidate_revision: revision(1),
         environment_spec_sha256,
         runtime_kind: RuntimeKind::Container,

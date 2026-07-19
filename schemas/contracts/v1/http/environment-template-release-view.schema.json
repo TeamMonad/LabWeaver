@@ -4,6 +4,10 @@
       "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
       "type": "string"
     },
+    "AgentRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `AgentRunId`.",
+      "type": "string"
+    },
     "ApprovalId": {
       "description": "Strongly typed UUIDv7 identifier for `ApprovalId`.",
       "type": "string"
@@ -362,6 +366,9 @@
   "additionalProperties": false,
   "description": "Read model that keeps the immutable release separate from its append-only withdrawal fact.",
   "properties": {
+    "agentRunId": {
+      "$ref": "#/$defs/AgentRunId"
+    },
     "approval": {
       "$ref": "#/$defs/CandidateApproval"
     },
@@ -416,6 +423,7 @@
     "courseId",
     "version",
     "candidateId",
+    "agentRunId",
     "candidateRevision",
     "environmentSpecSha256",
     "runtimeKind",
