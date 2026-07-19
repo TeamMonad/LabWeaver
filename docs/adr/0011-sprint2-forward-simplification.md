@@ -107,13 +107,18 @@ deployment manifest, migration catalog, image set, and run ID.
 
 ## Consequences
 
-- Existing Sigstore and Kyverno code, deployment automation, schemas, and
-  reports are deleted in a forward change.
-- The adopted cluster is reset for LabWeaver state. Kubernetes, KubeVirt,
-  PostgreSQL, NATS, MinIO, Harbor, and Keycloak services remain, while their
-  LabWeaver-owned state is recreated.
-- Kyverno itself is removed only after read-only inventory proves there are no
-  non-LabWeaver consumers. Otherwise deployment stops with a blocking report.
+- Sigstore, Kyverno, and Packer are absent from the Sprint 2 product profile and
+  Release Gate. Existing infrastructure installations are not deleted or
+  reconciled by this delivery.
+- The adopted cluster is consumed in place. Kubernetes, KubeVirt, PostgreSQL,
+  NATS, MinIO, Harbor, Keycloak, namespaces, volumes, realms, projects, streams,
+  buckets, and schemas are retained. Adoption may create a missing LabWeaver
+  object or apply a reviewed forward change, but it never drops or recreates an
+  existing object.
+- A narrow adoption command owns each required infrastructure change. For
+  example, `sprint2-harbor-route` validates the existing managed Harbor
+  installation and changes only its `HTTPRoute`; it does not run the Harbor
+  Helm reconciliation or touch persistent Harbor state.
 - The Sprint 2 Release Gate requires both Container and real KubeVirt paths.
 - Release evidence must expose the accepted broad-runtime-RBAC risk and must
   not report least-privilege verification while the exception remains.
@@ -123,8 +128,7 @@ deployment manifest, migration catalog, image set, and run ID.
 
 ## Rollback
 
-Before deployment, rollback is a normal revert of this branch. After the
-approved reset starts, old business data, signing data, and old wire versions
-are not recoverable. Rollback redeploys the last verified application images
-against a newly initialized database; it does not recreate the removed trust
-plane.
+Rollback is a normal revert of this branch plus a server-side apply of the last
+reviewed application and route manifests. Because this delivery does not delete
+infrastructure or business data, rollback does not depend on reconstructing
+Harbor, Keycloak, PostgreSQL, NATS, MinIO, Sigstore, or Kyverno state.

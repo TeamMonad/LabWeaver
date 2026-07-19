@@ -2,7 +2,7 @@
 
 ## Current contract
 
-Sprint 2 is a pre-release destructive reset. The six service/data ownership
+Sprint 2 adopts the retained infrastructure without destructive reset. The six service/data ownership
 boundaries remain fixed, but each domain now has exactly one current migration:
 
 ```text
@@ -12,8 +12,9 @@ migrations/<domain>/0001_sprint2_baseline.sql
 The domains are `control`, `access`, `environment`, `agent`, `evaluation`, and
 `resource`. Evaluation and Resource retain schema ownership even though their
 services are disabled in the Sprint 2 deployment profile. There is no supported
-upgrade, compatibility, backfill, down-migration, or recovery path for the old
-pre-release schema history.
+compatibility, backfill, or down-migration path for an older populated
+pre-release schema. Such a schema is an explicit blocker requiring a separately
+reviewed forward migration; it is never dropped implicitly.
 
 `migrations/catalog.yaml` is the checked-in source of migration identity. Its
 domain order, filename and SHA-256 values are deterministic. After an approved
@@ -23,9 +24,8 @@ baseline change, update the catalog hashes and verify them with:
 cargo test -p xtask migration_catalog
 ```
 
-Changing a baseline requires the same A+B review as any Migration change and a
-new clean reset. Editing an already deployed baseline without resetting the
-target is a blocking identity mismatch.
+Changing a baseline requires the same A+B review as any Migration change.
+Editing an already applied baseline is a blocking identity mismatch.
 
 ## Ownership and execution
 
@@ -34,18 +34,21 @@ boundaries. A service may read and write only its own domain. Cross-domain
 foreign keys, triggers, direct writes and shared business tables remain
 forbidden.
 
-The only Sprint 2 deployment execution path is the allowlisted Ansible reset:
+The Sprint 2 adoption path creates a domain schema and applies its baseline only
+when both the schema and its migration ledger are absent. It accepts an existing
+domain only when the recorded filename and SHA-256 exactly match the checked-in
+catalog:
 
 ```sh
-cargo xtask demo reset --infra --env <environment> --yes
+cargo xtask deploy --env <environment> --package-manifest <verified-manifest> --yes
 ```
 
 The playbook requires a root-controlled `PGSERVICEFILE`; database URLs and
-passwords are not command-line arguments or report fields. It binds destructive
-confirmation to the exact cluster UID and Run ID, drops/recreates the six
-schemas, and applies all six baseline files with `ON_ERROR_STOP`. A missing
-role, failed statement or unavailable database stops the run before product
-deployment and no passing reset report is written.
+passwords are not command-line arguments or report fields. It binds the run
+identity to the exact cluster UID and migration catalog. It never drops or
+recreates a schema. A partial schema, unknown table, missing role, failed
+statement, unavailable database, or catalog mismatch stops the run before
+product deployment and no passing deployment report is written.
 
 ## Runtime and Release Gate
 
@@ -57,4 +60,4 @@ invalid.
 
 Future post-v1 data evolution must introduce a new ADR and forward migrations.
 It must not restore the deleted pre-release v1/v2 compatibility machinery or
-reinterpret this destructive baseline as production upgrade evidence.
+reinterpret first-install baseline evidence as production upgrade evidence.

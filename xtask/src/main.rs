@@ -43,6 +43,8 @@ enum Command {
     Sprint2Foundation(EnvironmentArgs),
     /// Reconcile the dedicated rootless `BuildKit` Sprint 2 foundation.
     Sprint2Buildkit(EnvironmentArgs),
+    /// Adopt the existing Harbor Gateway route without reconciling Harbor state.
+    Sprint2HarborRoute(EnvironmentArgs),
     Upgrade(UpgradeArgs),
     Rollback(RollbackArgs),
     Restore(RestoreArgs),
@@ -386,6 +388,7 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::IdentityFoundation(args) => identity_foundation(&args),
         Command::Sprint2Foundation(args) => sprint2_foundation(&args),
         Command::Sprint2Buildkit(args) => sprint2_buildkit(&args),
+        Command::Sprint2HarborRoute(args) => sprint2_harbor_route(&args),
         Command::AcceptanceAssets(args) => match args.action {
             AcceptanceAssetsAction::Validate => acceptance_assets::validate(&repository_root()),
             AcceptanceAssetsAction::List => {
@@ -605,6 +608,25 @@ fn sprint2_buildkit(args: &EnvironmentArgs) -> Result<(), AppError> {
         &args.env,
         "92-sprint2-buildkit.yml",
         "sprint2-buildkit --infra",
+    )
+}
+
+fn sprint2_harbor_route(args: &EnvironmentArgs) -> Result<(), AppError> {
+    if !args.yes {
+        return Err(AppError::ConfirmationRequired {
+            command: "sprint2-harbor-route",
+        });
+    }
+    require_infrastructure(args, "sprint2-harbor-route --infra")?;
+    if args.package_manifest.is_some() {
+        return Err(AppError::InvalidArgument {
+            role: "Sprint 2 Harbor route adoption does not accept --package-manifest",
+        });
+    }
+    run_infrastructure(
+        &args.env,
+        "92-sprint2-harbor-route.yml",
+        "sprint2-harbor-route --infra",
     )
 }
 
@@ -1239,7 +1261,7 @@ fn not_implemented(command: impl Into<String>) -> Result<(), AppError> {
 mod tests {
     use super::{
         EnvironmentArgs, IdentityFoundationAction, IdentityFoundationArgs, deploy,
-        identity_foundation, sprint2_buildkit, sprint2_foundation,
+        identity_foundation, sprint2_buildkit, sprint2_foundation, sprint2_harbor_route,
     };
 
     fn identity_args(env: &str, infra: bool, yes: bool) -> IdentityFoundationArgs {
@@ -1376,6 +1398,20 @@ mod tests {
             package_manifest: None,
         }) else {
             return Err("Sprint 2 BuildKit without --yes must fail".into());
+        };
+        assert_eq!(error.diagnostic_code(), "XTASK_CONFIRMATION_REQUIRED");
+        Ok(())
+    }
+
+    #[test]
+    fn sprint2_harbor_route_requires_confirmation() -> Result<(), String> {
+        let Err(error) = sprint2_harbor_route(&EnvironmentArgs {
+            env: "demo".into(),
+            infra: true,
+            yes: false,
+            package_manifest: None,
+        }) else {
+            return Err("Sprint 2 Harbor route adoption without --yes must fail".into());
         };
         assert_eq!(error.diagnostic_code(), "XTASK_CONFIRMATION_REQUIRED");
         Ok(())

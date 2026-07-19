@@ -3,10 +3,11 @@
 The only deployment controller entry points are `cargo xtask preflight --infra
 --env <environment>`, `cargo xtask deploy --infra --env <environment> --yes`,
 `cargo xtask verify --infra --env <environment> --yes`, and `cargo xtask backup
---infra --env <environment> --yes`. The destructive Sprint 2 rebuild additionally
-uses `cargo xtask sprint2-foundation --infra --env <environment> --yes`,
-`cargo xtask sprint2-buildkit --infra --env <environment> --yes`, and then
-`cargo xtask demo reset --infra --env <environment> --yes`. They run only on the approved Linux router
+--infra --env <environment> --yes`. Sprint 2 adopts retained infrastructure with
+`cargo xtask sprint2-foundation --infra --env <environment> --yes`,
+`cargo xtask sprint2-buildkit --infra --env <environment> --yes`, and bounded
+commands such as `cargo xtask sprint2-harbor-route --infra --env <environment>
+--yes`. They run only on the approved Linux router
 worktree through `ansible-rs`; Windows fails with a stable unsupported-platform
 diagnostic. The removed Python launcher is not a deployment fallback.
 The router invocation must export explicit lowercase `LABWEAVER_RUN_ID` and
@@ -52,13 +53,20 @@ Harbor also requires the verified local `harbor-1.19.1.tgz` archive declared by
 are locked in `deploy/versions.lock.yml`. A tag-only image, archive mismatch,
 or remote repository fallback is rejected.
 
-Every `deploy --infra` runs the backup role before Harbor reconciliation. The
+Full `deploy --infra` runs the backup role before Harbor reconciliation. The
 run-specific backup evidence binds run ID, cluster UID, commit, inventory and
 component-lock hashes to the `harbor-reconcile` target. When Harbor already
 contains persistent data, the operator must additionally provide a protected
 Harbor data-backup evidence locator through
 `LABWEAVER_HARBOR_DATA_BACKUP_LOCATOR`; missing or identity-mismatched evidence
-blocks reconciliation. TestFlight temporary resources in `labweaver-demo` are
+blocks reconciliation. Sprint 2 adoption does not use this broad entry point for
+a route-only change. `sprint2-harbor-route` verifies that the namespace,
+Gateway, nginx Service, ready EndpointSlice and existing HTTPRoute are managed
+LabWeaver objects, then server-side-applies only the HTTPRoute backend to the
+Harbor nginx Service. It verifies Gateway `Accepted`/`ResolvedRefs` conditions
+and the authenticated Docker Registry `/v2/` response. It does not invoke Helm,
+write a Secret, restart a Harbor Pod, or mutate Harbor database, registry, PVC,
+project, or image state. TestFlight temporary resources in `labweaver-demo` are
 named and selected by its run ID, so cleanup cannot target another run.
 
 `ansible-lint`, syntax checks, encrypted fictional-Vault loading, and storage
@@ -68,7 +76,14 @@ schema-validated TestFlight report, and second idempotent replay. The report
 remains blocked until OIDC, Harbor policy/recovery, and Release Gate evidence
 are completed.
 
-## Sprint 2 destructive reset
+## Sprint 2 retained-infrastructure adoption
+
+The current Sprint 2 delivery does not run `cargo xtask demo reset`. It does not
+uninstall Sigstore or Kyverno and does not delete namespaces, webhooks, CRDs,
+PVCs, schemas, streams, consumers, buckets, Harbor projects/images, or Keycloak
+realms/clients. The reset implementation remains an explicitly destructive
+maintenance command outside this delivery and is not an installation
+prerequisite or Release Gate step.
 
 The foundation command reconciles the retained PostgreSQL, NATS JetStream and
 MinIO service bodies in `labweaver-data` before reset. All images are digest
@@ -141,7 +156,9 @@ generated `build-executor-client` material is injected only into the
 `build-executor` Secret. Default-deny NetworkPolicy admits that workload and
 the reviewed Harbor CIDR only.
 
-`demo reset` runs only the allowlisted `93-sprint2-reset.yml` playbook. It is a
+The following legacy reset description documents an out-of-scope maintenance
+path and must not be followed for Sprint 2 adoption. `demo reset` runs only the
+allowlisted `93-sprint2-reset.yml` playbook. It is a
 pre-release destructive operation: there is no upgrade or restore guarantee for
 the deleted LabWeaver business data. Before it changes the cluster it verifies
 PostgreSQL, JetStream, MinIO, BuildKit, Harbor and Keycloak connectivity, then
