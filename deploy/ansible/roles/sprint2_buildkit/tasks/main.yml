@@ -92,6 +92,30 @@
     fail_msg: SPRINT2_BUILDKIT_CONFIGURATION_INVALID
   no_log: true
 
+- name: Read the retained Harbor nginx service for cluster-local access
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ sprint2_buildkit_kubeconfig }}"
+    api_version: v1
+    kind: Service
+    namespace: harbor
+    name: harbor
+  register: sprint2_buildkit_harbor_service
+
+- name: Bind the retained Harbor service identity
+  ansible.builtin.set_fact:
+    sprint2_buildkit_harbor_service_ip: >-
+      {{ sprint2_buildkit_harbor_service.resources[0].spec.clusterIP
+         if sprint2_buildkit_harbor_service.resources | length == 1 else '' }}
+
+- name: Reject a missing or invalid retained Harbor service
+  ansible.builtin.assert:
+    that:
+      - sprint2_buildkit_harbor_service.resources | length == 1
+      - sprint2_buildkit_harbor_service.resources[0].metadata.labels['app.kubernetes.io/managed-by'] | default('') == 'Helm'
+      - sprint2_buildkit_harbor_service.resources[0].spec.ports | selectattr('port', 'equalto', 443) | list | length == 1
+      - sprint2_buildkit_harbor_service_ip is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
+    fail_msg: SPRINT2_BUILDKIT_HARBOR_SERVICE_INVALID
+
 - name: Inspect the generated BuildKit operator client inputs
   ansible.builtin.stat:
     path: "{{ sprint2_buildkit_bundle | dirname }}/build-executor-client/{{ item }}"

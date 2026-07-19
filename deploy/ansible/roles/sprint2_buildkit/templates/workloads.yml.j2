@@ -34,6 +34,9 @@ spec:
       serviceAccountName: buildkit
       automountServiceAccountToken: false
       hostNetwork: false
+      hostAliases:
+        - ip: {{ sprint2_buildkit_harbor_service_ip }}
+          hostnames: [harbor.lab.lan]
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -136,3 +139,9 @@ spec:
     - to:
         - ipBlock: {cidr: {{ sprint2_buildkit_registry_cidr }}}
       ports: [{protocol: TCP, port: 443}]
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: harbor}
+          podSelector:
+            matchLabels: {app.kubernetes.io/component: nginx, app.kubernetes.io/instance: harbor}
+      ports: [{protocol: TCP, port: 8443}]

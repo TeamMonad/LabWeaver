@@ -165,7 +165,11 @@ generated `build-executor-client` material is injected only into the
 `build-executor` Secret. The same authoring run installs a mode-0600 operator
 client in the fixed control-plane packaging directory; an older client is
 replaced whenever the BuildKit authority rotates. Default-deny NetworkPolicy admits that workload and
-the reviewed Harbor CIDR only.
+the reviewed Harbor CIDR only. For in-cluster builds, the role reads the
+retained Harbor nginx Service identity and pins `harbor.lab.lan` to that
+ClusterIP inside the BuildKit Pod, avoiding unsupported same-cluster
+LoadBalancer hairpinning. Egress is additionally limited to the `harbor`
+namespace's exact nginx labels and TLS target port.
 
 The following legacy reset description documents an out-of-scope maintenance
 path and must not be followed for Sprint 2 adoption. `demo reset` runs only the
