@@ -79,14 +79,9 @@ spec:
   hostnames:
     - {{ harbor_hostname }}
   rules:
-    - matches:
-        - path: { type: PathPrefix, value: /api/ }
-        - path: { type: PathPrefix, value: /service/ }
-        - path: { type: PathPrefix, value: /v2/ }
-        - path: { type: PathPrefix, value: /chartrepo/ }
-      backendRefs:
-        - name: {{ harbor_release_name }}-core
-          port: 80
     - backendRefs:
-        - name: {{ harbor_release_name }}-portal
+        # Harbor's nginx service owns the complete external routing contract.
+        # Routing /v2 directly to core bypasses registry authentication and
+        # breaks the HEAD requests required by BuildKit.
+        - name: {{ harbor_release_name }}
           port: 80

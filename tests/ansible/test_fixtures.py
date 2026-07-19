@@ -172,6 +172,14 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("require_python_module_version", xtask)
         self.assertIn("inventory_identity_hash(&inventory_root)", xtask)
 
+    def test_harbor_gateway_uses_the_chart_nginx_contract(self) -> None:
+        gateway = (
+            ROOT / "deploy/ansible/roles/harbor/templates/gateway.yml.j2"
+        ).read_text(encoding="utf-8")
+        self.assertIn("name: {{ harbor_release_name }}\n          port: 80", gateway)
+        self.assertNotIn("{{ harbor_release_name }}-core", gateway)
+        self.assertNotIn("{{ harbor_release_name }}-portal", gateway)
+
     def test_deploy_starts_with_preflight(self) -> None:
         site = (ROOT / "deploy/ansible/playbooks/site.yml").read_text(encoding="utf-8")
         self.assertEqual(site.splitlines()[1], "- import_playbook: 00-preflight.yml")
