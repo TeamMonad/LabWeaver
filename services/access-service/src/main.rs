@@ -750,10 +750,10 @@ fn effective_session_scopes(
         {
             revision = Revision::new(revision.get().max(membership.revision.get()))
                 .map_err(|_| ApiError::internal("LW_AUTH_MEMBERSHIP_UNAVAILABLE"))?;
-            if let Some(member_expiry) = membership.expires_at
-                && member_expiry.get() < expiry.get()
-            {
-                expiry = member_expiry;
+            if let Some(member_expiry) = membership.expires_at {
+                if member_expiry.get() < expiry.get() {
+                    expiry = member_expiry;
+                }
             }
             scopes.push(AuthorizationScope::Course {
                 course_id: membership.course_id,
@@ -768,10 +768,10 @@ fn effective_session_scopes(
         {
             revision = Revision::new(revision.get().max(membership.revision.get()))
                 .map_err(|_| ApiError::internal("LW_AUTH_MEMBERSHIP_UNAVAILABLE"))?;
-            if let Some(member_expiry) = membership.expires_at
-                && member_expiry.get() < expiry.get()
-            {
-                expiry = member_expiry;
+            if let Some(member_expiry) = membership.expires_at {
+                if member_expiry.get() < expiry.get() {
+                    expiry = member_expiry;
+                }
             }
             scopes.push(AuthorizationScope::Project {
                 course_id: membership.course_id,
