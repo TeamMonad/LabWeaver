@@ -9,6 +9,8 @@
       - harbor_hostname is match('^[a-z0-9][a-z0-9.-]+$')
       - harbor_kubeconfig_path | length > 0
       - harbor_public_ca_path == '/var/lib/labweaver/.private/harbor-public/registry-ca.crt'
+      - harbor_project_name == 'labweaver-system'
+      - harbor_admin_password | length > 0
     fail_msg: SPRINT2_HARBOR_ROUTE_INPUT_INVALID
 
 - name: Read the existing Harbor namespace
@@ -261,3 +263,71 @@
       - sprint2_harbor_registry_probe.docker_distribution_api_version | default('') == 'registry/2.0'
       - sprint2_harbor_registry_probe.www_authenticate | default('') is search('/service/token')
     fail_msg: SPRINT2_HARBOR_REGISTRY_ROUTE_INVALID
+
+- name: Read the retained Harbor Sprint 2 project policy
+  ansible.builtin.uri:
+    url: "https://{{ harbor_hostname }}/api/v2.0/projects?name={{ harbor_project_name | urlencode }}"
+    method: GET
+    user: admin
+    password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    validate_certs: true
+    status_code: 200
+    return_content: true
+  register: sprint2_harbor_project_read
+  no_log: true
+
+- name: Reject a missing or ambiguous Harbor Sprint 2 project
+  ansible.builtin.assert:
+    that:
+      - sprint2_harbor_project_read.json | length == 1
+      - sprint2_harbor_project_read.json[0].name == harbor_project_name
+      - sprint2_harbor_project_read.json[0].metadata.public | default('') == 'false'
+    fail_msg: SPRINT2_HARBOR_PROJECT_INVALID
+  no_log: true
+
+- name: Align the retained project with the Sprint 2 Critical gate
+  ansible.builtin.uri:
+    url: "https://{{ harbor_hostname }}/api/v2.0/projects/{{ sprint2_harbor_project_read.json[0].project_id }}"
+    method: PUT
+    user: admin
+    password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    validate_certs: true
+    body_format: json
+    body:
+      metadata:
+        public: 'false'
+        auto_scan: 'true'
+        prevent_vul: 'true'
+        severity: critical
+    status_code: 200
+  when: >-
+    sprint2_harbor_project_read.json[0].metadata.auto_scan | default('') != 'true' or
+    sprint2_harbor_project_read.json[0].metadata.prevent_vul | default('') != 'true' or
+    sprint2_harbor_project_read.json[0].metadata.severity | default('') != 'critical'
+  no_log: true
+
+- name: Read back the adopted Harbor Sprint 2 project policy
+  ansible.builtin.uri:
+    url: "https://{{ harbor_hostname }}/api/v2.0/projects?name={{ harbor_project_name | urlencode }}"
+    method: GET
+    user: admin
+    password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    validate_certs: true
+    status_code: 200
+    return_content: true
+  register: sprint2_harbor_project_readback
+  no_log: true
+
+- name: Require the exact private auto-scan Critical project gate
+  ansible.builtin.assert:
+    that:
+      - sprint2_harbor_project_readback.json | length == 1
+      - sprint2_harbor_project_readback.json[0].metadata.public | default('') == 'false'
+      - sprint2_harbor_project_readback.json[0].metadata.auto_scan | default('') == 'true'
+      - sprint2_harbor_project_readback.json[0].metadata.prevent_vul | default('') == 'true'
+      - sprint2_harbor_project_readback.json[0].metadata.severity | default('') == 'critical'
+    fail_msg: SPRINT2_HARBOR_PROJECT_POLICY_DRIFT
+  no_log: true

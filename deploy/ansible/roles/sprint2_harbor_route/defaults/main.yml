@@ -6,3 +6,4 @@ harbor_gateway_vip: ''
 harbor_hostname: harbor.lab.lan
 harbor_kubeconfig_path: /etc/kubernetes/admin.conf
 harbor_public_ca_path: /var/lib/labweaver/.private/harbor-public/registry-ca.crt
+harbor_project_name: labweaver-system
