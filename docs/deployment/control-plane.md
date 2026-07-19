@@ -34,8 +34,10 @@ original upload declaration. Control separately computes the immutable completed
 hash after freezing every exact MinIO object version. This keeps the client-verifiable upload
 contract distinct from the server-owned object-version identity.
 
-After the approved destructive reset, apply the Sprint 2 baseline catalog through
-the controlled entry point before starting the new processes:
+After the non-destructive retained-infrastructure inventory confirms that each
+domain has no business relations and an empty migration ledger, apply the Sprint
+2 baseline catalog through the controlled entry point before starting the new
+processes:
 
 ```sh
 cargo xtask migrate --yes
@@ -53,7 +55,7 @@ Startup never repairs an unknown schema.
 3. Confirm immutable packages and the current baseline identity remain present.
 4. Roll back only to an image set verified against the same Sprint 2 baseline.
 5. After Sprint 2 publication, schema corrections use reviewed forward Migrations;
-   the pre-release destructive reset is not a general rollback mechanism.
+   rollback never drops or rewrites retained infrastructure state.
 
 Rollback does not withdraw an EnvironmentTemplateRelease. A withdrawal is a separate append-only
 fact. A functional rollback to older material creates a higher release version referencing a

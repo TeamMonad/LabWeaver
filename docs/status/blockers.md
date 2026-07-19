@@ -63,22 +63,23 @@ admission boundary enforces the executor namespace/ServiceAccount fence.
   within 60 seconds.
 - Owner: A authorization semantics; B security review; D Verify.
 
-## Destructive reset and idempotent deployment
+## Non-destructive adoption and idempotent deployment
 
-- The repository now contains one Sprint 2 baseline migration per domain, a
-  ten-workload Helm profile and a cluster/run-bound destructive reset role.
-- Blocker: read-only target inventory and the retained-foundation replay confirm
-  Kubernetes/KubeVirt, Harbor, Keycloak, PostgreSQL, NATS and MinIO, but no
-  BuildKit service body or complete reviewed private workload-configuration
-  bundle is available on the approved controller. The reset therefore remains
-  intentionally unexecuted.
-  The role probes all six dependencies before its first destructive task and
-  rejects a missing or malformed nine-ConfigMap/nine-Secret bundle.
-- Exit: the deployment owner supplies the missing service bodies and ignored
-  reviewed inputs; the reset report binds cluster UID, source commit, migration
-  catalog, configuration-bundle hash, image set and deletion hashes without
-  Secret material after dependency guard, double deploy and rollback readback.
-- Owner: A reset approval and execution; D independent Verify.
+- The repository contains one Sprint 2 baseline migration per domain, a
+  Sprint 2 Helm profile and an allowlisted non-destructive application adoption
+  path. The legacy reset playbook is explicitly outside this delivery.
+- Retained PostgreSQL, NATS, MinIO, Harbor, Keycloak, Kubernetes, KubeVirt and
+  BuildKit service bodies have been inventoried. BuildKit packaging completed at
+  source `8db85997`; a new package is required for the current PR head.
+- Blocker: the edge router SSH port is reachable, but both ordinary-user and
+  root command channels time out. The private application bundle is otherwise
+  prepared but still lacks the Claude Code runtime credential.
+- Exit: restore edge-router command execution, provide `ANTHROPIC_API_KEY` or
+  explicitly authorize a long-lived Claude Code OAuth token, render the exact
+  private bundle, package the current head, then complete two atomic application
+  adoptions and rollback readback without invoking reset or deleting retained
+  infrastructure.
+- Owner: A adoption execution; D independent Verify.
 
 The repository now has a separate `sprint2-foundation` reconciliation for the
 retained PostgreSQL, NATS and MinIO service bodies. Its Linux syntax/lint and
@@ -86,13 +87,11 @@ fixture evidence is static deployment evidence only. At source identity
 `4ced06d`, the approved target also completed a real reconciliation and a second
 zero-change replay: PostgreSQL, NATS and MinIO each reported one ready replica,
 with bound persistent claims, digest-locked images, TLS and default-deny policy.
-The private four-object bundle and seven currently deployed workload NATS
-identities remain outside Git. The next foundation reconciliation must rotate
-that private authority to the eight-identity contract that includes the
-freeze-only Evaluation Service. The existing replay closes the retained service
-body dependency, but it is not Sprint 2 E3 evidence and does not authorize
-reset. `labweaver-data` and `labweaver-build` remain outside namespace reset;
-LabWeaver data is cleared only after all reset dependency probes pass.
+The private four-object bundle and deployed workload NATS identities remain
+outside Git. The next foundation reconciliation must rotate that private
+authority to the eight-identity contract that includes the freeze-only
+Evaluation Service. The existing replay closes the retained service-body
+dependency, but it is not Sprint 2 E3 evidence and does not authorize deletion.
 
 ## Browser replay and Release Gate
 
