@@ -67,7 +67,8 @@
       "nats-client.crt",
       "nats-client.key",
       "nats.creds",
-      "postgres-ca.pem"
+      "postgres-ca.pem",
+      "registry-pull-config.json"
     ],
     "control-service-secrets": [
       "database-url",
@@ -120,7 +121,8 @@
       "nats-client.crt",
       "nats-client.key",
       "nats.creds",
-      "postgres-ca.pem"
+      "postgres-ca.pem",
+      "registry-pull-config.json"
     ],
     "openssh-gateway-secrets": [
       "mtls-ca.pem",

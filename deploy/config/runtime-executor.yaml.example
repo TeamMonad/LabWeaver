@@ -28,3 +28,5 @@ executor:
   cleanupPollMilliseconds: 500
   cleanupRetentionSeconds: 86400
   sshHandshakeTimeoutMilliseconds: 5000
+  registryPullSecretFile: "/etc/labweaver/secrets/registry-pull-config.json"
+  registryPullSecretName: "harbor-course-pull"

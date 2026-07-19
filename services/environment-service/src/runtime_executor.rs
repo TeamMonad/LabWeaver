@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use artifact_store::{ImmutableObjectStore, S3ImmutableObjectStore};
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use contracts::{ArtifactRef, Revision, Sha256Digest, UtcTimestamp};
 use reqwest::{Certificate, Client, Method, StatusCode, Url};
 use serde::Deserialize;
@@ -25,6 +26,22 @@ use crate::{
 const FIELD_MANAGER: &str = "labweaver-runtime-executor";
 const CLEANUP_MEDIA_TYPE: &str = "application/vnd.labweaver.environment-cleanup+json";
 
+fn valid_dns_label(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 63
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && value
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && value
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_alphanumeric)
+}
+
 /// Reviewed, non-secret Kubernetes executor configuration.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -36,6 +53,8 @@ pub struct RuntimeExecutorConfiguration {
     pub cleanup_poll_milliseconds: u64,
     pub cleanup_retention_seconds: u64,
     pub ssh_handshake_timeout_milliseconds: u64,
+    pub registry_pull_secret_file: PathBuf,
+    pub registry_pull_secret_name: String,
 }
 
 impl RuntimeExecutorConfiguration {
@@ -52,6 +71,8 @@ impl RuntimeExecutorConfiguration {
             || self.cleanup_retention_seconds > 31_536_000
             || self.ssh_handshake_timeout_milliseconds == 0
             || self.ssh_handshake_timeout_milliseconds > 10_000
+            || !self.registry_pull_secret_file.is_absolute()
+            || !valid_dns_label(&self.registry_pull_secret_name)
         {
             return Err(rejected());
         }
@@ -100,10 +121,50 @@ impl KubernetesContainerExecutor {
         plan: &ContainerResourcePlan,
     ) -> Result<ContainerApplyObservation, ProviderFailure> {
         validate_plan(plan)?;
-        for resource in &plan.resources {
+        let namespace = plan
+            .resources
+            .iter()
+            .find(|resource| resource.kind == "Namespace")
+            .ok_or_else(rejected)?;
+        self.apply_resource(plan, namespace).await?;
+        self.ensure_registry_pull_secret(plan).await?;
+        for resource in plan
+            .resources
+            .iter()
+            .filter(|resource| resource.kind != "Namespace")
+        {
             self.apply_resource(plan, resource).await?;
         }
         self.observe_plan(plan).await
+    }
+
+    async fn ensure_registry_pull_secret(
+        &self,
+        plan: &ContainerResourcePlan,
+    ) -> Result<(), ProviderFailure> {
+        let docker_config =
+            validated_registry_pull_config(&self.configuration.registry_pull_secret_file)?;
+        let secret = ContainerResource {
+            kind: "Secret".to_owned(),
+            namespace: Some(plan.namespace.clone()),
+            name: self.configuration.registry_pull_secret_name.clone(),
+            document: json!({
+                "apiVersion": "v1",
+                "kind": "Secret",
+                "metadata": {
+                    "name": self.configuration.registry_pull_secret_name,
+                    "namespace": plan.namespace,
+                    "labels": {
+                        "app.kubernetes.io/name": "labweaver-environment",
+                        "labweaver.io/environment-id": plan.environment_id.to_string(),
+                        "labweaver.io/managed": "true"
+                    }
+                },
+                "type": "kubernetes.io/dockerconfigjson",
+                "data": {".dockerconfigjson": BASE64_STANDARD.encode(docker_config)}
+            }),
+        };
+        self.apply_resource(plan, &secret).await
     }
 
     async fn apply_resource(
@@ -1009,6 +1070,25 @@ fn read_secret(path: &PathBuf) -> Result<String, ProviderFailure> {
     Ok(value.to_owned())
 }
 
+fn validated_registry_pull_config(path: &PathBuf) -> Result<Vec<u8>, ProviderFailure> {
+    let docker_config = std::fs::read(path).map_err(|_| rejected())?;
+    if docker_config.is_empty() || docker_config.len() > 65_536 {
+        return Err(rejected());
+    }
+    let parsed: Value = serde_json::from_slice(&docker_config).map_err(|_| rejected())?;
+    let auths = parsed
+        .get("auths")
+        .and_then(Value::as_object)
+        .filter(|auths| !auths.is_empty())
+        .ok_or_else(rejected)?;
+    if auths.keys().any(|registry| registry.trim().is_empty())
+        || auths.values().any(|binding| !binding.is_object())
+    {
+        return Err(rejected());
+    }
+    Ok(docker_config)
+}
+
 fn timestamp() -> Result<UtcTimestamp, ProviderFailure> {
     UtcTimestamp::from_utc(OffsetDateTime::now_utc()).map_err(|_| unavailable())
 }
@@ -1055,5 +1135,19 @@ mod tests {
             resource_path("VirtualMachine"),
             Ok(("/apis/kubevirt.io/v1", "virtualmachines", true))
         ));
+    }
+
+    #[test]
+    fn registry_pull_config_is_bounded_and_structured() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("config.json");
+        std::fs::write(&path, br#"{"auths":{"harbor.lab.lan":{"auth":"opaque"}}}"#)
+            .expect("write valid config");
+        assert!(validated_registry_pull_config(&path).is_ok());
+        std::fs::write(&path, br#"{"auths":{}}"#).expect("write empty config");
+        assert!(validated_registry_pull_config(&path).is_err());
+        std::fs::write(&path, br#"{"auths":{"harbor.lab.lan":"opaque"}}"#)
+            .expect("write invalid binding");
+        assert!(validated_registry_pull_config(&path).is_err());
     }
 }

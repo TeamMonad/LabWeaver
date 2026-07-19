@@ -52,6 +52,12 @@ The HTTPS listener accepts routes only from namespaces labeled
 `labweaver.io/gateway-routes=allowed`; the role adds that label to the reviewed portal namespace,
 and the Container provider adds it to Environment-owned namespaces as part of the immutable plan.
 
+The Container executor receives one mounted Harbor pull configuration and server-side applies it
+as the fixed `harbor-course-pull` Secret inside each Environment-owned namespace before creating
+the runtime ServiceAccount and Deployment. The credential is not included in an Environment plan,
+NATS message, database row, report, or log. Missing, oversized, empty, or malformed Docker config
+blocks the apply operation.
+
 The private Keycloak representation is imported when the realm is absent. For a retained realm,
 the role uses `partialImport` with `ifResourceExists=SKIP`, then reads back the required client,
 roles and users. Existing identities are not overwritten or deleted.
