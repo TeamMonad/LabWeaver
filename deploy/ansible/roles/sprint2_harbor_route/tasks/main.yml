@@ -68,6 +68,7 @@
       - sprint2_harbor_namespace_object.metadata.labels['app.kubernetes.io/part-of'] | default('') == 'labweaver-infrastructure'
       - sprint2_harbor_service_object.metadata.name | default('') == harbor_release_name
       - sprint2_harbor_service_object.spec.ports | selectattr('port', 'equalto', 80) | list | length == 1
+      - sprint2_harbor_service_object.spec.ports | selectattr('port', 'equalto', 443) | list | length == 1
       - sprint2_harbor_endpoint_slices | length > 0
       - sprint2_harbor_endpoint_slices | map(attribute='endpoints') | flatten | selectattr('conditions.ready', 'defined') | selectattr('conditions.ready', 'equalto', true) | list | length > 0
       - sprint2_harbor_gateway_object.metadata.labels['app.kubernetes.io/part-of'] | default('') == 'labweaver-infrastructure'
@@ -92,6 +93,28 @@
       - sprint2_harbor_nginx_secret_read.resources[0].data['ca.crt'] | default('') | length > 0
     fail_msg: SPRINT2_HARBOR_BACKEND_CA_INVALID
   no_log: true
+
+- name: Declare the existing Harbor nginx HTTPS backend protocol
+  kubernetes.core.k8s:
+    kubeconfig: "{{ harbor_kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: "{{ harbor_release_name }}"
+        namespace: "{{ harbor_namespace }}"
+      spec:
+        ports:
+          - name: http
+            port: 80
+            protocol: TCP
+            targetPort: 8080
+          - name: https
+            appProtocol: https
+            port: 443
+            protocol: TCP
+            targetPort: 8443
 
 - name: Publish only the Harbor nginx public CA for Gateway validation
   kubernetes.core.k8s:
