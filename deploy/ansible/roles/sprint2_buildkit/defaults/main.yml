@@ -16,7 +16,7 @@ sprint2_buildkit_operator_client_path: /home/rocky/.config/labweaver/buildkit
 sprint2_buildkit_rollout_retries: 60
 sprint2_buildkit_rollout_delay: 5
 sprint2_buildkit_controller_enabled: false
-sprint2_buildkit_controller_host: "{{ groups['edge_router'] | first }}"
+sprint2_buildkit_controller_host: "{{ groups['routers'] | first }}"
 sprint2_buildkit_controller_kubeconfig_source: ""
 sprint2_buildkit_controller_kubeconfig: /home/rocky/.config/labweaver/package/kubeconfig
 sprint2_buildkit_controller_api_server: ""

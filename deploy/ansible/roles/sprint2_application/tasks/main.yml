@@ -903,7 +903,7 @@
     owner: root
     group: root
     mode: "0644"
-  delegate_to: "{{ groups['edge_router'] | first }}"
+  delegate_to: "{{ groups['routers'] | first }}"
   become: true
   notify: Refresh retained router trust
   when: sprint2_application_portal_route_name | length > 0

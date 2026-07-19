@@ -2,5 +2,5 @@
 - name: Refresh retained router trust
   ansible.builtin.command: update-ca-trust
   changed_when: true
-  delegate_to: "{{ groups['edge_router'] | first }}"
+  delegate_to: "{{ groups['routers'] | first }}"
   become: true

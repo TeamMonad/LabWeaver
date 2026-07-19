@@ -212,12 +212,17 @@ class AnsibleFixtureTests(unittest.TestCase):
         tasks = (ROOT / "deploy/ansible/roles/sprint2_buildkit/tasks/main.yml").read_text(
             encoding="utf-8"
         )
+        defaults = (
+            ROOT / "deploy/ansible/roles/sprint2_buildkit/defaults/main.yml"
+        ).read_text(encoding="utf-8")
         unit = (
             ROOT
             / "deploy/ansible/roles/sprint2_buildkit/templates/buildkit-port-forward.service.j2"
         ).read_text(encoding="utf-8")
         self.assertIn("SPRINT2_BUILDKIT_CONTROLLER_IDENTITY_INVALID", tasks)
         self.assertIn("tcp://127.0.0.1:1234", tasks)
+        self.assertIn("groups['routers'] | first", defaults)
+        self.assertNotIn("groups['edge_router']", defaults)
         self.assertIn("--server {{ sprint2_buildkit_controller_api_server }}", unit)
         self.assertIn("ProtectSystem=strict", unit)
         self.assertNotIn("state: absent", tasks)
@@ -235,6 +240,9 @@ class AnsibleFixtureTests(unittest.TestCase):
         network_policy = (
             ROOT / "deploy/helm/labweaver/templates/network-policy.yaml"
         ).read_text(encoding="utf-8")
+        handlers = (
+            ROOT / "deploy/ansible/roles/sprint2_application/handlers/main.yml"
+        ).read_text(encoding="utf-8")
         self.assertIn("SPRINT2_APPLICATION_PORTAL_GATEWAY_CONFLICT", tasks)
         self.assertIn("SPRINT2_APPLICATION_SSH_GATEWAY_CONFLICT", tasks)
         self.assertIn("SPRINT2_APPLICATION_SSH_ROUTE_INVALID", tasks)
@@ -246,6 +254,9 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("name: openssh-gateway", ssh_route)
         self.assertIn('eq $name "access-service"', network_policy)
         self.assertIn("port: 8080", network_policy)
+        self.assertIn("groups['routers'] | first", tasks)
+        self.assertIn("groups['routers'] | first", handlers)
+        self.assertNotIn("groups['edge_router']", tasks + handlers)
         self.assertNotIn("state: absent", tasks)
 
     def test_sprint2_service_configs_use_declared_tls_secret_keys(self) -> None:
