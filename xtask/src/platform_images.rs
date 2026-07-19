@@ -48,6 +48,25 @@ struct PlatformImageLock {
     buildx: String,
     trivy: String,
     helm: String,
+    ci_images: CiImageLock,
+    bases: BaseImageLock,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Deserialize)]
+struct CiImageLock {
+    trivy: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Deserialize)]
+struct BaseImageLock {
+    rust_builder: String,
+    rust_runtime: String,
+    node_builder: String,
+    web_runtime: String,
+    gateway_builder: String,
+    gateway_runtime: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -548,13 +567,23 @@ fn build_scan(
         &source_commit[..12]
     );
     let reproducibility_tag = format!("{tag}-repro");
-    build_image(root, component, source_commit, source_date_epoch, &tag)?;
+    build_image(
+        root,
+        component,
+        source_commit,
+        source_date_epoch,
+        &tag,
+        registry,
+        lock,
+    )?;
     build_image(
         root,
         component,
         source_commit,
         source_date_epoch,
         &reproducibility_tag,
+        registry,
+        lock,
     )?;
     let first = inspect_platform_digest(&tag)?;
     let second = inspect_platform_digest(&reproducibility_tag)?;
@@ -636,6 +665,8 @@ fn build_image(
     source_commit: &str,
     source_date_epoch: u64,
     tag: &str,
+    registry: &str,
+    lock: &PlatformImageLock,
 ) -> Result<(), AppError> {
     let file = match component {
         "web" => "containers/Containerfile.web",
@@ -667,8 +698,56 @@ fn build_image(
             },
         ]);
     }
-    command.args(["--tag", tag, "."]);
+    command.args(["--tag", tag]);
+    for (name, source) in build_base_images(component, lock) {
+        command.args([
+            "--build-arg",
+            &format!("{name}={}", pinned_mirror(registry, name, source)?),
+        ]);
+    }
+    command.arg(".");
     run_checked(&mut command, "BuildKit platform image build").map(|_| ())
+}
+
+#[cfg(target_os = "linux")]
+fn build_base_images<'a>(
+    component: &str,
+    lock: &'a PlatformImageLock,
+) -> Vec<(&'static str, &'a str)> {
+    match component {
+        "web" => vec![
+            ("NODE_BUILDER", lock.bases.node_builder.as_str()),
+            ("WEB_RUNTIME", lock.bases.web_runtime.as_str()),
+        ],
+        "openssh-gateway" => vec![
+            ("RUST_BUILDER", lock.bases.gateway_builder.as_str()),
+            ("GATEWAY_RUNTIME", lock.bases.gateway_runtime.as_str()),
+        ],
+        _ => vec![
+            ("RUST_BUILDER", lock.bases.rust_builder.as_str()),
+            ("RUST_RUNTIME", lock.bases.rust_runtime.as_str()),
+            ("BUILDKIT_IMAGE", lock.buildkit_image.as_str()),
+            ("TRIVY_IMAGE", lock.ci_images.trivy.as_str()),
+        ],
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn pinned_mirror(registry: &str, name: &str, source: &str) -> Result<String, AppError> {
+    let (_, digest) = source.rsplit_once('@').ok_or(AppError::PlatformImage {
+        code: "LW_PACKAGE_MANIFEST_INVALID",
+        detail: format!("{name} base image is not digest pinned"),
+    })?;
+    if !is_digest(digest) {
+        return Err(AppError::PlatformImage {
+            code: "LW_PACKAGE_MANIFEST_INVALID",
+            detail: format!("{name} base image digest is invalid"),
+        });
+    }
+    Ok(format!(
+        "{registry}/labweaver-system/base-{}@{digest}",
+        name.to_ascii_lowercase().replace('_', "-")
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -1226,6 +1305,23 @@ mod tests {
         assert!(validate_registry("harbor.internal.example:5443").is_ok());
         assert!(validate_registry("https://harbor.internal.example").is_err());
         assert!(validate_registry("harbor.internal.example/project").is_err());
+    }
+
+    #[test]
+    fn pinned_mirror_preserves_the_reviewed_digest() -> Result<(), String> {
+        let expected = digest('a');
+        let actual = pinned_mirror(
+            "harbor.lab.lan",
+            "RUST_BUILDER",
+            &format!("docker.io/library/rust:locked@{expected}"),
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            actual,
+            format!("harbor.lab.lan/labweaver-system/base-rust-builder@{expected}")
+        );
+        assert!(pinned_mirror("harbor.lab.lan", "RUST_BUILDER", "rust:latest").is_err());
+        Ok(())
     }
 
     #[test]

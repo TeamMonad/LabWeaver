@@ -31,6 +31,14 @@ v0.35.0 executable. A Docker daemon is not required: configure a named Buildx
 running the command. This keeps build storage on the reviewed BuildKit PVC
 instead of the infrastructure controller.
 
+Before packaging, copy every digest in `platform_images.bases`, the locked
+BuildKit tools image, and the locked Trivy image into the private
+`labweaver-system/base-<build-arg>` repositories with `skopeo copy --all`.
+The copy must preserve each source index digest. Packaging overrides every
+Containerfile base argument with the corresponding Harbor digest and does not
+permit BuildKit to reach a public registry; a missing mirror is therefore a
+blocking error rather than a network fallback.
+
 The command fails unless the source tree is clean, BuildKit/Buildx/Trivy match `deploy/versions.lock.yml`, the Trivy database is digest pinned, both reproducibility builds resolve to the same `linux/amd64` manifest digest, no secret or critical vulnerability is found, and every image is recorded as a Harbor digest reference. When Buildx uses the cluster-owned remote driver, `LABWEAVER_KUBECONFIG` is mandatory and packaging also reads back the `labweaver-build/buildkit` Deployment: its rootless image must match the locked digest, exactly one replica must be ready and updated, and its reviewed configuration hash annotation must be present. High vulnerabilities remain visible in the report but do not silently alter the gate.
 
 The package manifest records the source commit, component lock hash, builder versions, Harbor host, image digests, Trivy version/database identity, vulnerability counts, and content hash of each retained scan report. Sprint 2 intentionally does not generate or validate Sigstore, Fulcio, Rekor, CT, TUF, SBOM, provenance, or Kyverno evidence.
