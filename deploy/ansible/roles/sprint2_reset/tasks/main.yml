@@ -96,9 +96,14 @@
     that:
       - sprint2_reset_access_seed.apiVersion == 'deploy.labweaver.io/sprint2-access-seed/v1'
       - sprint2_reset_access_seed.courseMemberships | length >= 2
-      - sprint2_reset_access_seed.courseMemberships | map(attribute='actorId') | unique | list | length == sprint2_reset_access_seed.courseMemberships | map(attribute='actorId') | list | length
-      - sprint2_reset_access_seed.courseMemberships | map(attribute='subjectSha256') | unique | list | length == sprint2_reset_access_seed.courseMemberships | map(attribute='subjectSha256') | list | length
+      - sprint2_reset_access_actor_ids | unique | length == sprint2_reset_access_actor_ids | length
+      - sprint2_reset_access_subject_hashes | unique | length == sprint2_reset_access_subject_hashes | length
     fail_msg: SPRINT2_ACCESS_SEED_INVALID
+  vars:
+    sprint2_reset_access_actor_ids: >-
+      {{ sprint2_reset_access_seed.courseMemberships | map(attribute='actorId') | list }}
+    sprint2_reset_access_subject_hashes: >-
+      {{ sprint2_reset_access_seed.courseMemberships | map(attribute='subjectSha256') | list }}
   no_log: true
 
 - name: Validate every private Access membership seed
