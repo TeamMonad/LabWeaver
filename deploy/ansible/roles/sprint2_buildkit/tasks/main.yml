@@ -90,8 +90,8 @@
       - "'/etc/buildkit/tls/ca.crt' in sprint2_buildkit_configuration"
       - "'/etc/buildkit/tls/registry-ca.crt' in sprint2_buildkit_configuration"
       - >-
-        (sprint2_buildkit_dns_nameserver | ansible.utils.ipaddr)
-        == sprint2_buildkit_dns_nameserver
+        sprint2_buildkit_dns_nameserver is
+        match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
       - >-
         ('nameservers = ["' ~ sprint2_buildkit_dns_nameserver ~ '"]')
         in sprint2_buildkit_configuration
