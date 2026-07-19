@@ -240,7 +240,7 @@
       - --api
       - S3v4
       - --path
-      - on
+      - "on"
   environment:
     MC_CONFIG_DIR: "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/mc"
     SSL_CERT_FILE: "{{ sprint2_application_minio_ca_file }}"
