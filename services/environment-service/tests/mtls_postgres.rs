@@ -285,12 +285,14 @@ async fn insert_instance(
     instance.validate()?;
     sqlx::query(
         "INSERT INTO environment.environment_instances \
-         (environment_id, release_id, generation, observed_generation, desired_state, \
+         (environment_id, course_id, owner_actor_id, release_id, generation, observed_generation, desired_state, \
           observed_state, provider_binding, lease_id, revision, terminal_diagnostic, \
           eligibility_expires_at, contract) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
     )
     .bind(instance.id.as_uuid())
+    .bind(instance.course_id.as_uuid())
+    .bind(instance.owner_id.as_uuid())
     .bind(instance.release_id.as_uuid())
     .bind(i64::try_from(instance.generation)?)
     .bind(i64::try_from(instance.observed_generation)?)
