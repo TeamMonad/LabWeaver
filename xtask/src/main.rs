@@ -41,7 +41,7 @@ enum Command {
     IdentityFoundation(IdentityFoundationArgs),
     /// Reconcile the persistent `PostgreSQL`, NATS, and `MinIO` Sprint 2 foundation.
     Sprint2Foundation(EnvironmentArgs),
-    /// Reconcile the dedicated rootless BuildKit Sprint 2 foundation.
+    /// Reconcile the dedicated rootless `BuildKit` Sprint 2 foundation.
     Sprint2Buildkit(EnvironmentArgs),
     Upgrade(UpgradeArgs),
     Rollback(RollbackArgs),
