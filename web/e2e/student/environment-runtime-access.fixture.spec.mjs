@@ -32,7 +32,7 @@ test('student VM single-line SSH command, freeze evidence, and operations timeli
 
   // VM single-line SSH command with alias and gateway; no download config.
   const sshCommand = page.locator('.ssh-command__text')
-  await expect(sshCommand).toContainText(/^ssh lw-[a-f0-9]{20}@gateway\.labweaver\.local$/)
+  await expect(sshCommand).toContainText(/^ssh -p 2222 lw-[a-f0-9]{20}@gateway\.labweaver\.local$/)
   await expect(page.locator('text=Gateway fingerprint')).toBeVisible()
   await expect(page.locator('text=Grant：')).toBeVisible()
 
@@ -49,14 +49,14 @@ test('student VM single-line SSH command, freeze evidence, and operations timeli
   await expect(page.locator('.timeline-section')).toContainText('freeze')
 })
 
-test('student container code-server entry', async ({ page }) => {
+test('student container HTTPS entry', async ({ page }) => {
   await createEnvironmentFromRelease(page, '容器')
   await issueGrant(page)
 
-  const codeServerButton = page.locator('button:has-text("打开 code-server")')
-  await expect(codeServerButton).toBeEnabled()
+  const containerButton = page.locator('button:has-text("打开容器实验")')
+  await expect(containerButton).toBeEnabled()
 
-  await expectNoA11yViolations(page, 'code-server entry should have no a11y violations')
+  await expectNoA11yViolations(page, 'container HTTPS entry should have no a11y violations')
 
   await page.evaluate(() => {
     window.__openedUrls = []
@@ -65,9 +65,9 @@ test('student container code-server entry', async ({ page }) => {
       return null
     }
   })
-  await codeServerButton.click()
+  await containerButton.click()
   const urls = await page.evaluate(() => window.__openedUrls)
-  expect(urls.some((u) => u.startsWith('https://gateway.labweaver.local/connect/'))).toBe(true)
+  expect(urls.some((u) => u.startsWith('/connect/'))).toBe(true)
 })
 
 test('revoked grant hides runtime entries', async ({ page }) => {
@@ -97,12 +97,12 @@ for (const theme of themes) {
       })
     })
 
-    test(`container code-server entry ${theme} ${viewport.name}`, async ({ page }) => {
+    test(`container HTTPS entry ${theme} ${viewport.name}`, async ({ page }) => {
       await page.emulateMedia({ colorScheme: theme })
       await page.setViewportSize({ width: viewport.width, height: viewport.height })
       await createEnvironmentFromRelease(page, '容器')
       await issueGrant(page)
-      await expect(page.locator('button:has-text("打开 code-server")')).toBeVisible()
+      await expect(page.locator('button:has-text("打开容器实验")')).toBeVisible()
 
       await expect(page.locator('.runtime-access')).toHaveScreenshot(`container-codeserver-entry-${theme}-${viewport.name}.png`, {
         animations: 'disabled',

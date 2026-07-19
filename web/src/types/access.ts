@@ -14,7 +14,7 @@ export function buildSshCommand(endpointGrant: EndpointGrant): string | null {
   return `ssh -p ${endpointGrant.sshGatewayPort} ${endpointGrant.alias}@${endpointGrant.sshGatewayHostname}`
 }
 
-/** Code-server connect URL for an https endpoint grant. Returns null when the
+/** Browser connect URL for an HTTPS endpoint grant. Returns null when the
  * backend did not provide one (fail closed). */
 export function resolveConnectUrl(endpointGrant: EndpointGrant): string | null {
   return endpointGrant.connectUrl ?? null
