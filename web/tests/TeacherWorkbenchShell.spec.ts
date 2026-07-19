@@ -8,7 +8,7 @@ vi.mock('vue-router', async (importOriginal) => {
 })
 
 describe('TeacherWorkbenchShell', () => {
-  it('provides the six workbench modules and an explicit API-not-bound diagnostic', () => {
+  it('shows only the five Sprint 2 teacher modules and an explicit API-not-bound diagnostic', () => {
     const wrapper = mount(TeacherWorkbenchShell, {
       global: {
         stubs: {
@@ -18,8 +18,11 @@ describe('TeacherWorkbenchShell', () => {
       },
     })
 
-    expect(wrapper.findAll('.module-nav a')).toHaveLength(6)
+    expect(wrapper.findAll('.module-nav a')).toHaveLength(5)
     expect(wrapper.text()).toContain('材料')
+    expect(wrapper.text()).toContain('候选审批')
+    expect(wrapper.get('.module-nav').text()).not.toContain('评测')
+    expect(wrapper.get('.module-nav').text()).not.toContain('资源')
     expect(wrapper.text()).toContain('课程与实验 API 尚未绑定')
   })
 
