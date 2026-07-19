@@ -1239,7 +1239,7 @@ fn not_implemented(command: impl Into<String>) -> Result<(), AppError> {
 mod tests {
     use super::{
         EnvironmentArgs, IdentityFoundationAction, IdentityFoundationArgs, deploy,
-        identity_foundation, sprint2_foundation,
+        identity_foundation, sprint2_buildkit, sprint2_foundation,
     };
 
     fn identity_args(env: &str, infra: bool, yes: bool) -> IdentityFoundationArgs {
