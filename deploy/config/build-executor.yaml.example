@@ -3,7 +3,7 @@ database_max_connections: 8
 object_store:
   binding: "problem-package-minio-v1"
   endpoint: "https://minio.labweaver-data.svc:9000/"
-  bucket: "labweaver-problem-packages"
+  bucket: "labweaver-artifacts"
   region: "labweaver-internal-1"
   objectPrefix: "problem-packages"
   uploadTtlSeconds: 900

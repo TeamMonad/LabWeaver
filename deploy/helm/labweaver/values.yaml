@@ -14,6 +14,14 @@ imagePullSecrets: []
 # service discovery for LabWeaver workloads.
 hostAliases: []
 
+portalRoute:
+  enabled: false
+  namespace: ""
+  name: labweaver-sprint2
+  hostname: ""
+  gatewayName: ""
+  gatewaySectionName: http
+
 workloads:
   control-service:
     enabled: true
@@ -173,6 +181,8 @@ network:
     matchLabels: {labweaver.io/infrastructure: "true"}
   edgeNamespaceSelector:
     matchLabels: {labweaver.io/edge: "true"}
+  gatewayNamespaceSelector:
+    matchLabels: {kubernetes.io/metadata.name: labweaver-demo}
   environmentNamespaceSelector:
     matchLabels: {labweaver.io/environment: "true"}
   kubernetesApiCidrs: []

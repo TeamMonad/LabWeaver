@@ -33,6 +33,8 @@ spec:
     - from:
         - namespaceSelector:
             {{- toYaml $root.Values.network.edgeNamespaceSelector | nindent 12 }}
+        - namespaceSelector:
+            {{- toYaml $root.Values.network.gatewayNamespaceSelector | nindent 12 }}
       {{- with $configuration.ports }}
       ports:
         {{- range . }}

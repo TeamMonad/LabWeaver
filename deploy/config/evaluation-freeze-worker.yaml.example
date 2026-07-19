@@ -2,8 +2,8 @@ databaseUrlFile: /etc/labweaver/secrets/database-url
 databaseMaxConnections: 2
 objectStore:
   binding: minio-submissions-v1
-  endpoint: https://minio.labweaver-infra.svc:9000
-  bucket: labweaver-submissions
+  endpoint: https://minio.labweaver-data.svc:9000
+  bucket: labweaver-artifacts
   region: us-east-1
   objectPrefix: frozen-submissions
   uploadTtlSeconds: 300

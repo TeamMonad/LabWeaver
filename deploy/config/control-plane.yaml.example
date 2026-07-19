@@ -24,7 +24,7 @@ agent_service:
 object_store:
   binding: "problem-package-minio-v1"
   endpoint: "https://minio.labweaver-data.svc:9000/"
-  bucket: "labweaver-problem-packages"
+  bucket: "labweaver-artifacts"
   region: "labweaver-internal-1"
   objectPrefix: "problem-packages"
   uploadTtlSeconds: 900
@@ -50,11 +50,11 @@ control:
   containerBuild:
     builderBinding: "buildkit-primary-v1"
     # Registry authority only. Control creates `course-<course UUID>` as the Harbor Project.
-    outputRepositoryPrefix: "harbor.internal"
+    outputRepositoryPrefix: "harbor.example.invalid"
     dockerfilePath: "Dockerfile"
     network:
       mode: "restricted"
-      allowed_registries: ["harbor.internal"]
+      allowed_registries: ["harbor.example.invalid"]
     maxDurationMilliseconds: 600000
     maxCpuMillicores: 2000
     maxMemoryBytes: 2147483648

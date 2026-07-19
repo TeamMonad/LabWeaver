@@ -2,6 +2,9 @@
 BEGIN;
 {{ lookup('ansible.builtin.file', playbook_dir + '/../../../migrations/bootstrap/0001_roles_and_schemas.sql') }}
 {% for domain in sprint2_application_domains %}
+ALTER ROLE lw_{{ domain }}_runtime PASSWORD :'lw_{{ domain }}_password';
+{% endfor %}
+{% for domain in sprint2_application_domains %}
 SELECT NOT EXISTS (
     SELECT 1 FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace

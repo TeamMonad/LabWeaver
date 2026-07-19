@@ -15,9 +15,16 @@
       - sprint2_application_keycloak_username | length > 0
       - sprint2_application_keycloak_password | length > 0
       - sprint2_application_keycloak_realm_file | length > 0
+      - sprint2_application_keycloak_ca_file | length > 0
+      - sprint2_application_keycloak_hostname is match('^[a-z0-9][a-z0-9.-]+$')
+      - sprint2_application_keycloak_endpoint_address | ansible.utils.ipaddr
+      - sprint2_application_keycloak_truststore_password | length >= 16
       - sprint2_application_access_seed_file | length > 0
       - sprint2_application_values_files | length > 0
       - sprint2_application_configuration_bundle | length > 0
+      - sprint2_application_runtime_passwords.keys() | sort == sprint2_application_domains | sort
+      - sprint2_application_runtime_passwords.values() | map('length') | min >= 24
+      - (sprint2_application_portal_route_namespace | length == 0) == (sprint2_application_portal_route_name | length == 0)
     fail_msg: SPRINT2_APPLICATION_INPUT_INVALID
 
 - name: Validate remote application tools and credentials
@@ -31,9 +38,11 @@
     - "{{ sprint2_application_nats }}"
     - "{{ sprint2_application_mc }}"
     - "{{ sprint2_application_kcadm }}"
+    - "{{ sprint2_application_keytool }}"
     - "{{ sprint2_application_postgres_service_file }}"
     - "{{ sprint2_application_nats_credentials_file }}"
     - "{{ sprint2_application_keycloak_config }}"
+    - "{{ sprint2_application_keycloak_ca_file }}"
   register: sprint2_application_remote_inputs
 
 - name: Validate controller-owned reviewed inputs
@@ -180,6 +189,12 @@
       - "{{ sprint2_application_psql }}"
       - "service={{ sprint2_application_postgres_service }}"
       - --no-psqlrc
+      - "--set=lw_control_password={{ sprint2_application_runtime_passwords.control }}"
+      - "--set=lw_access_password={{ sprint2_application_runtime_passwords.access }}"
+      - "--set=lw_environment_password={{ sprint2_application_runtime_passwords.environment }}"
+      - "--set=lw_agent_password={{ sprint2_application_runtime_passwords.agent }}"
+      - "--set=lw_evaluation_password={{ sprint2_application_runtime_passwords.evaluation }}"
+      - "--set=lw_resource_password={{ sprint2_application_runtime_passwords.resource }}"
       - --file
       - "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/baseline-adopt.sql"
   environment:
@@ -347,6 +362,46 @@
     sprint2_application_harbor_project_info.json[0].name != sprint2_application_harbor_project
   no_log: true
 
+- name: Bind the reviewed Keycloak hostname to its retained Gateway address
+  ansible.builtin.copy:
+    dest: "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak.hosts"
+    mode: "0600"
+    content: |
+      {{ sprint2_application_keycloak_endpoint_address }} {{ sprint2_application_keycloak_hostname }}
+
+- name: Build an isolated Keycloak administration truststore
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_keytool }}"
+      - -importcert
+      - -noprompt
+      - -storetype
+      - PKCS12
+      - -alias
+      - labweaver-keycloak-ca
+      - -file
+      - "{{ sprint2_application_keycloak_ca_file }}"
+      - -keystore
+      - "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak-truststore.p12"
+      - -storepass
+      - "{{ sprint2_application_keycloak_truststore_password }}"
+  changed_when: true
+  no_log: true
+
+- name: Bind Keycloak administration to the isolated truststore
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_kcadm }}"
+      - config
+      - truststore
+      - "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak-truststore.p12"
+      - --trustpass
+      - "{{ sprint2_application_keycloak_truststore_password }}"
+      - --config
+      - "{{ sprint2_application_keycloak_config }}"
+  changed_when: false
+  no_log: true
+
 - name: Authenticate retained Keycloak administration
   ansible.builtin.command:
     argv:
@@ -363,6 +418,8 @@
       - "{{ sprint2_application_keycloak_password }}"
       - --config
       - "{{ sprint2_application_keycloak_config }}"
+  environment:
+    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak.hosts"
   changed_when: false
   no_log: true
 
@@ -375,6 +432,8 @@
       - --config
       - "{{ sprint2_application_keycloak_config }}"
   register: sprint2_application_keycloak_realm_before
+  environment:
+    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak.hosts"
   failed_when: false
   changed_when: false
   no_log: true
@@ -390,6 +449,28 @@
       - --file
       - "{{ sprint2_application_keycloak_realm_file }}"
   when: sprint2_application_keycloak_realm_before.rc != 0
+  environment:
+    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak.hosts"
+  changed_when: true
+  no_log: true
+
+- name: Add missing reviewed Sprint 2 identities without replacing the realm
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_kcadm }}"
+      - create
+      - partialImport
+      - --realm
+      - "{{ sprint2_application_keycloak_realm }}"
+      - --set
+      - ifResourceExists=SKIP
+      - --config
+      - "{{ sprint2_application_keycloak_config }}"
+      - --file
+      - "{{ sprint2_application_keycloak_realm_file }}"
+  when: sprint2_application_keycloak_realm_before.rc == 0
+  environment:
+    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak.hosts"
   changed_when: true
   no_log: true
 
@@ -402,6 +483,8 @@
       - --config
       - "{{ sprint2_application_keycloak_config }}"
   register: sprint2_application_keycloak_realm_after
+  environment:
+    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak.hosts"
   changed_when: false
   no_log: true
 
@@ -412,6 +495,73 @@
       - (sprint2_application_keycloak_realm_after.stdout | from_json).enabled | bool
       - (sprint2_application_keycloak_realm_after.stdout | from_json).sslRequired in ['external', 'all']
     fail_msg: SPRINT2_APPLICATION_KEYCLOAK_REALM_INVALID
+  no_log: true
+
+- name: Read back Sprint 2 Keycloak client
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_kcadm }}"
+      - get
+      - clients
+      - --realm
+      - "{{ sprint2_application_keycloak_realm }}"
+      - --query
+      - "clientId={{ sprint2_application_keycloak_client_id }}"
+      - --fields
+      - clientId,enabled
+      - --config
+      - "{{ sprint2_application_keycloak_config }}"
+  register: sprint2_application_keycloak_client
+  environment:
+    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak.hosts"
+  changed_when: false
+  no_log: true
+
+- name: Read back Sprint 2 Keycloak roles
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_kcadm }}"
+      - get
+      - roles
+      - --realm
+      - "{{ sprint2_application_keycloak_realm }}"
+      - --fields
+      - name
+      - --config
+      - "{{ sprint2_application_keycloak_config }}"
+  register: sprint2_application_keycloak_roles
+  environment:
+    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak.hosts"
+  changed_when: false
+  no_log: true
+
+- name: Read back Sprint 2 Keycloak users
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_kcadm }}"
+      - get
+      - users
+      - --realm
+      - "{{ sprint2_application_keycloak_realm }}"
+      - --fields
+      - username,enabled
+      - --config
+      - "{{ sprint2_application_keycloak_config }}"
+  register: sprint2_application_keycloak_users
+  environment:
+    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak.hosts"
+  changed_when: false
+  no_log: true
+
+- name: Require the reviewed Sprint 2 identity surface
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_keycloak_client.stdout | from_json | length == 1
+      - (sprint2_application_keycloak_client.stdout | from_json | first).clientId == sprint2_application_keycloak_client_id
+      - (sprint2_application_keycloak_client.stdout | from_json | first).enabled | bool
+      - sprint2_application_keycloak_required_roles | difference(sprint2_application_keycloak_roles.stdout | from_json | map(attribute='name') | list) | length == 0
+      - sprint2_application_keycloak_required_users | difference(sprint2_application_keycloak_users.stdout | from_json | selectattr('enabled') | map(attribute='username') | list) | length == 0
+    fail_msg: SPRINT2_APPLICATION_KEYCLOAK_SURFACE_INVALID
   no_log: true
 
 - name: Reconcile application namespace without deleting retained state
@@ -537,6 +687,38 @@
         | select('match', '^.+@sha256:[0-9a-f]{64}$') | list | length
         == sprint2_application_workloads | length
     fail_msg: SPRINT2_APPLICATION_DEPLOYMENT_READBACK_INVALID
+
+- name: Read back the adopted portal route
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_kubectl }}"
+      - --kubeconfig
+      - "{{ sprint2_application_kubeconfig }}"
+      - --namespace
+      - "{{ sprint2_application_portal_route_namespace }}"
+      - get
+      - httproute
+      - "{{ sprint2_application_portal_route_name }}"
+      - --output=json
+  register: sprint2_application_portal_route
+  when: sprint2_application_portal_route_name | length > 0
+  changed_when: false
+
+- name: Require the adopted portal route accepted and resolved
+  ansible.builtin.assert:
+    that:
+      - >-
+        (sprint2_application_portal_route.stdout | from_json).status.parents
+        | map(attribute='conditions') | flatten
+        | selectattr('type', 'equalto', 'Accepted')
+        | selectattr('status', 'equalto', 'True') | list | length > 0
+      - >-
+        (sprint2_application_portal_route.stdout | from_json).status.parents
+        | map(attribute='conditions') | flatten
+        | selectattr('type', 'equalto', 'ResolvedRefs')
+        | selectattr('status', 'equalto', 'True') | list | length > 0
+    fail_msg: SPRINT2_APPLICATION_PORTAL_ROUTE_INVALID
+  when: sprint2_application_portal_route_name | length > 0
 
 - name: Read final Helm revision
   ansible.builtin.command:
