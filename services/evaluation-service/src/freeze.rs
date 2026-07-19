@@ -17,7 +17,7 @@ use contracts::{
     ActorId, AgentRunId, CourseId, FrozenSubmissionId, RetentionClass, RetentionSnapshot, Revision,
     Sha256Digest,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::collector::{CollectError, SnapshotCollector, SnapshotSource, SnapshotTransport};
 use crate::freeze_store::{BeginFreeze, FreezeStoreError, PgFreezeStore};
@@ -25,7 +25,8 @@ use crate::freeze_store::{BeginFreeze, FreezeStoreError, PgFreezeStore};
 const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(15 * 60);
 
 /// Internal authenticated command produced from an approved `SubmissionManifest` projection.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FreezeRequest {
     pub frozen_submission_id: FrozenSubmissionId,
     pub course_id: CourseId,
