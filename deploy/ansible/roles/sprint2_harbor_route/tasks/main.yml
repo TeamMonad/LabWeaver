@@ -81,7 +81,9 @@
     apply: true
     server_side_apply:
       field_manager: labweaver-sprint2-adoption
-      force_conflicts: false
+      # The retained route was created by kubectl client-side apply. Ownership
+      # transfer is bounded by the managed-object and ready-backend checks above.
+      force_conflicts: true
     definition:
       apiVersion: gateway.networking.k8s.io/v1
       kind: HTTPRoute

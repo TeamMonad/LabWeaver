@@ -66,7 +66,9 @@ LabWeaver objects, then server-side-applies only the HTTPRoute backend to the
 Harbor nginx Service. It verifies Gateway `Accepted`/`ResolvedRefs` conditions
 and the authenticated Docker Registry `/v2/` response. It does not invoke Helm,
 write a Secret, restart a Harbor Pod, or mutate Harbor database, registry, PVC,
-project, or image state. TestFlight temporary resources in `labweaver-demo` are
+project, or image state. A route previously owned by kubectl client-side apply
+has its route fields transferred to the dedicated `labweaver-sprint2-adoption`
+field manager only after all managed-object checks pass. TestFlight temporary resources in `labweaver-demo` are
 named and selected by its run ID, so cleanup cannot target another run.
 
 `ansible-lint`, syntax checks, encrypted fictional-Vault loading, and storage
