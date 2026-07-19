@@ -62,16 +62,15 @@ Harbor data-backup evidence locator through
 blocks reconciliation. Sprint 2 adoption does not use this broad entry point for
 a route-only change. `sprint2-harbor-route` verifies that the namespace,
 Gateway, nginx Service, ready EndpointSlice and existing HTTPRoute are managed
-LabWeaver objects, then publishes the existing nginx public CA in a managed
-ConfigMap, applies a `BackendTLSPolicy`, and server-side-applies only the
-HTTPRoute backend to the Harbor nginx HTTPS Service. The adoption also declares
-`appProtocol: https` on the existing Service's 443 port so Gateway API clients
-cannot send plaintext to the TLS backend. It verifies Gateway `Accepted`/`ResolvedRefs` conditions
+LabWeaver objects, then changes the existing Gateway listener to TLS passthrough
+and applies one `TLSRoute` to the Harbor nginx HTTPS Service. The Harbor nginx
+certificate and public CA remain the end-to-end registry identity. It verifies Gateway `Accepted`/`ResolvedRefs` conditions
 and the authenticated Docker Registry `/v2/` response. It does not invoke Helm,
 write a Secret, restart a Harbor Pod, or mutate Harbor database, registry, PVC,
 project, or image state. A route previously owned by kubectl client-side apply
-has its route fields transferred to the dedicated `labweaver-sprint2-adoption`
-field manager only after all managed-object checks pass. TestFlight temporary resources in `labweaver-demo` are
+has its Gateway fields transferred to the dedicated `labweaver-sprint2-adoption`
+field manager only after all managed-object checks pass. The retained HTTPRoute
+is left in place but no longer attaches to the TLS-only listener. TestFlight temporary resources in `labweaver-demo` are
 named and selected by its run ID, so cleanup cannot target another run.
 
 `ansible-lint`, syntax checks, encrypted fictional-Vault loading, and storage
