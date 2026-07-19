@@ -39,13 +39,14 @@ admission boundary enforces the executor namespace/ServiceAccount fence.
 - The owner selected Evaluation as the Sprint 2 `FrozenSubmission` owner; all
   execution and scoring remain excluded.
 - The deployment topology is fixed in ADR 0010: a coordinator creates bounded
-  same-image freeze Jobs in `labweaver-system`; Container collection uses an
-  exact read-only NFS-backed PVC/PV binding, while VM collection uses a
-  five-minute Environment-issued read-only SFTP certificate.
-- Blocker: the coordinator and namespace-local Job RBAC are not yet
-  implemented. The same-image bounded freeze-worker and Environment-owned
-  short-lived certificate issuer are implemented locally but still require B
-  review and connected PVC/SFTP cleanup replay.
+  same-image freeze Jobs; Container collection runs in the Environment
+  namespace with an exact read-only NFS-backed PVC binding, while VM collection
+  runs in `labweaver-evaluation` with a five-minute Environment-issued
+  read-only SFTP certificate.
+- The coordinator, namespace-local immutable inputs, dedicated tokenless Worker
+  ServiceAccount, NetworkPolicy and cleanup readback are implemented locally.
+- Blocker: B review and connected PVC/SFTP Job, restart and cleanup replay have
+  not run against the adopted cluster.
 - Exit: duplicate/reordered commands, expired leases/certificates, PV identity
   mismatch, host-key mismatch, partial upload, worker restart and all residue
   checks fail closed under B review and D connected Verify.
@@ -64,14 +65,14 @@ admission boundary enforces the executor namespace/ServiceAccount fence.
 ## Destructive reset and idempotent deployment
 
 - The repository now contains one Sprint 2 baseline migration per domain, a
-  nine-workload Helm profile and a cluster/run-bound destructive reset role.
+  ten-workload Helm profile and a cluster/run-bound destructive reset role.
 - Blocker: read-only target inventory and the retained-foundation replay confirm
   Kubernetes/KubeVirt, Harbor, Keycloak, PostgreSQL, NATS and MinIO, but no
   BuildKit service body or complete reviewed private workload-configuration
   bundle is available on the approved controller. The reset therefore remains
   intentionally unexecuted.
   The role probes all six dependencies before its first destructive task and
-  rejects a missing or malformed eight-ConfigMap/eight-Secret bundle.
+  rejects a missing or malformed nine-ConfigMap/nine-Secret bundle.
 - Exit: the deployment owner supplies the missing service bodies and ignored
   reviewed inputs; the reset report binds cluster UID, source commit, migration
   catalog, configuration-bundle hash, image set and deletion hashes without

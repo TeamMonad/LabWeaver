@@ -50,6 +50,9 @@ baseline migration to a disposable PostgreSQL instance.
 - Kubernetes/KubeVirt executor apply, observe, restart, deletion tombstone,
   deadline, RBAC denial and cleanup tests;
 - Access/Environment mTLS authority and OpenSSH Gateway negative tests.
+- freeze command idempotency, owner-scoped readback, restart recovery, exact
+  Environment binding, immutable Job resources, worker NetworkPolicy and
+  terminal cleanup-before-result tests;
 - destructive reset dependency and configuration-bundle probes complete before
   the first namespace, trust-plane, schema, stream, bucket or realm mutation.
 

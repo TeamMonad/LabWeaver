@@ -1,7 +1,7 @@
 # Submission Collector v1
 
-Status: implemented locally for Issue #54; proposed ADR 0010, A+B security
-review, D Verify and connected E3 evidence remain required.
+Status: implemented locally for Issue #54 and PR #121; A+B security review, D
+Verify and connected dual-runtime evidence remain required.
 
 ## Accepted input and identity
 
@@ -66,6 +66,17 @@ are derived from the persisted running KubeVirt observation and receive a
 299-second certificate with principal `labweaver-collector` and critical
 `force-command=internal-sftp -R`; the configured CA private key must match the
 public CA embedded in the reviewed VM provider configuration.
+
+Evaluation Service owns the browser-facing freeze command after Access BFF
+authentication and course authorization. The coordinator atomically changes a
+queued command to `running`, uses only fixed Kubernetes API operations, and
+creates a digest-pinned same-image Job. Container Jobs run in the Environment
+namespace with the exact PVC mounted read-only; VM Jobs run in the dedicated
+Evaluation namespace with only the short-lived private key/certificate pair.
+Both receive an immutable command/config bundle, bounded resources, no Service
+Account token, default-deny ingress and explicit infrastructure/DNS/VM egress.
+Job, Secret, ConfigMap and NetworkPolicy deletion must read back absent before
+the command becomes `completed` or `failed`.
 
 ## Selection and limits
 

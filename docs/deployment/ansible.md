@@ -181,7 +181,7 @@ The role removes the historical Private Sigstore namespace and, only after the
 dependency guard passes, Kyverno and its residual CRDs/webhooks. It then resets
 the exact LabWeaver namespaces, six PostgreSQL schemas, declared NATS streams,
 artifact bucket, Harbor project/images and Keycloak realm. It applies the single
-Sprint 2 baseline migration for each domain, deploys the nine-workload profile
+Sprint 2 baseline migration for each domain, deploys the ten-workload profile
 twice, exercises Helm atomic rollback with the reviewed failing values, verifies
 all rollouts, and writes a sanitized report conforming to
 `schemas/results/sprint2-reset-report.v1.schema.json`.

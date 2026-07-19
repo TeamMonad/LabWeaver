@@ -127,15 +127,21 @@ the corrected freeze uniqueness rule that distinguishes independent approved
 freezes with identical bytes. No pre-reset Evaluation data upgrade is
 supported. Empty regular files are valid and remain hash-addressed.
 
-Before publication, rollback is whole-PR reversion. After Object Lock upload,
+Before publication, rollback disables the Evaluation workload or applies a
+forward corrective PR; it does not restore pre-baseline data. After Object Lock upload,
 rollback disables new collection, retains request/attempt rows and locked
 objects through their policy deadline, and never rewrites a completed
 `FrozenSubmission`.
 
 Local evidence covers PVC adversarial paths and deterministic archives, SSH
 configuration/credential guards, PostgreSQL idempotency and Outbox consistency,
-and a MinIO Object Lock integration test. This is E1 plus test-defined E2; it is
-not E3. E3 requires the same build against a real read-only PVC, real
+MinIO Object Lock, and the coordinator's fixed-operation Kubernetes resource
+construction. The owner process atomically claims queued commands, resumes
+`running` commands after restart, obtains the current Environment binding over
+mTLS, creates an immutable ConfigMap/Secret plus bounded Job and NetworkPolicy,
+and marks a command terminal only after Job residue is absent. This is local
+and test-defined evidence, not connected verification. Connected verification
+requires the same build against a real read-only PVC, real
 KubeVirt VM, private network, real short-lived certificate issuer and MinIO
 bucket, including credential expiry, SSH denial/timeout, retained-orphan and
 cleanup evidence.
