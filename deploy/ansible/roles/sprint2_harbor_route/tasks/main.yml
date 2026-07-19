@@ -9,34 +9,58 @@
       - harbor_kubeconfig_path | length > 0
     fail_msg: SPRINT2_HARBOR_ROUTE_INPUT_INVALID
 
-- name: Read existing Harbor adoption dependencies
+- name: Read the existing Harbor namespace
   kubernetes.core.k8s_info:
     kubeconfig: "{{ harbor_kubeconfig_path }}"
-    api_version: "{{ item.api_version }}"
-    kind: "{{ item.kind }}"
+    api_version: v1
+    kind: Namespace
+    name: "{{ harbor_namespace }}"
+  register: sprint2_harbor_namespace_read
+
+- name: Read the existing Harbor nginx service
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ harbor_kubeconfig_path }}"
+    api_version: v1
+    kind: Service
     namespace: "{{ harbor_namespace }}"
-    name: "{{ item.name }}"
-  loop:
-    - { api_version: v1, kind: Namespace, name: "{{ harbor_namespace }}" }
-    - { api_version: v1, kind: Service, name: "{{ harbor_release_name }}" }
-    - { api_version: discovery.k8s.io/v1, kind: EndpointSlice, name: '' }
-    - { api_version: gateway.networking.k8s.io/v1, kind: Gateway, name: "{{ harbor_gateway_name }}" }
-    - { api_version: gateway.networking.k8s.io/v1, kind: HTTPRoute, name: harbor }
-  register: sprint2_harbor_route_dependencies
-  no_log: true
+    name: "{{ harbor_release_name }}"
+  register: sprint2_harbor_service_read
+
+- name: Read the existing Harbor nginx endpoint slices
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ harbor_kubeconfig_path }}"
+    api_version: discovery.k8s.io/v1
+    kind: EndpointSlice
+    namespace: "{{ harbor_namespace }}"
+    label_selectors:
+      - "kubernetes.io/service-name={{ harbor_release_name }}"
+  register: sprint2_harbor_endpoint_slice_read
+
+- name: Read the existing Harbor Gateway
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ harbor_kubeconfig_path }}"
+    api_version: gateway.networking.k8s.io/v1
+    kind: Gateway
+    namespace: "{{ harbor_namespace }}"
+    name: "{{ harbor_gateway_name }}"
+  register: sprint2_harbor_gateway_read
+
+- name: Read the existing Harbor HTTPRoute
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ harbor_kubeconfig_path }}"
+    api_version: gateway.networking.k8s.io/v1
+    kind: HTTPRoute
+    namespace: "{{ harbor_namespace }}"
+    name: harbor
+  register: sprint2_harbor_route_read
 
 - name: Bind existing Harbor adoption objects
   ansible.builtin.set_fact:
-    sprint2_harbor_namespace_object: "{{ sprint2_harbor_route_dependencies.results[0].resources | first | default({}) }}"
-    sprint2_harbor_service_object: "{{ sprint2_harbor_route_dependencies.results[1].resources | first | default({}) }}"
-    sprint2_harbor_endpoint_slices: >-
-      {{ sprint2_harbor_route_dependencies.results[2].resources
-         | selectattr('metadata.labels.kubernetes.io/service-name', 'defined')
-         | selectattr('metadata.labels.kubernetes.io/service-name', 'equalto', harbor_release_name)
-         | list }}
-    sprint2_harbor_gateway_object: "{{ sprint2_harbor_route_dependencies.results[3].resources | first | default({}) }}"
-    sprint2_harbor_route_object: "{{ sprint2_harbor_route_dependencies.results[4].resources | first | default({}) }}"
-  no_log: true
+    sprint2_harbor_namespace_object: "{{ sprint2_harbor_namespace_read.resources | first | default({}) }}"
+    sprint2_harbor_service_object: "{{ sprint2_harbor_service_read.resources | first | default({}) }}"
+    sprint2_harbor_endpoint_slices: "{{ sprint2_harbor_endpoint_slice_read.resources }}"
+    sprint2_harbor_gateway_object: "{{ sprint2_harbor_gateway_read.resources | first | default({}) }}"
+    sprint2_harbor_route_object: "{{ sprint2_harbor_route_read.resources | first | default({}) }}"
 
 - name: Reject an incomplete or unmanaged Harbor installation
   ansible.builtin.assert:
@@ -49,7 +73,6 @@
       - sprint2_harbor_gateway_object.metadata.labels['app.kubernetes.io/part-of'] | default('') == 'labweaver-infrastructure'
       - sprint2_harbor_route_object.metadata.labels['app.kubernetes.io/part-of'] | default('') == 'labweaver-infrastructure'
     fail_msg: SPRINT2_HARBOR_ADOPTION_BOUNDARY_INVALID
-  no_log: true
 
 - name: Adopt only the existing Harbor HTTPRoute backend
   kubernetes.core.k8s:
