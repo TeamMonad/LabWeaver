@@ -18,3 +18,26 @@ nats:
   credentialsFile: /etc/labweaver/secrets/nats.creds
 outboxPublishTimeoutMilliseconds: 5000
 outboxPollIntervalMilliseconds: 100
+coordinatorPollIntervalMilliseconds: 500
+coordinator:
+  kubernetesApiServer: https://kubernetes.default.svc
+  kubernetesBearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+  kubernetesCaFile: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+  environmentServiceBaseUri: https://environment-service:9446/
+  environmentCaFile: /etc/labweaver/secrets/mtls-ca.pem
+  environmentClientCertificateFile: /etc/labweaver/secrets/tls.crt
+  environmentClientPrivateKeyFile: /etc/labweaver/secrets/tls.key
+  allowedEnvironmentServerSans: [environment-service]
+  workerImage: harbor.example.invalid/labweaver/evaluation-service@sha256:0000000000000000000000000000000000000000000000000000000000000000
+  workerServiceAccountName: evaluation-freeze-worker
+  vmJobNamespace: labweaver-evaluation
+  workerConfigurationFile: /etc/labweaver/evaluation-worker.yaml
+  workerSecretFiles:
+    database-url: /etc/labweaver/secrets/database-url
+    minio-access-key: /etc/labweaver/secrets/minio-access-key
+    minio-secret-key: /etc/labweaver/secrets/minio-secret-key
+  retentionPolicyId: 01900000-0000-7000-8000-000000000001
+  retentionPolicyRevision: 1
+  retentionDays: 90
+  jobActiveDeadlineSeconds: 900
+  requestTimeoutMilliseconds: 5000

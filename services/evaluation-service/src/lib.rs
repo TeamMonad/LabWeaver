@@ -3,6 +3,7 @@
 pub mod api;
 pub mod collector;
 pub mod command_store;
+pub mod coordinator;
 pub mod freeze;
 pub mod freeze_store;
 pub mod outbox;
@@ -18,6 +19,7 @@ pub use collector::{
 pub use command_store::{
     FreezeCommandAccept, FreezeCommandStoreError, PgFreezeCommandStore, SubmissionFreezeCommand,
 };
+pub use coordinator::{FreezeCoordinator, FreezeCoordinatorConfiguration, FreezeCoordinatorError};
 pub use freeze::{FreezeRequest, FreezeService, FreezeServiceError};
 pub use freeze_store::{BeginFreeze, FreezeLease, PgFreezeStore};
 pub use outbox::{EvaluationOutboxDispatcher, EvaluationOutboxError};

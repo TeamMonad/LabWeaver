@@ -18,8 +18,9 @@ use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 
 use crate::{
-    EvaluationApiState, EvaluationOutboxDispatcher, EvaluationOutboxError, PgFreezeCommandStore,
-    PgFreezeStore, evaluation_api_router, serve_evaluation_mtls,
+    EvaluationApiState, EvaluationOutboxDispatcher, EvaluationOutboxError, FreezeCoordinator,
+    FreezeCoordinatorConfiguration, FreezeCoordinatorError, PgFreezeCommandStore, PgFreezeStore,
+    evaluation_api_router, serve_evaluation_mtls,
 };
 
 const CONFIG_PATH: &str = "LABWEAVER_EVALUATION_CONFIG_FILE";
@@ -34,6 +35,8 @@ struct EvaluationConfiguration {
     nats: NatsConfiguration,
     outbox_publish_timeout_milliseconds: u64,
     outbox_poll_interval_milliseconds: u64,
+    coordinator_poll_interval_milliseconds: u64,
+    coordinator: FreezeCoordinatorConfiguration,
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,22 +63,29 @@ pub async fn run_evaluation_service() -> Result<(), EvaluationProcessError> {
     let address = SocketAddr::from_str(&configuration.api_mtls.bind_addr)
         .map_err(|_| EvaluationProcessError::ConfigurationInvalid)?;
     let listener = tokio::net::TcpListener::bind(address).await?;
+    let command_store = PgFreezeCommandStore::new(pool.clone());
     let api = evaluation_api_router(EvaluationApiState::new(
-        PgFreezeCommandStore::new(pool.clone()),
+        command_store.clone(),
         PgFreezeStore::new(pool.clone()),
     ));
+    let coordinator = FreezeCoordinator::new(configuration.coordinator, command_store)?;
     let dispatcher = EvaluationOutboxDispatcher::new(
         pool.clone(),
         nats.clone(),
         Duration::from_millis(configuration.outbox_publish_timeout_milliseconds),
     )?;
     let poll_interval = Duration::from_millis(configuration.outbox_poll_interval_milliseconds);
+    let coordinator_poll_interval =
+        Duration::from_millis(configuration.coordinator_poll_interval_milliseconds);
     tracing::info!(event = "evaluation.service.started", %address);
     tokio::select! {
         result = serve_evaluation_mtls(listener, api, mtls) => {
             result.map_err(EvaluationProcessError::Api)?;
         }
         result = outbox_loop(dispatcher, poll_interval) => {
+            result?;
+        }
+        result = coordinator_loop(coordinator, coordinator_poll_interval) => {
             result?;
         }
         result = shutdown_signal() => {
@@ -88,6 +98,18 @@ pub async fn run_evaluation_service() -> Result<(), EvaluationProcessError> {
     pool.close().await;
     tracing::info!(event = "evaluation.service.stopped");
     Ok(())
+}
+
+async fn coordinator_loop(
+    coordinator: FreezeCoordinator,
+    poll_interval: Duration,
+) -> Result<(), EvaluationProcessError> {
+    let mut interval = tokio::time::interval(poll_interval);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        interval.tick().await;
+        coordinator.reconcile_once().await?;
+    }
 }
 
 async fn outbox_loop(
@@ -154,6 +176,7 @@ fn validate_configuration(
         || nats_paths.iter().any(|path| !path.is_absolute())
         || !(100..=30_000).contains(&configuration.outbox_publish_timeout_milliseconds)
         || !(10..=10_000).contains(&configuration.outbox_poll_interval_milliseconds)
+        || !(100..=10_000).contains(&configuration.coordinator_poll_interval_milliseconds)
     {
         return Err(EvaluationProcessError::ConfigurationInvalid);
     }
@@ -238,4 +261,6 @@ pub enum EvaluationProcessError {
     Mtls(#[from] auth::MtlsError),
     #[error(transparent)]
     Outbox(#[from] EvaluationOutboxError),
+    #[error(transparent)]
+    Coordinator(#[from] FreezeCoordinatorError),
 }

@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
 /// Persisted command containing no runtime credentials or student file contents.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SubmissionFreezeCommand {
     pub frozen_submission_id: FrozenSubmissionId,
@@ -84,6 +84,97 @@ impl PgFreezeCommandStore {
         UtcTimestamp::from_utc(value).map_err(|_| FreezeCommandStoreError::ContractInvalid)
     }
 
+    /// Atomically claims the oldest queued command for one deterministic Kubernetes Job.
+    pub async fn claim_next(
+        &self,
+    ) -> Result<Option<SubmissionFreezeCommand>, FreezeCommandStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT frozen_submission_id,contract FROM evaluation.submission_freeze_commands \
+             WHERE state='queued' ORDER BY created_at,frozen_submission_id FOR UPDATE SKIP LOCKED LIMIT 1",
+        )
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+        let frozen_submission_id: uuid::Uuid = row.try_get("frozen_submission_id")?;
+        let command: SubmissionFreezeCommand = serde_json::from_value(row.try_get("contract")?)?;
+        command.validate()?;
+        if command.frozen_submission_id.as_uuid() != frozen_submission_id {
+            return Err(FreezeCommandStoreError::DatabaseIdentityInvalid);
+        }
+        let job_name = format!(
+            "lw-freeze-{}",
+            &frozen_submission_id.simple().to_string()[..20]
+        );
+        let updated = sqlx::query(
+            "UPDATE evaluation.submission_freeze_commands SET state='running',job_name=$2,updated_at=clock_timestamp() \
+             WHERE frozen_submission_id=$1 AND state='queued'",
+        )
+        .bind(frozen_submission_id)
+        .bind(job_name)
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(FreezeCommandStoreError::FenceConflict);
+        }
+        transaction.commit().await?;
+        Ok(Some(command))
+    }
+
+    /// Loads running commands so a restarted coordinator resumes observation and cleanup.
+    pub async fn running(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<SubmissionFreezeCommand>, FreezeCommandStoreError> {
+        if !(1..=64).contains(&limit) {
+            return Err(FreezeCommandStoreError::ContractInvalid);
+        }
+        let rows = sqlx::query(
+            "SELECT contract FROM evaluation.submission_freeze_commands WHERE state='running' \
+             ORDER BY updated_at,frozen_submission_id LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let command: SubmissionFreezeCommand =
+                    serde_json::from_value(row.try_get("contract")?)?;
+                command.validate()?;
+                Ok(command)
+            })
+            .collect()
+    }
+
+    /// Completes a command only after the immutable result exists and all Job residue is gone.
+    pub async fn mark_completed(
+        &self,
+        frozen_submission_id: FrozenSubmissionId,
+    ) -> Result<(), FreezeCommandStoreError> {
+        let result_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM evaluation.frozen_submissions WHERE frozen_submission_id=$1)",
+        )
+        .bind(frozen_submission_id.as_uuid())
+        .fetch_one(&self.pool)
+        .await?;
+        if !result_exists {
+            return Err(FreezeCommandStoreError::ResultMissing);
+        }
+        terminal_update(&self.pool, frozen_submission_id, "completed", None).await
+    }
+
+    /// Records one stable terminal diagnostic after residue cleanup is verified.
+    pub async fn mark_failed(
+        &self,
+        frozen_submission_id: FrozenSubmissionId,
+        diagnostic: &'static str,
+    ) -> Result<(), FreezeCommandStoreError> {
+        terminal_update(&self.pool, frozen_submission_id, "failed", Some(diagnostic)).await
+    }
+
     pub async fn accept(
         &self,
         command: &SubmissionFreezeCommand,
@@ -143,6 +234,27 @@ impl PgFreezeCommandStore {
             replay: false,
         })
     }
+}
+
+async fn terminal_update(
+    pool: &PgPool,
+    frozen_submission_id: FrozenSubmissionId,
+    state: &'static str,
+    diagnostic: Option<&'static str>,
+) -> Result<(), FreezeCommandStoreError> {
+    let updated = sqlx::query(
+        "UPDATE evaluation.submission_freeze_commands SET state=$2,diagnostic_code=$3,cleanup_verified=true,\
+         completed_at=clock_timestamp(),updated_at=clock_timestamp() WHERE frozen_submission_id=$1 AND state='running'",
+    )
+    .bind(frozen_submission_id.as_uuid())
+    .bind(state)
+    .bind(diagnostic)
+    .execute(pool)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(FreezeCommandStoreError::FenceConflict);
+    }
+    Ok(())
 }
 
 async fn enqueue_requested(
@@ -264,4 +376,8 @@ pub enum FreezeCommandStoreError {
     Event(#[from] contracts::events::EventError),
     #[error("LW_COLLECT_DATABASE_FAILED")]
     Persistence(#[from] persistence_sqlx::PersistenceError),
+    #[error("LW_COLLECT_FENCE_CONFLICT")]
+    FenceConflict,
+    #[error("LW_COLLECT_RESULT_MISSING")]
+    ResultMissing,
 }

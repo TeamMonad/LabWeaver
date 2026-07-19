@@ -2275,6 +2275,8 @@ dependencies = [
  "contracts",
  "hyper-util",
  "persistence-sqlx",
+ "rand 0.9.5",
+ "reqwest",
  "russh",
  "russh-sftp",
  "serde",

@@ -17,6 +17,8 @@ cap-std.workspace = true
 cap-fs-ext.workspace = true
 contracts = { path = "../../crates/contracts" }
 hyper-util = { version = "0.1.20", features = ["server", "service", "tokio"] }
+rand.workspace = true
+reqwest.workspace = true
 persistence-sqlx = { path = "../../crates/persistence-sqlx" }
 russh.workspace = true
 russh-sftp.workspace = true

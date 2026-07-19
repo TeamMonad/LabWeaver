@@ -68,6 +68,10 @@ async fn public_acceptance_is_atomic_idempotent_and_enqueues_one_command()
             .await?,
         1
     );
+    let claimed = store.claim_next().await?.expect("queued command");
+    assert_eq!(claimed.frozen_submission_id, command.frozen_submission_id);
+    assert!(store.claim_next().await?.is_none());
+    assert_eq!(store.running(32).await?, vec![command]);
     Ok(())
 }
 
