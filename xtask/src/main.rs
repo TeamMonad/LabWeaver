@@ -822,7 +822,7 @@ fn run_infrastructure_with_package(
         .map_err(|error| AppError::ExternalCommand {
             role: "allowlisted infrastructure playbook",
             code: None,
-            detail: Some(format!("ansible-rs returned a non-zero result: {error}")),
+            detail: Some(format!("ansible-rs returned a non-zero result: {error:?}")),
         })
 }
 
