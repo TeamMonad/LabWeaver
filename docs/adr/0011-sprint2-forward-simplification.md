@@ -120,6 +120,9 @@ deployment manifest, migration catalog, image set, and run ID.
   example, `sprint2-harbor-route` validates the existing managed Harbor
   installation and changes only its `HTTPRoute`; it does not run the Harbor
   Helm reconciliation or touch persistent Harbor state.
+- `sprint2-application` creates only missing application-owned state, verifies
+  exact migration and service identities when state already exists, and deploys
+  the seven-image profile without invoking the destructive reset path.
 - The Sprint 2 Release Gate requires both Container and real KubeVirt paths.
 - Release evidence must expose the accepted broad-runtime-RBAC risk and must
   not report least-privilege verification while the exception remains.

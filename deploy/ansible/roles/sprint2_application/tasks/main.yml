@@ -1,0 +1,566 @@
+---
+- name: Validate non-destructive application inputs
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_run_id is match('^[a-z0-9][a-z0-9-]{2,62}$')
+      - sprint2_application_source_commit is match('^[0-9a-f]{40,64}$')
+      - sprint2_application_package_manifest | length > 0
+      - sprint2_application_postgres_service_file | length > 0
+      - sprint2_application_nats_server | length > 0
+      - sprint2_application_nats_credentials_file | length > 0
+      - sprint2_application_minio_alias | length > 0
+      - sprint2_application_harbor_api | length > 0
+      - sprint2_application_keycloak_config | length > 0
+      - sprint2_application_keycloak_server | length > 0
+      - sprint2_application_keycloak_username | length > 0
+      - sprint2_application_keycloak_password | length > 0
+      - sprint2_application_keycloak_realm_file | length > 0
+      - sprint2_application_access_seed_file | length > 0
+      - sprint2_application_values_files | length > 0
+      - sprint2_application_configuration_bundle | length > 0
+    fail_msg: SPRINT2_APPLICATION_INPUT_INVALID
+
+- name: Validate remote application tools and credentials
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ sprint2_application_kubeconfig }}"
+    - "{{ sprint2_application_kubectl }}"
+    - "{{ sprint2_application_helm }}"
+    - "{{ sprint2_application_psql }}"
+    - "{{ sprint2_application_nats }}"
+    - "{{ sprint2_application_mc }}"
+    - "{{ sprint2_application_kcadm }}"
+    - "{{ sprint2_application_postgres_service_file }}"
+    - "{{ sprint2_application_nats_credentials_file }}"
+    - "{{ sprint2_application_keycloak_config }}"
+  register: sprint2_application_remote_inputs
+
+- name: Validate controller-owned reviewed inputs
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: >-
+    {{ [sprint2_application_package_manifest, sprint2_application_chart_source,
+        sprint2_application_migration_catalog,
+        sprint2_application_configuration_manifest,
+        sprint2_application_configuration_bundle,
+        sprint2_application_keycloak_realm_file,
+        sprint2_application_access_seed_file] + sprint2_application_values_files }}
+  register: sprint2_application_controller_inputs
+  delegate_to: localhost
+  become: false
+
+- name: Reject missing application inputs
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_remote_inputs.results | map(attribute='stat.exists') | min
+      - sprint2_application_controller_inputs.results | map(attribute='stat.exists') | min
+    fail_msg: SPRINT2_APPLICATION_REQUIRED_PATH_MISSING
+
+- name: Parse immutable package and private configuration
+  ansible.builtin.set_fact:
+    sprint2_application_package: >-
+      {{ lookup('ansible.builtin.file', sprint2_application_package_manifest) | from_json }}
+    sprint2_application_configuration_manifest_value: >-
+      {{ lookup('ansible.builtin.file', sprint2_application_configuration_manifest) | from_json }}
+    sprint2_application_configuration_objects: >-
+      {{ lookup('ansible.builtin.file', sprint2_application_configuration_bundle)
+         | from_yaml_all | list }}
+    sprint2_application_access_seed: >-
+      {{ lookup('ansible.builtin.file', sprint2_application_access_seed_file) | from_json }}
+  no_log: true
+
+- name: Validate immutable package identity
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_package.schema_version == 'platform-image-package-manifest.v1'
+      - sprint2_application_package.source_commit == sprint2_application_source_commit
+      - sprint2_application_package.overall == 'passed'
+      - sprint2_application_package.images | length == 7
+      - sprint2_application_package.images | map(attribute='component') | sort == sprint2_application_components | sort
+      - sprint2_application_package.images | map(attribute='component') | unique | length == 7
+      - sprint2_application_package.images | map(attribute='reference') | select('match', '^[^@]+@sha256:[0-9a-f]{64}$') | list | length == 7
+      - sprint2_application_package.images | map(attribute='scan.critical') | map('int') | max == 0
+    fail_msg: SPRINT2_APPLICATION_PACKAGE_INVALID
+
+- name: Validate private configuration object boundary
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_configuration_objects | length == (sprint2_application_required_configmaps | length + sprint2_application_required_secrets | length)
+      - sprint2_application_configuration_objects | map(attribute='apiVersion') | unique | list == ['v1']
+      - sprint2_application_configuration_objects | map(attribute='kind') | difference(['ConfigMap', 'Secret']) | length == 0
+      - sprint2_application_configuration_objects | map(attribute='metadata.namespace') | unique | list == [sprint2_application_namespace]
+      - sprint2_application_configuration_manifest_value.apiVersion == 'deploy.labweaver.io/sprint2-bundle-manifest/v1'
+      - sprint2_application_configuration_manifest_value.namespace == sprint2_application_namespace
+      - sprint2_application_configuration_manifest_value.configMaps.keys() | sort == sprint2_application_required_configmaps | sort
+      - sprint2_application_configuration_manifest_value.secrets.keys() | sort == sprint2_application_required_secrets | sort
+    fail_msg: SPRINT2_APPLICATION_CONFIGURATION_INVALID
+  no_log: true
+
+- name: Validate every private configuration key
+  ansible.builtin.assert:
+    that:
+      - item.data is defined
+      - item.stringData is not defined
+      - item.binaryData is not defined
+      - item.data.keys() | sort == sprint2_application_expected_keys | sort
+      - item.kind != 'Secret' or item.type == 'Opaque'
+    fail_msg: SPRINT2_APPLICATION_CONFIGURATION_KEYS_INVALID
+  vars:
+    sprint2_application_expected_keys: >-
+      {{ (sprint2_application_configuration_manifest_value.configMaps
+          if item.kind == 'ConfigMap'
+          else sprint2_application_configuration_manifest_value.secrets)[item.metadata.name] }}
+  loop: "{{ sprint2_application_configuration_objects }}"
+  no_log: true
+
+- name: Validate private Access seed boundary
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_access_seed.apiVersion == 'deploy.labweaver.io/sprint2-access-seed/v1'
+      - sprint2_application_access_seed.courseMemberships | length >= 2
+      - sprint2_application_access_seed.courseMemberships | map(attribute='actorId') | unique | length == sprint2_application_access_seed.courseMemberships | length
+      - sprint2_application_access_seed.courseMemberships | map(attribute='subjectSha256') | unique | length == sprint2_application_access_seed.courseMemberships | length
+    fail_msg: SPRINT2_APPLICATION_ACCESS_SEED_INVALID
+  no_log: true
+
+- name: Read target cluster UID
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_kubectl }}"
+      - --kubeconfig
+      - "{{ sprint2_application_kubeconfig }}"
+      - get
+      - namespace
+      - kube-system
+      - -o
+      - jsonpath={.metadata.uid}
+  register: sprint2_application_cluster_uid
+  changed_when: false
+
+- name: Create bounded application report directory
+  ansible.builtin.file:
+    path: "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Probe retained PostgreSQL
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_psql }}"
+      - "service={{ sprint2_application_postgres_service }}"
+      - --no-psqlrc
+      - --tuples-only
+      - --command
+      - SELECT 1
+  environment:
+    PGSERVICEFILE: "{{ sprint2_application_postgres_service_file }}"
+  changed_when: false
+  no_log: true
+
+- name: Render non-destructive six-domain baseline adoption
+  ansible.builtin.template:
+    src: baseline-adopt.sql.j2
+    dest: "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/baseline-adopt.sql"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Apply or verify exact six-domain baseline
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_psql }}"
+      - "service={{ sprint2_application_postgres_service }}"
+      - --no-psqlrc
+      - --file
+      - "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/baseline-adopt.sql"
+  environment:
+    PGSERVICEFILE: "{{ sprint2_application_postgres_service_file }}"
+  changed_when: true
+  no_log: true
+
+- name: Render conflict-detecting Access seed adoption
+  ansible.builtin.template:
+    src: access-seed-adopt.sql.j2
+    dest: "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/access-seed-adopt.sql"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Apply or verify Access service identities and memberships
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_psql }}"
+      - "service={{ sprint2_application_postgres_service }}"
+      - --no-psqlrc
+      - --file
+      - "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/access-seed-adopt.sql"
+  environment:
+    PGSERVICEFILE: "{{ sprint2_application_postgres_service_file }}"
+  changed_when: true
+  no_log: true
+
+- name: Probe retained JetStream
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_nats }}"
+      - --server
+      - "{{ sprint2_application_nats_server }}"
+      - --creds
+      - "{{ sprint2_application_nats_credentials_file }}"
+      - account
+      - info
+      - --json
+  changed_when: false
+  no_log: true
+
+- name: Inspect exact Sprint 2 streams without mutation
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_nats }}"
+      - --server
+      - "{{ sprint2_application_nats_server }}"
+      - --creds
+      - "{{ sprint2_application_nats_credentials_file }}"
+      - stream
+      - info
+      - "{{ item.name }}"
+      - --json
+  loop: "{{ sprint2_application_nats_streams }}"
+  register: sprint2_application_stream_info_before
+  failed_when: false
+  changed_when: false
+  no_log: true
+
+- name: Create only missing Sprint 2 streams
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_nats }}"
+      - --server
+      - "{{ sprint2_application_nats_server }}"
+      - --creds
+      - "{{ sprint2_application_nats_credentials_file }}"
+      - stream
+      - add
+      - "{{ item.item.name }}"
+      - --subjects
+      - "{{ item.item.subjects }}"
+      - --storage
+      - file
+      - --retention
+      - limits
+      - --max-age
+      - "{{ item.item.max_age }}"
+      - --discard
+      - old
+      - --defaults
+  loop: "{{ sprint2_application_stream_info_before.results }}"
+  when: item.rc != 0
+  changed_when: true
+  no_log: true
+
+- name: Read back exact Sprint 2 streams
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_nats }}"
+      - --server
+      - "{{ sprint2_application_nats_server }}"
+      - --creds
+      - "{{ sprint2_application_nats_credentials_file }}"
+      - stream
+      - info
+      - "{{ item.name }}"
+      - --json
+  loop: "{{ sprint2_application_nats_streams }}"
+  register: sprint2_application_stream_info_after
+  changed_when: false
+  no_log: true
+
+- name: Validate retained or created stream identities
+  ansible.builtin.assert:
+    that:
+      - (item.stdout | from_json).config.name == item.item.name
+      - (item.stdout | from_json).config.subjects == [item.item.subjects]
+      - (item.stdout | from_json).config.storage == 'file'
+      - (item.stdout | from_json).config.retention == 'limits'
+      - (item.stdout | from_json).config.discard == 'old'
+    fail_msg: SPRINT2_APPLICATION_STREAM_CONFLICT
+  loop: "{{ sprint2_application_stream_info_after.results }}"
+  no_log: true
+
+- name: Create the immutable artifact bucket only when missing
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_mc }}"
+      - mb
+      - --ignore-existing
+      - "{{ sprint2_application_minio_alias }}/{{ sprint2_application_minio_bucket }}"
+  changed_when: false
+  no_log: true
+
+- name: Enable versioning without removing existing objects
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_mc }}"
+      - version
+      - enable
+      - "{{ sprint2_application_minio_alias }}/{{ sprint2_application_minio_bucket }}"
+  changed_when: false
+  no_log: true
+
+- name: Verify immutable artifact bucket versioning
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_mc }}"
+      - version
+      - info
+      - "{{ sprint2_application_minio_alias }}/{{ sprint2_application_minio_bucket }}"
+      - --json
+  register: sprint2_application_minio_version
+  changed_when: false
+  failed_when: >-
+    sprint2_application_minio_version.rc != 0 or
+    (sprint2_application_minio_version.stdout | from_json).status != 'enabled'
+  no_log: true
+
+- name: Verify retained private Harbor project
+  ansible.builtin.uri:
+    url: "{{ sprint2_application_harbor_api }}/api/v2.0/projects?name={{ sprint2_application_harbor_project | urlencode }}"
+    user: "{{ sprint2_application_harbor_username }}"
+    password: "{{ sprint2_application_harbor_password }}"
+    force_basic_auth: true
+    validate_certs: true
+    return_content: true
+  register: sprint2_application_harbor_project_info
+  failed_when: >-
+    sprint2_application_harbor_project_info.status != 200 or
+    sprint2_application_harbor_project_info.json | length != 1 or
+    sprint2_application_harbor_project_info.json[0].name != sprint2_application_harbor_project
+  no_log: true
+
+- name: Authenticate retained Keycloak administration
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_kcadm }}"
+      - config
+      - credentials
+      - --server
+      - "{{ sprint2_application_keycloak_server }}"
+      - --realm
+      - "{{ sprint2_application_keycloak_admin_realm }}"
+      - --user
+      - "{{ sprint2_application_keycloak_username }}"
+      - --password
+      - "{{ sprint2_application_keycloak_password }}"
+      - --config
+      - "{{ sprint2_application_keycloak_config }}"
+  changed_when: false
+  no_log: true
+
+- name: Inspect retained Sprint 2 Keycloak realm
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_kcadm }}"
+      - get
+      - "realms/{{ sprint2_application_keycloak_realm }}"
+      - --config
+      - "{{ sprint2_application_keycloak_config }}"
+  register: sprint2_application_keycloak_realm_before
+  failed_when: false
+  changed_when: false
+  no_log: true
+
+- name: Import reviewed realm only when absent
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_kcadm }}"
+      - create
+      - realms
+      - --config
+      - "{{ sprint2_application_keycloak_config }}"
+      - --file
+      - "{{ sprint2_application_keycloak_realm_file }}"
+  when: sprint2_application_keycloak_realm_before.rc != 0
+  changed_when: true
+  no_log: true
+
+- name: Read back Sprint 2 Keycloak realm
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_kcadm }}"
+      - get
+      - "realms/{{ sprint2_application_keycloak_realm }}"
+      - --config
+      - "{{ sprint2_application_keycloak_config }}"
+  register: sprint2_application_keycloak_realm_after
+  changed_when: false
+  no_log: true
+
+- name: Require exact active Keycloak realm identity
+  ansible.builtin.assert:
+    that:
+      - (sprint2_application_keycloak_realm_after.stdout | from_json).realm == sprint2_application_keycloak_realm
+      - (sprint2_application_keycloak_realm_after.stdout | from_json).enabled | bool
+      - (sprint2_application_keycloak_realm_after.stdout | from_json).sslRequired in ['external', 'all']
+    fail_msg: SPRINT2_APPLICATION_KEYCLOAK_REALM_INVALID
+  no_log: true
+
+- name: Reconcile application namespace without deleting retained state
+  kubernetes.core.k8s:
+    kubeconfig: "{{ sprint2_application_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ sprint2_application_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver
+          labweaver.io/managed: "true"
+          pod-security.kubernetes.io/enforce: restricted
+          pod-security.kubernetes.io/audit: restricted
+          pod-security.kubernetes.io/warn: restricted
+
+- name: Apply reviewed application configuration without namespace reset
+  kubernetes.core.k8s:
+    kubeconfig: "{{ sprint2_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition: "{{ item }}"
+  loop: "{{ sprint2_application_configuration_objects }}"
+  no_log: true
+
+- name: Copy reviewed Sprint 2 Helm chart
+  ansible.builtin.copy:
+    src: "{{ sprint2_application_chart_source }}/"
+    dest: "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/chart/"
+    owner: root
+    group: root
+    mode: preserve
+
+- name: Copy reviewed private values files
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/{{ item | basename }}"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ sprint2_application_values_files }}"
+  no_log: true
+
+- name: Build immutable Helm arguments
+  ansible.builtin.set_fact:
+    sprint2_application_values_argv: >-
+      {{ sprint2_application_values_files
+         | map('basename')
+         | map('regex_replace', '^(.*)$', sprint2_application_report_root + '/' + sprint2_application_run_id + '/\\1')
+         | map('regex_replace', '^(.*)$', '--values=\\1') | list }}
+    sprint2_application_image_argv: >-
+      {%- set values = [] -%}
+      {%- for image in sprint2_application_package.images -%}
+      {%- set _ = values.extend(['--set-string', 'images.' + (image.component | replace('-', '_')) + '=' + image.reference]) -%}
+      {%- endfor -%}
+      {{ values }}
+
+- name: Atomically deploy the immutable Sprint 2 profile
+  ansible.builtin.command:
+    argv: >-
+      {{ [sprint2_application_helm, '--kubeconfig', sprint2_application_kubeconfig,
+          'upgrade', '--install', sprint2_application_release_name,
+          sprint2_application_report_root + '/' + sprint2_application_run_id + '/chart',
+          '--namespace', sprint2_application_namespace, '--atomic', '--wait',
+          '--timeout', sprint2_application_rollout_timeout]
+          + sprint2_application_values_argv + sprint2_application_image_argv }}
+  changed_when: true
+
+- name: Deploy the identical profile a second time
+  ansible.builtin.command:
+    argv: >-
+      {{ [sprint2_application_helm, '--kubeconfig', sprint2_application_kubeconfig,
+          'upgrade', '--install', sprint2_application_release_name,
+          sprint2_application_report_root + '/' + sprint2_application_run_id + '/chart',
+          '--namespace', sprint2_application_namespace, '--atomic', '--wait',
+          '--timeout', sprint2_application_rollout_timeout]
+          + sprint2_application_values_argv + sprint2_application_image_argv }}
+  changed_when: true
+
+- name: Verify every Sprint 2 workload rollout
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_kubectl }}"
+      - --kubeconfig
+      - "{{ sprint2_application_kubeconfig }}"
+      - --namespace
+      - "{{ sprint2_application_namespace }}"
+      - rollout
+      - status
+      - "deployment/{{ item }}"
+      - "--timeout={{ sprint2_application_rollout_timeout }}"
+  loop: "{{ sprint2_application_workloads }}"
+  changed_when: false
+
+- name: Read back exact deployment image set
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_kubectl }}"
+      - --kubeconfig
+      - "{{ sprint2_application_kubeconfig }}"
+      - --namespace
+      - "{{ sprint2_application_namespace }}"
+      - get
+      - deployments
+      - -l
+      - app.kubernetes.io/instance={{ sprint2_application_release_name }}
+      - -o
+      - json
+  register: sprint2_application_deployments
+  changed_when: false
+
+- name: Require exact workload count and digest-only images
+  ansible.builtin.assert:
+    that:
+      - (sprint2_application_deployments.stdout | from_json).items | length == sprint2_application_workloads | length
+      - (sprint2_application_deployments.stdout | from_json).items | map(attribute='metadata.name') | sort == sprint2_application_workloads | sort
+      - (sprint2_application_deployments.stdout | from_json).items | map(attribute='spec.template.spec.containers') | map('first') | map(attribute='image') | select('match', '^.+@sha256:[0-9a-f]{64}$') | list | length == sprint2_application_workloads | length
+    fail_msg: SPRINT2_APPLICATION_DEPLOYMENT_READBACK_INVALID
+
+- name: Read final Helm revision
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_helm }}"
+      - --kubeconfig
+      - "{{ sprint2_application_kubeconfig }}"
+      - history
+      - "{{ sprint2_application_release_name }}"
+      - --namespace
+      - "{{ sprint2_application_namespace }}"
+      - --max
+      - "1"
+      - --output
+      - json
+  register: sprint2_application_helm_history
+  changed_when: false
+
+- name: Hash application identity inputs
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    checksum_algorithm: sha256
+  loop:
+    - "{{ sprint2_application_package_manifest }}"
+    - "{{ sprint2_application_migration_catalog }}"
+    - "{{ sprint2_application_configuration_manifest }}"
+    - "{{ sprint2_application_configuration_bundle }}"
+  register: sprint2_application_identity_inputs
+  delegate_to: localhost
+  become: false
+
+- name: Write sanitized non-destructive adoption report
+  ansible.builtin.template:
+    src: application-report.json.j2
+    dest: "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/application-report.json"
+    owner: root
+    group: root
+    mode: "0600"

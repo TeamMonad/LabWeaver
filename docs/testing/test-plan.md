@@ -53,8 +53,10 @@ baseline migration to a disposable PostgreSQL instance.
 - freeze command idempotency, owner-scoped readback, restart recovery, exact
   Environment binding, immutable Job resources, worker NetworkPolicy and
   terminal cleanup-before-result tests;
-- destructive reset dependency and configuration-bundle probes complete before
-  the first namespace, trust-plane, schema, stream, bucket or realm mutation.
+- retained-infrastructure adoption rejects migration-ledger, stream, Harbor,
+  Keycloak, configuration-bundle or package identity conflicts before workload
+  rollout, and contains no namespace, schema, stream, bucket, project, realm,
+  trust-plane, CRD, PVC or image deletion step.
 
 ## Connected Sprint 2 verification
 

@@ -4,7 +4,7 @@
     that: >-
       (labweaver_preflight_scope | default('cluster')) in
       ['cluster', 'identity-foundation', 'sprint2-foundation',
-       'sprint2-buildkit', 'sprint2-harbor-route', 'sprint2-reset']
+       'sprint2-buildkit', 'sprint2-harbor-route', 'sprint2-application', 'sprint2-reset']
     fail_msg: PREFLIGHT_SCOPE_INVALID
   run_once: true
   delegate_to: localhost
@@ -19,7 +19,10 @@
     fail_msg: "inventory must declare exactly one router/control plane/NFS server and at least two workers"
   run_once: true
   delegate_to: localhost
-  when: (labweaver_preflight_scope | default('cluster')) in ['cluster', 'sprint2-foundation', 'sprint2-buildkit', 'sprint2-harbor-route', 'sprint2-reset']
+  when: >-
+    (labweaver_preflight_scope | default('cluster')) in
+    ['cluster', 'sprint2-foundation', 'sprint2-buildkit',
+     'sprint2-harbor-route', 'sprint2-application', 'sprint2-reset']
 
 - name: Assert the minimal identity-foundation inventory boundary
   ansible.builtin.assert:

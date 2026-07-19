@@ -265,7 +265,9 @@ fn validate_manifest(manifest: &PackageManifest) -> Result<(), AppError> {
         }
     }
     if names.len() != COMPONENTS.len() || COMPONENTS.iter().any(|name| !names.contains(name)) {
-        return manifest_invalid("manifest must contain exactly the seven Sprint 2 platform images");
+        return manifest_invalid(
+            "manifest must contain exactly the seven Sprint 2 platform images",
+        );
     }
     Ok(())
 }

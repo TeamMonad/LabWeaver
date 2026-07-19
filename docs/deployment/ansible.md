@@ -7,7 +7,8 @@ The only deployment controller entry points are `cargo xtask preflight --infra
 `cargo xtask sprint2-foundation --infra --env <environment> --yes`,
 `cargo xtask sprint2-buildkit --infra --env <environment> --yes`, and bounded
 commands such as `cargo xtask sprint2-harbor-route --infra --env <environment>
---yes`. They run only on the approved Linux router
+--yes` and `cargo xtask sprint2-application --infra --env <environment>
+--package-manifest <manifest> --yes`. They run only on the approved Linux router
 worktree through `ansible-rs`; Windows fails with a stable unsupported-platform
 diagnostic. The removed Python launcher is not a deployment fallback.
 The router invocation must export explicit lowercase `LABWEAVER_RUN_ID` and
@@ -102,7 +103,7 @@ maintenance command outside this delivery and is not an installation
 prerequisite or Release Gate step.
 
 The foundation command reconciles the retained PostgreSQL, NATS JetStream and
-MinIO service bodies in `labweaver-data` before reset. All images are digest
+MinIO service bodies in `labweaver-data` before application adoption. All images are digest
 locked, all three workloads use TLS, persistent volumes, restricted Pod Security
 and default-deny NetworkPolicy. Each StatefulSet Pod template binds the exact
 private bundle SHA-256 so an identity or configuration rotation cannot be
@@ -116,7 +117,7 @@ The same playbook first installs checksum-locked administration clients. NSC is
 installed on the approved router only for private NATS operator/account/user
 authoring; NATS CLI, PostgreSQL client, MinIO client, BuildKit client and the
 Keycloak administration client are installed on the control plane for the
-allowlisted reset role. Downloads are versioned in `deploy/versions.lock.yml`;
+allowlisted application-adoption role. Downloads are versioned in `deploy/versions.lock.yml`;
 the role neither discovers a latest release nor executes an arbitrary shell.
 
 On the approved router, create a new root-owned private authoring directory and
@@ -188,6 +189,34 @@ network access. TCP/443 is limited to the exact Cargo sparse-index, crate
 archive, npm registry, and Alpine package hostnames. Compilation remains
 `--network=none`; no wildcard data-plane FQDN or arbitrary egress is permitted.
 
+Prepare the ignored application configuration bundle, Keycloak realm, Access
+seed and Helm values with the checked-in renderers. Then adopt the retained data
+services and deploy the immutable profile:
+
+```sh
+export LABWEAVER_RUN_ID=sprint2-application-<run-id>
+export LABWEAVER_TESTFLIGHT_RUN_ID=testflight-sprint2-<run-id>
+cargo xtask sprint2-application \
+  --infra \
+  --env demo \
+  --package-manifest artifacts/package/<package-run>/PlatformImagePackageManifest.json \
+  --yes
+```
+
+This command is fail-closed and non-destructive. It applies a baseline only to
+a domain with no existing business relations and an empty migration ledger;
+otherwise it requires the exact catalog and migration hashes. Access seed rows
+are inserted only when missing and conflicting identities abort the transaction.
+Missing JetStream streams, the versioned MinIO bucket and the Keycloak realm may
+be created, while an existing object must pass identity checks. The Harbor
+project must already exist and is read-only. The application namespace and its
+reviewed ConfigMap/Secret bundle are reconciled in place, followed by two atomic
+Helm upgrades using exactly seven digest references. The command never invokes
+`demo reset`, `DROP`, stream or bucket deletion, Harbor project/image deletion,
+realm deletion, namespace deletion, trust-plane uninstall, CRD removal or PVC
+removal. Its sanitized report conforms to
+`schemas/results/sprint2-application-report.v1.schema.json`.
+
 The following legacy reset description documents an out-of-scope maintenance
 path and must not be followed for Sprint 2 adoption. `demo reset` runs only the
 allowlisted `93-sprint2-reset.yml` playbook. It is a
@@ -222,7 +251,9 @@ python3 tools/prepare_sprint2_access_seed.py \
   --output .private/sprint2-access-seed.json
 ```
 
-The reset inventory supplies that file as `sprint2_reset_access_seed_file`.
+The application inventory supplies that file as
+`sprint2_application_access_seed_file`. The legacy reset inventory may retain
+the old variable only for out-of-scope maintenance.
 The role validates all identities before destruction, seeds only Control and
 OpenSSH Gateway service identities, and checks the exact membership count after
 the baseline migration. The operator must first read the target UID and set:

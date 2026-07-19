@@ -1,0 +1,45 @@
+\set ON_ERROR_STOP on
+BEGIN;
+{{ lookup('ansible.builtin.file', playbook_dir + '/../../../migrations/bootstrap/0001_roles_and_schemas.sql') }}
+{% for domain in sprint2_application_domains %}
+SELECT NOT EXISTS (
+    SELECT 1 FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = '{{ domain }}'
+      AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+      AND c.relname <> 'schema_migrations'
+) AND NOT EXISTS (SELECT 1 FROM {{ domain }}.schema_migrations)
+AS apply_{{ domain }} \gset
+\if :apply_{{ domain }}
+SET ROLE lw_{{ domain }}_owner;
+SET search_path TO {{ domain }};
+{{ lookup('ansible.builtin.file', playbook_dir + '/../../../migrations/' + domain + '/0001_sprint2_baseline.sql') }}
+RESET ROLE;
+SET ROLE lw_{{ domain }}_migration;
+INSERT INTO {{ domain }}.schema_migrations (
+    migration_id, filename, sha256, outcome, executor_identity, release_id, catalog_sha256
+) VALUES (
+    1, '0001_sprint2_baseline.sql',
+    '{{ lookup('ansible.builtin.file', playbook_dir + '/../../../migrations/' + domain + '/0001_sprint2_baseline.sql') | hash('sha256') }}',
+    'applied', 'ansible-sprint2-application', '{{ sprint2_application_run_id }}',
+    '{{ lookup('ansible.builtin.file', playbook_dir + '/../../../migrations/catalog.yaml') | hash('sha256') }}'
+);
+RESET ROLE;
+\else
+DO $verify_{{ domain }}$
+BEGIN
+    IF (SELECT count(*) FROM {{ domain }}.schema_migrations) <> 1 OR NOT EXISTS (
+        SELECT 1 FROM {{ domain }}.schema_migrations
+        WHERE migration_id = 1
+          AND filename = '0001_sprint2_baseline.sql'
+          AND sha256 = '{{ lookup('ansible.builtin.file', playbook_dir + '/../../../migrations/' + domain + '/0001_sprint2_baseline.sql') | hash('sha256') }}'
+          AND outcome = 'applied'
+          AND catalog_sha256 = '{{ lookup('ansible.builtin.file', playbook_dir + '/../../../migrations/catalog.yaml') | hash('sha256') }}'
+    ) THEN
+        RAISE EXCEPTION 'SPRINT2_{{ domain | upper }}_MIGRATION_IDENTITY_MISMATCH';
+    END IF;
+END
+$verify_{{ domain }}$;
+\endif
+{% endfor %}
+COMMIT;

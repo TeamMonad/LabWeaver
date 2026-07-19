@@ -45,6 +45,8 @@ enum Command {
     Sprint2Buildkit(EnvironmentArgs),
     /// Adopt the existing Harbor Gateway route without reconciling Harbor state.
     Sprint2HarborRoute(EnvironmentArgs),
+    /// Adopt existing data services and atomically deploy the Sprint 2 application profile.
+    Sprint2Application(EnvironmentArgs),
     Upgrade(UpgradeArgs),
     Rollback(RollbackArgs),
     Restore(RestoreArgs),
@@ -389,6 +391,7 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::Sprint2Foundation(args) => sprint2_foundation(&args),
         Command::Sprint2Buildkit(args) => sprint2_buildkit(&args),
         Command::Sprint2HarborRoute(args) => sprint2_harbor_route(&args),
+        Command::Sprint2Application(args) => sprint2_application(&args),
         Command::AcceptanceAssets(args) => match args.action {
             AcceptanceAssetsAction::Validate => acceptance_assets::validate(&repository_root()),
             AcceptanceAssetsAction::List => {
@@ -630,6 +633,34 @@ fn sprint2_harbor_route(args: &EnvironmentArgs) -> Result<(), AppError> {
     )
 }
 
+fn sprint2_application(args: &EnvironmentArgs) -> Result<(), AppError> {
+    if !args.yes {
+        return Err(AppError::ConfirmationRequired {
+            command: "sprint2-application",
+        });
+    }
+    require_infrastructure(args, "sprint2-application --infra")?;
+    let package_manifest = args
+        .package_manifest
+        .as_deref()
+        .ok_or(AppError::InvalidArgument {
+            role: "Sprint 2 application package manifest",
+        })?;
+    let package_manifest = package_manifest
+        .canonicalize()
+        .map_err(|error| AppError::Io {
+            role: "resolve Sprint 2 application package manifest",
+            detail: error.to_string(),
+        })?;
+    platform_images::validate(&package_manifest, false, None, &repository_root())?;
+    run_infrastructure_with_package(
+        &args.env,
+        "93-sprint2-application.yml",
+        "sprint2-application --infra",
+        Some(&package_manifest),
+    )
+}
+
 fn require_infrastructure(args: &EnvironmentArgs, command: &'static str) -> Result<(), AppError> {
     if !args.infra {
         return Err(AppError::NotImplemented {
@@ -708,7 +739,27 @@ fn sprint2_reset(args: &EnvironmentArgs) -> Result<(), AppError> {
 fn run_infrastructure(
     environment: &str,
     playbook_name: &str,
+    command: &'static str,
+) -> Result<(), AppError> {
+    run_infrastructure_with_package(environment, playbook_name, command, None)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_infrastructure_with_package(
+    _environment: &str,
+    _playbook_name: &str,
+    command: &'static str,
+    _package_manifest: Option<&Path>,
+) -> Result<(), AppError> {
+    Err(AppError::UnsupportedPlatform { command })
+}
+
+#[cfg(target_os = "linux")]
+fn run_infrastructure_with_package(
+    environment: &str,
+    playbook_name: &str,
     _command: &'static str,
+    package_manifest: Option<&Path>,
 ) -> Result<(), AppError> {
     use ansible::{Play, Playbook};
 
@@ -752,6 +803,10 @@ fn run_infrastructure(
             harbor_data_backup_locator,
         )
         .add_env("LABWEAVER_TESTFLIGHT_RUN_ID", testflight_run_id)
+        .add_env(
+            "LABWEAVER_PACKAGE_MANIFEST",
+            package_manifest.map_or_else(String::new, infrastructure_path),
+        )
         .add_env(
             "LABWEAVER_SPRINT2_RESET_CONFIRMATION",
             std::env::var("LABWEAVER_SPRINT2_RESET_CONFIRMATION").unwrap_or_default(),
@@ -1261,7 +1316,8 @@ fn not_implemented(command: impl Into<String>) -> Result<(), AppError> {
 mod tests {
     use super::{
         EnvironmentArgs, IdentityFoundationAction, IdentityFoundationArgs, deploy,
-        identity_foundation, sprint2_buildkit, sprint2_foundation, sprint2_harbor_route,
+        identity_foundation, sprint2_application, sprint2_buildkit, sprint2_foundation,
+        sprint2_harbor_route,
     };
 
     fn identity_args(env: &str, infra: bool, yes: bool) -> IdentityFoundationArgs {
@@ -1412,6 +1468,20 @@ mod tests {
             package_manifest: None,
         }) else {
             return Err("Sprint 2 Harbor route adoption without --yes must fail".into());
+        };
+        assert_eq!(error.diagnostic_code(), "XTASK_CONFIRMATION_REQUIRED");
+        Ok(())
+    }
+
+    #[test]
+    fn sprint2_application_requires_confirmation() -> Result<(), String> {
+        let Err(error) = sprint2_application(&EnvironmentArgs {
+            env: "demo".into(),
+            infra: true,
+            yes: false,
+            package_manifest: None,
+        }) else {
+            return Err("Sprint 2 application adoption without --yes must fail".into());
         };
         assert_eq!(error.diagnostic_code(), "XTASK_CONFIRMATION_REQUIRED");
         Ok(())

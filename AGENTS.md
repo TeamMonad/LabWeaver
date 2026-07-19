@@ -50,6 +50,7 @@ commands:
   package_validate: "cargo xtask package-validate"
   release_gate: "cargo xtask release-gate"
   deploy_demo: "cargo xtask deploy --env demo"
+  adopt_sprint2_application: "cargo xtask sprint2-application --infra --env demo --package-manifest <manifest> --yes"
   deploy_verify: "cargo xtask verify --env demo"
   demo_replay: "cargo xtask demo replay"
 
@@ -65,6 +66,7 @@ status:
 ## 2. 产品与架构硬约束
 
 - 技术基线为 Rust + Axum、Vue 3、PostgreSQL/SQLx、NATS JetStream、MinIO、Keycloak/OIDC、Kubernetes、KubeVirt、Harbor、Trivy、BuildKit、Ansible、Helm 与 Playwright。Sprint 2 不包含 Headscale/Tailscale、Guacamole、Private Sigstore、Kyverno 或 Packer；不得让这些已删除能力重新进入默认部署或 Release Gate。
+- Sprint 2 采用现有基础设施时只允许盘点、严格校验、创建缺失对象和应用层原地 reconcile；不得删除或重建 namespace、Schema、stream、bucket、Harbor project/image、Keycloak realm/client、PVC、CRD、Webhook、Kyverno 或 Private Sigstore。破坏性 `demo reset` 是本轮明确排除的维护入口。
 - Sprint 2 部署 Evaluation Service，但仅负责 `FrozenSubmission` 的双运行时冻结协调与不可变发布；不得启用 Runner、Checker、Aggregator、Evaluation 执行或评分。Resource Service 保持独立边界且默认不部署。
 - Sprint 2 的 rootless BuildKit 仅允许在 `labweaver-build` 使用 `Unconfined` seccomp/AppArmor、container-scoped SELinux `spc_t` 与 `--oci-worker-no-process-sandbox`；仍禁止 privileged、HostPath、hostNetwork 和 Kubernetes API token。该 SELinux 例外只解决内层 `runc` 的 `devpts` mount 与 snapshot relabel，不得扩展到其他 workload 或改为节点全局策略。Container/KubeVirt executor 当前宽 ClusterRole 是明确的阶段性风险，不得描述为最小权限或生产安全验证通过。
 - Agent 只生成候选方案；确定性工具负责验证；教师负责最终批准。未经批准的 EnvironmentSpec、SubmissionSpec、EvaluationSpec、脚本和镜像不得进入生产执行路径。
