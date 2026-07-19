@@ -472,6 +472,9 @@
     "desiredState": {
       "$ref": "#/$defs/DesiredEnvironmentState"
     },
+    "displayLabel": {
+      "type": "string"
+    },
     "eligibilityExpiresAt": {
       "$ref": "#/$defs/UtcTimestamp"
     },
@@ -549,6 +552,7 @@
   },
   "required": [
     "id",
+    "displayLabel",
     "courseId",
     "ownerId",
     "class",

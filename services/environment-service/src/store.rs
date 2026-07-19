@@ -32,6 +32,15 @@ pub struct LeasedEnvironment {
     lease_token: Uuid,
 }
 
+/// One actor-scoped inventory record with database and public-stream identity.
+#[derive(Clone, Debug)]
+pub struct StoredEnvironmentInventory {
+    pub instance: EnvironmentInstance,
+    pub created_at: UtcTimestamp,
+    pub updated_at: UtcTimestamp,
+    pub stream_sequence: contracts::StreamSequence,
+}
+
 /// Immutable delivery metadata for one lifecycle command received from a durable consumer.
 #[derive(Clone, Debug)]
 pub struct InboundLifecycleCommand {
@@ -385,6 +394,49 @@ impl PgEnvironmentStore {
             .map(|row| decode_contract(row.try_get("contract")?))
             .collect()
     }
+
+    /// Lists one actor's environments in one course at a stable database snapshot.
+    pub async fn list_owned(
+        &self,
+        course_id: CourseId,
+        owner_actor_id: contracts::ActorId,
+        limit: u16,
+    ) -> Result<(Vec<StoredEnvironmentInventory>, UtcTimestamp), EnvironmentStoreError> {
+        if !(1..=100).contains(&limit) {
+            return Err(EnvironmentStoreError::InvalidLimit);
+        }
+        let mut transaction = self.pool.begin().await?;
+        let snapshot_at = database_now(&mut transaction).await?;
+        let rows = sqlx::query(
+            "SELECT i.contract,i.created_at,i.updated_at,COALESCE(max(o.public_sequence),1) AS stream_sequence \
+             FROM environment.environment_instances i LEFT JOIN environment.outbox_events o ON o.aggregate_id=i.environment_id \
+             WHERE i.course_id=$1 AND i.owner_actor_id=$2 \
+             GROUP BY i.environment_id,i.contract,i.created_at,i.updated_at \
+             ORDER BY i.created_at DESC,i.environment_id DESC LIMIT $3",
+        )
+        .bind(course_id.as_uuid())
+        .bind(owner_actor_id.as_uuid())
+        .bind(i64::from(limit))
+        .fetch_all(&mut *transaction)
+        .await?;
+        let records = rows
+            .into_iter()
+            .map(|row| {
+                let sequence: i64 = row.try_get("stream_sequence")?;
+                Ok(StoredEnvironmentInventory {
+                    instance: decode_contract(row.try_get("contract")?)?,
+                    created_at: UtcTimestamp::from_utc(row.try_get("created_at")?)?,
+                    updated_at: UtcTimestamp::from_utc(row.try_get("updated_at")?)?,
+                    stream_sequence: contracts::StreamSequence(
+                        u64::try_from(sequence)
+                            .map_err(|_| EnvironmentStoreError::InvalidDatabaseIdentity)?,
+                    ),
+                })
+            })
+            .collect::<Result<Vec<_>, EnvironmentStoreError>>()?;
+        transaction.commit().await?;
+        Ok((records, snapshot_at))
+    }
 }
 
 async fn create_in_transaction(
@@ -442,12 +494,14 @@ async fn create_in_transaction(
     }
     let result = sqlx::query(
         "INSERT INTO environment.environment_instances \
-         (environment_id, release_id, generation, observed_generation, desired_state, \
+         (environment_id, course_id, owner_actor_id, release_id, generation, observed_generation, desired_state, \
           observed_state, provider_binding, lease_id, capacity_binding, revision, \
           terminal_diagnostic, failed_phase, eligibility_expires_at, contract) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
     )
     .bind(instance.id.as_uuid())
+    .bind(instance.course_id.as_uuid())
+    .bind(instance.owner_id.as_uuid())
     .bind(instance.release_id.as_uuid())
     .bind(as_i64(instance.generation, "generation")?)
     .bind(as_i64(instance.observed_generation, "observed generation")?)
@@ -540,6 +594,7 @@ fn build_create_instance(
     };
     let instance = EnvironmentInstance {
         id: command.environment_id,
+        display_label: spec.display_label.clone(),
         course_id: spec.course_id,
         owner_id: spec.owner_actor_id,
         class: spec.class,

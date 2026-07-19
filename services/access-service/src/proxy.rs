@@ -5,7 +5,7 @@ use std::{io, time::Duration};
 use auth::{ControlGatewayFileConfig, TransportSecurityMode};
 use axum::{
     body::{Body, Bytes},
-    extract::State,
+    extract::{Query, State},
     http::{HeaderMap, Method, Uri, header},
     response::Response,
 };
@@ -115,6 +115,13 @@ pub(super) async fn forward_environment(
 ) -> Result<Response, ApiError> {
     if method == Method::POST && uri.path() == "/api/v1/environments" {
         authorize_environment_create(&state, &headers, &body).await?;
+    } else if method == Method::GET && uri.path() == "/api/v1/environments" {
+        let Query(query) = Query::<contracts::http::EnvironmentInventoryQuery>::try_from_uri(&uri)
+            .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+        query
+            .validate()
+            .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+        authorize_environment_course(&state, &headers, query.course_id, "listEnvironments").await?;
     }
     forward(
         &state,
@@ -228,12 +235,21 @@ async fn authorize_environment_create(
 ) -> Result<(), ApiError> {
     let request = contracts::parse_strict_json::<contracts::http::CreateEnvironmentRequest>(body)
         .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+    authorize_environment_course(state, headers, request.course_id, "createEnvironment").await
+}
+
+async fn authorize_environment_course(
+    state: &AppState,
+    headers: &HeaderMap,
+    course_id: contracts::CourseId,
+    operation_id: &'static str,
+) -> Result<(), ApiError> {
     let session = authenticated_session(state, headers).await?;
     let actor = super::actor_from_session(&session)?;
     let memberships = auth::load_membership_snapshot(&state.pool, session.actor_id)
         .await
         .map_err(ApiError::from)?;
-    let policy = contracts::operation_authorization("createEnvironment")
+    let policy = contracts::operation_authorization(operation_id)
         .ok_or_else(|| ApiError::forbidden("LW_AUTH_SCOPE_DENIED"))?;
     auth::authorize(
         &auth::AuthorizationContext {
@@ -242,9 +258,7 @@ async fn authorize_environment_create(
             project_memberships: memberships.project_memberships,
             now: time::OffsetDateTime::now_utc(),
         },
-        contracts::AuthorizationScope::Course {
-            course_id: request.course_id,
-        },
+        contracts::AuthorizationScope::Course { course_id },
         &policy.allowed_roles.iter().copied().collect(),
     )
     .map_err(ApiError::from)?;

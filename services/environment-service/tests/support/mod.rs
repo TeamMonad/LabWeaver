@@ -20,6 +20,7 @@ pub fn ready_instance() -> EnvironmentInstance {
     let accepted_at = timestamp("2026-07-14T00:00:00.000Z");
     EnvironmentInstance {
         id: EnvironmentId::new(),
+        display_label: "Ready environment".to_owned(),
         course_id: CourseId::new(),
         owner_id: ActorId::new(),
         class: EnvironmentClass::Experiment,
@@ -73,6 +74,7 @@ pub fn requested_instance() -> EnvironmentInstance {
     let accepted_at = timestamp("2026-07-14T00:00:00.000Z");
     EnvironmentInstance {
         id: EnvironmentId::new(),
+        display_label: "Requested environment".to_owned(),
         course_id: CourseId::new(),
         owner_id: ActorId::new(),
         class: EnvironmentClass::Experiment,

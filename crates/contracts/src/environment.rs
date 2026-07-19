@@ -62,6 +62,7 @@ pub enum EnvironmentOperationKind {
 pub struct EnvironmentCreateSpec {
     pub course_id: CourseId,
     pub owner_actor_id: ActorId,
+    pub display_label: String,
     pub class: EnvironmentClass,
     pub runtime_kind: RuntimeKind,
     pub release_id: ReleaseId,
@@ -436,6 +437,7 @@ pub enum EndpointHealth {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EnvironmentInstance {
     pub id: EnvironmentId,
+    pub display_label: String,
     pub course_id: crate::CourseId,
     pub owner_id: ActorId,
     pub class: EnvironmentClass,
@@ -461,7 +463,10 @@ pub struct EnvironmentInstance {
 impl EnvironmentInstance {
     /// Validates aggregate invariants without consulting provider state.
     pub fn validate(&self) -> Result<(), EnvironmentError> {
-        if self.release_version == 0
+        if self.display_label.trim().is_empty()
+            || self.display_label.chars().count() > 120
+            || self.display_label.chars().any(char::is_control)
+            || self.release_version == 0
             || self.provider_binding.trim().is_empty()
             || self.generation == 0
             || self.observed_generation > self.generation

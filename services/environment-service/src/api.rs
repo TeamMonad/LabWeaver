@@ -5,19 +5,24 @@ use std::{str::FromStr, time::Duration};
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{Extension, Path, State},
+    extract::{Extension, Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use contracts::{
-    ActorId, EnvironmentId, Revision, UtcTimestamp,
+    ActorId, DiagnosticCode, EnvironmentId, Revision, StreamSequence, UtcTimestamp,
     authoring::{EnvironmentClass, EnvironmentRuntimeSpec},
     environment::{
+        EndpointHealth, EnvironmentAccessEligibilityState, EnvironmentAccessEligibilitySummary,
         EnvironmentCreateSpec, EnvironmentInstance, EnvironmentLifecycleCommand,
-        EnvironmentOperationKind,
+        EnvironmentOperationKind, EnvironmentOwnerRelation, EnvironmentOwnerSummary,
+        EnvironmentSummary,
     },
-    http::{CreateEnvironmentRequest, IdempotencyKey, OperationAccepted, StrongEtag},
+    http::{
+        CreateEnvironmentRequest, DEFAULT_PAGE_LIMIT, EnvironmentInventoryQuery, IdempotencyKey,
+        OperationAccepted, SnapshotPage, StrongEtag,
+    },
 };
 use uuid::Uuid;
 
@@ -57,7 +62,10 @@ impl EnvironmentApiState {
 /// Builds the public routes served only behind the existing mTLS acceptor.
 pub fn environment_api_router(state: EnvironmentApiState) -> Router {
     Router::new()
-        .route("/api/v1/environments", post(create_environment))
+        .route(
+            "/api/v1/environments",
+            get(list_environments).post(create_environment),
+        )
         .route(
             "/api/v1/environments/{environment_id}",
             get(get_environment),
@@ -83,6 +91,106 @@ pub fn environment_api_router(state: EnvironmentApiState) -> Router {
             get(list_endpoints),
         )
         .with_state(state)
+}
+
+async fn list_environments(
+    State(state): State<EnvironmentApiState>,
+    caller: Option<Extension<VerifiedCallerIdentity>>,
+    Query(query): Query<EnvironmentInventoryQuery>,
+    headers: HeaderMap,
+) -> Result<Json<SnapshotPage<EnvironmentSummary>>, EnvironmentApiError> {
+    require_access_bff(caller)?;
+    require_session(&headers)?;
+    query
+        .validate()
+        .map_err(|_| EnvironmentApiError::RequestInvalid)?;
+    if query.project_id.is_some()
+        || query.runtime_kind.is_some()
+        || query.class.is_some()
+        || query.desired_state.is_some()
+        || query.observed_state.is_some()
+        || query.release_id.is_some()
+        || query.cursor.is_some()
+    {
+        return Err(EnvironmentApiError::InventoryFilterUnsupported);
+    }
+    let (records, snapshot_at) = state
+        .store
+        .list_owned(
+            query.course_id,
+            actor(&headers)?,
+            query.limit.unwrap_or(DEFAULT_PAGE_LIMIT),
+        )
+        .await?;
+    let snapshot_sequence = records
+        .iter()
+        .map(|record| record.stream_sequence)
+        .max_by_key(|sequence| sequence.0)
+        .unwrap_or(StreamSequence(1));
+    let items = records
+        .into_iter()
+        .map(|record| environment_summary(record, snapshot_at))
+        .collect::<Result<Vec<_>, EnvironmentApiError>>()?;
+    Ok(Json(SnapshotPage {
+        items,
+        next_cursor: None,
+        snapshot_sequence,
+        snapshot_at,
+    }))
+}
+
+fn environment_summary(
+    record: crate::StoredEnvironmentInventory,
+    snapshot_at: UtcTimestamp,
+) -> Result<EnvironmentSummary, EnvironmentApiError> {
+    let healthy_endpoint_count = u32::try_from(
+        record
+            .instance
+            .endpoints
+            .iter()
+            .filter(|endpoint| endpoint.health == EndpointHealth::Healthy)
+            .count(),
+    )
+    .map_err(|_| EnvironmentApiError::ResponseInvalid)?;
+    let eligible =
+        healthy_endpoint_count > 0 && record.instance.eligibility_expires_at > snapshot_at;
+    let summary = EnvironmentSummary {
+        id: record.instance.id,
+        display_label: record.instance.display_label,
+        course_id: record.instance.course_id,
+        project_id: None,
+        owner: EnvironmentOwnerSummary {
+            relation: EnvironmentOwnerRelation::SelfOwned,
+            display_label: None,
+        },
+        class: record.instance.class,
+        runtime_kind: record.instance.runtime_kind,
+        release_id: record.instance.release_id,
+        release_version: record.instance.release_version,
+        desired_state: record.instance.desired_state,
+        observed_state: record.instance.observed_state,
+        revision: record.instance.revision,
+        eligibility_expires_at: record.instance.eligibility_expires_at,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+        last_changed_stream_sequence: record.stream_sequence,
+        current_operation: None,
+        access: EnvironmentAccessEligibilitySummary {
+            state: if eligible {
+                EnvironmentAccessEligibilityState::Eligible
+            } else {
+                EnvironmentAccessEligibilityState::Ineligible
+            },
+            reason_code: (!eligible)
+                .then(|| DiagnosticCode::registered("LW_ENVIRONMENT_ENDPOINT_UNAVAILABLE")),
+            healthy_endpoint_count,
+            active_grant_count: 0,
+        },
+    };
+    summary
+        .validate()
+        .map_err(|_| EnvironmentApiError::ResponseInvalid)?;
+    Ok(summary)
 }
 
 async fn create_environment(
@@ -137,6 +245,10 @@ async fn create_environment(
     let create = EnvironmentCreateSpec {
         course_id: request.course_id,
         owner_actor_id: actor_id,
+        display_label: request
+            .display_label
+            .clone()
+            .unwrap_or_else(|| release.projection.environment_spec.name.clone()),
         class: release.projection.environment_spec.class,
         runtime_kind: release.projection.release.runtime_kind,
         release_id: request.release_id,
@@ -382,6 +494,8 @@ pub enum EnvironmentApiError {
     ClockInvalid,
     #[error("LW_ENVIRONMENT_RESPONSE_INVALID")]
     ResponseInvalid,
+    #[error("LW_ENVIRONMENT_INVENTORY_FILTER_UNSUPPORTED")]
+    InventoryFilterUnsupported,
     #[error(transparent)]
     Store(#[from] EnvironmentStoreError),
     #[error(transparent)]
@@ -395,9 +509,10 @@ impl IntoResponse for EnvironmentApiError {
         let status = match self {
             Self::CallerDenied | Self::ScopeDenied => StatusCode::FORBIDDEN,
             Self::IdentityInvalid => StatusCode::UNAUTHORIZED,
-            Self::RequestInvalid | Self::IdempotencyRequired | Self::IdempotencyInvalid => {
-                StatusCode::BAD_REQUEST
-            }
+            Self::RequestInvalid
+            | Self::IdempotencyRequired
+            | Self::IdempotencyInvalid
+            | Self::InventoryFilterUnsupported => StatusCode::BAD_REQUEST,
             Self::RevisionRequired => StatusCode::PRECONDITION_REQUIRED,
             Self::RevisionConflict => StatusCode::PRECONDITION_FAILED,
             Self::ReleaseDenied => StatusCode::UNPROCESSABLE_ENTITY,

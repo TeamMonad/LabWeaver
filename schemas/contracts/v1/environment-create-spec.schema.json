@@ -53,6 +53,9 @@
     "courseId": {
       "$ref": "#/$defs/CourseId"
     },
+    "displayLabel": {
+      "type": "string"
+    },
     "eligibilityExpiresAt": {
       "$ref": "#/$defs/UtcTimestamp"
     },
@@ -87,6 +90,7 @@
   "required": [
     "courseId",
     "ownerActorId",
+    "displayLabel",
     "class",
     "runtimeKind",
     "releaseId",

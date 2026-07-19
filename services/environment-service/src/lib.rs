@@ -67,6 +67,6 @@ pub use runtime::{OwnerResolverRuntime, OwnerResolverRuntimeError};
 pub use runtime_executor::{KubernetesContainerExecutor, RuntimeExecutorConfiguration};
 pub use store::{
     EnvironmentStoreError, InboundCommandDecision, InboundLifecycleCommand, LeasedEnvironment,
-    PgEnvironmentStore,
+    PgEnvironmentStore, StoredEnvironmentInventory,
 };
 pub use tls::{MtlsConfig, MtlsServerError, serve_owner_resolver_mtls};
