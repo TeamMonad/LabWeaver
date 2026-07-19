@@ -74,5 +74,15 @@ identity_secret_locator_sha256: sha256:REPLACE_IDENTITY_SECRET_LOCATOR_SHA256
 identity_storage_class: local-path
 identity_postgres_storage: 20Gi
 identity_keycloak_replicas: 2
+sprint2_foundation_enabled: false
+sprint2_foundation_bundle: REPLACE_PRIVATE_FOUNDATION_BUNDLE
+sprint2_foundation_storage_class: local-path
+sprint2_foundation_minio_storage_class: nfs-rwx
+sprint2_buildkit_enabled: false
+sprint2_buildkit_bundle: REPLACE_PRIVATE_BUILDKIT_BUNDLE
+sprint2_buildkit_storage_class: local-path
+sprint2_buildkit_storage: 40Gi
+# Exact private Harbor address range used by the pinned build base mirrors.
+sprint2_buildkit_registry_cidr: REPLACE_HARBOR_ENDPOINT_CIDR
 labweaver_run_id: infra-manual-0
 labweaver_commit_sha: 0000000000000000000000000000000000000000

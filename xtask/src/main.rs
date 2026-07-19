@@ -1366,4 +1366,18 @@ mod tests {
         assert_eq!(error.diagnostic_code(), "XTASK_CONFIRMATION_REQUIRED");
         Ok(())
     }
+
+    #[test]
+    fn sprint2_buildkit_requires_confirmation() -> Result<(), String> {
+        let Err(error) = sprint2_buildkit(&EnvironmentArgs {
+            env: "demo".into(),
+            infra: true,
+            yes: false,
+            package_manifest: None,
+        }) else {
+            return Err("Sprint 2 BuildKit without --yes must fail".into());
+        };
+        assert_eq!(error.diagnostic_code(), "XTASK_CONFIRMATION_REQUIRED");
+        Ok(())
+    }
 }

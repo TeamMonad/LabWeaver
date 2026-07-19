@@ -34,6 +34,21 @@ explicit Sprint 2 accepted risk. They are not described as least-privilege
 evidence. Production use remains blocked until RBAC is narrowed or a native
 admission boundary enforces the executor namespace/ServiceAccount fence.
 
+## Freeze-only Evaluation deployment
+
+- The owner selected Evaluation as the Sprint 2 `FrozenSubmission` owner; all
+  execution and scoring remain excluded.
+- The deployment topology is fixed in ADR 0010: a coordinator creates bounded
+  same-image freeze Jobs in `labweaver-system`; Container collection uses an
+  exact read-only NFS-backed PVC/PV binding, while VM collection uses a
+  five-minute Environment-issued read-only SFTP certificate.
+- Blocker: the coordinator, Environment certificate issuer, freeze-worker mode,
+  namespace-local Job RBAC and connected PVC/SFTP cleanup replay are not yet
+  implemented and reviewed.
+- Exit: duplicate/reordered commands, expired leases/certificates, PV identity
+  mismatch, host-key mismatch, partial upload, worker restart and all residue
+  checks fail closed under B review and D connected Verify.
+
 ## Access Gateway deployment
 
 - Local key authentication, post-auth alias redemption, one-time session token
