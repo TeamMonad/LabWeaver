@@ -126,6 +126,12 @@ class AnsibleFixtureTests(unittest.TestCase):
             ROOT / "deploy/ansible/roles/sprint2_buildkit/templates/workloads.yml.j2"
         ).read_text(encoding="utf-8")
         self.assertIn("labweaver_preflight_scope: sprint2-buildkit", playbook)
+        self.assertIn(
+            "'sprint2-buildkit'",
+            (ROOT / "deploy/ansible/roles/preflight/tasks/main.yml").read_text(
+                encoding="utf-8"
+            ),
+        )
         self.assertIn("SPRINT2_BUILDKIT_BUNDLE_KEYS_INVALID", tasks)
         self.assertIn("SPRINT2_BUILDKIT_READBACK_INVALID", tasks)
         self.assertIn("pod-security.kubernetes.io/enforce: privileged", tasks)
