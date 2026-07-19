@@ -508,6 +508,7 @@ async function freeze(data: EnvironmentInstanceSchema) {
     path: { environmentId: data.id },
     headers: { 'Idempotency-Key': idempotencyKey(), 'If-Match': ifMatch(data.revision) },
     body: {
+      courseId: data.courseId,
       manifest: {
         apiVersion: 'evaluation.labweaver.io/v1',
         kind: 'SubmissionManifest',

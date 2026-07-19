@@ -72,3 +72,31 @@ ALTER TABLE frozen_submissions
 CREATE UNIQUE INDEX frozen_submissions_course_id_idempotency_key_idx
     ON frozen_submissions (course_id, idempotency_key)
     WHERE idempotency_key IS NOT NULL;
+
+-- Public freeze acceptance and durable coordinator queue.
+CREATE TABLE submission_freeze_commands (
+    frozen_submission_id uuid PRIMARY KEY,
+    operation_id uuid NOT NULL UNIQUE,
+    course_id uuid NOT NULL,
+    environment_id uuid NOT NULL,
+    actor_id uuid NOT NULL,
+    idempotency_key text NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 512),
+    request_sha256 text NOT NULL CHECK (request_sha256 ~ '^[0-9a-f]{64}$'),
+    manifest_sha256 text NOT NULL CHECK (manifest_sha256 ~ '^[0-9a-f]{64}$'),
+    state text NOT NULL CHECK (state IN ('queued', 'running', 'completed', 'failed')),
+    contract jsonb NOT NULL CHECK (jsonb_typeof(contract) = 'object'),
+    job_name text,
+    diagnostic_code text,
+    cleanup_verified boolean NOT NULL DEFAULT false,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    completed_at timestamptz,
+    UNIQUE (course_id, idempotency_key),
+    CHECK ((state IN ('completed', 'failed')) = (completed_at IS NOT NULL)),
+    CHECK (state <> 'completed' OR cleanup_verified),
+    CHECK (state <> 'failed' OR diagnostic_code IS NOT NULL)
+);
+
+CREATE INDEX submission_freeze_commands_due_idx
+    ON submission_freeze_commands (state, created_at)
+    WHERE state IN ('queued', 'running');

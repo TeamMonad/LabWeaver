@@ -294,6 +294,7 @@ pub use crate::environment::{EnvironmentOwnerResolution, EnvironmentOwnerResolut
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FreezeSubmissionRequest {
+    pub course_id: CourseId,
     pub manifest: crate::submission::SubmissionManifest,
 }
 

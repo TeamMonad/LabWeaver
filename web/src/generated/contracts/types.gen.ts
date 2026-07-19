@@ -1033,6 +1033,7 @@ export type EnvironmentInstanceSchema = {
     cleanupEvidence?: EnvironmentInstanceSchemaArtifactRef | null;
     courseId: EnvironmentInstanceSchemaCourseId;
     desiredState: DesiredEnvironmentState;
+    displayLabel: string;
     eligibilityExpiresAt: EnvironmentInstanceSchemaUtcTimestamp;
     endpoints: Array<EnvironmentEndpoint>;
     failedPhase?: ObservedEnvironmentState | null;
@@ -2650,6 +2651,7 @@ export type EnvironmentSummaryPageSchemaUtcTimestamp = string;
  * Read model that keeps the immutable release separate from its append-only withdrawal fact.
  */
 export type EnvironmentTemplateReleaseViewSchema = {
+    agentRunId: EnvironmentTemplateReleaseViewSchemaAgentRunId;
     approval: CandidateApproval;
     artifact: EnvironmentTemplateReleaseViewSchemaImageArtifact;
     candidateId: EnvironmentTemplateReleaseViewSchemaCandidateId;
@@ -2669,6 +2671,11 @@ export type EnvironmentTemplateReleaseViewSchema = {
  * Strongly typed UUIDv7 identifier for `ActorId`.
  */
 export type EnvironmentTemplateReleaseViewSchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `AgentRunId`.
+ */
+export type EnvironmentTemplateReleaseViewSchemaAgentRunId = string;
 
 /**
  * Strongly typed UUIDv7 identifier for `ApprovalId`.
@@ -2847,8 +2854,14 @@ export type EnvironmentTemplateReleaseViewSchemaVulnerabilitySummary = {
  * FreezeSubmissionRequest
  */
 export type FreezeSubmissionRequestSchema = {
+    courseId: FreezeSubmissionRequestSchemaCourseId;
     manifest: SubmissionManifest;
 };
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type FreezeSubmissionRequestSchemaCourseId = string;
 
 /**
  * Strict safe path selector shared by packages, collectors, and LLM allowlists.
