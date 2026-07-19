@@ -21,7 +21,7 @@ url.workspace = true
 
 [dev-dependencies]
 reqwest.workspace = true
-testcontainers = { version = "0.25.0", features = ["blocking"] }
+testcontainers = { version = "=0.25.0", features = ["blocking"] }
 tokio.workspace = true
 
 [lints]

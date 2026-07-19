@@ -37,6 +37,12 @@
       "scan": { "scanner": "trivy:0.72.0", "database_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "critical": 0, "high": 0, "report": "artifact://package/environment-service/trivy.json", "report_sha256": "sha256:1212121212121212121212121212121212121212121212121212121212121212" }
     },
     {
+      "component": "evaluation-service",
+      "reference": "harbor.internal.example/labweaver-system/evaluation-service@sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "scan": { "scanner": "trivy:0.72.0", "database_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "critical": 0, "high": 0, "report": "artifact://package/evaluation-service/trivy.json", "report_sha256": "sha256:1515151515151515151515151515151515151515151515151515151515151515" }
+    },
+    {
       "component": "openssh-gateway",
       "reference": "harbor.internal.example/labweaver-system/openssh-gateway@sha256:5555555555555555555555555555555555555555555555555555555555555555",
       "digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",

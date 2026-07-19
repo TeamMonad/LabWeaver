@@ -48,7 +48,7 @@ reqwest = { version = "0.12.28", default-features = false, features = ["cookies"
 russh = { version = "0.62.2", default-features = false, features = ["ring"] }
 russh-sftp = "2.3.0"
 scraper = "0.24.0"
-rcgen = "0.14.8"
+rcgen = "=0.14.7"
 rustls = "0.23.42"
 rustls-pemfile = "2.2.0"
 schemars = "1.0.4"
