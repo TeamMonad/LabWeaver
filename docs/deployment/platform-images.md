@@ -22,8 +22,17 @@ Run on the approved Linux packaging host:
 export LABWEAVER_PLATFORM_REGISTRY=harbor.example.internal
 export LABWEAVER_TRIVY_DATABASE_REFERENCE=harbor.example.internal/cache/trivy-db@sha256:<digest>
 export LABWEAVER_TRIVY_DATABASE_DIGEST=sha256:<digest>
+export LABWEAVER_KUBECONFIG="$HOME/.config/labweaver/package/kubeconfig"
 cargo xtask package --env demo --release sprint2 --yes
 ```
+
+Before packaging, run the non-destructive `sprint2-buildkit` adoption with
+`sprint2_buildkit_controller_enabled=true`, an exact router-local kubeconfig source, and explicit
+control-plane API URL and address bindings. The role installs a persistent,
+loopback-only `kubectl port-forward` and the reviewed BuildKit mTLS identity on the retained edge
+router. The role creates the `labweaver-package` buildx context only when it is absent, and always
+requires it to resolve to `tcp://127.0.0.1:1234`; a conflicting context, missing tunnel, mismatched
+mTLS binding, or stale BuildKit identity is a blocking error.
 
 The packaging host uses the checksum-verified standalone `docker-buildx`
 v0.35.0 executable. A Docker daemon is not required: configure a named Buildx

@@ -309,3 +309,176 @@
       - sprint2_buildkit_deployment.resources[0].spec.template.spec.containers[0].securityContext.appArmorProfile.type == 'Unconfined'
       - sprint2_buildkit_deployment.resources[0].spec.template.spec.containers[0].securityContext.seLinuxOptions.type == 'spc_t'
     fail_msg: SPRINT2_BUILDKIT_READBACK_INVALID
+
+- name: Validate the router-owned BuildKit controller binding
+  ansible.builtin.assert:
+    that:
+      - sprint2_buildkit_controller_kubeconfig_source | length > 0
+      - sprint2_buildkit_controller_api_server is match('^https://(?:[0-9]{1,3}\.){3}[0-9]{1,3}:6443$')
+      - sprint2_buildkit_controller_api_address is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
+      - sprint2_buildkit_controller_port | int == 1234
+    fail_msg: SPRINT2_BUILDKIT_CONTROLLER_INPUT_INVALID
+  when: sprint2_buildkit_controller_enabled | bool
+
+- name: Inspect the router-owned Kubernetes controller input
+  ansible.builtin.stat:
+    path: "{{ sprint2_buildkit_controller_kubeconfig_source }}"
+  register: sprint2_buildkit_controller_kubeconfig_input
+  delegate_to: "{{ sprint2_buildkit_controller_host }}"
+  when: sprint2_buildkit_controller_enabled | bool
+
+- name: Require a protected router-owned Kubernetes controller input
+  ansible.builtin.assert:
+    that:
+      - sprint2_buildkit_controller_kubeconfig_input.stat.exists
+      - sprint2_buildkit_controller_kubeconfig_input.stat.isreg
+      - sprint2_buildkit_controller_kubeconfig_input.stat.mode is match('^0?600$')
+    fail_msg: SPRINT2_BUILDKIT_CONTROLLER_KUBECONFIG_INVALID
+  when: sprint2_buildkit_controller_enabled | bool
+  no_log: true
+
+- name: Create the router-owned package client directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: rocky
+    group: rocky
+    mode: "0700"
+  loop:
+    - "{{ sprint2_buildkit_controller_kubeconfig | dirname }}"
+    - "{{ sprint2_buildkit_controller_client_path }}"
+  delegate_to: "{{ sprint2_buildkit_controller_host }}"
+  become: true
+  when: sprint2_buildkit_controller_enabled | bool
+
+- name: Install the router-owned Kubernetes controller identity
+  ansible.builtin.copy:
+    src: "{{ sprint2_buildkit_controller_kubeconfig_source }}"
+    dest: "{{ sprint2_buildkit_controller_kubeconfig }}"
+    remote_src: true
+    owner: rocky
+    group: rocky
+    mode: "0600"
+  delegate_to: "{{ sprint2_buildkit_controller_host }}"
+  become: true
+  when: sprint2_buildkit_controller_enabled | bool
+  no_log: true
+
+- name: Install the router-owned BuildKit package identity
+  ansible.builtin.copy:
+    src: "{{ sprint2_buildkit_bundle | dirname }}/build-executor-client/{{ item }}"
+    dest: "{{ sprint2_buildkit_controller_client_path }}/{{ item }}"
+    owner: rocky
+    group: rocky
+    mode: "0600"
+  loop: [ca.crt, tls.crt, tls.key]
+  delegate_to: "{{ sprint2_buildkit_controller_host }}"
+  become: true
+  when: sprint2_buildkit_controller_enabled | bool
+  no_log: true
+
+- name: Reconcile the bounded Kubernetes API router resolution
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} LABWEAVER SPRINT2 KUBERNETES API"
+    block: >-
+      {{ sprint2_buildkit_controller_api_address }} k8s-api.lab.lan
+    create: false
+    owner: root
+    group: root
+    mode: "0644"
+  delegate_to: "{{ sprint2_buildkit_controller_host }}"
+  become: true
+  when: sprint2_buildkit_controller_enabled | bool
+
+- name: Install the persistent router-owned BuildKit tunnel
+  ansible.builtin.template:
+    src: buildkit-port-forward.service.j2
+    dest: /etc/systemd/system/labweaver-buildkit-port-forward.service
+    owner: root
+    group: root
+    mode: "0644"
+  delegate_to: "{{ sprint2_buildkit_controller_host }}"
+  become: true
+  notify: Restart router-owned BuildKit tunnel
+  when: sprint2_buildkit_controller_enabled | bool
+
+- name: Apply the router-owned BuildKit tunnel before package validation
+  ansible.builtin.meta: flush_handlers
+  when: sprint2_buildkit_controller_enabled | bool
+
+- name: Require the router-owned BuildKit endpoint
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ sprint2_buildkit_controller_port }}"
+    state: started
+    timeout: 30
+  delegate_to: "{{ sprint2_buildkit_controller_host }}"
+  when: sprint2_buildkit_controller_enabled | bool
+
+- name: Inspect the router-owned BuildKit package context
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/docker-buildx
+      - inspect
+      - labweaver-package
+  register: sprint2_buildkit_controller_context
+  environment:
+    HOME: /home/rocky
+  become: true
+  become_user: rocky
+  delegate_to: "{{ sprint2_buildkit_controller_host }}"
+  changed_when: false
+  failed_when: false
+  when: sprint2_buildkit_controller_enabled | bool
+
+- name: Create the missing router-owned BuildKit package context
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/docker-buildx
+      - create
+      - --name
+      - labweaver-package
+      - --driver
+      - remote
+      - --driver-opt
+      - >-
+        {{ 'cacert=' ~ sprint2_buildkit_controller_client_path ~ '/ca.crt,cert='
+           ~ sprint2_buildkit_controller_client_path ~ '/tls.crt,key='
+           ~ sprint2_buildkit_controller_client_path
+           ~ '/tls.key,servername=buildkit.labweaver-build.svc' }}
+      - --use
+      - tcp://127.0.0.1:1234
+  environment:
+    HOME: /home/rocky
+  become: true
+  become_user: rocky
+  delegate_to: "{{ sprint2_buildkit_controller_host }}"
+  when:
+    - sprint2_buildkit_controller_enabled | bool
+    - sprint2_buildkit_controller_context.rc != 0
+
+- name: Verify the router-owned BuildKit package binding
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/docker-buildx
+      - inspect
+      - labweaver-package
+      - --bootstrap
+  register: sprint2_buildkit_controller_inspect
+  environment:
+    HOME: /home/rocky
+  become: true
+  become_user: rocky
+  delegate_to: "{{ sprint2_buildkit_controller_host }}"
+  changed_when: false
+  when: sprint2_buildkit_controller_enabled | bool
+
+- name: Require the exact router-owned BuildKit package identity
+  ansible.builtin.assert:
+    that:
+      - "'Endpoint:         tcp://127.0.0.1:1234' in sprint2_buildkit_controller_inspect.stdout"
+      - "'BuildKit version: v0.31.1' in sprint2_buildkit_controller_inspect.stdout"
+      - "'servername=\"buildkit.labweaver-build.svc\"' in sprint2_buildkit_controller_inspect.stdout"
+    fail_msg: SPRINT2_BUILDKIT_CONTROLLER_IDENTITY_INVALID
+  when: sprint2_buildkit_controller_enabled | bool

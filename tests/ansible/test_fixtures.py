@@ -208,6 +208,20 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("data_source_name: ubuntu-lab-base-v1", lock)
         self.assertNotIn("state: absent", tasks)
 
+    def test_sprint2_buildkit_prepares_the_router_owned_package_endpoint(self) -> None:
+        tasks = (ROOT / "deploy/ansible/roles/sprint2_buildkit/tasks/main.yml").read_text(
+            encoding="utf-8"
+        )
+        unit = (
+            ROOT
+            / "deploy/ansible/roles/sprint2_buildkit/templates/buildkit-port-forward.service.j2"
+        ).read_text(encoding="utf-8")
+        self.assertIn("SPRINT2_BUILDKIT_CONTROLLER_IDENTITY_INVALID", tasks)
+        self.assertIn("tcp://127.0.0.1:1234", tasks)
+        self.assertIn("--server {{ sprint2_buildkit_controller_api_server }}", unit)
+        self.assertIn("ProtectSystem=strict", unit)
+        self.assertNotIn("state: absent", tasks)
+
     def test_sprint2_application_adopts_bounded_portal_and_ssh_routes(self) -> None:
         tasks = (
             ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"

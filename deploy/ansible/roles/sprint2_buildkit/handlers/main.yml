@@ -1,0 +1,9 @@
+---
+- name: Restart router-owned BuildKit tunnel
+  ansible.builtin.systemd_service:
+    name: labweaver-buildkit-port-forward.service
+    enabled: true
+    state: restarted
+    daemon_reload: true
+  delegate_to: "{{ sprint2_buildkit_controller_host }}"
+  become: true
