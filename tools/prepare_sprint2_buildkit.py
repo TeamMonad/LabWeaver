@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -118,12 +119,17 @@ def prepare(
     openssl: Path,
     days: int,
     registry_host: str,
+    dns_nameserver: str,
     registry_ca: Path,
 ) -> dict[str, object]:
     if not 30 <= days <= 825:
         raise BuildkitAuthoringError("LW_SPRINT2_BUILDKIT_VALIDITY_INVALID")
     if not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", registry_host):
         raise BuildkitAuthoringError("LW_SPRINT2_BUILDKIT_REGISTRY_HOST_INVALID")
+    try:
+        nameserver = str(ipaddress.ip_address(dns_nameserver))
+    except ValueError as error:
+        raise BuildkitAuthoringError("LW_SPRINT2_BUILDKIT_DNS_NAMESERVER_INVALID") from error
     try:
         registry_ca = registry_ca.resolve(strict=True)
     except OSError as error:
@@ -195,6 +201,9 @@ root = "/home/user/.local/share/buildkit"
 [registry."{registry_host}"]
   ca = ["/etc/buildkit/tls/registry-ca.crt"]
 
+[dns]
+  nameservers = ["{nameserver}"]
+
 [worker.oci]
   enabled = true
   rootless = true
@@ -217,6 +226,7 @@ def main() -> int:
     parser.add_argument("--openssl", type=Path, default=Path("/usr/bin/openssl"))
     parser.add_argument("--valid-days", type=int, default=365)
     parser.add_argument("--registry-host", required=True)
+    parser.add_argument("--dns-nameserver", required=True)
     parser.add_argument("--registry-ca", type=Path, required=True)
     arguments = parser.parse_args()
     output: Path | None = None
@@ -229,6 +239,7 @@ def main() -> int:
             openssl,
             arguments.valid_days,
             arguments.registry_host,
+            arguments.dns_nameserver,
             arguments.registry_ca,
         )
     except (BuildkitAuthoringError, OSError) as error:

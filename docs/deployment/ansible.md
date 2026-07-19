@@ -154,6 +154,7 @@ the reviewed Harbor endpoint CIDR in the ignored inventory:
 ```sh
 python3 tools/prepare_sprint2_buildkit.py \
   --registry-host harbor.lab.lan \
+  --dns-nameserver 10.96.0.10 \
   --registry-ca .private/harbor-gateway-ca.crt \
   --output .private/sprint2-buildkit-<run-id>
 python3 tools/render_sprint2_bundle.py \

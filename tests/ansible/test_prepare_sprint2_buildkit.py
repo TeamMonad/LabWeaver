@@ -54,6 +54,7 @@ class BuildkitAuthoringTests(unittest.TestCase):
                     Path("/not/invoked"),
                     1,
                     "harbor.lab.lan",
+                    "10.96.0.10",
                     Path("/not/invoked"),
                 )
 
@@ -69,6 +70,23 @@ class BuildkitAuthoringTests(unittest.TestCase):
                     Path("/not/invoked"),
                     365,
                     "https://harbor.lab.lan",
+                    "10.96.0.10",
+                    Path("/not/invoked"),
+                )
+
+    def test_dns_nameserver_is_an_explicit_ip_address(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(
+                BUILDKIT.BuildkitAuthoringError,
+                "LW_SPRINT2_BUILDKIT_DNS_NAMESERVER_INVALID",
+            ):
+                BUILDKIT.prepare(
+                    root,
+                    Path("/not/invoked"),
+                    365,
+                    "harbor.lab.lan",
+                    "kube-dns.kube-system.svc",
                     Path("/not/invoked"),
                 )
 
