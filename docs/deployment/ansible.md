@@ -182,9 +182,11 @@ ClusterIP inside the BuildKit Pod, avoiding unsupported same-cluster
 LoadBalancer hairpinning. Egress is additionally limited to the `harbor`
 namespace's exact nginx labels and TLS target port.
 Dependency-fetch steps use a separate Cilium policy bound only to the BuildKit
-Pod and TCP/443 for the exact Cargo sparse-index, crate archive, npm registry,
-and Alpine package hostnames. Compilation remains `--network=none`; no wildcard
-FQDN or arbitrary egress is permitted.
+Pod. DNS is intercepted through the cluster `kube-dns` endpoint so Cilium can
+materialize the reviewed FQDN identities; name resolution alone does not grant
+network access. TCP/443 is limited to the exact Cargo sparse-index, crate
+archive, npm registry, and Alpine package hostnames. Compilation remains
+`--network=none`; no wildcard data-plane FQDN or arbitrary egress is permitted.
 
 The following legacy reset description documents an out-of-scope maintenance
 path and must not be followed for Sprint 2 adoption. `demo reset` runs only the
