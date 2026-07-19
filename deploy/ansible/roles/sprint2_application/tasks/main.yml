@@ -119,8 +119,14 @@
     that:
       - sprint2_application_access_seed.apiVersion == 'deploy.labweaver.io/sprint2-access-seed/v1'
       - sprint2_application_access_seed.courseMemberships | length >= 2
-      - sprint2_application_access_seed.courseMemberships | map(attribute='actorId') | unique | length == sprint2_application_access_seed.courseMemberships | length
-      - sprint2_application_access_seed.courseMemberships | map(attribute='subjectSha256') | unique | length == sprint2_application_access_seed.courseMemberships | length
+      - >-
+        sprint2_application_access_seed.courseMemberships
+        | map(attribute='actorId') | unique | length
+        == sprint2_application_access_seed.courseMemberships | length
+      - >-
+        sprint2_application_access_seed.courseMemberships
+        | map(attribute='subjectSha256') | unique | length
+        == sprint2_application_access_seed.courseMemberships | length
     fail_msg: SPRINT2_APPLICATION_ACCESS_SEED_INVALID
   no_log: true
 
@@ -524,7 +530,12 @@
     that:
       - (sprint2_application_deployments.stdout | from_json).items | length == sprint2_application_workloads | length
       - (sprint2_application_deployments.stdout | from_json).items | map(attribute='metadata.name') | sort == sprint2_application_workloads | sort
-      - (sprint2_application_deployments.stdout | from_json).items | map(attribute='spec.template.spec.containers') | map('first') | map(attribute='image') | select('match', '^.+@sha256:[0-9a-f]{64}$') | list | length == sprint2_application_workloads | length
+      - >-
+        (sprint2_application_deployments.stdout | from_json).items
+        | map(attribute='spec.template.spec.containers') | map('first')
+        | map(attribute='image')
+        | select('match', '^.+@sha256:[0-9a-f]{64}$') | list | length
+        == sprint2_application_workloads | length
     fail_msg: SPRINT2_APPLICATION_DEPLOYMENT_READBACK_INVALID
 
 - name: Read final Helm revision
