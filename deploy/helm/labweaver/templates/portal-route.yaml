@@ -44,6 +44,12 @@ spec:
           namespace: {{ .Release.Namespace }}
           port: 8080
     - matches:
+        - path: {type: PathPrefix, value: /connect}
+      backendRefs:
+        - name: access-service
+          namespace: {{ .Release.Namespace }}
+          port: 8080
+    - matches:
         - path: {type: PathPrefix, value: /}
       backendRefs:
         - name: web

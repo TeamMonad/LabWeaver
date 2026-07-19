@@ -145,9 +145,8 @@ non-secret routing configuration. The formal Container Provider uses:
     "binding": "container-primary-v1",
     "subject": "labweaver.provider.kubernetes.container.v1",
     "providerKind": "container",
-    "gatewayNamespace": "access-system",
-    "gatewayName": "protected-gateway",
-    "gatewaySection": "protected-https",
+    "accessNamespace": "labweaver-system",
+    "accessPodLabel": "access-service",
     "imagePullSecretName": "harbor-course-pull",
     "workspaceStorageClassName": "nfs-rwx",
     "activeImagePolicyId": "01900000-0000-7000-8000-000000000001",
@@ -159,13 +158,24 @@ non-secret routing configuration. The formal Container Provider uses:
 
 The complete example is `deploy/config/environment-providers.json.example`.
 Omitting `providerKind` selects the existing remote provider; remote entries
-must not contain Gateway, image-pull or trust-policy fields. Container entries
-require every Gateway field, the exact same-namespace Harbor pull Secret name,
+must not contain Access proxy, image-pull or trust-policy fields. Container entries
+require the exact Access Service namespace and pod label, the exact same-namespace Harbor pull Secret name,
 the reviewed `nfs-rwx` workspace StorageClass, and the active image-policy
 ID/revision and trust revision. Container workspaces are provisioned as RWX so
 the same PVC can be mounted read-only by the bounded freeze Job. They use the
 immutable publication plus append-only withdrawal projection described in
 `docs/contracts/container-supply-chain-v1.md`.
+
+Container Services expose only the fixed cluster port `8080` to Access Service.
+No runtime `HTTPRoute` is created. Browser requests use the same-origin
+`/connect/{endpointGrantId}/` URL embedded in an active `EndpointGrant`; Access
+Service checks the BFF session, current membership, grant expiry and exact
+Environment endpoint revision on every request before deriving the internal
+Service DNS name. Cookies and arbitrary upstream redirects are never forwarded.
+Sprint 2 permits bounded HTTP request/response applications only; an Upgrade
+request fails with `LW_ACCESS_RUNTIME_UPGRADE_UNSUPPORTED`. Interactive
+code-server and WorkConfig remain outside this slice instead of weakening the
+Access boundary with an unauthenticated direct route.
 
 ## Desired and observed state
 

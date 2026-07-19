@@ -46,6 +46,13 @@
             "null"
           ]
         },
+        "connectUrl": {
+          "description": "Same-origin, Access Service-authorized browser entry point. Present only\nfor HTTP(S) grants and derived from this immutable endpoint grant ID.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "endpointId": {
           "$ref": "#/$defs/EndpointId"
         },

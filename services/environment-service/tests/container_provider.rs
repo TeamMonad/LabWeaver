@@ -130,7 +130,7 @@ impl ContainerProviderBackend for FixtureBackend {
 }
 
 #[test]
-fn plan_uses_digest_only_image_and_only_the_protected_gateway() {
+fn plan_uses_digest_only_image_and_only_the_access_proxy() {
     let projection = projection();
     let instance = instance_for(&projection);
     let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
@@ -203,37 +203,30 @@ fn plan_uses_digest_only_image_and_only_the_protected_gateway() {
             .all(|resource| resource.kind != "Ingress")
     );
 
-    let route = resource(&first, "HTTPRoute");
+    assert!(
+        first
+            .resources
+            .iter()
+            .all(|resource| resource.kind != "HTTPRoute")
+    );
     assert_eq!(
-        route
+        resource(&first, "Service")
             .document
-            .pointer("/metadata/annotations/labweaver.io~1access-controlled"),
-        Some(&json!("true"))
-    );
-    assert_eq!(
-        route.document.pointer("/spec/parentRefs/0/namespace"),
-        Some(&json!("access-system"))
-    );
-    assert_eq!(
-        route.document.pointer("/spec/parentRefs/0/name"),
-        Some(&json!("protected-gateway"))
-    );
-    assert_eq!(
-        route.document.pointer("/spec/rules/0/matches/0/path/value"),
-        Some(&json!(format!("/environments/{}/", instance.id)))
+            .pointer("/spec/ports/0/port"),
+        Some(&json!(8080))
     );
     let gateway_policy = first
         .resources
         .iter()
         .find(|resource| {
-            resource.kind == "NetworkPolicy" && resource.name == "protected-gateway-ingress"
+            resource.kind == "NetworkPolicy" && resource.name == "access-service-ingress"
         })
-        .expect("protected Gateway policy exists");
+        .expect("Access Service ingress policy exists");
     assert_eq!(
-        gateway_policy.document.pointer(
-            "/spec/ingress/0/from/0/podSelector/matchLabels/gateway.networking.k8s.io~1gateway-name"
-        ),
-        Some(&json!("protected-gateway"))
+        gateway_policy
+            .document
+            .pointer("/spec/ingress/0/from/0/podSelector/matchLabels/app.kubernetes.io~1name"),
+        Some(&json!("access-service"))
     );
 }
 
@@ -475,9 +468,8 @@ fn provider_with_state(
         ContainerProviderConfiguration::new(
             ContainerReleasePolicy::new(image_policy_id, image_policy_revision, trust_revision)
                 .expect("release policy"),
-            "access-system".to_owned(),
-            "protected-gateway".to_owned(),
-            "protected-https".to_owned(),
+            "labweaver-sprint2".to_owned(),
+            "access-service".to_owned(),
             "harbor-course-pull".to_owned(),
             "nfs-rwx".to_owned(),
         )

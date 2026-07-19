@@ -101,6 +101,11 @@ export type EndpointGrant = {
     accessGrantId: AccessGrantId;
     action: EndpointAction;
     alias?: string | null;
+    /**
+     * Same-origin, Access Service-authorized browser entry point. Present only
+     * for HTTP(S) grants and derived from this immutable endpoint grant ID.
+     */
+    connectUrl?: string | null;
     endpointId: EndpointId;
     endpointRevision: Revision;
     expiresAt: UtcTimestamp;
@@ -995,6 +1000,11 @@ export type EnvironmentEndpointSchema = {
     observedAt: EnvironmentEndpointSchemaUtcTimestamp;
     protocol: EnvironmentEndpointSchemaEndpointProtocol;
     revision: EnvironmentEndpointSchemaRevision;
+    /**
+     * SHA-256 of the OpenSSH host-key fingerprint string observed by the
+     * runtime executor. Required for SSH and absent for non-SSH endpoints.
+     */
+    sshHostKeyIdentitySha256?: EnvironmentEndpointSchemaSha256Digest | null;
 };
 
 /**
@@ -1016,6 +1026,11 @@ export type EnvironmentEndpointSchemaEndpointProtocol = 'http' | 'https' | 'ssh'
  * Monotonic aggregate revision. Zero is never a persisted revision.
  */
 export type EnvironmentEndpointSchemaRevision = number;
+
+/**
+ * Canonical lowercase SHA-256 digest.
+ */
+export type EnvironmentEndpointSchemaSha256Digest = string;
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
@@ -1131,6 +1146,11 @@ export type EnvironmentEndpoint = {
     observedAt: EnvironmentInstanceSchemaUtcTimestamp;
     protocol: EnvironmentInstanceSchemaEndpointProtocol;
     revision: EnvironmentInstanceSchemaRevision;
+    /**
+     * SHA-256 of the OpenSSH host-key fingerprint string observed by the
+     * runtime executor. Required for SSH and absent for non-SSH endpoints.
+     */
+    sshHostKeyIdentitySha256?: EnvironmentInstanceSchemaSha256Digest | null;
 };
 
 /**

@@ -225,6 +225,9 @@ pub struct EndpointGrant {
     pub action: EndpointAction,
     pub health: EndpointHealth,
     pub alias: Option<String>,
+    /// Same-origin, Access Service-authorized browser entry point. Present only
+    /// for HTTP(S) grants and derived from this immutable endpoint grant ID.
+    pub connect_url: Option<String>,
     pub expires_at: UtcTimestamp,
 }
 
@@ -236,6 +239,9 @@ impl EndpointGrant {
         }
         match self.protocol {
             EndpointProtocol::Ssh => {
+                if self.connect_url.is_some() {
+                    return Err(AccessError::InvalidConnectUrl);
+                }
                 let alias = self.alias.as_deref().ok_or(AccessError::InvalidAlias)?;
                 if alias.len() != 23
                     || !alias.starts_with("lw-")
@@ -249,6 +255,10 @@ impl EndpointGrant {
             EndpointProtocol::Http | EndpointProtocol::Https => {
                 if self.alias.is_some() {
                     return Err(AccessError::InvalidAlias);
+                }
+                let expected = format!("/connect/{}/", self.id);
+                if self.connect_url.as_deref() != Some(expected.as_str()) {
+                    return Err(AccessError::InvalidConnectUrl);
                 }
             }
         }
@@ -541,6 +551,8 @@ pub enum AccessError {
     EndpointUnhealthy,
     #[error("SSH alias is not a server-generated v1 alias")]
     InvalidAlias,
+    #[error("HTTP endpoint connect URL is not the server-generated v1 path")]
+    InvalidConnectUrl,
     #[error("GatewaySession is internally inconsistent")]
     InvalidSession,
     #[error("GatewaySession termination deadline exceeds 60 seconds")]
@@ -609,6 +621,26 @@ mod tests {
         let mut active = requested;
         active.state = AccessGrantState::Active;
         assert!(active.validate().is_err());
+    }
+
+    #[test]
+    fn http_endpoint_grant_requires_its_exact_same_origin_connect_path() {
+        let id = EndpointGrantId::new();
+        let mut endpoint = EndpointGrant {
+            id,
+            access_grant_id: AccessGrantId::new(),
+            endpoint_id: EndpointId::new(),
+            endpoint_revision: revision(1),
+            protocol: EndpointProtocol::Https,
+            action: EndpointAction::Connect,
+            health: EndpointHealth::Healthy,
+            alias: None,
+            connect_url: Some(format!("/connect/{id}/")),
+            expires_at: timestamp("2026-07-16T00:30:00.000Z"),
+        };
+        assert!(endpoint.validate().is_ok());
+        endpoint.connect_url = Some("https://runtime.invalid/".to_owned());
+        assert_eq!(endpoint.validate(), Err(AccessError::InvalidConnectUrl));
     }
 
     #[test]

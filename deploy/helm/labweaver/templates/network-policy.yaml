@@ -88,5 +88,11 @@ spec:
             {{- toYaml $root.Values.network.environmentNamespaceSelector | nindent 12 }}
       ports: [{protocol: TCP, port: 22}]
     {{- end }}
+    {{- if eq $name "access-service" }}
+    - to:
+        - namespaceSelector:
+            {{- toYaml $root.Values.network.environmentNamespaceSelector | nindent 12 }}
+      ports: [{protocol: TCP, port: 8080}]
+    {{- end }}
 {{- end }}
 {{- end }}

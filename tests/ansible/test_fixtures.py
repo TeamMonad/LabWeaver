@@ -232,14 +232,20 @@ class AnsibleFixtureTests(unittest.TestCase):
         ssh_route = (
             ROOT / "deploy/helm/labweaver/templates/ssh-gateway-route.yaml"
         ).read_text(encoding="utf-8")
+        network_policy = (
+            ROOT / "deploy/helm/labweaver/templates/network-policy.yaml"
+        ).read_text(encoding="utf-8")
         self.assertIn("SPRINT2_APPLICATION_PORTAL_GATEWAY_CONFLICT", tasks)
         self.assertIn("SPRINT2_APPLICATION_SSH_GATEWAY_CONFLICT", tasks)
         self.assertIn("SPRINT2_APPLICATION_SSH_ROUTE_INVALID", tasks)
         self.assertIn("Refresh retained router trust", tasks)
         self.assertIn("labweaver.io/gateway-routes: allowed", tasks)
         self.assertIn("kind: HTTPRoute", portal)
+        self.assertIn("value: /connect", portal)
         self.assertIn("kind: TCPRoute", ssh_route)
         self.assertIn("name: openssh-gateway", ssh_route)
+        self.assertIn('eq $name "access-service"', network_policy)
+        self.assertIn("port: 8080", network_policy)
         self.assertNotIn("state: absent", tasks)
 
     def test_sprint2_service_configs_use_declared_tls_secret_keys(self) -> None:

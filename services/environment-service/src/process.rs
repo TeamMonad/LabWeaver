@@ -154,7 +154,9 @@ impl EnvironmentProcessRuntime {
                     )?))?;
                 }
                 "container" => {
-                    if configuration.has_kubevirt_fields() {
+                    if configuration.has_kubevirt_fields()
+                        || !configuration.has_complete_container_fields()
+                    {
                         return Err(EnvironmentProcessRuntimeError::ConfigParse);
                     }
                     let backend = Arc::new(NatsContainerProviderBackend::new(
@@ -168,15 +170,11 @@ impl EnvironmentProcessRuntime {
                         ContainerProviderConfiguration::new(
                             configuration.release_policy()?,
                             configuration
-                                .gateway_namespace
+                                .access_namespace
                                 .clone()
                                 .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
                             configuration
-                                .gateway_name
-                                .clone()
-                                .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
-                            configuration
-                                .gateway_section
+                                .access_pod_label
                                 .clone()
                                 .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
                             configuration
@@ -643,6 +641,8 @@ struct ProviderBindingConfiguration {
     binding: String,
     subject: String,
     provider_kind: Option<String>,
+    access_namespace: Option<String>,
+    access_pod_label: Option<String>,
     gateway_namespace: Option<String>,
     gateway_name: Option<String>,
     gateway_section: Option<String>,
@@ -692,10 +692,24 @@ impl ProviderBindingConfiguration {
     }
 
     fn has_container_only_fields(&self) -> bool {
-        self.gateway_name.is_some()
+        self.access_namespace.is_some()
+            || self.access_pod_label.is_some()
+            || self.gateway_name.is_some()
             || self.gateway_section.is_some()
             || self.image_pull_secret_name.is_some()
             || self.workspace_storage_class_name.is_some()
+    }
+
+    fn has_complete_container_fields(&self) -> bool {
+        self.access_namespace.is_some()
+            && self.access_pod_label.is_some()
+            && self.gateway_name.is_none()
+            && self.gateway_section.is_none()
+            && self.image_pull_secret_name.is_some()
+            && self.workspace_storage_class_name.is_some()
+            && self.active_image_policy_id.is_some()
+            && self.active_image_policy_revision.is_some()
+            && self.active_trust_revision.is_some()
     }
 
     fn has_kubevirt_fields(&self) -> bool {
@@ -739,7 +753,9 @@ impl ProviderBindingConfiguration {
     }
 
     fn has_provider_specific_fields(&self) -> bool {
-        self.gateway_namespace.is_some()
+        self.access_namespace.is_some()
+            || self.access_pod_label.is_some()
+            || self.gateway_namespace.is_some()
             || self.has_container_only_fields()
             || self.has_kubevirt_fields()
             || self.active_image_policy_id.is_some()

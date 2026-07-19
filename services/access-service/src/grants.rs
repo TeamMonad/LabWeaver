@@ -1516,15 +1516,19 @@ async fn endpoint_grants(
         .bind(grant_id.as_uuid()).fetch_all(&mut **tx).await.map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
     rows.into_iter()
         .map(|row| {
+            let id = typed_id(row.get("endpoint_grant_id"))?;
+            let protocol = parse_protocol(&row.get::<String, _>("protocol"))?;
             Ok(EndpointGrant {
-                id: typed_id(row.get("endpoint_grant_id"))?,
+                id,
                 access_grant_id: grant_id,
                 endpoint_id: typed_id(row.get("endpoint_id"))?,
                 endpoint_revision: revision(row.get("endpoint_revision"))?,
-                protocol: parse_protocol(&row.get::<String, _>("protocol"))?,
+                protocol,
                 action: EndpointAction::Connect,
                 health: parse_health(&row.get::<String, _>("health"))?,
                 alias: row.get("alias"),
+                connect_url: matches!(protocol, EndpointProtocol::Http | EndpointProtocol::Https)
+                    .then(|| format!("/connect/{id}/")),
                 expires_at: utc_timestamp(row.get("expires_at"))?,
             })
         })

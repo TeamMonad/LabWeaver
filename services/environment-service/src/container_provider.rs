@@ -858,9 +858,8 @@ impl ContainerReleasePolicy {
 #[derive(Clone, Debug)]
 pub struct ContainerProviderConfiguration {
     pub release_policy: ContainerReleasePolicy,
-    pub gateway_namespace: String,
-    pub gateway_name: String,
-    pub gateway_section: String,
+    pub access_namespace: String,
+    pub access_pod_label: String,
     pub image_pull_secret_name: String,
     pub workspace_storage_class_name: String,
 }
@@ -868,15 +867,13 @@ pub struct ContainerProviderConfiguration {
 impl ContainerProviderConfiguration {
     pub fn new(
         release_policy: ContainerReleasePolicy,
-        gateway_namespace: String,
-        gateway_name: String,
-        gateway_section: String,
+        access_namespace: String,
+        access_pod_label: String,
         image_pull_secret_name: String,
         workspace_storage_class_name: String,
     ) -> Result<Self, ReleaseProjectionError> {
-        if !valid_dns_label(&gateway_namespace)
-            || !valid_dns_label(&gateway_name)
-            || !valid_dns_label(&gateway_section)
+        if !valid_dns_label(&access_namespace)
+            || !valid_dns_label(&access_pod_label)
             || !valid_dns_label(&image_pull_secret_name)
             || !valid_dns_label(&workspace_storage_class_name)
         {
@@ -884,9 +881,8 @@ impl ContainerProviderConfiguration {
         }
         Ok(Self {
             release_policy,
-            gateway_namespace,
-            gateway_name,
-            gateway_section,
+            access_namespace,
+            access_pod_label,
             image_pull_secret_name,
             workspace_storage_class_name,
         })
@@ -1123,9 +1119,8 @@ pub struct ContainerProvider<B, R> {
     backend: Arc<B>,
     releases: Arc<R>,
     release_policy: ContainerReleasePolicy,
-    gateway_namespace: String,
-    gateway_name: String,
-    gateway_section: String,
+    access_namespace: String,
+    access_pod_label: String,
     image_pull_secret_name: String,
     workspace_storage_class_name: String,
 }
@@ -1149,9 +1144,8 @@ where
             backend,
             releases,
             release_policy: configuration.release_policy,
-            gateway_namespace: configuration.gateway_namespace,
-            gateway_name: configuration.gateway_name,
-            gateway_section: configuration.gateway_section,
+            access_namespace: configuration.access_namespace,
+            access_pod_label: configuration.access_pod_label,
             image_pull_secret_name: configuration.image_pull_secret_name,
             workspace_storage_class_name: configuration.workspace_storage_class_name,
         })
@@ -1212,7 +1206,6 @@ where
             "labweaver.io/environment-id": instance.id.to_string(),
             "labweaver.io/course-id": instance.course_id.to_string(),
             "labweaver.io/managed": "true",
-            "labweaver.io/gateway-routes": "allowed",
         });
         let resources = &projection.environment_spec.resources;
         let service_port = match &projection.environment_spec.runtime {
@@ -1299,11 +1292,11 @@ where
             resource(
                 "NetworkPolicy",
                 Some(&namespace),
-                "protected-gateway-ingress",
+                "access-service-ingress",
                 json!({
                     "apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
-                    "metadata":{"name":"protected-gateway-ingress","namespace":namespace,"labels":labels},
-                    "spec":{"podSelector":{"matchLabels":{"app":app_name}},"policyTypes":["Ingress"],"ingress":[{"from":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":self.gateway_namespace}},"podSelector":{"matchLabels":{"gateway.networking.k8s.io/gateway-name":self.gateway_name}}}],"ports":[{"protocol":"TCP","port":service_port}]}]}
+                    "metadata":{"name":"access-service-ingress","namespace":namespace,"labels":labels},
+                    "spec":{"podSelector":{"matchLabels":{"app":app_name}},"policyTypes":["Ingress"],"ingress":[{"from":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":self.access_namespace}},"podSelector":{"matchLabels":{"app.kubernetes.io/name":self.access_pod_label}}}],"ports":[{"protocol":"TCP","port":service_port}]}]}
                 }),
             ),
             resource(
@@ -1342,18 +1335,7 @@ where
                 json!({
                     "apiVersion":"v1","kind":"Service",
                     "metadata":{"name":app_name,"namespace":namespace,"labels":labels},
-                    "spec":{"type":"ClusterIP","selector":{"app":app_name},"ports":[{"name":"service","port":service_port,"targetPort":"service"}]}
-                }),
-            ),
-            resource(
-                "HTTPRoute",
-                Some(&namespace),
-                "protected",
-                json!({
-                    "apiVersion":"gateway.networking.k8s.io/v1","kind":"HTTPRoute",
-                    "metadata":{"name":"protected","namespace":namespace,"labels":labels,"annotations":{"labweaver.io/access-controlled":"true"}},
-                    "spec":{"parentRefs":[{"group":"gateway.networking.k8s.io","kind":"Gateway","namespace":self.gateway_namespace,"name":self.gateway_name,"sectionName":self.gateway_section}],
-                        "rules":[{"matches":[{"path":{"type":"PathPrefix","value":format!("/environments/{}/",instance.id)}}],"filters":[{"type":"URLRewrite","urlRewrite":{"path":{"type":"ReplacePrefixMatch","replacePrefixMatch":"/"}}}],"backendRefs":[{"group":"","kind":"Service","name":app_name,"port":service_port}]}]}
+                    "spec":{"type":"ClusterIP","selector":{"app":app_name},"ports":[{"name":"http","port":8080,"targetPort":"service"}]}
                 }),
             ),
         ];

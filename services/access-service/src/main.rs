@@ -51,6 +51,7 @@ struct AppState {
     control_proxy: proxy::ControlGatewayProxy,
     environment_proxy: proxy::ControlGatewayProxy,
     evaluation_proxy: proxy::ControlGatewayProxy,
+    runtime_proxy: proxy::RuntimeGatewayProxy,
     metrics: telemetry::PrometheusHandle,
     nats: async_nats::Client,
 }
@@ -120,6 +121,14 @@ async fn main() -> Result<(), StartupError> {
         .route(
             "/api/v1/environments/{*environment_path}",
             axum::routing::any(proxy::forward_environment),
+        )
+        .route(
+            "/connect/{endpoint_grant_id}/",
+            axum::routing::any(proxy::forward_runtime),
+        )
+        .route(
+            "/connect/{endpoint_grant_id}/{*runtime_path}",
+            axum::routing::any(proxy::forward_runtime),
         )
         .with_state(Arc::clone(&state));
     let internal_router = Router::new()
@@ -232,6 +241,7 @@ async fn build_app_state(
     let control_proxy = build_control_proxy(&deployment)?;
     let environment_proxy = build_service_proxy(&deployment, &deployment.environment_gateway)?;
     let evaluation_proxy = build_service_proxy(&deployment, &deployment.evaluation_gateway)?;
+    let runtime_proxy = proxy::RuntimeGatewayProxy::new(&deployment.environment_gateway)?;
     let nats = grants::connect_nats(&deployment.nats).await?;
     Ok(Arc::new(AppState {
         config,
@@ -247,6 +257,7 @@ async fn build_app_state(
         control_proxy,
         environment_proxy,
         evaluation_proxy,
+        runtime_proxy,
         metrics,
         nats,
     }))
