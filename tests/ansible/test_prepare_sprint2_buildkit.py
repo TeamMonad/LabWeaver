@@ -49,7 +49,28 @@ class BuildkitAuthoringTests(unittest.TestCase):
                 BUILDKIT.BuildkitAuthoringError,
                 "LW_SPRINT2_BUILDKIT_VALIDITY_INVALID",
             ):
-                BUILDKIT.prepare(root, Path("/not/invoked"), 1)
+                BUILDKIT.prepare(
+                    root,
+                    Path("/not/invoked"),
+                    1,
+                    "harbor.lab.lan",
+                    Path("/not/invoked"),
+                )
+
+    def test_registry_identity_is_validated_before_authoring(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(
+                BUILDKIT.BuildkitAuthoringError,
+                "LW_SPRINT2_BUILDKIT_REGISTRY_HOST_INVALID",
+            ):
+                BUILDKIT.prepare(
+                    root,
+                    Path("/not/invoked"),
+                    365,
+                    "https://harbor.lab.lan",
+                    Path("/not/invoked"),
+                )
 
 
 if __name__ == "__main__":

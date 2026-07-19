@@ -152,6 +152,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("default-deny", workloads)
         self.assertIn("buildctl", workloads)
         self.assertIn("sprint2_buildkit_registry_cidr", tasks)
+        self.assertIn("/etc/buildkit/tls/registry-ca.crt", tasks)
         self.assertIn("sprint2-buildkit --infra", (
             ROOT / "docs/deployment/ansible.md"
         ).read_text(encoding="utf-8"))

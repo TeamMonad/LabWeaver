@@ -11,6 +11,7 @@
       "ca.crt",
       "health.crt",
       "health.key",
+      "registry-ca.crt",
       "tls.crt",
       "tls.key"
     ]

@@ -115,11 +115,14 @@ cargo xtask sprint2-foundation --infra --env demo --yes
 ```
 
 BuildKit is reconciled separately in `labweaver-build`. Generate a distinct
-mTLS authority and exact two-object private bundle, then provide the reviewed
-Harbor endpoint CIDR in the ignored inventory:
+mTLS authority and exact two-object private bundle. The bundle pins the public
+CA of the existing Harbor endpoint so registry TLS remains strict; then provide
+the reviewed Harbor endpoint CIDR in the ignored inventory:
 
 ```sh
 python3 tools/prepare_sprint2_buildkit.py \
+  --registry-host harbor.lab.lan \
+  --registry-ca .private/harbor-gateway-ca.crt \
   --output .private/sprint2-buildkit-<run-id>
 python3 tools/render_sprint2_bundle.py \
   --manifest deploy/config/sprint2-buildkit-bundle-manifest.json \

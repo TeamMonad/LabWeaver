@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -112,9 +113,23 @@ def _issue(
     return key, certificate
 
 
-def prepare(output: Path, openssl: Path, days: int) -> dict[str, object]:
+def prepare(
+    output: Path,
+    openssl: Path,
+    days: int,
+    registry_host: str,
+    registry_ca: Path,
+) -> dict[str, object]:
     if not 30 <= days <= 825:
         raise BuildkitAuthoringError("LW_SPRINT2_BUILDKIT_VALIDITY_INVALID")
+    if not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", registry_host):
+        raise BuildkitAuthoringError("LW_SPRINT2_BUILDKIT_REGISTRY_HOST_INVALID")
+    try:
+        registry_ca = registry_ca.resolve(strict=True)
+    except OSError as error:
+        raise BuildkitAuthoringError("LW_SPRINT2_BUILDKIT_REGISTRY_CA_INVALID") from error
+    if not registry_ca.is_file() or registry_ca.stat().st_size > 1024 * 1024:
+        raise BuildkitAuthoringError("LW_SPRINT2_BUILDKIT_REGISTRY_CA_INVALID")
     home = output / "home"
     authority = output / "authority"
     render_input = output / "render-input"
@@ -157,6 +172,7 @@ def prepare(output: Path, openssl: Path, days: int) -> dict[str, object]:
         (server_key, "tls.key"),
         (health_certificate, "health.crt"),
         (health_key, "health.key"),
+        (registry_ca, "registry-ca.crt"),
     ):
         _copy(source, secret / name)
     for source, name in (
@@ -166,7 +182,7 @@ def prepare(output: Path, openssl: Path, days: int) -> dict[str, object]:
     ):
         _copy(source, client / name)
 
-    configuration = b'''debug = false
+    configuration = f'''debug = false
 root = "/home/user/.local/share/buildkit"
 
 [grpc]
@@ -176,12 +192,15 @@ root = "/home/user/.local/share/buildkit"
     key = "/etc/buildkit/tls/tls.key"
     ca = "/etc/buildkit/tls/ca.crt"
 
+[registry."{registry_host}"]
+  ca = ["/etc/buildkit/tls/registry-ca.crt"]
+
 [worker.oci]
   enabled = true
   rootless = true
   noProcessSandbox = true
   gc = true
-'''
+'''.encode()
     _write(render_input / "configmaps" / "buildkit-config" / "buildkitd.toml", configuration)
 
     return {
@@ -197,13 +216,21 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--openssl", type=Path, default=Path("/usr/bin/openssl"))
     parser.add_argument("--valid-days", type=int, default=365)
+    parser.add_argument("--registry-host", required=True)
+    parser.add_argument("--registry-ca", type=Path, required=True)
     arguments = parser.parse_args()
     output: Path | None = None
     try:
         output = _private_output(arguments.output)
         openssl = _trusted_openssl(arguments.openssl)
         output.mkdir(mode=0o700)
-        result = prepare(output, openssl, arguments.valid_days)
+        result = prepare(
+            output,
+            openssl,
+            arguments.valid_days,
+            arguments.registry_host,
+            arguments.registry_ca,
+        )
     except (BuildkitAuthoringError, OSError) as error:
         if output is not None and output.is_dir():
             shutil.rmtree(output)
