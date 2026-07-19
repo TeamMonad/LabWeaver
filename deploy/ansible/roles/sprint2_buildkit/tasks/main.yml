@@ -130,7 +130,12 @@
     sprint2_buildkit_coredns_corefile: >-
       {{ sprint2_buildkit_coredns.resources[0].data.Corefile
          if sprint2_buildkit_coredns.resources | length == 1 else '' }}
-    sprint2_buildkit_coredns_harbor_block: >-
+    sprint2_buildkit_coredns_harbor_block: |
+          hosts {
+              {{ sprint2_buildkit_harbor_service_ip }} {{ sprint2_buildkit_harbor_hostname }}
+              fallthrough
+          }
+    sprint2_buildkit_coredns_harbor_legacy_block: >-
       {{ ['    hosts {',
           '        ' ~ sprint2_buildkit_harbor_service_ip ~ ' ' ~ sprint2_buildkit_harbor_hostname,
           '        fallthrough',
@@ -145,7 +150,8 @@
         sprint2_buildkit_coredns_corefile.count('    prometheus :9153') == 1
       - >-
         sprint2_buildkit_harbor_hostname not in sprint2_buildkit_coredns_corefile or
-        sprint2_buildkit_coredns_harbor_block in sprint2_buildkit_coredns_corefile
+        sprint2_buildkit_coredns_harbor_block in sprint2_buildkit_coredns_corefile or
+        sprint2_buildkit_coredns_harbor_legacy_block in sprint2_buildkit_coredns_corefile
     fail_msg: SPRINT2_BUILDKIT_CLUSTER_DNS_AMBIGUOUS
 
 - name: Render additive Harbor cluster DNS resolution
@@ -153,9 +159,13 @@
     sprint2_buildkit_coredns_desired: >-
       {{ sprint2_buildkit_coredns_corefile
          if sprint2_buildkit_coredns_harbor_block in sprint2_buildkit_coredns_corefile
+         else (sprint2_buildkit_coredns_corefile.replace(
+           sprint2_buildkit_coredns_harbor_legacy_block,
+           sprint2_buildkit_coredns_harbor_block)
+         if sprint2_buildkit_coredns_harbor_legacy_block in sprint2_buildkit_coredns_corefile
          else sprint2_buildkit_coredns_corefile.replace(
            '    prometheus :9153',
-           sprint2_buildkit_coredns_harbor_block ~ '    prometheus :9153') }}
+           sprint2_buildkit_coredns_harbor_block ~ '    prometheus :9153')) }}
 
 - name: Reconcile additive Harbor cluster DNS resolution
   kubernetes.core.k8s:
