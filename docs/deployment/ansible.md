@@ -78,9 +78,12 @@ route changes; it installs the same public CA in the control-plane system and
 container-client trust stores. Retaining the previous Gateway-termination CA is
 a blocking TLS identity mismatch.
 The same bounded adoption reads the existing private `labweaver-system` project
-and aligns only its project metadata to automatic scanning with pull prevention
-at `Critical`. It does not alter Harbor's global policy, CVE allowlist, project
-identity, repository contents, or scan reports.
+and aligns only its project metadata to automatic scanning without pull-time
+vulnerability prevention. Pull prevention is deliberately disabled because it
+also blocks builder-only layers; the package command's digest-bound Trivy scan
+is the single blocking Gate for final runtime images. The adoption does not
+alter Harbor's global policy, CVE allowlist, project identity, repository
+contents, or scan reports.
 
 `ansible-lint`, syntax checks, encrypted fictional-Vault loading, and storage
 safety fixtures run on Linux CI. The approved router or A-owned WSL controller worktree additionally

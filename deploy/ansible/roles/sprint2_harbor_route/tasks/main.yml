@@ -302,7 +302,7 @@
     fail_msg: SPRINT2_HARBOR_PROJECT_INVALID
   no_log: true
 
-- name: Align the retained project with the Sprint 2 Critical gate
+- name: Align the retained project with the Sprint 2 scan-only policy
   ansible.builtin.uri:
     url: "https://{{ harbor_hostname }}/api/v2.0/projects/{{ sprint2_harbor_project_read.json[0].project_id }}"
     method: PUT
@@ -315,12 +315,12 @@
       metadata:
         public: 'false'
         auto_scan: 'true'
-        prevent_vul: 'true'
+        prevent_vul: 'false'
         severity: critical
     status_code: 200
   when: >-
     sprint2_harbor_project_read.json[0].metadata.auto_scan | default('') != 'true' or
-    sprint2_harbor_project_read.json[0].metadata.prevent_vul | default('') != 'true' or
+    sprint2_harbor_project_read.json[0].metadata.prevent_vul | default('') != 'false' or
     sprint2_harbor_project_read.json[0].metadata.severity | default('') != 'critical'
   no_log: true
 
@@ -337,13 +337,13 @@
   register: sprint2_harbor_project_readback
   no_log: true
 
-- name: Require the exact private auto-scan Critical project gate
+- name: Require the exact private auto-scan project policy
   ansible.builtin.assert:
     that:
       - sprint2_harbor_project_readback.json | length == 1
       - sprint2_harbor_project_readback.json[0].metadata.public | default('') == 'false'
       - sprint2_harbor_project_readback.json[0].metadata.auto_scan | default('') == 'true'
-      - sprint2_harbor_project_readback.json[0].metadata.prevent_vul | default('') == 'true'
+      - sprint2_harbor_project_readback.json[0].metadata.prevent_vul | default('') == 'false'
       - sprint2_harbor_project_readback.json[0].metadata.severity | default('') == 'critical'
     fail_msg: SPRINT2_HARBOR_PROJECT_POLICY_DRIFT
   no_log: true
