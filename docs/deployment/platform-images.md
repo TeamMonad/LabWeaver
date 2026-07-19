@@ -39,7 +39,19 @@ Containerfile base argument with the corresponding Harbor digest and does not
 permit BuildKit to reach a public registry; a missing mirror is therefore a
 blocking error rather than a network fallback.
 
-The command fails unless the source tree is clean, BuildKit/Buildx/Trivy match `deploy/versions.lock.yml`, the Trivy database is digest pinned, both reproducibility builds resolve to the same `linux/amd64` manifest digest, no secret or critical vulnerability is found, and every image is recorded as a Harbor digest reference. When Buildx uses the cluster-owned remote driver, `LABWEAVER_KUBECONFIG` is mandatory and packaging also reads back the `labweaver-build/buildkit` Deployment: its rootless image must match the locked digest, exactly one replica must be ready and updated, and its reviewed configuration hash annotation must be present. High vulnerabilities remain visible in the report but do not silently alter the gate.
+The command fails unless the source tree is clean, the explicit Rust toolchain
+matches both digest-locked Rust builder images, BuildKit/Buildx/Trivy match
+`deploy/versions.lock.yml`, the Trivy database is digest pinned, both
+reproducibility builds resolve to the same `linux/amd64` manifest digest, no
+secret or critical vulnerability is found, and every image is recorded as a
+Harbor digest reference. A moving `stable` Rust channel is rejected so a build
+cannot silently download a different compiler. When Buildx uses the
+cluster-owned remote driver, `LABWEAVER_KUBECONFIG` is mandatory and packaging
+also reads back the `labweaver-build/buildkit` Deployment: its rootless image
+must match the locked digest, exactly one replica must be ready and updated,
+and its reviewed configuration hash annotation must be present. High
+vulnerabilities remain visible in the report but do not silently alter the
+gate.
 
 The package manifest records the source commit, component lock hash, builder versions, Harbor host, image digests, Trivy version/database identity, vulnerability counts, and content hash of each retained scan report. Sprint 2 intentionally does not generate or validate Sigstore, Fulcio, Rekor, CT, TUF, SBOM, provenance, or Kyverno evidence.
 

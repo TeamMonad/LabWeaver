@@ -43,6 +43,7 @@ struct Sprint2FoundationLock {
 #[derive(Debug, Deserialize)]
 struct PlatformImageLock {
     platform: String,
+    rust_toolchain: String,
     buildkit: String,
     buildkit_image: String,
     buildx: String,
@@ -429,6 +430,7 @@ fn package_linux(environment: &str, release: &str, root: &Path) -> Result<(), Ap
         detail: error.to_string(),
     })?;
     verify_tools(&lock)?;
+    verify_rust_toolchain(root, &lock.platform_images)?;
     let registry = required_env("LABWEAVER_PLATFORM_REGISTRY")?;
     validate_registry(&registry)?;
     let database_digest = verified_trivy_database()?;
@@ -920,6 +922,29 @@ fn verify_tools(lock: &VersionLock) -> Result<(), AppError> {
 }
 
 #[cfg(target_os = "linux")]
+fn verify_rust_toolchain(root: &Path, platform: &PlatformImageLock) -> Result<(), AppError> {
+    let toolchain = fs::read_to_string(root.join("rust-toolchain.toml"))
+        .map_err(|error| io_error("read Rust toolchain lock", error))?;
+    let expected = format!("channel = \"{}\"", platform.rust_toolchain);
+    let channels = toolchain
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("channel"))
+        .collect::<Vec<_>>();
+    let builder_marker = format!("rust:{}-", platform.rust_toolchain);
+    if channels != [expected.as_str()]
+        || !platform.bases.rust_builder.contains(&builder_marker)
+        || !platform.bases.gateway_builder.contains(&builder_marker)
+    {
+        return Err(AppError::PlatformImage {
+            code: "LW_PACKAGE_RUST_TOOLCHAIN_IDENTITY_MISMATCH",
+            detail: "rust-toolchain.toml and both locked Rust builder images must use the same explicit version".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn verify_remote_buildkit_deployment(expected_image: &str) -> Result<(), AppError> {
     let kubeconfig = required_env("LABWEAVER_KUBECONFIG")?;
     let output = run_checked(
@@ -980,6 +1005,7 @@ fn connected_validate(manifest: &PackageManifest, root: &Path) -> Result<(), App
         detail: error.to_string(),
     })?;
     verify_tools(&lock)?;
+    verify_rust_toolchain(root, &lock.platform_images)?;
     if sha256(&lock_bytes) != manifest.component_lock_hash {
         return manifest_invalid("component lock identity changed");
     }
