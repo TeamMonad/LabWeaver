@@ -425,11 +425,11 @@ mod tests {
     }
 
     #[test]
-    fn known_host_requires_the_authoritative_alias_and_fingerprint_identity() {
+    fn known_host_requires_the_authoritative_alias_and_fingerprint_identity()
+    -> Result<(), ssh_key::Error> {
         let key = PublicKey::from_openssh(
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFuGX5eSWJQm3kb+Jv4H0jHnI9I8FvkCcP9p3u3Cz5yz",
-        )
-        .expect("key");
+        )?;
         let fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
         let identity = format!("{:x}", Sha256::digest(fingerprint.as_bytes()));
         assert!(
@@ -452,5 +452,6 @@ mod tests {
             )
             .is_err()
         );
+        Ok(())
     }
 }
