@@ -166,7 +166,7 @@ cargo xtask sprint2-buildkit --infra --env demo --yes
 
 `--registry-ca` 必须指向当前 Harbor 公网入口证书的签发 CA，不能使用
 Harbor 集群内部 CA。部署角色会在修改 BuildKit 前把 bundle 中的 CA 与
-保留的 `harbor-gateway-tls` Secret 做精确比对；不一致时以
+保留的 Harbor nginx TLS Secret 做精确比对；不一致时以
 `SPRINT2_BUILDKIT_HARBOR_CA_MISMATCH` 阻断。
 
 The BuildKit namespace is the sole approved Sprint 2 exception for
