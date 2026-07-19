@@ -193,6 +193,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertNotIn("{{ harbor_release_name }}-portal", gateway)
         self.assertIn("LABWEAVER SPRINT2 HARBOR", sprint2_route)
         self.assertIn("SPRINT2_HARBOR_ROUTER_RESOLUTION_INVALID", sprint2_route)
+        self.assertIn("Refresh router system trust", sprint2_route)
 
     def test_deploy_starts_with_preflight(self) -> None:
         site = (ROOT / "deploy/ansible/playbooks/site.yml").read_text(encoding="utf-8")

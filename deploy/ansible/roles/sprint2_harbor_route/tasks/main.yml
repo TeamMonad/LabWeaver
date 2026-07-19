@@ -142,6 +142,24 @@
   notify: Refresh control-plane system trust after a Harbor CA change
   no_log: true
 
+- name: Install the adopted Harbor CA in the router system trust
+  ansible.builtin.copy:
+    dest: /etc/pki/ca-trust/source/anchors/labweaver-harbor-nginx.crt
+    owner: root
+    group: root
+    mode: '0644'
+    content: "{{ sprint2_harbor_nginx_secret_read.resources[0].data['ca.crt'] | b64decode }}"
+  delegate_to: "{{ groups['routers'][0] }}"
+  register: sprint2_harbor_router_system_ca
+  no_log: true
+
+- name: Refresh router system trust after a Harbor CA change
+  ansible.builtin.command:
+    argv: [update-ca-trust, extract]
+  delegate_to: "{{ groups['routers'][0] }}"
+  when: sprint2_harbor_router_system_ca.changed
+  changed_when: true
+
 - name: Apply the Harbor CA trust handler before connected probes
   ansible.builtin.meta: flush_handlers
 

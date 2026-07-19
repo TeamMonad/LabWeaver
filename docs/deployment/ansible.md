@@ -75,8 +75,8 @@ is left in place but no longer attaches to the TLS-only listener. TestFlight tem
 named and selected by its run ID, so cleanup cannot target another run.
 The command also publishes the public nginx CA to the fixed root-controlled
 operator locator. BuildKit and packaging inputs must consume that CA after the
-route changes; it installs the same public CA in the control-plane system and
-container-client trust stores. Retaining the previous Gateway-termination CA is
+route changes; it installs the same public CA in the control-plane, router
+system and container-client trust stores. Retaining the previous Gateway-termination CA is
 a blocking TLS identity mismatch.
 The same role adds one marked, exact `harbor.lab.lan` binding to the router
 controller hosts database so `buildx` can complete the Registry token exchange
