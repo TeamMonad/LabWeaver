@@ -60,6 +60,34 @@ NATS_USERS: dict[str, tuple[tuple[str, ...], tuple[str, ...], bool]] = {
     "kubevirt-executor": ((), ("labweaver.provider.kubevirt.vm.v1",), True),
 }
 
+PLATFORM_IDENTITIES: dict[str, tuple[tuple[str, ...], str]] = {
+    "control-service": (
+        (
+            "DNS:control-service",
+            "DNS:control-service.labweaver-system.svc",
+            "URI:spiffe://labweaver/control-service",
+        ),
+        "serverAuth,clientAuth",
+    ),
+    "access-service": (
+        (
+            "DNS:access-service",
+            "DNS:access-service.labweaver-system.svc",
+            "URI:spiffe://labweaver/access-service",
+        ),
+        "serverAuth,clientAuth",
+    ),
+    "agent-service": (
+        ("DNS:agent-service", "DNS:agent-service.labweaver-system.svc"),
+        "serverAuth",
+    ),
+    "environment-service": (
+        ("DNS:environment-service", "DNS:environment-service.labweaver-system.svc"),
+        "serverAuth",
+    ),
+    "openssh-gateway": (("URI:spiffe://labweaver/openssh-gateway",), "clientAuth"),
+}
+
 
 def _private_output(path: Path) -> Path:
     resolved = path.resolve()
@@ -174,7 +202,17 @@ def prepare(output: Path, openssl: Path, nsc: Path, days: int) -> dict[str, obje
     nsc_store = output / "nsc"
     render_input = output / "render-input"
     clients = output / "nats-clients"
-    for directory in (private_home, authority, nsc_store, render_input, clients):
+    platform_authority = output / "platform-authority"
+    platform_identities = output / "platform-identities"
+    for directory in (
+        private_home,
+        authority,
+        nsc_store,
+        render_input,
+        clients,
+        platform_authority,
+        platform_identities,
+    ):
         directory.mkdir(parents=True, mode=0o700)
 
     ca_key = authority / "ca.key"
@@ -188,6 +226,38 @@ def prepare(output: Path, openssl: Path, nsc: Path, days: int) -> dict[str, obje
         ],
         private_home,
     )
+
+    platform_ca_key = platform_authority / "ca.key"
+    platform_ca_certificate = platform_authority / "ca.crt"
+    _run(
+        openssl,
+        ["genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:4096", "-out", str(platform_ca_key)],
+        private_home,
+    )
+    _run(
+        openssl,
+        [
+            "req", "-x509", "-new", "-key", str(platform_ca_key), "-sha256", "-days", str(days),
+            "-subj", "/CN=LabWeaver Sprint 2 Platform CA", "-out", str(platform_ca_certificate),
+        ],
+        private_home,
+    )
+    for name, (sans, usage) in PLATFORM_IDENTITIES.items():
+        material = platform_authority / f"issued-{name}"
+        material.mkdir(mode=0o700)
+        key, certificate = _certificate(
+            openssl,
+            private_home,
+            platform_authority,
+            material,
+            name,
+            sans,
+            usage,
+            days,
+        )
+        _copy(key, platform_identities / name / "key.pem")
+        _copy(certificate, platform_identities / name / "certificate.pem")
+        _copy(platform_ca_certificate, platform_identities / name / "ca.pem")
 
     for service in ("postgres", "nats", "minio"):
         material = authority / f"issued-{service}"
@@ -283,6 +353,8 @@ tls {
         "ca_sha256": hashlib.sha256(ca_certificate.read_bytes()).hexdigest(),
         "nats_config_sha256": hashlib.sha256(nats_config.encode()).hexdigest(),
         "nats_clients": len(NATS_USERS),
+        "platform_ca_sha256": hashlib.sha256(platform_ca_certificate.read_bytes()).hexdigest(),
+        "platform_identities": len(PLATFORM_IDENTITIES),
         "render_input": "render-input",
     }
 

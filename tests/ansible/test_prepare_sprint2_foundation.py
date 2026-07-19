@@ -60,6 +60,22 @@ class FoundationAuthoringTests(unittest.TestCase):
             self.assertNotIn("*", publish)
             self.assertNotIn("*", subscribe)
 
+    def test_platform_identities_have_exact_service_and_client_boundaries(self) -> None:
+        identities = FOUNDATION.PLATFORM_IDENTITIES
+        self.assertEqual(
+            set(identities),
+            {
+                "control-service",
+                "access-service",
+                "agent-service",
+                "environment-service",
+                "openssh-gateway",
+            },
+        )
+        self.assertEqual(identities["openssh-gateway"][1], "clientAuth")
+        self.assertIn("URI:spiffe://labweaver/access-service", identities["access-service"][0])
+        self.assertIn("URI:spiffe://labweaver/control-service", identities["control-service"][0])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -98,11 +98,15 @@ python3 tools/render_sprint2_bundle.py \
   --output .private/sprint2-foundation-<run-id>/bundle.yml
 ```
 
-The authoring command creates one internal CA, separate server certificates,
-eight workload-specific NATS users and mTLS clients, the static operator/account
-resolver config, and random PostgreSQL/MinIO bootstrap credentials. It accepts
-only a new private path and fixed non-world-writable OpenSSL/NSC binaries. The
-checked-in renderer then enforces the exact foundation ConfigMap/Secret key set.
+The authoring command creates one infrastructure CA, separate server
+certificates, eight workload-specific NATS users and mTLS clients, the static
+operator/account resolver config, and random PostgreSQL/MinIO bootstrap
+credentials. A distinct Platform CA issues the exact Control, Access, Agent,
+Environment and OpenSSH Gateway identities: Control and Access have the combined
+server/client EKU required by the reviewed call graph, Agent and Environment are
+server-only, and OpenSSH Gateway is client-only. It accepts only a new private
+path and fixed non-world-writable OpenSSL/NSC binaries. The checked-in renderer
+then enforces the exact foundation ConfigMap/Secret key set.
 
 ```sh
 cargo xtask sprint2-foundation --infra --env demo --yes
