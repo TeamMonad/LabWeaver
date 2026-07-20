@@ -247,6 +247,15 @@ spec:
         - podSelector: {}
         - namespaceSelector:
             matchLabels: {kubernetes.io/metadata.name: labweaver-system}
+    # The trusted administration controller resolves retained EndpointSlices and performs
+    # credentialed readiness/adoption probes before any application mutation. Keep this to one
+    # reviewed /32; it is not a general node or LAN allowance.
+    - from:
+        - ipBlock: {cidr: {{ sprint2_foundation_admin_controller_cidr }}}
+      ports:
+        - {protocol: TCP, port: 5432}
+        - {protocol: TCP, port: 4222}
+        - {protocol: TCP, port: 9000}
   egress:
     - to:
         - podSelector: {}

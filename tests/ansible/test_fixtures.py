@@ -88,6 +88,7 @@ class AnsibleFixtureTests(unittest.TestCase):
             "{{ sprint2_foundation_postgres_storage }}": "20Gi",
             "{{ sprint2_foundation_nats_storage }}": "10Gi",
             "{{ sprint2_foundation_minio_storage }}": "100Gi",
+            "{{ sprint2_foundation_admin_controller_cidr }}": "10.20.0.11/32",
             "{{ sprint2_foundation_lock.postgresql.image }}": "registry.invalid/postgres@sha256:" + "a" * 64,
             "{{ sprint2_foundation_lock.sprint2_foundation.nats }}": "registry.invalid/nats@sha256:" + "b" * 64,
             "{{ sprint2_foundation_lock.sprint2_foundation.minio }}": "registry.invalid/minio@sha256:" + "c" * 64,
@@ -111,6 +112,16 @@ class AnsibleFixtureTests(unittest.TestCase):
             if document["kind"] == "StatefulSet" and document["metadata"]["name"] == "minio"
         )
         self.assertEqual(minio["spec"]["template"]["spec"]["securityContext"]["runAsUser"], 65534)
+        owner_policy = next(
+            document for document in documents
+            if document["kind"] == "NetworkPolicy" and document["metadata"]["name"] == "owner-services"
+        )
+        controller_ingress = owner_policy["spec"]["ingress"][1]
+        self.assertEqual(controller_ingress["from"], [{"ipBlock": {"cidr": "10.20.0.11/32"}}])
+        self.assertEqual(
+            {entry["port"] for entry in controller_ingress["ports"]},
+            {4222, 5432, 9000},
+        )
         self.assertIn("pod-security.kubernetes.io/enforce: restricted", tasks)
         reset_namespaces = reset.split("sprint2_reset_domains:", maxsplit=1)[0]
         self.assertNotIn("labweaver-data", reset_namespaces)

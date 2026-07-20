@@ -12,6 +12,7 @@
       - sprint2_foundation_bundle | length > 0
       - sprint2_foundation_storage_class | length > 0
       - sprint2_foundation_minio_storage_class | length > 0
+      - sprint2_foundation_admin_controller_cidr is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}/32$')
       - sprint2_foundation_lock.postgresql.image is match('^[^\s]+@sha256:[0-9a-f]{64}$')
       - sprint2_foundation_lock.sprint2_foundation.nats is match('^[^\s]+@sha256:[0-9a-f]{64}$')
       - sprint2_foundation_lock.sprint2_foundation.minio is match('^[^\s]+@sha256:[0-9a-f]{64}$')

@@ -21,6 +21,12 @@ machine identity to `deploy/ansible/controller.lock.yml`; a copied worktree on
 another Linux host is rejected before Ansible starts. Missing, malformed, or
 unreadable identity/dependency inputs fail before Ansible starts; the bundle
 does not infer a dependency directory from its temporary extraction path.
+
+The retained data-service NetworkPolicy admits credentialed administration probes only from the
+reviewed controller IPv4 `/32` in `sprint2_foundation_admin_controller_cidr`, and only on
+PostgreSQL 5432, NATS 4222 and MinIO 9000. This narrow rule is required because the controller
+binds exact ready EndpointSlice addresses before adoption; it must never be widened to a node,
+cluster or LAN CIDR.
 集群角色、固定版本、存储、网络和证据边界见
 [`cluster-internal-configuration.md`](cluster-internal-configuration.md)。
 
