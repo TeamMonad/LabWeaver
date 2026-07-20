@@ -845,6 +845,7 @@
           app.kubernetes.io/part-of: labweaver
           labweaver.io/sprint: sprint2
         annotations:
+          cdi.kubevirt.io/storage.bind.immediate.requested: "true"
           labweaver.io/source-release: "{{ sprint2_application_lock.sprint2_vm_base.release }}"
           labweaver.io/source-registry: "{{ sprint2_application_lock.sprint2_vm_base.registry_url }}"
           labweaver.io/disk-sha256: "{{ sprint2_application_lock.sprint2_vm_base.disk_sha256 }}"
@@ -860,6 +861,44 @@
             requests:
               storage: "{{ sprint2_application_lock.sprint2_vm_base.storage_request }}"
   when: sprint2_application_vm_base_dv.resources | length == 0
+
+- name: Reconcile immediate binding for the immutable Sprint 2 VM base
+  kubernetes.core.k8s:
+    kubeconfig: "{{ sprint2_application_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: cdi.kubevirt.io/v1beta1
+      kind: DataVolume
+      metadata:
+        name: "{{ sprint2_application_lock.sprint2_vm_base.seed_data_volume_name }}"
+        namespace: "{{ sprint2_application_namespace }}"
+        annotations:
+          cdi.kubevirt.io/storage.bind.immediate.requested: "true"
+
+- name: Wait for the immutable Sprint 2 VM base claim
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ sprint2_application_kubeconfig }}"
+    api_version: v1
+    kind: PersistentVolumeClaim
+    namespace: "{{ sprint2_application_namespace }}"
+    name: "{{ sprint2_application_lock.sprint2_vm_base.seed_data_volume_name }}"
+  register: sprint2_application_vm_base_claim
+  until: sprint2_application_vm_base_claim.resources | length == 1
+  retries: 30
+  delay: 2
+
+- name: Reconcile immediate binding on the immutable Sprint 2 VM base claim
+  kubernetes.core.k8s:
+    kubeconfig: "{{ sprint2_application_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: "{{ sprint2_application_lock.sprint2_vm_base.seed_data_volume_name }}"
+        namespace: "{{ sprint2_application_namespace }}"
+        annotations:
+          cdi.kubevirt.io/storage.bind.immediate.requested: "true"
 
 - name: Wait for the immutable Sprint 2 VM base import
   kubernetes.core.k8s_info:

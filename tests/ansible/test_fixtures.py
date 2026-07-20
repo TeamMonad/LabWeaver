@@ -220,6 +220,18 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("SPRINT2_VM_BASE_DATAVOLUME_CONFLICT", tasks)
         self.assertIn("SPRINT2_VM_BASE_DATASOURCE_CONFLICT", tasks)
         self.assertIn("SPRINT2_VM_BASE_IDENTITY_INVALID", tasks)
+        self.assertEqual(
+            tasks.count('cdi.kubevirt.io/storage.bind.immediate.requested: "true"'),
+            3,
+        )
+        self.assertIn(
+            "Reconcile immediate binding for the immutable Sprint 2 VM base",
+            tasks,
+        )
+        self.assertIn(
+            "Reconcile immediate binding on the immutable Sprint 2 VM base claim",
+            tasks,
+        )
         self.assertIn("docker://quay.io/containerdisks/ubuntu@sha256:", lock)
         self.assertIn("data_source_name: ubuntu-lab-base-v1", lock)
         self.assertNotIn("state: absent", tasks)
