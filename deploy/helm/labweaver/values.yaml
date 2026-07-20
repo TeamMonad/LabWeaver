@@ -22,6 +22,15 @@ portalRoute:
   gatewayName: ""
   gatewaySectionName: http
 
+objectStoreRoute:
+  enabled: false
+  namespace: ""
+  serviceName: minio
+  servicePort: 9000
+  pathPrefix: ""
+  backendHostname: ""
+  caCertificate: ""
+
 sshGatewayRoute:
   enabled: false
   namespace: ""
@@ -47,6 +56,7 @@ workloads:
     ports:
       - {name: mtls, containerPort: 9444, servicePort: 9444}
     readiness: {type: tcp, port: mtls}
+    externalEgress: []
   access-service:
     enabled: true
     imageKey: access_service

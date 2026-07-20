@@ -260,6 +260,10 @@ class AnsibleFixtureTests(unittest.TestCase):
             arguments,
         )
         self.assertIn("'portalRoute.enabled=true'", arguments)
+        self.assertIn("'objectStoreRoute.enabled=true'", arguments)
+        self.assertIn("'objectStoreRoute.pathPrefix=/' + sprint2_application_minio_bucket", arguments)
+        self.assertIn("'objectStoreRoute.caCertificate=' + sprint2_application_minio_ca_file", arguments)
+        self.assertIn("'workloads.control-service.externalEgress[0].cidr='", arguments)
         self.assertIn(
             "'portalRoute.namespace=' + sprint2_application_portal_route_namespace",
             arguments,

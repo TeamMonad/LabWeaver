@@ -40,6 +40,14 @@ ProblemPackage -> Claude Code AgentRun -> independent candidate approval
 -> FrozenSubmission -> cleanup
 ```
 
+Browser uploads use the portal HTTPS origin. A bucket-path `HTTPRoute`
+preserves the SigV4 `Host` and path while forwarding to the retained MinIO
+Service, and `BackendTLSPolicy` validates the MinIO certificate against the
+reviewed internal CA. Control signs that public authority; Agent, build,
+runtime and freeze workers continue to use the cluster-internal MinIO endpoint.
+The route, `ReferenceGrant`, CA `ConfigMap` and ingress allowance are additive
+application objects and do not reconfigure or replace MinIO.
+
 ### Contracts and persistence
 
 - The pre-release public contract has one current `v1` representation.

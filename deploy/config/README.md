@@ -56,6 +56,12 @@ only the exact reviewed HTTPS and TCP/2222 listeners when they are absent and re
 listener. `sprint2-application` fails unless both enabled routes are `Accepted` and `ResolvedRefs`.
 The portal authority is installed only in the retained router system trust so controller-side
 verification never disables TLS validation.
+When browser uploads are enabled, `objectStoreRoute` adds the bucket path to the same HTTPS
+origin, preserves the signed Host and path, and uses `BackendTLSPolicy` to validate MinIO with the
+reviewed internal CA. In that profile, only Control uses the portal origin as its object-store
+endpoint; workers continue to use the cluster-internal MinIO endpoint. The route, CA ConfigMap,
+ReferenceGrant and MinIO ingress allowance are additive application objects and do not replace or
+reconfigure the retained MinIO service.
 The HTTPS listener accepts routes only from namespaces labeled
 `labweaver.io/gateway-routes=allowed`; the role adds that label to the reviewed portal namespace,
 and the Container provider adds it to Environment-owned namespaces as part of the immutable plan.

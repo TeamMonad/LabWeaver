@@ -72,6 +72,14 @@ spec:
         - {protocol: TCP, port: {{ $port }}}
         {{- end }}
     {{- end }}
+    {{- range $endpoint := $configuration.externalEgress }}
+    - to:
+        - ipBlock: {cidr: {{ required "workloads[].externalEgress[].cidr is required" $endpoint.cidr | quote }}}
+      ports:
+        {{- range $port := required "workloads[].externalEgress[].ports is required" $endpoint.ports }}
+        - {protocol: TCP, port: {{ $port }}}
+        {{- end }}
+    {{- end }}
     {{- if $configuration.kubernetesApi }}
     {{- if empty $root.Values.network.kubernetesApiCidrs }}
     {{- fail "network.kubernetesApiCidrs must identify the adopted API endpoint when runtime executors are enabled" }}
