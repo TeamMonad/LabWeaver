@@ -1457,10 +1457,10 @@
 - name: Require exact workload count and digest-only images
   ansible.builtin.assert:
     that:
-      - (sprint2_application_deployments.stdout | from_json).items | length == sprint2_application_workloads | length
-      - (sprint2_application_deployments.stdout | from_json).items | map(attribute='metadata.name') | sort == sprint2_application_workloads | sort
+      - (sprint2_application_deployments.stdout | from_json)['items'] | length == sprint2_application_workloads | length
+      - (sprint2_application_deployments.stdout | from_json)['items'] | map(attribute='metadata.name') | sort == sprint2_application_workloads | sort
       - >-
-        (sprint2_application_deployments.stdout | from_json).items
+        (sprint2_application_deployments.stdout | from_json)['items']
         | map(attribute='spec.template.spec.containers') | map('first')
         | map(attribute='image')
         | select('match', '^.+@sha256:[0-9a-f]{64}$') | list | length

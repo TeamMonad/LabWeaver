@@ -261,6 +261,22 @@ class AnsibleFixtureTests(unittest.TestCase):
         )
         self.assertNotIn("regex_replace", arguments)
 
+    def test_sprint2_application_reads_kubernetes_items_as_a_mapping_key(self) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        readback = tasks.split(
+            "- name: Require exact workload count and digest-only images", maxsplit=1
+        )[1].split("- name:", maxsplit=1)[0]
+
+        self.assertEqual(
+            readback.count(
+                "(sprint2_application_deployments.stdout | from_json)['items']"
+            ),
+            3,
+        )
+        self.assertNotIn("(sprint2_application_deployments.stdout | from_json).items", readback)
+
     def test_sprint2_application_binds_the_baseline_to_the_runtime_database(self) -> None:
         tasks = (
             ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
