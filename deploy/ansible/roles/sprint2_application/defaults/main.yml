@@ -19,6 +19,8 @@ sprint2_application_postgres_service: sprint2-admin
 sprint2_application_nats_server: ""
 sprint2_application_nats_credentials_file: ""
 sprint2_application_nats_ca_file: ""
+sprint2_application_nats_client_certificate_file: ""
+sprint2_application_nats_client_private_key_file: ""
 sprint2_application_nats_streams:
   - {name: LABWEAVER_AGENT_EVENTS, subjects: "labweaver.agent.>", max_age: 24h}
   - {name: LABWEAVER_CONTROL_COMMANDS, subjects: "labweaver.control.agent_build.requested.v1", max_age: 24h}

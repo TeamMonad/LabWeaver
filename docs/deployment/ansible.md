@@ -142,7 +142,8 @@ python3 tools/render_sprint2_bundle.py \
 ```
 
 The authoring command creates one infrastructure CA, separate server
-certificates, eight workload-specific NATS users and mTLS clients, the static
+certificates, eight workload-specific NATS users and mTLS clients, one distinct
+`sprint2-admin` mTLS client for controller-side NATS administration, the static
 operator/account resolver config, and random PostgreSQL/MinIO bootstrap
 credentials. A distinct Platform CA issues the exact Control, Access, Agent,
 Environment and OpenSSH Gateway identities: Control and Access have the combined
@@ -150,6 +151,16 @@ server/client EKU required by the reviewed call graph, Agent and Environment are
 server-only, and OpenSSH Gateway is client-only. It accepts only a new private
 path and fixed non-world-writable OpenSSL/NSC binaries. The checked-in renderer
 then enforces the exact foundation ConfigMap/Secret key set.
+
+Application adoption must bind the retained NATS administrator credentials and
+the dedicated TLS identity separately. Set
+`sprint2_application_nats_credentials_file`,
+`sprint2_application_nats_ca_file`,
+`sprint2_application_nats_client_certificate_file`, and
+`sprint2_application_nats_client_private_key_file` to root-owned mode-0600
+files in ignored private storage. The role passes all four inputs to every NATS
+CLI invocation and fails before mutation when any input is absent; a workload
+client certificate must not be reused for administration.
 
 ```sh
 cargo xtask sprint2-foundation --infra --env demo --yes

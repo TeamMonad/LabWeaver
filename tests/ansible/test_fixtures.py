@@ -301,6 +301,31 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("- account\n      - info", probe)
         self.assertNotIn("--json", probe)
 
+    def test_sprint2_application_nats_administration_requires_mtls(self) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        nats_sections = [
+            tasks.split(f"- name: {name}", maxsplit=1)[1].split("- name:", maxsplit=1)[0]
+            for name in (
+                "Probe retained JetStream",
+                "Inspect exact Sprint 2 streams without mutation",
+                "Create only missing Sprint 2 streams",
+                "Read back exact Sprint 2 streams",
+            )
+        ]
+        for section in nats_sections:
+            self.assertIn("--creds", section)
+            self.assertIn("--tlsca", section)
+            self.assertIn("--tlscert", section)
+            self.assertIn("--tlskey", section)
+
+        defaults = (
+            ROOT / "deploy/ansible/roles/sprint2_application/defaults/main.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("sprint2_application_nats_client_certificate_file", defaults)
+        self.assertIn("sprint2_application_nats_client_private_key_file", defaults)
+
     def test_sprint2_environment_provider_matches_control_image_policy(self) -> None:
         control = (ROOT / "deploy/config/control-plane.yaml.example").read_text(encoding="utf-8")
         providers = json.loads(

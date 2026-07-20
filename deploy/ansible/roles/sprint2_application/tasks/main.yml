@@ -14,6 +14,8 @@
       - sprint2_application_nats_server | length > 0
       - sprint2_application_nats_credentials_file | length > 0
       - sprint2_application_nats_ca_file | length > 0
+      - sprint2_application_nats_client_certificate_file | length > 0
+      - sprint2_application_nats_client_private_key_file | length > 0
       - sprint2_application_minio_alias | length > 0
       - sprint2_application_minio_endpoint is match('^https://[^/]+(?::[0-9]+)?/?$')
       - sprint2_application_minio_username | length > 0
@@ -72,6 +74,8 @@
     - "{{ sprint2_application_postgres_service_file }}"
     - "{{ sprint2_application_nats_credentials_file }}"
     - "{{ sprint2_application_nats_ca_file }}"
+    - "{{ sprint2_application_nats_client_certificate_file }}"
+    - "{{ sprint2_application_nats_client_private_key_file }}"
     - "{{ sprint2_application_keycloak_config }}"
     - "{{ sprint2_application_keycloak_ca_file }}"
     - "{{ sprint2_application_minio_ca_file }}"
@@ -338,6 +342,10 @@
       - "{{ sprint2_application_nats_credentials_file }}"
       - --tlsca
       - "{{ sprint2_application_nats_ca_file }}"
+      - --tlscert
+      - "{{ sprint2_application_nats_client_certificate_file }}"
+      - --tlskey
+      - "{{ sprint2_application_nats_client_private_key_file }}"
       - account
       - info
   changed_when: false
@@ -353,6 +361,10 @@
       - "{{ sprint2_application_nats_credentials_file }}"
       - --tlsca
       - "{{ sprint2_application_nats_ca_file }}"
+      - --tlscert
+      - "{{ sprint2_application_nats_client_certificate_file }}"
+      - --tlskey
+      - "{{ sprint2_application_nats_client_private_key_file }}"
       - stream
       - info
       - "{{ item.name }}"
@@ -373,6 +385,10 @@
       - "{{ sprint2_application_nats_credentials_file }}"
       - --tlsca
       - "{{ sprint2_application_nats_ca_file }}"
+      - --tlscert
+      - "{{ sprint2_application_nats_client_certificate_file }}"
+      - --tlskey
+      - "{{ sprint2_application_nats_client_private_key_file }}"
       - stream
       - add
       - "{{ item.item.name }}"
@@ -402,6 +418,10 @@
       - "{{ sprint2_application_nats_credentials_file }}"
       - --tlsca
       - "{{ sprint2_application_nats_ca_file }}"
+      - --tlscert
+      - "{{ sprint2_application_nats_client_certificate_file }}"
+      - --tlskey
+      - "{{ sprint2_application_nats_client_private_key_file }}"
       - stream
       - info
       - "{{ item.name }}"

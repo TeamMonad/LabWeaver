@@ -100,6 +100,8 @@ PLATFORM_IDENTITIES: dict[str, tuple[tuple[str, ...], str]] = {
     "openssh-gateway": (("URI:spiffe://labweaver/openssh-gateway",), "clientAuth"),
 }
 
+NATS_ADMIN_TLS_IDENTITY = "sprint2-admin"
+
 
 def _private_output(path: Path) -> Path:
     resolved = path.resolve()
@@ -344,6 +346,22 @@ def prepare(output: Path, openssl: Path, ssh_keygen: Path, nsc: Path, days: int)
         _copy(client_certificate, clients / name / "nats-client.crt")
         _copy(ca_certificate, clients / name / "nats-ca.pem")
 
+    admin_material = authority / f"issued-{NATS_ADMIN_TLS_IDENTITY}"
+    admin_material.mkdir(mode=0o700)
+    _, admin_certificate = _certificate(
+        openssl,
+        private_home,
+        authority,
+        admin_material,
+        NATS_ADMIN_TLS_IDENTITY,
+        (f"URI:spiffe://labweaver/{NATS_ADMIN_TLS_IDENTITY}",),
+        "clientAuth",
+        days,
+    )
+    _copy(admin_material / "key", clients / NATS_ADMIN_TLS_IDENTITY / "nats-client.key")
+    _copy(admin_certificate, clients / NATS_ADMIN_TLS_IDENTITY / "nats-client.crt")
+    _copy(ca_certificate, clients / NATS_ADMIN_TLS_IDENTITY / "nats-ca.pem")
+
     generated_config = authority / "nats-generated.conf"
     _nsc(
         nsc,
@@ -374,6 +392,7 @@ tls {
         "ca_sha256": hashlib.sha256(ca_certificate.read_bytes()).hexdigest(),
         "nats_config_sha256": hashlib.sha256(nats_config.encode()).hexdigest(),
         "nats_clients": len(NATS_USERS),
+        "nats_admin_tls_clients": 1,
         "platform_ca_sha256": hashlib.sha256(platform_ca_certificate.read_bytes()).hexdigest(),
         "platform_identities": len(PLATFORM_IDENTITIES),
         "collector_ssh_ca_public_sha256": hashlib.sha256((ssh_authority / "collector-ca.pub").read_bytes()).hexdigest(),

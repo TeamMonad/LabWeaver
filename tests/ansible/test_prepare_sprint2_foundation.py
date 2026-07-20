@@ -60,6 +60,9 @@ class FoundationAuthoringTests(unittest.TestCase):
             self.assertNotIn("*", publish)
             self.assertNotIn("*", subscribe)
 
+        self.assertEqual(FOUNDATION.NATS_ADMIN_TLS_IDENTITY, "sprint2-admin")
+        self.assertNotIn(FOUNDATION.NATS_ADMIN_TLS_IDENTITY, FOUNDATION.NATS_USERS)
+
     def test_platform_identities_have_exact_service_and_client_boundaries(self) -> None:
         identities = FOUNDATION.PLATFORM_IDENTITIES
         self.assertEqual(
