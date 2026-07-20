@@ -365,6 +365,14 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("sprint2_application_keycloak_authentication.stderr", authentication)
         self.assertIn("HTTP [45][0-9][0-9]", authentication)
 
+        session_binding = tasks.split(
+            "- name: Load the isolated Keycloak administration session", maxsplit=1
+        )[1].split("- name: Require retained Keycloak realm-management authorization", maxsplit=1)[0]
+        self.assertIn("sprint2_application_keycloak_session_file.content", session_binding)
+        self.assertIn("sprint2_application_keycloak_admin_realm", session_binding)
+        self.assertIn("SPRINT2_APPLICATION_KEYCLOAK_ADMIN_TOKEN_INVALID", session_binding)
+        self.assertIn("no_log: true", session_binding)
+
         authorization = tasks.split(
             "- name: Require retained Keycloak realm-management authorization", maxsplit=1
         )[1].split("- name:", maxsplit=1)[0]
@@ -373,7 +381,16 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("- --limit\n      - \"1\"", authorization)
         self.assertNotIn("--max-results", authorization)
         self.assertIn("HTTP [45][0-9][0-9]", authorization)
+        self.assertIn("sprint2_application_keycloak_admin_token", authorization)
         self.assertIn("no_log: true", authorization)
+
+        target_realm_commands = tasks.split(
+            "- name: Inspect retained Sprint 2 Keycloak realm", maxsplit=1
+        )[1].split("- name: Require the reviewed Sprint 2 identity surface", maxsplit=1)[0]
+        self.assertGreaterEqual(
+            target_realm_commands.count("sprint2_application_keycloak_admin_token"),
+            7,
+        )
 
     def test_sprint2_environment_provider_matches_control_image_policy(self) -> None:
         control = (ROOT / "deploy/config/control-plane.yaml.example").read_text(encoding="utf-8")

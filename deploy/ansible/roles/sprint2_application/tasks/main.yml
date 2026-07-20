@@ -573,6 +573,33 @@
     sprint2_application_keycloak_authentication.stderr is search('HTTP [45][0-9][0-9]')
   no_log: true
 
+- name: Load the isolated Keycloak administration session
+  ansible.builtin.slurp:
+    src: "{{ sprint2_application_keycloak_config }}"
+  register: sprint2_application_keycloak_session_file
+  changed_when: false
+  no_log: true
+
+- name: Bind the authenticated master-realm token explicitly
+  ansible.builtin.set_fact:
+    sprint2_application_keycloak_admin_token: >-
+      {{
+        ((sprint2_application_keycloak_session_file.content | b64decode | from_json)
+          .get('endpoints', {})
+          .get(sprint2_application_keycloak_server, {})
+          .get(sprint2_application_keycloak_admin_realm, {})
+          .get('token', ''))
+      }}
+  no_log: true
+
+- name: Require a usable Keycloak administration token
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_keycloak_admin_token is string
+      - sprint2_application_keycloak_admin_token.split('.') | length == 3
+    fail_msg: SPRINT2_APPLICATION_KEYCLOAK_ADMIN_TOKEN_INVALID
+  no_log: true
+
 - name: Require retained Keycloak realm-management authorization
   ansible.builtin.command:
     argv:
@@ -585,6 +612,8 @@
       - "1"
       - --fields
       - id,username
+      - --token
+      - "{{ sprint2_application_keycloak_admin_token }}"
       - --config
       - "{{ sprint2_application_keycloak_config }}"
   environment:
@@ -602,6 +631,8 @@
       - "{{ sprint2_application_kcadm }}"
       - get
       - "realms/{{ sprint2_application_keycloak_realm }}"
+      - --token
+      - "{{ sprint2_application_keycloak_admin_token }}"
       - --config
       - "{{ sprint2_application_keycloak_config }}"
   register: sprint2_application_keycloak_realm_before
@@ -617,6 +648,8 @@
       - "{{ sprint2_application_kcadm }}"
       - create
       - realms
+      - --token
+      - "{{ sprint2_application_keycloak_admin_token }}"
       - --config
       - "{{ sprint2_application_keycloak_config }}"
       - --file
@@ -637,6 +670,8 @@
       - "{{ sprint2_application_keycloak_realm }}"
       - --set
       - ifResourceExists=SKIP
+      - --token
+      - "{{ sprint2_application_keycloak_admin_token }}"
       - --config
       - "{{ sprint2_application_keycloak_config }}"
       - --file
@@ -653,6 +688,8 @@
       - "{{ sprint2_application_kcadm }}"
       - get
       - "realms/{{ sprint2_application_keycloak_realm }}"
+      - --token
+      - "{{ sprint2_application_keycloak_admin_token }}"
       - --config
       - "{{ sprint2_application_keycloak_config }}"
   register: sprint2_application_keycloak_realm_after
@@ -682,6 +719,8 @@
       - "clientId={{ sprint2_application_keycloak_client_id }}"
       - --fields
       - clientId,enabled
+      - --token
+      - "{{ sprint2_application_keycloak_admin_token }}"
       - --config
       - "{{ sprint2_application_keycloak_config }}"
   register: sprint2_application_keycloak_client
@@ -700,6 +739,8 @@
       - "{{ sprint2_application_keycloak_realm }}"
       - --fields
       - name
+      - --token
+      - "{{ sprint2_application_keycloak_admin_token }}"
       - --config
       - "{{ sprint2_application_keycloak_config }}"
   register: sprint2_application_keycloak_roles
@@ -718,6 +759,8 @@
       - "{{ sprint2_application_keycloak_realm }}"
       - --fields
       - username,enabled
+      - --token
+      - "{{ sprint2_application_keycloak_admin_token }}"
       - --config
       - "{{ sprint2_application_keycloak_config }}"
   register: sprint2_application_keycloak_users
