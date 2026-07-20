@@ -506,6 +506,15 @@
     content: |
       {{ sprint2_application_keycloak_endpoint_address }} {{ sprint2_application_keycloak_hostname }}
 
+- name: Stage the reviewed Keycloak realm on the execution host
+  ansible.builtin.copy:
+    src: "{{ sprint2_application_keycloak_realm_file }}"
+    dest: "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak-realm.json"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
 - name: Build an isolated Keycloak administration truststore
   ansible.builtin.command:
     argv:
@@ -584,7 +593,7 @@
       - --config
       - "{{ sprint2_application_keycloak_config }}"
       - --file
-      - "{{ sprint2_application_keycloak_realm_file }}"
+      - "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak-realm.json"
   when: sprint2_application_keycloak_realm_before.rc != 0
   environment:
     JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak.hosts"
@@ -604,7 +613,7 @@
       - --config
       - "{{ sprint2_application_keycloak_config }}"
       - --file
-      - "{{ sprint2_application_keycloak_realm_file }}"
+      - "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak-realm.json"
   when: sprint2_application_keycloak_realm_before.rc == 0
   environment:
     JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak.hosts"

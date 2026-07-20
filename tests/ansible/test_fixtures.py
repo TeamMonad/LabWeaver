@@ -337,6 +337,24 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn(".versioning.status != 'Enabled'", versioning)
         self.assertNotIn("no_log: true", versioning)
 
+    def test_sprint2_application_stages_keycloak_realm_on_execution_host(self) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        staging = tasks.split(
+            "- name: Stage the reviewed Keycloak realm on the execution host", maxsplit=1
+        )[1].split("- name:", maxsplit=1)[0]
+        self.assertIn('src: "{{ sprint2_application_keycloak_realm_file }}"', staging)
+        self.assertIn("keycloak-realm.json", staging)
+        self.assertIn('mode: "0600"', staging)
+        self.assertIn("no_log: true", staging)
+
+        remote_path = (
+            '"{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/'
+            'keycloak-realm.json"'
+        )
+        self.assertEqual(tasks.count(f"- {remote_path}"), 2)
+
     def test_sprint2_environment_provider_matches_control_image_policy(self) -> None:
         control = (ROOT / "deploy/config/control-plane.yaml.example").read_text(encoding="utf-8")
         providers = json.loads(

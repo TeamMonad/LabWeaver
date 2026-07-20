@@ -164,6 +164,9 @@ the dedicated TLS identity separately. Set
 files in ignored private storage. The role passes all four inputs to every NATS
 CLI invocation and fails before mutation when any input is absent; a workload
 client certificate must not be reused for administration.
+The reviewed Keycloak realm remains controller-owned input; the application
+role validates it locally, stages a root-owned mode-0600 copy in the bounded
+remote run directory, and gives only that execution-host path to `kcadm`.
 
 ```sh
 cargo xtask sprint2-foundation --infra --env demo --yes
