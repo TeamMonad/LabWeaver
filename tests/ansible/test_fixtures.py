@@ -445,6 +445,19 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("Wait for the OpenSSH Gateway shared load balancer address", tasks)
         self.assertIn("SPRINT2_APPLICATION_SSH_LOAD_BALANCER_INVALID", tasks)
 
+    def test_cilium_ingress_identity_reaches_only_public_backends(self) -> None:
+        policy = (
+            ROOT / "deploy/helm/labweaver/templates/cilium-ingress-policy.yaml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("name: gateway-backends", policy)
+        self.assertIn("values: [web, access-service]", policy)
+        self.assertIn("fromEntities: [ingress]", policy)
+        self.assertIn('{port: "8080", protocol: TCP}', policy)
+        self.assertIn("app.kubernetes.io/name: openssh-gateway", policy)
+        self.assertIn("fromEntities: [world]", policy)
+        self.assertIn('{port: "2222", protocol: TCP}', policy)
+
     def test_sprint2_service_configs_use_declared_tls_secret_keys(self) -> None:
         manifest = json.loads(
             (ROOT / "deploy/config/sprint2-bundle-manifest.json").read_text(encoding="utf-8")
