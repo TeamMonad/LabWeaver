@@ -25,6 +25,7 @@ export function createPlaywrightConfig({ ci = Boolean(process.env.CI) } = {}) {
       return {
         ...base,
         dependencies: ['setup'],
+        testIgnore: isFixture ? /\.live\.spec\.mjs$/ : /\.fixture\.spec\.mjs$/,
         use: { storageState: project.storageState },
       }
     }
@@ -61,11 +62,15 @@ export function createPlaywrightConfig({ ci = Boolean(process.env.CI) } = {}) {
     expect: { timeout: 10_000 },
     projects,
     metadata: evidenceMetadata,
-    webServer: {
-      command: isFixture ? 'pnpm preview:fixture' : 'pnpm preview --port 4173',
-      url: 'http://localhost:4173',
-      reuseExistingServer: !ci,
-    },
+    ...(isFixture || !process.env.LABWEAVER_BASE_URL
+      ? {
+          webServer: {
+            command: isFixture ? 'pnpm preview:fixture' : 'pnpm preview --port 4173',
+            url: 'http://localhost:4173',
+            reuseExistingServer: !ci,
+          },
+        }
+      : {}),
   }
 }
 

@@ -73,3 +73,24 @@ catalog, image digest set and Run ID. It must execute:
 
 Failed browser runs retain Trace, screenshot and video. Failed deployment or
 cleanup retains a sanitized diagnostic and blocks the release report.
+
+The real browser gate consumes existing connected-flow identities and reads
+Keycloak passwords only from private files. Values are never accepted on the
+command line or written to reports:
+
+```sh
+export LABWEAVER_BASE_URL=https://demo.lab.example
+export LABWEAVER_E2E_PRIVATE_DIR=.private/e2e
+export LABWEAVER_TEACHER_USERNAME=teacher
+export LABWEAVER_TEACHER_PASSWORD_FILE="$LABWEAVER_E2E_PRIVATE_DIR/teacher-password"
+export LABWEAVER_STUDENT_USERNAME=student
+export LABWEAVER_STUDENT_PASSWORD_FILE="$LABWEAVER_E2E_PRIVATE_DIR/student-password"
+export LABWEAVER_E2E_AGENT_RUN_ID=<approved-agent-run-id>
+export LABWEAVER_E2E_CONTAINER_ENVIRONMENT_ID=<frozen-container-environment-id>
+export LABWEAVER_E2E_VM_ENVIRONMENT_ID=<frozen-kubevirt-environment-id>
+pnpm --dir web test:e2e:live
+```
+
+Fixture specifications are excluded from this live invocation. Conversely,
+the fixture gate excludes the live specifications, so neither evidence class
+can silently satisfy the other.

@@ -18,6 +18,8 @@ test('role projects are uniquely derived from the authoritative definition', () 
     assert.deepEqual(project.dependencies, ['setup'])
     assert.equal(project.use.storageState, ROLE_PROJECTS_BY_NAME[name].storageState)
     assert.match(project.use.storageState, /^\.auth\/[a-z-]+\.json$/)
+    assert.equal(project.testIgnore.test(`${name}/example.live.spec.mjs`), isFixture)
+    assert.equal(project.testIgnore.test(`${name}/example.fixture.spec.mjs`), !isFixture)
   }
   for (const name of ['visual-regression', 'a11y']) {
     const project = config.projects.find((candidate) => candidate.name === name)
