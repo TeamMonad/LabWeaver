@@ -72,16 +72,19 @@ admission boundary enforces the executor namespace/ServiceAccount fence.
   BuildKit service bodies have been inventoried. The previous Draft PR head has
   a connected seven-image package; the ECNU provider-binding change requires a
   new package for the next exact source identity.
-- Blocker: edge-router command execution is restored. The reviewed ECNU
-  Anthropic-compatible endpoint is now explicit, but the authorized
-  `ECNU_API_KEY` is not present in the current process environment or the
-  prepared deployment host private input, so the Secret file cannot yet be
-  rendered without inventing or exposing a credential.
-- Exit: make the supplied `ECNU_API_KEY` available through a private file or the
-  deployment process environment, render it only as
-  `agent-service-secrets/anthropic-auth-token`, package the current head, then
-  complete two atomic application adoptions and rollback readback without
-  invoking reset or deleting retained infrastructure.
+- The reviewed ECNU Anthropic-compatible endpoint and `ecnu-plus` binding were
+  verified from the operator workstation with the supplied credential. The
+  credential is present only in ignored private input as
+  `agent-service-secrets/anthropic-auth-token`; it is not repository or release
+  evidence until the application adoption reads it back through the mounted
+  Secret file.
+- Blocker: SSH command execution to the retained control plane and router, and
+  direct Kubernetes API access from the operator workstation, currently time
+  out. Therefore the current source identity cannot be packaged, adopted or
+  verified without substituting stale deployment evidence.
+- Exit: restore the reviewed SSH/Kubernetes management path, package the
+  current head, then complete two atomic application adoptions and rollback
+  readback without invoking reset or deleting retained infrastructure.
 - Owner: A adoption execution; D independent Verify.
 
 The repository now has a separate `sprint2-foundation` reconciliation for the
