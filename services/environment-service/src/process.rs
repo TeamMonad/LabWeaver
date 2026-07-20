@@ -610,10 +610,11 @@ async fn require_schema(pool: &sqlx::PgPool) -> Result<(), EnvironmentProcessRun
 fn required(name: &'static str) -> Result<String, EnvironmentProcessRuntimeError> {
     let value =
         std::env::var(name).map_err(|_| EnvironmentProcessRuntimeError::Configuration(name))?;
-    if value.trim().is_empty() {
+    let value = value.trim();
+    if value.is_empty() {
         return Err(EnvironmentProcessRuntimeError::Configuration(name));
     }
-    Ok(value)
+    Ok(value.to_owned())
 }
 
 fn required_path(name: &'static str) -> Result<PathBuf, EnvironmentProcessRuntimeError> {

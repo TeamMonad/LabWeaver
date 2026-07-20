@@ -198,6 +198,8 @@ network:
     matchLabels: {kubernetes.io/metadata.name: labweaver-demo}
   environmentNamespaceSelector:
     matchLabels: {labweaver.io/environment: "true"}
+  identityNamespaceSelector:
+    matchLabels: {kubernetes.io/metadata.name: keycloak-system}
   kubernetesApiCidrs: []
   gatewayIngressCidrs: []
   externalServiceEndpoints: []

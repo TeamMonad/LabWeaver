@@ -177,6 +177,13 @@ baseline SQL is applied, the role checks `current_database()` against
 `SPRINT2_APPLICATION_POSTGRES_DATABASE_IDENTITY_MISMATCH` on drift. This keeps
 the six domain schemas and the runtime `database-url` in one authoritative
 database without resetting retained PostgreSQL state.
+When the retained Keycloak public hostname rejects traffic routed through the
+node-facing address, private Helm values may bind only `access-service` to the
+retained in-cluster identity Gateway through
+`workloads.access-service.hostAliases`. The checked-in NetworkPolicy permits
+Access to ports 443 and 8080 only in the namespace selected by
+`network.identityNamespaceSelector`; no cluster DNS rewrite or global egress
+exception is required.
 The reviewed Keycloak realm remains controller-owned input; the application
 role validates it locally, stages a root-owned mode-0600 copy in the bounded
 remote run directory, and gives only that execution-host path to `kcadm`.

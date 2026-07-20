@@ -300,6 +300,20 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("map('regex_replace', '^', '--filter=')", tasks)
         self.assertNotIn("consumer delete", tasks)
 
+    def test_access_can_bind_the_adopted_keycloak_gateway_without_global_dns_changes(self) -> None:
+        workloads = (
+            ROOT / "deploy/helm/labweaver/templates/workloads.yaml"
+        ).read_text(encoding="utf-8")
+        policies = (
+            ROOT / "deploy/helm/labweaver/templates/network-policy.yaml"
+        ).read_text(encoding="utf-8")
+        values = (ROOT / "deploy/helm/labweaver/values.yaml").read_text(encoding="utf-8")
+        self.assertIn("with $configuration.hostAliases", workloads)
+        self.assertNotIn("with $root.Values.hostAliases", workloads)
+        self.assertIn("identityNamespaceSelector", policies)
+        self.assertIn("port: 443", policies)
+        self.assertIn("kubernetes.io/metadata.name: keycloak-system", values)
+
     def test_sprint2_application_distributes_harbor_ca_and_bounds_gateway_pod_security(self) -> None:
         tasks = (
             ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
