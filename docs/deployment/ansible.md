@@ -164,6 +164,12 @@ the dedicated TLS identity separately. Set
 files in ignored private storage. The role passes all four inputs to every NATS
 CLI invocation and fails before mutation when any input is absent; a workload
 client certificate must not be reused for administration.
+The application role also owns the five reviewed pull-consumer identities used
+by Control, Agent and Environment. It creates a durable consumer only when it
+is absent, then reads back its stream, durable name, explicit-ack policy and
+complete subject filter set. A retained consumer with conflicting semantics
+blocks as `SPRINT2_APPLICATION_CONSUMER_CONFLICT`; the role never deletes or
+silently replaces retained JetStream state.
 The root-owned PostgreSQL service file must bind `sprint2-admin` to the
 `labweaver` database, not the server's default `postgres` database. Before any
 baseline SQL is applied, the role checks `current_database()` against

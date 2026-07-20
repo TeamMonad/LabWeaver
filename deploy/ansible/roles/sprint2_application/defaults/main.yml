@@ -29,6 +29,26 @@ sprint2_application_nats_streams:
   - {name: LABWEAVER_RELEASES, subjects: "labweaver.control.environment_template_release.>", max_age: 168h}
   - {name: LABWEAVER_ACCESS, subjects: "labweaver.access.>", max_age: 24h}
   - {name: LABWEAVER_SUBMISSION, subjects: "labweaver.evaluation.submission.>", max_age: 168h}
+sprint2_application_nats_consumers:
+  - name: control-agent-run-projection-v1
+    stream: LABWEAVER_AGENT_EVENTS
+    filters: ["labweaver.agent.run.>"]
+  - name: control-agent-build-projection-v1
+    stream: LABWEAVER_AGENT_EVENTS
+    filters:
+      - labweaver.agent.build.completed.v1
+      - labweaver.agent.build.failed.v1
+  - name: agent-build-command-v1
+    stream: LABWEAVER_CONTROL_COMMANDS
+    filters: [labweaver.control.agent_build.requested.v1]
+  - name: environment-service-v1
+    stream: LABWEAVER_ENVIRONMENT_COMMANDS
+    filters: [labweaver.environment.instance.lifecycle_requested.v1]
+  - name: environment-release-v1
+    stream: LABWEAVER_RELEASES
+    filters:
+      - labweaver.control.environment_template_release.published.v1
+      - labweaver.control.environment_template_release.withdrawn.v1
 sprint2_application_minio_alias: ""
 sprint2_application_minio_endpoint: ""
 sprint2_application_minio_username: ""

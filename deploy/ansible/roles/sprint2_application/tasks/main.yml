@@ -447,6 +447,87 @@
   loop: "{{ sprint2_application_stream_info_after.results }}"
   no_log: true
 
+- name: Inspect exact Sprint 2 durable consumers without mutation
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_nats }}"
+      - --server
+      - "{{ sprint2_application_nats_server }}"
+      - --creds
+      - "{{ sprint2_application_nats_credentials_file }}"
+      - --tlsca
+      - "{{ sprint2_application_nats_ca_file }}"
+      - --tlscert
+      - "{{ sprint2_application_nats_client_certificate_file }}"
+      - --tlskey
+      - "{{ sprint2_application_nats_client_private_key_file }}"
+      - consumer
+      - info
+      - "{{ item.stream }}"
+      - "{{ item.name }}"
+      - --json
+  loop: "{{ sprint2_application_nats_consumers }}"
+  register: sprint2_application_consumer_info_before
+  failed_when: false
+  changed_when: false
+
+- name: Create only missing Sprint 2 durable consumers
+  ansible.builtin.command:
+    argv: >-
+      {{ [sprint2_application_nats,
+          '--server', sprint2_application_nats_server,
+          '--creds', sprint2_application_nats_credentials_file,
+          '--tlsca', sprint2_application_nats_ca_file,
+          '--tlscert', sprint2_application_nats_client_certificate_file,
+          '--tlskey', sprint2_application_nats_client_private_key_file,
+          'consumer', 'add', item.item.stream, item.item.name,
+          '--filter']
+         + item.item.filters
+         + ['--ack', 'explicit', '--deliver', 'all', '--pull',
+            '--replay', 'instant', '--max-deliver', '10', '--defaults'] }}
+  loop: "{{ sprint2_application_consumer_info_before.results }}"
+  when: item.rc != 0
+  changed_when: true
+
+- name: Read back exact Sprint 2 durable consumers
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_nats }}"
+      - --server
+      - "{{ sprint2_application_nats_server }}"
+      - --creds
+      - "{{ sprint2_application_nats_credentials_file }}"
+      - --tlsca
+      - "{{ sprint2_application_nats_ca_file }}"
+      - --tlscert
+      - "{{ sprint2_application_nats_client_certificate_file }}"
+      - --tlskey
+      - "{{ sprint2_application_nats_client_private_key_file }}"
+      - consumer
+      - info
+      - "{{ item.stream }}"
+      - "{{ item.name }}"
+      - --json
+  loop: "{{ sprint2_application_nats_consumers }}"
+  register: sprint2_application_consumer_info_after
+  changed_when: false
+
+- name: Validate retained or created consumer identities
+  ansible.builtin.assert:
+    that:
+      - (item.stdout | from_json).name == item.item.name
+      - (item.stdout | from_json).stream_name == item.item.stream
+      - (item.stdout | from_json).config.durable_name == item.item.name
+      - (item.stdout | from_json).config.ack_policy == 'explicit'
+      - >-
+        (((item.stdout | from_json).config.filter_subjects | default([]))
+          + ([((item.stdout | from_json).config.filter_subject)]
+             if ((item.stdout | from_json).config.filter_subject | default('') | length > 0)
+             else [])) | sort == item.item.filters | sort
+    fail_msg: SPRINT2_APPLICATION_CONSUMER_CONFLICT
+  loop: "{{ sprint2_application_consumer_info_after.results }}"
+  no_log: true
+
 - name: Create the immutable artifact bucket only when missing
   ansible.builtin.command:
     argv:

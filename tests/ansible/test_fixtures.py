@@ -278,6 +278,27 @@ class AnsibleFixtureTests(unittest.TestCase):
             tasks.index("Render non-destructive six-domain baseline adoption"),
         )
 
+    def test_sprint2_application_reconciles_the_exact_durable_consumers(self) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        defaults = (
+            ROOT / "deploy/ansible/roles/sprint2_application/defaults/main.yml"
+        ).read_text(encoding="utf-8")
+        for consumer in (
+            "control-agent-run-projection-v1",
+            "control-agent-build-projection-v1",
+            "agent-build-command-v1",
+            "environment-service-v1",
+            "environment-release-v1",
+        ):
+            self.assertIn(consumer, defaults)
+        self.assertIn("Create only missing Sprint 2 durable consumers", tasks)
+        self.assertIn("SPRINT2_APPLICATION_CONSUMER_CONFLICT", tasks)
+        self.assertIn("'--ack', 'explicit'", tasks)
+        self.assertIn("'--pull'", tasks)
+        self.assertNotIn("consumer delete", tasks)
+
     def test_sprint2_application_distributes_harbor_ca_and_bounds_gateway_pod_security(self) -> None:
         tasks = (
             ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
