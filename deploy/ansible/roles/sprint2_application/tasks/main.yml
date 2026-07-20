@@ -855,6 +855,22 @@
         | selectattr('type', 'equalto', 'password')
         | list
         | length == 1
+      - >-
+        (sprint2_application_keycloak_seed.users
+          | selectattr('username', 'equalto', item)
+          | first).firstName | default('') | length > 0
+      - >-
+        (sprint2_application_keycloak_seed.users
+          | selectattr('username', 'equalto', item)
+          | first).lastName | default('') | length > 0
+      - >-
+        (sprint2_application_keycloak_seed.users
+          | selectattr('username', 'equalto', item)
+          | first).email | default('') | length > 0
+      - >-
+        (sprint2_application_keycloak_seed.users
+          | selectattr('username', 'equalto', item)
+          | first).emailVerified | default(false) | bool
     fail_msg: SPRINT2_APPLICATION_KEYCLOAK_SEED_INVALID
   loop: "{{ sprint2_application_keycloak_required_users }}"
   no_log: true
@@ -982,6 +998,47 @@
           | first).credentials
           | selectattr('type', 'equalto', 'password')
           | first).value }}
+    ca_path: "{{ sprint2_application_keycloak_ca_file }}"
+    status_code: 204
+    return_content: false
+  loop: >-
+    {{ sprint2_application_keycloak_users.stdout | from_json
+      | selectattr('username', 'in', sprint2_application_keycloak_required_users)
+      | list }}
+  loop_control:
+    label: "{{ item.username }}"
+  no_log: true
+
+- name: Reconcile managed Sprint 2 demo profiles without replacing the realm
+  ansible.builtin.uri:
+    url: >-
+      {{ sprint2_application_keycloak_server }}/admin/realms/{{ sprint2_application_keycloak_realm
+      }}/users/{{ item.id }}
+    method: PUT
+    headers:
+      Authorization: "Bearer {{ sprint2_application_keycloak_admin_token }}"
+    body_format: json
+    body:
+      id: "{{ item.id }}"
+      username: "{{ item.username }}"
+      enabled: true
+      firstName: >-
+        {{ (sprint2_application_keycloak_seed.users
+          | selectattr('username', 'equalto', item.username)
+          | first).firstName }}
+      lastName: >-
+        {{ (sprint2_application_keycloak_seed.users
+          | selectattr('username', 'equalto', item.username)
+          | first).lastName }}
+      email: >-
+        {{ (sprint2_application_keycloak_seed.users
+          | selectattr('username', 'equalto', item.username)
+          | first).email }}
+      emailVerified: true
+      requiredActions: >-
+        {{ (sprint2_application_keycloak_seed.users
+          | selectattr('username', 'equalto', item.username)
+          | first).requiredActions | default([]) }}
     ca_path: "{{ sprint2_application_keycloak_ca_file }}"
     status_code: 204
     return_content: false

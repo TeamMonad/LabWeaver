@@ -589,8 +589,10 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("sprint2_application_keycloak_required_users", identity_reconcile)
         self.assertIn("clients/{{", identity_reconcile)
         self.assertIn("reset-password", identity_reconcile)
-        self.assertEqual(identity_reconcile.count("status_code: 204"), 2)
-        self.assertEqual(identity_reconcile.count("ca_path:"), 2)
+        self.assertIn("firstName", identity_reconcile)
+        self.assertIn("requiredActions", identity_reconcile)
+        self.assertEqual(identity_reconcile.count("status_code: 204"), 3)
+        self.assertEqual(identity_reconcile.count("ca_path:"), 3)
         self.assertNotIn("delete", identity_reconcile.lower())
         self.assertGreaterEqual(identity_reconcile.count("no_log: true"), 5)
 
