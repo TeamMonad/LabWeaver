@@ -422,6 +422,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("name: openssh-gateway", ssh_route)
         self.assertIn("sshGatewayService.enabled", workloads)
         self.assertIn("metallb.io/allow-shared-ip", workloads)
+        self.assertNotIn("metallb.io/loadBalancerIPs", workloads)
         self.assertIn("type: LoadBalancer", workloads)
         self.assertIn('eq $name "access-service"', network_policy)
         self.assertIn("port: 8080", network_policy)

@@ -153,7 +153,6 @@ metadata:
   {{- if and (eq $name "openssh-gateway") $root.Values.sshGatewayService.enabled }}
   annotations:
     metallb.io/allow-shared-ip: {{ required "sshGatewayService.sharedIPKey is required" $root.Values.sshGatewayService.sharedIPKey | quote }}
-    metallb.io/loadBalancerIPs: {{ required "sshGatewayService.loadBalancerIP is required" $root.Values.sshGatewayService.loadBalancerIP | quote }}
   {{- end }}
   labels:
     app.kubernetes.io/name: {{ $name }}
