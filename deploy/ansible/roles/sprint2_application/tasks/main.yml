@@ -59,7 +59,8 @@
          sprint2_application_minio_bucket is match('^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$') and
          sprint2_application_object_store_service_name is match('^[a-z]([-a-z0-9]*[a-z0-9])?$') and
          sprint2_application_object_store_service_port | int == 9000 and
-         sprint2_application_object_store_backend_hostname is match('^[a-z0-9][a-z0-9.-]+$'))
+         sprint2_application_object_store_backend_hostname is match('^[a-z0-9][a-z0-9.-]+$') and
+         sprint2_application_object_store_external_cidr is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}/32$'))
       - >-
         sprint2_application_ssh_route_name | length == 0 or
         (sprint2_application_ssh_gateway_name | length > 0 and
@@ -1637,7 +1638,9 @@
         '--set', 'objectStoreRoute.servicePort=' + (sprint2_application_object_store_service_port | string),
         '--set-string', 'objectStoreRoute.pathPrefix=/' + sprint2_application_minio_bucket,
         '--set-string', 'objectStoreRoute.backendHostname=' + sprint2_application_object_store_backend_hostname,
-        '--set-file', 'objectStoreRoute.caCertificate=' + sprint2_application_minio_ca_file
+        '--set-file', 'objectStoreRoute.caCertificate=' + sprint2_application_minio_ca_file,
+        '--set-string', 'workloads.control-service.externalEgress[0].cidr=' + sprint2_application_object_store_external_cidr,
+        '--set', 'workloads.control-service.externalEgress[0].ports[0]=443'
       ]) -%}
       {%- endif -%}
       {%- if sprint2_application_ssh_route_name | length > 0 -%}

@@ -422,16 +422,26 @@ impl ControlService {
                     .map_err(ControlError::from),
                 _ => Err(ControlError::PersistenceIdentityMismatch),
             };
-            let Ok(object) = verified else {
-                return self
-                    .fail_upload(
-                        upload_id,
-                        completion_lease,
-                        idempotency_key,
-                        "LW_PACKAGE_OBJECT_VERIFICATION_FAILED",
-                        &frozen_versions,
-                    )
-                    .await;
+            let object = match verified {
+                Ok(object) => object,
+                Err(error) => {
+                    tracing::warn!(
+                        event = "control.problem_package.object_verification_failed",
+                        diagnostic = "LW_PACKAGE_OBJECT_VERIFICATION_FAILED",
+                        upload_id = %upload_id,
+                        object_key = %key,
+                        cause = %error,
+                    );
+                    return self
+                        .fail_upload(
+                            upload_id,
+                            completion_lease,
+                            idempotency_key,
+                            "LW_PACKAGE_OBJECT_VERIFICATION_FAILED",
+                            &frozen_versions,
+                        )
+                        .await;
+                }
             };
             self.record_frozen_version(upload_id, completion_lease, &key, &object.reference, now)
                 .await?;
