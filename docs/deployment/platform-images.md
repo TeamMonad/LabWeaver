@@ -9,10 +9,11 @@ Sprint 2 packages the enabled platform workloads into Harbor and deploys only im
 - `agent-service` (also runs `build-executor`)
 - `environment-service` (also runs separate `container-executor` and
   `kubevirt-executor` processes with independent identities)
+- `evaluation-service` (Sprint 2 immutable submission freeze coordination only)
 - `openssh-gateway`
 - `web`
 
-Evaluation and Resource remain separate code domains but are not packaged or deployed by the Sprint 2 profile.
+Resource remains a separate code domain but is not packaged or deployed by the Sprint 2 profile.
 
 ## Package gate
 
@@ -50,7 +51,8 @@ blocking error rather than a network fallback.
 
 The command fails unless the source tree is clean, the explicit Rust toolchain
 matches both digest-locked Rust builder images, BuildKit/Buildx/Trivy match
-`deploy/versions.lock.yml`, the Trivy database is digest pinned, both
+`deploy/versions.lock.yml`, the Trivy database is digest pinned and passed to
+the scanner as the sole database repository (without a public fallback), both
 reproducibility builds resolve to the same `linux/amd64` manifest digest, no
 secret or critical vulnerability is found, and every image is recorded as a
 Harbor digest reference. A moving `stable` Rust channel is rejected so a build

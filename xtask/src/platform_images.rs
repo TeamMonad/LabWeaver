@@ -438,7 +438,7 @@ fn package_linux(environment: &str, release: &str, root: &Path) -> Result<(), Ap
     verify_rust_toolchain(root, &lock.platform_images)?;
     let registry = required_env("LABWEAVER_PLATFORM_REGISTRY")?;
     validate_registry(&registry)?;
-    let database_digest = verified_trivy_database()?;
+    let (database_reference, database_digest) = verified_trivy_database()?;
     let run_id = format!("pkg-{environment}-{release}-{}", &source_commit[..12]);
     let run_dir = root.join("artifacts/package").join(&run_id);
     fs::create_dir_all(&run_dir)
@@ -453,6 +453,7 @@ fn package_linux(environment: &str, release: &str, root: &Path) -> Result<(), Ap
             component,
             &source_commit,
             source_date_epoch,
+            &database_reference,
             &database_digest,
             &lock.platform_images,
         )?);
@@ -566,6 +567,7 @@ fn build_scan(
     component: &str,
     source_commit: &str,
     source_date_epoch: u64,
+    database_reference: &str,
     database_digest: &str,
     lock: &PlatformImageLock,
 ) -> Result<ImageEvidence, AppError> {
@@ -601,7 +603,8 @@ fn build_scan(
         });
     }
     let reference = format!("{registry}/labweaver-system/{component}@{first}");
-    let (scan_bytes, critical, high) = scan_image(run_dir, component, &reference)?;
+    let (scan_bytes, critical, high) =
+        scan_image(run_dir, component, &reference, database_reference)?;
     Ok(ImageEvidence {
         component: component.to_owned(),
         reference: reference.clone(),
@@ -622,12 +625,15 @@ fn scan_image(
     run_dir: &Path,
     component: &str,
     reference: &str,
+    database_reference: &str,
 ) -> Result<(Vec<u8>, u64, u64), AppError> {
     let scan_path = scan_path(run_dir, component);
     run_checked(
         Command::new("trivy")
             .args([
                 "image",
+                "--db-repository",
+                database_reference,
                 "--format",
                 "json",
                 "--scanners",
@@ -880,22 +886,28 @@ fn platform_digest_from_manifest(
 }
 
 #[cfg(target_os = "linux")]
-fn verified_trivy_database() -> Result<String, AppError> {
+fn verified_trivy_database() -> Result<(String, String), AppError> {
     let reference = required_env("LABWEAVER_TRIVY_DATABASE_REFERENCE")?;
     let expected = required_env("LABWEAVER_TRIVY_DATABASE_DIGEST")?;
-    if !is_digest(&expected) || !reference.ends_with(&format!("@{expected}")) {
-        return Err(AppError::PlatformImage {
-            code: "LW_PACKAGE_MANIFEST_INVALID",
-            detail: "Trivy database must be an exact OCI digest reference".to_owned(),
-        });
-    }
+    validate_trivy_database_reference(&reference, &expected)?;
     if inspect_digest(&reference)? != expected {
         return Err(AppError::PlatformImage {
             code: "LW_PACKAGE_CONNECTED_IDENTITY_MISMATCH",
             detail: "Trivy database registry identity differs from configuration".to_owned(),
         });
     }
-    Ok(expected)
+    Ok((reference, expected))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn validate_trivy_database_reference(reference: &str, expected: &str) -> Result<(), AppError> {
+    if !is_digest(expected) || !reference.ends_with(&format!("@{expected}")) {
+        return Err(AppError::PlatformImage {
+            code: "LW_PACKAGE_MANIFEST_INVALID",
+            detail: "Trivy database must be an exact OCI digest reference".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -1419,6 +1431,29 @@ mod tests {
         );
         assert!(pinned_mirror("harbor.lab.lan", "RUST_BUILDER", "rust:latest").is_err());
         Ok(())
+    }
+
+    #[test]
+    fn trivy_database_reference_requires_the_exact_digest() {
+        let expected = digest('a');
+        assert!(
+            validate_trivy_database_reference(
+                &format!("harbor.lab.lan/cache/trivy-db@{expected}"),
+                &expected,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_trivy_database_reference("harbor.lab.lan/cache/trivy-db:2", &expected,)
+                .is_err()
+        );
+        assert!(
+            validate_trivy_database_reference(
+                &format!("harbor.lab.lan/cache/trivy-db@{}", digest('b')),
+                &expected,
+            )
+            .is_err()
+        );
     }
 
     #[test]
