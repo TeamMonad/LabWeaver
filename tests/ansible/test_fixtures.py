@@ -257,6 +257,23 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("'--values=' + sprint2_application_report_root", arguments)
         self.assertNotIn("regex_replace", arguments)
 
+    def test_sprint2_application_distributes_harbor_ca_and_bounds_gateway_pod_security(self) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Load the adopted Harbor CA for Kubernetes nodes", tasks)
+        self.assertIn("groups['k8s_cluster']", tasks)
+        self.assertIn("/etc/pki/ca-trust/source/anchors/labweaver-harbor.crt", tasks)
+        self.assertIn("/etc/containers/certs.d/", tasks)
+        self.assertIn("Refresh changed Kubernetes node trust stores", tasks)
+        application_namespace = tasks.split(
+            "- name: Reconcile application namespace without deleting retained state",
+            maxsplit=1,
+        )[1].split("- name:", maxsplit=1)[0]
+        self.assertIn("pod-security.kubernetes.io/enforce: baseline", application_namespace)
+        self.assertIn("pod-security.kubernetes.io/audit: restricted", application_namespace)
+        self.assertIn("pod-security.kubernetes.io/warn: restricted", application_namespace)
+
     def test_sprint2_buildkit_prepares_the_router_owned_package_endpoint(self) -> None:
         tasks = (ROOT / "deploy/ansible/roles/sprint2_buildkit/tasks/main.yml").read_text(
             encoding="utf-8"

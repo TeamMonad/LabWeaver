@@ -499,6 +499,58 @@
     sprint2_application_harbor_project_info.json[0].name != sprint2_application_harbor_project
   no_log: true
 
+- name: Load the adopted Harbor CA for Kubernetes nodes
+  ansible.builtin.slurp:
+    src: "{{ sprint2_application_harbor_ca_file }}"
+  register: sprint2_application_harbor_ca_bundle
+  changed_when: false
+  no_log: true
+
+- name: Create Harbor trust directories on every Kubernetes node
+  ansible.builtin.file:
+    path: "{{ item.1 }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  delegate_to: "{{ item.0 }}"
+  loop: >-
+    {{ groups['k8s_cluster']
+       | product(['/etc/pki/ca-trust/source/anchors',
+                  '/etc/containers/certs.d/' + sprint2_application_harbor_registry])
+       | list }}
+
+- name: Install the adopted Harbor CA in every Kubernetes node system trust
+  ansible.builtin.copy:
+    dest: /etc/pki/ca-trust/source/anchors/labweaver-harbor.crt
+    owner: root
+    group: root
+    mode: "0644"
+    content: "{{ sprint2_application_harbor_ca_bundle.content | b64decode }}"
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['k8s_cluster'] }}"
+  register: sprint2_application_harbor_system_ca
+  no_log: true
+
+- name: Refresh changed Kubernetes node trust stores
+  ansible.builtin.command: update-ca-trust
+  changed_when: true
+  delegate_to: "{{ item.item }}"
+  loop: "{{ sprint2_application_harbor_system_ca.results }}"
+  when: item.changed | bool
+  no_log: true
+
+- name: Install the adopted Harbor CA for every Kubernetes container runtime
+  ansible.builtin.copy:
+    dest: "/etc/containers/certs.d/{{ sprint2_application_harbor_registry }}/ca.crt"
+    owner: root
+    group: root
+    mode: "0644"
+    content: "{{ sprint2_application_harbor_ca_bundle.content | b64decode }}"
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['k8s_cluster'] }}"
+  no_log: true
+
 - name: Bind the reviewed Keycloak hostname to its retained Gateway address
   ansible.builtin.copy:
     dest: "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak.hosts"
@@ -800,7 +852,7 @@
         labels:
           app.kubernetes.io/part-of: labweaver
           labweaver.io/managed: "true"
-          pod-security.kubernetes.io/enforce: restricted
+          pod-security.kubernetes.io/enforce: baseline
           pod-security.kubernetes.io/audit: restricted
           pod-security.kubernetes.io/warn: restricted
 

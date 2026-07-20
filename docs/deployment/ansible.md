@@ -172,6 +172,20 @@ failure, the role rejects any 4xx/5xx response text and immediately performs a
 bounded master-realm user query. A readable realm metadata endpoint alone is
 not accepted as administrator authorization.
 
+Application adoption installs the reviewed Harbor public CA into both the
+system trust store and `/etc/containers/certs.d/<registry>/ca.crt` on every
+inventory member of `k8s_cluster`, then refreshes only changed trust stores.
+This is required before the digest-only workloads are created; an image pull
+through an untrusted registry certificate remains a blocking rollout error.
+
+The `labweaver-system` namespace enforces Pod Security `baseline` because the
+OpenSSH Gateway must start as root and retain only `CHOWN`, `DAC_OVERRIDE`,
+`FOWNER`, `SETGID`, `SETUID`, and `SYS_CHROOT` for the fixed account/session
+boundary. The namespace continues to audit and warn at `restricted`; every
+other Sprint 2 workload is explicitly non-root, drops all capabilities, and
+uses a read-only root filesystem. The Gateway exception does not permit
+`privileged`, HostPath, host networking, or a Kubernetes API token.
+
 ```sh
 cargo xtask sprint2-foundation --infra --env demo --yes
 ```
