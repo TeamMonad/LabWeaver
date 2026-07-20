@@ -1,3 +1,4 @@
+import base64
 import importlib.util
 import json
 import tempfile
@@ -90,6 +91,34 @@ class Sprint2BundleTests(unittest.TestCase):
             MODULE._require_private_path(self.root / "bundle.yaml")
 
         MODULE._require_private_path(self.root / ".private" / "bundle.yaml")
+
+    def test_jetstream_consumer_requires_ack_publish_permission(self) -> None:
+        secret = self.root / "consumer"
+        secret.mkdir()
+        payload = base64.urlsafe_b64encode(
+            json.dumps({"nats": {"pub": {"allow": ["$JS.API.>"]}}}).encode()
+        ).rstrip(b"=")
+        (secret / "nats.creds").write_bytes(
+            b"-----BEGIN NATS USER JWT-----\na."
+            + payload
+            + b".signature\n------END NATS USER JWT------\n"
+        )
+
+        with self.assertRaisesRegex(
+            MODULE.BundleError,
+            "LW_SPRINT2_NATS_ACK_PERMISSION_REQUIRED",
+        ):
+            MODULE._validate_jetstream_ack_permission("control-service-secrets", secret)
+
+        payload = base64.urlsafe_b64encode(
+            json.dumps({"nats": {"pub": {"allow": ["$JS.API.>", "$JS.ACK.>"]}}}).encode()
+        ).rstrip(b"=")
+        (secret / "nats.creds").write_bytes(
+            b"-----BEGIN NATS USER JWT-----\na."
+            + payload
+            + b".signature\n------END NATS USER JWT------\n"
+        )
+        MODULE._validate_jetstream_ack_permission("control-service-secrets", secret)
 
 
 if __name__ == "__main__":

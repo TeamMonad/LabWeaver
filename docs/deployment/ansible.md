@@ -147,7 +147,12 @@ certificates, eight workload-specific NATS users and mTLS clients, one distinct
 operator/account resolver config, and random PostgreSQL/MinIO bootstrap
 credentials. The `WORKLOADS` account enables JetStream with bounded 8 GiB disk,
 256 MiB memory, 16-stream, 64-consumer and 4096-pending-ack limits; the NATS
-server remains bounded by the same or stricter global storage limits. A distinct
+server remains bounded by the same or stricter global storage limits. Control,
+Agent, Environment and Evaluation are durable JetStream consumers, so their
+user JWTs explicitly allow both `$JS.API.>` and `$JS.ACK.>` publication. The
+application bundle renderer rejects any of these four credentials when the ACK
+permission is absent; a successful connection alone is not sufficient adoption
+evidence. A distinct
 Platform CA issues the exact Control, Access, Agent,
 Environment and OpenSSH Gateway identities: Control and Access have the combined
 server/client EKU required by the reviewed call graph, Agent and Environment are

@@ -23,6 +23,7 @@ NATS_USERS: dict[str, tuple[tuple[str, ...], tuple[str, ...], bool]] = {
     "control-service": (
         (
             "$JS.API.>",
+            "$JS.ACK.>",
             "labweaver.control.>",
             "labweaver.agent.run.requested.v1",
         ),
@@ -31,7 +32,12 @@ NATS_USERS: dict[str, tuple[tuple[str, ...], tuple[str, ...], bool]] = {
     ),
     "access-service": (("labweaver.access.>",), (), False),
     "agent-service": (
-        ("$JS.API.>", "labweaver.agent.>", "labweaver.provider.container_build.execute.v1"),
+        (
+            "$JS.API.>",
+            "$JS.ACK.>",
+            "labweaver.agent.>",
+            "labweaver.provider.container_build.execute.v1",
+        ),
         ("_INBOX.>", "labweaver.control.agent_build.requested.v1"),
         False,
     ),
@@ -39,6 +45,7 @@ NATS_USERS: dict[str, tuple[tuple[str, ...], tuple[str, ...], bool]] = {
     "environment-service": (
         (
             "$JS.API.>",
+            "$JS.ACK.>",
             "labweaver.environment.>",
             "labweaver.provider.kubernetes.container.v1",
             "labweaver.provider.kubevirt.vm.v1",
@@ -54,6 +61,7 @@ NATS_USERS: dict[str, tuple[tuple[str, ...], tuple[str, ...], bool]] = {
     "evaluation-service": (
         (
             "$JS.API.>",
+            "$JS.ACK.>",
             "labweaver.evaluation.submission.freeze_requested.v1",
             "labweaver.evaluation.submission.frozen.v1",
         ),

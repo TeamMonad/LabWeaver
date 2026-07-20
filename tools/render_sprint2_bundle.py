@@ -17,6 +17,15 @@ MAX_FILE_BYTES = 1024 * 1024
 DNS_LABEL = re.compile(r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$")
 DATA_KEY = re.compile(r"^[A-Za-z0-9._-]+$")
 API_VERSION = "deploy.labweaver.io/sprint2-bundle-manifest/v1"
+JETSTREAM_CONSUMER_SECRETS = {
+    "control-service-secrets",
+    "agent-service-secrets",
+    "environment-service-secrets",
+    "evaluation-service-secrets",
+}
+NATS_USER_JWT = re.compile(
+    rb"-----BEGIN NATS USER JWT-----\s+([A-Za-z0-9._-]+)\s+------END NATS USER JWT------"
+)
 
 
 class BundleError(Exception):
@@ -81,6 +90,24 @@ def _read_exact_files(directory: Path, keys: list[str], binary: bool) -> dict[st
     return result
 
 
+def _validate_jetstream_ack_permission(secret_name: str, directory: Path) -> None:
+    if secret_name not in JETSTREAM_CONSUMER_SECRETS:
+        return
+    try:
+        credentials = (directory / "nats.creds").read_bytes()
+        match = NATS_USER_JWT.search(credentials)
+        if match is None:
+            raise ValueError
+        encoded_payload = match.group(1).split(b".")[1]
+        encoded_payload += b"=" * (-len(encoded_payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(encoded_payload))
+        publish_allow = claims["nats"]["pub"]["allow"]
+    except (OSError, ValueError, IndexError, KeyError, TypeError, json.JSONDecodeError) as error:
+        raise BundleError("LW_SPRINT2_NATS_CREDENTIALS_INVALID") from error
+    if not isinstance(publish_allow, list) or "$JS.ACK.>" not in publish_allow:
+        raise BundleError("LW_SPRINT2_NATS_ACK_PERMISSION_REQUIRED")
+
+
 def render_bundle(manifest_path: Path, input_root: Path) -> bytes:
     manifest = _load_manifest(manifest_path)
     if not input_root.is_dir() or input_root.is_symlink():
@@ -102,6 +129,8 @@ def render_bundle(manifest_path: Path, input_root: Path) -> bytes:
         if {entry.name for entry in group_root.iterdir()} != expected_names:
             raise BundleError("LW_SPRINT2_BUNDLE_INPUT_INCOMPLETE")
         for name in sorted(expected_names):
+            if kind == "Secret":
+                _validate_jetstream_ack_permission(name, group_root / name)
             data = _read_exact_files(group_root / name, manifest[manifest_key][name], binary)
             value: dict[str, Any] = {
                 "apiVersion": "v1",

@@ -63,6 +63,23 @@ class FoundationAuthoringTests(unittest.TestCase):
         self.assertEqual(FOUNDATION.NATS_ADMIN_TLS_IDENTITY, "sprint2-admin")
         self.assertNotIn(FOUNDATION.NATS_ADMIN_TLS_IDENTITY, FOUNDATION.NATS_USERS)
 
+        for consumer in (
+            "control-service",
+            "agent-service",
+            "environment-service",
+            "evaluation-service",
+        ):
+            publish, _, _ = FOUNDATION.NATS_USERS[consumer]
+            self.assertIn("$JS.ACK.>", publish)
+        for non_consumer in (
+            "access-service",
+            "build-executor",
+            "container-executor",
+            "kubevirt-executor",
+        ):
+            publish, _, _ = FOUNDATION.NATS_USERS[non_consumer]
+            self.assertNotIn("$JS.ACK.>", publish)
+
     def test_workloads_account_has_bounded_jetstream_limits(self) -> None:
         limits = FOUNDATION.NATS_ACCOUNT_JETSTREAM_LIMITS
         self.assertEqual(
