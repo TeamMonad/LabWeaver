@@ -529,15 +529,7 @@
     content: "{{ sprint2_application_harbor_ca_bundle.content | b64decode }}"
   delegate_to: "{{ item }}"
   loop: "{{ groups['k8s_cluster'] }}"
-  register: sprint2_application_harbor_system_ca
-  no_log: true
-
-- name: Refresh changed Kubernetes node trust stores
-  ansible.builtin.command: update-ca-trust
-  changed_when: true
-  delegate_to: "{{ item.item }}"
-  loop: "{{ sprint2_application_harbor_system_ca.results }}"
-  when: item.changed | bool
+  notify: Refresh Kubernetes node Harbor trust
   no_log: true
 
 - name: Install the adopted Harbor CA for every Kubernetes container runtime
@@ -550,6 +542,9 @@
   delegate_to: "{{ item }}"
   loop: "{{ groups['k8s_cluster'] }}"
   no_log: true
+
+- name: Apply changed Kubernetes node Harbor trust before workload rollout
+  ansible.builtin.meta: flush_handlers
 
 - name: Bind the reviewed Keycloak hostname to its retained Gateway address
   ansible.builtin.copy:

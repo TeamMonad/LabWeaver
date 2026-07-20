@@ -4,3 +4,10 @@
   changed_when: true
   delegate_to: "{{ groups['routers'] | first }}"
   become: true
+
+- name: Refresh Kubernetes node Harbor trust
+  ansible.builtin.command: update-ca-trust
+  changed_when: true
+  delegate_to: "{{ item }}"
+  become: true
+  loop: "{{ groups['k8s_cluster'] }}"

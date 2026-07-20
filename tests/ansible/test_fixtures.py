@@ -265,11 +265,17 @@ class AnsibleFixtureTests(unittest.TestCase):
         tasks = (
             ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
         ).read_text(encoding="utf-8")
+        handlers = (
+            ROOT / "deploy/ansible/roles/sprint2_application/handlers/main.yml"
+        ).read_text(encoding="utf-8")
         self.assertIn("Load the adopted Harbor CA for Kubernetes nodes", tasks)
         self.assertIn("groups['k8s_cluster']", tasks)
         self.assertIn("/etc/pki/ca-trust/source/anchors/labweaver-harbor.crt", tasks)
         self.assertIn("/etc/containers/certs.d/", tasks)
-        self.assertIn("Refresh changed Kubernetes node trust stores", tasks)
+        self.assertIn("notify: Refresh Kubernetes node Harbor trust", tasks)
+        self.assertIn("Apply changed Kubernetes node Harbor trust before workload rollout", tasks)
+        self.assertIn("name: Refresh Kubernetes node Harbor trust", handlers)
+        self.assertIn("groups['k8s_cluster']", handlers)
         application_namespace = tasks.split(
             "- name: Reconcile application namespace without deleting retained state",
             maxsplit=1,
