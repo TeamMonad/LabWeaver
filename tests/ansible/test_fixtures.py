@@ -290,6 +290,17 @@ class AnsibleFixtureTests(unittest.TestCase):
             for locator in re.findall(r"/etc/labweaver/config/([a-z0-9.-]+)", configuration):
                 self.assertIn(locator, manifest["configMaps"][config_map])
 
+    def test_sprint2_application_uses_supported_nats_account_probe(self) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        probe = tasks.split("- name: Probe retained JetStream", maxsplit=1)[1].split(
+            "- name: Inspect exact Sprint 2 streams", maxsplit=1
+        )[0]
+
+        self.assertIn("- account\n      - info", probe)
+        self.assertNotIn("--json", probe)
+
     def test_sprint2_environment_provider_matches_control_image_policy(self) -> None:
         control = (ROOT / "deploy/config/control-plane.yaml.example").read_text(encoding="utf-8")
         providers = json.loads(

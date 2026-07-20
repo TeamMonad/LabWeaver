@@ -340,7 +340,6 @@
       - "{{ sprint2_application_nats_ca_file }}"
       - account
       - info
-      - --json
   changed_when: false
   no_log: true
 
