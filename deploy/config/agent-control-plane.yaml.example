@@ -26,9 +26,12 @@ worker_id: "agent-worker-01"
 dispatch_lease_seconds: 120
 track_lease_seconds: 120
 poll_interval_milliseconds: 500
-# Values are read from mounted files and passed into an env-cleared Claude Code process.
+# The ECNU Anthropic-compatible endpoint is a reviewed ConfigMap value. Its token is a
+# Secret value. Both are read from mounted files and passed into an env-cleared Claude Code
+# process; neither is inherited from the service environment.
 worker_environment_files:
-  ANTHROPIC_API_KEY: "/etc/labweaver/secrets/anthropic-api-key"
+  ANTHROPIC_BASE_URL: "/etc/labweaver/config/anthropic-base-url"
+  ANTHROPIC_AUTH_TOKEN: "/etc/labweaver/secrets/anthropic-auth-token"
 build:
   # Served by the deployment-owned executor binding immutable ArtifactRef inputs
   # to restricted BuildKit and private Harbor/Trivy.

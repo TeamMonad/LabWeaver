@@ -571,6 +571,8 @@ enum StartupError {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::case_sensitive_file_extension_comparisons)]
 mod deployment_contract_tests {
+    use std::collections::BTreeMap;
+
     use super::{BuildExecutorDeploymentFile, DeploymentFile};
 
     #[test]
@@ -582,6 +584,19 @@ mod deployment_contract_tests {
         assert!(deployment.database_url_file.starts_with('/'));
         assert!(deployment.nats.server.starts_with("tls://"));
         assert!(deployment.build.provider_subject.ends_with(".v1"));
+        assert_eq!(
+            deployment.worker_environment_files,
+            BTreeMap::from([
+                (
+                    "ANTHROPIC_AUTH_TOKEN".to_owned(),
+                    "/etc/labweaver/secrets/anthropic-auth-token".to_owned(),
+                ),
+                (
+                    "ANTHROPIC_BASE_URL".to_owned(),
+                    "/etc/labweaver/config/anthropic-base-url".to_owned(),
+                ),
+            ])
+        );
         assert!(!example.contains(".v2"));
     }
 

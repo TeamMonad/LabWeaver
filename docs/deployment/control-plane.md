@@ -9,6 +9,13 @@ Control and Agent read one reviewed YAML document from
 NATS credentials and private keys are file locators; secret values do not belong in YAML, logs,
 reports or Git.
 
+The Sprint 2 Claude Code worker has one deployment-owned provider binding: the reviewed ECNU
+Anthropic-compatible base URL from `agent-service-config/anthropic-base-url`, and the
+operator-provided `ECNU_API_KEY` mounted as
+`agent-service-secrets/anthropic-auth-token`. The env-cleared child receives these as
+`ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`. Missing or empty input blocks startup; the worker
+does not inherit an ambient provider credential and has no fallback endpoint.
+
 The deployment must provision these identities before either service starts:
 
 - Gateway client CA and exact URI SAN accepted by Control;

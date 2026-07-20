@@ -69,16 +69,19 @@ admission boundary enforces the executor namespace/ServiceAccount fence.
   Sprint 2 Helm profile and an allowlisted non-destructive application adoption
   path. The legacy reset playbook is explicitly outside this delivery.
 - Retained PostgreSQL, NATS, MinIO, Harbor, Keycloak, Kubernetes, KubeVirt and
-  BuildKit service bodies have been inventoried. BuildKit packaging completed at
-  source `8db85997`; a new package is required for the current PR head.
-- Blocker: the edge router SSH port is reachable, but both ordinary-user and
-  root command channels time out. The private application bundle is otherwise
-  prepared but still lacks the Claude Code runtime credential.
-- Exit: restore edge-router command execution, provide `ANTHROPIC_API_KEY` or
-  explicitly authorize a long-lived Claude Code OAuth token, render the exact
-  private bundle, package the current head, then complete two atomic application
-  adoptions and rollback readback without invoking reset or deleting retained
-  infrastructure.
+  BuildKit service bodies have been inventoried. The previous Draft PR head has
+  a connected seven-image package; the ECNU provider-binding change requires a
+  new package for the next exact source identity.
+- Blocker: edge-router command execution is restored. The reviewed ECNU
+  Anthropic-compatible endpoint is now explicit, but the authorized
+  `ECNU_API_KEY` is not present in the current process environment or the
+  prepared deployment host private input, so the Secret file cannot yet be
+  rendered without inventing or exposing a credential.
+- Exit: make the supplied `ECNU_API_KEY` available through a private file or the
+  deployment process environment, render it only as
+  `agent-service-secrets/anthropic-auth-token`, package the current head, then
+  complete two atomic application adoptions and rollback readback without
+  invoking reset or deleting retained infrastructure.
 - Owner: A adoption execution; D independent Verify.
 
 The repository now has a separate `sprint2-foundation` reconciliation for the

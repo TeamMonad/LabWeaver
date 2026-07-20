@@ -263,13 +263,16 @@ class AnsibleFixtureTests(unittest.TestCase):
         manifest = json.loads(
             (ROOT / "deploy/config/sprint2-bundle-manifest.json").read_text(encoding="utf-8")
         )
-        for service, example in (
-            ("control-service-secrets", "control-plane.yaml.example"),
-            ("access-service-secrets", "access-auth.yaml.example"),
+        for service, config_map, example in (
+            ("control-service-secrets", "control-service-config", "control-plane.yaml.example"),
+            ("access-service-secrets", "access-service-config", "access-auth.yaml.example"),
+            ("agent-service-secrets", "agent-service-config", "agent-control-plane.yaml.example"),
         ):
             configuration = (ROOT / "deploy/config" / example).read_text(encoding="utf-8")
             for locator in re.findall(r"/etc/labweaver/secrets/([a-z0-9.-]+)", configuration):
                 self.assertIn(locator, manifest["secrets"][service])
+            for locator in re.findall(r"/etc/labweaver/config/([a-z0-9.-]+)", configuration):
+                self.assertIn(locator, manifest["configMaps"][config_map])
 
     def test_sprint2_environment_provider_matches_control_image_policy(self) -> None:
         control = (ROOT / "deploy/config/control-plane.yaml.example").read_text(encoding="utf-8")

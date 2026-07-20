@@ -34,10 +34,18 @@ Copy and specialize the examples as follows:
 - `control-plane.yaml.example` → `control-service-config/config.yaml`
 - `access-auth.yaml.example` → `access-service-config/config.yaml`
 - `agent-control-plane.yaml.example` → `agent-service-config/config.yaml`
+- `anthropic-base-url` → `agent-service-config/anthropic-base-url` (copy exactly)
 - `build-executor.yaml.example` → `build-executor-config/config.yaml`
 - `environment-providers.json.example` → `environment-service-config/providers.json`
 - `runtime-executor.yaml.example` → both runtime executor `config.yaml` files
 - `web-deployment.json.example` → `web-config/deployment.json`
+
+Sprint 2 binds the pinned Claude Code CLI to ECNU's Anthropic-compatible endpoint. Put the
+operator-provided `ECNU_API_KEY` value in
+`secrets/agent-service-secrets/anthropic-auth-token` with mode `0600`; never put it in YAML, a
+command argument, a log or a report. The Agent process receives only
+`ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` from the two mounted files. There is no ambient
+credential fallback or alternate provider route.
 
 Environment-specific Helm values must explicitly bind adopted infrastructure names and VIPs. This
 includes reviewed `hostAliases`, matching `/32` entries under

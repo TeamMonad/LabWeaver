@@ -3,7 +3,7 @@
   "namespace": "labweaver-system",
   "configMaps": {
     "access-service-config": ["config.yaml"],
-    "agent-service-config": ["config.yaml"],
+    "agent-service-config": ["anthropic-base-url", "config.yaml"],
     "build-executor-config": ["config.yaml"],
     "container-executor-config": ["config.yaml"],
     "control-service-config": ["config.yaml"],
@@ -28,7 +28,7 @@
       "tls.key"
     ],
     "agent-service-secrets": [
-      "anthropic-api-key",
+      "anthropic-auth-token",
       "database-url",
       "minio-access-key",
       "minio-ca.pem",
