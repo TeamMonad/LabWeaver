@@ -22,6 +22,10 @@ spec:
       labels:
         app.kubernetes.io/name: {{ $name }}
         {{- include "labweaver.labels" $root | nindent 8 }}
+      {{- if and (eq $name "web") $root.Values.objectStoreRoute.enabled }}
+      annotations:
+        checksum/object-store-proxy: {{ printf "%s\n%s\n%s\n%s" $root.Values.objectStoreRoute.caCertificate $root.Values.objectStoreRoute.backendHostname $root.Values.objectStoreRoute.pathPrefix $root.Values.objectStoreRoute.serviceName | sha256sum | quote }}
+      {{- end }}
     spec:
       serviceAccountName: {{ $name }}
       automountServiceAccountToken: {{ default false $configuration.kubernetesApi }}
@@ -120,6 +124,10 @@ spec:
             - {name: secret-source, mountPath: /var/run/labweaver-secrets-src, readOnly: true}
             - {name: gateway-secrets, mountPath: /etc/labweaver/secrets}
             {{- end }}
+            {{- if and (eq $name "web") $root.Values.objectStoreRoute.enabled }}
+            - {name: object-store, mountPath: /etc/labweaver/object-store, readOnly: true}
+            - {name: object-store-nginx, mountPath: /etc/nginx/labweaver-conf.d, readOnly: true}
+            {{- end }}
       volumes:
         {{- if $configuration.configMap }}
         - name: config
@@ -142,6 +150,16 @@ spec:
             defaultMode: 0400
         - name: gateway-secrets
           emptyDir: {sizeLimit: 8Mi}
+        {{- end }}
+        {{- if and (eq $name "web") $root.Values.objectStoreRoute.enabled }}
+        - name: object-store
+          configMap:
+            name: {{ $root.Release.Name }}-object-store-ca
+            items: [{key: ca.crt, path: ca.crt}]
+        - name: object-store-nginx
+          configMap:
+            name: {{ $root.Release.Name }}-object-store-ca
+            items: [{key: object-store.conf, path: object-store.conf}]
         {{- end }}
 {{- with $configuration.ports }}
 ---

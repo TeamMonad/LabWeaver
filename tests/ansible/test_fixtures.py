@@ -263,7 +263,6 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("'objectStoreRoute.enabled=true'", arguments)
         self.assertIn("'objectStoreRoute.pathPrefix=/' + sprint2_application_minio_bucket", arguments)
         self.assertIn("'objectStoreRoute.caCertificate=' + sprint2_application_minio_ca_file", arguments)
-        self.assertIn("'workloads.control-service.externalEgress[0].cidr='", arguments)
         self.assertIn(
             "'portalRoute.namespace=' + sprint2_application_portal_route_namespace",
             arguments,
@@ -279,6 +278,23 @@ class AnsibleFixtureTests(unittest.TestCase):
             arguments,
         )
         self.assertNotIn("regex_replace", arguments)
+
+    def test_object_store_route_uses_existing_web_workload_with_verified_tls(self) -> None:
+        backend = (
+            ROOT / "deploy/helm/labweaver/templates/object-store-backend.yaml"
+        ).read_text(encoding="utf-8")
+        route = (
+            ROOT / "deploy/helm/labweaver/templates/portal-route.yaml"
+        ).read_text(encoding="utf-8")
+        nginx = (ROOT / "containers/nginx.conf").read_text(encoding="utf-8")
+        self.assertIn("proxy_ssl_verify on;", backend)
+        self.assertIn("proxy_request_buffering off;", backend)
+        self.assertIn("proxy_set_header Host $http_host;", backend)
+        self.assertNotIn("kind: BackendTLSPolicy", backend)
+        self.assertNotIn("kind: CiliumNetworkPolicy", backend)
+        self.assertIn("- name: web", route)
+        self.assertNotIn("-object-store\n", route)
+        self.assertIn("include /etc/nginx/labweaver-conf.d/*.conf;", nginx)
 
     def test_sprint2_application_reads_kubernetes_items_as_a_mapping_key(self) -> None:
         tasks = (

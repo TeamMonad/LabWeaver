@@ -120,7 +120,6 @@ sprint2_application_object_store_route_enabled: false
 sprint2_application_object_store_service_name: minio
 sprint2_application_object_store_service_port: 9000
 sprint2_application_object_store_backend_hostname: minio.labweaver-data.svc
-sprint2_application_object_store_external_cidr: ""
 sprint2_application_ssh_route_namespace: ""
 sprint2_application_ssh_route_name: ""
 sprint2_application_ssh_gateway_name: ""

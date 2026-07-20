@@ -40,13 +40,15 @@ ProblemPackage -> Claude Code AgentRun -> independent candidate approval
 -> FrozenSubmission -> cleanup
 ```
 
-Browser uploads use the portal HTTPS origin. A bucket-path `HTTPRoute`
-preserves the SigV4 `Host` and path while forwarding to the retained MinIO
-Service, and `BackendTLSPolicy` validates the MinIO certificate against the
-reviewed internal CA. Control signs that public authority; Agent, build,
-runtime and freeze workers continue to use the cluster-internal MinIO endpoint.
-The route, `ReferenceGrant`, CA `ConfigMap` and ingress allowance are additive
-application objects and do not reconfigure or replace MinIO.
+Browser uploads use the portal HTTPS origin. The bucket path is routed to the
+existing Web Nginx workload, which preserves the SigV4 `Host` and path and
+proxies to the retained MinIO Service over verified TLS. The MinIO CA and the
+allowlisted proxy location are mounted from a release-owned `ConfigMap`.
+Control signs the public authority; Agent, build, runtime and freeze workers
+continue to use the cluster-internal MinIO endpoint. This application-layer
+bridge is required because the adopted Cilium Gateway controller does not
+reconcile `BackendTLSPolicy`; it neither reconfigures nor replaces MinIO and
+does not add another workload or service boundary.
 
 ### Contracts and persistence
 

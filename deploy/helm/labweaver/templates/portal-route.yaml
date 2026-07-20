@@ -21,25 +21,6 @@ spec:
     - group: ""
       kind: Service
       name: access-service
-{{- if .Values.objectStoreRoute.enabled }}
----
-apiVersion: gateway.networking.k8s.io/v1beta1
-kind: ReferenceGrant
-metadata:
-  name: {{ $routeName }}-object-store
-  namespace: {{ required "objectStoreRoute.namespace is required" .Values.objectStoreRoute.namespace }}
-  labels:
-    {{- include "labweaver.labels" . | nindent 4 }}
-spec:
-  from:
-    - group: gateway.networking.k8s.io
-      kind: HTTPRoute
-      namespace: {{ $routeNamespace }}
-  to:
-    - group: ""
-      kind: Service
-      name: {{ required "objectStoreRoute.serviceName is required" .Values.objectStoreRoute.serviceName }}
-{{- end }}
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
@@ -61,9 +42,9 @@ spec:
             type: PathPrefix
             value: {{ required "objectStoreRoute.pathPrefix is required" .Values.objectStoreRoute.pathPrefix | quote }}
       backendRefs:
-        - name: {{ required "objectStoreRoute.serviceName is required" .Values.objectStoreRoute.serviceName }}
-          namespace: {{ required "objectStoreRoute.namespace is required" .Values.objectStoreRoute.namespace }}
-          port: {{ required "objectStoreRoute.servicePort is required" .Values.objectStoreRoute.servicePort }}
+        - name: web
+          namespace: {{ .Release.Namespace }}
+          port: 8080
     {{- end }}
     - matches:
         - path: {type: PathPrefix, value: /api}
