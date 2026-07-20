@@ -1073,11 +1073,11 @@ fn connected_validate(manifest: &PackageManifest, root: &Path) -> Result<(), App
     if sha256(&lock_bytes) != manifest.component_lock_hash {
         return manifest_invalid("component lock identity changed");
     }
-    let database = verified_trivy_database()?;
+    let (_, database_digest) = verified_trivy_database()?;
     if manifest
         .images
         .iter()
-        .any(|image| image.scan.database_digest != database)
+        .any(|image| image.scan.database_digest != database_digest)
     {
         return Err(AppError::PlatformImage {
             code: "LW_PACKAGE_CONNECTED_IDENTITY_MISMATCH",
