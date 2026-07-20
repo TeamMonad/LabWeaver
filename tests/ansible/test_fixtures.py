@@ -246,6 +246,17 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("port: 2222", ssh_listener)
         self.assertNotIn('port: "{{', ssh_listener)
 
+    def test_sprint2_application_builds_helm_value_arguments_without_regex(self) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        arguments = tasks.split(
+            "- name: Build immutable Helm arguments", maxsplit=1
+        )[1].split("- name:", maxsplit=1)[0]
+        self.assertIn("for values_file in sprint2_application_values_files", arguments)
+        self.assertIn("'--values=' + sprint2_application_report_root", arguments)
+        self.assertNotIn("regex_replace", arguments)
+
     def test_sprint2_buildkit_prepares_the_router_owned_package_endpoint(self) -> None:
         tasks = (ROOT / "deploy/ansible/roles/sprint2_buildkit/tasks/main.yml").read_text(
             encoding="utf-8"

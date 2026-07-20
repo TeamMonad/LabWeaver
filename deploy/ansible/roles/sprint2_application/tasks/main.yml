@@ -1248,10 +1248,13 @@
 - name: Build immutable Helm arguments
   ansible.builtin.set_fact:
     sprint2_application_values_argv: >-
-      {{ sprint2_application_values_files
-         | map('basename')
-         | map('regex_replace', '^(.*)$', sprint2_application_report_root + '/' + sprint2_application_run_id + '/\\1')
-         | map('regex_replace', '^(.*)$', '--values=\\1') | list }}
+      {%- set values = [] -%}
+      {%- for values_file in sprint2_application_values_files -%}
+      {%- set _ = values.append(
+        '--values=' + sprint2_application_report_root + '/' + sprint2_application_run_id
+        + '/' + (values_file | basename)) -%}
+      {%- endfor -%}
+      {{ values }}
     sprint2_application_image_argv: >-
       {%- set values = [] -%}
       {%- for image in sprint2_application_package.images -%}
