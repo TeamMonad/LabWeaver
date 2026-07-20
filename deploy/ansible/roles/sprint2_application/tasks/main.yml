@@ -480,9 +480,8 @@
           '--tlsca', sprint2_application_nats_ca_file,
           '--tlscert', sprint2_application_nats_client_certificate_file,
           '--tlskey', sprint2_application_nats_client_private_key_file,
-          'consumer', 'add', item.item.stream, item.item.name,
-          '--filter']
-         + item.item.filters
+          'consumer', 'add', item.item.stream, item.item.name]
+         + (item.item.filters | map('regex_replace', '^', '--filter=') | list)
          + ['--ack', 'explicit', '--deliver', 'all', '--pull',
             '--replay', 'instant', '--max-deliver', '10', '--defaults'] }}
   loop: "{{ sprint2_application_consumer_info_before.results }}"

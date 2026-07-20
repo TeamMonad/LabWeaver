@@ -297,6 +297,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("SPRINT2_APPLICATION_CONSUMER_CONFLICT", tasks)
         self.assertIn("'--ack', 'explicit'", tasks)
         self.assertIn("'--pull'", tasks)
+        self.assertIn("map('regex_replace', '^', '--filter=')", tasks)
         self.assertNotIn("consumer delete", tasks)
 
     def test_sprint2_application_distributes_harbor_ca_and_bounds_gateway_pod_security(self) -> None:
