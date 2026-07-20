@@ -277,6 +277,11 @@ class AnsibleFixtureTests(unittest.TestCase):
         )
         self.assertNotIn("(sprint2_application_deployments.stdout | from_json).items", readback)
 
+        helpers = (
+            ROOT / "deploy/helm/labweaver/templates/_helpers.tpl"
+        ).read_text(encoding="utf-8")
+        self.assertIn("app.kubernetes.io/instance: {{ .Release.Name }}", helpers)
+
     def test_sprint2_application_binds_the_baseline_to_the_runtime_database(self) -> None:
         tasks = (
             ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
