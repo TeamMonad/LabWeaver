@@ -121,6 +121,8 @@ sprint2_application_ssh_route_name: ""
 sprint2_application_ssh_gateway_name: ""
 sprint2_application_ssh_gateway_listener_name: ssh
 sprint2_application_ssh_gateway_port: 2222
+sprint2_application_ssh_load_balancer_ip: ""
+sprint2_application_ssh_shared_ip_key: labweaver-sprint2-public
 sprint2_application_workloads:
   - control-service
   - access-service

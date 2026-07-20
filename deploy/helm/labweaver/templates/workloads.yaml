@@ -150,10 +150,20 @@ kind: Service
 metadata:
   name: {{ $name }}
   namespace: {{ $root.Release.Namespace }}
+  {{- if and (eq $name "openssh-gateway") $root.Values.sshGatewayService.enabled }}
+  annotations:
+    metallb.io/allow-shared-ip: {{ required "sshGatewayService.sharedIPKey is required" $root.Values.sshGatewayService.sharedIPKey | quote }}
+    metallb.io/loadBalancerIPs: {{ required "sshGatewayService.loadBalancerIP is required" $root.Values.sshGatewayService.loadBalancerIP | quote }}
+  {{- end }}
   labels:
     app.kubernetes.io/name: {{ $name }}
     {{- include "labweaver.labels" $root | nindent 4 }}
 spec:
+  {{- if and (eq $name "openssh-gateway") $root.Values.sshGatewayService.enabled }}
+  type: LoadBalancer
+  loadBalancerIP: {{ required "sshGatewayService.loadBalancerIP is required" $root.Values.sshGatewayService.loadBalancerIP | quote }}
+  externalTrafficPolicy: Cluster
+  {{- end }}
   selector: {app.kubernetes.io/name: {{ $name }}}
   ports:
     {{- range . }}

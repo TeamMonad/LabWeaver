@@ -269,6 +269,11 @@ class AnsibleFixtureTests(unittest.TestCase):
             "'sshGatewayRoute.namespace=' + sprint2_application_ssh_route_namespace",
             arguments,
         )
+        self.assertIn("'sshGatewayService.enabled=true'", arguments)
+        self.assertIn(
+            "'sshGatewayService.loadBalancerIP=' + sprint2_application_ssh_load_balancer_ip",
+            arguments,
+        )
         self.assertNotIn("regex_replace", arguments)
 
     def test_sprint2_application_reads_kubernetes_items_as_a_mapping_key(self) -> None:
@@ -397,6 +402,9 @@ class AnsibleFixtureTests(unittest.TestCase):
         ssh_route = (
             ROOT / "deploy/helm/labweaver/templates/ssh-gateway-route.yaml"
         ).read_text(encoding="utf-8")
+        workloads = (
+            ROOT / "deploy/helm/labweaver/templates/workloads.yaml"
+        ).read_text(encoding="utf-8")
         network_policy = (
             ROOT / "deploy/helm/labweaver/templates/network-policy.yaml"
         ).read_text(encoding="utf-8")
@@ -412,12 +420,29 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("value: /connect", portal)
         self.assertIn("kind: TCPRoute", ssh_route)
         self.assertIn("name: openssh-gateway", ssh_route)
+        self.assertIn("sshGatewayService.enabled", workloads)
+        self.assertIn("metallb.io/allow-shared-ip", workloads)
+        self.assertIn("type: LoadBalancer", workloads)
         self.assertIn('eq $name "access-service"', network_policy)
         self.assertIn("port: 8080", network_policy)
         self.assertIn("groups['routers'] | first", tasks)
         self.assertIn("groups['routers'] | first", handlers)
         self.assertNotIn("groups['edge_router']", tasks + handlers)
         self.assertNotIn("state: absent", tasks)
+
+    def test_sprint2_application_supports_ssh_on_the_existing_metallb_address(self) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        defaults = (
+            ROOT / "deploy/ansible/roles/sprint2_application/defaults/main.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("sprint2_application_ssh_load_balancer_ip", defaults)
+        self.assertIn("Persist the MetalLB sharing key", tasks)
+        self.assertIn("SPRINT2_APPLICATION_SSH_SHARED_IP_CONFLICT", tasks)
+        self.assertIn("Wait for the OpenSSH Gateway shared load balancer address", tasks)
+        self.assertIn("SPRINT2_APPLICATION_SSH_LOAD_BALANCER_INVALID", tasks)
 
     def test_sprint2_service_configs_use_declared_tls_secret_keys(self) -> None:
         manifest = json.loads(

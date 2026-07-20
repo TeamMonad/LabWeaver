@@ -58,6 +58,12 @@
         (sprint2_application_ssh_gateway_name | length > 0 and
          sprint2_application_ssh_gateway_listener_name is match('^[a-z]([-a-z0-9]*[a-z0-9])?$') and
          sprint2_application_ssh_gateway_port | int == 2222)
+      - >-
+        sprint2_application_ssh_load_balancer_ip | length == 0 or
+        (sprint2_application_portal_route_name | length > 0 and
+         sprint2_application_ssh_load_balancer_ip is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$') and
+         sprint2_application_ssh_shared_ip_key is match('^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$') and
+         sprint2_application_ssh_gateway_port | int == 2222)
     fail_msg: SPRINT2_APPLICATION_INPUT_INVALID
 
 - name: Validate remote application tools and credentials
@@ -1282,6 +1288,59 @@
          | list }}
   when: sprint2_application_portal_route_name | length > 0
 
+- name: Persist the MetalLB sharing key on the retained application Gateway
+  kubernetes.core.k8s:
+    kubeconfig: "{{ sprint2_application_kubeconfig }}"
+    state: present
+    merge_type: merge
+    definition:
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: Gateway
+      metadata:
+        name: "{{ sprint2_application_portal_gateway_name }}"
+        namespace: "{{ sprint2_application_portal_route_namespace }}"
+      spec:
+        infrastructure:
+          annotations:
+            metallb.io/allow-shared-ip: "{{ sprint2_application_ssh_shared_ip_key }}"
+  when: sprint2_application_ssh_load_balancer_ip | length > 0
+
+- name: Read the retained application Gateway load balancer Service
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ sprint2_application_kubeconfig }}"
+    api_version: v1
+    kind: Service
+    namespace: "{{ sprint2_application_portal_route_namespace }}"
+    label_selectors:
+      - "gateway.networking.k8s.io/gateway-name={{ sprint2_application_portal_gateway_name }}"
+  register: sprint2_application_gateway_services
+  when: sprint2_application_ssh_load_balancer_ip | length > 0
+
+- name: Require the retained Gateway to own the reviewed shared address
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_gateway_services.resources | length == 1
+      - sprint2_application_gateway_services.resources[0].spec.type == 'LoadBalancer'
+      - sprint2_application_gateway_services.resources[0].status.loadBalancer.ingress | length == 1
+      - sprint2_application_gateway_services.resources[0].status.loadBalancer.ingress[0].ip == sprint2_application_ssh_load_balancer_ip
+    fail_msg: SPRINT2_APPLICATION_SSH_SHARED_IP_CONFLICT
+  when: sprint2_application_ssh_load_balancer_ip | length > 0
+
+- name: Reconcile the sharing key on the retained Gateway Service
+  kubernetes.core.k8s:
+    kubeconfig: "{{ sprint2_application_kubeconfig }}"
+    state: present
+    merge_type: merge
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: "{{ sprint2_application_gateway_services.resources[0].metadata.name }}"
+        namespace: "{{ sprint2_application_portal_route_namespace }}"
+        annotations:
+          metallb.io/allow-shared-ip: "{{ sprint2_application_ssh_shared_ip_key }}"
+  when: sprint2_application_ssh_load_balancer_ip | length > 0
+
 - name: Inspect the retained SSH Gateway
   kubernetes.core.k8s_info:
     kubeconfig: "{{ sprint2_application_kubeconfig }}"
@@ -1420,6 +1479,13 @@
         '--set-string', 'sshGatewayRoute.gatewaySectionName=' + sprint2_application_ssh_gateway_listener_name
       ]) -%}
       {%- endif -%}
+      {%- if sprint2_application_ssh_load_balancer_ip | length > 0 -%}
+      {%- set _ = values.extend([
+        '--set', 'sshGatewayService.enabled=true',
+        '--set-string', 'sshGatewayService.loadBalancerIP=' + sprint2_application_ssh_load_balancer_ip,
+        '--set-string', 'sshGatewayService.sharedIPKey=' + sprint2_application_ssh_shared_ip_key
+      ]) -%}
+      {%- endif -%}
       {{ values }}
 
 - name: Atomically deploy the immutable Sprint 2 profile
@@ -1554,6 +1620,32 @@
         | selectattr('status', 'equalto', 'True') | list | length > 0
     fail_msg: SPRINT2_APPLICATION_SSH_ROUTE_INVALID
   when: sprint2_application_ssh_route_name | length > 0
+
+- name: Wait for the OpenSSH Gateway shared load balancer address
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ sprint2_application_kubeconfig }}"
+    api_version: v1
+    kind: Service
+    namespace: "{{ sprint2_application_namespace }}"
+    name: openssh-gateway
+  register: sprint2_application_ssh_service
+  until:
+    - sprint2_application_ssh_service.resources | length == 1
+    - sprint2_application_ssh_service.resources[0].status.loadBalancer.ingress | default([]) | length == 1
+    - sprint2_application_ssh_service.resources[0].status.loadBalancer.ingress[0].ip | default('') == sprint2_application_ssh_load_balancer_ip
+  retries: 30
+  delay: 2
+  when: sprint2_application_ssh_load_balancer_ip | length > 0
+
+- name: Require the exact OpenSSH Gateway shared Service contract
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_ssh_service.resources[0].spec.type == 'LoadBalancer'
+      - sprint2_application_ssh_service.resources[0].spec.externalTrafficPolicy == 'Cluster'
+      - sprint2_application_ssh_service.resources[0].metadata.annotations['metallb.io/allow-shared-ip'] == sprint2_application_ssh_shared_ip_key
+      - sprint2_application_ssh_service.resources[0].spec.ports | selectattr('port', 'equalto', 2222) | list | length == 1
+    fail_msg: SPRINT2_APPLICATION_SSH_LOAD_BALANCER_INVALID
+  when: sprint2_application_ssh_load_balancer_ip | length > 0
 
 - name: Read final Helm revision
   ansible.builtin.command:

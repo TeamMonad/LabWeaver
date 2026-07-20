@@ -29,6 +29,11 @@ sshGatewayRoute:
   gatewayName: ""
   gatewaySectionName: ssh
 
+sshGatewayService:
+  enabled: false
+  loadBalancerIP: ""
+  sharedIPKey: ""
+
 workloads:
   control-service:
     enabled: true
