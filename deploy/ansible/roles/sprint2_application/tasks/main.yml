@@ -1308,7 +1308,10 @@
       {%- endfor -%}
       {{ values }}
     sprint2_application_image_argv: >-
-      {%- set values = [] -%}
+      {%- set values = [
+        '--set-string',
+        'imagePullSecrets[0].name=' + sprint2_application_image_pull_secret_name
+      ] -%}
       {%- for image in sprint2_application_package.images -%}
       {%- set _ = values.extend(['--set-string', 'images.' + (image.component | replace('-', '_')) + '=' + image.reference]) -%}
       {%- endfor -%}

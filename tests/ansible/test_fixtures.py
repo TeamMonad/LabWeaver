@@ -255,6 +255,10 @@ class AnsibleFixtureTests(unittest.TestCase):
         )[1].split("- name:", maxsplit=1)[0]
         self.assertIn("for values_file in sprint2_application_values_files", arguments)
         self.assertIn("'--values=' + sprint2_application_report_root", arguments)
+        self.assertIn(
+            "'imagePullSecrets[0].name=' + sprint2_application_image_pull_secret_name",
+            arguments,
+        )
         self.assertNotIn("regex_replace", arguments)
 
     def test_sprint2_application_distributes_harbor_ca_and_bounds_gateway_pod_security(self) -> None:
