@@ -57,7 +57,7 @@ serde_jcs = "0.2.0"
 serde_json = "1.0.140"
 serde_yaml = "0.9.34"
 sha2 = "0.10.9"
-sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "postgres", "json", "uuid", "time"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "json", "uuid", "time"] }
 ssh-key = { version = "0.6.7", default-features = false, features = ["std"] }
 subtle = "2.6.1"
 thiserror = "2.0.12"
