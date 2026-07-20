@@ -50,6 +50,8 @@ struct PlatformImageLock {
     buildx: String,
     trivy: String,
     helm: String,
+    claude_code: String,
+    claude_code_linux_x64_sha512: String,
     ci_images: CiImageLock,
     bases: BaseImageLock,
 }
@@ -709,6 +711,17 @@ fn build_image(
             &format!("RUST_TOOLCHAIN={}", lock.rust_toolchain),
         ]);
     }
+    if component == "agent-service" {
+        command.args([
+            "--build-arg",
+            &format!("CLAUDE_CODE_VERSION={}", lock.claude_code),
+            "--build-arg",
+            &format!(
+                "CLAUDE_CODE_LINUX_X64_SHA512={}",
+                lock.claude_code_linux_x64_sha512
+            ),
+        ]);
+    }
     command.args(["--tag", tag]);
     for (name, source) in build_base_images(component, lock) {
         command.args([
@@ -733,6 +746,13 @@ fn build_base_images<'a>(
         "openssh-gateway" => vec![
             ("RUST_BUILDER", lock.bases.gateway_builder.as_str()),
             ("GATEWAY_RUNTIME", lock.bases.gateway_runtime.as_str()),
+        ],
+        "agent-service" => vec![
+            ("RUST_BUILDER", lock.bases.rust_builder.as_str()),
+            ("RUST_RUNTIME", lock.bases.rust_runtime.as_str()),
+            ("NODE_BUILDER", lock.bases.node_builder.as_str()),
+            ("BUILDKIT_IMAGE", lock.buildkit_image.as_str()),
+            ("TRIVY_IMAGE", lock.ci_images.trivy.as_str()),
         ],
         _ => vec![
             ("RUST_BUILDER", lock.bases.rust_builder.as_str()),
@@ -1415,6 +1435,9 @@ mod tests {
             );
         }
         assert!(containerfile.contains("RUSTUP_TOOLCHAIN=${RUST_TOOLCHAIN}"));
+        assert!(containerfile.contains("@anthropic-ai/claude-code-linux-x64@"));
+        assert!(containerfile.contains("sha512sum --check --strict"));
+        assert!(containerfile.contains("/usr/local/bin/claude"));
         assert!(
             std::fs::read_to_string(root.join("access-gateway/Dockerfile"))?
                 .contains("RUSTUP_TOOLCHAIN=${RUST_TOOLCHAIN}")

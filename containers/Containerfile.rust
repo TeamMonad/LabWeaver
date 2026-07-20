@@ -1,5 +1,6 @@
 ARG RUST_BUILDER="docker.io/library/rust:1.85.1-bookworm@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4"
 ARG RUST_RUNTIME="gcr.io/distroless/cc-debian12:nonroot@sha256:66aa873a4a14fb164aa01296058efd8253744606d72715e45acface073359faa"
+ARG NODE_BUILDER="docker.io/library/node:22.18.0-bookworm-slim@sha256:752ea8a2f758c34002a0461bd9f1cee4f9a3c36d48494586f60ffce1fc708e0e"
 ARG BUILDKIT_IMAGE="docker.io/moby/buildkit@sha256:6b59b7df63a8cb9902736f9ddf7fcff8261613d3e7449b8ea8b7537fc399c03a"
 ARG TRIVY_IMAGE="docker.io/aquasec/trivy:0.72.0@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f"
 
@@ -36,6 +37,17 @@ RUN --network=none \
 FROM ${BUILDKIT_IMAGE} AS buildkit-tools
 FROM ${TRIVY_IMAGE} AS trivy-tools
 
+FROM ${NODE_BUILDER} AS claude-tools
+ARG CLAUDE_CODE_VERSION
+ARG CLAUDE_CODE_LINUX_X64_SHA512
+WORKDIR /tmp/claude-code
+RUN test -n "${CLAUDE_CODE_VERSION}" && test -n "${CLAUDE_CODE_LINUX_X64_SHA512}" && \
+    archive="$(npm pack "@anthropic-ai/claude-code-linux-x64@${CLAUDE_CODE_VERSION}" --pack-destination . --silent)" && \
+    printf '%s  %s\n' "${CLAUDE_CODE_LINUX_X64_SHA512}" "${archive}" | sha512sum --check --strict && \
+    tar --extract --gzip --file "${archive}" && \
+    test -x package/claude && \
+    install -D -m 0555 package/claude /out/claude
+
 FROM ${RUST_RUNTIME} AS runtime-base
 ARG SERVICE
 ARG SOURCE_COMMIT
@@ -50,5 +62,6 @@ ENTRYPOINT ["/usr/local/bin/labweaver-service"]
 FROM runtime-base AS agent-runtime
 COPY --from=buildkit-tools /usr/bin/buildctl /usr/local/bin/buildctl
 COPY --from=trivy-tools /usr/local/bin/trivy /usr/local/bin/trivy
+COPY --from=claude-tools --chown=65532:65532 /out/claude /usr/local/bin/claude
 
 FROM runtime-base AS runtime

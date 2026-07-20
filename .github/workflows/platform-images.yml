@@ -100,7 +100,15 @@ jobs:
             file=access-gateway/Dockerfile
             service_args=()
           elif [[ "$COMPONENT" == agent-service ]]; then
-            service_args=(--build-arg "SERVICE=$COMPONENT" --target agent-runtime)
+            claude_code_version="$(awk '$1 == "claude_code:" { print $2 }' deploy/versions.lock.yml)"
+            claude_code_sha512="$(awk '$1 == "claude_code_linux_x64_sha512:" { print $2 }' deploy/versions.lock.yml)"
+            test -n "$claude_code_version" && test -n "$claude_code_sha512"
+            service_args=(
+              --build-arg "SERVICE=$COMPONENT"
+              --build-arg "CLAUDE_CODE_VERSION=$claude_code_version"
+              --build-arg "CLAUDE_CODE_LINUX_X64_SHA512=$claude_code_sha512"
+              --target agent-runtime
+            )
           fi
           for pass in first second; do
             docker buildx build --file "$file" --platform linux/amd64 \
