@@ -50,7 +50,7 @@ pub fn load_mtls_server_config(config: &MtlsFileConfig) -> Result<MtlsServerConf
 
 fn install_crypto_provider() -> Result<(), MtlsError> {
     if CryptoProvider::get_default().is_none()
-        && rustls::crypto::aws_lc_rs::default_provider()
+        && rustls::crypto::ring::default_provider()
             .install_default()
             .is_err()
         && CryptoProvider::get_default().is_none()
