@@ -71,7 +71,24 @@ async fn main() -> Result<(), StartupError> {
     let internal_bind = SocketAddr::from_str(&deployment.internal_mtls.bind_addr)
         .map_err(|_| StartupError::Config)?;
     let state = build_app_state(deployment, metrics).await?;
-    let router = Router::new()
+    let router = browser_router(Arc::clone(&state));
+    let internal_router = internal_router(Arc::clone(&state));
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    let internal_listener = tokio::net::TcpListener::bind(internal_bind).await?;
+    let mtls = load_mtls_server_config(&state.deployment.internal_mtls)?;
+    tokio::select! {
+        result = axum::serve(listener, router) => result.map_err(StartupError::from)?,
+        result = serve_internal_mtls(internal_listener, internal_router, mtls) => result?,
+        result = auth_cleanup_loop(Arc::clone(&state)) => result?,
+        result = grants::activation_loop(Arc::clone(&state)) => result?,
+        result = grants::maintenance_loop(Arc::clone(&state)) => result?,
+        result = grants::outbox_loop(Arc::clone(&state)) => result?,
+    }
+    Ok(())
+}
+
+fn browser_router(state: Arc<AppState>) -> Router {
+    Router::new()
         .route("/auth/login", get(login))
         .route("/auth/callback", get(callback))
         .route("/auth/backchannel-logout", post(backchannel_logout))
@@ -146,8 +163,11 @@ async fn main() -> Result<(), StartupError> {
             "/connect/{endpoint_grant_id}/{*runtime_path}",
             axum::routing::any(proxy::forward_runtime),
         )
-        .with_state(Arc::clone(&state));
-    let internal_router = Router::new()
+        .with_state(state)
+}
+
+fn internal_router(state: Arc<AppState>) -> Router {
+    Router::new()
         .route("/internal/v1/auth/decision", post(authorization_decision))
         .route("/internal/v1/metrics", get(metrics_endpoint))
         .route("/internal/v1/ssh/authorize", post(grants::authorize_ssh))
@@ -163,19 +183,7 @@ async fn main() -> Result<(), StartupError> {
             "/internal/v1/sessions/{session_id}/close",
             post(grants::close_gateway_session),
         )
-        .with_state(Arc::clone(&state));
-    let listener = tokio::net::TcpListener::bind(bind).await?;
-    let internal_listener = tokio::net::TcpListener::bind(internal_bind).await?;
-    let mtls = load_mtls_server_config(&state.deployment.internal_mtls)?;
-    tokio::select! {
-        result = axum::serve(listener, router) => result.map_err(StartupError::from)?,
-        result = serve_internal_mtls(internal_listener, internal_router, mtls) => result?,
-        result = auth_cleanup_loop(Arc::clone(&state)) => result?,
-        result = grants::activation_loop(Arc::clone(&state)) => result?,
-        result = grants::maintenance_loop(Arc::clone(&state)) => result?,
-        result = grants::outbox_loop(Arc::clone(&state)) => result?,
-    }
-    Ok(())
+        .with_state(state)
 }
 
 async fn build_app_state(
