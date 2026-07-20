@@ -102,6 +102,21 @@ PLATFORM_IDENTITIES: dict[str, tuple[tuple[str, ...], str]] = {
 
 NATS_ADMIN_TLS_IDENTITY = "sprint2-admin"
 
+NATS_ACCOUNT_JETSTREAM_LIMITS = (
+    "--js-enable",
+    "0",
+    "--js-disk-storage",
+    "8G",
+    "--js-mem-storage",
+    "256M",
+    "--js-streams",
+    "16",
+    "--js-consumer",
+    "64",
+    "--js-max-ack-pending",
+    "4096",
+)
+
 
 def _private_output(path: Path) -> Path:
     resolved = path.resolve()
@@ -317,6 +332,12 @@ def prepare(output: Path, openssl: Path, ssh_keygen: Path, nsc: Path, days: int)
 
     _nsc(nsc, nsc_store, ["add", "operator", "--name", "LABWEAVER", "--sys", "--generate-signing-key", "--expiry", f"{days}d"], private_home)
     _nsc(nsc, nsc_store, ["add", "account", "--name", "WORKLOADS", "--expiry", f"{days}d"], private_home)
+    _nsc(
+        nsc,
+        nsc_store,
+        ["edit", "account", "--name", "WORKLOADS", *NATS_ACCOUNT_JETSTREAM_LIMITS],
+        private_home,
+    )
     for name, (publish, subscribe, response) in NATS_USERS.items():
         arguments = ["add", "user", "--account", "WORKLOADS", "--name", name, "--expiry", f"{days}d"]
         for subject in publish:

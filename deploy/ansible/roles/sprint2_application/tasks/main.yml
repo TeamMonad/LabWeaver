@@ -349,7 +349,6 @@
       - account
       - info
   changed_when: false
-  no_log: true
 
 - name: Inspect exact Sprint 2 streams without mutation
   ansible.builtin.command:
@@ -373,7 +372,6 @@
   register: sprint2_application_stream_info_before
   failed_when: false
   changed_when: false
-  no_log: true
 
 - name: Create only missing Sprint 2 streams
   ansible.builtin.command:
@@ -406,7 +404,6 @@
   loop: "{{ sprint2_application_stream_info_before.results }}"
   when: item.rc != 0
   changed_when: true
-  no_log: true
 
 - name: Read back exact Sprint 2 streams
   ansible.builtin.command:
@@ -429,7 +426,6 @@
   loop: "{{ sprint2_application_nats_streams }}"
   register: sprint2_application_stream_info_after
   changed_when: false
-  no_log: true
 
 - name: Validate retained or created stream identities
   ansible.builtin.assert:

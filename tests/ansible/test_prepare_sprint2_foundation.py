@@ -63,6 +63,26 @@ class FoundationAuthoringTests(unittest.TestCase):
         self.assertEqual(FOUNDATION.NATS_ADMIN_TLS_IDENTITY, "sprint2-admin")
         self.assertNotIn(FOUNDATION.NATS_ADMIN_TLS_IDENTITY, FOUNDATION.NATS_USERS)
 
+    def test_workloads_account_has_bounded_jetstream_limits(self) -> None:
+        limits = FOUNDATION.NATS_ACCOUNT_JETSTREAM_LIMITS
+        self.assertEqual(
+            limits,
+            (
+                "--js-enable",
+                "0",
+                "--js-disk-storage",
+                "8G",
+                "--js-mem-storage",
+                "256M",
+                "--js-streams",
+                "16",
+                "--js-consumer",
+                "64",
+                "--js-max-ack-pending",
+                "4096",
+            ),
+        )
+
     def test_platform_identities_have_exact_service_and_client_boundaries(self) -> None:
         identities = FOUNDATION.PLATFORM_IDENTITIES
         self.assertEqual(
