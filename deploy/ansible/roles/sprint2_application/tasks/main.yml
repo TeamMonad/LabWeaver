@@ -187,6 +187,18 @@
     fail_msg: SPRINT2_APPLICATION_ACCESS_SEED_INVALID
   no_log: true
 
+- name: Validate every private Access membership seed
+  ansible.builtin.assert:
+    that:
+      - item.actorId is match('^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
+      - item.courseId is match('^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
+      - item.subjectSha256 is match('^[0-9a-f]{64}$')
+      - item.issuer is match('^https://[A-Za-z0-9._:/-]{1,512}$')
+      - item.role in ['teacher', 'student', 'platform_admin']
+    fail_msg: SPRINT2_APPLICATION_ACCESS_MEMBERSHIP_INVALID
+  loop: "{{ sprint2_application_access_seed.courseMemberships }}"
+  no_log: true
+
 - name: Read target cluster UID
   ansible.builtin.command:
     argv:

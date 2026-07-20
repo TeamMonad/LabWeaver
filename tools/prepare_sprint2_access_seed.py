@@ -7,7 +7,9 @@ import argparse
 import hashlib
 import json
 import os
+import secrets
 import stat
+import time
 import uuid
 from pathlib import Path
 from urllib.parse import urlparse
@@ -55,6 +57,19 @@ def find_user(realm: dict[str, object], username: str, role: str) -> str:
     return subject
 
 
+def uuid7() -> uuid.UUID:
+    """Generate an RFC 9562 UUIDv7 without relying on Python 3.14's uuid.uuid7."""
+    unix_milliseconds = time.time_ns() // 1_000_000
+    if not 0 <= unix_milliseconds < 1 << 48:
+        raise AccessSeedError("LW_SPRINT2_ACCESS_SEED_CLOCK_INVALID")
+    value = unix_milliseconds << 80
+    value |= 0x7 << 76
+    value |= secrets.randbits(12) << 64
+    value |= 0b10 << 62
+    value |= secrets.randbits(62)
+    return uuid.UUID(int=value)
+
+
 def build_seed(
     realm: dict[str, object],
     issuer: str,
@@ -64,19 +79,21 @@ def build_seed(
 ) -> dict[str, object]:
     issuer = validate_issuer(issuer)
     try:
-        uuid.UUID(course_id)
+        parsed_course_id = uuid.UUID(course_id)
     except ValueError as error:
         raise AccessSeedError("LW_SPRINT2_ACCESS_SEED_COURSE_INVALID") from error
+    if parsed_course_id.version != 7:
+        raise AccessSeedError("LW_SPRINT2_ACCESS_SEED_COURSE_INVALID")
     memberships: list[dict[str, str]] = []
     for username, role in ((teacher_username, "teacher"), (student_username, "student")):
         subject = find_user(realm, username, role)
-        actor_id = uuid.uuid5(uuid.NAMESPACE_URL, f"{issuer}|{subject}")
+        actor_id = uuid7()
         memberships.append(
             {
                 "actorId": str(actor_id),
                 "issuer": issuer,
                 "subjectSha256": hashlib.sha256(subject.encode("utf-8")).hexdigest(),
-                "courseId": str(uuid.UUID(course_id)),
+                "courseId": str(parsed_course_id),
                 "role": role,
             }
         )
