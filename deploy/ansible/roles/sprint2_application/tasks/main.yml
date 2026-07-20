@@ -1185,7 +1185,7 @@
         value:
           name: "{{ sprint2_application_ssh_gateway_listener_name }}"
           protocol: TCP
-          port: "{{ sprint2_application_ssh_gateway_port | int }}"
+          port: 2222
           allowedRoutes:
             namespaces:
               from: Same

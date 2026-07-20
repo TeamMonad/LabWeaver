@@ -236,6 +236,16 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("data_source_name: ubuntu-lab-base-v1", lock)
         self.assertNotIn("state: absent", tasks)
 
+    def test_sprint2_application_gateway_listener_ports_are_integers(self) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        ssh_listener = tasks.split(
+            "- name: Add the bounded Sprint 2 SSH listener when absent", maxsplit=1
+        )[1].split("- name:", maxsplit=1)[0]
+        self.assertIn("port: 2222", ssh_listener)
+        self.assertNotIn('port: "{{', ssh_listener)
+
     def test_sprint2_buildkit_prepares_the_router_owned_package_endpoint(self) -> None:
         tasks = (ROOT / "deploy/ansible/roles/sprint2_buildkit/tasks/main.yml").read_text(
             encoding="utf-8"
