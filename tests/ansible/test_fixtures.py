@@ -355,6 +355,26 @@ class AnsibleFixtureTests(unittest.TestCase):
         )
         self.assertEqual(tasks.count(f"- {remote_path}"), 2)
 
+    def test_sprint2_application_rejects_kcadm_http_errors_and_missing_authorization(self) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        authentication = tasks.split(
+            "- name: Authenticate retained Keycloak administration", maxsplit=1
+        )[1].split("- name:", maxsplit=1)[0]
+        self.assertIn("sprint2_application_keycloak_authentication.stderr", authentication)
+        self.assertIn("HTTP [45][0-9][0-9]", authentication)
+
+        authorization = tasks.split(
+            "- name: Require retained Keycloak realm-management authorization", maxsplit=1
+        )[1].split("- name:", maxsplit=1)[0]
+        self.assertIn("- get\n      - users", authorization)
+        self.assertIn("sprint2_application_keycloak_admin_realm", authorization)
+        self.assertIn("- --limit\n      - \"1\"", authorization)
+        self.assertNotIn("--max-results", authorization)
+        self.assertIn("HTTP [45][0-9][0-9]", authorization)
+        self.assertIn("no_log: true", authorization)
+
     def test_sprint2_environment_provider_matches_control_image_policy(self) -> None:
         control = (ROOT / "deploy/config/control-plane.yaml.example").read_text(encoding="utf-8")
         providers = json.loads(

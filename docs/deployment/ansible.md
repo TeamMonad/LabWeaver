@@ -167,6 +167,10 @@ client certificate must not be reused for administration.
 The reviewed Keycloak realm remains controller-owned input; the application
 role validates it locally, stages a root-owned mode-0600 copy in the bounded
 remote run directory, and gives only that execution-host path to `kcadm`.
+Because `kcadm config credentials` can return zero after an HTTP authentication
+failure, the role rejects any 4xx/5xx response text and immediately performs a
+bounded master-realm user query. A readable realm metadata endpoint alone is
+not accepted as administrator authorization.
 
 ```sh
 cargo xtask sprint2-foundation --infra --env demo --yes

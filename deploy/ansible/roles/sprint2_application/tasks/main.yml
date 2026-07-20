@@ -566,7 +566,34 @@
       - "{{ sprint2_application_keycloak_config }}"
   environment:
     JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak.hosts"
+  register: sprint2_application_keycloak_authentication
   changed_when: false
+  failed_when: >-
+    sprint2_application_keycloak_authentication.rc != 0 or
+    sprint2_application_keycloak_authentication.stderr is search('HTTP [45][0-9][0-9]')
+  no_log: true
+
+- name: Require retained Keycloak realm-management authorization
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_kcadm }}"
+      - get
+      - users
+      - --realm
+      - "{{ sprint2_application_keycloak_admin_realm }}"
+      - --limit
+      - "1"
+      - --fields
+      - id,username
+      - --config
+      - "{{ sprint2_application_keycloak_config }}"
+  environment:
+    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak.hosts"
+  register: sprint2_application_keycloak_authorization
+  changed_when: false
+  failed_when: >-
+    sprint2_application_keycloak_authorization.rc != 0 or
+    sprint2_application_keycloak_authorization.stderr is search('HTTP [45][0-9][0-9]')
   no_log: true
 
 - name: Inspect retained Sprint 2 Keycloak realm
