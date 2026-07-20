@@ -326,6 +326,17 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("sprint2_application_nats_client_certificate_file", defaults)
         self.assertIn("sprint2_application_nats_client_private_key_file", defaults)
 
+    def test_sprint2_application_reads_locked_minio_versioning_shape(self) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        versioning = tasks.split(
+            "- name: Verify immutable artifact bucket versioning", maxsplit=1
+        )[1].split("- name:", maxsplit=1)[0]
+        self.assertIn(".status != 'success'", versioning)
+        self.assertIn(".versioning.status != 'Enabled'", versioning)
+        self.assertNotIn("no_log: true", versioning)
+
     def test_sprint2_environment_provider_matches_control_image_policy(self) -> None:
         control = (ROOT / "deploy/config/control-plane.yaml.example").read_text(encoding="utf-8")
         providers = json.loads(

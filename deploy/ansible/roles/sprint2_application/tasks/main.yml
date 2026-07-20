@@ -480,8 +480,8 @@
   changed_when: false
   failed_when: >-
     sprint2_application_minio_version.rc != 0 or
-    (sprint2_application_minio_version.stdout | from_json).status != 'enabled'
-  no_log: true
+    (sprint2_application_minio_version.stdout | from_json).status != 'success' or
+    (sprint2_application_minio_version.stdout | from_json).versioning.status != 'Enabled'
 
 - name: Verify retained private Harbor project
   ansible.builtin.uri:
