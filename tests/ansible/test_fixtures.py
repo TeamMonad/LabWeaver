@@ -259,6 +259,16 @@ class AnsibleFixtureTests(unittest.TestCase):
             "'imagePullSecrets[0].name=' + sprint2_application_image_pull_secret_name",
             arguments,
         )
+        self.assertIn("'portalRoute.enabled=true'", arguments)
+        self.assertIn(
+            "'portalRoute.namespace=' + sprint2_application_portal_route_namespace",
+            arguments,
+        )
+        self.assertIn("'sshGatewayRoute.enabled=true'", arguments)
+        self.assertIn(
+            "'sshGatewayRoute.namespace=' + sprint2_application_ssh_route_namespace",
+            arguments,
+        )
         self.assertNotIn("regex_replace", arguments)
 
     def test_sprint2_application_reads_kubernetes_items_as_a_mapping_key(self) -> None:

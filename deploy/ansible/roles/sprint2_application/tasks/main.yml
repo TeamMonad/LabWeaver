@@ -1399,6 +1399,28 @@
       {%- set _ = values.extend(['--set-string', 'images.' + (image.component | replace('-', '_')) + '=' + image.reference]) -%}
       {%- endfor -%}
       {{ values }}
+    sprint2_application_route_argv: >-
+      {%- set values = [] -%}
+      {%- if sprint2_application_portal_route_name | length > 0 -%}
+      {%- set _ = values.extend([
+        '--set', 'portalRoute.enabled=true',
+        '--set-string', 'portalRoute.namespace=' + sprint2_application_portal_route_namespace,
+        '--set-string', 'portalRoute.name=' + sprint2_application_portal_route_name,
+        '--set-string', 'portalRoute.hostname=' + sprint2_application_portal_hostname,
+        '--set-string', 'portalRoute.gatewayName=' + sprint2_application_portal_gateway_name,
+        '--set-string', 'portalRoute.gatewaySectionName=' + sprint2_application_portal_gateway_listener_name
+      ]) -%}
+      {%- endif -%}
+      {%- if sprint2_application_ssh_route_name | length > 0 -%}
+      {%- set _ = values.extend([
+        '--set', 'sshGatewayRoute.enabled=true',
+        '--set-string', 'sshGatewayRoute.namespace=' + sprint2_application_ssh_route_namespace,
+        '--set-string', 'sshGatewayRoute.name=' + sprint2_application_ssh_route_name,
+        '--set-string', 'sshGatewayRoute.gatewayName=' + sprint2_application_ssh_gateway_name,
+        '--set-string', 'sshGatewayRoute.gatewaySectionName=' + sprint2_application_ssh_gateway_listener_name
+      ]) -%}
+      {%- endif -%}
+      {{ values }}
 
 - name: Atomically deploy the immutable Sprint 2 profile
   ansible.builtin.command:
@@ -1408,7 +1430,8 @@
           sprint2_application_report_root + '/' + sprint2_application_run_id + '/chart',
           '--namespace', sprint2_application_namespace, '--atomic', '--wait',
           '--timeout', sprint2_application_rollout_timeout]
-          + sprint2_application_values_argv + sprint2_application_image_argv }}
+          + sprint2_application_values_argv + sprint2_application_image_argv
+          + sprint2_application_route_argv }}
   changed_when: true
 
 - name: Deploy the identical profile a second time
@@ -1419,7 +1442,8 @@
           sprint2_application_report_root + '/' + sprint2_application_run_id + '/chart',
           '--namespace', sprint2_application_namespace, '--atomic', '--wait',
           '--timeout', sprint2_application_rollout_timeout]
-          + sprint2_application_values_argv + sprint2_application_image_argv }}
+          + sprint2_application_values_argv + sprint2_application_image_argv
+          + sprint2_application_route_argv }}
   changed_when: true
 
 - name: Verify every Sprint 2 workload rollout
