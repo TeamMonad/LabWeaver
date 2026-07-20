@@ -2158,6 +2158,7 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.26.4",
  "tracing",
+ "url",
  "uuid",
  "x509-parser 0.18.1",
 ]
