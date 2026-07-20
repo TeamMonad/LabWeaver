@@ -119,8 +119,24 @@ async fn main() -> Result<(), StartupError> {
             get(proxy::forward_evaluation),
         )
         .route(
-            "/api/v1/environments/{*environment_path}",
+            "/api/v1/environments/{environment_id}",
             axum::routing::any(proxy::forward_environment),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/start",
+            post(proxy::forward_environment),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/stop",
+            post(proxy::forward_environment),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/restart",
+            post(proxy::forward_environment),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/endpoints",
+            get(proxy::forward_environment),
         )
         .route(
             "/connect/{endpoint_grant_id}/",
