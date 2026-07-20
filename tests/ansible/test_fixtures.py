@@ -575,6 +575,25 @@ class AnsibleFixtureTests(unittest.TestCase):
             7,
         )
 
+    def test_sprint2_application_reconciles_only_reviewed_demo_identities(self) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        identity_reconcile = tasks.split(
+            "- name: Load the reviewed Sprint 2 identity seed", maxsplit=1
+        )[1].split(
+            "- name: Require the reviewed Sprint 2 identity surface", maxsplit=1
+        )[0]
+
+        self.assertIn("SPRINT2_APPLICATION_KEYCLOAK_SEED_INVALID", identity_reconcile)
+        self.assertIn("sprint2_application_keycloak_required_users", identity_reconcile)
+        self.assertIn("clients/{{", identity_reconcile)
+        self.assertIn("reset-password", identity_reconcile)
+        self.assertEqual(identity_reconcile.count("status_code: 204"), 2)
+        self.assertEqual(identity_reconcile.count("ca_path:"), 2)
+        self.assertNotIn("delete", identity_reconcile.lower())
+        self.assertGreaterEqual(identity_reconcile.count("no_log: true"), 5)
+
     def test_sprint2_environment_provider_matches_control_image_policy(self) -> None:
         control = (ROOT / "deploy/config/control-plane.yaml.example").read_text(encoding="utf-8")
         providers = json.loads(

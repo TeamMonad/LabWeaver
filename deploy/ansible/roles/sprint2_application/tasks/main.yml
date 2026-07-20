@@ -823,6 +823,42 @@
   changed_when: true
   no_log: true
 
+- name: Load the reviewed Sprint 2 identity seed
+  ansible.builtin.slurp:
+    src: "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak-realm.json"
+  register: sprint2_application_keycloak_seed_file
+  changed_when: false
+  no_log: true
+
+- name: Bind the reviewed Sprint 2 identity seed
+  ansible.builtin.set_fact:
+    sprint2_application_keycloak_seed: >-
+      {{ sprint2_application_keycloak_seed_file.content | b64decode | from_json }}
+  no_log: true
+
+- name: Require managed client and user credentials in the reviewed identity seed
+  ansible.builtin.assert:
+    that:
+      - >-
+        sprint2_application_keycloak_seed.clients
+        | selectattr('clientId', 'equalto', sprint2_application_keycloak_client_id)
+        | list
+        | length == 1
+      - >-
+        sprint2_application_keycloak_required_users
+        | difference(sprint2_application_keycloak_seed.users | map(attribute='username') | list)
+        | length == 0
+      - >-
+        (sprint2_application_keycloak_seed.users
+          | selectattr('username', 'equalto', item)
+          | first).credentials
+        | selectattr('type', 'equalto', 'password')
+        | list
+        | length == 1
+    fail_msg: SPRINT2_APPLICATION_KEYCLOAK_SEED_INVALID
+  loop: "{{ sprint2_application_keycloak_required_users }}"
+  no_log: true
+
 - name: Read back Sprint 2 Keycloak realm
   ansible.builtin.command:
     argv:
@@ -859,7 +895,7 @@
       - --query
       - "clientId={{ sprint2_application_keycloak_client_id }}"
       - --fields
-      - clientId,enabled
+      - id,clientId,enabled
       - --token
       - "{{ sprint2_application_keycloak_admin_token }}"
       - --config
@@ -899,7 +935,7 @@
       - --realm
       - "{{ sprint2_application_keycloak_realm }}"
       - --fields
-      - username,enabled
+      - id,username,enabled
       - --token
       - "{{ sprint2_application_keycloak_admin_token }}"
       - --config
@@ -908,6 +944,53 @@
   environment:
     JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak.hosts"
   changed_when: false
+  no_log: true
+
+- name: Reconcile the managed Sprint 2 OIDC client without replacing the realm
+  ansible.builtin.uri:
+    url: >-
+      {{ sprint2_application_keycloak_server }}/admin/realms/{{ sprint2_application_keycloak_realm
+      }}/clients/{{ (sprint2_application_keycloak_client.stdout | from_json | first).id }}
+    method: PUT
+    headers:
+      Authorization: "Bearer {{ sprint2_application_keycloak_admin_token }}"
+    body_format: json
+    body: >-
+      {{ sprint2_application_keycloak_seed.clients
+        | selectattr('clientId', 'equalto', sprint2_application_keycloak_client_id)
+        | first }}
+    ca_path: "{{ sprint2_application_keycloak_ca_file }}"
+    status_code: 204
+    return_content: false
+  no_log: true
+
+- name: Reconcile managed Sprint 2 demo credentials without replacing the realm
+  ansible.builtin.uri:
+    url: >-
+      {{ sprint2_application_keycloak_server }}/admin/realms/{{ sprint2_application_keycloak_realm
+      }}/users/{{ item.id }}/reset-password
+    method: PUT
+    headers:
+      Authorization: "Bearer {{ sprint2_application_keycloak_admin_token }}"
+    body_format: json
+    body:
+      type: password
+      temporary: false
+      value: >-
+        {{ ((sprint2_application_keycloak_seed.users
+          | selectattr('username', 'equalto', item.username)
+          | first).credentials
+          | selectattr('type', 'equalto', 'password')
+          | first).value }}
+    ca_path: "{{ sprint2_application_keycloak_ca_file }}"
+    status_code: 204
+    return_content: false
+  loop: >-
+    {{ sprint2_application_keycloak_users.stdout | from_json
+      | selectattr('username', 'in', sprint2_application_keycloak_required_users)
+      | list }}
+  loop_control:
+    label: "{{ item.username }}"
   no_log: true
 
 - name: Require the reviewed Sprint 2 identity surface
