@@ -88,7 +88,6 @@ class AnsibleFixtureTests(unittest.TestCase):
             "{{ sprint2_foundation_postgres_storage }}": "20Gi",
             "{{ sprint2_foundation_nats_storage }}": "10Gi",
             "{{ sprint2_foundation_minio_storage }}": "100Gi",
-            "{{ sprint2_foundation_admin_controller_cidr }}": "10.20.0.11/32",
             "{{ sprint2_foundation_lock.postgresql.image }}": "registry.invalid/postgres@sha256:" + "a" * 64,
             "{{ sprint2_foundation_lock.sprint2_foundation.nats }}": "registry.invalid/nats@sha256:" + "b" * 64,
             "{{ sprint2_foundation_lock.sprint2_foundation.minio }}": "registry.invalid/minio@sha256:" + "c" * 64,
@@ -98,7 +97,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         for source, value in replacements.items():
             rendered = rendered.replace(source, value)
         documents = list(yaml.safe_load_all(rendered))
-        self.assertEqual(len(documents), 8)
+        self.assertEqual(len(documents), 9)
         self.assertEqual(sum(document["kind"] == "StatefulSet" for document in documents), 3)
         for document in documents:
             if document["kind"] == "StatefulSet":
@@ -116,11 +115,17 @@ class AnsibleFixtureTests(unittest.TestCase):
             document for document in documents
             if document["kind"] == "NetworkPolicy" and document["metadata"]["name"] == "owner-services"
         )
-        controller_ingress = owner_policy["spec"]["ingress"][1]
-        self.assertEqual(controller_ingress["from"], [{"ipBlock": {"cidr": "10.20.0.11/32"}}])
+        self.assertEqual(len(owner_policy["spec"]["ingress"]), 1)
+        admin_policy = next(
+            document for document in documents
+            if document["kind"] == "CiliumNetworkPolicy"
+            and document["metadata"]["name"] == "admin-probes"
+        )
+        controller_ingress = admin_policy["spec"]["ingress"][0]
+        self.assertEqual(controller_ingress["fromEntities"], ["host", "remote-node"])
         self.assertEqual(
-            {entry["port"] for entry in controller_ingress["ports"]},
-            {4222, 5432, 9000},
+            {entry["port"] for entry in controller_ingress["toPorts"][0]["ports"]},
+            {"4222", "5432", "9000"},
         )
         self.assertIn("pod-security.kubernetes.io/enforce: restricted", tasks)
         reset_namespaces = reset.split("sprint2_reset_domains:", maxsplit=1)[0]

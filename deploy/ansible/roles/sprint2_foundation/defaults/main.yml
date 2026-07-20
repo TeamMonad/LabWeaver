@@ -9,6 +9,5 @@ sprint2_foundation_minio_storage_class: nfs-rwx
 sprint2_foundation_postgres_storage: 20Gi
 sprint2_foundation_nats_storage: 10Gi
 sprint2_foundation_minio_storage: 100Gi
-sprint2_foundation_admin_controller_cidr: ""
 sprint2_foundation_rollout_retries: 60
 sprint2_foundation_rollout_delay: 5
