@@ -68,8 +68,6 @@ class FoundationAuthoringTests(unittest.TestCase):
         self.assertEqual(
             limits,
             (
-                "--js-enable",
-                "0",
                 "--js-disk-storage",
                 "8G",
                 "--js-mem-storage",

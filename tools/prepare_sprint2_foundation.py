@@ -103,8 +103,6 @@ PLATFORM_IDENTITIES: dict[str, tuple[tuple[str, ...], str]] = {
 NATS_ADMIN_TLS_IDENTITY = "sprint2-admin"
 
 NATS_ACCOUNT_JETSTREAM_LIMITS = (
-    "--js-enable",
-    "0",
     "--js-disk-storage",
     "8G",
     "--js-mem-storage",
@@ -332,6 +330,12 @@ def prepare(output: Path, openssl: Path, ssh_keygen: Path, nsc: Path, days: int)
 
     _nsc(nsc, nsc_store, ["add", "operator", "--name", "LABWEAVER", "--sys", "--generate-signing-key", "--expiry", f"{days}d"], private_home)
     _nsc(nsc, nsc_store, ["add", "account", "--name", "WORKLOADS", "--expiry", f"{days}d"], private_home)
+    _nsc(
+        nsc,
+        nsc_store,
+        ["edit", "account", "--name", "WORKLOADS", "--js-enable", "0"],
+        private_home,
+    )
     _nsc(
         nsc,
         nsc_store,
