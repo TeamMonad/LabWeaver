@@ -261,6 +261,23 @@ class AnsibleFixtureTests(unittest.TestCase):
         )
         self.assertNotIn("regex_replace", arguments)
 
+    def test_sprint2_application_binds_the_baseline_to_the_runtime_database(self) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        defaults = (
+            ROOT / "deploy/ansible/roles/sprint2_application/defaults/main.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("sprint2_application_postgres_database: labweaver", defaults)
+        self.assertIn("SELECT current_database()", tasks)
+        self.assertIn(
+            "SPRINT2_APPLICATION_POSTGRES_DATABASE_IDENTITY_MISMATCH", tasks
+        )
+        self.assertLess(
+            tasks.index("Require the exact Sprint 2 PostgreSQL database"),
+            tasks.index("Render non-destructive six-domain baseline adoption"),
+        )
+
     def test_sprint2_application_distributes_harbor_ca_and_bounds_gateway_pod_security(self) -> None:
         tasks = (
             ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"

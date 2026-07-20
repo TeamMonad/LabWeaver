@@ -11,6 +11,7 @@
       - sprint2_application_source_commit is match('^[0-9a-f]{40,64}$')
       - sprint2_application_package_manifest | length > 0
       - sprint2_application_postgres_service_file | length > 0
+      - sprint2_application_postgres_database is match('^[a-z][a-z0-9_]{0,62}$')
       - sprint2_application_nats_server | length > 0
       - sprint2_application_nats_credentials_file | length > 0
       - sprint2_application_nats_ca_file | length > 0
@@ -269,7 +270,7 @@
   changed_when: false
   no_log: true
 
-- name: Probe retained PostgreSQL
+- name: Probe retained PostgreSQL database identity
   ansible.builtin.command:
     argv:
       - "{{ sprint2_application_psql }}"
@@ -277,11 +278,18 @@
       - --no-psqlrc
       - --tuples-only
       - --command
-      - SELECT 1
+      - SELECT current_database()
   environment:
     PGSERVICEFILE: "{{ sprint2_application_postgres_service_file }}"
+  register: sprint2_application_postgres_identity
   changed_when: false
   no_log: true
+
+- name: Require the exact Sprint 2 PostgreSQL database
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_postgres_identity.stdout | trim == sprint2_application_postgres_database
+    fail_msg: SPRINT2_APPLICATION_POSTGRES_DATABASE_IDENTITY_MISMATCH
 
 - name: Render non-destructive six-domain baseline adoption
   ansible.builtin.template:

@@ -164,6 +164,13 @@ the dedicated TLS identity separately. Set
 files in ignored private storage. The role passes all four inputs to every NATS
 CLI invocation and fails before mutation when any input is absent; a workload
 client certificate must not be reused for administration.
+The root-owned PostgreSQL service file must bind `sprint2-admin` to the
+`labweaver` database, not the server's default `postgres` database. Before any
+baseline SQL is applied, the role checks `current_database()` against
+`sprint2_application_postgres_database` and blocks with
+`SPRINT2_APPLICATION_POSTGRES_DATABASE_IDENTITY_MISMATCH` on drift. This keeps
+the six domain schemas and the runtime `database-url` in one authoritative
+database without resetting retained PostgreSQL state.
 The reviewed Keycloak realm remains controller-owned input; the application
 role validates it locally, stages a root-owned mode-0600 copy in the bounded
 remote run directory, and gives only that execution-host path to `kcadm`.
