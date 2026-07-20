@@ -98,9 +98,15 @@ dependency, but it is not Sprint 2 E3 evidence and does not authorize deletion.
 
 ## Browser replay and Release Gate
 
-- Web SDK and local browser fixtures exist.
+- Web SDK, local browser fixtures, real Keycloak auth setup and live
+  teacher/student specifications exist. Passwords are read only from private
+  files; live and Fixture specifications are mutually excluded.
 - Blocker: real Keycloak teacher/student sessions, `demo replay` and the
   machine-readable `release-gate` are not closed under one deployment identity.
+- Operational blocker: the application endpoint remains reachable, but SSH and
+  Kubernetes management connections from the authorized workstation time out.
+  Current-head packaging and non-destructive Ansible reconcile cannot proceed
+  until that management path is restored.
 - Exit: Playwright records Trace, screenshot and video without fixed sleeps;
   the only passing Sprint 2 report validates against its schema and binds the
   same commit, deployment manifest, migration catalog, image digests and Run ID.
