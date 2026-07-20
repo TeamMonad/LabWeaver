@@ -68,7 +68,8 @@ The package manifest records the source commit, component lock hash, builder ver
 
 ```sh
 cargo xtask package-validate --manifest artifacts/package/<run-id>/PlatformImagePackageManifest.json --mode connected --env demo
-cargo xtask deploy --env demo --manifest artifacts/package/<run-id>/PlatformImagePackageManifest.json
+LABWEAVER_CONFIGURATION_BUNDLE_SHA256=sha256:<configuration-bundle-sha256> \
+  cargo xtask deploy --env demo --manifest artifacts/package/<run-id>/PlatformImagePackageManifest.json
 ```
 
 Connected validation rereads the version lock, Trivy database identity, and every Harbor digest before Helm rollout. Deployment uses the existing chart and environment values, writes a deployment manifest bound to the cluster UID and Helm revision, and never substitutes mutable tags.

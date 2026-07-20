@@ -11,3 +11,11 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- $image -}}
 {{- end -}}
+
+{{- define "labweaver.configurationBundleSha256" -}}
+{{- $digest := required "deploymentIdentity.configurationBundleSha256 is required" .Values.deploymentIdentity.configurationBundleSha256 -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" $digest) -}}
+{{- fail "deploymentIdentity.configurationBundleSha256 must be a sha256 digest" -}}
+{{- end -}}
+{{- $digest -}}
+{{- end -}}

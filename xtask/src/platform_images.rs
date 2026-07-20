@@ -1098,6 +1098,7 @@ fn deploy_linux(
     let kubeconfig = required_env("LABWEAVER_KUBECONFIG")?;
     let values = root.join("deploy/helm/labweaver/values.yaml");
     let environment_values = PathBuf::from(required_env("LABWEAVER_PLATFORM_VALUES_FILE")?);
+    let configuration_bundle_sha256 = required_env("LABWEAVER_CONFIGURATION_BUNDLE_SHA256")?;
     let mut command = Command::new("helm");
     command
         .env("KUBECONFIG", &kubeconfig)
@@ -1117,7 +1118,11 @@ fn deploy_linux(
         ])
         .arg(values)
         .arg("--values")
-        .arg(environment_values);
+        .arg(environment_values)
+        .args([
+            "--set-string",
+            &format!("deploymentIdentity.configurationBundleSha256={configuration_bundle_sha256}"),
+        ]);
     for image in &manifest.images {
         command.args([
             "--set-string",

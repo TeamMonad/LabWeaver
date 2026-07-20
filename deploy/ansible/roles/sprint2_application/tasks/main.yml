@@ -100,6 +100,7 @@
 - name: Validate controller-owned reviewed inputs
   ansible.builtin.stat:
     path: "{{ item }}"
+    checksum_algorithm: sha256
   loop: >-
     {{ [sprint2_application_package_manifest, sprint2_application_chart_source,
         sprint2_application_migration_catalog,
@@ -133,6 +134,8 @@
          | from_yaml_all | list }}
     sprint2_application_access_seed: >-
       {{ lookup('ansible.builtin.file', sprint2_application_access_seed_file) | from_json }}
+    sprint2_application_configuration_bundle_sha256: >-
+      sha256:{{ sprint2_application_controller_inputs.results[4].stat.checksum }}
   no_log: true
 
 - name: Validate immutable package identity
@@ -1612,7 +1615,9 @@
     sprint2_application_image_argv: >-
       {%- set values = [
         '--set-string',
-        'imagePullSecrets[0].name=' + sprint2_application_image_pull_secret_name
+        'imagePullSecrets[0].name=' + sprint2_application_image_pull_secret_name,
+        '--set-string',
+        'deploymentIdentity.configurationBundleSha256=' + sprint2_application_configuration_bundle_sha256
       ] -%}
       {%- for image in sprint2_application_package.images -%}
       {%- set _ = values.extend(['--set-string', 'images.' + (image.component | replace('-', '_')) + '=' + image.reference]) -%}

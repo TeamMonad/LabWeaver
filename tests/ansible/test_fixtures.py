@@ -259,6 +259,10 @@ class AnsibleFixtureTests(unittest.TestCase):
             "'imagePullSecrets[0].name=' + sprint2_application_image_pull_secret_name",
             arguments,
         )
+        self.assertIn(
+            "'deploymentIdentity.configurationBundleSha256=' + sprint2_application_configuration_bundle_sha256",
+            arguments,
+        )
         self.assertIn("'portalRoute.enabled=true'", arguments)
         self.assertIn("'objectStoreRoute.enabled=true'", arguments)
         self.assertIn("'objectStoreRoute.pathPrefix=/' + sprint2_application_minio_bucket", arguments)
@@ -279,6 +283,31 @@ class AnsibleFixtureTests(unittest.TestCase):
             arguments,
         )
         self.assertNotIn("regex_replace", arguments)
+
+    def test_sprint2_application_binds_configuration_identity_to_every_workload(self) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        values = (ROOT / "deploy/helm/labweaver/values.yaml").read_text(encoding="utf-8")
+        helpers = (
+            ROOT / "deploy/helm/labweaver/templates/_helpers.tpl"
+        ).read_text(encoding="utf-8")
+        workloads = (
+            ROOT / "deploy/helm/labweaver/templates/workloads.yaml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("sprint2_application_configuration_bundle_sha256", tasks)
+        self.assertIn("sprint2_application_controller_inputs.results[4].stat.checksum", tasks)
+        self.assertIn("configurationBundleSha256: \"\"", values)
+        self.assertIn(
+            'required "deploymentIdentity.configurationBundleSha256 is required"',
+            helpers,
+        )
+        self.assertIn('regexMatch "^sha256:[0-9a-f]{64}$"', helpers)
+        self.assertIn(
+            "labweaver.io/configuration-bundle-sha256:",
+            workloads,
+        )
 
     def test_object_store_route_uses_existing_web_workload_with_verified_tls(self) -> None:
         backend = (

@@ -9,6 +9,12 @@ images:
 
 imagePullSecrets: []
 
+# The private configuration bundle is applied by Ansible before Helm. Binding
+# its immutable digest to every Pod template ensures services that read their
+# configuration only during startup are rolled whenever that bundle changes.
+deploymentIdentity:
+  configurationBundleSha256: ""
+
 # Static aliases are only for adopted, stable infrastructure VIPs whose names
 # are already part of the reviewed Sprint 2 configuration. They do not replace
 # service discovery for LabWeaver workloads.

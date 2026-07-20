@@ -22,8 +22,9 @@ spec:
       labels:
         app.kubernetes.io/name: {{ $name }}
         {{- include "labweaver.labels" $root | nindent 8 }}
-      {{- if and (eq $name "web") $root.Values.objectStoreRoute.enabled }}
       annotations:
+        labweaver.io/configuration-bundle-sha256: {{ include "labweaver.configurationBundleSha256" $root | quote }}
+      {{- if and (eq $name "web") $root.Values.objectStoreRoute.enabled }}
         checksum/object-store-proxy: {{ printf "%s\n%s\n%s\n%s" $root.Values.objectStoreRoute.caCertificate $root.Values.objectStoreRoute.backendHostname $root.Values.objectStoreRoute.pathPrefix $root.Values.objectStoreRoute.serviceName | sha256sum | quote }}
       {{- end }}
     spec:
