@@ -1284,6 +1284,11 @@ async fn evaluation_prompt_enforces_supported_schema_variants_and_semantics()
             "missing prompt invariant: {required}"
         );
     }
+    let example = prompt
+        .lines()
+        .find(|line| line.starts_with("{\"apiVersion\":\"environment.labweaver.io/v1\""))
+        .ok_or_else(|| std::io::Error::other("environment prompt example is missing"))?;
+    serde_json::from_str::<EnvironmentSpec>(example)?;
     Ok(())
 }
 
