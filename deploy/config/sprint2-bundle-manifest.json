@@ -47,6 +47,7 @@
       "buildkit-client.crt",
       "buildkit-client.key",
       "database-url",
+      "harbor-ca.crt",
       "harbor-password",
       "harbor-username",
       "minio-access-key",

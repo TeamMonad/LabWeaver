@@ -15,7 +15,7 @@ use contracts::events::AgentBuildRequested;
 use contracts::supply_chain::VulnerabilitySummary;
 use contracts::{BuildRequestId, Sha256Digest};
 use flate2::read::GzDecoder;
-use reqwest::{Client, StatusCode, Url};
+use reqwest::{Certificate, Client, StatusCode, Url};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
@@ -47,6 +47,7 @@ pub struct ProductionBuildExecutorConfig {
     pub max_unpacked_context_bytes: u64,
     pub harbor_api: Url,
     pub harbor_registry: String,
+    pub harbor_ca_file: PathBuf,
     pub harbor_username_file: PathBuf,
     pub harbor_password_file: PathBuf,
     pub project_storage_quota_bytes: u64,
@@ -74,6 +75,7 @@ impl ProductionBuildExecutorConfig {
                 .any(|byte| byte.is_ascii_whitespace())
             || self.harbor_api.scheme() != "https"
             || self.harbor_api.host_str().is_none()
+            || !self.harbor_ca_file.is_absolute()
             || self.harbor_registry.contains('/')
             || self.harbor_registry.contains("//")
             || self.project_storage_quota_bytes == 0
@@ -114,9 +116,12 @@ impl ProductionBuildExecutor {
         }
         let harbor_username = read_secret(&config.harbor_username_file)?;
         let harbor_password = read_secret(&config.harbor_password_file)?;
+        let harbor_ca = std::fs::read(&config.harbor_ca_file).map_err(|_| rejected())?;
+        let harbor_ca = Certificate::from_pem(&harbor_ca).map_err(|_| rejected())?;
         let client = Client::builder()
             .https_only(true)
             .timeout(std::time::Duration::from_secs(30))
+            .add_root_certificate(harbor_ca)
             .build()
             .map_err(|_| rejected())?;
         Ok(Self {
