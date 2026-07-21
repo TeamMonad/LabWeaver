@@ -111,10 +111,14 @@ impl BuildSupplyChainProvider for FakeProvider {
             repository_prefix: format!("harbor.internal/course-{}", command.request.course_id),
             private: self.project_private,
             storage_quota_bytes: self.project_quota_bytes,
-            robot_subject: format!(
-                "robot$course-{}+{}",
-                command.request.course_id, self.robot_name
-            ),
+            robot_subject: if self.robot_name.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "robot$course-{}+{}",
+                    command.request.course_id, self.robot_name
+                )
+            },
         })
     }
 
@@ -308,7 +312,7 @@ async fn private_project_quota_and_robot_are_mandatory() {
             ..FakeProvider::default()
         },
         FakeProvider {
-            robot_name: "wrong-robot".to_owned(),
+            robot_name: String::new(),
             ..FakeProvider::default()
         },
     ] {
@@ -321,7 +325,7 @@ async fn private_project_quota_and_robot_are_mandatory() {
                 &BuildCancellation::new(),
             )
             .await
-            .expect_err("private project, quota and exact robot are required");
+            .expect_err("private project, quota and a bound robot are required");
         assert_eq!(error.code, BuildFailureCode::RegistryProjectInvalid);
         assert_eq!(
             calls.calls(),

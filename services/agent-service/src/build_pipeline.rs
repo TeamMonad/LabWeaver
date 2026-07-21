@@ -404,11 +404,7 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
             || project.repository_prefix != expected_repository_prefix
             || !project.private
             || project.storage_quota_bytes == 0
-            || project.robot_subject
-                != format!(
-                    "robot$course-{}+{}",
-                    command.request.course_id, self.policy.registry_robot_name
-                )
+            || project.robot_subject.trim().is_empty()
         {
             return Err(self
                 .cleanup(
