@@ -69,22 +69,27 @@ admission boundary enforces the executor namespace/ServiceAccount fence.
   Sprint 2 Helm profile and an allowlisted non-destructive application adoption
   path. The legacy reset playbook is explicitly outside this delivery.
 - Retained PostgreSQL, NATS, MinIO, Harbor, Keycloak, Kubernetes, KubeVirt and
-  BuildKit service bodies have been inventoried. The previous Draft PR head has
-  a connected seven-image package; the ECNU provider-binding change requires a
-  new package for the next exact source identity.
+  BuildKit service bodies have been inventoried. Source
+  `d85855e9a236ba605411921b8575d1f785acfde5` has a connected seven-image
+  package whose Harbor digests and pinned Trivy database passed connected
+  validation.
 - The reviewed ECNU Anthropic-compatible endpoint and `ecnu-plus` binding were
   verified from the operator workstation with the supplied credential. The
   credential is present only in ignored private input as
   `agent-service-secrets/anthropic-auth-token`; it is not repository or release
   evidence until the application adoption reads it back through the mounted
   Secret file.
-- Blocker: SSH command execution to the retained control plane and router, and
-  direct Kubernetes API access from the operator workstation, currently time
-  out. Therefore the current source identity cannot be packaged, adopted or
-  verified without substituting stale deployment evidence.
-- Exit: restore the reviewed SSH/Kubernetes management path, package the
-  current head, then complete two atomic application adoptions and rollback
-  readback without invoking reset or deleting retained infrastructure.
+- The current Control NATS user was forward-rotated to permit only the two
+  configured Agent quarantine subjects in addition to its retained grants. Its
+  public claims passed the checked-in fail-closed credential validator; no
+  retained stream or account was reset.
+- Blocker: router, both workers and NFS preflight pass, but `k8s-cp1` currently
+  accepts ICMP and TCP handshakes while sshd and kube-apiserver return no
+  application-layer response. The application playbook therefore stops before
+  mutation and cannot complete current-head adoption or verification.
+- Exit: restore `k8s-cp1` sshd and kube-apiserver responsiveness, then complete
+  two atomic application adoptions and rollback/readback without invoking reset
+  or deleting retained infrastructure.
 - Owner: A adoption execution; D independent Verify.
 
 The repository now has a separate `sprint2-foundation` reconciliation for the
@@ -106,10 +111,9 @@ dependency, but it is not Sprint 2 E3 evidence and does not authorize deletion.
   files; live and Fixture specifications are mutually excluded.
 - Blocker: real Keycloak teacher/student sessions, `demo replay` and the
   machine-readable `release-gate` are not closed under one deployment identity.
-- Operational blocker: the application endpoint remains reachable, but SSH and
-  Kubernetes management connections from the authorized workstation time out.
-  Current-head packaging and non-destructive Ansible reconcile cannot proceed
-  until that management path is restored.
+- Operational blocker: the application endpoint remains reachable and the
+  current-head package is complete, but the non-destructive Ansible reconcile
+  cannot proceed while `k8s-cp1` sshd and kube-apiserver are unresponsive.
 - Exit: Playwright records Trace, screenshot and video without fixed sleeps;
   the only passing Sprint 2 report validates against its schema and binds the
   same commit, deployment manifest, migration catalog, image digests and Run ID.
