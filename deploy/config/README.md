@@ -49,11 +49,12 @@ credential fallback or alternate provider route.
 
 Environment-specific Helm values must explicitly bind adopted infrastructure names and VIPs. This
 includes reviewed `hostAliases`, matching `/32` entries under
-`network.externalServiceEndpoints`, an opt-in `portalRoute`, and an opt-in
-`sshGatewayRoute`. The routes create new application HTTPRoute/TCPRoute and ReferenceGrant
-objects; they do not replace a retained Gateway or existing route. The application role may add
-only the exact reviewed HTTPS and TCP/2222 listeners when they are absent and rejects a conflicting
-listener. `sprint2-application` fails unless both enabled routes are `Accepted` and `ResolvedRefs`.
+`network.externalServiceEndpoints`, an opt-in `portalRoute`, and the reviewed shared MetalLB VIP
+for `sshGatewayService`. The portal route creates only the application HTTPRoute and
+ReferenceGrant; it does not replace the retained Gateway. OpenSSH uses a dedicated TCP/2222
+`LoadBalancer` Service on the same reviewed VIP because the adopted Cilium Gateway API controller
+does not reconcile TCPRoute. `sprint2-application` fails unless the HTTPRoute is `Accepted` and
+`ResolvedRefs` and the OpenSSH Service owns the exact shared VIP and port.
 The portal authority is installed only in the retained router system trust so controller-side
 verification never disables TLS validation.
 When browser uploads are enabled, `objectStoreRoute` adds the bucket path to the same HTTPS

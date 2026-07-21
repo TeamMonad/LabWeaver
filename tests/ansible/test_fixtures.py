@@ -236,15 +236,10 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("data_source_name: ubuntu-lab-base-v1", lock)
         self.assertNotIn("state: absent", tasks)
 
-    def test_sprint2_application_gateway_listener_ports_are_integers(self) -> None:
-        tasks = (
-            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
-        ).read_text(encoding="utf-8")
-        ssh_listener = tasks.split(
-            "- name: Add the bounded Sprint 2 SSH listener when absent", maxsplit=1
-        )[1].split("- name:", maxsplit=1)[0]
-        self.assertIn("port: 2222", ssh_listener)
-        self.assertNotIn('port: "{{', ssh_listener)
+    def test_sprint2_application_ssh_service_port_is_an_integer(self) -> None:
+        values = (ROOT / "deploy/helm/labweaver/values.yaml").read_text(encoding="utf-8")
+        self.assertIn("containerPort: 2222, servicePort: 2222", values)
+        self.assertNotIn('servicePort: "2222"', values)
 
     def test_sprint2_application_builds_helm_value_arguments_without_regex(self) -> None:
         tasks = (
@@ -270,11 +265,6 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("'workloads.control-service.externalEgress[0].cidr='", arguments)
         self.assertIn(
             "'portalRoute.namespace=' + sprint2_application_portal_route_namespace",
-            arguments,
-        )
-        self.assertIn("'sshGatewayRoute.enabled=true'", arguments)
-        self.assertIn(
-            "'sshGatewayRoute.namespace=' + sprint2_application_ssh_route_namespace",
             arguments,
         )
         self.assertIn("'sshGatewayService.enabled=true'", arguments)
@@ -442,16 +432,13 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("ProtectSystem=strict", unit)
         self.assertNotIn("state: absent", tasks)
 
-    def test_sprint2_application_adopts_bounded_portal_and_ssh_routes(self) -> None:
+    def test_sprint2_application_adopts_portal_route_and_shared_ssh_service(self) -> None:
         tasks = (
             ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
         ).read_text(encoding="utf-8")
         portal = (ROOT / "deploy/helm/labweaver/templates/portal-route.yaml").read_text(
             encoding="utf-8"
         )
-        ssh_route = (
-            ROOT / "deploy/helm/labweaver/templates/ssh-gateway-route.yaml"
-        ).read_text(encoding="utf-8")
         workloads = (
             ROOT / "deploy/helm/labweaver/templates/workloads.yaml"
         ).read_text(encoding="utf-8")
@@ -462,14 +449,11 @@ class AnsibleFixtureTests(unittest.TestCase):
             ROOT / "deploy/ansible/roles/sprint2_application/handlers/main.yml"
         ).read_text(encoding="utf-8")
         self.assertIn("SPRINT2_APPLICATION_PORTAL_GATEWAY_CONFLICT", tasks)
-        self.assertIn("SPRINT2_APPLICATION_SSH_GATEWAY_CONFLICT", tasks)
-        self.assertIn("SPRINT2_APPLICATION_SSH_ROUTE_INVALID", tasks)
+        self.assertNotIn("SPRINT2_APPLICATION_SSH_ROUTE_INVALID", tasks)
         self.assertIn("Refresh retained router trust", tasks)
         self.assertIn("labweaver.io/gateway-routes: allowed", tasks)
         self.assertIn("kind: HTTPRoute", portal)
         self.assertIn("value: /connect", portal)
-        self.assertIn("kind: TCPRoute", ssh_route)
-        self.assertIn("name: openssh-gateway", ssh_route)
         self.assertIn("sshGatewayService.enabled", workloads)
         self.assertIn("metallb.io/allow-shared-ip", workloads)
         self.assertNotIn("metallb.io/loadBalancerIPs", workloads)

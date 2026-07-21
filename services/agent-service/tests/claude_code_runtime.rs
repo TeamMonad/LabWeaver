@@ -298,12 +298,13 @@ fn environment_candidate() -> Value {
             "kind": "virtual_machine",
             "provider_binding": "kubevirt-primary",
             "base_disk": {
-                "artifactId": ArtifactId::new(),
-                "storeBinding": "minio-primary",
-                "objectVersion": "version-1",
-                "sha256": "33".repeat(32),
-                "sizeBytes": 1_073_741_824_u64,
-                "mediaType": "application/octet-stream"
+                "binding": "linux-lab-base-v1",
+                "sourceRegistryDigest": format!(
+                    "docker://harbor.labweaver.internal/labweaver-vm/linux-lab@sha256:{}",
+                    "44".repeat(32)
+                ),
+                "diskSha256": "33".repeat(32),
+                "capacityBytes": 1_073_741_824_u64
             },
             "storage_class_binding": "rwx-primary",
             "ssh_port": 22

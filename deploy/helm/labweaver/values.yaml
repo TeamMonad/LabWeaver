@@ -37,13 +37,6 @@ objectStoreRoute:
   backendHostname: ""
   caCertificate: ""
 
-sshGatewayRoute:
-  enabled: false
-  namespace: ""
-  name: labweaver-sprint2-ssh
-  gatewayName: ""
-  gatewaySectionName: ssh
-
 sshGatewayService:
   enabled: false
   loadBalancerIP: ""

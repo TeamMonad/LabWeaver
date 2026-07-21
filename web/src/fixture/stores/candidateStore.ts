@@ -8,7 +8,7 @@ import type {
   RuntimeKind,
   VulnerabilitySummary,
 } from '@/generated/contracts'
-import { nowIso } from '../utils/clock'
+import { addHoursIso, nowIso } from '../utils/clock'
 import { nextUuid7 } from '../utils/identity'
 import { nextRevision } from '../utils/sequence'
 
@@ -27,8 +27,12 @@ export interface StoredEvaluationCandidate {
 const environmentCandidates = new Map<string, StoredEnvironmentCandidate>()
 const evaluationCandidates = new Map<string, StoredEvaluationCandidate>()
 
-function sha256(prefix: string): string {
-  return `sha256:${prefix.repeat(64)}`
+function sha256Hex(prefix: string): string {
+  return prefix.repeat(64)
+}
+
+function ociDigest(prefix: string): string {
+  return `sha256:${sha256Hex(prefix)}`
 }
 
 function artifactRef(mediaType: string, prefix: string) {
@@ -36,7 +40,7 @@ function artifactRef(mediaType: string, prefix: string) {
     artifactId: nextUuid7('artifact'),
     mediaType,
     objectVersion: 'version-1',
-    sha256: sha256(prefix),
+    sha256: sha256Hex(prefix),
     sizeBytes: 1024,
     storeBinding: 'fixture-store',
   }
@@ -74,7 +78,7 @@ function createEnvironmentSpec(runtimeKind: RuntimeKind, courseId: string): Envi
         kind: 'container',
         provider_binding: 'container-primary-v1',
         build_context: artifactRef('application/vnd.oci.image.layer.v1.tar+gzip', 'b'),
-        base_image_digest: sha256('c'),
+        base_image_digest: ociDigest('c'),
         service_port: 8080,
       },
     }
@@ -85,7 +89,12 @@ function createEnvironmentSpec(runtimeKind: RuntimeKind, courseId: string): Envi
     runtime: {
       kind: 'virtual_machine',
       provider_binding: 'kubevirt-primary-v1',
-      base_disk: artifactRef('application/vnd.qemu.qcow2', 'd'),
+      base_disk: {
+        binding: 'linux-lab-base-v1',
+        sourceRegistryDigest: `docker://registry.labweaver.local/vm/linux-lab@${ociDigest('d')}`,
+        diskSha256: sha256Hex('d'),
+        capacityBytes: 1073741824,
+      },
       ssh_port: 22,
       storage_class_binding: 'storage-primary-v1',
     },
@@ -131,7 +140,7 @@ function createEvaluationSpec(courseId: string): EvaluationSpec {
 function createImageArtifact(runtimeKind: RuntimeKind, candidateId: string): ImageArtifact {
   const artifactId = nextUuid7('image')
   const buildRequestId = nextUuid7('build')
-  const digest = sha256('e')
+  const digest = ociDigest('e')
 
   if (runtimeKind === 'container') {
     return {
@@ -147,13 +156,20 @@ function createImageArtifact(runtimeKind: RuntimeKind, candidateId: string): Ima
     kind: 'virtual_machine',
     id: artifactId,
     format: 'qcow2',
-    base_disk: artifactRef('application/vnd.qemu.qcow2', 'd'),
+    base_disk: {
+      binding: 'linux-lab-base-v1',
+      sourceRegistryDigest: `docker://registry.labweaver.local/vm/linux-lab@${ociDigest('d')}`,
+      diskSha256: sha256Hex('d'),
+      capacityBytes: 1073741824,
+    },
   }
 }
 
 function createImagePolicyEvaluation(artifact: ImageArtifact): ImagePolicyEvaluation {
   const artifactId = artifact.id
-  const artifactSha256 = artifact.kind === 'container' ? artifact.digest : sha256('e')
+  const artifactSha256 = artifact.kind === 'container'
+    ? artifact.digest.replace(/^sha256:/, '')
+    : artifact.base_disk.diskSha256
   const vulnerabilities: VulnerabilitySummary = { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 }
   const now = nowIso()
   return {
@@ -164,10 +180,10 @@ function createImagePolicyEvaluation(artifact: ImageArtifact): ImagePolicyEvalua
     passed: true,
     policyId: 'image-policy-1',
     policyRevision: 1,
-    scannerDatabaseSha256: sha256('scanner-db'),
+    scannerDatabaseSha256: sha256Hex('f'),
     scannerName: 'trivy',
     scannerVersion: '1.0.0',
-    validUntil: now,
+    validUntil: addHoursIso(1),
     vulnerabilities,
   }
 }
@@ -191,7 +207,7 @@ export function createEnvironmentCandidate(
     runId,
     schemaSha256,
     spec,
-    specSha256: sha256('e'),
+    specSha256: sha256Hex('e'),
   }
   const imageArtifact = createImageArtifact(runtimeKind, id)
   const imagePolicyEvaluation = createImagePolicyEvaluation(imageArtifact)
@@ -222,7 +238,7 @@ export function createEvaluationCandidate(
     runId,
     schemaSha256,
     spec: createEvaluationSpec(courseId),
-    specSha256: sha256('e'),
+    specSha256: sha256Hex('e'),
   }
   const stored: StoredEvaluationCandidate = { candidate, trustRevision: 1 }
   evaluationCandidates.set(id, stored)

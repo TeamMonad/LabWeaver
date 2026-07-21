@@ -393,7 +393,7 @@ export function freezeEnvironment(
     artifactId: nextUuid7('artifact'),
     mediaType: 'application/vnd.labweaver.submission+tar',
     objectVersion: `freeze-${op.operationId}`,
-    sha256: 'sha256:' + 'f'.repeat(64),
+    sha256: 'f'.repeat(64),
     sizeBytes: 4096,
     storeBinding: 'fixture-store',
   }

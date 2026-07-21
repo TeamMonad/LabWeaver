@@ -49,7 +49,6 @@
       - sprint2_application_runtime_passwords.keys() | sort == sprint2_application_domains | sort
       - sprint2_application_runtime_passwords.values() | map('length') | min >= 24
       - (sprint2_application_portal_route_namespace | length == 0) == (sprint2_application_portal_route_name | length == 0)
-      - (sprint2_application_ssh_route_namespace | length == 0) == (sprint2_application_ssh_route_name | length == 0)
       - >-
         sprint2_application_portal_route_name | length == 0 or
         (sprint2_application_portal_gateway_name | length > 0 and
@@ -65,17 +64,9 @@
          sprint2_application_object_store_service_port | int == 9000 and
          sprint2_application_object_store_backend_hostname is match('^[a-z0-9][a-z0-9.-]+$') and
          sprint2_application_object_store_external_cidr is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}/32$'))
-      - >-
-        sprint2_application_ssh_route_name | length == 0 or
-        (sprint2_application_ssh_gateway_name | length > 0 and
-         sprint2_application_ssh_gateway_listener_name is match('^[a-z]([-a-z0-9]*[a-z0-9])?$') and
-         sprint2_application_ssh_gateway_port | int == 2222)
-      - >-
-        sprint2_application_ssh_load_balancer_ip | length == 0 or
-        (sprint2_application_portal_route_name | length > 0 and
-         sprint2_application_ssh_load_balancer_ip is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$') and
-         sprint2_application_ssh_shared_ip_key is match('^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$') and
-         sprint2_application_ssh_gateway_port | int == 2222)
+      - sprint2_application_portal_route_name | length > 0
+      - sprint2_application_ssh_load_balancer_ip is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
+      - sprint2_application_ssh_shared_ip_key is match('^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$')
     fail_msg: SPRINT2_APPLICATION_INPUT_INVALID
 
 - name: Validate remote application tools and credentials
@@ -1553,77 +1544,6 @@
           metallb.io/allow-shared-ip: "{{ sprint2_application_ssh_shared_ip_key }}"
   when: sprint2_application_ssh_load_balancer_ip | length > 0
 
-- name: Inspect the retained SSH Gateway
-  kubernetes.core.k8s_info:
-    kubeconfig: "{{ sprint2_application_kubeconfig }}"
-    api_version: gateway.networking.k8s.io/v1
-    kind: Gateway
-    namespace: "{{ sprint2_application_ssh_route_namespace }}"
-    name: "{{ sprint2_application_ssh_gateway_name }}"
-  register: sprint2_application_ssh_gateway
-  when: sprint2_application_ssh_route_name | length > 0
-
-- name: Require exactly one retained SSH Gateway
-  ansible.builtin.assert:
-    that:
-      - sprint2_application_ssh_gateway.resources | length == 1
-    fail_msg: SPRINT2_APPLICATION_SSH_GATEWAY_MISSING
-  when: sprint2_application_ssh_route_name | length > 0
-
-- name: Select an existing Sprint 2 SSH listener
-  ansible.builtin.set_fact:
-    sprint2_application_ssh_gateway_listener: >-
-      {{ sprint2_application_ssh_gateway.resources[0].spec.listeners
-         | selectattr('name', 'equalto', sprint2_application_ssh_gateway_listener_name)
-         | list }}
-  when: sprint2_application_ssh_route_name | length > 0
-
-- name: Add the bounded Sprint 2 SSH listener when absent
-  kubernetes.core.k8s_json_patch:
-    kubeconfig: "{{ sprint2_application_kubeconfig }}"
-    api_version: gateway.networking.k8s.io/v1
-    kind: Gateway
-    namespace: "{{ sprint2_application_ssh_route_namespace }}"
-    name: "{{ sprint2_application_ssh_gateway_name }}"
-    patch:
-      - op: add
-        path: /spec/listeners/-
-        value:
-          name: "{{ sprint2_application_ssh_gateway_listener_name }}"
-          protocol: TCP
-          port: 2222
-          allowedRoutes:
-            namespaces:
-              from: Same
-  when:
-    - sprint2_application_ssh_route_name | length > 0
-    - sprint2_application_ssh_gateway_listener | length == 0
-
-- name: Read back the retained SSH Gateway after listener adoption
-  kubernetes.core.k8s_info:
-    kubeconfig: "{{ sprint2_application_kubeconfig }}"
-    api_version: gateway.networking.k8s.io/v1
-    kind: Gateway
-    namespace: "{{ sprint2_application_ssh_route_namespace }}"
-    name: "{{ sprint2_application_ssh_gateway_name }}"
-  register: sprint2_application_ssh_gateway_after
-  when: sprint2_application_ssh_route_name | length > 0
-
-- name: Require the exact bounded Sprint 2 SSH listener
-  ansible.builtin.assert:
-    that:
-      - sprint2_application_ssh_gateway_listener_after | length == 1
-      - sprint2_application_ssh_gateway_listener_after[0].protocol == 'TCP'
-      - sprint2_application_ssh_gateway_listener_after[0].port | int == sprint2_application_ssh_gateway_port | int
-      - sprint2_application_ssh_gateway_listener_after[0].allowedRoutes.namespaces.from == 'Same'
-    fail_msg: SPRINT2_APPLICATION_SSH_GATEWAY_CONFLICT
-  vars:
-    sprint2_application_ssh_gateway_listener_after: >-
-      {{ sprint2_application_ssh_gateway_after.resources[0].spec.listeners
-         | selectattr('name', 'equalto', sprint2_application_ssh_gateway_listener_name)
-         | list }}
-  when: sprint2_application_ssh_route_name | length > 0
-
 - name: Apply reviewed application configuration without namespace reset
   kubernetes.core.k8s:
     kubeconfig: "{{ sprint2_application_kubeconfig }}"
@@ -1695,15 +1615,6 @@
         '--set-file', 'objectStoreRoute.caCertificate=' + sprint2_application_minio_ca_file,
         '--set-string', 'workloads.control-service.externalEgress[0].cidr=' + sprint2_application_object_store_external_cidr,
         '--set', 'workloads.control-service.externalEgress[0].ports[0]=443'
-      ]) -%}
-      {%- endif -%}
-      {%- if sprint2_application_ssh_route_name | length > 0 -%}
-      {%- set _ = values.extend([
-        '--set', 'sshGatewayRoute.enabled=true',
-        '--set-string', 'sshGatewayRoute.namespace=' + sprint2_application_ssh_route_namespace,
-        '--set-string', 'sshGatewayRoute.name=' + sprint2_application_ssh_route_name,
-        '--set-string', 'sshGatewayRoute.gatewayName=' + sprint2_application_ssh_gateway_name,
-        '--set-string', 'sshGatewayRoute.gatewaySectionName=' + sprint2_application_ssh_gateway_listener_name
       ]) -%}
       {%- endif -%}
       {%- if sprint2_application_ssh_load_balancer_ip | length > 0 -%}
@@ -1841,38 +1752,6 @@
       - "'proxy_set_header Host $http_host;' in (sprint2_application_object_store_proxy.stdout | from_json).data['object-store.conf']"
     fail_msg: SPRINT2_APPLICATION_OBJECT_STORE_ROUTE_INVALID
   when: sprint2_application_object_store_route_enabled
-
-- name: Read back the adopted SSH route
-  ansible.builtin.command:
-    argv:
-      - "{{ sprint2_application_kubectl }}"
-      - --kubeconfig
-      - "{{ sprint2_application_kubeconfig }}"
-      - --namespace
-      - "{{ sprint2_application_ssh_route_namespace }}"
-      - get
-      - tcproute
-      - "{{ sprint2_application_ssh_route_name }}"
-      - --output=json
-  register: sprint2_application_ssh_route
-  when: sprint2_application_ssh_route_name | length > 0
-  changed_when: false
-
-- name: Require the adopted SSH route accepted and resolved
-  ansible.builtin.assert:
-    that:
-      - >-
-        (sprint2_application_ssh_route.stdout | from_json).status.parents
-        | map(attribute='conditions') | flatten
-        | selectattr('type', 'equalto', 'Accepted')
-        | selectattr('status', 'equalto', 'True') | list | length > 0
-      - >-
-        (sprint2_application_ssh_route.stdout | from_json).status.parents
-        | map(attribute='conditions') | flatten
-        | selectattr('type', 'equalto', 'ResolvedRefs')
-        | selectattr('status', 'equalto', 'True') | list | length > 0
-    fail_msg: SPRINT2_APPLICATION_SSH_ROUTE_INVALID
-  when: sprint2_application_ssh_route_name | length > 0
 
 - name: Wait for the OpenSSH Gateway shared load balancer address
   kubernetes.core.k8s_info:

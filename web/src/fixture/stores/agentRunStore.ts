@@ -119,7 +119,7 @@ function advance(stored: StoredAgentRun): void {
         run.courseId,
         run.requestedRuntime,
         run.policyRevision,
-        'sha256:' + 's'.repeat(64),
+        's'.repeat(64),
         envTrack.candidateId,
       )
     }
@@ -128,7 +128,7 @@ function advance(stored: StoredAgentRun): void {
         run.id,
         run.courseId,
         run.policyRevision,
-        'sha256:' + 's'.repeat(64),
+        's'.repeat(64),
         evalTrack.candidateId,
       )
     }

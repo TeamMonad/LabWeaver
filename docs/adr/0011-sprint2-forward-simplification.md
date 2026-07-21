@@ -50,6 +50,14 @@ bridge is required because the adopted Cilium Gateway controller does not
 reconcile `BackendTLSPolicy`; it neither reconfigures nor replaces MinIO and
 does not add another workload or service boundary.
 
+OpenSSH does not use `TCPRoute` in the adopted Cilium 1.19 profile because that
+controller does not reconcile it. The existing `openssh-gateway` workload is
+exposed by a dedicated TCP/2222 `LoadBalancer` Service sharing the reviewed
+MetalLB VIP with the portal Gateway. Deployment fails closed unless the
+retained Gateway already owns that VIP and both Services carry the same bounded
+sharing key. This is an application exposure change only; it does not replace
+the retained Gateway or alter the MetalLB installation.
+
 ### Contracts and persistence
 
 - The pre-release public contract has one current `v1` representation.
@@ -149,7 +157,7 @@ deployment manifest, migration catalog, image set, and run ID.
   Helm reconciliation or touch persistent Harbor state.
 - `sprint2-application` creates only missing application-owned state, verifies
   exact migration and service identities when state already exists, and deploys
-  the seven-image profile without invoking the destructive reset path.
+  the manifest-bound image profile without invoking the destructive reset path.
 - The Sprint 2 Release Gate requires both Container and real KubeVirt paths.
 - Release evidence must expose the accepted broad-runtime-RBAC risk and must
   not report least-privilege verification while the exception remains.
