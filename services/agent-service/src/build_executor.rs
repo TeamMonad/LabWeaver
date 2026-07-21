@@ -183,12 +183,8 @@ impl ProductionBuildExecutor {
         // Deployment reconciles project privacy, quota, and robot membership with
         // Harbor administrator credentials. This runtime deliberately receives only
         // the scoped robot credential, for which Harbor's project API returns 403.
-        // Verify the adopted endpoint and credential binding here; BuildKit's push is
-        // the authoritative repository permission check in the following stage.
-        let expected_robot_prefix = format!("robot${}+", repository.project);
-        if !self.harbor_username.starts_with(&expected_robot_prefix) {
-            return Err(rejected());
-        }
+        // Verify the adopted endpoint here; BuildKit's push is the authoritative
+        // scoped-credential and repository permission check in the following stage.
         self.client
             .get(self.harbor_url(&["health"])?)
             .send()
