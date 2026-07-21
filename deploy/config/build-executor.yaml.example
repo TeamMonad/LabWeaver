@@ -39,4 +39,5 @@ executor:
   robotSubject: "sprint2-build-executor"
   scannerName: "trivy"
   scannerVersion: "0.72.0"
+  scannerDatabaseRepository: "harbor.example.invalid/labweaver-system/trivy-db@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   scannerDatabaseSha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

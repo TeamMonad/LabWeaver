@@ -57,6 +57,7 @@ pub struct ProductionBuildExecutorConfig {
     pub robot_subject: String,
     pub scanner_name: String,
     pub scanner_version: String,
+    pub scanner_database_repository: String,
     pub scanner_database_sha256: Sha256Digest,
 }
 
@@ -85,6 +86,7 @@ impl ProductionBuildExecutorConfig {
             || self.robot_subject.trim().is_empty()
             || self.scanner_name != "trivy"
             || self.scanner_version.trim().is_empty()
+            || !valid_database_reference(&self.scanner_database_repository, &self.harbor_registry)
             || self.scanner_database_sha256 == Sha256Digest::of_bytes(&[])
         {
             return Err(rejected());
@@ -361,6 +363,13 @@ impl ProductionBuildExecutor {
                 "--cache-dir",
             ])
             .arg(&self.config.trivy_cache_directory)
+            .args(["--db-repository", &self.config.scanner_database_repository])
+            .args([
+                "--skip-java-db-update",
+                "--skip-check-update",
+                "--skip-vex-repo-update",
+                "--skip-version-check",
+            ])
             .arg("--output")
             .arg(report.path())
             .arg(format!("{}@{}", candidate.repository, candidate.digest))
@@ -780,6 +789,15 @@ fn valid_digest(value: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
+fn valid_database_reference(value: &str, registry: &str) -> bool {
+    let Some((repository, digest)) = value.rsplit_once('@') else {
+        return false;
+    };
+    repository.starts_with(&format!("{registry}/"))
+        && !repository.contains("..")
+        && valid_digest(digest)
+}
+
 fn portable_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -895,6 +913,22 @@ mod tests {
             "https://harbor.internal/labweaver-system/course-123-candidate-456",
         ] {
             assert!(RepositoryIdentity::parse(invalid, "harbor.internal").is_err());
+        }
+    }
+
+    #[test]
+    fn trivy_database_is_one_digest_bound_internal_repository() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        assert!(valid_database_reference(
+            &format!("harbor.internal/labweaver-system/trivy-db@{digest}"),
+            "harbor.internal",
+        ));
+        for invalid in [
+            "ghcr.io/aquasecurity/trivy-db:2",
+            "harbor.internal/labweaver-system/trivy-db:2",
+            "harbor.internal/../cache/trivy-db@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            assert!(!valid_database_reference(invalid, "harbor.internal"));
         }
     }
 

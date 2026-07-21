@@ -81,6 +81,9 @@ a still-valid fenced executor request.
 Its mounted `outbound-ca.pem` is the reviewed concatenation of the MinIO and
 Harbor CA certificates so the same process can read the immutable build context
 and complete BuildKit registry authentication without ambient host trust.
+The executor receives exactly one digest-bound `scannerDatabaseRepository`
+inside its own Harbor project and disables Java DB, checks bundle, VEX, and
+version-check downloads. It never falls back to a public Trivy DB registry.
 
 ## Connected validation and deployment
 
