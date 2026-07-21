@@ -8,7 +8,6 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Duration;
 
 use artifact_store::{ImmutableObjectStore, S3ImmutableObjectStore};
 use async_trait::async_trait;
@@ -33,8 +32,7 @@ use crate::build_provider::{BuildExecutorBackend, BuildExecutorRequest, BuildExe
 
 const MAX_DOCKERFILE_BYTES: u64 = 256 * 1024;
 const MAX_CONTEXT_ENTRIES: usize = 10_000;
-const HARBOR_TAG_ABSENCE_ATTEMPTS: usize = 12;
-const HARBOR_TAG_ABSENCE_INTERVAL: Duration = Duration::from_millis(250);
+const MAX_HARBOR_RESPONSE_BYTES: usize = 1024 * 1024;
 
 /// Deployment-owned, non-secret executor bindings.
 #[derive(Clone, Debug, Deserialize)]
@@ -468,40 +466,35 @@ impl ProductionBuildExecutor {
             "tags",
             &tag,
         ])?;
-        let response = self
-            .authorized(self.client.delete(url.clone()))
-            .send()
-            .await
-            .map_err(network)?;
-        let status = response.status();
-        if status != StatusCode::OK
-            && status != StatusCode::ACCEPTED
-            && status != StatusCode::NO_CONTENT
-            && status != StatusCode::NOT_FOUND
+        let delete = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            self.authorized(self.client.delete(url)).send(),
+        )
+        .await;
+        match delete {
+            Ok(Ok(response))
+                if matches!(
+                    response.status(),
+                    StatusCode::OK
+                        | StatusCode::ACCEPTED
+                        | StatusCode::NO_CONTENT
+                        | StatusCode::NOT_FOUND
+                ) => {}
+            Ok(Ok(_)) => return Err(unavailable()),
+            Ok(Err(_)) | Err(_) => tracing::warn!(
+                event = "agent.build_executor.harbor_tag_delete_indeterminate",
+                build_request_id = %build_request_id,
+                diagnostic = "LW_AGENT_BUILD_CLEANUP_DELETE_INDETERMINATE"
+            ),
+        }
+        // Harbor can complete the delete while its Core API response remains
+        // pending. Registry tag listing is a separate, read-only and
+        // authoritative absence check; an indeterminate delete never becomes
+        // success unless this exact repository proves the tag is absent.
+        if !self
+            .registry_tag_absent(&project, &repository, &tag)
+            .await?
         {
-            return Err(unavailable());
-        }
-        // Harbor applies tag deletion asynchronously. Project robots cannot
-        // GET this endpoint, so bounded idempotent DELETE readback waits until
-        // Harbor returns 404. Exhausting the bound remains a hard failure.
-        let mut absent = status == StatusCode::NOT_FOUND;
-        for _ in 0..HARBOR_TAG_ABSENCE_ATTEMPTS {
-            if absent {
-                break;
-            }
-            tokio::time::sleep(HARBOR_TAG_ABSENCE_INTERVAL).await;
-            let verify = self
-                .authorized(self.client.delete(url.clone()))
-                .send()
-                .await
-                .map_err(network)?;
-            match verify.status() {
-                StatusCode::NOT_FOUND => absent = true,
-                StatusCode::OK | StatusCode::ACCEPTED | StatusCode::NO_CONTENT => {}
-                _ => return Err(unavailable()),
-            }
-        }
-        if !absent {
             return Err(unavailable());
         }
         sqlx::query(
@@ -514,6 +507,67 @@ impl ProductionBuildExecutor {
         .await
         .map_err(|_| unavailable())?;
         Ok(())
+    }
+
+    async fn registry_tag_absent(
+        &self,
+        project: &str,
+        repository: &str,
+        tag: &str,
+    ) -> Result<bool, BuildProviderFailure> {
+        let scope = format!("repository:{project}/{repository}:pull");
+        let mut token_url = self.config.harbor_api.clone();
+        token_url.set_path("/service/token");
+        token_url
+            .query_pairs_mut()
+            .clear()
+            .append_pair("service", "harbor-registry")
+            .append_pair("scope", &scope);
+        let token_response = self
+            .authorized(self.client.get(token_url))
+            .send()
+            .await
+            .map_err(network)?;
+        if token_response.status() != StatusCode::OK {
+            return Err(unavailable());
+        }
+        let token_bytes = token_response.bytes().await.map_err(network)?;
+        if token_bytes.len() > MAX_HARBOR_RESPONSE_BYTES {
+            return Err(output_invalid());
+        }
+        let token: HarborTokenResponse =
+            serde_json::from_slice(&token_bytes).map_err(|_| output_invalid())?;
+        if token.token.is_empty() {
+            return Err(output_invalid());
+        }
+
+        let mut tags_url = Url::parse(&format!("https://{}/", self.config.harbor_registry))
+            .map_err(|_| rejected())?;
+        tags_url
+            .path_segments_mut()
+            .map_err(|()| rejected())?
+            .extend(["v2", project, repository, "tags", "list"]);
+        let tags_response = self
+            .client
+            .get(tags_url)
+            .bearer_auth(token.token)
+            .send()
+            .await
+            .map_err(network)?;
+        if tags_response.status() != StatusCode::OK {
+            return Err(unavailable());
+        }
+        let tags_bytes = tags_response.bytes().await.map_err(network)?;
+        if tags_bytes.len() > MAX_HARBOR_RESPONSE_BYTES {
+            return Err(output_invalid());
+        }
+        let listing: HarborTagList =
+            serde_json::from_slice(&tags_bytes).map_err(|_| output_invalid())?;
+        Ok(!listing
+            .tags
+            .unwrap_or_default()
+            .iter()
+            .any(|item| item == tag))
     }
 
     fn harbor_url(&self, segments: &[&str]) -> Result<Url, BuildProviderFailure> {
@@ -530,6 +584,16 @@ impl ProductionBuildExecutor {
     fn authorized(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         request.basic_auth(&self.harbor_username, Some(&self.harbor_password))
     }
+}
+
+#[derive(Deserialize)]
+struct HarborTokenResponse {
+    token: String,
+}
+
+#[derive(Deserialize)]
+struct HarborTagList {
+    tags: Option<Vec<String>>,
 }
 
 #[async_trait]

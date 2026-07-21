@@ -71,9 +71,10 @@ The runtime Build Executor uses one project-scoped Harbor credential with only
 `artifact:delete`, and `tag:delete`. Candidate cleanup removes only the
 temporary candidate tag through Harbor's digest-bound tag endpoint; it never
 deletes the digest artifact referenced by an `EnvironmentTemplateRelease`.
-Because Harbor applies tag deletion asynchronously, the executor performs a
-bounded idempotent delete readback until the endpoint returns `404`; exhausting
-that bound blocks publication instead of reporting cleanup success.
+Because Harbor can complete tag deletion while its Core API response remains
+pending, the executor uses the scoped registry token endpoint and the OCI tag
+listing as a separate read-only absence check. An indeterminate delete remains
+blocking unless that exact repository proves the candidate tag is absent.
 The NATS request timeout is explicitly bound to the reviewed build-stage
 timeout; the client library's shorter default request timeout must not cut off
 a still-valid fenced executor request.
