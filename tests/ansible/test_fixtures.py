@@ -384,7 +384,10 @@ class AnsibleFixtureTests(unittest.TestCase):
             ROOT / "deploy/helm/labweaver/templates/network-policy.yaml"
         ).read_text(encoding="utf-8")
         values = (ROOT / "deploy/helm/labweaver/values.yaml").read_text(encoding="utf-8")
-        self.assertIn("with $configuration.hostAliases", workloads)
+        self.assertIn(
+            "with (default $root.Values.hostAliases $configuration.hostAliases)",
+            workloads,
+        )
         self.assertNotIn("with $root.Values.hostAliases", workloads)
         self.assertIn("identityNamespaceSelector", policies)
         self.assertIn("port: 443", policies)
