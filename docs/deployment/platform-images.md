@@ -66,6 +66,15 @@ gate.
 
 The package manifest records the source commit, component lock hash, builder versions, Harbor host, image digests, Trivy version/database identity, vulnerability counts, and content hash of each retained scan report. Sprint 2 intentionally does not generate or validate Sigstore, Fulcio, Rekor, CT, TUF, SBOM, provenance, or Kyverno evidence.
 
+The runtime Build Executor uses one project-scoped Harbor credential with only
+`repository:pull`, `repository:push`, `repository:delete`,
+`artifact:delete`, and `tag:delete`. Candidate cleanup removes only the
+temporary candidate tag through Harbor's digest-bound tag endpoint; it never
+deletes the digest artifact referenced by an `EnvironmentTemplateRelease`.
+Its mounted `outbound-ca.pem` is the reviewed concatenation of the MinIO and
+Harbor CA certificates so the same process can read the immutable build context
+and complete BuildKit registry authentication without ambient host trust.
+
 ## Connected validation and deployment
 
 ```sh

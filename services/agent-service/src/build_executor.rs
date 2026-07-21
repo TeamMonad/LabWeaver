@@ -426,7 +426,7 @@ impl ProductionBuildExecutor {
         identity: BuildIdentity,
     ) -> Result<(), BuildProviderFailure> {
         let row = sqlx::query(
-            "SELECT project_name,repository_name,candidate_tag,build_identity,cleaned_at \
+            "SELECT project_name,repository_name,candidate_tag,digest,build_identity,cleaned_at \
              FROM agent.build_executor_artifacts WHERE build_request_id=$1",
         )
         .bind(build_request_id.as_uuid())
@@ -454,12 +454,15 @@ impl ProductionBuildExecutor {
             .try_get("repository_name")
             .map_err(|_| output_invalid())?;
         let tag: String = row.try_get("candidate_tag").map_err(|_| output_invalid())?;
+        let digest: String = row.try_get("digest").map_err(|_| output_invalid())?;
         let url = self.harbor_url(&[
             "projects",
             &project,
             "repositories",
             &repository,
             "artifacts",
+            &digest,
+            "tags",
             &tag,
         ])?;
         let response = self
@@ -474,8 +477,11 @@ impl ProductionBuildExecutor {
         {
             return Err(unavailable());
         }
+        // Harbor's tag endpoint does not support GET for project robots. A
+        // second idempotent DELETE is the authoritative absence readback: an
+        // existing tag would return success again, while 404 proves cleanup.
         let verify = self
-            .authorized(self.client.get(url))
+            .authorized(self.client.delete(url))
             .send()
             .await
             .map_err(network)?;

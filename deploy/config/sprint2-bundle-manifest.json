@@ -43,6 +43,7 @@
       "tls.key"
     ],
     "build-executor-secrets": [
+      "outbound-ca.pem",
       "buildkit-ca.pem",
       "buildkit-client.crt",
       "buildkit-client.key",
