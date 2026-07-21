@@ -1,25 +1,7 @@
 import type {
-  CandidateApprovalSchema,
-  EnvironmentCandidateSchema,
-  EvaluationCandidateSchema,
   ImageArtifact,
   ImagePolicyEvaluation,
 } from '@/generated/contracts'
-
-/** Environment candidate response may include backend-provided scan evidence
- * as additive optional fields. The UI only consumes these values; it never
- * fabricates them. */
-export type EnvironmentCandidateWithEvidence = EnvironmentCandidateSchema & {
-  approvals?: CandidateApprovalSchema[]
-  imageArtifact?: ImageArtifact
-  imagePolicyEvaluation?: ImagePolicyEvaluation
-  trustRevision?: number
-}
-
-export type EvaluationCandidateWithApprovals = EvaluationCandidateSchema & {
-  approvals?: CandidateApprovalSchema[]
-  trustRevision?: number
-}
 
 export type CandidateKind = 'environment' | 'evaluation'
 export type CandidateDecision = 'approved' | 'rejected' | 'withdrawn'

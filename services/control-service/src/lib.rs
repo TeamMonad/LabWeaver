@@ -23,8 +23,9 @@ use contracts::events::{
     ReleasePublished, ReleaseWithdrawn, SPEC_VERSION, subjects,
 };
 use contracts::http::{
-    CandidateDecisionRequest, CreateEnvironmentTemplateReleaseRequest,
-    CreateProblemPackageUploadRequest, IdempotencyKey, ProblemPackageUploadFile,
+    CandidateBuildState, CandidateBuildView, CandidateDecisionRequest,
+    CreateEnvironmentTemplateReleaseRequest, CreateProblemPackageUploadRequest,
+    EnvironmentCandidateView, EvaluationCandidateView, IdempotencyKey, ProblemPackageUploadFile,
     ProblemPackageUploadSession, ProblemPackageUploadTarget,
 };
 use contracts::supply_chain::{
@@ -32,9 +33,9 @@ use contracts::supply_chain::{
     ImageArtifact, ReleaseWithdrawal,
 };
 use contracts::{
-    ActorId, ApprovalId, BuildRequestId, CandidateId, CourseId, EventId, ImageArtifactId, PolicyId,
-    ProblemPackageId, ReleaseId, RetentionClass, RetentionDisposition, RetentionSnapshot, Revision,
-    Sequence, Sha256Digest, UploadSessionId, UtcTimestamp,
+    ActorId, ApprovalId, BuildRequestId, CandidateId, CourseId, DiagnosticCode, EventId,
+    ImageArtifactId, PolicyId, ProblemPackageId, ReleaseId, RetentionClass, RetentionDisposition,
+    RetentionSnapshot, Revision, Sequence, Sha256Digest, UploadSessionId, UtcTimestamp,
 };
 use persistence_sqlx::{
     Domain, IdempotencyDecision, IdempotencyStore, InboxDecision, InboxStore, OutboxStore,
@@ -686,6 +687,23 @@ impl ControlService {
         load_candidate_contract(&self.pool, course_id, candidate_id, "environment").await
     }
 
+    /// Reads the Control-owned teacher view for one Environment candidate.
+    pub async fn environment_candidate_view(
+        &self,
+        course_id: CourseId,
+        candidate_id: CandidateId,
+    ) -> Result<EnvironmentCandidateView, ControlError> {
+        let candidate = self.environment_candidate(course_id, candidate_id).await?;
+        let approvals = load_candidate_approvals(&self.pool, candidate_id).await?;
+        let build = load_candidate_build(&self.pool, course_id, candidate_id).await?;
+        Ok(EnvironmentCandidateView {
+            candidate,
+            approvals,
+            build,
+            trust_revision: self.config.trust_revision,
+        })
+    }
+
     /// Reads a validated Evaluation candidate projection.
     pub async fn evaluation_candidate(
         &self,
@@ -693,6 +711,21 @@ impl ControlService {
         candidate_id: CandidateId,
     ) -> Result<EvaluationCandidate, ControlError> {
         load_candidate_contract(&self.pool, course_id, candidate_id, "evaluation").await
+    }
+
+    /// Reads the Control-owned teacher view for one Evaluation candidate.
+    pub async fn evaluation_candidate_view(
+        &self,
+        course_id: CourseId,
+        candidate_id: CandidateId,
+    ) -> Result<EvaluationCandidateView, ControlError> {
+        let candidate = self.evaluation_candidate(course_id, candidate_id).await?;
+        let approvals = load_candidate_approvals(&self.pool, candidate_id).await?;
+        Ok(EvaluationCandidateView {
+            candidate,
+            approvals,
+            trust_revision: self.config.trust_revision,
+        })
     }
 
     /// Reads one immutable Release together with its optional append-only withdrawal fact.
@@ -2574,6 +2607,93 @@ where
     .ok_or(ControlError::CandidateNotFound)?;
     serde_json::from_value(row.try_get("contract").map_err(db)?)
         .map_err(|_| ControlError::PersistenceIdentityMismatch)
+}
+
+async fn load_candidate_approvals(
+    pool: &PgPool,
+    candidate_id: CandidateId,
+) -> Result<Vec<CandidateApproval>, ControlError> {
+    let rows = sqlx::query(
+        "SELECT contract FROM control.candidate_approvals \
+         WHERE candidate_id=$1 ORDER BY decided_at,approval_id",
+    )
+    .bind(candidate_id.as_uuid())
+    .fetch_all(pool)
+    .await
+    .map_err(db)?;
+    rows.into_iter()
+        .map(|row| {
+            serde_json::from_value(row.try_get("contract").map_err(db)?)
+                .map_err(|_| ControlError::PersistenceIdentityMismatch)
+        })
+        .collect()
+}
+
+async fn load_candidate_build(
+    pool: &PgPool,
+    course_id: CourseId,
+    candidate_id: CandidateId,
+) -> Result<Option<CandidateBuildView>, ControlError> {
+    let row = sqlx::query(
+        "SELECT builds.state,builds.terminal_diagnostic,builds.cleanup_verified, \
+                artifacts.artifact,artifacts.policy_evaluation \
+         FROM control.container_build_projections builds \
+         LEFT JOIN control.image_artifact_projections artifacts \
+           ON artifacts.image_artifact_id=builds.image_artifact_id \
+         WHERE builds.course_id=$1 AND builds.candidate_id=$2",
+    )
+    .bind(course_id.as_uuid())
+    .bind(candidate_id.as_uuid())
+    .fetch_optional(pool)
+    .await
+    .map_err(db)?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let state = match row.try_get::<String, _>("state").map_err(db)?.as_str() {
+        "requested" => CandidateBuildState::Requested,
+        "succeeded" => CandidateBuildState::Succeeded,
+        "failed" => CandidateBuildState::Failed,
+        "cancelled" => CandidateBuildState::Cancelled,
+        _ => return Err(ControlError::PersistenceIdentityMismatch),
+    };
+    let artifact = row
+        .try_get::<Option<Value>, _>("artifact")
+        .map_err(db)?
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+    let image_policy_evaluation = row
+        .try_get::<Option<Value>, _>("policy_evaluation")
+        .map_err(db)?
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+    let diagnostic_code = row
+        .try_get::<Option<String>, _>("terminal_diagnostic")
+        .map_err(db)?
+        .map(DiagnosticCode::parse)
+        .transpose()
+        .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+    let cleanup_verified: Option<bool> = row.try_get("cleanup_verified").map_err(db)?;
+    let evidence_is_complete = artifact.is_some() && image_policy_evaluation.is_some();
+    if (state == CandidateBuildState::Succeeded) != evidence_is_complete
+        || (state == CandidateBuildState::Requested
+            && (diagnostic_code.is_some() || cleanup_verified.is_some()))
+        || (matches!(
+            state,
+            CandidateBuildState::Failed | CandidateBuildState::Cancelled
+        ) && diagnostic_code.is_none())
+    {
+        return Err(ControlError::PersistenceIdentityMismatch);
+    }
+    Ok(Some(CandidateBuildView {
+        state,
+        artifact,
+        image_policy_evaluation,
+        diagnostic_code,
+        cleanup_verified,
+    }))
 }
 
 async fn load_contract_tx<T>(

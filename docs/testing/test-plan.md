@@ -33,6 +33,9 @@ baseline migration to a disposable PostgreSQL instance.
   product contract;
 - Critical Trivy findings reject publication and High findings remain visible;
 - candidate kind, course, approval, digest and scanner identity cannot drift;
+- candidate reads are Control-owned views: approval history and deterministic
+  build state are reloaded from PostgreSQL, and a succeeded build is rejected
+  unless both the immutable artifact and its policy evaluation are present;
 - a Container build context must resolve to a verified object in a completed
   upload for the same course; cross-course or pending uploads fail before the
   approval and outbox transaction commits;

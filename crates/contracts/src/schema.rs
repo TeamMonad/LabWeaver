@@ -282,6 +282,14 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::http::CandidateDecisionRequest
     );
     document!(
+        "schemas/contracts/v1/http/environment-candidate-view.schema.json",
+        crate::http::EnvironmentCandidateView
+    );
+    document!(
+        "schemas/contracts/v1/http/evaluation-candidate-view.schema.json",
+        crate::http::EvaluationCandidateView
+    );
+    document!(
         "schemas/contracts/v1/http/create-environment-template-release-request.schema.json",
         crate::http::CreateEnvironmentTemplateReleaseRequest
     );
@@ -831,8 +839,8 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             contract_ref("course-llm-egress-policy")
         }
         "getAgentRun" => contract_ref("agent-run"),
-        "getEnvironmentCandidate" => contract_ref("environment-candidate"),
-        "getEvaluationCandidate" => contract_ref("evaluation-candidate"),
+        "getEnvironmentCandidate" => contract_ref("http/environment-candidate-view"),
+        "getEvaluationCandidate" => contract_ref("http/evaluation-candidate-view"),
         "appendEnvironmentCandidateDecision" | "appendEvaluationCandidateDecision" => {
             contract_ref("candidate-approval")
         }

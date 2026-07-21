@@ -1,4 +1,8 @@
-import type { CandidateDecisionRequestSchema, EnvironmentCandidateSchema, EvaluationCandidateSchema } from '@/generated/contracts'
+import type {
+  CandidateDecisionRequestSchema,
+  EnvironmentCandidateViewSchema,
+  EvaluationCandidateViewSchema,
+} from '@/generated/contracts'
 import { conflict, problem } from '../diagnostics'
 import { getEnvironmentCandidate, getEvaluationCandidate } from '../stores/candidateStore'
 import { appendDecision, getApprovals, getLatestApproval } from '../stores/approvalStore'
@@ -77,12 +81,17 @@ export const getEnvironmentCandidateHandler: FixtureHandler = (req) => {
   return {
     status: 200,
     data: {
-      ...stored.candidate,
       approvals: getApprovals(params.candidateId),
-      imageArtifact,
-      imagePolicyEvaluation,
+      build: {
+        artifact: imageArtifact,
+        cleanupVerified: null,
+        diagnosticCode: null,
+        imagePolicyEvaluation,
+        state: 'succeeded',
+      },
+      candidate: stored.candidate,
       trustRevision: stored.trustRevision,
-    } as EnvironmentCandidateSchema,
+    } satisfies EnvironmentCandidateViewSchema,
   }
 }
 
@@ -135,10 +144,10 @@ export const getEvaluationCandidateHandler: FixtureHandler = (req) => {
   return {
     status: 200,
     data: {
-      ...stored.candidate,
       approvals: getApprovals(params.candidateId),
+      candidate: stored.candidate,
       trustRevision: stored.trustRevision,
-    } as EvaluationCandidateSchema,
+    } satisfies EvaluationCandidateViewSchema,
   }
 }
 

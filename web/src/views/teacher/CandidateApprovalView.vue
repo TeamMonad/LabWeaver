@@ -37,28 +37,28 @@
           </h3>
 
           <AsyncStateView :state="approval.environmentCandidate" @retry="approval.load">
-            <template #success="{ data: candidate }">
+            <template #success="{ data: view }">
               <div class="candidate-card md-card">
                 <div class="candidate-meta">
                   <div class="meta-row">
                     <span class="meta-label">Candidate ID</span>
-                    <code class="meta-value">{{ candidate.id }}</code>
+                    <code class="meta-value">{{ view.candidate.id }}</code>
                   </div>
                   <div class="meta-row">
                     <span class="meta-label">Revision</span>
-                    <span class="meta-value">rev-{{ candidate.revision }}</span>
+                    <span class="meta-value">rev-{{ view.candidate.revision }}</span>
                   </div>
                   <div class="meta-row">
                     <span class="meta-label">Spec SHA-256</span>
-                    <code class="meta-value">{{ truncateSha256(candidate.specSha256) }}</code>
+                    <code class="meta-value">{{ truncateSha256(view.candidate.specSha256) }}</code>
                   </div>
                   <div class="meta-row">
                     <span class="meta-label">Policy Revision</span>
-                    <span class="meta-value">rev-{{ candidate.policyRevision }}</span>
+                    <span class="meta-value">rev-{{ view.candidate.policyRevision }}</span>
                   </div>
                   <div class="meta-row">
                     <span class="meta-label">Schema SHA-256</span>
-                    <code class="meta-value">{{ truncateSha256(candidate.schemaSha256) }}</code>
+                    <code class="meta-value">{{ truncateSha256(view.candidate.schemaSha256) }}</code>
                   </div>
                 </div>
 
@@ -116,19 +116,19 @@
                 <div class="evidence-card md-card">
                   <div class="evidence-row">
                     <span class="evidence-label">Digest</span>
-                    <code class="evidence-value">{{ candidate.imageArtifact?.digest ?? '—' }}</code>
+                    <code class="evidence-value">{{ view.build?.artifact?.kind === 'container' ? view.build.artifact.digest : '—' }}</code>
                   </div>
                   <div class="evidence-row">
                     <span class="evidence-label">Repository</span>
-                    <code class="evidence-value">{{ candidate.imageArtifact?.kind === 'container' ? candidate.imageArtifact.repository : '—' }}</code>
+                    <code class="evidence-value">{{ view.build?.artifact?.kind === 'container' ? view.build.artifact.repository : '—' }}</code>
                   </div>
                   <div class="evidence-row">
                     <span class="evidence-label">Trivy</span>
                     <span class="evidence-value">
-                      Critical {{ candidate.imagePolicyEvaluation?.vulnerabilities.critical ?? 0 }},
-                      High {{ candidate.imagePolicyEvaluation?.vulnerabilities.high ?? 0 }},
-                      Medium {{ candidate.imagePolicyEvaluation?.vulnerabilities.medium ?? 0 }},
-                      Low {{ candidate.imagePolicyEvaluation?.vulnerabilities.low ?? 0 }}
+                      Critical {{ view.build?.imagePolicyEvaluation?.vulnerabilities.critical ?? 0 }},
+                      High {{ view.build?.imagePolicyEvaluation?.vulnerabilities.high ?? 0 }},
+                      Medium {{ view.build?.imagePolicyEvaluation?.vulnerabilities.medium ?? 0 }},
+                      Low {{ view.build?.imagePolicyEvaluation?.vulnerabilities.low ?? 0 }}
                     </span>
                   </div>
                 </div>
@@ -184,28 +184,28 @@
           <p class="sprint-note">Sprint 2 不执行 EvaluationRun；审批仅作为候选确认，不触发评分。</p>
 
           <AsyncStateView :state="approval.evaluationCandidate" @retry="approval.load">
-            <template #success="{ data: candidate }">
+            <template #success="{ data: view }">
               <div class="candidate-card md-card">
                 <div class="candidate-meta">
                   <div class="meta-row">
                     <span class="meta-label">Candidate ID</span>
-                    <code class="meta-value">{{ candidate.id }}</code>
+                    <code class="meta-value">{{ view.candidate.id }}</code>
                   </div>
                   <div class="meta-row">
                     <span class="meta-label">Revision</span>
-                    <span class="meta-value">rev-{{ candidate.revision }}</span>
+                    <span class="meta-value">rev-{{ view.candidate.revision }}</span>
                   </div>
                   <div class="meta-row">
                     <span class="meta-label">Spec SHA-256</span>
-                    <code class="meta-value">{{ truncateSha256(candidate.specSha256) }}</code>
+                    <code class="meta-value">{{ truncateSha256(view.candidate.specSha256) }}</code>
                   </div>
                   <div class="meta-row">
                     <span class="meta-label">Policy Revision</span>
-                    <span class="meta-value">rev-{{ candidate.policyRevision }}</span>
+                    <span class="meta-value">rev-{{ view.candidate.policyRevision }}</span>
                   </div>
                   <div class="meta-row">
                     <span class="meta-label">Schema SHA-256</span>
-                    <code class="meta-value">{{ truncateSha256(candidate.schemaSha256) }}</code>
+                    <code class="meta-value">{{ truncateSha256(view.candidate.schemaSha256) }}</code>
                   </div>
                 </div>
 
@@ -262,7 +262,7 @@
     <ConfirmDialog
       :open="publishConfirmOpen"
       title="确认发布 EnvironmentTemplateRelease"
-      :description="`将绑定候选 rev-${approval.environmentCandidate.kind === 'success' ? approval.environmentCandidate.data.revision : '?'} 与镜像 digest。发布后不可变，是否继续？`"
+      :description="`将绑定候选 rev-${approval.environmentCandidate.kind === 'success' ? approval.environmentCandidate.data.candidate.revision : '?'} 与镜像 digest。发布后不可变，是否继续？`"
       confirm-text="发布"
       severity="warning"
       @confirm="onPublishConfirmed"

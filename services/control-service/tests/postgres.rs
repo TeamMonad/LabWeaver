@@ -442,6 +442,18 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
             "2026-07-16T08:00:00.000Z".parse()?,
         )
         .await?;
+    let requested_view = service
+        .environment_candidate_view(course_id, environment_candidate.id)
+        .await?;
+    assert_eq!(requested_view.candidate, environment_candidate);
+    assert_eq!(requested_view.approvals, vec![approval.clone()]);
+    let requested_build = requested_view.build.ok_or("missing requested build view")?;
+    assert_eq!(
+        requested_build.state,
+        contracts::http::CandidateBuildState::Requested
+    );
+    assert!(requested_build.artifact.is_none());
+    assert!(requested_build.image_policy_evaluation.is_none());
     let payload: serde_json::Value = sqlx::query_scalar(
         "SELECT payload FROM control.outbox_events WHERE subject=$1 AND aggregate_id<>$2",
     )
@@ -508,6 +520,22 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
             &supply_chain.image_policy_evaluation,
         )
         .await?;
+    let succeeded_view = service
+        .environment_candidate_view(course_id, environment_candidate.id)
+        .await?;
+    let succeeded_build = succeeded_view.build.ok_or("missing succeeded build view")?;
+    assert_eq!(
+        succeeded_build.state,
+        contracts::http::CandidateBuildState::Succeeded
+    );
+    assert_eq!(
+        succeeded_build.artifact,
+        Some(supply_chain.artifact.clone())
+    );
+    assert_eq!(
+        succeeded_build.image_policy_evaluation,
+        Some(supply_chain.image_policy_evaluation.clone())
+    );
     let release = service
         .create_release(
             course_id,

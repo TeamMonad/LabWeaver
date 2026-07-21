@@ -790,220 +790,6 @@ export type CsrfTokenResponseSchema = {
 export type CsrfTokenResponseSchemaUtcTimestamp = string;
 
 /**
- * EnvironmentCandidate
- *
- * Immutable validated Environment candidate.
- */
-export type EnvironmentCandidateSchema = {
-    createdAt: EnvironmentCandidateSchemaUtcTimestamp;
-    id: EnvironmentCandidateSchemaCandidateId;
-    model: string;
-    policyRevision: EnvironmentCandidateSchemaRevision;
-    revision: EnvironmentCandidateSchemaRevision;
-    runId: EnvironmentCandidateSchemaAgentRunId;
-    schemaSha256: EnvironmentCandidateSchemaSha256Digest;
-    spec: EnvironmentSpec;
-    specSha256: EnvironmentCandidateSchemaSha256Digest;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `AgentRunId`.
- */
-export type EnvironmentCandidateSchemaAgentRunId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `ArtifactId`.
- */
-export type EnvironmentCandidateSchemaArtifactId = string;
-
-/**
- * Immutable object-store identity without a machine-local path or credential.
- */
-export type EnvironmentCandidateSchemaArtifactRef = {
-    /**
-     * Stable metadata identity resolved by the owning service.
-     */
-    artifactId: EnvironmentCandidateSchemaArtifactId;
-    /**
-     * Registered media type.
-     */
-    mediaType: string;
-    /**
-     * Immutable backend object version.
-     */
-    objectVersion: string;
-    /**
-     * Exact content digest.
-     */
-    sha256: EnvironmentCandidateSchemaSha256Digest;
-    /**
-     * Raw object length.
-     */
-    sizeBytes: number;
-    /**
-     * Explicit object-store binding from deployment configuration.
-     */
-    storeBinding: string;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `CandidateId`.
- */
-export type EnvironmentCandidateSchemaCandidateId = string;
-
-/**
- * Supported controlled protocols.
- */
-export type EnvironmentCandidateSchemaEndpointProtocol = 'http' | 'https' | 'ssh';
-
-export type EnvironmentApiVersion = 'environment.labweaver.io/v1';
-
-/**
- * Environment business class retained from the v2.1 architecture.
- */
-export type EnvironmentClass = 'experiment' | 'work';
-
-export type EnvironmentDocumentKind = 'EnvironmentSpec';
-
-/**
- * One named service entry exposed only through the controlled access plane.
- */
-export type EnvironmentEntrySpec = {
-    name: string;
-    protocol: EnvironmentCandidateSchemaEndpointProtocol;
-    servicePort: number;
-};
-
-/**
- * Strict runtime-specific environment shape.
- */
-export type EnvironmentRuntimeSpec = {
-    base_image_digest: string;
-    build_context: EnvironmentCandidateSchemaArtifactRef;
-    kind: 'container';
-    provider_binding: string;
-    service_port: number;
-} | {
-    base_disk: EnvironmentCandidateSchemaArtifactRef;
-    kind: 'virtual_machine';
-    provider_binding: string;
-    ssh_port: number;
-    storage_class_binding: string;
-};
-
-/**
- * Runtime-independent minimum security posture.
- */
-export type EnvironmentSecuritySpec = {
-    privilegeEscalationPolicy: PrivilegeEscalationPolicy;
-    publicExposurePolicy: PublicExposurePolicy;
-    rootFilesystemPolicy: RootFilesystemPolicy;
-    securityProfileBinding: string;
-    userPolicy: RuntimeUserPolicy;
-};
-
-/**
- * Stable EnvironmentSpec v1.
- */
-export type EnvironmentSpec = {
-    apiVersion: EnvironmentApiVersion;
-    class: EnvironmentClass;
-    entries: Array<EnvironmentEntrySpec>;
-    kind: EnvironmentDocumentKind;
-    name: string;
-    network: NetworkPolicySpec;
-    resources: ResourceRequirements;
-    retention: RetentionSnapshot;
-    runtime: EnvironmentRuntimeSpec;
-    security: EnvironmentSecuritySpec;
-};
-
-/**
- * Network egress posture for a published environment.
- */
-export type NetworkPolicySpec = {
-    mode: 'allow_all';
-} | {
-    mode: 'deny_all';
-} | {
-    mode: 'restricted';
-    policy_binding: string;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `PolicyId`.
- */
-export type EnvironmentCandidateSchemaPolicyId = string;
-
-export type PrivilegeEscalationPolicy = 'deny';
-
-export type PublicExposurePolicy = 'deny';
-
-/**
- * Bounded runtime resources expressed without Kubernetes-dependent parsing.
- */
-export type ResourceRequirements = {
-    cpuMillicores: number;
-    memoryBytes: number;
-    storageBytes: number;
-};
-
-/**
- * Retention classes with distinct privacy and recovery requirements.
- */
-export type RetentionClass = 'course_material' | 'build_evidence' | 'run_evidence' | 'student_submission' | 'security_audit';
-
-/**
- * Required action after retention expires.
- */
-export type RetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt';
-
-/**
- * Frozen data-retention decision for an immutable resource.
- */
-export type RetentionSnapshot = {
-    /**
-     * Stable retention class.
-     */
-    class: RetentionClass;
-    /**
-     * Required terminal disposition.
-     */
-    disposition: RetentionDisposition;
-    /**
-     * Policy identity.
-     */
-    policyId: EnvironmentCandidateSchemaPolicyId;
-    /**
-     * Exact policy revision used at creation.
-     */
-    policyRevision: EnvironmentCandidateSchemaRevision;
-    /**
-     * Absolute retention boundary.
-     */
-    retainUntil: EnvironmentCandidateSchemaUtcTimestamp;
-};
-
-/**
- * Monotonic aggregate revision. Zero is never a persisted revision.
- */
-export type EnvironmentCandidateSchemaRevision = number;
-
-export type RootFilesystemPolicy = 'read_only_required' | 'mutable_required';
-
-export type RuntimeUserPolicy = 'non_root_required';
-
-/**
- * Canonical lowercase SHA-256 digest.
- */
-export type EnvironmentCandidateSchemaSha256Digest = string;
-
-/**
- * UTC timestamp serialized with a literal `Z` and millisecond precision.
- */
-export type EnvironmentCandidateSchemaUtcTimestamp = string;
-
-/**
  * EnvironmentEndpoint
  *
  * Sanitized Environment-owned endpoint metadata.
@@ -1058,7 +844,7 @@ export type EnvironmentEndpointSchemaUtcTimestamp = string;
  */
 export type EnvironmentInstanceSchema = {
     capacityBinding?: string | null;
-    class: EnvironmentInstanceSchemaEnvironmentClass;
+    class: EnvironmentClass;
     cleanupEvidence?: EnvironmentInstanceSchemaArtifactRef | null;
     courseId: EnvironmentInstanceSchemaCourseId;
     desiredState: DesiredEnvironmentState;
@@ -1149,7 +935,7 @@ export type EnvironmentInstanceSchemaEndpointProtocol = 'http' | 'https' | 'ssh'
 /**
  * Environment business class retained from the v2.1 architecture.
  */
-export type EnvironmentInstanceSchemaEnvironmentClass = 'experiment' | 'work';
+export type EnvironmentClass = 'experiment' | 'work';
 
 /**
  * Sanitized Environment-owned endpoint metadata.
@@ -1358,346 +1144,6 @@ export type StreamSequence = string;
 export type EnvironmentOperationSnapshotSchemaUtcTimestamp = string;
 
 /**
- * EvaluationCandidate
- *
- * Immutable validated Evaluation candidate.
- */
-export type EvaluationCandidateSchema = {
-    createdAt: EvaluationCandidateSchemaUtcTimestamp;
-    id: EvaluationCandidateSchemaCandidateId;
-    model: string;
-    policyRevision: EvaluationCandidateSchemaRevision;
-    revision: EvaluationCandidateSchemaRevision;
-    runId: EvaluationCandidateSchemaAgentRunId;
-    schemaSha256: EvaluationCandidateSchemaSha256Digest;
-    spec: EvaluationSpec;
-    specSha256: EvaluationCandidateSchemaSha256Digest;
-};
-
-/**
- * Preserve the advisory failure without changing deterministic results.
- */
-export type AdvisoryFailurePolicy = 'continue_advisory';
-
-/**
- * Emit a `goal-review/v1` assessment.
- */
-export type AdvisoryOutputMode = 'goal_assessment';
-
-/**
- * Reviews allowlisted submission paths without producing a score.
- */
-export type AdvisoryRunnerSpec = {
-    /**
-     * Submission-relative paths visible to the LLM.
-     */
-    include: Array<string>;
-    kind: 'llm_review';
-    /**
-     * Versioned advisory output shape.
-     */
-    outputMode: AdvisoryOutputMode;
-    /**
-     * Immutable advisory rubric locator.
-     */
-    rubric: string;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `AgentRunId`.
- */
-export type EvaluationCandidateSchemaAgentRunId = string;
-
-/**
- * Required Gate status used by deterministic aggregation.
- */
-export type AggregationGate = {
-    requiredStatus: RequiredStatus;
-    step: string;
-};
-
-/**
- * Checked sum of deterministic Score steps.
- */
-export type AggregationKind = 'deterministic_sum';
-
-/**
- * Pure deterministic score aggregation contract.
- */
-export type AggregationSpec = {
-    gates: Array<AggregationGate>;
-    kind: AggregationKind;
-    maxScore: number;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `CandidateId`.
- */
-export type EvaluationCandidateSchemaCandidateId = string;
-
-/**
- * Deterministic Checker configurations frozen for v1.
- */
-export type CheckerSpec = {
-    kind: 'exact';
-} | {
-    kind: 'token';
-} | {
-    /**
-     * Required exit code.
-     */
-    expected: number;
-    kind: 'exit_code';
-} | {
-    kind: 'json_schema';
-    /**
-     * Immutable schema locator.
-     */
-    schemaRef: string;
-} | {
-    /**
-     * Required service state.
-     */
-    expected: ExpectedServiceState;
-    kind: 'service_state';
-    /**
-     * Stable service name.
-     */
-    service: string;
-};
-
-/**
- * Supported P0 submission collectors.
- */
-export type CollectorSpec = {
-    /**
-     * Excluded submission-relative paths.
-     */
-    exclude?: Array<string>;
-    /**
-     * Included submission-relative paths.
-     */
-    include: Array<string>;
-    kind: 'workspace_snapshot';
-    /**
-     * Maximum collected bytes.
-     */
-    maxBytes: number;
-} | {
-    /**
-     * Named facts to collect.
-     */
-    facts: Array<string>;
-    kind: 'system_facts';
-    /**
-     * Maximum collected bytes.
-     */
-    maxBytes: number;
-};
-
-/**
- * Deterministic Runner configurations frozen for P0 OJ and Linux evaluation.
- */
-export type DeterministicRunnerSpec = {
-    kind: 'file_assertion';
-    /**
-     * Required submission-relative files.
-     */
-    requiredFiles: Array<string>;
-} | {
-    /**
-     * Submission-relative program input.
-     */
-    input: string;
-    kind: 'program';
-    /**
-     * Mandatory execution limits.
-     */
-    limits: ExecutionLimits;
-    /**
-     * Compile or test phase.
-     */
-    phase: ProgramPhase;
-    /**
-     * Deterministic test groups used by the test phase.
-     */
-    testGroups?: Array<TestGroup>;
-    /**
-     * Explicit approved toolchain binding.
-     */
-    toolchainProfile: string;
-} | {
-    /**
-     * Facts expected from the probe.
-     */
-    assertions: Array<FactAssertion>;
-    kind: 'ansible_probe';
-    /**
-     * Modules requested from the frozen P0 allowlist.
-     */
-    moduleAllowlist: Array<string>;
-    /**
-     * Explicit approved playbook binding.
-     */
-    playbookProfile: string;
-    /**
-     * Must remain true in v1.
-     */
-    readOnly: boolean;
-};
-
-export type EvaluationApiVersion = 'evaluation.labweaver.io/v1';
-
-/**
- * Submission, step, aggregation, and review decomposition of an evaluation.
- */
-export type EvaluationBody = {
-    aggregation: AggregationSpec;
-    review: ReviewPolicy;
-    steps: Array<EvaluationStep>;
-    submission: SubmissionSpec;
-};
-
-export type EvaluationKind = 'EvaluationSpec';
-
-/**
- * Stable name and version of an evaluation definition.
- */
-export type EvaluationMetadata = {
-    name: string;
-    version: string;
-};
-
-/**
- * Versioned evaluation definition shared by OJ and Linux system experiments.
- */
-export type EvaluationSpec = {
-    apiVersion: EvaluationApiVersion;
-    kind: EvaluationKind;
-    metadata: EvaluationMetadata;
-    spec: EvaluationBody;
-};
-
-/**
- * A role-specific evaluation step.
- */
-export type EvaluationStep = {
-    checker: CheckerSpec;
-    dependsOn?: Array<string>;
-    failurePolicy: GateFailurePolicy;
-    id: string;
-    role: 'gate';
-    runner: DeterministicRunnerSpec;
-} | {
-    checker: CheckerSpec;
-    dependsOn?: Array<string>;
-    failurePolicy: ScoreFailurePolicy;
-    id: string;
-    role: 'score';
-    runner: DeterministicRunnerSpec;
-    score: ScoreSpec;
-} | {
-    dependsOn?: Array<string>;
-    failurePolicy: AdvisoryFailurePolicy;
-    id: string;
-    role: 'advisory';
-    runner: AdvisoryRunnerSpec;
-};
-
-/**
- * Resource and output limits for a program Runner.
- */
-export type ExecutionLimits = {
-    memoryBytes: number;
-    outputBytes: number;
-    wallTimeSeconds: number;
-};
-
-/**
- * Expected state of a system service.
- */
-export type ExpectedServiceState = 'active' | 'inactive';
-
-/**
- * Expected fact emitted by a Linux probe.
- */
-export type FactAssertion = {
-    fact: string;
-};
-
-/**
- * Stop downstream deterministic execution.
- */
-export type GateFailurePolicy = 'stop';
-
-/**
- * Conditions that force manual teacher review.
- */
-export type ManualReviewReason = 'infrastructureError' | 'invalidEvidence';
-
-/**
- * Approved program Runner phase.
- */
-export type ProgramPhase = 'compile' | 'test';
-
-/**
- * The Gate must pass.
- */
-export type RequiredStatus = 'passed';
-
-/**
- * Mandatory approval and manual-review policy.
- */
-export type ReviewPolicy = {
-    forceManualWhen: Array<ManualReviewReason>;
-    teacherApprovalRequiredForRelease: true;
-};
-
-/**
- * Monotonic aggregate revision. Zero is never a persisted revision.
- */
-export type EvaluationCandidateSchemaRevision = number;
-
-/**
- * Failure behavior for a Score step.
- */
-export type ScoreFailurePolicy = 'stop' | 'continue';
-
-/**
- * Maximum contribution of a deterministic Score step.
- */
-export type ScoreSpec = {
-    max: number;
-};
-
-/**
- * Canonical lowercase SHA-256 digest.
- */
-export type EvaluationCandidateSchemaSha256Digest = string;
-
-/**
- * Submission collection boundary used before evaluation starts.
- */
-export type SubmissionSpec = {
-    collector: CollectorSpec;
-    llmReadable: Array<string>;
-};
-
-/**
- * One deterministic program test group.
- */
-export type TestGroup = {
-    maxPoints: number;
-    name: string;
-    source: string;
-};
-
-/**
- * UTC timestamp serialized with a literal `Z` and millisecond precision.
- */
-export type EvaluationCandidateSchemaUtcTimestamp = string;
-
-/**
  * FrozenSubmission
  *
  * Manifest-authoritative immutable collection result.
@@ -1715,7 +1161,7 @@ export type FrozenSubmissionSchema = {
     manifestRevision: FrozenSubmissionSchemaRevision;
     manifestSha256: FrozenSubmissionSchemaSha256Digest;
     object: FrozenSubmissionSchemaArtifactRef;
-    retention: FrozenSubmissionSchemaRetentionSnapshot;
+    retention: RetentionSnapshot;
     submissionManifestSha256: FrozenSubmissionSchemaSha256Digest;
     systemFacts: {
         [key: string]: string;
@@ -1823,25 +1269,25 @@ export type FrozenSubmissionSchemaReleaseId = string;
 /**
  * Retention classes with distinct privacy and recovery requirements.
  */
-export type FrozenSubmissionSchemaRetentionClass = 'course_material' | 'build_evidence' | 'run_evidence' | 'student_submission' | 'security_audit';
+export type RetentionClass = 'course_material' | 'build_evidence' | 'run_evidence' | 'student_submission' | 'security_audit';
 
 /**
  * Required action after retention expires.
  */
-export type FrozenSubmissionSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt';
+export type RetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt';
 
 /**
  * Frozen data-retention decision for an immutable resource.
  */
-export type FrozenSubmissionSchemaRetentionSnapshot = {
+export type RetentionSnapshot = {
     /**
      * Stable retention class.
      */
-    class: FrozenSubmissionSchemaRetentionClass;
+    class: RetentionClass;
     /**
      * Required terminal disposition.
      */
-    disposition: FrozenSubmissionSchemaRetentionDisposition;
+    disposition: RetentionDisposition;
     /**
      * Policy identity.
      */
@@ -2286,6 +1732,347 @@ export type EnvironmentAccessGrantPageSchemaStreamSequence = string;
 export type EnvironmentAccessGrantPageSchemaUtcTimestamp = string;
 
 /**
+ * EnvironmentCandidateView
+ *
+ * Control-owned teacher read model for one immutable Environment candidate.
+ */
+export type EnvironmentCandidateViewSchema = {
+    approvals: Array<CandidateApproval>;
+    build?: CandidateBuildView | null;
+    candidate: EnvironmentCandidate;
+    trustRevision: EnvironmentCandidateViewSchemaRevision;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type EnvironmentCandidateViewSchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `AgentRunId`.
+ */
+export type EnvironmentCandidateViewSchemaAgentRunId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ApprovalId`.
+ */
+export type EnvironmentCandidateViewSchemaApprovalId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ArtifactId`.
+ */
+export type EnvironmentCandidateViewSchemaArtifactId = string;
+
+/**
+ * Immutable object-store identity without a machine-local path or credential.
+ */
+export type EnvironmentCandidateViewSchemaArtifactRef = {
+    /**
+     * Stable metadata identity resolved by the owning service.
+     */
+    artifactId: EnvironmentCandidateViewSchemaArtifactId;
+    /**
+     * Registered media type.
+     */
+    mediaType: string;
+    /**
+     * Immutable backend object version.
+     */
+    objectVersion: string;
+    /**
+     * Exact content digest.
+     */
+    sha256: EnvironmentCandidateViewSchemaSha256Digest;
+    /**
+     * Raw object length.
+     */
+    sizeBytes: number;
+    /**
+     * Explicit object-store binding from deployment configuration.
+     */
+    storeBinding: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `BuildRequestId`.
+ */
+export type EnvironmentCandidateViewSchemaBuildRequestId = string;
+
+/**
+ * Human decision bound to an exact candidate and dependency identity.
+ */
+export type CandidateApproval = {
+    actorId: EnvironmentCandidateViewSchemaActorId;
+    candidateId: EnvironmentCandidateViewSchemaCandidateId;
+    candidateRevision: EnvironmentCandidateViewSchemaRevision;
+    candidateSha256: EnvironmentCandidateViewSchemaSha256Digest;
+    decidedAt: EnvironmentCandidateViewSchemaUtcTimestamp;
+    decision: EnvironmentCandidateViewSchemaCandidateDecision;
+    id: EnvironmentCandidateViewSchemaApprovalId;
+    policyRevision: EnvironmentCandidateViewSchemaRevision;
+    reason: string;
+    schemaSha256: EnvironmentCandidateViewSchemaSha256Digest;
+    trustRevision: EnvironmentCandidateViewSchemaRevision;
+};
+
+/**
+ * Public state of the deterministic Container build attached to one approved candidate.
+ */
+export type CandidateBuildState = 'requested' | 'succeeded' | 'failed' | 'cancelled';
+
+/**
+ * Control-owned build projection exposed for teacher review without leaking object keys or
+ * executor internals.
+ */
+export type CandidateBuildView = {
+    artifact?: EnvironmentCandidateViewSchemaImageArtifact | null;
+    cleanupVerified?: boolean | null;
+    diagnosticCode?: EnvironmentCandidateViewSchemaDiagnosticCode | null;
+    imagePolicyEvaluation?: EnvironmentCandidateViewSchemaImagePolicyEvaluation | null;
+    state: CandidateBuildState;
+};
+
+/**
+ * Append-only candidate decision.
+ */
+export type EnvironmentCandidateViewSchemaCandidateDecision = 'approved' | 'rejected' | 'withdrawn';
+
+/**
+ * Strongly typed UUIDv7 identifier for `CandidateId`.
+ */
+export type EnvironmentCandidateViewSchemaCandidateId = string;
+
+/**
+ * Stable machine-readable diagnostic code.
+ *
+ * Consumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so
+ * additive diagnostics do not force a wire-version change.
+ */
+export type EnvironmentCandidateViewSchemaDiagnosticCode = string;
+
+/**
+ * Supported controlled protocols.
+ */
+export type EnvironmentCandidateViewSchemaEndpointProtocol = 'http' | 'https' | 'ssh';
+
+export type EnvironmentApiVersion = 'environment.labweaver.io/v1';
+
+/**
+ * Immutable validated Environment candidate.
+ */
+export type EnvironmentCandidate = {
+    createdAt: EnvironmentCandidateViewSchemaUtcTimestamp;
+    id: EnvironmentCandidateViewSchemaCandidateId;
+    model: string;
+    policyRevision: EnvironmentCandidateViewSchemaRevision;
+    revision: EnvironmentCandidateViewSchemaRevision;
+    runId: EnvironmentCandidateViewSchemaAgentRunId;
+    schemaSha256: EnvironmentCandidateViewSchemaSha256Digest;
+    spec: EnvironmentSpec;
+    specSha256: EnvironmentCandidateViewSchemaSha256Digest;
+};
+
+/**
+ * Environment business class retained from the v2.1 architecture.
+ */
+export type EnvironmentCandidateViewSchemaEnvironmentClass = 'experiment' | 'work';
+
+export type EnvironmentDocumentKind = 'EnvironmentSpec';
+
+/**
+ * One named service entry exposed only through the controlled access plane.
+ */
+export type EnvironmentEntrySpec = {
+    name: string;
+    protocol: EnvironmentCandidateViewSchemaEndpointProtocol;
+    servicePort: number;
+};
+
+/**
+ * Strict runtime-specific environment shape.
+ */
+export type EnvironmentRuntimeSpec = {
+    base_image_digest: string;
+    build_context: EnvironmentCandidateViewSchemaArtifactRef;
+    kind: 'container';
+    provider_binding: string;
+    service_port: number;
+} | {
+    base_disk: EnvironmentCandidateViewSchemaArtifactRef;
+    kind: 'virtual_machine';
+    provider_binding: string;
+    ssh_port: number;
+    storage_class_binding: string;
+};
+
+/**
+ * Runtime-independent minimum security posture.
+ */
+export type EnvironmentSecuritySpec = {
+    privilegeEscalationPolicy: PrivilegeEscalationPolicy;
+    publicExposurePolicy: PublicExposurePolicy;
+    rootFilesystemPolicy: RootFilesystemPolicy;
+    securityProfileBinding: string;
+    userPolicy: RuntimeUserPolicy;
+};
+
+/**
+ * Stable EnvironmentSpec v1.
+ */
+export type EnvironmentSpec = {
+    apiVersion: EnvironmentApiVersion;
+    class: EnvironmentCandidateViewSchemaEnvironmentClass;
+    entries: Array<EnvironmentEntrySpec>;
+    kind: EnvironmentDocumentKind;
+    name: string;
+    network: NetworkPolicySpec;
+    resources: ResourceRequirements;
+    retention: EnvironmentCandidateViewSchemaRetentionSnapshot;
+    runtime: EnvironmentRuntimeSpec;
+    security: EnvironmentSecuritySpec;
+};
+
+/**
+ * Complete immutable runtime artifact identity.
+ */
+export type EnvironmentCandidateViewSchemaImageArtifact = {
+    build_request_id: EnvironmentCandidateViewSchemaBuildRequestId;
+    digest: string;
+    id: EnvironmentCandidateViewSchemaImageArtifactId;
+    kind: 'container';
+    repository: string;
+} | {
+    base_disk: EnvironmentCandidateViewSchemaArtifactRef;
+    format: EnvironmentCandidateViewSchemaVirtualMachineDiskFormat;
+    id: EnvironmentCandidateViewSchemaImageArtifactId;
+    kind: 'virtual_machine';
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ImageArtifactId`.
+ */
+export type EnvironmentCandidateViewSchemaImageArtifactId = string;
+
+/**
+ * Deterministic digest-bound Trivy evaluation.
+ */
+export type EnvironmentCandidateViewSchemaImagePolicyEvaluation = {
+    artifactId: EnvironmentCandidateViewSchemaImageArtifactId;
+    artifactSha256: EnvironmentCandidateViewSchemaSha256Digest;
+    evaluatedAt: EnvironmentCandidateViewSchemaUtcTimestamp;
+    maxEvidenceAgeMilliseconds: number;
+    passed: boolean;
+    policyId: EnvironmentCandidateViewSchemaPolicyId;
+    policyRevision: EnvironmentCandidateViewSchemaRevision;
+    scannerDatabaseSha256: EnvironmentCandidateViewSchemaSha256Digest;
+    scannerName: string;
+    scannerVersion: string;
+    validUntil: EnvironmentCandidateViewSchemaUtcTimestamp;
+    vulnerabilities: EnvironmentCandidateViewSchemaVulnerabilitySummary;
+};
+
+/**
+ * Network egress posture for a published environment.
+ */
+export type NetworkPolicySpec = {
+    mode: 'allow_all';
+} | {
+    mode: 'deny_all';
+} | {
+    mode: 'restricted';
+    policy_binding: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `PolicyId`.
+ */
+export type EnvironmentCandidateViewSchemaPolicyId = string;
+
+export type PrivilegeEscalationPolicy = 'deny';
+
+export type PublicExposurePolicy = 'deny';
+
+/**
+ * Bounded runtime resources expressed without Kubernetes-dependent parsing.
+ */
+export type ResourceRequirements = {
+    cpuMillicores: number;
+    memoryBytes: number;
+    storageBytes: number;
+};
+
+/**
+ * Retention classes with distinct privacy and recovery requirements.
+ */
+export type EnvironmentCandidateViewSchemaRetentionClass = 'course_material' | 'build_evidence' | 'run_evidence' | 'student_submission' | 'security_audit';
+
+/**
+ * Required action after retention expires.
+ */
+export type EnvironmentCandidateViewSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt';
+
+/**
+ * Frozen data-retention decision for an immutable resource.
+ */
+export type EnvironmentCandidateViewSchemaRetentionSnapshot = {
+    /**
+     * Stable retention class.
+     */
+    class: EnvironmentCandidateViewSchemaRetentionClass;
+    /**
+     * Required terminal disposition.
+     */
+    disposition: EnvironmentCandidateViewSchemaRetentionDisposition;
+    /**
+     * Policy identity.
+     */
+    policyId: EnvironmentCandidateViewSchemaPolicyId;
+    /**
+     * Exact policy revision used at creation.
+     */
+    policyRevision: EnvironmentCandidateViewSchemaRevision;
+    /**
+     * Absolute retention boundary.
+     */
+    retainUntil: EnvironmentCandidateViewSchemaUtcTimestamp;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type EnvironmentCandidateViewSchemaRevision = number;
+
+export type RootFilesystemPolicy = 'read_only_required' | 'mutable_required';
+
+export type RuntimeUserPolicy = 'non_root_required';
+
+/**
+ * Canonical lowercase SHA-256 digest.
+ */
+export type EnvironmentCandidateViewSchemaSha256Digest = string;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type EnvironmentCandidateViewSchemaUtcTimestamp = string;
+
+/**
+ * Supported VM base-disk encodings.
+ */
+export type EnvironmentCandidateViewSchemaVirtualMachineDiskFormat = 'qcow2' | 'raw';
+
+/**
+ * Vulnerability counts by severity.
+ */
+export type EnvironmentCandidateViewSchemaVulnerabilitySummary = {
+    critical: number;
+    high: number;
+    low: number;
+    medium: number;
+    unknown: number;
+};
+
+/**
  * SseEvent
  */
 export type EnvironmentManagementEventSchema = {
@@ -2686,7 +2473,7 @@ export type EnvironmentSummaryPageSchemaUtcTimestamp = string;
  */
 export type EnvironmentTemplateReleaseViewSchema = {
     agentRunId: EnvironmentTemplateReleaseViewSchemaAgentRunId;
-    approval: CandidateApproval;
+    approval: EnvironmentTemplateReleaseViewSchemaCandidateApproval;
     artifact: EnvironmentTemplateReleaseViewSchemaImageArtifact;
     candidateId: EnvironmentTemplateReleaseViewSchemaCandidateId;
     candidateRevision: EnvironmentTemplateReleaseViewSchemaRevision;
@@ -2759,7 +2546,7 @@ export type EnvironmentTemplateReleaseViewSchemaBuildRequestId = string;
 /**
  * Human decision bound to an exact candidate and dependency identity.
  */
-export type CandidateApproval = {
+export type EnvironmentTemplateReleaseViewSchemaCandidateApproval = {
     actorId: EnvironmentTemplateReleaseViewSchemaActorId;
     candidateId: EnvironmentTemplateReleaseViewSchemaCandidateId;
     candidateRevision: EnvironmentTemplateReleaseViewSchemaRevision;
@@ -2883,6 +2670,387 @@ export type EnvironmentTemplateReleaseViewSchemaVulnerabilitySummary = {
     medium: number;
     unknown: number;
 };
+
+/**
+ * EvaluationCandidateView
+ *
+ * Control-owned teacher read model for one immutable Evaluation candidate.
+ */
+export type EvaluationCandidateViewSchema = {
+    approvals: Array<EvaluationCandidateViewSchemaCandidateApproval>;
+    candidate: EvaluationCandidate;
+    trustRevision: EvaluationCandidateViewSchemaRevision;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type EvaluationCandidateViewSchemaActorId = string;
+
+/**
+ * Preserve the advisory failure without changing deterministic results.
+ */
+export type AdvisoryFailurePolicy = 'continue_advisory';
+
+/**
+ * Emit a `goal-review/v1` assessment.
+ */
+export type AdvisoryOutputMode = 'goal_assessment';
+
+/**
+ * Reviews allowlisted submission paths without producing a score.
+ */
+export type AdvisoryRunnerSpec = {
+    /**
+     * Submission-relative paths visible to the LLM.
+     */
+    include: Array<string>;
+    kind: 'llm_review';
+    /**
+     * Versioned advisory output shape.
+     */
+    outputMode: AdvisoryOutputMode;
+    /**
+     * Immutable advisory rubric locator.
+     */
+    rubric: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `AgentRunId`.
+ */
+export type EvaluationCandidateViewSchemaAgentRunId = string;
+
+/**
+ * Required Gate status used by deterministic aggregation.
+ */
+export type AggregationGate = {
+    requiredStatus: RequiredStatus;
+    step: string;
+};
+
+/**
+ * Checked sum of deterministic Score steps.
+ */
+export type AggregationKind = 'deterministic_sum';
+
+/**
+ * Pure deterministic score aggregation contract.
+ */
+export type AggregationSpec = {
+    gates: Array<AggregationGate>;
+    kind: AggregationKind;
+    maxScore: number;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ApprovalId`.
+ */
+export type EvaluationCandidateViewSchemaApprovalId = string;
+
+/**
+ * Human decision bound to an exact candidate and dependency identity.
+ */
+export type EvaluationCandidateViewSchemaCandidateApproval = {
+    actorId: EvaluationCandidateViewSchemaActorId;
+    candidateId: EvaluationCandidateViewSchemaCandidateId;
+    candidateRevision: EvaluationCandidateViewSchemaRevision;
+    candidateSha256: EvaluationCandidateViewSchemaSha256Digest;
+    decidedAt: EvaluationCandidateViewSchemaUtcTimestamp;
+    decision: EvaluationCandidateViewSchemaCandidateDecision;
+    id: EvaluationCandidateViewSchemaApprovalId;
+    policyRevision: EvaluationCandidateViewSchemaRevision;
+    reason: string;
+    schemaSha256: EvaluationCandidateViewSchemaSha256Digest;
+    trustRevision: EvaluationCandidateViewSchemaRevision;
+};
+
+/**
+ * Append-only candidate decision.
+ */
+export type EvaluationCandidateViewSchemaCandidateDecision = 'approved' | 'rejected' | 'withdrawn';
+
+/**
+ * Strongly typed UUIDv7 identifier for `CandidateId`.
+ */
+export type EvaluationCandidateViewSchemaCandidateId = string;
+
+/**
+ * Deterministic Checker configurations frozen for v1.
+ */
+export type CheckerSpec = {
+    kind: 'exact';
+} | {
+    kind: 'token';
+} | {
+    /**
+     * Required exit code.
+     */
+    expected: number;
+    kind: 'exit_code';
+} | {
+    kind: 'json_schema';
+    /**
+     * Immutable schema locator.
+     */
+    schemaRef: string;
+} | {
+    /**
+     * Required service state.
+     */
+    expected: ExpectedServiceState;
+    kind: 'service_state';
+    /**
+     * Stable service name.
+     */
+    service: string;
+};
+
+/**
+ * Supported P0 submission collectors.
+ */
+export type CollectorSpec = {
+    /**
+     * Excluded submission-relative paths.
+     */
+    exclude?: Array<string>;
+    /**
+     * Included submission-relative paths.
+     */
+    include: Array<string>;
+    kind: 'workspace_snapshot';
+    /**
+     * Maximum collected bytes.
+     */
+    maxBytes: number;
+} | {
+    /**
+     * Named facts to collect.
+     */
+    facts: Array<string>;
+    kind: 'system_facts';
+    /**
+     * Maximum collected bytes.
+     */
+    maxBytes: number;
+};
+
+/**
+ * Deterministic Runner configurations frozen for P0 OJ and Linux evaluation.
+ */
+export type DeterministicRunnerSpec = {
+    kind: 'file_assertion';
+    /**
+     * Required submission-relative files.
+     */
+    requiredFiles: Array<string>;
+} | {
+    /**
+     * Submission-relative program input.
+     */
+    input: string;
+    kind: 'program';
+    /**
+     * Mandatory execution limits.
+     */
+    limits: ExecutionLimits;
+    /**
+     * Compile or test phase.
+     */
+    phase: ProgramPhase;
+    /**
+     * Deterministic test groups used by the test phase.
+     */
+    testGroups?: Array<TestGroup>;
+    /**
+     * Explicit approved toolchain binding.
+     */
+    toolchainProfile: string;
+} | {
+    /**
+     * Facts expected from the probe.
+     */
+    assertions: Array<FactAssertion>;
+    kind: 'ansible_probe';
+    /**
+     * Modules requested from the frozen P0 allowlist.
+     */
+    moduleAllowlist: Array<string>;
+    /**
+     * Explicit approved playbook binding.
+     */
+    playbookProfile: string;
+    /**
+     * Must remain true in v1.
+     */
+    readOnly: boolean;
+};
+
+export type EvaluationApiVersion = 'evaluation.labweaver.io/v1';
+
+/**
+ * Submission, step, aggregation, and review decomposition of an evaluation.
+ */
+export type EvaluationBody = {
+    aggregation: AggregationSpec;
+    review: ReviewPolicy;
+    steps: Array<EvaluationStep>;
+    submission: SubmissionSpec;
+};
+
+/**
+ * Immutable validated Evaluation candidate.
+ */
+export type EvaluationCandidate = {
+    createdAt: EvaluationCandidateViewSchemaUtcTimestamp;
+    id: EvaluationCandidateViewSchemaCandidateId;
+    model: string;
+    policyRevision: EvaluationCandidateViewSchemaRevision;
+    revision: EvaluationCandidateViewSchemaRevision;
+    runId: EvaluationCandidateViewSchemaAgentRunId;
+    schemaSha256: EvaluationCandidateViewSchemaSha256Digest;
+    spec: EvaluationSpec;
+    specSha256: EvaluationCandidateViewSchemaSha256Digest;
+};
+
+export type EvaluationKind = 'EvaluationSpec';
+
+/**
+ * Stable name and version of an evaluation definition.
+ */
+export type EvaluationMetadata = {
+    name: string;
+    version: string;
+};
+
+/**
+ * Versioned evaluation definition shared by OJ and Linux system experiments.
+ */
+export type EvaluationSpec = {
+    apiVersion: EvaluationApiVersion;
+    kind: EvaluationKind;
+    metadata: EvaluationMetadata;
+    spec: EvaluationBody;
+};
+
+/**
+ * A role-specific evaluation step.
+ */
+export type EvaluationStep = {
+    checker: CheckerSpec;
+    dependsOn?: Array<string>;
+    failurePolicy: GateFailurePolicy;
+    id: string;
+    role: 'gate';
+    runner: DeterministicRunnerSpec;
+} | {
+    checker: CheckerSpec;
+    dependsOn?: Array<string>;
+    failurePolicy: ScoreFailurePolicy;
+    id: string;
+    role: 'score';
+    runner: DeterministicRunnerSpec;
+    score: ScoreSpec;
+} | {
+    dependsOn?: Array<string>;
+    failurePolicy: AdvisoryFailurePolicy;
+    id: string;
+    role: 'advisory';
+    runner: AdvisoryRunnerSpec;
+};
+
+/**
+ * Resource and output limits for a program Runner.
+ */
+export type ExecutionLimits = {
+    memoryBytes: number;
+    outputBytes: number;
+    wallTimeSeconds: number;
+};
+
+/**
+ * Expected state of a system service.
+ */
+export type ExpectedServiceState = 'active' | 'inactive';
+
+/**
+ * Expected fact emitted by a Linux probe.
+ */
+export type FactAssertion = {
+    fact: string;
+};
+
+/**
+ * Stop downstream deterministic execution.
+ */
+export type GateFailurePolicy = 'stop';
+
+/**
+ * Conditions that force manual teacher review.
+ */
+export type ManualReviewReason = 'infrastructureError' | 'invalidEvidence';
+
+/**
+ * Approved program Runner phase.
+ */
+export type ProgramPhase = 'compile' | 'test';
+
+/**
+ * The Gate must pass.
+ */
+export type RequiredStatus = 'passed';
+
+/**
+ * Mandatory approval and manual-review policy.
+ */
+export type ReviewPolicy = {
+    forceManualWhen: Array<ManualReviewReason>;
+    teacherApprovalRequiredForRelease: true;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type EvaluationCandidateViewSchemaRevision = number;
+
+/**
+ * Failure behavior for a Score step.
+ */
+export type ScoreFailurePolicy = 'stop' | 'continue';
+
+/**
+ * Maximum contribution of a deterministic Score step.
+ */
+export type ScoreSpec = {
+    max: number;
+};
+
+/**
+ * Canonical lowercase SHA-256 digest.
+ */
+export type EvaluationCandidateViewSchemaSha256Digest = string;
+
+/**
+ * Submission collection boundary used before evaluation starts.
+ */
+export type SubmissionSpec = {
+    collector: CollectorSpec;
+    llmReadable: Array<string>;
+};
+
+/**
+ * One deterministic program test group.
+ */
+export type TestGroup = {
+    maxPoints: number;
+    name: string;
+    source: string;
+};
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type EvaluationCandidateViewSchemaUtcTimestamp = string;
 
 /**
  * FreezeSubmissionRequest
@@ -3082,11 +3250,11 @@ export type InternalAgentRunOutcomeSchema = {
     /**
      * Validated Environment candidate, if that track succeeded.
      */
-    environmentCandidate?: EnvironmentCandidate | null;
+    environmentCandidate?: InternalAgentRunOutcomeSchemaEnvironmentCandidate | null;
     /**
      * Validated Evaluation candidate, if that track succeeded.
      */
-    evaluationCandidate?: EvaluationCandidate | null;
+    evaluationCandidate?: InternalAgentRunOutcomeSchemaEvaluationCandidate | null;
     /**
      * Canonical hash over this response, excluding this field.
      */
@@ -3375,7 +3543,7 @@ export type InternalAgentRunOutcomeSchemaEnvironmentApiVersion = 'environment.la
 /**
  * Immutable validated Environment candidate.
  */
-export type EnvironmentCandidate = {
+export type InternalAgentRunOutcomeSchemaEnvironmentCandidate = {
     createdAt: InternalAgentRunOutcomeSchemaUtcTimestamp;
     id: InternalAgentRunOutcomeSchemaCandidateId;
     model: string;
@@ -3462,7 +3630,7 @@ export type InternalAgentRunOutcomeSchemaEvaluationBody = {
 /**
  * Immutable validated Evaluation candidate.
  */
-export type EvaluationCandidate = {
+export type InternalAgentRunOutcomeSchemaEvaluationCandidate = {
     createdAt: InternalAgentRunOutcomeSchemaUtcTimestamp;
     id: InternalAgentRunOutcomeSchemaCandidateId;
     model: string;
@@ -4955,7 +5123,7 @@ export type GetEnvironmentCandidateResponses = {
     /**
      * Successful response
      */
-    200: EnvironmentCandidateSchema;
+    200: EnvironmentCandidateViewSchema;
 };
 
 export type GetEnvironmentCandidateResponse = GetEnvironmentCandidateResponses[keyof GetEnvironmentCandidateResponses];
@@ -5376,7 +5544,7 @@ export type GetEvaluationCandidateResponses = {
     /**
      * Successful response
      */
-    200: EvaluationCandidateSchema;
+    200: EvaluationCandidateViewSchema;
 };
 
 export type GetEvaluationCandidateResponse = GetEvaluationCandidateResponses[keyof GetEvaluationCandidateResponses];

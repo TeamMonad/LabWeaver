@@ -43,40 +43,44 @@ function makeRun() {
 
 function makeEnvCandidate() {
   return {
-    id: 'env-cand-1',
-    runId: 'run-1',
-    courseId: 'course-1',
-    model: 'claude-sonnet-4-5',
-    policyRevision: 1,
-    revision: 2,
-    schemaSha256: 'sha256:schema',
-    spec: {
-      name: 'env',
-      runtime: { kind: 'container', provider_binding: 'x', build_context: {}, base_image_digest: 'x', service_port: 8080 },
-    },
-    specSha256: 'sha256:spec',
-    createdAt: '2026-07-16T08:00:00.000Z',
-    approvals: [],
-    imageArtifact: {
-      kind: 'container',
-      id: 'image-1',
-      build_request_id: 'build-1',
-      repository: 'registry.labweaver.local/candidate-1',
-      digest: 'sha256:image',
-    },
-    imagePolicyEvaluation: {
-      artifactId: 'image-1',
-      artifactSha256: 'sha256:image',
-      evaluatedAt: '2026-07-16T08:00:00.000Z',
-      maxEvidenceAgeMilliseconds: 3600000,
-      passed: true,
-      policyId: 'policy-1',
+    candidate: {
+      id: 'env-cand-1',
+      runId: 'run-1',
+      model: 'claude-sonnet-4-5',
       policyRevision: 1,
-      scannerDatabaseSha256: 'sha256:scanner-db',
-      scannerName: 'trivy',
-      scannerVersion: '1.0.0',
-      validUntil: '2026-07-16T10:00:00.000Z',
-      vulnerabilities: { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 },
+      revision: 2,
+      schemaSha256: 'sha256:schema',
+      spec: {
+        name: 'env',
+        runtime: { kind: 'container', provider_binding: 'x', build_context: {}, base_image_digest: 'x', service_port: 8080 },
+      },
+      specSha256: 'sha256:spec',
+      createdAt: '2026-07-16T08:00:00.000Z',
+    },
+    approvals: [],
+    build: {
+      state: 'succeeded' as const,
+      artifact: {
+        kind: 'container' as const,
+        id: 'image-1',
+        build_request_id: 'build-1',
+        repository: 'registry.labweaver.local/candidate-1',
+        digest: 'sha256:image',
+      },
+      imagePolicyEvaluation: {
+        artifactId: 'image-1',
+        artifactSha256: 'sha256:image',
+        evaluatedAt: '2026-07-16T08:00:00.000Z',
+        maxEvidenceAgeMilliseconds: 3600000,
+        passed: true,
+        policyId: 'policy-1',
+        policyRevision: 1,
+        scannerDatabaseSha256: 'sha256:scanner-db',
+        scannerName: 'trivy',
+        scannerVersion: '1.0.0',
+        validUntil: '2026-07-16T10:00:00.000Z',
+        vulnerabilities: { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 },
+      },
     },
     trustRevision: 1,
   }
@@ -84,16 +88,17 @@ function makeEnvCandidate() {
 
 function makeEvalCandidate() {
   return {
-    id: 'eval-cand-1',
-    runId: 'run-1',
-    courseId: 'course-1',
-    model: 'claude-sonnet-4-5',
-    policyRevision: 1,
-    revision: 1,
-    schemaSha256: 'sha256:schema',
-    spec: { name: 'eval' },
-    specSha256: 'sha256:spec',
-    createdAt: '2026-07-16T08:00:00.000Z',
+    candidate: {
+      id: 'eval-cand-1',
+      runId: 'run-1',
+      model: 'claude-sonnet-4-5',
+      policyRevision: 1,
+      revision: 1,
+      schemaSha256: 'sha256:schema',
+      spec: { name: 'eval' },
+      specSha256: 'sha256:spec',
+      createdAt: '2026-07-16T08:00:00.000Z',
+    },
     approvals: [],
     trustRevision: 1,
   }
@@ -196,7 +201,7 @@ describe('useCandidateApproval', () => {
     await vi.waitFor(() => expect(approval.environmentCandidate.kind).toBe('success'))
 
     const blocked = makeEnvCandidate()
-    blocked.imagePolicyEvaluation.vulnerabilities.critical = 1
+    blocked.build.imagePolicyEvaluation.vulnerabilities.critical = 1
     vi.mocked(getEnvironmentCandidate).mockResolvedValue({ data: blocked, error: undefined as never })
     await approval.load()
     await vi.waitFor(() => expect(approval.environmentCandidate.kind).toBe('success'))

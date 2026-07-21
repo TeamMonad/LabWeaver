@@ -449,9 +449,9 @@ async fn get_environment_candidate(
     .await?;
     let value = state
         .control
-        .environment_candidate(course_id, candidate_id)
+        .environment_candidate_view(course_id, candidate_id)
         .await?;
-    Ok(with_etag(StatusCode::OK, &value, value.revision))
+    Ok(with_etag(StatusCode::OK, &value, value.candidate.revision))
 }
 
 async fn get_evaluation_candidate(
@@ -470,9 +470,9 @@ async fn get_evaluation_candidate(
     .await?;
     let value = state
         .control
-        .evaluation_candidate(course_id, candidate_id)
+        .evaluation_candidate_view(course_id, candidate_id)
         .await?;
-    Ok(with_etag(StatusCode::OK, &value, value.revision))
+    Ok(with_etag(StatusCode::OK, &value, value.candidate.revision))
 }
 
 async fn decide_environment_candidate(
