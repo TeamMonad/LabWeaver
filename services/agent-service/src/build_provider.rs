@@ -11,6 +11,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{PgPool, Row};
+use std::time::Duration;
 
 use crate::build_pipeline::{
     BuildIdentity, BuildProviderFailure, BuildProviderFailureCode, BuildProviderRequestContext,
@@ -27,6 +28,7 @@ pub struct NatsBuildSupplyChainProvider {
     builder_binding: String,
     scanner_binding: String,
     registry_binding: String,
+    request_timeout: Duration,
 }
 
 impl NatsBuildSupplyChainProvider {
@@ -36,8 +38,11 @@ impl NatsBuildSupplyChainProvider {
         builder_binding: String,
         scanner_binding: String,
         registry_binding: String,
+        request_timeout: Duration,
     ) -> Result<Self, BuildProviderFailure> {
         if !valid_subject(&subject)
+            || request_timeout.is_zero()
+            || request_timeout > Duration::from_secs(3_600)
             || [
                 builder_binding.as_str(),
                 scanner_binding.as_str(),
@@ -54,6 +59,7 @@ impl NatsBuildSupplyChainProvider {
             builder_binding,
             scanner_binding,
             registry_binding,
+            request_timeout,
         })
     }
 
@@ -68,9 +74,12 @@ impl NatsBuildSupplyChainProvider {
         let context = bind_build_executor_request(*context, &request)?;
         let payload = serde_json::to_vec(&BuildExecutorRequestEnvelope { context, request })
             .map_err(|_| output_invalid())?;
+        let request = async_nats::Request::new()
+            .timeout(Some(self.request_timeout))
+            .payload(payload.into());
         let message = self
             .client
-            .request(self.subject.clone(), payload.into())
+            .send_request(self.subject.clone(), request)
             .await
             .map_err(|_| unavailable())?;
         if message.payload.len() > MAX_RESPONSE_BYTES {

@@ -168,6 +168,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
         deployment.build.builder_binding.clone(),
         deployment.build.scanner_binding.clone(),
         deployment.build.registry_binding.clone(),
+        Duration::from_millis(deployment.build.stage_timeout_milliseconds),
     )
     .map_err(|_| StartupError::Configuration)?;
     let build_pipeline = BuildPipeline::new(

@@ -74,6 +74,9 @@ deletes the digest artifact referenced by an `EnvironmentTemplateRelease`.
 Because Harbor applies tag deletion asynchronously, the executor performs a
 bounded idempotent delete readback until the endpoint returns `404`; exhausting
 that bound blocks publication instead of reporting cleanup success.
+The NATS request timeout is explicitly bound to the reviewed build-stage
+timeout; the client library's shorter default request timeout must not cut off
+a still-valid fenced executor request.
 Its mounted `outbound-ca.pem` is the reviewed concatenation of the MinIO and
 Harbor CA certificates so the same process can read the immutable build context
 and complete BuildKit registry authentication without ambient host trust.
