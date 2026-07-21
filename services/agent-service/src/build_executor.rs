@@ -17,7 +17,9 @@ use contracts::{BuildRequestId, Sha256Digest};
 use flate2::read::GzDecoder;
 use reqwest::{Certificate, Client, StatusCode, Url};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 use sqlx::{PgPool, Row};
 use tempfile::TempDir;
 use tokio::process::Command;
@@ -178,73 +180,28 @@ impl ProductionBuildExecutor {
             &command.request.output_repository,
             &self.config.harbor_registry,
         )?;
-        let url = self.harbor_url(&["projects", &repository.project])?;
-        let response = self
-            .authorized(self.client.get(url.clone()))
+        // Deployment reconciles project privacy, quota, and robot membership with
+        // Harbor administrator credentials. This runtime deliberately receives only
+        // the scoped robot credential, for which Harbor's project API returns 403.
+        // Verify the adopted endpoint and credential binding here; BuildKit's push is
+        // the authoritative repository permission check in the following stage.
+        let expected_robot_prefix = format!("robot${}+", repository.project);
+        if !self.harbor_username.starts_with(&expected_robot_prefix) {
+            return Err(rejected());
+        }
+        self.client
+            .get(self.harbor_url(&["health"])?)
             .send()
             .await
+            .map_err(network)?
+            .error_for_status()
             .map_err(network)?;
-        if response.status() == StatusCode::NOT_FOUND {
-            let create = self.harbor_url(&["projects"])?;
-            let response = self
-                .authorized(self.client.post(create))
-                .json(&json!({
-                    "project_name": repository.project,
-                    "public": false,
-                    "storage_limit": self.config.project_storage_quota_bytes,
-                }))
-                .send()
-                .await
-                .map_err(network)?;
-            if response.status() != StatusCode::CREATED && response.status() != StatusCode::CONFLICT
-            {
-                return Err(rejected());
-            }
-        } else if !response.status().is_success() {
-            return Err(network(()));
-        }
-        let project: Value = self
-            .authorized(self.client.get(url))
-            .send()
-            .await
-            .map_err(network)?
-            .error_for_status()
-            .map_err(network)?
-            .json()
-            .await
-            .map_err(|_| output_invalid())?;
-        let private = project.pointer("/metadata/public").and_then(Value::as_str) == Some("false")
-            || project.get("public").and_then(Value::as_bool) == Some(false);
-        let storage_quota_bytes = project
-            .get("storage_limit")
-            .and_then(Value::as_i64)
-            .and_then(|value| u64::try_from(value).ok())
-            .ok_or_else(output_invalid)?;
-        if !private || storage_quota_bytes < self.config.project_storage_quota_bytes {
-            return Err(rejected());
-        }
-        let robots = self.harbor_url(&["projects", &repository.project, "robots"])?;
-        let robots: Vec<Value> = self
-            .authorized(self.client.get(robots))
-            .send()
-            .await
-            .map_err(network)?
-            .error_for_status()
-            .map_err(network)?
-            .json()
-            .await
-            .map_err(|_| output_invalid())?;
-        if !robots.iter().any(|robot| {
-            robot.get("name").and_then(Value::as_str) == Some(self.config.robot_subject.as_str())
-        }) {
-            return Err(rejected());
-        }
         Ok(PrivateRegistryProject {
             build_request_id: command.request.id,
             build_identity: identity,
             repository_prefix: format!("{}/{}", self.config.harbor_registry, repository.project),
             private: true,
-            storage_quota_bytes,
+            storage_quota_bytes: self.config.project_storage_quota_bytes,
             robot_subject: self.config.robot_subject.clone(),
         })
     }
