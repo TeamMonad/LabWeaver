@@ -1249,6 +1249,45 @@ async fn successful_invocation_is_shell_free_hardened_and_hash_audited()
 }
 
 #[tokio::test]
+async fn evaluation_prompt_enforces_supported_schema_variants_and_semantics()
+-> Result<(), Box<dyn Error>> {
+    let (runtime, process, policy) = runtime(FakeMode::FullSuccess)?;
+    let execution = runtime
+        .generate(
+            AgentTrackKind::Evaluation,
+            input(&policy).await?,
+            RunCancellation::new(),
+        )
+        .await?;
+
+    assert!(matches!(
+        execution.document,
+        CandidateDocument::Evaluation(_)
+    ));
+    let commands = process.commands();
+    assert_eq!(commands.len(), 1);
+    let prompt = commands[0]
+        .args()
+        .last()
+        .ok_or_else(|| std::io::Error::other("candidate prompt is missing"))?;
+    for required in [
+        "never invent a runner, checker, collector",
+        "use the normalized submission-relative path result.txt",
+        "file_assertion runner is compatible only with an exit_code checker",
+        "aggregation.maxScore equals the sum of score.max values",
+        "teacherApprovalRequiredForRelease is true",
+        "\"maxScore\":0",
+        "\"requiredStatus\":\"passed\"",
+    ] {
+        assert!(
+            prompt.contains(required),
+            "missing prompt invariant: {required}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn worker_admission_limit_queues_excess_processes() -> Result<(), Box<dyn Error>> {
     let (runtime, process, policy) = runtime(FakeMode::SlowSuccess)?;
     let prepared = input(&policy).await?;
