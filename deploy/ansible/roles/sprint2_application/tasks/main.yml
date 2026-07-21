@@ -182,6 +182,25 @@
   loop: "{{ sprint2_application_configuration_objects }}"
   no_log: true
 
+- name: Bind the Control event configuration for retained stream validation
+  ansible.builtin.set_fact:
+    sprint2_application_control_configuration: >-
+      {{ (sprint2_application_configuration_objects
+          | selectattr('kind', 'equalto', 'ConfigMap')
+          | selectattr('metadata.name', 'equalto', 'control-service-config')
+          | first).data['config.yaml'] | from_yaml }}
+  no_log: true
+
+- name: Require Control quarantine subjects to belong to the retained Agent stream
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_control_configuration.nats.stream_name == 'LABWEAVER_AGENT_EVENTS'
+      - sprint2_application_control_configuration.nats.quarantine_subject is match('^labweaver\.agent\.')
+      - sprint2_application_control_configuration.nats.build_quarantine_subject is match('^labweaver\.agent\.')
+      - sprint2_application_control_configuration.nats.quarantine_subject != sprint2_application_control_configuration.nats.build_quarantine_subject
+    fail_msg: SPRINT2_APPLICATION_CONTROL_QUARANTINE_STREAM_MISMATCH
+  no_log: true
+
 - name: Validate private Access seed boundary
   ansible.builtin.assert:
     that:

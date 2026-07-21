@@ -28,6 +28,13 @@ delivery, deadline, cancellation and exhausted retry budget produce a stable
 diagnostic and no speculative success. Terminal invalid messages are
 quarantined with bounded metadata, never silently skipped.
 
+Control consumes AgentRun and build results from `LABWEAVER_AGENT_EVENTS`.
+Its sanitized quarantine records therefore use distinct
+`labweaver.agent.quarantine.control_*` subjects covered by that retained
+stream. Deployment fails before rollout if the configured quarantine subjects
+fall outside the stream; a quarantine publish failure is never treated as a
+successful terminal acknowledgement.
+
 Payloads contain IDs, immutable references, SHA-256 values and bounded status
 summaries. They never contain credentials, raw submissions, full logs, direct
 endpoints or arbitrary executable text. Large files and logs remain artifacts;

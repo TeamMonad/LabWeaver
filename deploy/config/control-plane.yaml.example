@@ -70,11 +70,11 @@ nats:
   credentials_file: "/etc/labweaver/secrets/nats.creds"
   stream_name: "LABWEAVER_AGENT_EVENTS"
   consumer_name: "control-agent-run-projection-v1"
-  quarantine_subject: "labweaver.control.quarantine.agent_run.v1"
+  quarantine_subject: "labweaver.agent.quarantine.control_agent_run.v1"
   # Deployment-owned durable consumer filter_subjects:
   # - labweaver.agent.build.completed.v1
   # - labweaver.agent.build.failed.v1
   build_consumer_name: "control-agent-build-projection-v1"
-  build_quarantine_subject: "labweaver.control.quarantine.agent_build.v1"
+  build_quarantine_subject: "labweaver.agent.quarantine.control_agent_build.v1"
   publish_timeout_milliseconds: 5000
   outbox_poll_milliseconds: 250

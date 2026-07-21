@@ -291,6 +291,22 @@ mod deployment_contract_tests {
         assert!(deployment.database_url_file.starts_with('/'));
         assert!(deployment.nats.server.starts_with("tls://"));
         assert!(deployment.nats.build_consumer_name.ends_with("-v1"));
+        assert!(
+            deployment
+                .nats
+                .quarantine_subject
+                .starts_with("labweaver.agent.quarantine.control_")
+        );
+        assert!(
+            deployment
+                .nats
+                .build_quarantine_subject
+                .starts_with("labweaver.agent.quarantine.control_")
+        );
+        assert_ne!(
+            deployment.nats.quarantine_subject,
+            deployment.nats.build_quarantine_subject
+        );
         assert!(!example.contains(".v2"));
     }
 }

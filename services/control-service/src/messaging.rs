@@ -28,6 +28,7 @@ use crate::{ControlError, ControlService};
 
 const MAX_EVENT_BYTES: usize = 1024 * 1024;
 const REDELIVERY_DELAY: Duration = Duration::from_secs(1);
+const AGENT_STREAM_SUBJECT_PREFIX: &str = "labweaver.agent.";
 
 /// Agent-owned read boundary used by the durable projection consumer.
 #[async_trait]
@@ -214,6 +215,7 @@ impl AgentRunConsumer {
         if [stream_name, consumer_name, quarantine_subject]
             .iter()
             .any(|value| value.trim().is_empty() || value.chars().any(char::is_whitespace))
+            || !quarantine_subject.starts_with(AGENT_STREAM_SUBJECT_PREFIX)
         {
             return Err(MessagingError::Configuration);
         }
@@ -405,6 +407,7 @@ impl AgentBuildConsumer {
         if [stream_name, consumer_name, quarantine_subject]
             .iter()
             .any(|value| value.trim().is_empty() || value.chars().any(char::is_whitespace))
+            || !quarantine_subject.starts_with(AGENT_STREAM_SUBJECT_PREFIX)
         {
             return Err(MessagingError::Configuration);
         }

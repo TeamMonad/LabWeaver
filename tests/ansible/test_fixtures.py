@@ -667,6 +667,23 @@ class AnsibleFixtureTests(unittest.TestCase):
             all(provider["activeImagePolicyId"] == policy_id.group(1) for provider in providers)
         )
 
+    def test_control_quarantine_subjects_belong_to_the_retained_agent_stream(self) -> None:
+        control = yaml.safe_load(
+            (ROOT / "deploy/config/control-plane.yaml.example").read_text(encoding="utf-8")
+        )
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(control["nats"]["stream_name"], "LABWEAVER_AGENT_EVENTS")
+        for field in ("quarantine_subject", "build_quarantine_subject"):
+            self.assertTrue(control["nats"][field].startswith("labweaver.agent."))
+        self.assertNotEqual(
+            control["nats"]["quarantine_subject"],
+            control["nats"]["build_quarantine_subject"],
+        )
+        self.assertIn("SPRINT2_APPLICATION_CONTROL_QUARANTINE_STREAM_MISMATCH", tasks)
+
     def test_deploy_starts_with_preflight(self) -> None:
         site = (ROOT / "deploy/ansible/playbooks/site.yml").read_text(encoding="utf-8")
         self.assertEqual(site.splitlines()[1], "- import_playbook: 00-preflight.yml")
