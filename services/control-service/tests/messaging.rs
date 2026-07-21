@@ -63,7 +63,7 @@ async fn control_projection_is_transactional_across_duplicate_restart_outage_and
     context
         .create_stream(async_nats::jetstream::stream::Config {
             name: "AGENT_RUNS".to_owned(),
-            subjects: vec!["labweaver.agent.run.>".to_owned()],
+            subjects: vec!["labweaver.agent.>".to_owned()],
             ..Default::default()
         })
         .await?
@@ -94,7 +94,7 @@ async fn control_projection_is_transactional_across_duplicate_restart_outage_and
         client.clone(),
         "AGENT_RUNS",
         "control-agent-projection-v1",
-        "private.control.quarantine.v1",
+        "labweaver.agent.quarantine.control_agent_run.v1",
     )
     .await?;
     consumer.process_next(&service, &authority).await?;
@@ -120,7 +120,7 @@ async fn control_projection_is_transactional_across_duplicate_restart_outage_and
         client,
         "AGENT_RUNS",
         "control-agent-projection-v1",
-        "private.control.quarantine.v1",
+        "labweaver.agent.quarantine.control_agent_run.v1",
     )
     .await?;
     consumer.process_next(&service, &authority).await?;
