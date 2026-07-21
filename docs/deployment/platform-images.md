@@ -71,6 +71,9 @@ The runtime Build Executor uses one project-scoped Harbor credential with only
 `artifact:delete`, and `tag:delete`. Candidate cleanup removes only the
 temporary candidate tag through Harbor's digest-bound tag endpoint; it never
 deletes the digest artifact referenced by an `EnvironmentTemplateRelease`.
+Because Harbor applies tag deletion asynchronously, the executor performs a
+bounded idempotent delete readback until the endpoint returns `404`; exhausting
+that bound blocks publication instead of reporting cleanup success.
 Its mounted `outbound-ca.pem` is the reviewed concatenation of the MinIO and
 Harbor CA certificates so the same process can read the immutable build context
 and complete BuildKit registry authentication without ambient host trust.

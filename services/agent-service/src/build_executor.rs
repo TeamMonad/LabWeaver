@@ -8,6 +8,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use artifact_store::{ImmutableObjectStore, S3ImmutableObjectStore};
 use async_trait::async_trait;
@@ -32,6 +33,8 @@ use crate::build_provider::{BuildExecutorBackend, BuildExecutorRequest, BuildExe
 
 const MAX_DOCKERFILE_BYTES: u64 = 256 * 1024;
 const MAX_CONTEXT_ENTRIES: usize = 10_000;
+const HARBOR_TAG_ABSENCE_ATTEMPTS: usize = 12;
+const HARBOR_TAG_ABSENCE_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Deployment-owned, non-secret executor bindings.
 #[derive(Clone, Debug, Deserialize)]
@@ -470,22 +473,35 @@ impl ProductionBuildExecutor {
             .send()
             .await
             .map_err(network)?;
-        if response.status() != StatusCode::OK
-            && response.status() != StatusCode::ACCEPTED
-            && response.status() != StatusCode::NO_CONTENT
-            && response.status() != StatusCode::NOT_FOUND
+        let status = response.status();
+        if status != StatusCode::OK
+            && status != StatusCode::ACCEPTED
+            && status != StatusCode::NO_CONTENT
+            && status != StatusCode::NOT_FOUND
         {
             return Err(unavailable());
         }
-        // Harbor's tag endpoint does not support GET for project robots. A
-        // second idempotent DELETE is the authoritative absence readback: an
-        // existing tag would return success again, while 404 proves cleanup.
-        let verify = self
-            .authorized(self.client.delete(url))
-            .send()
-            .await
-            .map_err(network)?;
-        if verify.status() != StatusCode::NOT_FOUND {
+        // Harbor applies tag deletion asynchronously. Project robots cannot
+        // GET this endpoint, so bounded idempotent DELETE readback waits until
+        // Harbor returns 404. Exhausting the bound remains a hard failure.
+        let mut absent = status == StatusCode::NOT_FOUND;
+        for _ in 0..HARBOR_TAG_ABSENCE_ATTEMPTS {
+            if absent {
+                break;
+            }
+            tokio::time::sleep(HARBOR_TAG_ABSENCE_INTERVAL).await;
+            let verify = self
+                .authorized(self.client.delete(url.clone()))
+                .send()
+                .await
+                .map_err(network)?;
+            match verify.status() {
+                StatusCode::NOT_FOUND => absent = true,
+                StatusCode::OK | StatusCode::ACCEPTED | StatusCode::NO_CONTENT => {}
+                _ => return Err(unavailable()),
+            }
+        }
+        if !absent {
             return Err(unavailable());
         }
         sqlx::query(

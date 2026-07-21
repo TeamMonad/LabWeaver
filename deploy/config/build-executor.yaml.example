@@ -32,6 +32,7 @@ executor:
   maxUnpackedContextBytes: 536870912
   harborApi: "https://harbor.example.invalid/"
   harborRegistry: "harbor.example.invalid"
+  harborCaFile: "/etc/labweaver/secrets/harbor-ca.crt"
   harborUsernameFile: "/etc/labweaver/secrets/harbor-username"
   harborPasswordFile: "/etc/labweaver/secrets/harbor-password"
   projectStorageQuotaBytes: 10737418240
