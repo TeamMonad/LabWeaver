@@ -130,6 +130,7 @@ dependencies = [
  "async-trait",
  "auth",
  "axum 0.8.9",
+ "base64 0.22.1",
  "contracts",
  "flate2",
  "futures-util",

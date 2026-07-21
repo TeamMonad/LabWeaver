@@ -11,15 +11,15 @@ use std::sync::Arc;
 
 use artifact_store::{ImmutableObjectStore, S3ImmutableObjectStore};
 use async_trait::async_trait;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use contracts::events::AgentBuildRequested;
 use contracts::supply_chain::VulnerabilitySummary;
 use contracts::{BuildRequestId, Sha256Digest};
 use flate2::read::GzDecoder;
 use reqwest::{Certificate, Client, StatusCode, Url};
 use serde::Deserialize;
-use serde_json::Value;
-#[cfg(test)]
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use tempfile::TempDir;
 use tokio::process::Command;
@@ -118,6 +118,12 @@ impl ProductionBuildExecutor {
         }
         let harbor_username = read_secret(&config.harbor_username_file)?;
         let harbor_password = read_secret(&config.harbor_password_file)?;
+        prepare_docker_config(
+            &config.docker_config_directory,
+            &config.harbor_registry,
+            &harbor_username,
+            &harbor_password,
+        )?;
         let harbor_ca = std::fs::read(&config.harbor_ca_file).map_err(|_| rejected())?;
         let harbor_ca = Certificate::from_pem(&harbor_ca).map_err(|_| rejected())?;
         let client = Client::builder()
@@ -703,6 +709,45 @@ fn read_secret(path: &Path) -> Result<String, BuildProviderFailure> {
     Ok(value.to_owned())
 }
 
+fn prepare_docker_config(
+    directory: &Path,
+    registry: &str,
+    username: &str,
+    password: &str,
+) -> Result<(), BuildProviderFailure> {
+    std::fs::create_dir_all(directory).map_err(|_| rejected())?;
+    let metadata = std::fs::symlink_metadata(directory).map_err(|_| rejected())?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(rejected());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+            .map_err(|_| rejected())?;
+    }
+    let auth = BASE64_STANDARD.encode(format!("{username}:{password}"));
+    let bytes = serde_json::to_vec(&json!({"auths": {registry: {"auth": auth}}}))
+        .map_err(|_| rejected())?;
+    let path = directory.join("config.json");
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|_| rejected())?;
+        file.write_all(&bytes).map_err(|_| rejected())?;
+    }
+    #[cfg(not(unix))]
+    std::fs::write(path, bytes).map_err(|_| rejected())?;
+    Ok(())
+}
+
 fn network<T>(_error: T) -> BuildProviderFailure {
     unavailable()
 }
@@ -757,6 +802,34 @@ mod tests {
             "https://harbor.internal/labweaver-system/course-123-candidate-456",
         ] {
             assert!(RepositoryIdentity::parse(invalid, "harbor.internal").is_err());
+        }
+    }
+
+    #[test]
+    fn docker_config_is_written_for_the_exact_registry() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let target = directory.path().join("docker");
+        prepare_docker_config(&target, "harbor.internal", "robot$user", "secret")
+            .expect("docker config");
+        let value: Value = serde_json::from_slice(
+            &std::fs::read(target.join("config.json")).expect("config bytes"),
+        )
+        .expect("config json");
+        assert_eq!(
+            value.pointer("/auths/harbor.internal/auth"),
+            Some(&Value::String(BASE64_STANDARD.encode("robot$user:secret")))
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(target.join("config.json"))
+                    .expect("config metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
         }
     }
 

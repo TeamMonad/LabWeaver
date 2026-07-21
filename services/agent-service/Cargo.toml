@@ -12,6 +12,7 @@ artifact-store = { path = "../../crates/artifact-store" }
 async-nats = { version = "=0.45.0", default-features = false, features = ["ring", "server_2_10", "server_2_11"] }
 auth = { path = "../../crates/auth" }
 axum.workspace = true
+base64.workspace = true
 contracts = { path = "../../crates/contracts" }
 futures-util = "0.3.31"
 flate2 = "=1.1.9"
