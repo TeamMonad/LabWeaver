@@ -7,6 +7,21 @@ not runtime completion evidence.
 Current source line: Draft PR #121 on `release/sprint2`; the exact reviewed head
 is read from Git/PR metadata rather than duplicated as a stale status value.
 
+## Sprint 3 runnable Demo contract
+
+Issue #122 freezes the shared execution/evidence contract for Issues #123
+through #126 in
+[`runnable-environment-demo.md`](../architecture/runnable-environment-demo.md).
+It defines the same-identity ledger, Container/KubeVirt resource readback,
+delivery DAG and fail-closed Go/No-Go template without changing a public API,
+event, Schema or Migration.
+
+This is an implemented documentation contract, not connected runtime evidence.
+#123 remains dependent on #63's real application/Gateway deployment; #124,
+#125 and #126 remain dependent on their declared upstream implementation and
+Verify work. No Sprint 3 Demo, Release Gate pass or `outcome:go` is claimed by
+the presence of this document.
+
 ## Sprint 1 and Sprint 2
 
 | Capability | Owner | State | Current evidence | Blocker or limitation |
