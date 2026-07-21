@@ -83,14 +83,19 @@ admission boundary enforces the executor namespace/ServiceAccount fence.
   configured Agent quarantine subjects in addition to its retained grants. Its
   public claims passed the checked-in fail-closed credential validator; no
   retained stream or account was reset.
-- Blocker: router, both workers and NFS preflight pass, but `k8s-cp1` currently
-  accepts ICMP and TCP handshakes while sshd and kube-apiserver return no
-  application-layer response. The application playbook therefore stops before
-  mutation and cannot complete current-head adoption or verification.
-- Exit: restore `k8s-cp1` sshd and kube-apiserver responsiveness, then complete
-  two atomic application adoptions and rollback/readback without invoking reset
-  or deleting retained infrastructure.
-- Owner: A adoption execution; D independent Verify.
+- Resolved prerequisite: `k8s-cp1` and kube-apiserver recovered. Source
+  `da498a2643a83e32b3ab6cab3465771a019d1882` then completed connected package
+  validation and two non-destructive application reconciliations; all ten
+  workloads were Ready with digest-only images.
+- Current blocker: the deployed Web image redirected protected routes to
+  `AUTH-NOT-CONFIGURED` because it incorrectly required browser-side OIDC build
+  variables while the approved deployment uses the Access BFF. Its generated
+  SDK transport also forced bearer mode, so browser mutations could not carry
+  the BFF cookie and synchronizer token.
+- Exit: package and reconcile the BFF repair, then complete fresh teacher and
+  student sessions plus the same-build Container/VM evidence without invoking
+  reset or deleting retained infrastructure.
+- Owner: A BFF/adoption execution; C frontend review; D independent Verify.
 
 The repository now has a separate `sprint2-foundation` reconciliation for the
 retained PostgreSQL, NATS and MinIO service bodies. Its Linux syntax/lint and
@@ -111,9 +116,10 @@ dependency, but it is not Sprint 2 E3 evidence and does not authorize deletion.
   files; live and Fixture specifications are mutually excluded.
 - Blocker: real Keycloak teacher/student sessions, `demo replay` and the
   machine-readable `release-gate` are not closed under one deployment identity.
-- Operational blocker: the application endpoint remains reachable and the
-  current-head package is complete, but the non-destructive Ansible reconcile
-  cannot proceed while `k8s-cp1` sshd and kube-apiserver are unresponsive.
+- Operational blocker: the cluster and application endpoint are reachable, but
+  real login currently stops at the deployed Web BFF mismatch described above.
+  Retained Agent runs cannot substitute because their completion event did not
+  produce Control candidates.
 - Exit: Playwright records Trace, screenshot and video without fixed sleeps;
   the only passing Sprint 2 report validates against its schema and binds the
   same commit, deployment manifest, migration catalog, image digests and Run ID.
