@@ -70,7 +70,7 @@ impl BuildSupplyChainProvider for SlowProvider {
         Ok(PrivateRegistryProject {
             build_request_id: command.request.id,
             build_identity: identity,
-            repository_prefix: format!("harbor.internal/course-{}", command.request.course_id),
+            repository_prefix: "harbor.internal/labweaver-system".to_owned(),
             private: true,
             storage_quota_bytes: 10 * 1024 * 1024 * 1024,
             robot_subject: format!("robot$course-{}+runtime-puller", command.request.course_id),
@@ -375,10 +375,7 @@ impl BuildExecutorBackend for CountingBuildExecutor {
                     project: PrivateRegistryProject {
                         build_request_id: command.request.id,
                         build_identity: *identity,
-                        repository_prefix: format!(
-                            "harbor.internal/course-{}",
-                            command.request.course_id
-                        ),
+                        repository_prefix: "harbor.internal/labweaver-system".to_owned(),
                         private: true,
                         storage_quota_bytes: 1,
                         robot_subject: "robot$runtime".to_owned(),
@@ -633,7 +630,9 @@ fn build_command() -> Result<AgentBuildRequested, Box<dyn std::error::Error>> {
         context_object_key: "build-contexts/context.tar.gz".to_owned(),
         dockerfile_path: "Dockerfile".to_owned(),
         base_image_digest: format!("sha256:{}", "c".repeat(64)),
-        output_repository: format!("harbor.internal/course-{course_id}/{candidate_id}"),
+        output_repository: format!(
+            "harbor.internal/labweaver-system/course-{course_id}-{candidate_id}"
+        ),
         network: BuildNetworkPolicy::DenyAll,
         max_duration_milliseconds: 2_000,
         max_cpu_millicores: 2_000,

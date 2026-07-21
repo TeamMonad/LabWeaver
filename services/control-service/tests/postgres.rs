@@ -471,7 +471,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     assert_eq!(
         build_event.data.request.output_repository,
         format!(
-            "harbor.internal/course-{course_id}/{}",
+            "harbor.internal/labweaver-system/course-{course_id}-{}",
             environment_candidate.id
         )
     );
@@ -753,7 +753,7 @@ fn control_config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
         evaluation_schema_sha256: Sha256Digest::of_bytes(b"evaluation"),
         container_build: ContainerBuildPolicy {
             builder_binding: "buildkit-primary-v1".to_owned(),
-            output_repository_prefix: "harbor.internal".to_owned(),
+            output_repository_prefix: "harbor.internal/labweaver-system".to_owned(),
             dockerfile_path: "Dockerfile".to_owned(),
             network: BuildNetworkPolicy::DenyAll,
             max_duration_milliseconds: 600_000,

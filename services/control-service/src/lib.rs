@@ -99,7 +99,7 @@ pub struct ControlConfig {
 pub struct ContainerBuildPolicy {
     /// Exact registered `BuildKit` provider binding.
     pub builder_binding: String,
-    /// Harbor registry authority; Control appends one `course-<uuid>` Project and repository.
+    /// Harbor registry/project prefix; Control appends one course-bound repository name.
     pub output_repository_prefix: String,
     /// Candidate-context-relative Dockerfile path.
     pub dockerfile_path: String,
@@ -154,6 +154,14 @@ impl ControlConfig {
 impl ContainerBuildPolicy {
     fn validate(&self) -> bool {
         let prefix = self.output_repository_prefix.trim_end_matches('/');
+        let repository_scope = prefix.split_once('/').filter(|(registry, project)| {
+            !registry.is_empty()
+                && !project.is_empty()
+                && !project.contains('/')
+                && project
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        });
         !self.builder_binding.trim().is_empty()
             && !self
                 .builder_binding
@@ -163,7 +171,7 @@ impl ContainerBuildPolicy {
             && !prefix.contains("://")
             && !prefix.contains('@')
             && !prefix.contains("..")
-            && !prefix.contains('/')
+            && repository_scope.is_some()
             && !self.dockerfile_path.trim().is_empty()
             && self.max_duration_milliseconds > 0
             && self.max_cpu_millicores > 0
@@ -1402,7 +1410,7 @@ impl ControlService {
                     dockerfile_path: self.config.container_build.dockerfile_path.clone(),
                     base_image_digest: base_image_digest.clone(),
                     output_repository: format!(
-                        "{}/course-{course_id}/{candidate_id}",
+                        "{}/course-{course_id}-{candidate_id}",
                         self.config
                             .container_build
                             .output_repository_prefix
@@ -3039,7 +3047,7 @@ mod tests {
             evaluation_schema_sha256: Sha256Digest::of_bytes(b"evaluation-schema"),
             container_build: ContainerBuildPolicy {
                 builder_binding: "buildkit-primary-v1".to_owned(),
-                output_repository_prefix: "harbor.internal".to_owned(),
+                output_repository_prefix: "harbor.internal/labweaver-system".to_owned(),
                 dockerfile_path: "Dockerfile".to_owned(),
                 network: BuildNetworkPolicy::DenyAll,
                 max_duration_milliseconds: 600_000,

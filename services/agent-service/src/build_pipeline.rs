@@ -639,8 +639,12 @@ fn expected_course_repository_prefix(
     let project = parts.next().unwrap_or_default();
     let repository = parts.next().unwrap_or_default();
     if registry.is_empty()
-        || project != format!("course-{}", command.request.course_id)
-        || repository != command.request.candidate_id.to_string()
+        || project.is_empty()
+        || repository
+            != format!(
+                "course-{}-{}",
+                command.request.course_id, command.request.candidate_id
+            )
         || parts.next().is_some()
     {
         return Err(BuildPipelineError::new(

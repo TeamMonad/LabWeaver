@@ -108,7 +108,7 @@ impl BuildSupplyChainProvider for FakeProvider {
         Ok(PrivateRegistryProject {
             build_request_id: command.request.id,
             build_identity: identity,
-            repository_prefix: format!("harbor.internal/course-{}", command.request.course_id),
+            repository_prefix: "harbor.internal/labweaver-system".to_owned(),
             private: self.project_private,
             storage_quota_bytes: self.project_quota_bytes,
             robot_subject: if self.robot_name.is_empty() {
@@ -449,7 +449,9 @@ fn command(max_duration_milliseconds: u64) -> AgentBuildRequested {
         context_object_key: "build-contexts/context.tar.gz".to_owned(),
         dockerfile_path: "Dockerfile".to_owned(),
         base_image_digest: format!("sha256:{}", "c".repeat(64)),
-        output_repository: format!("harbor.internal/course-{course_id}/{candidate_id}"),
+        output_repository: format!(
+            "harbor.internal/labweaver-system/course-{course_id}-{candidate_id}"
+        ),
         network: BuildNetworkPolicy::Restricted {
             allowed_registries: vec!["harbor.internal".to_owned()],
         },

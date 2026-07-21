@@ -538,11 +538,7 @@ impl RepositoryIdentity {
         let mut segments = suffix.ok_or_else(rejected)?.split('/');
         let project = segments.next().ok_or_else(rejected)?;
         let repository = segments.next().ok_or_else(rejected)?;
-        if segments.next().is_some()
-            || !portable_name(project)
-            || !portable_name(repository)
-            || !project.starts_with("course-")
-        {
+        if segments.next().is_some() || !portable_name(project) || !portable_name(repository) {
             return Err(rejected());
         }
         Ok(Self {
@@ -749,17 +745,16 @@ mod tests {
     #[test]
     fn repository_identity_is_exactly_harbor_project_and_repository() {
         let parsed = RepositoryIdentity::parse(
-            "harbor.internal/course-123/candidate-456",
+            "harbor.internal/labweaver-system/course-123-candidate-456",
             "harbor.internal",
         )
         .expect("valid repository");
-        assert_eq!(parsed.project, "course-123");
-        assert_eq!(parsed.repository, "candidate-456");
+        assert_eq!(parsed.project, "labweaver-system");
+        assert_eq!(parsed.repository, "course-123-candidate-456");
         for invalid in [
-            "other.internal/course-123/candidate-456",
-            "harbor.internal/public/candidate-456",
-            "harbor.internal/course-123/nested/candidate-456",
-            "https://harbor.internal/course-123/candidate-456",
+            "other.internal/labweaver-system/course-123-candidate-456",
+            "harbor.internal/labweaver-system/nested/candidate-456",
+            "https://harbor.internal/labweaver-system/course-123-candidate-456",
         ] {
             assert!(RepositoryIdentity::parse(invalid, "harbor.internal").is_err());
         }

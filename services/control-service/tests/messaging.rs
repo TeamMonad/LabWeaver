@@ -377,7 +377,7 @@ fn config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
         evaluation_schema_sha256: Sha256Digest::of_bytes(b"evaluation"),
         container_build: ContainerBuildPolicy {
             builder_binding: "buildkit-primary-v1".to_owned(),
-            output_repository_prefix: "harbor.internal".to_owned(),
+            output_repository_prefix: "harbor.internal/labweaver-system".to_owned(),
             dockerfile_path: "Dockerfile".to_owned(),
             network: BuildNetworkPolicy::DenyAll,
             max_duration_milliseconds: 600_000,
