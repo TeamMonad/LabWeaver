@@ -1288,6 +1288,40 @@ async fn evaluation_prompt_enforces_supported_schema_variants_and_semantics()
 }
 
 #[tokio::test]
+async fn environment_prompt_preserves_mixed_case_variant_contract() -> Result<(), Box<dyn Error>> {
+    let (runtime, process, policy) = runtime(FakeMode::Success)?;
+    runtime
+        .generate(
+            AgentTrackKind::Environment,
+            input(&policy).await?,
+            RunCancellation::new(),
+        )
+        .await?;
+
+    let commands = process.commands();
+    assert_eq!(commands.len(), 1);
+    let prompt = commands[0]
+        .args()
+        .last()
+        .ok_or_else(|| std::io::Error::other("candidate prompt is missing"))?;
+    for required in [
+        "runtime variant properties are exactly provider_binding",
+        "Container security requires rootFilesystemPolicy read_only_required",
+        "virtual_machine requires mutable_required",
+        "\"build_context\"",
+        "\"base_image_digest\"",
+        "\"service_port\":8080",
+        "\"storeBinding\":\"minio-primary-v1\"",
+    ] {
+        assert!(
+            prompt.contains(required),
+            "missing prompt invariant: {required}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn worker_admission_limit_queues_excess_processes() -> Result<(), Box<dyn Error>> {
     let (runtime, process, policy) = runtime(FakeMode::SlowSuccess)?;
     let prepared = input(&policy).await?;
