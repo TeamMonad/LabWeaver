@@ -24,7 +24,7 @@ domains:
     migrations:
       - id: 1
         file: agent/0001_sprint2_baseline.sql
-        sha256: 8e0c1708907f8df2a15cf2377cf95e79af5ad64c5cfd15c02459417a66b8075c
+        sha256: 96f87d22cad7b0638aa48151c91fd8ae2ad46b786610a8979902ec51fd899b9e
   - name: evaluation
     migrations:
       - id: 1

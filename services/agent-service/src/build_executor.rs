@@ -118,6 +118,8 @@ impl ProductionBuildExecutor {
         }
         let harbor_username = read_secret(&config.harbor_username_file)?;
         let harbor_password = read_secret(&config.harbor_password_file)?;
+        prepare_private_directory(&config.work_directory)?;
+        prepare_private_directory(&config.trivy_cache_directory)?;
         prepare_docker_config(
             &config.docker_config_directory,
             &config.harbor_registry,
@@ -715,17 +717,7 @@ fn prepare_docker_config(
     username: &str,
     password: &str,
 ) -> Result<(), BuildProviderFailure> {
-    std::fs::create_dir_all(directory).map_err(|_| rejected())?;
-    let metadata = std::fs::symlink_metadata(directory).map_err(|_| rejected())?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(rejected());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
-            .map_err(|_| rejected())?;
-    }
+    prepare_private_directory(directory)?;
     let auth = BASE64_STANDARD.encode(format!("{username}:{password}"));
     let bytes = serde_json::to_vec(&json!({"auths": {registry: {"auth": auth}}}))
         .map_err(|_| rejected())?;
@@ -745,6 +737,21 @@ fn prepare_docker_config(
     }
     #[cfg(not(unix))]
     std::fs::write(path, bytes).map_err(|_| rejected())?;
+    Ok(())
+}
+
+fn prepare_private_directory(directory: &Path) -> Result<(), BuildProviderFailure> {
+    std::fs::create_dir_all(directory).map_err(|_| rejected())?;
+    let metadata = std::fs::symlink_metadata(directory).map_err(|_| rejected())?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(rejected());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+            .map_err(|_| rejected())?;
+    }
     Ok(())
 }
 
@@ -829,6 +836,29 @@ mod tests {
                     .mode()
                     & 0o777,
                 0o600
+            );
+        }
+    }
+
+    #[test]
+    fn private_executor_directories_are_created_before_first_build() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let work = directory.path().join("work");
+        let trivy = directory.path().join("trivy");
+        prepare_private_directory(&work).expect("work directory");
+        prepare_private_directory(&trivy).expect("trivy directory");
+        assert!(work.is_dir());
+        assert!(trivy.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(work)
+                    .expect("work metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
             );
         }
     }
