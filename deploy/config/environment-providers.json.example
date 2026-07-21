@@ -31,8 +31,6 @@
     "cdiImporterMemoryRequestBytes": 262144000,
     "cdiImporterMemoryLimitBytes": 1073741824,
     "cdiScratchStorageBytes": 10737418240,
-    "activeImagePolicyId": "00000000-0000-7000-8000-000000000002",
-    "activeImagePolicyRevision": 1,
     "activeTrustRevision": 1
   }
 ]

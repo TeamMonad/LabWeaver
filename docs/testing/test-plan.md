@@ -32,7 +32,12 @@ baseline migration to a disposable PostgreSQL instance.
 - no Sigstore, Kyverno, SBOM, provenance or attestation field in the active
   product contract;
 - Critical Trivy findings reject publication and High findings remain visible;
-- candidate kind, course, approval, digest and scanner identity cannot drift;
+- Container candidate kind, course, approval, digest and scanner identity cannot
+  drift; VM publication instead requires the exact deployment-locked OCI source
+  digest, disk SHA-256, capacity, format, provider and storage bindings and
+  carries no fabricated Container scan result;
+- publication requests cannot submit artifact or policy evidence; Control
+  resolves the authoritative Container build projection or VM base binding;
 - candidate reads are Control-owned views: approval history and deterministic
   build state are reloaded from PostgreSQL, and a succeeded build is rejected
   unless both the immutable artifact and its policy evaluation are present;

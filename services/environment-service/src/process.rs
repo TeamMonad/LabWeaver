@@ -208,7 +208,7 @@ impl EnvironmentProcessRuntime {
                         Arc::new(release_store.clone()),
                         Arc::new(PgKubeVirtObservationStore::new(pool.clone())),
                         KubeVirtProviderConfiguration::new(
-                            configuration.release_policy()?,
+                            configuration.trust_revision()?,
                             KubeVirtStorageBinding::new(
                                 configuration
                                     .storage_class_binding
@@ -670,6 +670,14 @@ struct ProviderBindingConfiguration {
 }
 
 impl ProviderBindingConfiguration {
+    fn trust_revision(&self) -> Result<Revision, EnvironmentProcessRuntimeError> {
+        Revision::new(
+            self.active_trust_revision
+                .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+        )
+        .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)
+    }
+
     fn release_policy(&self) -> Result<ContainerReleasePolicy, EnvironmentProcessRuntimeError> {
         ContainerReleasePolicy::new(
             PolicyId::from_str(
@@ -748,8 +756,8 @@ impl ProviderBindingConfiguration {
             && self.cdi_importer_memory_request_bytes.is_some()
             && self.cdi_importer_memory_limit_bytes.is_some()
             && self.cdi_scratch_storage_bytes.is_some()
-            && self.active_image_policy_id.is_some()
-            && self.active_image_policy_revision.is_some()
+            && self.active_image_policy_id.is_none()
+            && self.active_image_policy_revision.is_none()
             && self.active_trust_revision.is_some()
     }
 

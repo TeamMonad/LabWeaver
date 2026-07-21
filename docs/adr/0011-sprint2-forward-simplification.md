@@ -67,7 +67,7 @@ does not add another workload or service boundary.
 
 Private Sigstore, Fulcio, Rekor, CT log, TUF, Kyverno, Packer, SBOM,
 provenance, and attestation are removed from the current product contract and
-deployment. A runnable image is authorized by all of the following:
+deployment. A runnable Container image is authorized by all of the following:
 
 1. it belongs to the configured private Harbor project;
 2. it is referenced by an immutable `sha256` digest;
@@ -77,6 +77,13 @@ deployment. A runnable image is authorized by all of the following:
 
 The absence of a signature or admission controller is not silently converted
 into another trust claim.
+
+KubeVirt does not fabricate a Container vulnerability report for an imported
+guest disk. Its release instead binds the deployment-owned base identity:
+the immutable OCI source digest, imported disk SHA-256, capacity, disk format,
+provider binding and storage binding. Control resolves both Container and VM
+evidence from owner-controlled projections or reviewed deployment config; the
+browser cannot submit artifact or policy evidence during publication.
 
 ### Executors
 

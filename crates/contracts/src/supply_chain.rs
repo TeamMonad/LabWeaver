@@ -81,6 +81,40 @@ pub struct VulnerabilitySummary {
     pub critical: u32,
 }
 
+/// Deployment-owned immutable KubeVirt base-disk identity.
+///
+/// Unlike an object-store `ArtifactRef`, this identifies a CDI source image and its imported
+/// disk content. `capacity_bytes` is the reviewed PVC capacity, not a fabricated object length.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VirtualMachineBaseDisk {
+    pub binding: String,
+    pub source_registry_digest: String,
+    pub disk_sha256: Sha256Digest,
+    pub capacity_bytes: u64,
+}
+
+impl VirtualMachineBaseDisk {
+    /// Validates a fixed CDI binding and immutable OCI source digest.
+    pub fn validate(&self) -> Result<(), SupplyChainError> {
+        let Some(source) = self.source_registry_digest.strip_prefix("docker://") else {
+            return Err(SupplyChainError::IncompleteArtifact);
+        };
+        let Some((repository, digest)) = source.rsplit_once('@') else {
+            return Err(SupplyChainError::DigestMismatch);
+        };
+        if self.binding.trim().is_empty()
+            || self.binding.bytes().any(|byte| byte.is_ascii_whitespace())
+            || repository.trim().is_empty()
+            || repository.contains(char::is_whitespace)
+            || self.capacity_bytes == 0
+        {
+            return Err(SupplyChainError::IncompleteArtifact);
+        }
+        validate_oci_digest(digest)
+    }
+}
+
 /// Complete immutable runtime artifact identity.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -93,7 +127,7 @@ pub enum ImageArtifact {
     },
     VirtualMachine {
         id: ImageArtifactId,
-        base_disk: ArtifactRef,
+        base_disk: VirtualMachineBaseDisk,
         format: VirtualMachineDiskFormat,
     },
 }
@@ -124,7 +158,7 @@ impl ImageArtifact {
                 .ok_or(SupplyChainError::DigestMismatch)?
                 .parse()
                 .map_err(|_| SupplyChainError::DigestMismatch),
-            Self::VirtualMachine { base_disk, .. } => Ok(base_disk.sha256),
+            Self::VirtualMachine { base_disk, .. } => Ok(base_disk.disk_sha256),
         }
     }
 
@@ -143,12 +177,7 @@ impl ImageArtifact {
                 }
                 validate_oci_digest(digest)
             }
-            Self::VirtualMachine { base_disk, .. } => {
-                if base_disk.size_bytes == 0 || base_disk.object_version.trim().is_empty() {
-                    return Err(SupplyChainError::IncompleteArtifact);
-                }
-                Ok(())
-            }
+            Self::VirtualMachine { base_disk, .. } => base_disk.validate(),
         }
     }
 }
@@ -221,7 +250,9 @@ pub struct EnvironmentTemplateRelease {
     pub runtime_kind: RuntimeKind,
     pub approval: CandidateApproval,
     pub artifact: ImageArtifact,
-    pub image_policy_evaluation: ImagePolicyEvaluation,
+    /// Container-only Trivy evidence. VM releases bind a deployment-owned CDI base disk instead
+    /// and must not fabricate vulnerability counts for an imported guest disk.
+    pub image_policy_evaluation: Option<ImagePolicyEvaluation>,
     pub published_by: ActorId,
     pub published_at: UtcTimestamp,
 }
@@ -235,14 +266,21 @@ impl EnvironmentTemplateRelease {
             || self.approval.candidate_revision != self.candidate_revision
             || self.approval.candidate_sha256 != self.environment_spec_sha256
             || self.runtime_kind != self.artifact.runtime_kind()
-            || self.image_policy_evaluation.artifact_id != self.artifact.id()
         {
             return Err(SupplyChainError::ApprovalMismatch);
         }
         self.artifact.validate()?;
-        self.image_policy_evaluation.validate()?;
-        if self.image_policy_evaluation.artifact_sha256 != self.artifact.content_sha256()? {
-            return Err(SupplyChainError::DigestMismatch);
+        match (&self.artifact, &self.image_policy_evaluation) {
+            (ImageArtifact::Container { id, .. }, Some(evaluation)) => {
+                evaluation.validate()?;
+                if evaluation.artifact_id != *id
+                    || evaluation.artifact_sha256 != self.artifact.content_sha256()?
+                {
+                    return Err(SupplyChainError::DigestMismatch);
+                }
+            }
+            (ImageArtifact::VirtualMachine { .. }, None) => {}
+            _ => return Err(SupplyChainError::ApprovalMismatch),
         }
         Ok(())
     }

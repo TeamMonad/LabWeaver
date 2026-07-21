@@ -12,7 +12,7 @@ use contracts::authoring::{
 use contracts::environment::{
     EndpointHealth, EnvironmentEndpoint, EnvironmentInstance, ObservedEnvironmentState,
 };
-use contracts::supply_chain::{ImageArtifact, VirtualMachineDiskFormat};
+use contracts::supply_chain::{ImageArtifact, VirtualMachineBaseDisk, VirtualMachineDiskFormat};
 use contracts::{
     ArtifactRef, EndpointId, EnvironmentId, OperationId, Revision, Sha256Digest, UtcTimestamp,
 };
@@ -23,9 +23,8 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::{
-    ContainerReleasePolicy, ContainerReleaseResolver, EnvironmentProvider, ProviderFailure,
-    ProviderFailureCode, ProviderObservation, ReconcileAction, ReleaseProjectionError,
-    ResolvedContainerRelease,
+    ContainerReleaseResolver, EnvironmentProvider, ProviderFailure, ProviderFailureCode,
+    ProviderObservation, ReconcileAction, ReleaseProjectionError, ResolvedContainerRelease,
 };
 
 pub const KUBEVIRT_BACKEND_PROTOCOL_VERSION: u8 = 1;
@@ -88,7 +87,7 @@ pub struct KubeVirtResource {
     pub document: Value,
 }
 
-/// Immutable VM resource plan. The backend resolves the private `ArtifactRef` without exposing URLs.
+/// Immutable VM resource plan bound to one deployment-owned CDI source and imported disk hash.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KubeVirtResourcePlan {
@@ -96,7 +95,7 @@ pub struct KubeVirtResourcePlan {
     pub namespace: String,
     pub virtual_machine_name: String,
     pub data_volume_name: String,
-    pub base_disk: ArtifactRef,
+    pub base_disk: VirtualMachineBaseDisk,
     pub base_disk_format: VirtualMachineDiskFormat,
     pub storage_class_name: String,
     pub resources: Vec<KubeVirtResource>,
@@ -910,7 +909,7 @@ impl KubeVirtSshBootstrap {
 /// Reviewed non-secret configuration for one exact `KubeVirt` Provider binding.
 #[derive(Clone, Debug)]
 pub struct KubeVirtProviderConfiguration {
-    pub release_policy: ContainerReleasePolicy,
+    pub trust_revision: Revision,
     pub storage: KubeVirtStorageBinding,
     pub ssh: KubeVirtSshBootstrap,
     pub resource_budget: KubeVirtResourceBudget,
@@ -959,13 +958,13 @@ impl KubeVirtResourceBudget {
 impl KubeVirtProviderConfiguration {
     #[must_use]
     pub const fn new(
-        release_policy: ContainerReleasePolicy,
+        trust_revision: Revision,
         storage: KubeVirtStorageBinding,
         ssh: KubeVirtSshBootstrap,
         resource_budget: KubeVirtResourceBudget,
     ) -> Self {
         Self {
-            release_policy,
+            trust_revision,
             storage,
             ssh,
             resource_budget,
@@ -1446,7 +1445,6 @@ where
             || storage_class_binding != &self.configuration.storage.binding
             || *ssh_port != 22
             || spec_base_disk != base_disk
-            || projection.release.image_policy_evaluation.artifact_sha256 != base_disk.sha256
             || projection.environment_spec.security.user_policy
                 != RuntimeUserPolicy::NonRootRequired
             || projection.environment_spec.security.root_filesystem_policy
@@ -1458,7 +1456,7 @@ where
                 != PrivilegeEscalationPolicy::Deny
             || projection.environment_spec.security.public_exposure_policy
                 != PublicExposurePolicy::Deny
-            || !valid_artifact_ref(base_disk)
+            || base_disk.validate().is_err()
         {
             return Err(ReleaseProjectionError::SecurityPostureInvalid);
         }
@@ -1484,9 +1482,9 @@ where
         let annotations = json!({
             "labweaver.io/release-id": projection.release.id.to_string(),
             "labweaver.io/release-version": projection.release.version.to_string(),
-            "labweaver.io/base-disk-store-binding": base_disk.store_binding,
-            "labweaver.io/base-disk-object-version": base_disk.object_version,
-            "labweaver.io/base-disk-sha256": base_disk.sha256.to_string(),
+            "labweaver.io/base-disk-binding": base_disk.binding,
+            "labweaver.io/base-disk-source-registry": base_disk.source_registry_digest,
+            "labweaver.io/base-disk-sha256": base_disk.disk_sha256.to_string(),
             "labweaver.io/environment-generation": instance.generation.to_string(),
         });
         let resources = &projection.environment_spec.resources;
@@ -1694,14 +1692,7 @@ where
         if resolved.withdrawn_at.is_some() {
             return Err(ReleaseProjectionError::Withdrawn);
         }
-        if resolved.authority_now >= release.image_policy_evaluation.valid_until {
-            return Err(ReleaseProjectionError::EvidenceExpired);
-        }
-        let policy = self.configuration.release_policy;
-        if release.image_policy_evaluation.policy_id != policy.image_policy_id
-            || release.image_policy_evaluation.policy_revision != policy.image_policy_revision
-            || release.approval.trust_revision != policy.trust_revision
-        {
+        if release.approval.trust_revision != self.configuration.trust_revision {
             return Err(ReleaseProjectionError::TrustRevisionMismatch);
         }
         Ok(())

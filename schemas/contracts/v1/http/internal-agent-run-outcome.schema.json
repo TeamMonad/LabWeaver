@@ -749,7 +749,7 @@
           "additionalProperties": false,
           "properties": {
             "base_disk": {
-              "$ref": "#/$defs/ArtifactRef"
+              "$ref": "#/$defs/VirtualMachineBaseDisk"
             },
             "kind": {
               "const": "virtual_machine",
@@ -1520,6 +1520,33 @@
     "UtcTimestamp": {
       "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
       "type": "string"
+    },
+    "VirtualMachineBaseDisk": {
+      "additionalProperties": false,
+      "description": "Deployment-owned immutable KubeVirt base-disk identity.\n\nUnlike an object-store `ArtifactRef`, this identifies a CDI source image and its imported\ndisk content. `capacity_bytes` is the reviewed PVC capacity, not a fabricated object length.",
+      "properties": {
+        "binding": {
+          "type": "string"
+        },
+        "capacityBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "diskSha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "sourceRegistryDigest": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "binding",
+        "sourceRegistryDigest",
+        "diskSha256",
+        "capacityBytes"
+      ],
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

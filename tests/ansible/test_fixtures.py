@@ -654,7 +654,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertNotIn("delete", identity_reconcile.lower())
         self.assertGreaterEqual(identity_reconcile.count("no_log: true"), 5)
 
-    def test_sprint2_environment_provider_matches_control_image_policy(self) -> None:
+    def test_sprint2_runtime_authorities_match_control_policy(self) -> None:
         control = (ROOT / "deploy/config/control-plane.yaml.example").read_text(encoding="utf-8")
         providers = json.loads(
             (ROOT / "deploy/config/environment-providers.json.example").read_text(
@@ -663,9 +663,25 @@ class AnsibleFixtureTests(unittest.TestCase):
         )
         policy_id = re.search(r'imagePolicyId: "([0-9a-f-]+)"', control)
         self.assertIsNotNone(policy_id)
-        self.assertTrue(
-            all(provider["activeImagePolicyId"] == policy_id.group(1) for provider in providers)
+        container = next(provider for provider in providers if provider["providerKind"] == "container")
+        virtual_machine = next(
+            provider for provider in providers if provider["providerKind"] == "kubevirt"
         )
+        self.assertEqual(container["activeImagePolicyId"], policy_id.group(1))
+        self.assertNotIn("activeImagePolicyId", virtual_machine)
+        self.assertNotIn("activeImagePolicyRevision", virtual_machine)
+
+        control_config = yaml.safe_load(control)
+        lock = yaml.safe_load((ROOT / "deploy/versions.lock.yml").read_text(encoding="utf-8"))
+        vm_policy = control_config["control"]["virtualMachineBase"]
+        vm_lock = lock["sprint2_vm_base"]
+        self.assertEqual(vm_policy["providerBinding"], virtual_machine["binding"])
+        self.assertEqual(vm_policy["storageClassBinding"], virtual_machine["storageClassBinding"])
+        self.assertEqual(vm_policy["artifactId"], vm_lock["artifact_id"])
+        self.assertEqual(vm_policy["baseDisk"]["binding"], vm_lock["binding"])
+        self.assertEqual(vm_policy["baseDisk"]["sourceRegistryDigest"], vm_lock["registry_url"])
+        self.assertEqual(vm_policy["baseDisk"]["diskSha256"], vm_lock["disk_sha256"])
+        self.assertEqual(vm_policy["baseDisk"]["capacityBytes"], vm_lock["capacity_bytes"])
 
     def test_control_quarantine_subjects_belong_to_the_retained_agent_stream(self) -> None:
         control = yaml.safe_load(

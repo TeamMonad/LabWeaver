@@ -20,7 +20,7 @@ use contracts::environment::{
     ObservedEnvironmentState, OperationState,
 };
 use contracts::events::{CloudEvent, EVENT_CONTRACTS, ReleaseWithdrawn, SPEC_VERSION, subjects};
-use contracts::supply_chain::VirtualMachineDiskFormat;
+use contracts::supply_chain::{VirtualMachineBaseDisk, VirtualMachineDiskFormat};
 use contracts::{
     ActorId, ArtifactId, ArtifactRef, CourseId, EndpointId, EnvironmentId, EventId, OperationId,
     ReleaseId, Revision, Sequence, Sha256Digest, UtcTimestamp,
@@ -1207,13 +1207,15 @@ fn kubevirt_executor_plan(environment_id: EnvironmentId) -> KubeVirtResourcePlan
         namespace: format!("lw-env-{environment_id}"),
         virtual_machine_name: "runtime".to_owned(),
         data_volume_name: "rootdisk".to_owned(),
-        base_disk: ArtifactRef {
-            artifact_id: ArtifactId::new(),
-            store_binding: "artifact-store-v1".to_owned(),
-            object_version: "version-1".to_owned(),
-            sha256: Sha256Digest::of_bytes(b"vm-base-disk"),
-            size_bytes: 1024,
-            media_type: "application/x-qemu-disk".to_owned(),
+        base_disk: VirtualMachineBaseDisk {
+            binding: "ubuntu-24.04-v1".to_owned(),
+            source_registry_digest: concat!(
+                "docker://quay.io/containerdisks/ubuntu@",
+                "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
+            )
+            .to_owned(),
+            disk_sha256: Sha256Digest::of_bytes(b"vm-base-disk"),
+            capacity_bytes: 10_737_418_240,
         },
         base_disk_format: VirtualMachineDiskFormat::Qcow2,
         storage_class_name: "local-path".to_owned(),
@@ -1304,13 +1306,15 @@ async fn kubevirt_observation_identity_is_durable_fenced_and_tombstoned()
         namespace: format!("lw-env-{environment_id}"),
         virtual_machine_name: "runtime".to_owned(),
         data_volume_name: "rootdisk".to_owned(),
-        base_disk: ArtifactRef {
-            artifact_id: ArtifactId::new(),
-            store_binding: "artifact-store-v1".to_owned(),
-            object_version: "version-1".to_owned(),
-            sha256: Sha256Digest::of_bytes(b"vm-base-disk"),
-            size_bytes: 1024,
-            media_type: "application/x-qemu-disk".to_owned(),
+        base_disk: VirtualMachineBaseDisk {
+            binding: "ubuntu-24.04-v1".to_owned(),
+            source_registry_digest: concat!(
+                "docker://quay.io/containerdisks/ubuntu@",
+                "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
+            )
+            .to_owned(),
+            disk_sha256: Sha256Digest::of_bytes(b"vm-base-disk"),
+            capacity_bytes: 10_737_418_240,
         },
         base_disk_format: VirtualMachineDiskFormat::Qcow2,
         storage_class_name: "local-path".to_owned(),

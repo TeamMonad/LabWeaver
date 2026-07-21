@@ -17,7 +17,7 @@ function makeArtifact(overrides: Partial<ImageArtifact> = {}): ImageArtifact {
 function makeEvaluation(overrides: Partial<ImagePolicyEvaluation> = {}): ImagePolicyEvaluation {
   return {
     artifactId: 'image-1',
-    artifactSha256: 'sha256:image',
+    artifactSha256: 'image',
     evaluatedAt: '2026-07-16T08:00:00.000Z',
     maxEvidenceAgeMilliseconds: 3600000,
     passed: true,

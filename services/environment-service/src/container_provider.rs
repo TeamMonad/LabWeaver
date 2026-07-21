@@ -1385,12 +1385,15 @@ where
         if resolved.withdrawn_at.is_some() {
             return Err(ReleaseProjectionError::Withdrawn);
         }
-        if resolved.authority_now >= release.image_policy_evaluation.valid_until {
+        let evaluation = release
+            .image_policy_evaluation
+            .as_ref()
+            .ok_or(ReleaseProjectionError::ContractInvalid)?;
+        if resolved.authority_now >= evaluation.valid_until {
             return Err(ReleaseProjectionError::EvidenceExpired);
         }
-        if release.image_policy_evaluation.policy_id != self.release_policy.image_policy_id
-            || release.image_policy_evaluation.policy_revision
-                != self.release_policy.image_policy_revision
+        if evaluation.policy_id != self.release_policy.image_policy_id
+            || evaluation.policy_revision != self.release_policy.image_policy_revision
             || release.approval.trust_revision != self.release_policy.trust_revision
         {
             return Err(ReleaseProjectionError::TrustRevisionMismatch);

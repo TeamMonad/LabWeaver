@@ -176,10 +176,13 @@ export function useCandidateApproval(courseId: Ref<string | undefined>, runId: R
   })
 
   const canPublish = computed(() => {
+    const runtimeKind = environmentCandidate.value.kind === 'success'
+      ? environmentCandidate.value.data.candidate.spec.runtime.kind
+      : undefined
     return (
       environmentCandidate.value.kind === 'success' &&
       latestEnvironmentApproval.value?.decision === 'approved' &&
-      imageGate.value.status !== 'blocked' &&
+      (runtimeKind === 'virtual_machine' || imageGate.value.status !== 'blocked') &&
       publish.value.kind !== 'loading'
     )
   })
@@ -247,7 +250,10 @@ export function useCandidateApproval(courseId: Ref<string | undefined>, runId: R
     const candidate = view.candidate
     const approval = latestEnvironmentApproval.value
     if (!approval || approval.decision !== 'approved') return
-    if (!view.build?.artifact || !view.build.imagePolicyEvaluation) return
+    if (
+      candidate.spec.runtime.kind === 'container' &&
+      (!view.build?.artifact || !view.build.imagePolicyEvaluation)
+    ) return
 
     publish.value = { kind: 'loading', message: '发布 EnvironmentTemplateRelease…' }
     const result = await createEnvironmentTemplateRelease({
@@ -255,11 +261,9 @@ export function useCandidateApproval(courseId: Ref<string | undefined>, runId: R
       headers: { 'Idempotency-Key': idempotencyKey(), 'If-Match': ifMatch(candidate.revision) },
       body: {
         approvalId: approval.id,
-        artifact: view.build.artifact,
         candidateId: candidate.id,
         candidateRevision: candidate.revision,
         environmentSpecSha256: candidate.specSha256,
-        imagePolicyEvaluation: view.build.imagePolicyEvaluation,
         runtimeKind: candidate.spec.runtime.kind,
       },
     })

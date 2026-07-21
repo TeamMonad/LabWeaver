@@ -7,6 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::diagnostic;
 use crate::evaluation::EvaluationSpec;
+use crate::supply_chain::VirtualMachineBaseDisk;
 use crate::{
     ActorId, AgentRunId, ApprovalId, ArtifactRef, CandidateId, CourseId, PolicyId,
     ProblemPackageId, RetentionSnapshot, Revision, Sha256Digest, UtcTimestamp,
@@ -304,7 +305,7 @@ pub enum EnvironmentRuntimeSpec {
     },
     VirtualMachine {
         provider_binding: String,
-        base_disk: ArtifactRef,
+        base_disk: VirtualMachineBaseDisk,
         storage_class_binding: String,
         ssh_port: u16,
     },
@@ -463,7 +464,11 @@ impl EnvironmentSpec {
                         "VM requires provider/storage binding and SSH port 22".to_owned(),
                     ));
                 }
-                validate_artifact_ref(base_disk)?;
+                base_disk.validate().map_err(|_| {
+                    AuthoringError::InvalidEnvironmentSpec(
+                        "VM base disk binding must be immutable and complete".to_owned(),
+                    )
+                })?;
             }
         }
         Ok(())

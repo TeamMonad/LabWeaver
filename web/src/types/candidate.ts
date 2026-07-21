@@ -22,7 +22,10 @@ export function evaluateImageGate(
   }
 
   const reasons: string[] = []
-  if (artifact.kind === 'container' && artifact.digest !== evaluation.artifactSha256) {
+  const artifactDigest = artifact.kind === 'container'
+    ? artifact.digest.replace(/^sha256:/, '')
+    : undefined
+  if (artifactDigest !== undefined && artifactDigest !== evaluation.artifactSha256) {
     reasons.push('镜像 digest 与扫描结果不一致')
   }
 

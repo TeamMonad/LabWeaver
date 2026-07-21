@@ -30,7 +30,7 @@ use contracts::http::{
 };
 use contracts::supply_chain::{
     BuildNetworkPolicy, BuildRequest, EnvironmentTemplateRelease, EnvironmentTemplateReleaseView,
-    ImageArtifact, ReleaseWithdrawal,
+    ImageArtifact, ReleaseWithdrawal, VirtualMachineBaseDisk, VirtualMachineDiskFormat,
 };
 use contracts::{
     ActorId, ApprovalId, BuildRequestId, CandidateId, CourseId, DiagnosticCode, EventId,
@@ -89,6 +89,8 @@ pub struct ControlConfig {
     pub evaluation_schema_sha256: Sha256Digest,
     /// Exact build execution policy used to turn an approved Container candidate into a command.
     pub container_build: ContainerBuildPolicy,
+    /// Exact deployment-owned `KubeVirt` base disk accepted for VM publication.
+    pub virtual_machine_base: VirtualMachineBasePolicy,
 }
 
 /// Deployment-owned, non-secret limits and bindings for approved Container builds.
@@ -111,6 +113,22 @@ pub struct ContainerBuildPolicy {
     pub max_memory_bytes: u64,
 }
 
+/// Deployment-owned fixed `KubeVirt` artifact and provider bindings.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VirtualMachineBasePolicy {
+    /// Exact Environment provider binding accepted in the candidate.
+    pub provider_binding: String,
+    /// Exact reviewed storage binding accepted in the candidate.
+    pub storage_class_binding: String,
+    /// Stable release artifact identity assigned to this deployment-owned disk.
+    pub artifact_id: ImageArtifactId,
+    /// Immutable CDI source and imported disk identity.
+    pub base_disk: VirtualMachineBaseDisk,
+    /// Exact disk encoding exposed to the runtime provider.
+    pub format: VirtualMachineDiskFormat,
+}
+
 impl ControlConfig {
     /// Rejects unsafe or unbounded configuration.
     pub fn validate(&self) -> Result<(), ControlError> {
@@ -125,6 +143,7 @@ impl ControlConfig {
             || self.retention_seconds == 0
             || self.sse_retention_seconds == 0
             || !self.container_build.validate()
+            || !self.virtual_machine_base.validate()
         {
             return Err(ControlError::ConfigurationInvalid);
         }
@@ -160,6 +179,14 @@ impl ContainerBuildPolicy {
                         })
                 }
             }
+    }
+}
+
+impl VirtualMachineBasePolicy {
+    fn validate(&self) -> bool {
+        !self.provider_binding.trim().is_empty()
+            && !self.storage_class_binding.trim().is_empty()
+            && self.base_disk.validate().is_ok()
     }
 }
 
@@ -1503,23 +1530,6 @@ impl ControlService {
         trace_id: &str,
     ) -> Result<EnvironmentTemplateRelease, ControlError> {
         validate_trace_id(trace_id)?;
-        request
-            .artifact
-            .validate()
-            .map_err(|_| ControlError::ReleaseEvidenceInvalid)?;
-        request
-            .image_policy_evaluation
-            .validate()
-            .map_err(|_| ControlError::ReleaseEvidenceInvalid)?;
-        if now >= request.image_policy_evaluation.valid_until {
-            return Err(ControlError::ReleaseEvidenceStale);
-        }
-        let evaluation = &request.image_policy_evaluation;
-        if evaluation.policy_id != self.config.image_policy_id
-            || evaluation.policy_revision != self.config.image_policy_revision
-        {
-            return Err(ControlError::ReleaseEvidenceInvalid);
-        }
         let request_hash = canonical_hash(&json!({
             "courseId":course_id,"request":request,"actorId":actor_id
         }))?;
@@ -1573,6 +1583,9 @@ impl ControlService {
         environment_candidate
             .validate()
             .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+        if environment_candidate.spec.runtime.kind() != request.runtime_kind {
+            return Err(ControlError::ReleaseCandidateMismatch);
+        }
         let approval: CandidateApproval = load_contract_tx(
             &mut transaction,
             "SELECT contract FROM control.candidate_approvals WHERE approval_id=$1 AND candidate_id=$2",
@@ -1600,54 +1613,78 @@ impl ControlService {
         {
             return Err(ControlError::ReleaseCandidateMismatch);
         }
-        let artifact_id = image_artifact_id(&request.artifact);
-        if artifact_id != request.image_policy_evaluation.artifact_id {
-            return Err(ControlError::ArtifactMismatch);
-        }
-        let projection = sqlx::query(
-            "SELECT artifact,policy_evaluation FROM control.image_artifact_projections \
-             WHERE image_artifact_id=$1 FOR SHARE",
-        )
-        .bind(artifact_id.as_uuid())
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(db)?
-        .ok_or(ControlError::ArtifactNotAuthoritative)?;
-        let projected_artifact: ImageArtifact =
-            serde_json::from_value(projection.try_get("artifact").map_err(db)?)
-                .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
-        let projected_evaluation: contracts::supply_chain::ImagePolicyEvaluation =
-            serde_json::from_value(projection.try_get("policy_evaluation").map_err(db)?)
-                .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
-        if projected_artifact != request.artifact
-            || projected_evaluation != request.image_policy_evaluation
-        {
-            return Err(ControlError::ArtifactMismatch);
-        }
-        if let Some(build_request_id) = image_build_request_id(&request.artifact) {
-            let build_is_authoritative = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS(SELECT 1 FROM control.container_build_projections \
-                 WHERE build_request_id=$1 AND course_id=$2 AND candidate_id=$3 \
-                   AND candidate_revision=$4 AND candidate_sha256=$5 AND approval_id=$6 \
-                   AND state='succeeded' AND image_artifact_id=$7)",
-            )
-            .bind(build_request_id.as_uuid())
-            .bind(course_id.as_uuid())
-            .bind(request.candidate_id.as_uuid())
-            .bind(
-                i64::try_from(request.candidate_revision.get())
-                    .map_err(|_| ControlError::ReleaseCandidateMismatch)?,
-            )
-            .bind(request.environment_spec_sha256.to_string())
-            .bind(approval.id.as_uuid())
-            .bind(artifact_id.as_uuid())
-            .fetch_one(&mut *transaction)
-            .await
-            .map_err(db)?;
-            if !build_is_authoritative {
-                return Err(ControlError::ArtifactMismatch);
+        let (artifact, image_policy_evaluation) = match &environment_candidate.spec.runtime {
+            contracts::authoring::EnvironmentRuntimeSpec::Container { .. } => {
+                let projection = sqlx::query(
+                    "SELECT artifacts.artifact,artifacts.policy_evaluation \
+                     FROM control.container_build_projections builds \
+                     JOIN control.image_artifact_projections artifacts \
+                       ON artifacts.image_artifact_id=builds.image_artifact_id \
+                     WHERE builds.course_id=$1 AND builds.candidate_id=$2 \
+                       AND builds.candidate_revision=$3 AND builds.candidate_sha256=$4 \
+                       AND builds.approval_id=$5 AND builds.state='succeeded' FOR SHARE",
+                )
+                .bind(course_id.as_uuid())
+                .bind(request.candidate_id.as_uuid())
+                .bind(
+                    i64::try_from(request.candidate_revision.get())
+                        .map_err(|_| ControlError::ReleaseCandidateMismatch)?,
+                )
+                .bind(request.environment_spec_sha256.to_string())
+                .bind(approval.id.as_uuid())
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(db)?
+                .ok_or(ControlError::ArtifactNotAuthoritative)?;
+                let artifact: ImageArtifact =
+                    serde_json::from_value(projection.try_get("artifact").map_err(db)?)
+                        .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+                let evaluation: contracts::supply_chain::ImagePolicyEvaluation =
+                    serde_json::from_value(projection.try_get("policy_evaluation").map_err(db)?)
+                        .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+                if !matches!(artifact, ImageArtifact::Container { .. })
+                    || evaluation.artifact_id != artifact.id()
+                    || evaluation.artifact_sha256
+                        != artifact
+                            .content_sha256()
+                            .map_err(|_| ControlError::ReleaseEvidenceInvalid)?
+                    || evaluation.policy_id != self.config.image_policy_id
+                    || evaluation.policy_revision != self.config.image_policy_revision
+                {
+                    return Err(ControlError::ArtifactMismatch);
+                }
+                evaluation
+                    .validate()
+                    .map_err(|_| ControlError::ReleaseEvidenceInvalid)?;
+                if now >= evaluation.valid_until {
+                    return Err(ControlError::ReleaseEvidenceStale);
+                }
+                (artifact, Some(evaluation))
             }
-        }
+            contracts::authoring::EnvironmentRuntimeSpec::VirtualMachine {
+                provider_binding,
+                base_disk,
+                storage_class_binding,
+                ..
+            } => {
+                let policy = &self.config.virtual_machine_base;
+                if provider_binding != &policy.provider_binding
+                    || storage_class_binding != &policy.storage_class_binding
+                    || base_disk != &policy.base_disk
+                {
+                    return Err(ControlError::ArtifactMismatch);
+                }
+                (
+                    ImageArtifact::VirtualMachine {
+                        id: policy.artifact_id,
+                        base_disk: policy.base_disk.clone(),
+                        format: policy.format,
+                    },
+                    None,
+                )
+            }
+        };
+        let artifact_id = artifact.id();
         let next_version = sqlx::query_scalar::<_, i64>(
             "SELECT COALESCE(MAX(version),0)+1 FROM control.environment_template_releases WHERE course_id=$1",
         )
@@ -1666,8 +1703,8 @@ impl ControlService {
             environment_spec_sha256: request.environment_spec_sha256,
             runtime_kind: request.runtime_kind,
             approval,
-            artifact: request.artifact.clone(),
-            image_policy_evaluation: request.image_policy_evaluation.clone(),
+            artifact,
+            image_policy_evaluation,
             published_by: actor_id,
             published_at: now,
         };
@@ -1745,7 +1782,8 @@ impl ControlService {
             json!({
                 "releaseId":release.id,"version":release.version,
                 "environmentSpecSha256":release.environment_spec_sha256,
-                "highSeverityWarnings":release.image_policy_evaluation.high_severity_warning_count()
+                "highSeverityWarnings":release.image_policy_evaluation.as_ref()
+                    .map_or(0, contracts::supply_chain::ImagePolicyEvaluation::high_severity_warning_count)
             }),
         )
         .await?;
@@ -2980,8 +3018,8 @@ mod tests {
     use contracts::supply_chain::BuildNetworkPolicy;
 
     use super::{
-        ContainerBuildPolicy, ControlConfig, ControlError, reject_sensitive_payload,
-        validate_upload_request,
+        ContainerBuildPolicy, ControlConfig, ControlError, VirtualMachineBasePolicy,
+        reject_sensitive_payload, validate_upload_request,
     };
 
     fn config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
@@ -3007,6 +3045,22 @@ mod tests {
                 max_duration_milliseconds: 600_000,
                 max_cpu_millicores: 2_000,
                 max_memory_bytes: 2_147_483_648,
+            },
+            virtual_machine_base: VirtualMachineBasePolicy {
+                provider_binding: "kubevirt-primary-v1".to_owned(),
+                storage_class_binding: "vm-rwo-primary-v1".to_owned(),
+                artifact_id: contracts::ImageArtifactId::new(),
+                base_disk: contracts::supply_chain::VirtualMachineBaseDisk {
+                    binding: "ubuntu-24.04-v1".to_owned(),
+                    source_registry_digest: concat!(
+                        "docker://quay.io/containerdisks/ubuntu@",
+                        "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
+                    )
+                    .to_owned(),
+                    disk_sha256: Sha256Digest::of_bytes(b"vm-disk"),
+                    capacity_bytes: 10_737_418_240,
+                },
+                format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
             },
         })
     }

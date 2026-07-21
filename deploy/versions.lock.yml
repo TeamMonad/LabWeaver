@@ -104,9 +104,13 @@ test_images:
   busybox: docker.io/library/busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
   cirros: quay.io/kubevirt/cirros-container-disk-demo@sha256:e2a45211b1f4a73e40b5356e503786c6dc7b5fb003b5d1d4ffa0a450a3dfdefe
 sprint2_vm_base:
+  binding: ubuntu-24.04-v1
   release: ubuntu-24.04
   registry_url: docker://quay.io/containerdisks/ubuntu@sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5
   disk_sha256: ffe6203da54deeb6db5d2a98a83f9ec8e55f149d3f7ba622e1abe5fa966ee3d6
+  artifact_id: 00000000-0000-7000-8000-000000000003
+  format: qcow2
+  capacity_bytes: 10737418240
   data_source_name: ubuntu-lab-base-v1
   seed_data_volume_name: ubuntu-lab-base-v1-seed
   storage_class_name: local-path

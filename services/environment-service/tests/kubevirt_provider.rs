@@ -14,26 +14,26 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use contracts::authoring::{
-    CandidateApproval, CandidateDecision, EnvironmentEntrySpec, EnvironmentSpec, RuntimeKind,
+    CandidateApproval, CandidateDecision, EnvironmentEntrySpec, EnvironmentRuntimeSpec,
+    EnvironmentSpec, RuntimeKind,
 };
 use contracts::environment::{DesiredEnvironmentState, EndpointProtocol, ObservedEnvironmentState};
 use contracts::events::ReleasePublished;
 use contracts::supply_chain::{
-    EnvironmentTemplateRelease, ImageArtifact, ImagePolicyEvaluation, VirtualMachineDiskFormat,
-    VulnerabilitySummary,
+    EnvironmentTemplateRelease, ImageArtifact, VirtualMachineBaseDisk, VirtualMachineDiskFormat,
 };
 use contracts::{
     ActorId, ApprovalId, ArtifactId, ArtifactRef, CandidateId, ImageArtifactId, PolicyId,
     ReleaseId, Revision, Sha256Digest, UtcTimestamp,
 };
 use environment_service::{
-    ContainerReleasePolicy, ContainerReleaseResolver, EnvironmentProvider,
-    KUBEVIRT_BACKEND_PROTOCOL_VERSION, KubeVirtBackendFence, KubeVirtCleanupPlan,
-    KubeVirtObservationStore, KubeVirtObservationStoreError, KubeVirtProvider,
-    KubeVirtProviderBackend, KubeVirtProviderConfiguration, KubeVirtResourceBudget,
-    KubeVirtResourcePlan, KubeVirtRunningObservation, KubeVirtSshBootstrap,
-    KubeVirtStoppedObservation, KubeVirtStorageBinding, ProviderFailure, ReconcileAction,
-    ReleaseProjectionError, ResolvedContainerRelease,
+    ContainerReleaseResolver, EnvironmentProvider, KUBEVIRT_BACKEND_PROTOCOL_VERSION,
+    KubeVirtBackendFence, KubeVirtCleanupPlan, KubeVirtObservationStore,
+    KubeVirtObservationStoreError, KubeVirtProvider, KubeVirtProviderBackend,
+    KubeVirtProviderConfiguration, KubeVirtResourceBudget, KubeVirtResourcePlan,
+    KubeVirtRunningObservation, KubeVirtSshBootstrap, KubeVirtStoppedObservation,
+    KubeVirtStorageBinding, ProviderFailure, ReconcileAction, ReleaseProjectionError,
+    ResolvedContainerRelease,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -277,14 +277,12 @@ fn plan_is_deterministic_private_and_digest_bound() {
         .expect("same input plans deterministically");
 
     assert_eq!(first.plan_sha256, second.plan_sha256);
-    assert_eq!(
-        first.base_disk.sha256,
-        resolved
-            .projection
-            .release
-            .image_policy_evaluation
-            .artifact_sha256
-    );
+    let EnvironmentRuntimeSpec::VirtualMachine { base_disk, .. } =
+        &resolved.projection.environment_spec.runtime
+    else {
+        panic!("VM fixture runtime");
+    };
+    assert_eq!(&first.base_disk, base_disk);
     assert_eq!(first.base_disk_format, VirtualMachineDiskFormat::Qcow2);
     assert_eq!(first.storage_class_name, "local-path");
     assert_eq!(count_resource(&first, "DataVolume"), 1);
@@ -312,13 +310,13 @@ fn plan_is_deterministic_private_and_digest_bound() {
         data_volume
             .document
             .pointer("/metadata/annotations/labweaver.io~1base-disk-sha256"),
-        Some(&json!(first.base_disk.sha256.to_string()))
+        Some(&json!(first.base_disk.disk_sha256.to_string()))
     );
     assert_eq!(
         data_volume
             .document
-            .pointer("/metadata/annotations/labweaver.io~1base-disk-object-version"),
-        Some(&json!(first.base_disk.object_version))
+            .pointer("/metadata/annotations/labweaver.io~1base-disk-source-registry"),
+        Some(&json!(first.base_disk.source_registry_digest))
     );
 
     let virtual_machine = resource(&first, "VirtualMachine");
@@ -624,12 +622,6 @@ fn invalid_release_storage_or_ssh_bootstrap_fails_closed() {
     let backend = Arc::new(FixtureBackend::default());
     let vm_provider = provider(projection.clone(), backend);
 
-    let mut expired = resolved(projection.clone());
-    expired.authority_now = projection.release.image_policy_evaluation.valid_until;
-    assert!(matches!(
-        vm_provider.plan(&instance, &expired, ReconcileAction::Provision),
-        Err(ReleaseProjectionError::EvidenceExpired)
-    ));
     let mut withdrawn = resolved(projection.clone());
     withdrawn.withdrawn_at = Some(timestamp("2026-07-16T08:20:00.000Z"));
     assert!(matches!(
@@ -734,7 +726,6 @@ fn provider_with_budget(
     backend: Arc<FixtureBackend>,
     resource_budget: KubeVirtResourceBudget,
 ) -> KubeVirtProvider<FixtureBackend, FixtureResolver, FixtureObservationStore> {
-    let image_policy_id = projection.release.image_policy_evaluation.policy_id;
     KubeVirtProvider::new(
         "kubevirt-primary-v1".to_owned(),
         backend,
@@ -745,8 +736,7 @@ fn provider_with_budget(
         }),
         Arc::new(FixtureObservationStore::default()),
         KubeVirtProviderConfiguration::new(
-            ContainerReleasePolicy::new(image_policy_id, revision(1), revision(1))
-                .expect("release policy"),
+            revision(1),
             KubeVirtStorageBinding::new(
                 "vm-rwo-primary-v1".to_owned(),
                 "local-path".to_owned(),
@@ -818,7 +808,16 @@ fn instance_for(projection: &ReleasePublished) -> contracts::environment::Enviro
     reason = "the fixture deliberately constructs the complete immutable VM release identity"
 )]
 fn projection() -> ReleasePublished {
-    let base_disk = artifact_ref("application/x-qemu-disk");
+    let base_disk = VirtualMachineBaseDisk {
+        binding: "ubuntu-24.04-v1".to_owned(),
+        source_registry_digest: concat!(
+            "docker://quay.io/containerdisks/ubuntu@",
+            "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
+        )
+        .to_owned(),
+        disk_sha256: Sha256Digest::of_bytes(b"vm-base-disk"),
+        capacity_bytes: 10_737_418_240,
+    };
     let environment_spec: EnvironmentSpec = serde_json::from_value(json!({
         "apiVersion":"environment.labweaver.io/v1",
         "kind":"EnvironmentSpec",
@@ -848,7 +847,6 @@ fn projection() -> ReleasePublished {
     }))
     .expect("valid EnvironmentSpec");
     let environment_spec_sha256 = Sha256Digest::of_canonical(&environment_spec).expect("spec hash");
-    let artifact_sha256 = base_disk.sha256;
     let artifact_id = ImageArtifactId::new();
     let course_id = contracts::CourseId::new();
     let candidate_id = CandidateId::new();
@@ -880,26 +878,7 @@ fn projection() -> ReleasePublished {
             base_disk: base_disk.clone(),
             format: VirtualMachineDiskFormat::Qcow2,
         },
-        image_policy_evaluation: ImagePolicyEvaluation {
-            artifact_id,
-            artifact_sha256,
-            policy_id: PolicyId::new(),
-            policy_revision: revision(1),
-            scanner_name: "trivy".to_owned(),
-            scanner_version: "0.58.0".to_owned(),
-            scanner_database_sha256: Sha256Digest::of_bytes(b"trivy-db"),
-            vulnerabilities: VulnerabilitySummary {
-                unknown: 0,
-                low: 0,
-                medium: 0,
-                high: 1,
-                critical: 0,
-            },
-            evaluated_at: published_at,
-            max_evidence_age_milliseconds: 3_600_000,
-            valid_until: timestamp("2026-07-16T09:00:00.000Z"),
-            passed: true,
-        },
+        image_policy_evaluation: None,
         published_by: ActorId::new(),
         published_at,
     };
@@ -915,17 +894,6 @@ fn projection() -> ReleasePublished {
     };
     projection.validate().expect("valid projection");
     projection
-}
-
-fn artifact_ref(media_type: &str) -> ArtifactRef {
-    ArtifactRef {
-        artifact_id: ArtifactId::new(),
-        store_binding: "artifact-store-v1".to_owned(),
-        object_version: "version-1".to_owned(),
-        sha256: Sha256Digest::of_bytes(media_type.as_bytes()),
-        size_bytes: 128,
-        media_type: media_type.to_owned(),
-    }
 }
 
 fn rebind_projection(projection: &mut ReleasePublished) {

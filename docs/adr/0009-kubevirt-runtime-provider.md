@@ -25,15 +25,16 @@ owner's authoritative state from object existence or message order.
 binding, `StorageClass`, CDI `DataSource`, OpenSSH Gateway identity, locked guest
 user, public user CA and active release policy/trust identity. Startup rejects
 missing, mixed or wildcard bindings. A release is usable only when its VM
-`ArtifactRef`, SHA-256, format, provider and storage binding match the approved
-`EnvironmentSpec`; signature, policy, freshness and withdrawal checks are
-reapplied before every operation that can create or expose a running VM.
+base-disk binding, immutable OCI source digest, disk SHA-256, capacity, format,
+provider and storage binding match the approved `EnvironmentSpec` and reviewed
+deployment lock. Approval trust revision and withdrawal checks are reapplied
+before every operation that can create or expose a running VM.
 
 The provider deterministically emits one namespace with a cleanup finalizer,
 quota, default-deny policy, Gateway-only SSH ingress policy, fixed cloud-init
 Secret, CDI `DataVolume`, KubeVirt `VirtualMachine` and ClusterIP SSH Service.
-The plan carries the immutable base-disk `ArtifactRef`, expected SHA-256 and
-plan SHA-256. It never emits NodePort, LoadBalancer, Ingress, VNC, a private key,
+The plan carries the immutable base-disk identity, expected SHA-256 and plan
+SHA-256. It never emits NodePort, LoadBalancer, Ingress, VNC, a private key,
 `authorized_keys`, user-supplied shell or arbitrary cloud-init content.
 
 VM v1 admits exactly one approved `ssh:22` entry. Cloud-init is stored under
@@ -53,7 +54,7 @@ older or payload-conflicting requests, and persist a namespace deletion
 tombstone before reporting cleanup. The implementation uses a typed, allowlisted
 HTTPS client and never invokes `kubectl` or accepts a command string. Server-side apply uses deterministic field
 ownership and names; it must verify the CDI source/PVC corresponds to the exact
-base-disk object version and SHA-256 rather than trusting a mutable name or
+base-disk source digest and SHA-256 rather than trusting a mutable name or
 annotation.
 
 `Ready` requires the current environment generation, a current observed VM

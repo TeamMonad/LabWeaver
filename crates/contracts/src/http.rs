@@ -151,8 +151,6 @@ pub struct CreateEnvironmentTemplateReleaseRequest {
     pub environment_spec_sha256: Sha256Digest,
     pub runtime_kind: crate::authoring::RuntimeKind,
     pub approval_id: ApprovalId,
-    pub artifact: crate::supply_chain::ImageArtifact,
-    pub image_policy_evaluation: crate::supply_chain::ImagePolicyEvaluation,
 }
 
 /// Append-only reason supplied when withdrawing an immutable release.

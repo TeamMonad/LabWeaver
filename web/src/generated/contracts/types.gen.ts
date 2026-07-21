@@ -1460,11 +1460,9 @@ export type CreateEnvironmentRequestSchemaReleaseId = string;
  */
 export type CreateEnvironmentTemplateReleaseRequestSchema = {
     approvalId: CreateEnvironmentTemplateReleaseRequestSchemaApprovalId;
-    artifact: ImageArtifact;
     candidateId: CreateEnvironmentTemplateReleaseRequestSchemaCandidateId;
     candidateRevision: CreateEnvironmentTemplateReleaseRequestSchemaRevision;
     environmentSpecSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
-    imagePolicyEvaluation: ImagePolicyEvaluation;
     runtimeKind: CreateEnvironmentTemplateReleaseRequestSchemaRuntimeKind;
 };
 
@@ -1474,93 +1472,9 @@ export type CreateEnvironmentTemplateReleaseRequestSchema = {
 export type CreateEnvironmentTemplateReleaseRequestSchemaApprovalId = string;
 
 /**
- * Strongly typed UUIDv7 identifier for `ArtifactId`.
- */
-export type CreateEnvironmentTemplateReleaseRequestSchemaArtifactId = string;
-
-/**
- * Immutable object-store identity without a machine-local path or credential.
- */
-export type CreateEnvironmentTemplateReleaseRequestSchemaArtifactRef = {
-    /**
-     * Stable metadata identity resolved by the owning service.
-     */
-    artifactId: CreateEnvironmentTemplateReleaseRequestSchemaArtifactId;
-    /**
-     * Registered media type.
-     */
-    mediaType: string;
-    /**
-     * Immutable backend object version.
-     */
-    objectVersion: string;
-    /**
-     * Exact content digest.
-     */
-    sha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
-    /**
-     * Raw object length.
-     */
-    sizeBytes: number;
-    /**
-     * Explicit object-store binding from deployment configuration.
-     */
-    storeBinding: string;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `BuildRequestId`.
- */
-export type CreateEnvironmentTemplateReleaseRequestSchemaBuildRequestId = string;
-
-/**
  * Strongly typed UUIDv7 identifier for `CandidateId`.
  */
 export type CreateEnvironmentTemplateReleaseRequestSchemaCandidateId = string;
-
-/**
- * Complete immutable runtime artifact identity.
- */
-export type ImageArtifact = {
-    build_request_id: CreateEnvironmentTemplateReleaseRequestSchemaBuildRequestId;
-    digest: string;
-    id: ImageArtifactId;
-    kind: 'container';
-    repository: string;
-} | {
-    base_disk: CreateEnvironmentTemplateReleaseRequestSchemaArtifactRef;
-    format: VirtualMachineDiskFormat;
-    id: ImageArtifactId;
-    kind: 'virtual_machine';
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `ImageArtifactId`.
- */
-export type ImageArtifactId = string;
-
-/**
- * Deterministic digest-bound Trivy evaluation.
- */
-export type ImagePolicyEvaluation = {
-    artifactId: ImageArtifactId;
-    artifactSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
-    evaluatedAt: CreateEnvironmentTemplateReleaseRequestSchemaUtcTimestamp;
-    maxEvidenceAgeMilliseconds: number;
-    passed: boolean;
-    policyId: CreateEnvironmentTemplateReleaseRequestSchemaPolicyId;
-    policyRevision: CreateEnvironmentTemplateReleaseRequestSchemaRevision;
-    scannerDatabaseSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
-    scannerName: string;
-    scannerVersion: string;
-    validUntil: CreateEnvironmentTemplateReleaseRequestSchemaUtcTimestamp;
-    vulnerabilities: VulnerabilitySummary;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `PolicyId`.
- */
-export type CreateEnvironmentTemplateReleaseRequestSchemaPolicyId = string;
 
 /**
  * Monotonic aggregate revision. Zero is never a persisted revision.
@@ -1576,27 +1490,6 @@ export type CreateEnvironmentTemplateReleaseRequestSchemaRuntimeKind = 'containe
  * Canonical lowercase SHA-256 digest.
  */
 export type CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest = string;
-
-/**
- * UTC timestamp serialized with a literal `Z` and millisecond precision.
- */
-export type CreateEnvironmentTemplateReleaseRequestSchemaUtcTimestamp = string;
-
-/**
- * Supported VM base-disk encodings.
- */
-export type VirtualMachineDiskFormat = 'qcow2' | 'raw';
-
-/**
- * Vulnerability counts by severity.
- */
-export type VulnerabilitySummary = {
-    critical: number;
-    high: number;
-    low: number;
-    medium: number;
-    unknown: number;
-};
 
 /**
  * CreateProblemPackageUploadRequest
@@ -1825,10 +1718,10 @@ export type CandidateBuildState = 'requested' | 'succeeded' | 'failed' | 'cancel
  * executor internals.
  */
 export type CandidateBuildView = {
-    artifact?: EnvironmentCandidateViewSchemaImageArtifact | null;
+    artifact?: ImageArtifact | null;
     cleanupVerified?: boolean | null;
     diagnosticCode?: EnvironmentCandidateViewSchemaDiagnosticCode | null;
-    imagePolicyEvaluation?: EnvironmentCandidateViewSchemaImagePolicyEvaluation | null;
+    imagePolicyEvaluation?: ImagePolicyEvaluation | null;
     state: CandidateBuildState;
 };
 
@@ -1898,7 +1791,7 @@ export type EnvironmentRuntimeSpec = {
     provider_binding: string;
     service_port: number;
 } | {
-    base_disk: EnvironmentCandidateViewSchemaArtifactRef;
+    base_disk: VirtualMachineBaseDisk;
     kind: 'virtual_machine';
     provider_binding: string;
     ssh_port: number;
@@ -1935,29 +1828,29 @@ export type EnvironmentSpec = {
 /**
  * Complete immutable runtime artifact identity.
  */
-export type EnvironmentCandidateViewSchemaImageArtifact = {
+export type ImageArtifact = {
     build_request_id: EnvironmentCandidateViewSchemaBuildRequestId;
     digest: string;
-    id: EnvironmentCandidateViewSchemaImageArtifactId;
+    id: ImageArtifactId;
     kind: 'container';
     repository: string;
 } | {
-    base_disk: EnvironmentCandidateViewSchemaArtifactRef;
-    format: EnvironmentCandidateViewSchemaVirtualMachineDiskFormat;
-    id: EnvironmentCandidateViewSchemaImageArtifactId;
+    base_disk: VirtualMachineBaseDisk;
+    format: VirtualMachineDiskFormat;
+    id: ImageArtifactId;
     kind: 'virtual_machine';
 };
 
 /**
  * Strongly typed UUIDv7 identifier for `ImageArtifactId`.
  */
-export type EnvironmentCandidateViewSchemaImageArtifactId = string;
+export type ImageArtifactId = string;
 
 /**
  * Deterministic digest-bound Trivy evaluation.
  */
-export type EnvironmentCandidateViewSchemaImagePolicyEvaluation = {
-    artifactId: EnvironmentCandidateViewSchemaImageArtifactId;
+export type ImagePolicyEvaluation = {
+    artifactId: ImageArtifactId;
     artifactSha256: EnvironmentCandidateViewSchemaSha256Digest;
     evaluatedAt: EnvironmentCandidateViewSchemaUtcTimestamp;
     maxEvidenceAgeMilliseconds: number;
@@ -1968,7 +1861,7 @@ export type EnvironmentCandidateViewSchemaImagePolicyEvaluation = {
     scannerName: string;
     scannerVersion: string;
     validUntil: EnvironmentCandidateViewSchemaUtcTimestamp;
-    vulnerabilities: EnvironmentCandidateViewSchemaVulnerabilitySummary;
+    vulnerabilities: VulnerabilitySummary;
 };
 
 /**
@@ -2057,14 +1950,27 @@ export type EnvironmentCandidateViewSchemaSha256Digest = string;
 export type EnvironmentCandidateViewSchemaUtcTimestamp = string;
 
 /**
+ * Deployment-owned immutable KubeVirt base-disk identity.
+ *
+ * Unlike an object-store `ArtifactRef`, this identifies a CDI source image and its imported
+ * disk content. `capacity_bytes` is the reviewed PVC capacity, not a fabricated object length.
+ */
+export type VirtualMachineBaseDisk = {
+    binding: string;
+    capacityBytes: number;
+    diskSha256: EnvironmentCandidateViewSchemaSha256Digest;
+    sourceRegistryDigest: string;
+};
+
+/**
  * Supported VM base-disk encodings.
  */
-export type EnvironmentCandidateViewSchemaVirtualMachineDiskFormat = 'qcow2' | 'raw';
+export type VirtualMachineDiskFormat = 'qcow2' | 'raw';
 
 /**
  * Vulnerability counts by severity.
  */
-export type EnvironmentCandidateViewSchemaVulnerabilitySummary = {
+export type VulnerabilitySummary = {
     critical: number;
     high: number;
     low: number;
@@ -2480,7 +2386,11 @@ export type EnvironmentTemplateReleaseViewSchema = {
     courseId: EnvironmentTemplateReleaseViewSchemaCourseId;
     environmentSpecSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
     id: EnvironmentTemplateReleaseViewSchemaReleaseId;
-    imagePolicyEvaluation: EnvironmentTemplateReleaseViewSchemaImagePolicyEvaluation;
+    /**
+     * Container-only Trivy evidence. VM releases bind a deployment-owned CDI base disk instead
+     * and must not fabricate vulnerability counts for an imported guest disk.
+     */
+    imagePolicyEvaluation?: EnvironmentTemplateReleaseViewSchemaImagePolicyEvaluation | null;
     publishedAt: EnvironmentTemplateReleaseViewSchemaUtcTimestamp;
     publishedBy: EnvironmentTemplateReleaseViewSchemaActorId;
     runtimeKind: EnvironmentTemplateReleaseViewSchemaRuntimeKind;
@@ -2502,41 +2412,6 @@ export type EnvironmentTemplateReleaseViewSchemaAgentRunId = string;
  * Strongly typed UUIDv7 identifier for `ApprovalId`.
  */
 export type EnvironmentTemplateReleaseViewSchemaApprovalId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `ArtifactId`.
- */
-export type EnvironmentTemplateReleaseViewSchemaArtifactId = string;
-
-/**
- * Immutable object-store identity without a machine-local path or credential.
- */
-export type EnvironmentTemplateReleaseViewSchemaArtifactRef = {
-    /**
-     * Stable metadata identity resolved by the owning service.
-     */
-    artifactId: EnvironmentTemplateReleaseViewSchemaArtifactId;
-    /**
-     * Registered media type.
-     */
-    mediaType: string;
-    /**
-     * Immutable backend object version.
-     */
-    objectVersion: string;
-    /**
-     * Exact content digest.
-     */
-    sha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
-    /**
-     * Raw object length.
-     */
-    sizeBytes: number;
-    /**
-     * Explicit object-store binding from deployment configuration.
-     */
-    storeBinding: string;
-};
 
 /**
  * Strongly typed UUIDv7 identifier for `BuildRequestId`.
@@ -2585,7 +2460,7 @@ export type EnvironmentTemplateReleaseViewSchemaImageArtifact = {
     kind: 'container';
     repository: string;
 } | {
-    base_disk: EnvironmentTemplateReleaseViewSchemaArtifactRef;
+    base_disk: EnvironmentTemplateReleaseViewSchemaVirtualMachineBaseDisk;
     format: EnvironmentTemplateReleaseViewSchemaVirtualMachineDiskFormat;
     id: EnvironmentTemplateReleaseViewSchemaImageArtifactId;
     kind: 'virtual_machine';
@@ -2654,6 +2529,19 @@ export type EnvironmentTemplateReleaseViewSchemaSha256Digest = string;
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
  */
 export type EnvironmentTemplateReleaseViewSchemaUtcTimestamp = string;
+
+/**
+ * Deployment-owned immutable KubeVirt base-disk identity.
+ *
+ * Unlike an object-store `ArtifactRef`, this identifies a CDI source image and its imported
+ * disk content. `capacity_bytes` is the reviewed PVC capacity, not a fabricated object length.
+ */
+export type EnvironmentTemplateReleaseViewSchemaVirtualMachineBaseDisk = {
+    binding: string;
+    capacityBytes: number;
+    diskSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
+    sourceRegistryDigest: string;
+};
 
 /**
  * Supported VM base-disk encodings.
@@ -3581,7 +3469,7 @@ export type InternalAgentRunOutcomeSchemaEnvironmentRuntimeSpec = {
     provider_binding: string;
     service_port: number;
 } | {
-    base_disk: InternalAgentRunOutcomeSchemaArtifactRef;
+    base_disk: InternalAgentRunOutcomeSchemaVirtualMachineBaseDisk;
     kind: 'virtual_machine';
     provider_binding: string;
     ssh_port: number;
@@ -3872,6 +3760,19 @@ export type InternalAgentRunOutcomeSchemaTestGroup = {
 export type InternalAgentRunOutcomeSchemaUtcTimestamp = string;
 
 /**
+ * Deployment-owned immutable KubeVirt base-disk identity.
+ *
+ * Unlike an object-store `ArtifactRef`, this identifies a CDI source image and its imported
+ * disk content. `capacity_bytes` is the reviewed PVC capacity, not a fabricated object length.
+ */
+export type InternalAgentRunOutcomeSchemaVirtualMachineBaseDisk = {
+    binding: string;
+    capacityBytes: number;
+    diskSha256: InternalAgentRunOutcomeSchemaSha256Digest;
+    sourceRegistryDigest: string;
+};
+
+/**
  * InternalCreateAgentRunRequest
  *
  * Control-to-Agent command carried only over an allowlisted mTLS service identity.
@@ -4127,41 +4028,6 @@ export type InternalImageArtifactResolutionSchema = {
 };
 
 /**
- * Strongly typed UUIDv7 identifier for `ArtifactId`.
- */
-export type InternalImageArtifactResolutionSchemaArtifactId = string;
-
-/**
- * Immutable object-store identity without a machine-local path or credential.
- */
-export type InternalImageArtifactResolutionSchemaArtifactRef = {
-    /**
-     * Stable metadata identity resolved by the owning service.
-     */
-    artifactId: InternalImageArtifactResolutionSchemaArtifactId;
-    /**
-     * Registered media type.
-     */
-    mediaType: string;
-    /**
-     * Immutable backend object version.
-     */
-    objectVersion: string;
-    /**
-     * Exact content digest.
-     */
-    sha256: InternalImageArtifactResolutionSchemaSha256Digest;
-    /**
-     * Raw object length.
-     */
-    sizeBytes: number;
-    /**
-     * Explicit object-store binding from deployment configuration.
-     */
-    storeBinding: string;
-};
-
-/**
  * Strongly typed UUIDv7 identifier for `BuildRequestId`.
  */
 export type InternalImageArtifactResolutionSchemaBuildRequestId = string;
@@ -4176,7 +4042,7 @@ export type InternalImageArtifactResolutionSchemaImageArtifact = {
     kind: 'container';
     repository: string;
 } | {
-    base_disk: InternalImageArtifactResolutionSchemaArtifactRef;
+    base_disk: InternalImageArtifactResolutionSchemaVirtualMachineBaseDisk;
     format: InternalImageArtifactResolutionSchemaVirtualMachineDiskFormat;
     id: InternalImageArtifactResolutionSchemaImageArtifactId;
     kind: 'virtual_machine';
@@ -4224,6 +4090,19 @@ export type InternalImageArtifactResolutionSchemaSha256Digest = string;
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
  */
 export type InternalImageArtifactResolutionSchemaUtcTimestamp = string;
+
+/**
+ * Deployment-owned immutable KubeVirt base-disk identity.
+ *
+ * Unlike an object-store `ArtifactRef`, this identifies a CDI source image and its imported
+ * disk content. `capacity_bytes` is the reviewed PVC capacity, not a fabricated object length.
+ */
+export type InternalImageArtifactResolutionSchemaVirtualMachineBaseDisk = {
+    binding: string;
+    capacityBytes: number;
+    diskSha256: InternalImageArtifactResolutionSchemaSha256Digest;
+    sourceRegistryDigest: string;
+};
 
 /**
  * Supported VM base-disk encodings.

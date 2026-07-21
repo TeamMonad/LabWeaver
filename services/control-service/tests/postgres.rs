@@ -498,16 +498,23 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     {
         *build_request_id = build_event.data.request.id;
     }
-    supply_chain.image_policy_evaluation.policy_id = image_policy_id;
-    supply_chain.image_policy_evaluation.artifact_sha256 =
-        supply_chain.artifact.content_sha256()?;
+    let artifact_sha256 = supply_chain.artifact.content_sha256()?;
+    let evaluation = supply_chain
+        .image_policy_evaluation
+        .as_mut()
+        .ok_or("container fixture must carry image policy evidence")?;
+    evaluation.policy_id = image_policy_id;
+    evaluation.artifact_sha256 = artifact_sha256;
     assert!(matches!(
         service
             .project_artifact(
                 EventId::new(),
                 CourseId::new(),
                 &supply_chain.artifact,
-                &supply_chain.image_policy_evaluation,
+                supply_chain
+                    .image_policy_evaluation
+                    .as_ref()
+                    .ok_or("container fixture must carry image policy evidence")?,
             )
             .await,
         Err(ControlError::CourseMismatch)
@@ -517,7 +524,10 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
             EventId::new(),
             course_id,
             &supply_chain.artifact,
-            &supply_chain.image_policy_evaluation,
+            supply_chain
+                .image_policy_evaluation
+                .as_ref()
+                .ok_or("container fixture must carry image policy evidence")?,
         )
         .await?;
     let succeeded_view = service
@@ -534,7 +544,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     );
     assert_eq!(
         succeeded_build.image_policy_evaluation,
-        Some(supply_chain.image_policy_evaluation.clone())
+        supply_chain.image_policy_evaluation.clone()
     );
     let release = service
         .create_release(
@@ -545,8 +555,6 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
                 environment_spec_sha256: environment_candidate.spec_sha256,
                 runtime_kind: contracts::authoring::RuntimeKind::Container,
                 approval_id: approval.id,
-                artifact: supply_chain.artifact,
-                image_policy_evaluation: supply_chain.image_policy_evaluation,
             },
             ActorId::new(),
             &IdempotencyKey::parse("publish-container-release")?,
@@ -683,7 +691,7 @@ fn release_fixture(
             repository: "registry.invalid/course/environment".to_owned(),
             digest: format!("sha256:{artifact_sha256}"),
         },
-        image_policy_evaluation: ImagePolicyEvaluation {
+        image_policy_evaluation: Some(ImagePolicyEvaluation {
             artifact_id,
             artifact_sha256,
             policy_id: PolicyId::new(),
@@ -702,7 +710,7 @@ fn release_fixture(
             max_evidence_age_milliseconds: 7_200_000,
             valid_until,
             passed: true,
-        },
+        }),
         published_by: ActorId::new(),
         published_at,
     })
@@ -751,6 +759,22 @@ fn control_config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
             max_duration_milliseconds: 600_000,
             max_cpu_millicores: 2_000,
             max_memory_bytes: 2_147_483_648,
+        },
+        virtual_machine_base: control_service::VirtualMachineBasePolicy {
+            provider_binding: "kubevirt-primary-v1".to_owned(),
+            storage_class_binding: "vm-rwo-primary-v1".to_owned(),
+            artifact_id: contracts::ImageArtifactId::new(),
+            base_disk: contracts::supply_chain::VirtualMachineBaseDisk {
+                binding: "ubuntu-24.04-v1".to_owned(),
+                source_registry_digest: concat!(
+                    "docker://quay.io/containerdisks/ubuntu@",
+                    "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
+                )
+                .to_owned(),
+                disk_sha256: Sha256Digest::of_bytes(b"vm-disk"),
+                capacity_bytes: 10_737_418_240,
+            },
+            format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
         },
     })
 }

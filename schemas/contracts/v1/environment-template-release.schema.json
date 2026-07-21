@@ -12,51 +12,6 @@
       "description": "Strongly typed UUIDv7 identifier for `ApprovalId`.",
       "type": "string"
     },
-    "ArtifactId": {
-      "description": "Strongly typed UUIDv7 identifier for `ArtifactId`.",
-      "type": "string"
-    },
-    "ArtifactRef": {
-      "additionalProperties": false,
-      "description": "Immutable object-store identity without a machine-local path or credential.",
-      "properties": {
-        "artifactId": {
-          "$ref": "#/$defs/ArtifactId",
-          "description": "Stable metadata identity resolved by the owning service."
-        },
-        "mediaType": {
-          "description": "Registered media type.",
-          "type": "string"
-        },
-        "objectVersion": {
-          "description": "Immutable backend object version.",
-          "type": "string"
-        },
-        "sha256": {
-          "$ref": "#/$defs/Sha256Digest",
-          "description": "Exact content digest."
-        },
-        "sizeBytes": {
-          "description": "Raw object length.",
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "storeBinding": {
-          "description": "Explicit object-store binding from deployment configuration.",
-          "type": "string"
-        }
-      },
-      "required": [
-        "artifactId",
-        "storeBinding",
-        "objectVersion",
-        "sha256",
-        "sizeBytes",
-        "mediaType"
-      ],
-      "type": "object"
-    },
     "BuildRequestId": {
       "description": "Strongly typed UUIDv7 identifier for `BuildRequestId`.",
       "type": "string"
@@ -167,7 +122,7 @@
           "additionalProperties": false,
           "properties": {
             "base_disk": {
-              "$ref": "#/$defs/ArtifactRef"
+              "$ref": "#/$defs/VirtualMachineBaseDisk"
             },
             "format": {
               "$ref": "#/$defs/VirtualMachineDiskFormat"
@@ -283,6 +238,33 @@
       "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
       "type": "string"
     },
+    "VirtualMachineBaseDisk": {
+      "additionalProperties": false,
+      "description": "Deployment-owned immutable KubeVirt base-disk identity.\n\nUnlike an object-store `ArtifactRef`, this identifies a CDI source image and its imported\ndisk content. `capacity_bytes` is the reviewed PVC capacity, not a fabricated object length.",
+      "properties": {
+        "binding": {
+          "type": "string"
+        },
+        "capacityBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "diskSha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "sourceRegistryDigest": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "binding",
+        "sourceRegistryDigest",
+        "diskSha256",
+        "capacityBytes"
+      ],
+      "type": "object"
+    },
     "VirtualMachineDiskFormat": {
       "description": "Supported VM base-disk encodings.",
       "enum": [
@@ -360,7 +342,15 @@
       "$ref": "#/$defs/ReleaseId"
     },
     "imagePolicyEvaluation": {
-      "$ref": "#/$defs/ImagePolicyEvaluation"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ImagePolicyEvaluation"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Container-only Trivy evidence. VM releases bind a deployment-owned CDI base disk instead\nand must not fabricate vulnerability counts for an imported guest disk."
     },
     "publishedAt": {
       "$ref": "#/$defs/UtcTimestamp"
@@ -388,7 +378,6 @@
     "runtimeKind",
     "approval",
     "artifact",
-    "imagePolicyEvaluation",
     "publishedBy",
     "publishedAt"
   ],

@@ -36,6 +36,10 @@
       - sprint2_application_keycloak_endpoint_address is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
       - sprint2_application_lock.sprint2_vm_base.registry_url is match('^docker://[^@]+@sha256:[0-9a-f]{64}$')
       - sprint2_application_lock.sprint2_vm_base.disk_sha256 is match('^[0-9a-f]{64}$')
+      - sprint2_application_lock.sprint2_vm_base.binding == 'ubuntu-24.04-v1'
+      - sprint2_application_lock.sprint2_vm_base.artifact_id is match('^[0-9a-f-]{36}$')
+      - sprint2_application_lock.sprint2_vm_base.format in ['qcow2', 'raw']
+      - sprint2_application_lock.sprint2_vm_base.capacity_bytes | int > 0
       - sprint2_application_lock.sprint2_vm_base.data_source_name == 'ubuntu-lab-base-v1'
       - sprint2_application_lock.sprint2_vm_base.storage_class_name == 'local-path'
       - sprint2_application_keycloak_truststore_password | length >= 16

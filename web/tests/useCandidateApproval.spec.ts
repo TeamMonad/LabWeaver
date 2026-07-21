@@ -9,6 +9,7 @@ import {
   getEvaluationCandidate,
   listEnvironmentTemplateReleases,
 } from '@/generated/contracts'
+import type { EnvironmentCandidateViewSchema } from '@/generated/contracts'
 
 vi.mock('@/generated/contracts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/generated/contracts')>()
@@ -69,7 +70,7 @@ function makeEnvCandidate() {
       },
       imagePolicyEvaluation: {
         artifactId: 'image-1',
-        artifactSha256: 'sha256:image',
+        artifactSha256: 'image',
         evaluatedAt: '2026-07-16T08:00:00.000Z',
         maxEvidenceAgeMilliseconds: 3600000,
         passed: true,
@@ -102,6 +103,24 @@ function makeEvalCandidate() {
     approvals: [],
     trustRevision: 1,
   }
+}
+
+function makeVmCandidate(): EnvironmentCandidateViewSchema {
+  const view = structuredClone(makeEnvCandidate()) as EnvironmentCandidateViewSchema
+  view.candidate.spec.runtime = {
+    kind: 'virtual_machine',
+    provider_binding: 'kubevirt-primary-v1',
+    storage_class_binding: 'vm-rwo-primary-v1',
+    ssh_port: 22,
+    base_disk: {
+      binding: 'ubuntu-24.04-v1',
+      source_registry_digest: `docker://registry.invalid/ubuntu@sha256:${'a'.repeat(64)}`,
+      disk_sha256: 'b'.repeat(64),
+      capacity_bytes: 10_737_418_240,
+    },
+  }
+  delete view.build
+  return view
 }
 
 describe('useCandidateApproval', () => {
@@ -151,7 +170,7 @@ describe('useCandidateApproval', () => {
     expect(approval.canPublish).toBe(true)
   })
 
-  it('publishes release with candidate identity and image evidence', async () => {
+  it('publishes release with candidate identity while Control resolves evidence', async () => {
     const courseId = ref('course-1')
     const runId = ref('run-1')
     const approval = useCandidateApproval(courseId, runId)
@@ -192,6 +211,43 @@ describe('useCandidateApproval', () => {
       }),
     )
     expect(approval.publish.kind).toBe('success')
+  })
+
+  it('allows an approved VM release without fabricated Container scan evidence', async () => {
+    vi.mocked(getEnvironmentCandidate).mockResolvedValue({ data: makeVmCandidate(), error: undefined as never })
+    const approval = useCandidateApproval(ref('course-1'), ref('run-1'))
+    await vi.waitFor(() => expect(approval.environmentCandidate.kind).toBe('success'))
+
+    vi.mocked(appendEnvironmentCandidateDecision).mockResolvedValue({
+      data: {
+        id: 'approval-vm-1',
+        actorId: 'teacher',
+        candidateId: 'env-cand-1',
+        candidateRevision: 2,
+        candidateSha256: 'sha256:spec',
+        decidedAt: '2026-07-16T09:00:00.000Z',
+        decision: 'approved',
+        policyRevision: 1,
+        reason: 'approved VM base',
+        schemaSha256: 'sha256:schema',
+        trustRevision: 1,
+      },
+      error: undefined as never,
+    })
+    await approval.decide('environment', 'approved', 'approved VM base')
+    expect(approval.imageGate.status).toBe('blocked')
+    expect(approval.canPublish).toBe(true)
+
+    vi.mocked(createEnvironmentTemplateRelease).mockResolvedValue({
+      data: { operationId: 'op-vm-1', revision: 1, statusUrl: '/x' },
+      error: undefined as never,
+    })
+    await approval.publishRelease()
+    expect(createEnvironmentTemplateRelease).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({ runtimeKind: 'virtual_machine' }),
+      }),
+    )
   })
 
   it('does not publish when image gate is blocked', async () => {

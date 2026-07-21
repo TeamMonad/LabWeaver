@@ -55,6 +55,9 @@ development data and installs one current baseline per domain.
 
 Critical findings, a missing or mutable digest, a repository mismatch, stale
 executor generation, missing approval or a failed cleanup block publication.
+Control resolves the exact successful build projection and policy evaluation;
+the public publication request contains only candidate, approval and runtime
+identity and cannot supply its own artifact or scanner evidence.
 Sprint 2 does not generate or validate Sigstore, Fulcio, Rekor, CT, TUF, SBOM,
 provenance, attestation or Kyverno evidence.
 
