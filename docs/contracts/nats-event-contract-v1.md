@@ -32,8 +32,11 @@ Control consumes AgentRun and build results from `LABWEAVER_AGENT_EVENTS`.
 Its sanitized quarantine records therefore use distinct
 `labweaver.agent.quarantine.control_*` subjects covered by that retained
 stream. Deployment fails before rollout if the configured quarantine subjects
-fall outside the stream; a quarantine publish failure is never treated as a
-successful terminal acknowledgement.
+fall outside the stream or the mounted Control user JWT cannot publish both
+subjects. Foundation authoring grants Control only the bounded
+`labweaver.agent.quarantine.>` family in addition to its existing subjects; a
+quarantine publish failure is never treated as a successful terminal
+acknowledgement.
 
 Payloads contain IDs, immutable references, SHA-256 values and bounded status
 summaries. They never contain credentials, raw submissions, full logs, direct

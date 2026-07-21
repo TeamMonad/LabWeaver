@@ -1,6 +1,6 @@
 //! Black-box regression coverage for the Claude Code worker boundary.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -659,12 +659,85 @@ async fn postgres_run_is_atomic_and_exact_replay_is_not_billed_twice() -> Result
     let store = PostgresAgentRunStore::new(pool.clone());
     assert_exact_replay(&store, &pool, now).await?;
     assert_track_recovery(&store, now).await?;
+    assert_dispatch_does_not_replay_live_tracks(&store, now).await?;
     assert_durable_cancellation(&store, now).await?;
     assert_concurrent_idempotency(&store, now).await?;
 
     drop(store);
     remove_isolated_database(admin_pool, pool, &database_name).await?;
     drop(container);
+    Ok(())
+}
+
+async fn assert_dispatch_does_not_replay_live_tracks(
+    store: &PostgresAgentRunStore,
+    now: UtcTimestamp,
+) -> Result<(), Box<dyn Error>> {
+    let policy = valid_policy()?;
+    let bytes = b"dispatch lease fencing";
+    let package = package(policy.course_id, bytes)?;
+    let request = CreateAgentRunRequest {
+        package_id: package.id,
+        package_revision: package.revision,
+        package_sha256: package.manifest_sha256,
+        policy_id: policy.id,
+        policy_revision: policy.revision,
+        requested_runtime: RuntimeKind::Container,
+    };
+    let object = package
+        .files
+        .first()
+        .ok_or("package file missing")?
+        .object
+        .clone();
+    let locators = BTreeMap::from([(object.artifact_id, "problem-packages/test".to_owned())]);
+    let key = IdempotencyKey::parse("agent-dispatch-live-track-fence-0001")?;
+    store
+        .reserve_dispatch(
+            policy.course_id,
+            &request,
+            &package,
+            &locators,
+            &policy,
+            &key,
+            now,
+            "trace-agent-dispatch-fence",
+        )
+        .await?;
+    let dispatch = store
+        .claim_dispatch(Duration::from_secs(1))
+        .await?
+        .ok_or("pending dispatch was not claimable")?;
+    let input_sha256 = Sha256Digest::of_bytes(bytes);
+    store
+        .bind_prepared_dispatch(&dispatch, input_sha256)
+        .await?;
+    let lease_duration = Duration::from_millis(80);
+    for track in [AgentTrackKind::Environment, AgentTrackKind::Evaluation] {
+        store
+            .claim_track(
+                dispatch.run.id,
+                track,
+                input_sha256,
+                "dispatch-fence-worker",
+                lease_duration,
+            )
+            .await?
+            .ok_or("prepared track was not claimable")?;
+    }
+    assert!(
+        store
+            .claim_dispatch(Duration::from_secs(1))
+            .await?
+            .is_none()
+    );
+    tokio::time::sleep(Duration::from_millis(110)).await;
+    assert!(
+        store
+            .claim_dispatch(Duration::from_secs(1))
+            .await?
+            .is_some()
+    );
     Ok(())
 }
 

@@ -63,6 +63,9 @@ class FoundationAuthoringTests(unittest.TestCase):
         self.assertEqual(FOUNDATION.NATS_ADMIN_TLS_IDENTITY, "sprint2-admin")
         self.assertNotIn(FOUNDATION.NATS_ADMIN_TLS_IDENTITY, FOUNDATION.NATS_USERS)
 
+        control_publish, _, _ = FOUNDATION.NATS_USERS["control-service"]
+        self.assertIn("labweaver.agent.quarantine.>", control_publish)
+
         for consumer in (
             "control-service",
             "agent-service",

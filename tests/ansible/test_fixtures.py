@@ -674,6 +674,9 @@ class AnsibleFixtureTests(unittest.TestCase):
         tasks = (
             ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
         ).read_text(encoding="utf-8")
+        defaults = (
+            ROOT / "deploy/ansible/roles/sprint2_application/defaults/main.yml"
+        ).read_text(encoding="utf-8")
 
         self.assertEqual(control["nats"]["stream_name"], "LABWEAVER_AGENT_EVENTS")
         for field in ("quarantine_subject", "build_quarantine_subject"):
@@ -683,6 +686,8 @@ class AnsibleFixtureTests(unittest.TestCase):
             control["nats"]["build_quarantine_subject"],
         )
         self.assertIn("SPRINT2_APPLICATION_CONTROL_QUARANTINE_STREAM_MISMATCH", tasks)
+        self.assertIn("validate_nats_user_credentials.py", defaults)
+        self.assertIn("sprint2_application_control_nats_credentials", tasks)
 
     def test_deploy_starts_with_preflight(self) -> None:
         site = (ROOT / "deploy/ansible/playbooks/site.yml").read_text(encoding="utf-8")

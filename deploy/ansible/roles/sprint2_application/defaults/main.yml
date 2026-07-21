@@ -84,6 +84,7 @@ sprint2_application_chart_source: "{{ playbook_dir }}/../../helm/labweaver"
 sprint2_application_values_files: []
 sprint2_application_configuration_bundle: ""
 sprint2_application_configuration_manifest: "{{ playbook_dir }}/../../config/sprint2-bundle-manifest.json"
+sprint2_application_nats_credential_validator: "{{ playbook_dir }}/../../../tools/validate_nats_user_credentials.py"
 sprint2_application_required_configmaps:
   - control-service-config
   - access-service-config

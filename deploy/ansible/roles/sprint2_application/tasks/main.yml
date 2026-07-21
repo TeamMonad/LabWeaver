@@ -107,7 +107,8 @@
         sprint2_application_configuration_manifest,
         sprint2_application_configuration_bundle,
         sprint2_application_keycloak_realm_file,
-        sprint2_application_access_seed_file] + sprint2_application_values_files
+        sprint2_application_access_seed_file,
+        sprint2_application_nats_credential_validator] + sprint2_application_values_files
        + ([sprint2_application_portal_tls_certificate_file,
            sprint2_application_portal_tls_key_file,
            sprint2_application_portal_tls_ca_file]
@@ -199,6 +200,31 @@
       - sprint2_application_control_configuration.nats.build_quarantine_subject is match('^labweaver\.agent\.')
       - sprint2_application_control_configuration.nats.quarantine_subject != sprint2_application_control_configuration.nats.build_quarantine_subject
     fail_msg: SPRINT2_APPLICATION_CONTROL_QUARANTINE_STREAM_MISMATCH
+  no_log: true
+
+- name: Bind the Control NATS credential for permission validation
+  ansible.builtin.set_fact:
+    sprint2_application_control_nats_credentials: >-
+      {{ ((sprint2_application_configuration_objects
+           | selectattr('kind', 'equalto', 'Secret')
+           | selectattr('metadata.name', 'equalto', 'control-service-secrets')
+           | first).data['nats.creds']) | b64decode }}
+  no_log: true
+
+- name: Require Control to publish both retained quarantine subjects
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ sprint2_application_nats_credential_validator }}"
+      - --allow-pub
+      - "{{ sprint2_application_control_configuration.nats.quarantine_subject }}"
+      - --allow-pub
+      - "{{ sprint2_application_control_configuration.nats.build_quarantine_subject }}"
+    stdin: "{{ sprint2_application_control_nats_credentials }}"
+    stdin_add_newline: false
+  delegate_to: localhost
+  become: false
+  changed_when: false
   no_log: true
 
 - name: Validate private Access seed boundary

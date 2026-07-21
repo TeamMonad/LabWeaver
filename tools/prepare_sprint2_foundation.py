@@ -25,6 +25,7 @@ NATS_USERS: dict[str, tuple[tuple[str, ...], tuple[str, ...], bool]] = {
             "$JS.API.>",
             "$JS.ACK.>",
             "labweaver.control.>",
+            "labweaver.agent.quarantine.>",
             "labweaver.agent.run.requested.v1",
         ),
         ("_INBOX.>", "labweaver.agent.run.>", "labweaver.agent.build.>"),

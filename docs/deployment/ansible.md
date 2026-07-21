@@ -150,6 +150,8 @@ credentials. The `WORKLOADS` account enables JetStream with bounded 8 GiB disk,
 server remains bounded by the same or stricter global storage limits. Control,
 Agent, Environment and Evaluation are durable JetStream consumers, so their
 user JWTs explicitly allow both `$JS.API.>` and `$JS.ACK.>` publication. The
+Control user additionally allows only `labweaver.agent.quarantine.>` for its
+two retained sanitized quarantine subjects. The
 application bundle renderer rejects any of these four credentials when the ACK
 permission is absent; a successful connection alone is not sufficient adoption
 evidence. A distinct
@@ -175,6 +177,14 @@ is absent, then reads back its stream, durable name, explicit-ack policy and
 complete subject filter set. A retained consumer with conflicting semantics
 blocks as `SPRINT2_APPLICATION_CONSUMER_CONFLICT`; the role never deletes or
 silently replaces retained JetStream state.
+Before applying the private configuration bundle, the application role decodes
+only the public claims in the mounted Control user JWT and verifies that its
+publish allowlist covers both configured quarantine subjects. The validator
+reads credential bytes over stdin with `no_log`; it never prints or persists
+the JWT, seed or Secret value. A retained credential created before this
+permission existed must be forward-rotated from the retained NSC account and
+rebundled before application reconciliation; it is never accepted with a
+runtime fallback.
 The root-owned PostgreSQL service file must bind `sprint2-admin` to the
 `labweaver` database, not the server's default `postgres` database. Before any
 baseline SQL is applied, the role checks `current_database()` against
