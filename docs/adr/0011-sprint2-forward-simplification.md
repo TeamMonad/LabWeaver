@@ -109,6 +109,16 @@ The executors preserve the existing generation, deadline, replay,
 cancellation, and cleanup fences. No generic plugin loader, runtime discovery,
 provider ordering, or fallback is introduced.
 
+Sprint 2 permits unrestricted outbound network access for Agent Service so the
+Claude Code runtime can reach the selected model authority and teacher-requested
+tool endpoints. A Container `EnvironmentSpec` may explicitly select
+`network.mode=allow_all`; the generated runtime plan then keeps default-deny
+ingress but does not isolate egress. `deny_all` and reviewed `restricted` modes
+remain available. KubeVirt VM, BuildKit, Evaluation and every other platform
+workload retain their existing egress policy. This is an accepted course-slice
+risk and does not weaken identity, Secret, resource, approval or publication
+checks.
+
 ### Evidence and release
 
 Unit, contract, integration, browser, deployment, and release reports remain.

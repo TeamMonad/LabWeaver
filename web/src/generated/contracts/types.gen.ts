@@ -922,6 +922,8 @@ export type EnvironmentSpec = {
  * Network egress posture for a published environment.
  */
 export type NetworkPolicySpec = {
+    mode: 'allow_all';
+} | {
     mode: 'deny_all';
 } | {
     mode: 'restricted';
@@ -3563,6 +3565,8 @@ export type InternalAgentRunOutcomeSchemaManualReviewReason = 'infrastructureErr
  * Network egress posture for a published environment.
  */
 export type InternalAgentRunOutcomeSchemaNetworkPolicySpec = {
+    mode: 'allow_all';
+} | {
     mode: 'deny_all';
 } | {
     mode: 'restricted';

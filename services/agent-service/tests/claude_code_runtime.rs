@@ -19,8 +19,8 @@ use agent_service::run_store::{
 };
 use async_trait::async_trait;
 use contracts::authoring::{
-    AgentRunState, AgentTrackKind, CourseLlmEgressPolicy, DeniedDataClass, PackageFile,
-    ProblemPackage, RuntimeKind,
+    AgentRunState, AgentTrackKind, CourseLlmEgressPolicy, DeniedDataClass, EnvironmentSpec,
+    PackageFile, ProblemPackage, RuntimeKind,
 };
 use contracts::evaluation::EvaluationSpec;
 use contracts::http::{CreateAgentRunRequest, IdempotencyKey};
@@ -316,6 +316,14 @@ fn environment_candidate() -> Value {
             "disposition": "delete"
         }
     })
+}
+
+#[test]
+fn virtual_machine_candidate_rejects_allow_all_network() {
+    let mut candidate = environment_candidate();
+    candidate["network"]["mode"] = json!("allow_all");
+
+    assert!(serde_json::from_value::<EnvironmentSpec>(candidate).is_err());
 }
 
 fn evaluation_candidate() -> Result<Value, ClaudeCodeProcessError> {

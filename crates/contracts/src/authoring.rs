@@ -245,6 +245,7 @@ pub struct ResourceRequirements {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NetworkPolicySpec {
+    AllowAll,
     DenyAll,
     Restricted { policy_binding: String },
 }
@@ -444,6 +445,12 @@ impl EnvironmentSpec {
                 storage_class_binding,
                 ssh_port,
             } => {
+                if matches!(self.network, NetworkPolicySpec::AllowAll) {
+                    return Err(AuthoringError::InvalidEnvironmentSpec(
+                        "allow_all network policy is supported only by container runtimes"
+                            .to_owned(),
+                    ));
+                }
                 if provider_binding.trim().is_empty()
                     || storage_class_binding.trim().is_empty()
                     || *ssh_port != 22

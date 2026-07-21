@@ -50,6 +50,11 @@ spec:
     {{- end }}
     {{- end }}
   egress:
+    {{- if eq $name "agent-service" }}
+    # Agent candidate generation may reach arbitrary external tools and package
+    # authorities. Identity, secrets, budgets and approval remain service-owned.
+    - {}
+    {{- end }}
     - to:
         - podSelector:
             matchLabels: {app.kubernetes.io/part-of: labweaver}

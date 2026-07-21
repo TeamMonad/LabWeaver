@@ -7,6 +7,7 @@
 
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use auth::extract_mtls_principal;
 use axum::extract::{Path, Query, State};
@@ -40,6 +41,8 @@ use crate::{ControlError, ControlService};
 
 const ACTOR_HEADER: &str = "x-labweaver-actor-id";
 const SESSION_HEADER: &str = "x-labweaver-session-id";
+const AGENT_PROJECTION_WAIT: Duration = Duration::from_secs(2);
+const AGENT_PROJECTION_POLL: Duration = Duration::from_millis(20);
 /// Runtime state shared only by authenticated mTLS connections.
 #[derive(Clone, Debug)]
 pub struct ApiState {
@@ -326,7 +329,28 @@ async fn create_agent_run(
             &key,
         )
         .await?;
-    Ok(accepted(&run))
+    let deadline = tokio::time::Instant::now() + AGENT_PROJECTION_WAIT;
+    loop {
+        match state.control.agent_run(course_id, run.id).await {
+            Ok(projected) if projected.id != run.id || projected.course_id != run.course_id => {
+                return Err(DownstreamError::IdentityMismatch.into());
+            }
+            Ok(projected) if projected.revision >= run.revision => {
+                return Ok(accepted(&projected));
+            }
+            Ok(_) | Err(ControlError::NotFound) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(AGENT_PROJECTION_POLL).await;
+            }
+            Ok(_) | Err(ControlError::NotFound) => {
+                return Err(ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "LW_CONTROL_DOWNSTREAM_UNAVAILABLE",
+                    true,
+                ));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 
 async fn get_agent_run(

@@ -508,6 +508,14 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("fromEntities: [world]", policy)
         self.assertIn('{port: "2222", protocol: TCP}', policy)
 
+    def test_agent_runtime_egress_allows_all_destinations_and_ports(self) -> None:
+        policy = (
+            ROOT / "deploy/helm/labweaver/templates/network-policy.yaml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('if eq $name "agent-service"', policy)
+        self.assertIn("    - {}", policy)
+
     def test_sprint2_service_configs_use_declared_tls_secret_keys(self) -> None:
         manifest = json.loads(
             (ROOT / "deploy/config/sprint2-bundle-manifest.json").read_text(encoding="utf-8")

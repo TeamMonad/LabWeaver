@@ -1283,11 +1283,11 @@ where
             resource(
                 "NetworkPolicy",
                 Some(&namespace),
-                "default-deny",
+                "default-deny-ingress",
                 json!({
                     "apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
-                    "metadata":{"name":"default-deny","namespace":namespace,"labels":labels},
-                    "spec":{"podSelector":{},"policyTypes":["Ingress","Egress"]}
+                    "metadata":{"name":"default-deny-ingress","namespace":namespace,"labels":labels},
+                    "spec":{"podSelector":{},"policyTypes":["Ingress"]}
                 }),
             ),
             resource(
@@ -1340,14 +1340,22 @@ where
                 }),
             ),
         ];
-        if let NetworkPolicySpec::Restricted { policy_binding } =
-            &projection.environment_spec.network
-        {
-            documents.push(resource("NetworkPolicy", Some(&namespace), "restricted-egress", json!({
-                "apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
-                "metadata":{"name":"restricted-egress","namespace":namespace,"labels":labels},
-                "spec":{"podSelector":{"matchLabels":{"app":app_name}},"policyTypes":["Egress"],"egress":[{"to":[{"namespaceSelector":{"matchLabels":{"labweaver.io/egress-policy":policy_binding}}}]}]}
-            })));
+        match &projection.environment_spec.network {
+            NetworkPolicySpec::AllowAll => {}
+            NetworkPolicySpec::DenyAll => {
+                documents.push(resource("NetworkPolicy", Some(&namespace), "deny-all-egress", json!({
+                    "apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
+                    "metadata":{"name":"deny-all-egress","namespace":namespace,"labels":labels},
+                    "spec":{"podSelector":{"matchLabels":{"app":app_name}},"policyTypes":["Egress"]}
+                })));
+            }
+            NetworkPolicySpec::Restricted { policy_binding } => {
+                documents.push(resource("NetworkPolicy", Some(&namespace), "restricted-egress", json!({
+                    "apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
+                    "metadata":{"name":"restricted-egress","namespace":namespace,"labels":labels},
+                    "spec":{"podSelector":{"matchLabels":{"app":app_name}},"policyTypes":["Egress"],"egress":[{"to":[{"namespaceSelector":{"matchLabels":{"labweaver.io/egress-policy":policy_binding}}}]}]}
+                })));
+            }
         }
         let plan_sha256 = canonical_hash(&json!({
             "environmentId": instance.id,

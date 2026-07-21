@@ -67,6 +67,7 @@ status:
 
 - 技术基线为 Rust + Axum、Vue 3、PostgreSQL/SQLx、NATS JetStream、MinIO、Keycloak/OIDC、Kubernetes、KubeVirt、Harbor、Trivy、BuildKit、Ansible、Helm 与 Playwright。Sprint 2 不包含 Headscale/Tailscale、Guacamole、Private Sigstore、Kyverno 或 Packer；不得让这些已删除能力重新进入默认部署或 Release Gate。
 - Sprint 2 的 Claude Code-only Runtime 固定使用 ECNU Anthropic 兼容端点；`ANTHROPIC_BASE_URL` 来自受审 ConfigMap，`ECNU_API_KEY` 仅以 Secret 文件注入为 `ANTHROPIC_AUTH_TOKEN`。禁止把令牌写入 Git、YAML、命令参数、日志或报告，也禁止 ambient credential、备用端点和 Provider fallback。
+- Sprint 2 明确允许 Agent Service 任意出站网络访问，并允许 Container 环境通过已审批的 `network.mode=allow_all` 使用任意出站网络与端口；这是课程切片的已接受风险，不得扩展到 KubeVirt VM、BuildKit、Evaluation 或其他平台 workload。身份、Secret、资源上限、入口隔离和教师审批仍必须 fail closed。
 - Sprint 2 采用现有基础设施时只允许盘点、严格校验、创建缺失对象和应用层原地 reconcile；不得删除或重建 namespace、Schema、stream、bucket、Harbor project/image、Keycloak realm/client、PVC、CRD、Webhook、Kyverno 或 Private Sigstore。破坏性 `demo reset` 是本轮明确排除的维护入口。
 - Sprint 2 部署 Evaluation Service，但仅负责 `FrozenSubmission` 的双运行时冻结协调与不可变发布；不得启用 Runner、Checker、Aggregator、Evaluation 执行或评分。Resource Service 保持独立边界且默认不部署。
 - Sprint 2 的 rootless BuildKit 仅允许在 `labweaver-build` 使用 `Unconfined` seccomp/AppArmor、container-scoped SELinux `spc_t` 与 `--oci-worker-no-process-sandbox`；仍禁止 privileged、HostPath、hostNetwork 和 Kubernetes API token。该 SELinux 例外只解决内层 `runc` 的 `devpts` mount 与 snapshot relabel，不得扩展到其他 workload 或改为节点全局策略。Container/KubeVirt executor 当前宽 ClusterRole 是明确的阶段性风险，不得描述为最小权限或生产安全验证通过。
@@ -113,7 +114,7 @@ status:
 
 - Keycloak/OIDC 负责身份与基础角色；LabWeaver Access Service 负责课程、项目、环境、端点和 Lease 范围授权。两层检查缺一不可。
 - AccessGrant、EndpointGrant 与 Headscale Policy 必须有显式到期、撤销、revision 和审计链；策略编译或应用失败时拒绝新访问。
-- Agent Tool、Ansible Module、Runner 镜像、网络访问、挂载路径和 Kubernetes 权限必须采用 allowlist 与最小权限。
+- Agent Tool、Ansible Module、Runner 镜像、挂载路径和 Kubernetes 权限必须采用 allowlist 与最小权限。网络访问遵循产品切片的显式策略；Sprint 2 的 Agent Service 与经审批的 `allow_all` Container 是记录在案的例外。
 - Evaluation Job 使用受限 SecurityContext、资源上限、超时、输出上限和网络策略；生成脚本在批准前不得执行。
 - Secret、token、密钥、原始提交、完整材料、日志 payload 和可复原商业内容不得进入 Git、镜像、普通日志或发布报告。
 - 原始或未授权学生内容禁止出站。`SubmissionManifest.llmReadable` 只是候选 allowlist；命中路径仍必须通过敏感信息分类、大小、内容和课程 LLM egress policy 门禁，禁止整包或隐式出站。

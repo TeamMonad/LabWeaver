@@ -11,7 +11,9 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use contracts::authoring::{CandidateApproval, CandidateDecision, EnvironmentSpec, RuntimeKind};
+use contracts::authoring::{
+    CandidateApproval, CandidateDecision, EnvironmentSpec, NetworkPolicySpec, RuntimeKind,
+};
 use contracts::environment::{DesiredEnvironmentState, EndpointProtocol, ObservedEnvironmentState};
 use contracts::events::ReleasePublished;
 use contracts::supply_chain::{
@@ -233,6 +235,66 @@ fn plan_uses_digest_only_image_and_only_the_access_proxy() {
             .document
             .pointer("/spec/ingress/0/from/0/podSelector/matchLabels/app.kubernetes.io~1name"),
         Some(&json!("access-service"))
+    );
+}
+
+#[test]
+fn deny_all_container_network_keeps_ingress_and_egress_isolation() {
+    let projection = projection();
+    let instance = instance_for(&projection);
+    let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
+    let plan = provider
+        .plan(&instance, &resolved(projection), ReconcileAction::Provision)
+        .expect("deny_all plan");
+
+    assert_eq!(
+        resource(&plan, "NetworkPolicy").name,
+        "default-deny-ingress"
+    );
+    assert!(plan.resources.iter().any(|resource| {
+        resource.kind == "NetworkPolicy" && resource.name == "deny-all-egress"
+    }));
+}
+
+#[test]
+fn allow_all_container_network_leaves_egress_unisolated() {
+    let mut projection = projection();
+    projection.environment_spec.network = NetworkPolicySpec::AllowAll;
+    let spec_sha256 = Sha256Digest::of_canonical(&projection.environment_spec).expect("spec hash");
+    projection.release.environment_spec_sha256 = spec_sha256;
+    projection.release.approval.candidate_sha256 = spec_sha256;
+    projection.projection_sha256 = Sha256Digest::of_canonical(&json!({
+        "release": &projection.release,
+        "environmentSpec": &projection.environment_spec,
+    }))
+    .expect("projection hash");
+    projection
+        .validate()
+        .expect("allow_all container projection");
+
+    let instance = instance_for(&projection);
+    let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
+    let plan = provider
+        .plan(&instance, &resolved(projection), ReconcileAction::Provision)
+        .expect("allow_all plan");
+
+    assert!(plan.resources.iter().all(|resource| {
+        resource.kind != "NetworkPolicy"
+            || !matches!(
+                resource.name.as_str(),
+                "deny-all-egress" | "restricted-egress"
+            )
+    }));
+    let ingress = plan
+        .resources
+        .iter()
+        .find(|resource| {
+            resource.kind == "NetworkPolicy" && resource.name == "default-deny-ingress"
+        })
+        .expect("ingress isolation remains");
+    assert_eq!(
+        ingress.document.pointer("/spec/policyTypes"),
+        Some(&json!(["Ingress"]))
     );
 }
 
