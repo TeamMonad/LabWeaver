@@ -198,7 +198,7 @@ export function useCandidateApproval(courseId: Ref<string | undefined>, runId: R
         const candidate = view.candidate
         const result = await appendEnvironmentCandidateDecision({
           path: { courseId: id, candidateId: candidate.id },
-          headers: { 'If-Match': ifMatch(candidate.revision) },
+          headers: { 'Idempotency-Key': idempotencyKey(), 'If-Match': ifMatch(candidate.revision) },
           body: {
             candidateRevision: candidate.revision,
             candidateSha256: candidate.specSha256,
@@ -221,7 +221,7 @@ export function useCandidateApproval(courseId: Ref<string | undefined>, runId: R
         const candidate = view.candidate
         const result = await appendEvaluationCandidateDecision({
           path: { courseId: id, candidateId: candidate.id },
-          headers: { 'If-Match': ifMatch(candidate.revision) },
+          headers: { 'Idempotency-Key': idempotencyKey(), 'If-Match': ifMatch(candidate.revision) },
           body: {
             candidateRevision: candidate.revision,
             candidateSha256: candidate.specSha256,
