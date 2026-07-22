@@ -363,6 +363,21 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("migration.file | basename", adoption)
         self.assertNotIn("count(*) FROM {{ domain }}.schema_migrations) <> 1", adoption)
 
+    def test_sprint2_application_preflight_does_not_requalify_retained_hosts(self) -> None:
+        application = (
+            ROOT / "deploy/ansible/playbooks/93-sprint2-application.yml"
+        ).read_text(encoding="utf-8")
+        preflight = (
+            ROOT / "deploy/ansible/playbooks/00-preflight.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("labweaver_preflight_validate_remote_hosts: false", application)
+        self.assertEqual(
+            preflight.count(
+                "labweaver_preflight_validate_remote_hosts | default(true) | bool"
+            ),
+            3,
+        )
+
     def test_sprint2_application_reconciles_the_exact_durable_consumers(self) -> None:
         tasks = (
             ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
