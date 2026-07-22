@@ -7,8 +7,6 @@
     # infrastructure qualification or mutate those hosts.
     labweaver_preflight_validate_remote_hosts: false
 
-- import_playbook: 91-sprint2-admin-tools.yml
-
 - name: Adopt existing services and deploy the Sprint 2 application profile
   hosts: control_plane
   gather_facts: false
