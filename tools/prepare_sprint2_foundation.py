@@ -201,6 +201,7 @@ def _certificate(
     _write(
         extension,
         (
+            "[v3_req]\n"
             "basicConstraints=critical,CA:FALSE\n"
             "keyUsage=critical,digitalSignature,keyEncipherment\n"
             f"extendedKeyUsage={usage}\n"
@@ -215,6 +216,7 @@ def _certificate(
             "x509", "-req", "-in", str(request), "-CA", str(authority / "ca.crt"),
             "-CAkey", str(authority / "ca.key"), "-CAcreateserial", "-days", str(days),
             "-sha256", "-extfile", str(extension), "-out", str(certificate),
+            "-extensions", "v3_req",
         ],
         private_home,
     )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 from pathlib import Path
 import sys
 import tempfile
@@ -125,6 +126,11 @@ class FoundationAuthoringTests(unittest.TestCase):
         self.assertEqual(identities["openssh-gateway"][1], "clientAuth")
         self.assertIn("URI:spiffe://labweaver/access-service", identities["access-service"][0])
         self.assertIn("URI:spiffe://labweaver/control-service", identities["control-service"][0])
+
+    def test_certificate_authoring_activates_san_extension_section(self) -> None:
+        source = inspect.getsource(FOUNDATION._certificate)
+        self.assertIn('"[v3_req]\\n"', source)
+        self.assertIn('"-extensions", "v3_req"', source)
 
 
 if __name__ == "__main__":

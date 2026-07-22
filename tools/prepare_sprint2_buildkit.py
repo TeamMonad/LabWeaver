@@ -94,6 +94,7 @@ def _issue(
     _write(
         extension,
         (
+            "[v3_req]\n"
             "basicConstraints=critical,CA:FALSE\n"
             "keyUsage=critical,digitalSignature,keyEncipherment\n"
             f"extendedKeyUsage={extended_usage}\n"
@@ -108,6 +109,7 @@ def _issue(
             "x509", "-req", "-in", str(request), "-CA", str(authority / "ca.crt"),
             "-CAkey", str(authority / "ca.key"), "-CAcreateserial", "-days", str(days),
             "-sha256", "-extfile", str(extension), "-out", str(certificate),
+            "-extensions", "v3_req",
         ],
         home,
     )
