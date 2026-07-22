@@ -403,6 +403,12 @@ impl KubernetesContainerExecutor {
                 .send()
                 .await
                 .map_err(|_| unavailable())?;
+            tracing::info!(
+                event = "environment.container_executor.namespace_delete",
+                environment_id = %plan.environment_id,
+                namespace = %plan.namespace,
+                status = deletion.status().as_u16()
+            );
             if deletion.status() != StatusCode::NOT_FOUND
                 && !deletion.status().is_success()
                 && deletion.status() != StatusCode::CONFLICT
@@ -419,6 +425,12 @@ impl KubernetesContainerExecutor {
                 .send()
                 .await
                 .map_err(|_| unavailable())?;
+            tracing::info!(
+                event = "environment.container_executor.namespace_finalizers_patch",
+                environment_id = %plan.environment_id,
+                namespace = %plan.namespace,
+                status = patch.status().as_u16()
+            );
             if patch.status() != StatusCode::NOT_FOUND
                 && !patch.status().is_success()
                 && patch.status() != StatusCode::CONFLICT
@@ -665,6 +677,12 @@ impl KubernetesContainerExecutor {
                 .send()
                 .await
                 .map_err(|_| unavailable())?;
+            tracing::info!(
+                event = "environment.kubevirt_executor.namespace_delete",
+                environment_id = %plan.environment_id,
+                namespace = %plan.namespace,
+                status = deletion.status().as_u16()
+            );
             if deletion.status() != StatusCode::NOT_FOUND
                 && !deletion.status().is_success()
                 && deletion.status() != StatusCode::CONFLICT
@@ -681,6 +699,12 @@ impl KubernetesContainerExecutor {
                 .send()
                 .await
                 .map_err(|_| unavailable())?;
+            tracing::info!(
+                event = "environment.kubevirt_executor.namespace_finalizers_patch",
+                environment_id = %plan.environment_id,
+                namespace = %plan.namespace,
+                status = patch.status().as_u16()
+            );
             if patch.status() != StatusCode::NOT_FOUND
                 && !patch.status().is_success()
                 && patch.status() != StatusCode::CONFLICT
