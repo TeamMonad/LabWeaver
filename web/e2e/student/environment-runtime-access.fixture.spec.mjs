@@ -42,7 +42,7 @@ test('student VM single-line SSH command, freeze evidence, and operations timeli
   await page.locator('button:has-text("冻结提交")').click()
   await expect(page.getByText('Object Version', { exact: true })).toBeVisible({ timeout: 15000 })
   await expect(page.getByText('SHA-256', { exact: true })).toBeVisible()
-  await expect(page.locator('.evidence-card')).toContainText('sha256:')
+  await expect(page.locator('.evidence-card')).toContainText('f'.repeat(64))
 
   // Operations timeline shows create + freeze with revisions.
   await expect(page.locator('.timeline-section')).toBeVisible()
