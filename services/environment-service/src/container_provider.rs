@@ -708,19 +708,30 @@ impl<B: ContainerExecutorBackend + 'static> NatsContainerExecutorServer<B> {
                 let fence = envelope.fence;
                 let response = match executor.execute(envelope).await {
                     Ok(response) => response,
-                    Err(error) => ContainerExecutorResponseEnvelope {
-                        protocol_version: fence.protocol_version,
-                        environment_id: fence.environment_id,
-                        operation_id: fence.operation_id,
-                        provider_step: fence.provider_step,
-                        operation_generation: fence.operation_generation,
-                        attempt: fence.attempt,
-                        request_id: fence.request_id,
-                        action: fence.action,
-                        response: ContainerExecutorResponse::Failed {
-                            failure: container_executor_failure(&error),
-                        },
-                    },
+                    Err(error) => {
+                        let failure = container_executor_failure(&error);
+                        tracing::warn!(
+                            event = "environment.container_executor.request_failed",
+                            diagnostic = failure.diagnostic_code(),
+                            operation_id = %fence.operation_id,
+                            environment_id = %fence.environment_id,
+                            action = ?fence.action,
+                            provider_step = fence.provider_step,
+                            operation_generation = fence.operation_generation,
+                            error = %error
+                        );
+                        ContainerExecutorResponseEnvelope {
+                            protocol_version: fence.protocol_version,
+                            environment_id: fence.environment_id,
+                            operation_id: fence.operation_id,
+                            provider_step: fence.provider_step,
+                            operation_generation: fence.operation_generation,
+                            attempt: fence.attempt,
+                            request_id: fence.request_id,
+                            action: fence.action,
+                            response: ContainerExecutorResponse::Failed { failure },
+                        }
+                    }
                 };
                 let Ok(payload) = serde_json::to_vec(&response) else {
                     tracing::error!(
