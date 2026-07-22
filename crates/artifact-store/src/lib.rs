@@ -200,6 +200,11 @@ impl S3ImmutableObjectStore {
 
     /// Prefixes an application-relative key with the configured immutable
     /// object namespace and validates the resulting locator.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ObjectStoreError::ObjectIdentityInvalid`] when the scoped
+    /// locator violates the configured object namespace rules.
     pub fn scoped_key(&self, suffix: &str) -> Result<String, ObjectStoreError> {
         let prefix = self.config.object_prefix.trim_matches('/');
         let suffix = suffix.trim_start_matches('/');
@@ -212,6 +217,12 @@ impl S3ImmutableObjectStore {
     /// S3 Object Lock. The conditional write, version id, and read-back hash
     /// still make the artifact identity explicit for clusters whose existing
     /// bucket was provisioned without Governance Lock support.
+    ///
+    /// # Errors
+    ///
+    /// Returns an object-store error when the key or payload identity is
+    /// invalid, the bucket cannot establish a version, the upload fails, or
+    /// the read-back identity does not match.
     pub async fn put_versioned_immutable(
         &self,
         key: &str,

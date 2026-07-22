@@ -372,7 +372,7 @@ impl ContainerProviderBackend for NatsContainerProviderBackend {
                 );
                 Err(failure)
             }
-            _ => Err(ProviderFailure {
+            ContainerExecutorResponse::Observed { .. } => Err(ProviderFailure {
                 code: ProviderFailureCode::CleanupFailed,
                 retryable: true,
             }),

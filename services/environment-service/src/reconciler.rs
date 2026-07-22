@@ -464,7 +464,10 @@ mod tests {
     use std::str::FromStr;
 
     fn timestamp(value: &str) -> UtcTimestamp {
-        UtcTimestamp::from_str(value).expect("test timestamp must be valid")
+        UtcTimestamp::from_str(value).unwrap_or_else(|error| {
+            eprintln!("test timestamp must be valid: {error}");
+            std::process::abort();
+        })
     }
 
     fn provisioning_instance() -> EnvironmentInstance {
@@ -483,14 +486,20 @@ mod tests {
             provider_binding: "container-primary-v1".to_owned(),
             desired_state: DesiredEnvironmentState::Running,
             observed_state: ObservedEnvironmentState::Provisioning,
-            revision: Revision::new(2).expect("revision"),
+            revision: Revision::new(2).unwrap_or_else(|error| {
+                eprintln!("revision must be valid: {error}");
+                std::process::abort();
+            }),
             generation: 1,
             observed_generation: 0,
             operation: EnvironmentOperation {
                 id: OperationId::new(),
                 kind: EnvironmentOperationKind::Create,
                 state: OperationState::Running,
-                accepted_revision: Revision::new(1).expect("revision"),
+                accepted_revision: Revision::new(1).unwrap_or_else(|error| {
+                    eprintln!("revision must be valid: {error}");
+                    std::process::abort();
+                }),
                 attempt: 1,
                 provider_step: 2,
                 max_attempts: 3,
@@ -521,7 +530,10 @@ mod tests {
         let now = timestamp("2026-07-22T00:01:00.000Z");
         let deferred =
             ReconcileWorker::defer_non_terminal_observation(&current, now, Duration::from_secs(1))
-                .expect("valid deferred observation");
+                .unwrap_or_else(|error| {
+                    eprintln!("valid deferred observation: {error}");
+                    std::process::abort();
+                });
 
         assert_eq!(
             deferred.operation.next_attempt_at,

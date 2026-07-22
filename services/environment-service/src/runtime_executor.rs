@@ -1219,7 +1219,10 @@ mod namespace_identity_tests {
     fn namespace_identity_accepts_retained_kubesphere_finalizer() {
         let environment_id =
             contracts::EnvironmentId::from_str("019f8b1a-f95f-7551-a5ce-33f4c26466fd")
-                .expect("fixture environment id");
+                .unwrap_or_else(|error| {
+                    eprintln!("fixture environment id: {error}");
+                    std::process::abort();
+                });
         let namespace = json!({
             "metadata": {
                 "name": format!("lw-env-{environment_id}"),
@@ -1244,7 +1247,10 @@ mod namespace_identity_tests {
     fn namespace_identity_rejects_unowned_finalizer() {
         let environment_id =
             contracts::EnvironmentId::from_str("019f8b1a-f95f-7551-a5ce-33f4c26466fd")
-                .expect("fixture environment id");
+                .unwrap_or_else(|error| {
+                    eprintln!("fixture environment id: {error}");
+                    std::process::abort();
+                });
         let namespace = json!({
             "metadata": {
                 "name": format!("lw-env-{environment_id}"),
