@@ -118,13 +118,28 @@ fn start_and_recover_converge_through_validated_provider_states()
             operation_complete: false,
         },
     )?;
-    let mut started_endpoints = current.endpoints.clone();
-    for endpoint in &mut started_endpoints {
-        endpoint.revision = revision(start_provisioning.revision.get() + 1);
-    }
-    let started = apply_provider_observation(
+    let pending_start = apply_provider_observation(
         &start_provisioning,
         start_provisioning.operation.id,
+        ProviderObservation {
+            next_state: ObservedEnvironmentState::Provisioning,
+            endpoints: Vec::new(),
+            cleanup_evidence: None,
+            operation_complete: false,
+        },
+    )?;
+    assert_eq!(
+        pending_start.operation.provider_step,
+        start_provisioning.operation.provider_step + 1
+    );
+    assert_eq!(pending_start.operation.state, OperationState::Running);
+    let mut started_endpoints = current.endpoints.clone();
+    for endpoint in &mut started_endpoints {
+        endpoint.revision = revision(pending_start.revision.get() + 1);
+    }
+    let started = apply_provider_observation(
+        &pending_start,
+        pending_start.operation.id,
         ProviderObservation {
             next_state: ObservedEnvironmentState::Ready,
             endpoints: started_endpoints,
