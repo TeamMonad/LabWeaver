@@ -34,6 +34,7 @@ coordinator:
   workerConfigurationFile: /etc/labweaver/config/worker.yaml
   workerSecretFiles:
     database-url: /etc/labweaver/secrets/database-url
+    postgres-ca.pem: /etc/labweaver/secrets/postgres-ca.pem
     minio-access-key: /etc/labweaver/secrets/minio-access-key
     minio-ca.pem: /etc/labweaver/secrets/minio-ca.pem
     minio-secret-key: /etc/labweaver/secrets/minio-secret-key
