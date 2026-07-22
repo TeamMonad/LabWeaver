@@ -312,6 +312,12 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("maxSurge: 0", environment)
         self.assertIn("maxUnavailable: 1", environment)
 
+        evaluation = values.split("  evaluation-service:", maxsplit=1)[1].split(
+            "  resource-service:", maxsplit=1
+        )[0]
+        self.assertIn("maxSurge: 0", evaluation)
+        self.assertIn("maxUnavailable: 1", evaluation)
+
     def test_object_store_route_uses_existing_web_workload_with_verified_tls(self) -> None:
         backend = (
             ROOT / "deploy/helm/labweaver/templates/object-store-backend.yaml"

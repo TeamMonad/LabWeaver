@@ -199,6 +199,11 @@ workloads:
   evaluation-service:
     enabled: true
     imageKey: evaluation_service
+    # Evaluation owns the freeze coordinator and must also roll without a
+    # second replica on the retained resource-constrained demo cluster.
+    strategy:
+      type: RollingUpdate
+      rollingUpdate: {maxSurge: 0, maxUnavailable: 1}
     args: ["--mode", "evaluation-service"]
     configMap: evaluation-service-config
     secret: evaluation-service-secrets
