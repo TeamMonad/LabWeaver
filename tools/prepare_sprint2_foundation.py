@@ -31,7 +31,11 @@ NATS_USERS: dict[str, tuple[tuple[str, ...], tuple[str, ...], bool]] = {
         ("_INBOX.>", "labweaver.agent.run.>", "labweaver.agent.build.>"),
         False,
     ),
-    "access-service": (("labweaver.access.>",), (), False),
+    "access-service": (
+        ("labweaver.access.>",),
+        ("labweaver.access.revoke.v1",),
+        True,
+    ),
     "agent-service": (
         (
             "$JS.API.>",
@@ -48,6 +52,7 @@ NATS_USERS: dict[str, tuple[tuple[str, ...], tuple[str, ...], bool]] = {
             "$JS.API.>",
             "$JS.ACK.>",
             "labweaver.environment.>",
+            "labweaver.access.revoke.v1",
             "labweaver.provider.kubernetes.container.v1",
             "labweaver.provider.kubevirt.vm.v1",
         ),

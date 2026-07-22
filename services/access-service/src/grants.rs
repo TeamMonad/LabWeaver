@@ -9,8 +9,9 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
 };
 use contracts::{
-    AccessGrantId, ActorId, CourseId, EndpointGrantId, EndpointId, EventId, GatewaySessionId,
-    PlatformRole, Revision, Sequence, Sha256Digest, SshPublicKeyId, StreamSequence, UtcTimestamp,
+    AccessGrantId, ActorId, CourseId, EndpointGrantId, EndpointId, EnvironmentId, EventId,
+    GatewaySessionId, PlatformRole, Revision, Sequence, Sha256Digest, SshPublicKeyId,
+    StreamSequence, UtcTimestamp,
     access::{
         AccessGrant, AccessGrantSnapshot, AccessGrantState, AuthorizationDecision,
         AuthorizationDecisionSummary, CloseGatewaySessionRequest, CreateGatewaySessionRequest,
@@ -31,6 +32,7 @@ use contracts::{
         IdempotencyKey, RenewAccessGrantRequest, RevokeAccessGrantRequest, StrongEtag,
     },
 };
+use futures_util::StreamExt;
 use rand::RngCore;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -46,6 +48,25 @@ use super::{
 };
 
 const TERMINATION_SECONDS: i64 = 60;
+const ACCESS_REVOCATION_SUBJECT: &str = "labweaver.access.revoke.v1";
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EnvironmentAccessRevocationRequest {
+    version: u8,
+    environment_id: EnvironmentId,
+    environment_revision: Revision,
+    reason: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EnvironmentAccessRevocationResponse {
+    version: u8,
+    environment_id: EnvironmentId,
+    environment_revision: Revision,
+    access_revocation_revision: Revision,
+}
 
 fn parse_body<T: DeserializeOwned>(body: &Bytes) -> Result<T, ApiError> {
     contracts::parse_strict_json(body)
@@ -1321,6 +1342,124 @@ fn log_activation_lease_lost(grant_id: Uuid, action: &'static str) {
     );
 }
 
+/// Handles the synchronous Environment owner request/reply used to revoke all
+/// live grants before stop, restart, delete, cancellation, or expiry advances.
+pub async fn environment_revocation_loop(state: Arc<AppState>) -> Result<(), GrantRuntimeError> {
+    let mut subscriber = state
+        .nats
+        .subscribe(ACCESS_REVOCATION_SUBJECT)
+        .await
+        .map_err(|_| GrantRuntimeError::NatsSubscribe)?;
+    while let Some(message) = subscriber.next().await {
+        let Some(reply) = message.reply else {
+            tracing::warn!(
+                event = "access.environment_revocation.request_rejected",
+                diagnostic = "LW_ACCESS_REVOCATION_REPLY_MISSING"
+            );
+            continue;
+        };
+        let request = match contracts::parse_strict_json::<EnvironmentAccessRevocationRequest>(
+            &message.payload,
+        ) {
+            Ok(request) if valid_environment_revocation_request(&request) => request,
+            _ => {
+                tracing::warn!(
+                    event = "access.environment_revocation.request_rejected",
+                    diagnostic = "LW_ACCESS_REVOCATION_REQUEST_INVALID"
+                );
+                continue;
+            }
+        };
+        let access_revocation_revision = revoke_environment_grants(&state.pool, &request).await?;
+        let response = EnvironmentAccessRevocationResponse {
+            version: 1,
+            environment_id: request.environment_id,
+            environment_revision: request.environment_revision,
+            access_revocation_revision,
+        };
+        let payload = serde_json::to_vec(&response).map_err(|_| GrantRuntimeError::Contract)?;
+        state
+            .nats
+            .publish(reply, payload.into())
+            .await
+            .map_err(|_| GrantRuntimeError::NatsPublish)?;
+        tracing::info!(
+            event = "access.environment_revocation.completed",
+            environment_id = %request.environment_id,
+            environment_revision = request.environment_revision.get(),
+            access_revocation_revision = access_revocation_revision.get(),
+            reason = request.reason
+        );
+    }
+    Err(GrantRuntimeError::NatsSubscribe)
+}
+
+fn valid_environment_revocation_request(request: &EnvironmentAccessRevocationRequest) -> bool {
+    request.version == 1
+        && matches!(
+            request.reason.as_str(),
+            "environment_stopped"
+                | "environment_restarted"
+                | "environment_deleted"
+                | "environment_cancelled"
+                | "environment_expired"
+        )
+}
+
+async fn revoke_environment_grants(
+    pool: &PgPool,
+    request: &EnvironmentAccessRevocationRequest,
+) -> Result<Revision, GrantRuntimeError> {
+    let now = OffsetDateTime::now_utc();
+    let terminate_by = now + time::Duration::seconds(TERMINATION_SECONDS);
+    let mut transaction = pool.begin().await?;
+    let rows = sqlx::query(
+        "UPDATE access.access_grants \
+         SET state='revoked',revision=revision+1,revoked_at=$2,reason_code=$3,updated_at=$2 \
+         WHERE environment_id=$1 AND state IN ('requested','active') RETURNING grant_id",
+    )
+    .bind(request.environment_id.as_uuid())
+    .bind(now)
+    .bind(&request.reason)
+    .fetch_all(&mut *transaction)
+    .await?;
+    for row in rows {
+        let grant_id = typed_id::<AccessGrantId>(row.get("grant_id"))
+            .map_err(|error| log_revocation_mutation_error(&error))?;
+        terminate_sessions_for_grant(&mut transaction, grant_id, now, terminate_by)
+            .await
+            .map_err(|error| log_revocation_mutation_error(&error))?;
+        let grant = load_grant_tx(&mut transaction, grant_id, None)
+            .await
+            .map_err(|error| log_revocation_mutation_error(&error))?;
+        enqueue_grant_event(
+            &mut transaction,
+            &grant,
+            subjects::ACCESS_GRANT_REVOKED,
+            now,
+        )
+        .await
+        .map_err(|error| log_revocation_mutation_error(&error))?;
+    }
+    let maximum_revision: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(revision),1) FROM access.access_grants WHERE environment_id=$1",
+    )
+    .bind(request.environment_id.as_uuid())
+    .fetch_one(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    revision(maximum_revision).map_err(|error| log_revocation_mutation_error(&error))
+}
+
+fn log_revocation_mutation_error(error: &ApiError) -> GrantRuntimeError {
+    tracing::error!(
+        event = "access.environment_revocation.failed",
+        diagnostic = error.diagnostic,
+        status = error.status.as_u16()
+    );
+    GrantRuntimeError::AccessMutation
+}
+
 pub async fn maintenance_loop(state: Arc<AppState>) -> Result<(), GrantRuntimeError> {
     let interval = Duration::from_secs(state.deployment.grants.expiry_poll_seconds);
     let mut ticker = tokio::time::interval(interval);
@@ -2087,6 +2226,34 @@ fn typed_id<T: FromStr>(v: Uuid) -> Result<T, ApiError> {
         .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))
 }
 
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn environment_revocation_request_is_strict_and_reason_bounded() {
+        let valid: EnvironmentAccessRevocationRequest = contracts::parse_strict_json(
+            br#"{"version":1,"environmentId":"00000000-0000-7000-8000-000000000101","environmentRevision":4,"reason":"environment_deleted"}"#,
+        )
+        .expect("valid revocation request");
+        assert!(valid_environment_revocation_request(&valid));
+
+        let unsupported: EnvironmentAccessRevocationRequest = contracts::parse_strict_json(
+            br#"{"version":1,"environmentId":"00000000-0000-7000-8000-000000000101","environmentRevision":4,"reason":"arbitrary"}"#,
+        )
+        .expect("structurally valid request");
+        assert!(!valid_environment_revocation_request(&unsupported));
+
+        assert!(
+            contracts::parse_strict_json::<EnvironmentAccessRevocationRequest>(
+                br#"{"version":1,"environmentId":"00000000-0000-7000-8000-000000000101","environmentRevision":4,"reason":"environment_deleted","extra":true}"#,
+            )
+            .is_err()
+        );
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum GrantRuntimeError {
     #[error("LW_ACCESS_CONFIG_INVALID")]
@@ -2097,10 +2264,14 @@ pub enum GrantRuntimeError {
     NatsConnect,
     #[error("LW_ACCESS_NATS_PUBLISH_FAILED")]
     NatsPublish,
+    #[error("LW_ACCESS_NATS_SUBSCRIBE_FAILED")]
+    NatsSubscribe,
     #[error("LW_ACCESS_CONTRACT_INVALID")]
     Contract,
     #[error("LW_ACCESS_ACTIVATION_LEASE_LOST")]
     ActivationLeaseLost,
+    #[error("LW_ACCESS_REVOCATION_FAILED")]
+    AccessMutation,
     #[error("LW_ACCESS_STORE_UNAVAILABLE")]
     Database(#[from] sqlx::Error),
 }

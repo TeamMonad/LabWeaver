@@ -83,6 +83,7 @@ async fn main() -> Result<(), StartupError> {
         result = grants::activation_loop(Arc::clone(&state)) => result?,
         result = grants::maintenance_loop(Arc::clone(&state)) => result?,
         result = grants::outbox_loop(Arc::clone(&state)) => result?,
+        result = grants::environment_revocation_loop(Arc::clone(&state)) => result?,
     }
     Ok(())
 }

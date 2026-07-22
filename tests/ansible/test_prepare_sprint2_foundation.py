@@ -66,6 +66,14 @@ class FoundationAuthoringTests(unittest.TestCase):
         control_publish, _, _ = FOUNDATION.NATS_USERS["control-service"]
         self.assertIn("labweaver.agent.quarantine.>", control_publish)
 
+        access_publish, access_subscribe, access_response = FOUNDATION.NATS_USERS["access-service"]
+        self.assertEqual(access_publish, ("labweaver.access.>",))
+        self.assertEqual(access_subscribe, ("labweaver.access.revoke.v1",))
+        self.assertTrue(access_response)
+
+        environment_publish, _, _ = FOUNDATION.NATS_USERS["environment-service"]
+        self.assertIn("labweaver.access.revoke.v1", environment_publish)
+
         for consumer in (
             "control-service",
             "agent-service",
