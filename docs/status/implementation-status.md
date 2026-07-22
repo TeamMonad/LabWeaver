@@ -24,6 +24,21 @@ the presence of this document.
 
 ## Sprint 1 and Sprint 2
 
+## Current connected slice (2026-07-22)
+
+The current source identity is `12069bbb` on `release/sprint2`.  The live
+cluster was reached through the direct architect kubeconfig; retained
+infrastructure was not deleted or rebuilt.
+
+| Check | Result | Evidence / limitation |
+| --- | --- | --- |
+| Container environment reconcile | verified | A fresh approved Container environment reached `ready` without revision churn; the runtime Pod is Running and the workspace PVC is mounted. |
+| Freeze worker storage binding | verified prerequisite | `labweaver-frozen-submissions` is an additive Object Lock bucket with versioning; the live Evaluation ConfigMap points at it. The existing `labweaver-artifacts` bucket was not changed. |
+| Freeze worker network path | verified prerequisite | The retained data NetworkPolicy now permits the labelled environment namespace to reach PostgreSQL/NATS/MinIO; TLS and TCP probes passed. |
+| Freeze completion | fixed in source, not yet redeployed | The previous worker failure was caused by `SubmissionFreezeRequested` and `SubmissionFrozen` both using aggregate sequence 1, which violated the outbox uniqueness fence. `12069bbb` advances the completion event to sequence/revision 2. A new package and connected replay are still required. |
+| KubeVirt | intentionally skipped | The user limited this round to Container runtime verification; no VM completion claim is made. |
+| Release Gate / Sprint 2 | blocked | No same-build Container freeze/delete replay or machine-readable passing Release Gate exists yet. |
+
 | Capability | Owner | State | Current evidence | Blocker or limitation |
 | --- | --- | --- | --- | --- |
 | Six service and six PostgreSQL domain boundaries | A | implemented | Cargo workspace, service crates, deterministic catalog and one `0001_sprint2_baseline.sql` per domain; non-destructive adoption applies only to an empty domain or verifies the exact existing ledger; an earlier Draft head completed connected adoption | current-head adoption is pending; Resource has no Sprint 2 production path |

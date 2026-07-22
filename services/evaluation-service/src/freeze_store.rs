@@ -186,6 +186,16 @@ impl PgFreezeStore {
             || request.try_get::<String, _>("source_identity_sha256")?
                 != source_identity_sha256.to_string()
         {
+            tracing::error!(
+                event = "evaluation.freeze.idempotency_conflict",
+                frozen_submission_id = %frozen_submission_id,
+                environment_id = %environment_id,
+                persisted_environment_id = %request.try_get::<Uuid, _>("environment_id")?,
+                persisted_request_sha256 = %request.try_get::<String, _>("request_sha256")?,
+                request_sha256 = %request_sha256,
+                persisted_source_identity_sha256 = %request.try_get::<String, _>("source_identity_sha256")?,
+                source_identity_sha256 = %source_identity_sha256,
+            );
             transaction.rollback().await?;
             return Ok(BeginFreeze::Conflict);
         }

@@ -24,10 +24,14 @@ the design-decision blocker, but not the missing deployment or connected replay.
 
 - Local restricted Kubernetes API executors, independent ServiceAccounts/RBAC,
   generation fences and cleanup tombstones are implemented.
-- Blocker: no current same-build run proves Container and real hardware-KVM
-  KubeVirt create, access, stop, recover, freeze and residue-free deletion.
-- Exit: both runtimes pass lifecycle, identity drift, stale generation,
-  namespace ownership, network isolation, disk preservation and cleanup tests.
+- Container create/readiness has now passed on the current retained cluster,
+  including a fresh approved environment without revision churn. The remaining
+  Container blocker is the same-build freeze, access, stop/recover and
+  residue-free delete replay. KubeVirt is intentionally skipped in this round
+  and remains unverified.
+- Exit for the current Container slice: create, access, stop, recover, freeze,
+  delete and cleanup readback under one package/deployment identity. The full
+  Sprint 2 exit still additionally requires the real KubeVirt replay.
 - Owner: B implementation review; D connected Verify.
 
 The current broad Container/KubeVirt namespace CRUD ClusterRoles are an
@@ -46,8 +50,14 @@ admission boundary enforces the executor namespace/ServiceAccount fence.
   read-only SFTP certificate.
 - The coordinator, namespace-local immutable inputs, dedicated tokenless Worker
   ServiceAccount, NetworkPolicy and cleanup readback are implemented locally.
-- Blocker: B review and connected PVC/SFTP Job, restart and cleanup replay have
-  not run against the adopted cluster.
+- The first connected Container freeze attempts reached the worker and exposed
+  a source defect: the request and completion events reused aggregate sequence
+  1, so PostgreSQL rejected the completion outbox insert and the attempt became
+  `LW_COLLECT_DATABASE_FAILED`. Commit `12069bbb` advances the completion event
+  to sequence/revision 2. It is not yet packaged or replayed against the live
+  cluster.
+- Blocker: package/deploy `12069bbb`, then complete the Container PVC freeze,
+  restart and cleanup replay. VM/SFTP replay is explicitly deferred this round.
 - Exit: duplicate/reordered commands, expired leases/certificates, PV identity
   mismatch, host-key mismatch, partial upload, worker restart and all residue
   checks fail closed under B review and D connected Verify.
