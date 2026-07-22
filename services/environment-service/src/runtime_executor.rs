@@ -118,6 +118,7 @@ impl KubernetesContainerExecutor {
 
     async fn apply_plan(
         &self,
+        fence: &ContainerBackendFence,
         plan: &ContainerResourcePlan,
     ) -> Result<ContainerApplyObservation, ProviderFailure> {
         validate_plan(plan)?;
@@ -131,11 +132,45 @@ impl KubernetesContainerExecutor {
         for resource in plan
             .resources
             .iter()
-            .filter(|resource| resource.kind != "Namespace")
+            .filter(|resource| resource.kind != "Namespace" && resource.kind != "Deployment")
         {
             self.apply_resource(plan, resource).await?;
         }
+        self.wait_for_workspace_claim(fence, plan).await?;
+        let deployment = plan
+            .resources
+            .iter()
+            .find(|resource| resource.kind == "Deployment")
+            .ok_or_else(rejected)?;
+        self.apply_resource(plan, deployment).await?;
         self.observe_plan(plan).await
+    }
+
+    async fn wait_for_workspace_claim(
+        &self,
+        fence: &ContainerBackendFence,
+        plan: &ContainerResourcePlan,
+    ) -> Result<(), ProviderFailure> {
+        let claim = plan
+            .resources
+            .iter()
+            .find(|resource| resource.kind == "PersistentVolumeClaim")
+            .ok_or_else(rejected)?;
+        loop {
+            if timestamp()?.get() >= fence.deadline_at.get() {
+                return Err(unavailable());
+            }
+            let observed = self
+                .get_json("PersistentVolumeClaim", &plan.namespace, &claim.name)
+                .await?;
+            if workspace_claim_is_bound(observed.as_ref())? {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(
+                self.configuration.cleanup_poll_milliseconds,
+            ))
+            .await;
+        }
     }
 
     async fn ensure_registry_pull_secret(
@@ -805,12 +840,12 @@ impl ContainerExecutorBackend for KubernetesContainerExecutor {
     ) -> ContainerExecutorResponse {
         let result = match request {
             ContainerExecutorRequest::Apply { plan } => {
-                self.apply_plan(plan)
-                    .await
-                    .map(|observation| ContainerExecutorResponse::Observed {
+                self.apply_plan(fence, plan).await.map(|observation| {
+                    ContainerExecutorResponse::Observed {
                         plan_sha256: plan.plan_sha256,
                         observation,
-                    })
+                    }
+                })
             }
             ContainerExecutorRequest::Observe { plan } => {
                 self.observe_plan(plan).await.map(|observation| {
@@ -1087,6 +1122,21 @@ fn pointer_uuid(value: &Value, pointer: &str) -> Result<uuid::Uuid, ProviderFail
         .map_err(|_| invalid_observation())
 }
 
+fn workspace_claim_is_bound(claim: Option<&Value>) -> Result<bool, ProviderFailure> {
+    let Some(claim) = claim else {
+        return Ok(false);
+    };
+    let Some(phase) = claim.pointer("/status/phase") else {
+        return Ok(false);
+    };
+    match phase.as_str().ok_or_else(invalid_observation)? {
+        "Bound" => Ok(true),
+        "Pending" => Ok(false),
+        "Lost" => Err(rejected()),
+        _ => Err(invalid_observation()),
+    }
+}
+
 fn verify_namespace_identity(
     namespace: &Value,
     expected_name: &str,
@@ -1193,6 +1243,25 @@ mod tests {
 
         let invalid = json!({"status":{"observedGeneration":"one"}});
         assert!(pointer_u64_or_zero(&invalid, "/status/observedGeneration").is_err());
+    }
+
+    #[test]
+    fn workspace_claim_must_bind_before_the_runtime_deployment_is_applied() {
+        assert!(!workspace_claim_is_bound(None).expect("missing claim remains pending"));
+        assert!(
+            !workspace_claim_is_bound(Some(&json!({"metadata":{"name":"workspace"}})))
+                .expect("missing phase remains pending")
+        );
+        assert!(
+            !workspace_claim_is_bound(Some(&json!({"status":{"phase":"Pending"}})))
+                .expect("pending phase remains pending")
+        );
+        assert!(
+            workspace_claim_is_bound(Some(&json!({"status":{"phase":"Bound"}})))
+                .expect("bound phase is accepted")
+        );
+        assert!(workspace_claim_is_bound(Some(&json!({"status":{"phase":"Lost"}}))).is_err());
+        assert!(workspace_claim_is_bound(Some(&json!({"status":{"phase":1}}))).is_err());
     }
 
     #[test]
