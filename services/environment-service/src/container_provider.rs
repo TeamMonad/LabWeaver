@@ -2,6 +2,7 @@
 
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use contracts::authoring::{
@@ -144,17 +145,26 @@ pub trait ContainerProviderBackend: Send + Sync {
 pub struct NatsContainerProviderBackend {
     client: async_nats::Client,
     subject: String,
+    request_timeout: Duration,
 }
 
 impl NatsContainerProviderBackend {
     pub fn new(
         client: async_nats::Client,
         subject: String,
+        request_timeout: Duration,
     ) -> Result<Self, ReleaseProjectionError> {
-        if !valid_subject(&subject) {
+        if !valid_subject(&subject)
+            || request_timeout.is_zero()
+            || request_timeout > Duration::from_secs(300)
+        {
             return Err(ReleaseProjectionError::ConfigurationInvalid);
         }
-        Ok(Self { client, subject })
+        Ok(Self {
+            client,
+            subject,
+            request_timeout,
+        })
     }
 
     async fn request(
@@ -168,11 +178,27 @@ impl NatsContainerProviderBackend {
         let fence = bind_container_executor_request(*fence, &request)?;
         let payload = serde_json::to_vec(&ContainerExecutorRequestEnvelope { fence, request })
             .map_err(|_| invalid_observation())?;
+        let request = async_nats::Request::new()
+            .timeout(Some(self.request_timeout))
+            .payload(payload.into());
         let message = self
             .client
-            .request(self.subject.clone(), payload.into())
+            .send_request(self.subject.clone(), request)
             .await
-            .map_err(|_| unavailable())?;
+            .map_err(|error| {
+                tracing::warn!(
+                    event = "environment.container_provider.executor_request_failed",
+                    diagnostic = "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
+                    environment_id = %fence.environment_id,
+                    operation_id = %fence.operation_id,
+                    provider_step = fence.provider_step,
+                    attempt = fence.attempt,
+                    action = ?fence.action,
+                    timeout_milliseconds = self.request_timeout.as_millis(),
+                    error = %error
+                );
+                unavailable()
+            })?;
         if message.payload.len() > MAX_CONTAINER_EXECUTOR_MESSAGE_BYTES {
             return Err(invalid_observation());
         }

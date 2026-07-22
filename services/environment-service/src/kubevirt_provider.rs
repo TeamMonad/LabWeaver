@@ -1,6 +1,7 @@
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -185,14 +186,26 @@ pub trait KubeVirtProviderBackend: Send + Sync {
 pub struct NatsKubeVirtProviderBackend {
     client: async_nats::Client,
     subject: String,
+    request_timeout: Duration,
 }
 
 impl NatsKubeVirtProviderBackend {
-    pub fn new(client: async_nats::Client, subject: String) -> Result<Self, ProviderFailure> {
-        if !valid_subject(&subject) {
+    pub fn new(
+        client: async_nats::Client,
+        subject: String,
+        request_timeout: Duration,
+    ) -> Result<Self, ProviderFailure> {
+        if !valid_subject(&subject)
+            || request_timeout.is_zero()
+            || request_timeout > Duration::from_secs(300)
+        {
             return Err(configuration_invalid());
         }
-        Ok(Self { client, subject })
+        Ok(Self {
+            client,
+            subject,
+            request_timeout,
+        })
     }
 
     async fn request(
@@ -206,11 +219,27 @@ impl NatsKubeVirtProviderBackend {
         let fence = bind_kubevirt_executor_request(*fence, &request)?;
         let payload = serde_json::to_vec(&KubeVirtExecutorRequestEnvelope { fence, request })
             .map_err(|_| invalid_observation())?;
+        let request = async_nats::Request::new()
+            .timeout(Some(self.request_timeout))
+            .payload(payload.into());
         let message = self
             .client
-            .request(self.subject.clone(), payload.into())
+            .send_request(self.subject.clone(), request)
             .await
-            .map_err(|_| unavailable())?;
+            .map_err(|error| {
+                tracing::warn!(
+                    event = "environment.kubevirt_provider.executor_request_failed",
+                    diagnostic = "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
+                    environment_id = %fence.environment_id,
+                    operation_id = %fence.operation_id,
+                    provider_step = fence.provider_step,
+                    attempt = fence.attempt,
+                    action = ?fence.action,
+                    timeout_milliseconds = self.request_timeout.as_millis(),
+                    error = %error
+                );
+                unavailable()
+            })?;
         if message.payload.len() > MAX_RESPONSE_BYTES {
             return Err(invalid_observation());
         }

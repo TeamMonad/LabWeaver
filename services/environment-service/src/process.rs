@@ -42,6 +42,7 @@ const WORKER_ID: &str = "LABWEAVER_ENVIRONMENT_WORKER_ID";
 const SYSTEM_ACTOR_ID: &str = "LABWEAVER_ENVIRONMENT_SYSTEM_ACTOR_ID";
 
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(10);
+const EXECUTOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(9);
 const RECONCILE_LEASE: Duration = Duration::from_secs(15);
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 const OUTBOX_TIMEOUT: Duration = Duration::from_secs(5);
@@ -162,6 +163,7 @@ impl EnvironmentProcessRuntime {
                     let backend = Arc::new(NatsContainerProviderBackend::new(
                         nats.clone(),
                         configuration.subject.clone(),
+                        EXECUTOR_REQUEST_TIMEOUT,
                     )?);
                     let provider = ContainerProvider::new(
                         configuration.binding.clone(),
@@ -203,6 +205,7 @@ impl EnvironmentProcessRuntime {
                         NatsKubeVirtProviderBackend::new(
                             nats.clone(),
                             configuration.subject.clone(),
+                            EXECUTOR_REQUEST_TIMEOUT,
                         )
                         .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)?,
                     );
