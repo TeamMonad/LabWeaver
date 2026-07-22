@@ -574,12 +574,21 @@ impl FreezeCoordinator {
             ("v1", "secrets"),
             ("networking.k8s.io/v1", "networkpolicies"),
         ] {
-            if self
-                .get(namespace, api_version, plural, name)
-                .await?
-                .is_some()
-            {
-                return Ok(false);
+            if let Some(resource) = self.get(namespace, api_version, plural, name).await? {
+                // A foreground Job deletion remains observable until its Pods have terminated.
+                // Once deletionTimestamp is set, the API server has accepted the destructive
+                // request and Kubernetes owns the remaining garbage collection. Treating that
+                // state as pending caused the coordinator to recreate the Job after it vanished,
+                // leaving a terminal command in an endless create/delete loop.
+                let deleting = api_version == "batch/v1"
+                    && plural == "jobs"
+                    && resource
+                        .pointer("/metadata/deletionTimestamp")
+                        .and_then(Value::as_str)
+                        .is_some();
+                if !deleting {
+                    return Ok(false);
+                }
             }
         }
         Ok(true)
