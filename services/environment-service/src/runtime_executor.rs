@@ -372,7 +372,7 @@ impl KubernetesContainerExecutor {
         fence: &ContainerBackendFence,
         plan: &ContainerResourcePlan,
     ) -> Result<ArtifactRef, ProviderFailure> {
-        validate_plan(plan)?;
+        validate_cleanup_plan(plan)?;
         let namespace_url =
             self.namespaced_url(&format!("/api/v1/namespaces/{}", plan.namespace))?;
         loop {
@@ -1022,6 +1022,16 @@ fn validate_plan(plan: &ContainerResourcePlan) -> Result<(), ProviderFailure> {
     Ok(())
 }
 
+fn validate_cleanup_plan(plan: &ContainerResourcePlan) -> Result<(), ProviderFailure> {
+    if plan.namespace != format!("lw-env-{}", plan.environment_id)
+        || !plan.image.is_empty()
+        || !plan.resources.is_empty()
+    {
+        return Err(rejected());
+    }
+    Ok(())
+}
+
 fn validate_kubevirt_plan(plan: &KubeVirtResourcePlan) -> Result<(), ProviderFailure> {
     if plan.namespace != format!("lw-env-{}", plan.environment_id)
         || plan.virtual_machine_name != "runtime"
@@ -1363,6 +1373,20 @@ mod tests {
             resource_path("VirtualMachine"),
             Ok(("/apis/kubevirt.io/v1", "virtualmachines", true))
         ));
+    }
+
+    #[test]
+    fn cleanup_plan_does_not_require_provisioning_resources() {
+        let environment_id = contracts::EnvironmentId::new();
+        let cleanup = ContainerResourcePlan {
+            environment_id,
+            namespace: format!("lw-env-{environment_id}"),
+            image: String::new(),
+            resources: Vec::new(),
+            plan_sha256: Sha256Digest::of_bytes(b"cleanup"),
+        };
+        assert!(validate_cleanup_plan(&cleanup).is_ok());
+        assert!(validate_plan(&cleanup).is_err());
     }
 
     #[test]
