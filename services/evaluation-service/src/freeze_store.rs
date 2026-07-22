@@ -517,8 +517,11 @@ async fn enqueue_frozen_event(
         datacontenttype: "application/json".to_owned(),
         dataschema: contract.data_schema(),
         course_id: submission.course_id,
-        aggregate_revision: Revision::new(1).map_err(|_| FreezeStoreError::ContractInvalid)?,
-        aggregate_sequence: Sequence(1),
+        // The request event is the first event for this aggregate.  The frozen
+        // result must advance the same stream instead of colliding with the
+        // outbox `(aggregate_id, aggregate_sequence)` uniqueness fence.
+        aggregate_revision: Revision::new(2).map_err(|_| FreezeStoreError::ContractInvalid)?,
+        aggregate_sequence: Sequence(2),
         trace_id: trace_id.to_owned(),
         data,
     };
@@ -535,7 +538,7 @@ async fn enqueue_frozen_event(
         subjects::SUBMISSION_FROZEN,
         subjects::SUBMISSION_FROZEN,
         submission.id.as_uuid(),
-        1,
+        2,
         &payload,
         payload_sha256,
     )
