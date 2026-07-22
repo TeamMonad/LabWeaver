@@ -408,7 +408,8 @@ impl FreezeCoordinator {
             &self.configuration.worker_service_account_name,
             json!({"apiVersion":"v1","kind":"ServiceAccount","metadata":{"name":self.configuration.worker_service_account_name,
                 "namespace":namespace,"labels":{"app.kubernetes.io/managed-by":FIELD_MANAGER,"app.kubernetes.io/name":"evaluation-freeze-worker"}},
-                "automountServiceAccountToken":false}),
+                "automountServiceAccountToken":false,
+                "imagePullSecrets":[{"name":"harbor-course-pull"}]}),
         )
         .await?;
         let mut egress = vec![
