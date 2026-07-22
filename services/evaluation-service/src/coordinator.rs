@@ -435,7 +435,7 @@ impl FreezeCoordinator {
         .await?;
         let mut volumes = vec![
             json!({"name":"command","configMap":{"name":job_name}}),
-            json!({"name":"secrets","secret":{"secretName":job_name,"defaultMode":256}}),
+            json!({"name":"secrets","secret":{"secretName":job_name,"defaultMode":292}}),
         ];
         let mut mounts = vec![
             json!({"name":"command","mountPath":"/etc/labweaver/worker","readOnly":true}),
@@ -456,7 +456,7 @@ impl FreezeCoordinator {
             "apiVersion":"batch/v1","kind":"Job","metadata":{"name":job_name,"namespace":namespace,"labels":labels},
             "spec":{"backoffLimit":0,"activeDeadlineSeconds":self.configuration.job_active_deadline_seconds,
                 "template":{"metadata":{"labels":labels},"spec":{"restartPolicy":"Never","serviceAccountName":self.configuration.worker_service_account_name,
-                    "automountServiceAccountToken":false,"securityContext":{"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}},
+                    "automountServiceAccountToken":false,"securityContext":{"runAsNonRoot":true,"runAsUser":65532,"runAsGroup":65532,"fsGroup":65532,"seccompProfile":{"type":"RuntimeDefault"}},
                     "containers":[{"name":"freeze","image":self.configuration.worker_image,"imagePullPolicy":"IfNotPresent",
                         "args":["--mode","freeze-worker"],"env":[
                             {"name":"LABWEAVER_EVALUATION_CONFIG_FILE","value":"/etc/labweaver/worker/worker.yaml"},
