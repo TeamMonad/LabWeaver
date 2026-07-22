@@ -187,6 +187,7 @@ fn plan_uses_digest_only_image_and_only_the_access_proxy() {
         workspace.document.pointer("/spec/accessModes/0"),
         Some(&json!("ReadWriteMany"))
     );
+    assert_freeze_quota(resource(&first, "ResourceQuota"));
     assert!(
         first
             .resources
@@ -218,6 +219,32 @@ fn plan_uses_digest_only_image_and_only_the_access_proxy() {
             .document
             .pointer("/spec/ingress/0/from/0/podSelector/matchLabels/app.kubernetes.io~1name"),
         Some(&json!("access-service"))
+    );
+}
+
+fn assert_freeze_quota(quota: &environment_service::ContainerResource) {
+    assert_eq!(
+        quota.document.pointer("/spec/hard/requests.cpu"),
+        Some(&json!("1100m"))
+    );
+    assert_eq!(
+        quota.document.pointer("/spec/hard/limits.cpu"),
+        Some(&json!("2000m"))
+    );
+    assert_eq!(
+        quota.document.pointer("/spec/hard/requests.memory"),
+        Some(&json!(1_207_959_552_u64.to_string()))
+    );
+    assert_eq!(
+        quota.document.pointer("/spec/hard/limits.memory"),
+        Some(&json!(2_147_483_648_u64.to_string()))
+    );
+    assert_eq!(quota.document.pointer("/spec/hard/pods"), Some(&json!("2")));
+    assert_eq!(
+        quota
+            .document
+            .pointer("/metadata/annotations/labweaver.io~1freeze-request-cpu-millicores"),
+        Some(&json!("100"))
     );
 }
 

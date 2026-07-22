@@ -31,6 +31,14 @@ use crate::{
 
 pub const CONTAINER_BACKEND_PROTOCOL_VERSION: u8 = 2;
 const MAX_CONTAINER_EXECUTOR_MESSAGE_BYTES: usize = 1024 * 1024;
+// The Evaluation freeze coordinator is the only additional workload admitted to a
+// Sprint 2 Container environment namespace. Keep its fixed budget aligned with
+// `evaluation-service::coordinator` and account for it in the namespace quota so
+// submission freezing cannot deadlock behind the running environment Pod.
+const FREEZE_REQUEST_CPU_MILLICORES: u32 = 100;
+const FREEZE_LIMIT_CPU_MILLICORES: u32 = 1_000;
+const FREEZE_REQUEST_MEMORY_BYTES: u64 = 128 * 1024 * 1024;
+const FREEZE_LIMIT_MEMORY_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// One server-side-apply document. The name is deterministic and never user-controlled.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -1258,6 +1266,22 @@ where
         }
         let cpu = format!("{}m", resources.cpu_millicores);
         let memory = resources.memory_bytes.to_string();
+        let quota_request_cpu = resources
+            .cpu_millicores
+            .checked_add(FREEZE_REQUEST_CPU_MILLICORES)
+            .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
+        let quota_limit_cpu = resources
+            .cpu_millicores
+            .checked_add(FREEZE_LIMIT_CPU_MILLICORES)
+            .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
+        let quota_request_memory = resources
+            .memory_bytes
+            .checked_add(FREEZE_REQUEST_MEMORY_BYTES)
+            .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
+        let quota_limit_memory = resources
+            .memory_bytes
+            .checked_add(FREEZE_LIMIT_MEMORY_BYTES)
+            .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
         let storage = resources.storage_bytes.to_string();
         let mut documents = vec![
             resource(
@@ -1275,8 +1299,26 @@ where
                 "runtime-quota",
                 json!({
                     "apiVersion":"v1","kind":"ResourceQuota",
-                    "metadata":{"name":"runtime-quota","namespace":namespace,"labels":labels},
-                    "spec":{"hard":{"requests.cpu":cpu,"limits.cpu":cpu,"requests.memory":memory,"limits.memory":memory,"requests.storage":storage,"persistentvolumeclaims":"1","pods":"1"}}
+                    "metadata":{
+                        "name":"runtime-quota",
+                        "namespace":namespace,
+                        "labels":labels,
+                        "annotations":{
+                            "labweaver.io/freeze-request-cpu-millicores":FREEZE_REQUEST_CPU_MILLICORES.to_string(),
+                            "labweaver.io/freeze-limit-cpu-millicores":FREEZE_LIMIT_CPU_MILLICORES.to_string(),
+                            "labweaver.io/freeze-request-memory-bytes":FREEZE_REQUEST_MEMORY_BYTES.to_string(),
+                            "labweaver.io/freeze-limit-memory-bytes":FREEZE_LIMIT_MEMORY_BYTES.to_string()
+                        }
+                    },
+                    "spec":{"hard":{
+                        "requests.cpu":format!("{quota_request_cpu}m"),
+                        "limits.cpu":format!("{quota_limit_cpu}m"),
+                        "requests.memory":quota_request_memory.to_string(),
+                        "limits.memory":quota_limit_memory.to_string(),
+                        "requests.storage":storage,
+                        "persistentvolumeclaims":"1",
+                        "pods":"2"
+                    }}
                 }),
             ),
             resource(
