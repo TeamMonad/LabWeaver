@@ -28,16 +28,15 @@ the design-decision blocker, but not the missing deployment or connected replay.
   stop, and start now pass on a fresh published Container release. The
   Environment worker fix is `8c08fe4e`; it accepts the provider's immediate
   `Stopped -> Ready` observation instead of converting it to a failure.
-- Delete was accepted with access revocation recorded, but cleanup is blocked by
-  the retained cluster's external `finalizers.kubesphere.io/namespaces`
-  metadata finalizer. The executor fails closed rather than removing an
-  external finalizer. The namespace remains active, so residue-free deletion is
-  not claimed. KubeVirt is intentionally skipped in this round and remains
-  unverified.
-- Exit for the current Container slice: obtain an approved cleanup policy for
-  the external namespace finalizer (or have the cluster owner remove it), then
-  rerun delete and namespace/PVC readback under the same identity. The full
-  Sprint 2 exit still additionally requires the real KubeVirt replay.
+- Delete and cleanup now pass on the same Container identity after fixing the
+  cleanup-plan validator, failed-operation fence tombstone, KubeSphere finalizer
+  race, MinIO object-prefix binding and versioned evidence write. The namespace
+  and runtime resources are absent after the application-owned cleanup request.
+  The retained `labweaver-artifacts` bucket has versioning but no Object Lock;
+  cleanup evidence therefore uses conditional versioned immutable storage and
+  does not claim Governance Lock.
+- KubeVirt is intentionally skipped in this round and remains unverified. The
+  full Sprint 2 exit still additionally requires the real KubeVirt replay.
 - Owner: B implementation review; D connected Verify.
 
 The current broad Container/KubeVirt namespace CRUD ClusterRoles are an

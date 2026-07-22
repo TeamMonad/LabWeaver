@@ -26,9 +26,9 @@ the presence of this document.
 
 ## Current connected slice (2026-07-23)
 
-The current source identity is `8c08fe4e` on `release/sprint2`; the deployed
+The current source identity is `5ca719cc` on `release/sprint2`; the deployed
 Environment worker contains the same source line as
-`harbor.lab.lan/labweaver-system/environment-service@sha256:c43101f7f042f879d34a6bc34ca9a14720629b00dfb88c132742c796026802d8`.
+`harbor.lab.lan/labweaver-system/environment-service@sha256:7fe414023942ddbc5919621108c60c793bd5701134346a136c78f598ddd02c2d`.
 The deployed Evaluation worker remains the same implementation line at source
 `c14c5eda`. The live
 cluster was reached through the direct architect kubeconfig; retained
@@ -43,9 +43,9 @@ infrastructure was not deleted or rebuilt.
 | Container access | verified prerequisite | A real student session created an AccessGrant for the fresh Container environment after endpoint discovery; the grant was course- and environment-scoped. Gateway protocol replay remains pending. |
 | Container freeze | verified | Fresh environment `019f8b1a-f95f-7551-a5ce-33f4c26466fd` froze submission `019f8b1b-e2e7-7212-9272-a5b89160cc98` from the mounted workspace; the immutable object was materialized by the Evaluation worker and the freeze command completed. |
 | Container stop/start | verified | The same fresh environment accepted stop (`stopped`, revision 10), then start (`ready`, revision 12) after the lifecycle fix allowing an immediate `Stopped → Ready` provider observation. |
-| Container delete/cleanup | blocked | Delete was accepted with access revocation recorded, but the retained cluster's namespace has an external `finalizers.kubesphere.io/namespaces` metadata finalizer. The executor fails closed instead of removing an external finalizer; the namespace remains active and no residue-free cleanup claim is made. |
+| Container delete/cleanup | verified | After the cleanup-plan, fence replay, finalizer-race and MinIO-prefix fixes, environment `019f8b1a-f95f-7551-a5ce-33f4c26466fd` reached `deleted` (revision 42) with cleanup artifact version `d7cfd573-6d27-48d9-8ea2-1e6407cd3da0`; the namespace and its runtime resources are absent. The retained `labweaver-artifacts` bucket has versioning but no Object Lock, so this evidence uses conditional versioned immutable storage rather than Governance Lock. |
 | KubeVirt | intentionally skipped | The user limited this round to Container runtime verification; no VM completion claim is made. |
-| Release Gate / Sprint 2 | blocked | Container create/access/freeze/stop/start now pass on the current identity; delete cleanup is blocked by the external namespace finalizer, and no machine-readable passing Release Gate exists. |
+| Release Gate / Sprint 2 | blocked | Container create/access/freeze/stop/start/delete now pass on the current identity; KubeVirt was intentionally skipped and no machine-readable passing Release Gate exists. |
 
 | Capability | Owner | State | Current evidence | Blocker or limitation |
 | --- | --- | --- | --- | --- |
@@ -56,7 +56,7 @@ infrastructure was not deleted or rebuilt.
 | Claude Code Agent runtime | B | implemented; previous head deployed | bounded process runtime, leases, cancellation, candidate validation and explicit ECNU Anthropic-compatible endpoint/Secret binding; retained data proves two real ECNU runs completed both tracks, while their completion projection exhausted redelivery before producing Control candidates | the current BFF repair must be deployed before a fresh same-head dual-candidate replay; retained runs are diagnostic evidence only |
 | BuildKit/Harbor/Trivy supply chain | B | implemented; previous head packaged | fixed-command `build-executor`, persistent fence and negative tests; source `da498a2643a83e32b3ab6cab3465771a019d1882` produced seven digest-bound Harbor images and passed connected `package-validate` against the locked Trivy database | the BFF repair changes the source identity and therefore requires a new package; a real course build/publication remains pending |
 | Environment lifecycle and owner resolver | B/A | implemented locally | lifecycle, PostgreSQL, JetStream, mTLS and typed executor tests | deployed owner/executor API path is pending |
-| Container runtime | B | implemented locally | deterministic plan, persistent fence and restricted Kubernetes SSA/observe/scale/restart/delete backend | connected Kubernetes apply, object-lock cleanup and access replay are pending |
+| Container runtime | B | connected Container slice verified | deterministic plan, persistent fence, restricted Kubernetes SSA/observe/scale/restart/delete backend, finalizer-race handling and versioned cleanup evidence | KubeVirt replay and Gateway protocol replay remain pending; the retained artifact bucket does not provide Object Lock |
 | KubeVirt runtime | B | implemented locally; retained platform recovered | deterministic VM/CDI plan, independent persistent fence, restricted API/subresource backend and SSH host-key probe; KubeVirt is `Deployed`, current API/controller/operator/handler replicas and CDI deployments are Ready after the control-plane recovery | real base-disk/guest-agent/SSH/cleanup replay is pending; readiness alone is not VM evidence |
 | AccessGrant and session authorization | A | implemented locally | fixed local OpenSSH account, post-auth alias redemption, one-time token and session contracts; HTTP(S) grants use same-origin `/connect` paths with per-request Access and Environment revalidation and no direct runtime route | built Gateway image, connected HTTP/SSH denial, expiry and revocation replay are pending; Upgrade is explicitly outside Sprint 2 |
 | Freeze-only Evaluation Service | B | implemented locally | Evaluation-owned public API, Access BFF authorization, PostgreSQL command/outbox, Environment-issued PVC/299-second read-only VM binding, bounded Kubernetes Job/Secret/ConfigMap/NetworkPolicy reconciliation, immutable MinIO Object Lock, restart recovery and cleanup readback | connected deployment and real PVC/VM replay are pending; Runner, Checker, Aggregator and scoring are excluded |
