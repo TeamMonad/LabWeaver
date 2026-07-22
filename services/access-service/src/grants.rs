@@ -48,7 +48,10 @@ use super::{
 };
 
 const TERMINATION_SECONDS: i64 = 60;
-const ACCESS_REVOCATION_SUBJECT: &str = "labweaver.access.revoke.v1";
+// This request/reply subject deliberately sits outside the persisted
+// `labweaver.access.>` event stream. Otherwise JetStream's PubAck races the
+// authoritative Access response and the caller can observe the wrong payload.
+const ACCESS_REVOCATION_SUBJECT: &str = "labweaver.service.access.revoke.v1";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

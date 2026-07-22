@@ -124,7 +124,7 @@ workloads:
       LABWEAVER_ENVIRONMENT_RELEASE_CONSUMER: environment-release-v1
       LABWEAVER_ENVIRONMENT_RELEASE_QUARANTINE_SUBJECT: labweaver.environment.release.quarantine.v1
       LABWEAVER_ENVIRONMENT_PROVIDER_BINDINGS_PATH: /etc/labweaver/config/providers.json
-      LABWEAVER_ACCESS_REVOCATION_SUBJECT: labweaver.access.revoke.v1
+      LABWEAVER_ACCESS_REVOCATION_SUBJECT: labweaver.service.access.revoke.v1
       LABWEAVER_RESOURCE_LEASE_VERIFICATION_SUBJECT: labweaver.resource.lease.verify.v1
       LABWEAVER_ENVIRONMENT_WORKER_ID: environment-service-sprint2
     secretEnv:

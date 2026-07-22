@@ -68,11 +68,12 @@ class FoundationAuthoringTests(unittest.TestCase):
 
         access_publish, access_subscribe, access_response = FOUNDATION.NATS_USERS["access-service"]
         self.assertEqual(access_publish, ("labweaver.access.>",))
-        self.assertEqual(access_subscribe, ("labweaver.access.revoke.v1",))
+        self.assertEqual(access_subscribe, ("labweaver.service.access.revoke.v1",))
         self.assertTrue(access_response)
+        self.assertFalse(access_subscribe[0].startswith("labweaver.access."))
 
         environment_publish, _, _ = FOUNDATION.NATS_USERS["environment-service"]
-        self.assertIn("labweaver.access.revoke.v1", environment_publish)
+        self.assertIn("labweaver.service.access.revoke.v1", environment_publish)
 
         for consumer in (
             "control-service",
