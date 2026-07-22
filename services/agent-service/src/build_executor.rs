@@ -223,7 +223,7 @@ impl ProductionBuildExecutor {
             &command.request.output_repository,
             &self.config.harbor_registry,
         )?;
-        let object = self
+        let object = match self
             .objects
             .read_verified(
                 &command.request.context_object_key,
@@ -233,19 +233,48 @@ impl ProductionBuildExecutor {
                 &command.request.context.media_type,
             )
             .await
-            .map_err(|_| rejected())?;
+        {
+            Ok(object) => object,
+            Err(error) => {
+                tracing::warn!(
+                    event = "agent.build_executor.context_rejected",
+                    build_request_id = %context.build_request_id,
+                    object_key = %command.request.context_object_key,
+                    object_version = %command.request.context.object_version,
+                    expected_size_bytes = command.request.context.size_bytes,
+                    expected_media_type = %command.request.context.media_type,
+                    diagnostic_code = error.diagnostic_code(),
+                );
+                return Err(rejected());
+            }
+        };
         let workspace = TempDir::new_in(&self.config.work_directory).map_err(|_| unavailable())?;
-        unpack_context(
+        if let Err(failure) = unpack_context(
             &object.bytes,
             &command.request.context.media_type,
             workspace.path(),
             self.config.max_unpacked_context_bytes,
-        )?;
-        validate_dockerfile(
+        ) {
+            tracing::warn!(
+                event = "agent.build_executor.context_unpack_rejected",
+                build_request_id = %context.build_request_id,
+                code = ?failure.code,
+            );
+            return Err(failure);
+        }
+        if let Err(failure) = validate_dockerfile(
             workspace.path(),
             &command.request.dockerfile_path,
             &command.request.base_image_digest,
-        )?;
+        ) {
+            tracing::warn!(
+                event = "agent.build_executor.dockerfile_rejected",
+                build_request_id = %context.build_request_id,
+                dockerfile_path = %command.request.dockerfile_path,
+                code = ?failure.code,
+            );
+            return Err(failure);
+        }
         let tag = candidate_tag(identity);
         let tagged = format!("{}:{tag}", command.request.output_repository);
         let metadata = workspace.path().join("build-metadata.json");
