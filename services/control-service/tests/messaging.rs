@@ -89,6 +89,9 @@ async fn control_projection_is_transactional_across_duplicate_restart_outage_and
         "requested",
         None,
     )?;
+    service
+        .project_agent_run(EventId::new(), &requested)
+        .await?;
     publish(&context, &event1).await?;
     let mut consumer = AgentRunConsumer::bind(
         client.clone(),
