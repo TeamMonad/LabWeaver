@@ -20,8 +20,8 @@ use contracts::{
         EnvironmentSummary,
     },
     http::{
-        CreateEnvironmentRequest, DEFAULT_PAGE_LIMIT, EnvironmentInventoryQuery, IdempotencyKey,
-        OperationAccepted, SnapshotPage, StrongEtag,
+        CreateEnvironmentRequest, DEFAULT_PAGE_LIMIT, EnvironmentInventoryQuery,
+        EnvironmentOperationAccepted, IdempotencyKey, SnapshotPage, StrongEtag,
     },
     submission::{EnvironmentFreezeBinding, EnvironmentFreezeBindingRequest},
 };
@@ -227,7 +227,7 @@ async fn create_environment(
     caller: Option<Extension<VerifiedCallerIdentity>>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<(StatusCode, Json<OperationAccepted>), EnvironmentApiError> {
+) -> Result<(StatusCode, Json<EnvironmentOperationAccepted>), EnvironmentApiError> {
     require_access_bff(caller)?;
     let actor_id = actor(&headers)?;
     require_session(&headers)?;
@@ -323,7 +323,7 @@ macro_rules! lifecycle_handler {
             caller: Option<Extension<VerifiedCallerIdentity>>,
             Path(environment_id): Path<EnvironmentId>,
             headers: HeaderMap,
-        ) -> Result<(StatusCode, Json<OperationAccepted>), EnvironmentApiError> {
+        ) -> Result<(StatusCode, Json<EnvironmentOperationAccepted>), EnvironmentApiError> {
             accept_lifecycle(
                 &state,
                 caller,
@@ -371,7 +371,7 @@ async fn accept_lifecycle(
     kind: EnvironmentOperationKind,
     revocation_reason: Option<&'static str>,
     preserve_mutable_disk: bool,
-) -> Result<(StatusCode, Json<OperationAccepted>), EnvironmentApiError> {
+) -> Result<(StatusCode, Json<EnvironmentOperationAccepted>), EnvironmentApiError> {
     require_access_bff(caller)?;
     require_session(headers)?;
     let instance = load_owned(state, environment_id, actor(headers)?).await?;

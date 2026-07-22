@@ -9,7 +9,7 @@ use contracts::environment::{
 use contracts::events::{
     CloudEvent, EVENT_CONTRACTS, EnvironmentEvent, EventContract, SPEC_VERSION, subjects,
 };
-use contracts::http::{IdempotencyKey, OperationAccepted};
+use contracts::http::{EnvironmentOperationAccepted, IdempotencyKey};
 use contracts::{
     CourseId, EnvironmentId, EventId, OperationId, Revision, Sequence, Sha256Digest, UtcTimestamp,
 };
@@ -58,7 +58,7 @@ pub struct InboundLifecycleCommand {
 /// Durable Inbox decision and, only for the next event, its atomic lifecycle result.
 #[derive(Clone, Debug, PartialEq)]
 pub enum InboundCommandDecision {
-    Applied(OperationAccepted),
+    Applied(EnvironmentOperationAccepted),
     Duplicate,
     Stale,
     Gap,
@@ -90,7 +90,7 @@ impl PgEnvironmentStore {
         &self,
         idempotency_key: &str,
         instance: &EnvironmentInstance,
-    ) -> Result<OperationAccepted, EnvironmentStoreError> {
+    ) -> Result<EnvironmentOperationAccepted, EnvironmentStoreError> {
         let mut transaction = self.pool.begin().await?;
         let accepted = create_in_transaction(&mut transaction, idempotency_key, instance).await?;
         transaction.commit().await?;
@@ -102,7 +102,7 @@ impl PgEnvironmentStore {
         &self,
         idempotency_key: &str,
         command: &LifecycleCommand,
-    ) -> Result<OperationAccepted, EnvironmentStoreError> {
+    ) -> Result<EnvironmentOperationAccepted, EnvironmentStoreError> {
         let mut transaction = self.pool.begin().await?;
         let accepted = accept_command_in_transaction(
             &mut transaction,
@@ -124,7 +124,7 @@ impl PgEnvironmentStore {
         command: &LifecycleCommand,
         create: Option<&EnvironmentCreateSpec>,
         course_id: CourseId,
-    ) -> Result<OperationAccepted, EnvironmentStoreError> {
+    ) -> Result<EnvironmentOperationAccepted, EnvironmentStoreError> {
         let mut transaction = self.pool.begin().await?;
         let accepted = accept_command_in_transaction(
             &mut transaction,
@@ -443,7 +443,7 @@ async fn create_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     idempotency_key: &str,
     instance: &EnvironmentInstance,
-) -> Result<OperationAccepted, EnvironmentStoreError> {
+) -> Result<EnvironmentOperationAccepted, EnvironmentStoreError> {
     IdempotencyKey::parse(idempotency_key)
         .map_err(|_| EnvironmentStoreError::InvalidIdempotencyKey)?;
     instance.validate()?;
@@ -651,7 +651,7 @@ async fn accept_command_in_transaction(
     create: Option<&EnvironmentCreateSpec>,
     lease_authorization: Option<EnvironmentLeaseAuthorization>,
     course_id: Option<CourseId>,
-) -> Result<OperationAccepted, EnvironmentStoreError> {
+) -> Result<EnvironmentOperationAccepted, EnvironmentStoreError> {
     if command.kind == EnvironmentOperationKind::Create {
         let authority_now = database_now(transaction).await?;
         let instance = build_create_instance(
@@ -939,14 +939,15 @@ async fn database_now(
     UtcTimestamp::from_utc(value).map_err(Into::into)
 }
 
-fn accepted_response(instance: &EnvironmentInstance) -> OperationAccepted {
-    OperationAccepted {
+fn accepted_response(instance: &EnvironmentInstance) -> EnvironmentOperationAccepted {
+    EnvironmentOperationAccepted {
         operation_id: instance.operation.id,
         revision: instance.revision,
         status_url: format!(
             "/api/v1/environments/{}/operations/{}",
             instance.id, instance.operation.id
         ),
+        environment_id: instance.id,
     }
 }
 

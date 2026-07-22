@@ -87,6 +87,11 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
 
     let instance = requested_instance();
     let accepted = store.create("create-key-0001", &instance).await?;
+    assert_eq!(accepted.environment_id, instance.id);
+    assert_eq!(
+        serde_json::to_value(&accepted)?["environmentId"],
+        instance.id.to_string()
+    );
     let replay = store.create("create-key-0001", &instance).await?;
     assert_eq!(accepted, replay);
 
