@@ -508,7 +508,12 @@ impl PgContainerExecutorFenceStore {
             if last_response.is_none() && authority_now < previous_deadline {
                 return Err(ContainerExecutorFenceError::InProgress);
             }
-            if tombstoned {
+            let cleanup_succeeded = last_response
+                .as_ref()
+                .and_then(|value| value.get("status"))
+                .and_then(Value::as_str)
+                == Some("deleted");
+            if tombstoned && cleanup_succeeded {
                 return Err(ContainerExecutorFenceError::Tombstoned);
             }
             if fence.operation_generation < highest_generation
@@ -534,7 +539,7 @@ impl PgContainerExecutorFenceStore {
             .bind(fence.operation_id.as_uuid())
             .bind(i32::try_from(fence.provider_step).map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?)
             .bind(i32::try_from(fence.attempt).map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?)
-            .bind(fence.action == ReconcileAction::Cleanup)
+            .bind(false)
             .bind(reconcile_action_name(fence.action))
             .bind(fence.request_id.to_string())
             .bind(fence.deadline_at.get())
@@ -560,7 +565,7 @@ impl PgContainerExecutorFenceStore {
                 i32::try_from(fence.attempt)
                     .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?,
             )
-            .bind(fence.action == ReconcileAction::Cleanup)
+            .bind(false)
             .bind(reconcile_action_name(fence.action))
             .bind(fence.request_id.to_string())
             .bind(fence.deadline_at.get())
@@ -579,7 +584,8 @@ impl PgContainerExecutorFenceStore {
         let value = serde_json::to_value(response)
             .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
         let updated = sqlx::query(
-            "UPDATE environment.container_executor_fences SET last_response=$7,updated_at=clock_timestamp() \
+            "UPDATE environment.container_executor_fences SET last_response=$7, \
+                 tombstoned=CASE WHEN $8 THEN TRUE ELSE tombstoned END,updated_at=clock_timestamp() \
              WHERE environment_id=$1 AND highest_generation=$2 AND operation_id=$3 \
                AND provider_step=$4 AND attempt=$5 AND last_request_id=$6 AND last_response IS NULL",
         )
@@ -590,6 +596,7 @@ impl PgContainerExecutorFenceStore {
         .bind(i32::try_from(fence.attempt).map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?)
         .bind(fence.request_id.to_string())
         .bind(value)
+        .bind(matches!(response, ContainerExecutorResponse::Deleted { .. }))
         .execute(&self.pool)
         .await?;
         if updated.rows_affected() != 1 {

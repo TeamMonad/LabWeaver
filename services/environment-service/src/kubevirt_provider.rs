@@ -569,7 +569,12 @@ impl PgKubeVirtExecutorFenceStore {
             if last_response.is_none() && authority_now < previous_deadline {
                 return Err(KubeVirtExecutorFenceError::InProgress);
             }
-            if tombstoned {
+            let cleanup_succeeded = last_response
+                .as_ref()
+                .and_then(|value| value.get("status"))
+                .and_then(Value::as_str)
+                == Some("deleted");
+            if tombstoned && cleanup_succeeded {
                 return Err(KubeVirtExecutorFenceError::Tombstoned);
             }
             if fence.environment_generation < highest_generation
@@ -604,7 +609,7 @@ impl PgKubeVirtExecutorFenceStore {
                 i32::try_from(fence.attempt)
                     .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?,
             )
-            .bind(fence.action == ReconcileAction::Cleanup)
+            .bind(false)
             .bind(kubevirt_action_name(fence.action))
             .bind(fence.request_id.to_string())
             .bind(fence.deadline_at.get())
@@ -630,7 +635,7 @@ impl PgKubeVirtExecutorFenceStore {
                 i32::try_from(fence.attempt)
                     .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?,
             )
-            .bind(fence.action == ReconcileAction::Cleanup)
+            .bind(false)
             .bind(kubevirt_action_name(fence.action))
             .bind(fence.request_id.to_string())
             .bind(fence.deadline_at.get())
@@ -649,7 +654,8 @@ impl PgKubeVirtExecutorFenceStore {
         let value = serde_json::to_value(response)
             .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?;
         let updated = sqlx::query(
-            "UPDATE environment.kubevirt_executor_fences SET last_response=$7,updated_at=clock_timestamp() \
+            "UPDATE environment.kubevirt_executor_fences SET last_response=$7, \
+                 tombstoned=CASE WHEN $8 THEN TRUE ELSE tombstoned END,updated_at=clock_timestamp() \
              WHERE environment_id=$1 AND highest_generation=$2 AND operation_id=$3 \
                AND provider_step=$4 AND attempt=$5 AND last_request_id=$6 AND last_response IS NULL",
         )
@@ -660,6 +666,7 @@ impl PgKubeVirtExecutorFenceStore {
         .bind(i32::try_from(fence.attempt).map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?)
         .bind(fence.request_id.to_string())
         .bind(value)
+        .bind(matches!(response, KubeVirtExecutorResponse::Deleted { .. }))
         .execute(&self.pool)
         .await?;
         if updated.rows_affected() != 1 {
