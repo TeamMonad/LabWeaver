@@ -20,7 +20,9 @@ use russh::keys::ssh_key::{LineEnding, PrivateKey, private::Ed25519Keypair};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{FreezeRequest, PgFreezeCommandStore, SubmissionFreezeCommand};
+use crate::{
+    FreezeCommandStoreError, FreezeRequest, PgFreezeCommandStore, SubmissionFreezeCommand,
+};
 
 const FIELD_MANAGER: &str = "labweaver-freeze-coordinator";
 const MAX_BOUND_FILE_BYTES: u64 = 1024 * 1024;
@@ -224,14 +226,23 @@ impl FreezeCoordinator {
                 .unwrap_or(0)
                 > 0;
             if (succeeded || failed) && self.cleanup(&namespace, &job_name).await? {
-                if succeeded {
-                    self.store
-                        .mark_completed(command.frozen_submission_id)
-                        .await?;
-                } else {
-                    self.store
-                        .mark_failed(command.frozen_submission_id, "LW_COLLECT_JOB_FAILED")
-                        .await?;
+                // The worker persists the immutable result before exiting. A
+                // Job can still be observed as failed after that durable write
+                // (for example when the kubelet reports a terminal transition
+                // during cleanup). Never overwrite a completed submission with
+                // a job-level failure; use the database result as the authority.
+                match self
+                    .store
+                    .mark_completed(command.frozen_submission_id)
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(FreezeCommandStoreError::ResultMissing) if failed => {
+                        self.store
+                            .mark_failed(command.frozen_submission_id, "LW_COLLECT_JOB_FAILED")
+                            .await?;
+                    }
+                    Err(error) => return Err(error.into()),
                 }
             }
             return Ok(());
