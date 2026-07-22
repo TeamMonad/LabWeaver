@@ -208,6 +208,54 @@ impl S3ImmutableObjectStore {
         Ok(key)
     }
 
+    /// Stores an immutable version in a versioned bucket without requiring
+    /// S3 Object Lock. The conditional write, version id, and read-back hash
+    /// still make the artifact identity explicit for clusters whose existing
+    /// bucket was provisioned without Governance Lock support.
+    pub async fn put_versioned_immutable(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        sha256: Sha256Digest,
+        media_type: &str,
+    ) -> Result<VerifiedObject, ObjectStoreError> {
+        self.validate_key(key)?;
+        let size_bytes =
+            u64::try_from(bytes.len()).map_err(|_| ObjectStoreError::ObjectTooLarge)?;
+        if bytes.is_empty()
+            || size_bytes > self.config.max_object_bytes
+            || Sha256Digest::of_bytes(bytes) != sha256
+            || media_type.trim().is_empty()
+        {
+            return Err(ObjectStoreError::ObjectIdentityInvalid);
+        }
+        let checksum = STANDARD
+            .encode(hex_bytes(&sha256.to_string()).ok_or(ObjectStoreError::ObjectIdentityInvalid)?);
+        let response = self
+            .client
+            .put_object()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .content_length(
+                i64::try_from(size_bytes).map_err(|_| ObjectStoreError::ObjectTooLarge)?,
+            )
+            .content_type(media_type)
+            .checksum_sha256(checksum)
+            .if_none_match("*")
+            .metadata("sha256", sha256.to_string())
+            .body(ByteStream::from(bytes.to_vec()))
+            .send()
+            .await
+            .map_err(|_| ObjectStoreError::UploadFailed)?;
+        let version = response
+            .version_id()
+            .filter(|value| !value.is_empty() && *value != "null")
+            .ok_or(ObjectStoreError::VersioningRequired)?
+            .to_owned();
+        self.read_verified(key, &version, size_bytes, sha256, media_type)
+            .await
+    }
+
     fn validate_key(&self, key: &str) -> Result<(), ObjectStoreError> {
         let prefix = self.config.object_prefix.trim_matches('/');
         if key.is_empty()

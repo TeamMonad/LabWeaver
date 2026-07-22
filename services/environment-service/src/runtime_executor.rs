@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use artifact_store::{ImmutableObjectStore, S3ImmutableObjectStore};
+use artifact_store::S3ImmutableObjectStore;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use contracts::{ArtifactRef, Revision, Sha256Digest, UtcTimestamp};
@@ -737,19 +737,11 @@ impl KubernetesContainerExecutor {
         &self,
         environment_id: contracts::EnvironmentId,
         request_id: Sha256Digest,
-        now: UtcTimestamp,
+        _now: UtcTimestamp,
         document: Value,
     ) -> Result<ArtifactRef, ProviderFailure> {
         let bytes = serde_json::to_vec(&document).map_err(|_| invalid_observation())?;
         let sha256 = Sha256Digest::of_bytes(&bytes);
-        let retain_until = UtcTimestamp::from_utc(
-            now.get()
-                + time::Duration::seconds(
-                    i64::try_from(self.configuration.cleanup_retention_seconds)
-                        .map_err(|_| rejected())?,
-                ),
-        )
-        .map_err(|_| rejected())?;
         let key = self
             .objects
             .scoped_key(&format!("cleanup/{environment_id}/{request_id}.json"))
@@ -764,7 +756,7 @@ impl KubernetesContainerExecutor {
                 rejected()
             })?;
         self.objects
-            .put_governance_locked(&key, &bytes, sha256, CLEANUP_MEDIA_TYPE, now, retain_until)
+            .put_versioned_immutable(&key, &bytes, sha256, CLEANUP_MEDIA_TYPE)
             .await
             .map(|object| object.reference)
             .map_err(|error| {
