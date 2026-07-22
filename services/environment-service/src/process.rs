@@ -170,6 +170,10 @@ impl EnvironmentProcessRuntime {
                         ContainerProviderConfiguration::new(
                             configuration.release_policy()?,
                             configuration
+                                .image_repository_prefix
+                                .clone()
+                                .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                            configuration
                                 .access_namespace
                                 .clone()
                                 .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
@@ -648,6 +652,7 @@ struct ProviderBindingConfiguration {
     gateway_name: Option<String>,
     gateway_section: Option<String>,
     image_pull_secret_name: Option<String>,
+    image_repository_prefix: Option<String>,
     workspace_storage_class_name: Option<String>,
     active_image_policy_id: Option<String>,
     active_image_policy_revision: Option<u64>,
@@ -706,6 +711,7 @@ impl ProviderBindingConfiguration {
             || self.gateway_name.is_some()
             || self.gateway_section.is_some()
             || self.image_pull_secret_name.is_some()
+            || self.image_repository_prefix.is_some()
             || self.workspace_storage_class_name.is_some()
     }
 
@@ -715,6 +721,7 @@ impl ProviderBindingConfiguration {
             && self.gateway_name.is_none()
             && self.gateway_section.is_none()
             && self.image_pull_secret_name.is_some()
+            && self.image_repository_prefix.is_some()
             && self.workspace_storage_class_name.is_some()
             && self.active_image_policy_id.is_some()
             && self.active_image_policy_revision.is_some()

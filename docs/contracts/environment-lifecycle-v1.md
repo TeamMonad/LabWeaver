@@ -147,6 +147,7 @@ non-secret routing configuration. The formal Container Provider uses:
     "providerKind": "container",
     "accessNamespace": "labweaver-system",
     "accessPodLabel": "access-service",
+    "imageRepositoryPrefix": "harbor.internal/labweaver-system",
     "imagePullSecretName": "harbor-course-pull",
     "workspaceStorageClassName": "nfs-rwx",
     "activeImagePolicyId": "01900000-0000-7000-8000-000000000001",
@@ -158,9 +159,9 @@ non-secret routing configuration. The formal Container Provider uses:
 
 The complete example is `deploy/config/environment-providers.json.example`.
 Omitting `providerKind` selects the existing remote provider; remote entries
-must not contain Access proxy, image-pull or trust-policy fields. Container entries
+must not contain Access proxy, image-repository, image-pull or trust-policy fields. Container entries
 require the exact Access Service namespace and pod label, the exact same-namespace Harbor pull Secret name,
-the reviewed `nfs-rwx` workspace StorageClass, and the active image-policy
+the reviewed Harbor registry/project prefix, the `nfs-rwx` workspace StorageClass, and the active image-policy
 ID/revision and trust revision. Container workspaces are provisioned as RWX so
 the same PVC can be mounted read-only by the bounded freeze Job. They use the
 immutable publication plus append-only withdrawal projection described in

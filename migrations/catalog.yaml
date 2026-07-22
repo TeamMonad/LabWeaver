@@ -3,7 +3,7 @@ toolVersion: 0.1.0
 bootstrap:
   id: 1
   file: bootstrap/0001_roles_and_schemas.sql
-  sha256: 4ed2088f2f4e0aa6558ca6aa9ad638d92e9e4512531c076b2d233539ff482e38
+  sha256: fb7ac1590f394b6fb5c1e9fe1b84024b8c8f87d6bf272f57e3fba29fc15ed6e5
 domains:
   - name: control
     migrations:

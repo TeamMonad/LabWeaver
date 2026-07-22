@@ -34,7 +34,10 @@ sprint2_application_nats_client_private_key_file: ""
 sprint2_application_nats_streams:
   - {name: LABWEAVER_AGENT_EVENTS, subjects: "labweaver.agent.>", max_age: 24h}
   - {name: LABWEAVER_CONTROL_COMMANDS, subjects: "labweaver.control.agent_build.requested.v1", max_age: 24h}
-  - {name: LABWEAVER_ENVIRONMENT_COMMANDS, subjects: "labweaver.environment.instance.lifecycle_requested.v1", max_age: 24h}
+  - name: LABWEAVER_ENVIRONMENT_COMMANDS
+    subjects: "labweaver.environment.instance.>"
+    adopted_subjects: "labweaver.environment.instance.lifecycle_requested.v1"
+    max_age: 24h
   - {name: LABWEAVER_RELEASES, subjects: "labweaver.control.environment_template_release.>", max_age: 168h}
   - {name: LABWEAVER_ACCESS, subjects: "labweaver.access.>", max_age: 24h}
   - {name: LABWEAVER_SUBMISSION, subjects: "labweaver.evaluation.submission.>", max_age: 168h}

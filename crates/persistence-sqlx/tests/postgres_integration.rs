@@ -106,6 +106,22 @@ async fn bootstrap_migrate_and_enforce_domain_boundaries() -> Result<(), Box<dyn
             SchemaVerifier::classify(&runtime_pools[&catalog_domain.name], catalog_domain).await,
             SchemaStatus::Ready
         );
+        let inaccessible_sequences: i64 = sqlx::query_scalar(
+            "WITH domain_sequences AS MATERIALIZED ( \
+                 SELECT sequence.oid FROM pg_class sequence \
+                 JOIN pg_namespace namespace ON namespace.oid = sequence.relnamespace \
+                 WHERE namespace.nspname = $1 AND sequence.relkind = 'S' \
+             ) \
+             SELECT count(*)::bigint FROM domain_sequences \
+             WHERE NOT has_sequence_privilege(oid, 'USAGE')",
+        )
+        .bind(catalog_domain.name.schema())
+        .fetch_one(&runtime_pools[&catalog_domain.name])
+        .await?;
+        assert_eq!(
+            inaccessible_sequences, 0,
+            "runtime role must be able to allocate every sequence in its domain"
+        );
     }
 
     let access = &runtime_pools[&Domain::Access];

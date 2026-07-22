@@ -5,6 +5,7 @@
     "providerKind": "container",
     "accessNamespace": "labweaver-system",
     "accessPodLabel": "access-service",
+    "imageRepositoryPrefix": "harbor.internal/labweaver-system",
     "imagePullSecretName": "harbor-course-pull",
     "workspaceStorageClassName": "nfs-rwx",
     "activeImagePolicyId": "00000000-0000-7000-8000-000000000002",

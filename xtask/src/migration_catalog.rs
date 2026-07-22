@@ -54,25 +54,46 @@ pub(super) fn validate(root: &Path) -> Result<(), AppError> {
     validate_migration(
         root,
         &catalog.bootstrap,
+        1,
         "bootstrap/0001_roles_and_schemas.sql",
     )?;
+    if catalog.bootstrap.file != "bootstrap/0001_roles_and_schemas.sql" {
+        return Err(invalid("bootstrap migration path is invalid"));
+    }
     for (domain, expected) in catalog.domains.iter().zip(DOMAINS) {
-        if domain.name != expected || domain.migrations.len() != 1 {
+        if domain.name != expected || domain.migrations.is_empty() {
             return Err(invalid("domain order or migration count is invalid"));
         }
-        validate_migration(
-            root,
-            &domain.migrations[0],
-            &format!("{expected}/0001_sprint2_baseline.sql"),
-        )?;
+        for (index, migration) in domain.migrations.iter().enumerate() {
+            let expected_id = u8::try_from(index + 1)
+                .map_err(|_| invalid("migration sequence exceeds the supported ID range"))?;
+            validate_migration(
+                root,
+                migration,
+                expected_id,
+                &format!("{expected}/{expected_id:04}_"),
+            )?;
+            if expected_id == 1 && migration.file != format!("{expected}/0001_sprint2_baseline.sql")
+            {
+                return Err(invalid(
+                    "the first domain migration must be the Sprint 2 baseline",
+                ));
+            }
+        }
     }
     Ok(())
 }
 
-fn validate_migration(root: &Path, migration: &Migration, expected: &str) -> Result<(), AppError> {
+fn validate_migration(
+    root: &Path,
+    migration: &Migration,
+    expected_id: u8,
+    expected_path_or_prefix: &str,
+) -> Result<(), AppError> {
     let path = Path::new(&migration.file);
-    if migration.id != 1
-        || migration.file != expected
+    if migration.id != expected_id
+        || !migration.file.starts_with(expected_path_or_prefix)
+        || std::path::Path::new(&migration.file).extension() != Some(std::ffi::OsStr::new("sql"))
         || path.is_absolute()
         || path
             .components()
@@ -119,6 +140,23 @@ mod tests {
             migrations.join("control/0001_sprint2_baseline.sql"),
             b"SELECT 1;\n",
         )?;
+        assert!(validate(temporary.path()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn non_sequential_follow_up_migration_is_rejected() -> io::Result<()> {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let temporary = tempfile::tempdir()?;
+        let migrations = temporary.path().join("migrations");
+        fs::create_dir_all(&migrations)?;
+        copy_tree(&source.join("migrations"), &migrations)?;
+        let catalog_path = migrations.join("catalog.yaml");
+        let catalog = fs::read_to_string(&catalog_path)?.replace(
+            "id: 2\n        file: agent/0002_",
+            "id: 3\n        file: agent/0003_",
+        );
+        fs::write(catalog_path, catalog)?;
         assert!(validate(temporary.path()).is_err());
         Ok(())
     }

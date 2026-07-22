@@ -299,7 +299,7 @@ fn allow_all_container_network_leaves_egress_unisolated() {
 }
 
 #[test]
-fn non_https_container_entry_cannot_be_projected_as_a_gateway_endpoint() {
+fn non_http_container_entry_cannot_be_projected_as_a_gateway_endpoint() {
     let mut projection = projection();
     projection.environment_spec.entries[0].protocol = EndpointProtocol::Ssh;
     let spec_sha256 = Sha256Digest::of_canonical(&projection.environment_spec).expect("spec hash");
@@ -317,6 +317,28 @@ fn non_https_container_entry_cannot_be_projected_as_a_gateway_endpoint() {
     assert!(matches!(
         provider.plan(&instance, &resolved(projection), ReconcileAction::Provision),
         Err(ReleaseProjectionError::SecurityPostureInvalid)
+    ));
+}
+
+#[test]
+fn release_from_a_different_harbor_prefix_is_rejected() {
+    let mut projection = projection();
+    let ImageArtifact::Container { repository, .. } = &mut projection.release.artifact else {
+        panic!("fixture must use a container artifact");
+    };
+    *repository = repository.replacen("labweaver-system", "unreviewed-project", 1);
+    projection.projection_sha256 = Sha256Digest::of_canonical(&json!({
+        "release": &projection.release,
+        "environmentSpec": &projection.environment_spec,
+    }))
+    .expect("projection hash");
+    projection.validate().expect("internally valid projection");
+    let instance = instance_for(&projection);
+    let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
+
+    assert!(matches!(
+        provider.plan(&instance, &resolved(projection), ReconcileAction::Provision),
+        Err(ReleaseProjectionError::IdentityMismatch)
     ));
 }
 
@@ -340,6 +362,7 @@ async fn provision_returns_one_stable_healthy_endpoint() {
     assert_eq!(first.next_state, ObservedEnvironmentState::Ready);
     assert!(first.operation_complete);
     assert_eq!(first.endpoints.len(), 1);
+    assert_eq!(first.endpoints[0].protocol, EndpointProtocol::Http);
     assert_eq!(first.endpoints[0].id, second.endpoints[0].id);
     assert_eq!(
         backend
@@ -566,6 +589,7 @@ fn provider_with_state(
         ContainerProviderConfiguration::new(
             ContainerReleasePolicy::new(image_policy_id, image_policy_revision, trust_revision)
                 .expect("release policy"),
+            "harbor.internal/labweaver-system".to_owned(),
             "labweaver-sprint2".to_owned(),
             "access-service".to_owned(),
             "harbor-course-pull".to_owned(),
@@ -615,7 +639,7 @@ fn projection() -> ReleasePublished {
         "class":"experiment",
         "resources":{"cpuMillicores":1000,"memoryBytes":1_073_741_824_u64,"storageBytes":1_073_741_824_u64},
         "network":{"mode":"deny_all"},
-        "entries":[{"name":"web","protocol":"https","servicePort":8080}],
+        "entries":[{"name":"web","protocol":"http","servicePort":8080}],
         "security":{
             "userPolicy":"non_root_required",
             "rootFilesystemPolicy":"read_only_required",
@@ -667,7 +691,9 @@ fn projection() -> ReleasePublished {
         artifact: ImageArtifact::Container {
             id: artifact_id,
             build_request_id: BuildRequestId::new(),
-            repository: format!("harbor.internal/course-{course_id}/{candidate_id}"),
+            repository: format!(
+                "harbor.internal/labweaver-system/course-{course_id}-{candidate_id}"
+            ),
             digest: format!("sha256:{artifact_sha256}"),
         },
         image_policy_evaluation: Some(ImagePolicyEvaluation {

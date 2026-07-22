@@ -858,6 +858,7 @@ impl ContainerReleasePolicy {
 #[derive(Clone, Debug)]
 pub struct ContainerProviderConfiguration {
     pub release_policy: ContainerReleasePolicy,
+    pub image_repository_prefix: String,
     pub access_namespace: String,
     pub access_pod_label: String,
     pub image_pull_secret_name: String,
@@ -867,12 +868,14 @@ pub struct ContainerProviderConfiguration {
 impl ContainerProviderConfiguration {
     pub fn new(
         release_policy: ContainerReleasePolicy,
+        image_repository_prefix: String,
         access_namespace: String,
         access_pod_label: String,
         image_pull_secret_name: String,
         workspace_storage_class_name: String,
     ) -> Result<Self, ReleaseProjectionError> {
-        if !valid_dns_label(&access_namespace)
+        if !valid_image_repository_prefix(&image_repository_prefix)
+            || !valid_dns_label(&access_namespace)
             || !valid_dns_label(&access_pod_label)
             || !valid_dns_label(&image_pull_secret_name)
             || !valid_dns_label(&workspace_storage_class_name)
@@ -881,6 +884,7 @@ impl ContainerProviderConfiguration {
         }
         Ok(Self {
             release_policy,
+            image_repository_prefix,
             access_namespace,
             access_pod_label,
             image_pull_secret_name,
@@ -1119,6 +1123,7 @@ pub struct ContainerProvider<B, R> {
     backend: Arc<B>,
     releases: Arc<R>,
     release_policy: ContainerReleasePolicy,
+    image_repository_prefix: String,
     access_namespace: String,
     access_pod_label: String,
     image_pull_secret_name: String,
@@ -1144,6 +1149,7 @@ where
             backend,
             releases,
             release_policy: configuration.release_policy,
+            image_repository_prefix: configuration.image_repository_prefix,
             access_namespace: configuration.access_namespace,
             access_pod_label: configuration.access_pod_label,
             image_pull_secret_name: configuration.image_pull_secret_name,
@@ -1187,15 +1193,13 @@ where
         {
             return Err(ReleaseProjectionError::ContractInvalid);
         }
-        let mut repository_parts = repository.split('/');
-        let registry = repository_parts.next().unwrap_or_default();
-        let project = repository_parts.next().unwrap_or_default();
-        let image_name = repository_parts.next().unwrap_or_default();
-        if registry.is_empty()
-            || project != format!("course-{}", projection.release.course_id)
-            || image_name != projection.release.candidate_id.to_string()
-            || repository_parts.next().is_some()
-        {
+        let expected_repository = format!(
+            "{}/course-{}-{}",
+            self.image_repository_prefix,
+            projection.release.course_id,
+            projection.release.candidate_id
+        );
+        if repository != &expected_repository {
             return Err(ReleaseProjectionError::IdentityMismatch);
         }
         let image = format!("{repository}@{digest}");
@@ -1217,7 +1221,7 @@ where
         };
         if !projection.environment_spec.entries.iter().any(|entry| {
             entry.service_port == service_port
-                && entry.protocol == contracts::environment::EndpointProtocol::Https
+                && entry.protocol == contracts::environment::EndpointProtocol::Http
         }) {
             return Err(ReleaseProjectionError::SecurityPostureInvalid);
         }
@@ -1466,10 +1470,14 @@ where
             .releases
             .resolve(instance.release_id, instance.release_version)
             .await
-            .map_err(|error| projection_failure(&error))?;
-        let plan = self
-            .plan(instance, &resolved, action)
-            .map_err(|error| projection_failure(&error))?;
+            .map_err(|error| {
+                log_projection_failure(&error, instance, action, "resolve");
+                projection_failure(&error)
+            })?;
+        let plan = self.plan(instance, &resolved, action).map_err(|error| {
+            log_projection_failure(&error, instance, action, "plan");
+            projection_failure(&error)
+        })?;
         let no_endpoints = |next_state, operation_complete| ProviderObservation {
             next_state,
             endpoints: Vec::new(),
@@ -1548,7 +1556,7 @@ fn ready_observation(
         next_state: ObservedEnvironmentState::Ready,
         endpoints: vec![EnvironmentEndpoint {
             id: deterministic_endpoint_id(instance.id)?,
-            protocol: contracts::environment::EndpointProtocol::Https,
+            protocol: contracts::environment::EndpointProtocol::Http,
             revision,
             health: EndpointHealth::Healthy,
             ssh_host_key_identity_sha256: None,
@@ -1615,6 +1623,24 @@ fn projection_failure(error: &ReleaseProjectionError) -> ProviderFailure {
     }
 }
 
+fn log_projection_failure(
+    error: &ReleaseProjectionError,
+    instance: &EnvironmentInstance,
+    action: ReconcileAction,
+    phase: &'static str,
+) {
+    tracing::warn!(
+        event = "environment.container_provider.release_rejected",
+        environment_id = %instance.id,
+        release_id = %instance.release_id,
+        release_version = instance.release_version,
+        provider_binding = %instance.provider_binding,
+        ?action,
+        phase,
+        diagnostic_code = %error,
+    );
+}
+
 fn canonical_hash<T: Serialize>(value: &T) -> Result<Sha256Digest, ReleaseProjectionError> {
     Sha256Digest::of_canonical(value).map_err(|_| ReleaseProjectionError::ContractInvalid)
 }
@@ -1625,6 +1651,19 @@ fn valid_binding(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+}
+
+fn valid_image_repository_prefix(value: &str) -> bool {
+    let mut parts = value.split('/');
+    let registry = parts.next().unwrap_or_default();
+    let project = parts.next().unwrap_or_default();
+    !registry.is_empty()
+        && !registry.contains("//")
+        && !registry.contains(char::is_whitespace)
+        && !registry.contains('@')
+        && !registry.contains(':')
+        && valid_dns_label(project)
+        && parts.next().is_none()
 }
 
 fn valid_subject(value: &str) -> bool {

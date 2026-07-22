@@ -59,7 +59,14 @@ export function createPlaywrightConfig({ ci = Boolean(process.env.CI) } = {}) {
       actionTimeout: 10_000,
       navigationTimeout: 15_000,
     },
-    expect: { timeout: 10_000 },
+    expect: {
+      timeout: 10_000,
+      // The pinned Chromium image is identical in CI and local generation, but
+      // Linux kernel/font rasterization still changes anti-aliased edge pixels.
+      // Keep the allowance below a layout-sized change while avoiding false
+      // failures on otherwise byte-for-byte identical content and geometry.
+      ...(isFixture ? { toHaveScreenshot: { maxDiffPixelRatio: 0.025 } } : {}),
+    },
     projects,
     metadata: evidenceMetadata,
     ...(isFixture || !process.env.LABWEAVER_BASE_URL

@@ -186,6 +186,37 @@
   loop: "{{ sprint2_application_configuration_objects }}"
   no_log: true
 
+- name: Bind the Environment and container executor configuration
+  ansible.builtin.set_fact:
+    sprint2_application_environment_providers: >-
+      {{ ((sprint2_application_configuration_objects
+           | selectattr('kind', 'equalto', 'ConfigMap')
+           | selectattr('metadata.name', 'equalto', 'environment-service-config')
+           | first).data['providers.json']) | from_json }}
+    sprint2_application_container_executor_configuration: >-
+      {{ ((sprint2_application_configuration_objects
+           | selectattr('kind', 'equalto', 'ConfigMap')
+           | selectattr('metadata.name', 'equalto', 'container-executor-config')
+           | first).data['config.yaml']) | from_yaml }}
+  no_log: true
+
+- name: Require one shared namespaced Harbor pull-secret identity
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_environment_providers | selectattr('providerKind', 'equalto', 'container') | list | length == 1
+      - >-
+        (sprint2_application_environment_providers
+         | selectattr('providerKind', 'equalto', 'container')
+         | first).imagePullSecretName == 'harbor-course-pull'
+      - >-
+        (sprint2_application_environment_providers
+         | selectattr('providerKind', 'equalto', 'container')
+         | first).imageRepositoryPrefix ==
+        sprint2_application_harbor_registry + '/' + sprint2_application_harbor_project
+      - sprint2_application_container_executor_configuration.executor.registryPullSecretName == 'harbor-course-pull'
+    fail_msg: SPRINT2_APPLICATION_CONTAINER_IMAGE_IDENTITY_MISMATCH
+  no_log: true
+
 - name: Bind the Control event configuration for retained stream validation
   ansible.builtin.set_fact:
     sprint2_application_control_configuration: >-
@@ -488,6 +519,33 @@
       - --defaults
   loop: "{{ sprint2_application_stream_info_before.results }}"
   when: item.rc != 0
+  changed_when: true
+
+- name: Expand only the explicitly adopted Environment lifecycle stream
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_nats }}"
+      - --server
+      - "{{ sprint2_application_nats_server }}"
+      - --creds
+      - "{{ sprint2_application_nats_credentials_file }}"
+      - --tlsca
+      - "{{ sprint2_application_nats_ca_file }}"
+      - --tlscert
+      - "{{ sprint2_application_nats_client_certificate_file }}"
+      - --tlskey
+      - "{{ sprint2_application_nats_client_private_key_file }}"
+      - stream
+      - edit
+      - "{{ item.item.name }}"
+      - --subjects
+      - "{{ item.item.subjects }}"
+      - --force
+  loop: "{{ sprint2_application_stream_info_before.results }}"
+  when:
+    - item.rc == 0
+    - item.item.adopted_subjects is defined
+    - (item.stdout | from_json).config.subjects == [item.item.adopted_subjects]
   changed_when: true
 
 - name: Read back exact Sprint 2 streams
