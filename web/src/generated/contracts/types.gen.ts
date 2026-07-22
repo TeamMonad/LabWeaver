@@ -4721,7 +4721,7 @@ export type CreateAgentRunResponses = {
     /**
      * Successful response
      */
-    202: OperationAccepted;
+    202: AgentRunSchema;
 };
 
 export type CreateAgentRunResponse = CreateAgentRunResponses[keyof CreateAgentRunResponses];
@@ -4861,7 +4861,7 @@ export type CancelAgentRunResponses = {
     /**
      * Successful response
      */
-    202: OperationAccepted;
+    202: AgentRunSchema;
 };
 
 export type CancelAgentRunResponse = CancelAgentRunResponses[keyof CancelAgentRunResponses];
@@ -4934,7 +4934,7 @@ export type RetryAgentRunTrackResponses = {
     /**
      * Successful response
      */
-    202: OperationAccepted;
+    202: AgentRunSchema;
 };
 
 export type RetryAgentRunTrackResponse = RetryAgentRunTrackResponses[keyof RetryAgentRunTrackResponses];

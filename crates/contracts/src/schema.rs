@@ -838,7 +838,9 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "createCourseLlmPolicy" | "getActiveCourseLlmPolicy" => {
             contract_ref("course-llm-egress-policy")
         }
-        "getAgentRun" => contract_ref("agent-run"),
+        "createAgentRun" | "getAgentRun" | "cancelAgentRun" | "retryAgentRunTrack" => {
+            contract_ref("agent-run")
+        }
         "getEnvironmentCandidate" => contract_ref("http/environment-candidate-view"),
         "getEvaluationCandidate" => contract_ref("http/evaluation-candidate-view"),
         "appendEnvironmentCandidateDecision" | "appendEvaluationCandidateDecision" => {
@@ -870,9 +872,6 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             contract_ref("gateway-session")
         }
         id if [
-            "createAgentRun",
-            "cancelAgentRun",
-            "retryAgentRunTrack",
             "createEnvironmentTemplateRelease",
             "createEnvironment",
             "startEnvironment",
@@ -977,6 +976,21 @@ mod tests {
         assert!(public.contains("/auth/backchannel-logout"));
         assert!(public.contains("#/components/schemas/AuthSession"));
         assert!(public.contains("__Host-labweaver_session"));
+        let public_document: Value = serde_json::from_str(&public)?;
+        for path in [
+            "/api/v1/courses/{courseId}/agent-runs",
+            "/api/v1/courses/{courseId}/agent-runs/{runId}/cancel",
+            "/api/v1/courses/{courseId}/agent-runs/{runId}/tracks/{track}/retry",
+        ] {
+            assert_eq!(
+                public_document.pointer(&format!(
+                    "/paths/{}/post/responses/202/content/application~1json/schema/$ref",
+                    path.replace('~', "~0").replace('/', "~1")
+                )),
+                Some(&json!("../contracts/v1/agent-run.schema.json")),
+                "{path} must return the AgentRun body implemented by Control Service"
+            );
+        }
         assert!(internal.contains("/internal/v1/auth/decision"));
         assert!(internal.contains("AuthorizationDecisionRequest"));
         assert!(internal.contains("mutualTLS"));

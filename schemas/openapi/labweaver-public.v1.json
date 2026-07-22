@@ -606,7 +606,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OperationAccepted"
+                  "$ref": "../contracts/v1/agent-run.schema.json"
                 }
               }
             },
@@ -828,7 +828,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OperationAccepted"
+                  "$ref": "../contracts/v1/agent-run.schema.json"
                 }
               }
             },
@@ -956,7 +956,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OperationAccepted"
+                  "$ref": "../contracts/v1/agent-run.schema.json"
                 }
               }
             },
