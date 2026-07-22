@@ -1139,7 +1139,11 @@ fn validated_registry_pull_config(path: &PathBuf) -> Result<Vec<u8>, ProviderFai
 }
 
 fn timestamp() -> Result<UtcTimestamp, ProviderFailure> {
-    UtcTimestamp::from_utc(OffsetDateTime::now_utc()).map_err(|_| unavailable())
+    let value = OffsetDateTime::now_utc();
+    let value = value
+        .replace_nanosecond((value.nanosecond() / 1_000_000) * 1_000_000)
+        .map_err(|_| unavailable())?;
+    UtcTimestamp::from_utc(value).map_err(|_| unavailable())
 }
 
 const fn rejected() -> ProviderFailure {
@@ -1167,6 +1171,12 @@ const fn invalid_observation() -> ProviderFailure {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn executor_timestamp_is_normalized_to_contract_milliseconds() {
+        let observed = timestamp().expect("current UTC time should normalize");
+        assert_eq!(observed.get().nanosecond() % 1_000_000, 0);
+    }
 
     #[test]
     fn resource_allowlist_has_no_dynamic_api_path() {
