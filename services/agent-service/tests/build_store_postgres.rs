@@ -156,8 +156,9 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
         .connect(&url)
         .await?;
     let baseline = format!(
-        "CREATE SCHEMA agent; SET search_path TO agent;\n{}",
-        include_str!("../../../migrations/agent/0001_sprint2_baseline.sql")
+        "CREATE SCHEMA agent; SET search_path TO agent;\n{}\n{}",
+        include_str!("../../../migrations/agent/0001_sprint2_baseline.sql"),
+        include_str!("../../../migrations/agent/0002_allow_content_addressed_image_reuse.sql")
     );
     sqlx::raw_sql(&baseline).execute(&pool).await?;
 
@@ -312,6 +313,43 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
     );
     assert_eq!(completed_events, 1);
 
+    let repeated_content_command = build_command()?;
+    assert_eq!(
+        store
+            .accept_command(
+                "agent-build-command-v2",
+                &command_event(repeated_content_command.clone())?,
+            )
+            .await?,
+        BuildCommandDecision::Accepted
+    );
+    let repeated_content_worker = BuildWorker::new(
+        store.clone(),
+        BuildPipeline::new(
+            SlowProvider {
+                cleanup_called: Arc::new(AtomicBool::new(false)),
+                build_delay: Duration::ZERO,
+                fail_build: false,
+            },
+            policy()?,
+        )?,
+        "build-worker-repeated-content".to_owned(),
+        Duration::from_secs(1),
+        Duration::from_millis(10),
+        2,
+    )?;
+    assert!(matches!(
+        repeated_content_worker.run_once(now()).await?,
+        BuildWorkerOutcome::Completed { build_request_id }
+            if build_request_id == repeated_content_command.request.id
+    ));
+    let repeated_digest_artifacts: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM agent.image_artifacts WHERE image_digest=$1")
+            .bind(digest())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(repeated_digest_artifacts, 2);
+
     let retry_command = build_command()?;
     assert_eq!(
         store
@@ -412,8 +450,9 @@ async fn executor_fence_survives_restart_and_cleanup_dominates_its_generation()
         .connect(&url)
         .await?;
     let migrations = format!(
-        "CREATE SCHEMA agent; SET search_path TO agent;\n{}",
-        include_str!("../../../migrations/agent/0001_sprint2_baseline.sql")
+        "CREATE SCHEMA agent; SET search_path TO agent;\n{}\n{}",
+        include_str!("../../../migrations/agent/0001_sprint2_baseline.sql"),
+        include_str!("../../../migrations/agent/0002_allow_content_addressed_image_reuse.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;
     let command = build_command()?;
