@@ -344,6 +344,10 @@ class AnsibleFixtureTests(unittest.TestCase):
         defaults = (
             ROOT / "deploy/ansible/roles/sprint2_application/defaults/main.yml"
         ).read_text(encoding="utf-8")
+        adoption = (
+            ROOT
+            / "deploy/ansible/roles/sprint2_application/templates/baseline-adopt.sql.j2"
+        ).read_text(encoding="utf-8")
         self.assertIn("sprint2_application_postgres_database: labweaver", defaults)
         self.assertIn("SELECT current_database()", tasks)
         self.assertIn(
@@ -353,6 +357,11 @@ class AnsibleFixtureTests(unittest.TestCase):
             tasks.index("Require the exact Sprint 2 PostgreSQL database"),
             tasks.index("Render non-destructive six-domain baseline adoption"),
         )
+        self.assertIn("domain_catalog.migrations", adoption)
+        self.assertIn("MIGRATION_PREFIX_INVALID", adoption)
+        self.assertIn("MIGRATION_SET_INCOMPLETE", adoption)
+        self.assertIn("migration.file | basename", adoption)
+        self.assertNotIn("count(*) FROM {{ domain }}.schema_migrations) <> 1", adoption)
 
     def test_sprint2_application_reconciles_the_exact_durable_consumers(self) -> None:
         tasks = (
