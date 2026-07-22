@@ -27,6 +27,7 @@ sprint2_application_postgres_service_file: ""
 sprint2_application_postgres_service: sprint2-admin
 sprint2_application_postgres_database: labweaver
 sprint2_application_nats_server: ""
+sprint2_application_nats_controller_address: ""
 sprint2_application_nats_credentials_file: ""
 sprint2_application_nats_ca_file: ""
 sprint2_application_nats_client_certificate_file: ""
@@ -63,6 +64,7 @@ sprint2_application_nats_consumers:
       - labweaver.control.environment_template_release.withdrawn.v1
 sprint2_application_minio_alias: ""
 sprint2_application_minio_endpoint: ""
+sprint2_application_minio_controller_address: ""
 sprint2_application_minio_username: ""
 sprint2_application_minio_password: ""
 sprint2_application_minio_ca_file: ""

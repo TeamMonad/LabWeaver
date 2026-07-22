@@ -7,9 +7,12 @@ identity. Historical Issue evidence is not a current completion claim.
 
 - Local fixed-command Build Executor, persistent fences and digest/Trivy
   contracts are implemented.
-- Blocker: no current connected run has bound BuildKit, the private Harbor
-  project, pinned Trivy database and published digest to the same source and
-  deployment manifest.
+- The d888 package was built and validated against retained BuildKit/Harbor/Trivy;
+  application adoption run `sprint2-application-d888a515-2215` published seven
+  digest-bound images and reconciled the retained target without destructive
+  reset.
+- Blocker: a real course build/publication replay and its negative cases have
+  not yet been executed on the d888 deployment.
 - Exit: duplicate/reordered command, cancel, deadline, scanner rejection,
   cleanup and private-pull negatives pass in the adopted environment.
 - Owner: B implementation review; D connected Verify; A release judgment.
@@ -61,8 +64,9 @@ admission boundary enforces the executor namespace/ServiceAccount fence.
   `LW_COLLECT_DATABASE_FAILED`. Commit `12069bbb` advances the completion event
   to sequence/revision 2. It is not yet packaged or replayed against the live
   cluster.
-- Container PVC freeze is now verified with the `c14c5eda` worker build and the
-  new Object Lock bucket. VM/SFTP replay is explicitly deferred this round.
+- Container PVC freeze is verified on the retained prior worker build; a fresh
+  d888 same-identity freeze replay remains pending. VM/SFTP replay is
+  explicitly deferred this round.
 - Exit: duplicate/reordered commands, expired leases/certificates, PV identity
   mismatch, host-key mismatch, partial upload, worker restart and all residue
   checks fail closed under B review and D connected Verify.

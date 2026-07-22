@@ -350,6 +350,20 @@
       {{ sprint2_application_harbor_endpoint_address }} {{ sprint2_application_harbor_registry }}
       {{ sprint2_application_keycloak_endpoint_address }} {{ sprint2_application_keycloak_hostname }}
 
+- name: Apply the explicitly approved controller-side NATS transport override
+  ansible.builtin.replace:
+    path: /etc/hosts
+    regexp: '^[0-9.]+\s+nats\.labweaver-data\.svc$'
+    replace: "{{ sprint2_application_nats_controller_address }} nats.labweaver-data.svc"
+  when: sprint2_application_nats_controller_address | length > 0
+
+- name: Apply the explicitly approved controller-side MinIO transport override
+  ansible.builtin.replace:
+    path: /etc/hosts
+    regexp: '^[0-9.]+\s+minio\.labweaver-data\.svc$'
+    replace: "{{ sprint2_application_minio_controller_address }} minio.labweaver-data.svc"
+  when: sprint2_application_minio_controller_address | length > 0
+
 - name: Create isolated MinIO administration configuration
   ansible.builtin.file:
     path: "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/mc"
@@ -391,6 +405,9 @@
     PGSERVICEFILE: "{{ sprint2_application_postgres_service_file }}"
   register: sprint2_application_postgres_identity
   changed_when: false
+  retries: 6
+  delay: 2
+  until: sprint2_application_postgres_identity.rc == 0
   no_log: true
 
 - name: Require the exact Sprint 2 PostgreSQL database
@@ -424,6 +441,10 @@
   environment:
     PGSERVICEFILE: "{{ sprint2_application_postgres_service_file }}"
   changed_when: true
+  register: sprint2_application_baseline_apply
+  retries: 6
+  delay: 2
+  until: sprint2_application_baseline_apply.rc == 0
   no_log: true
 
 - name: Render conflict-detecting Access seed adoption
@@ -446,6 +467,10 @@
   environment:
     PGSERVICEFILE: "{{ sprint2_application_postgres_service_file }}"
   changed_when: true
+  register: sprint2_application_access_seed_apply
+  retries: 6
+  delay: 2
+  until: sprint2_application_access_seed_apply.rc == 0
   no_log: true
 
 - name: Probe retained JetStream

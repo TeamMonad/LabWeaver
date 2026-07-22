@@ -26,11 +26,13 @@ the presence of this document.
 
 ## Current connected slice (2026-07-23)
 
-The current source identity is `5ca719cc` on `release/sprint2`; the deployed
-Environment worker contains the same source line as
-`harbor.lab.lan/labweaver-system/environment-service@sha256:7fe414023942ddbc5919621108c60c793bd5701134346a136c78f598ddd02c2d`.
-The deployed Evaluation worker remains the same implementation line at source
-`c14c5eda`. The live
+The current source identity is `d888a515ee089a77cca8253244ea54a8c17104f8` on
+`release/sprint2`. Non-destructive application adoption completed as run
+`sprint2-application-d888a515-2215`, Helm revision `160`, and cluster UID
+`171e3e6b-1e8b-4666-9936-b5f8a514132e`. Its machine-readable report records
+`destructive_reset=false`, the retained six-domain baseline, six retained NATS
+streams, Harbor project `labweaver-system`, and seven digest-bound images. All
+ten application workloads reached Ready on that package identity. The live
 cluster was reached through the direct architect kubeconfig; retained
 infrastructure was not deleted or rebuilt.
 
@@ -45,11 +47,11 @@ infrastructure was not deleted or rebuilt.
 | Container stop/start | verified | The same fresh environment accepted stop (`stopped`, revision 10), then start (`ready`, revision 12) after the lifecycle fix allowing an immediate `Stopped → Ready` provider observation. |
 | Container delete/cleanup | verified | After the cleanup-plan, fence replay, finalizer-race and MinIO-prefix fixes, environment `019f8b1a-f95f-7551-a5ce-33f4c26466fd` reached `deleted` (revision 42) with cleanup artifact version `d7cfd573-6d27-48d9-8ea2-1e6407cd3da0`; the namespace and its runtime resources are absent. The retained `labweaver-artifacts` bucket has versioning but no Object Lock, so this evidence uses conditional versioned immutable storage rather than Governance Lock. |
 | KubeVirt | intentionally skipped | The user limited this round to Container runtime verification; no VM completion claim is made. |
-| Release Gate / Sprint 2 | blocked | Container create/access/freeze/stop/start/delete now pass on the current identity; KubeVirt was intentionally skipped and no machine-readable passing Release Gate exists. |
+| Release Gate / Sprint 2 | blocked | Container create/access/freeze/stop/start/delete are verified; KubeVirt was intentionally skipped and no machine-readable passing Release Gate exists. The d888 adoption is deployment evidence, not a full Sprint 2 completion claim. |
 
 | Capability | Owner | State | Current evidence | Blocker or limitation |
 | --- | --- | --- | --- | --- |
-| Six service and six PostgreSQL domain boundaries | A | implemented | Cargo workspace, service crates, deterministic catalog and one `0001_sprint2_baseline.sql` per domain; non-destructive adoption applies only to an empty domain or verifies the exact existing ledger; an earlier Draft head completed connected adoption | current-head adoption is pending; Resource has no Sprint 2 production path |
+| Six service and six PostgreSQL domain boundaries | A | implemented | Cargo workspace, service crates, deterministic catalog and one `0001_sprint2_baseline.sql` per domain; d888 non-destructive adoption verified the exact retained ledger across all six domains | Resource has no Sprint 2 production path |
 | Contracts, OpenAPI and Web SDK | A/C | implemented locally | one ADR 0011 v1 Rust source with generated JSON Schema, Public/Internal OpenAPI and Web SDK; publication accepts only candidate/approval/runtime identity, while Control resolves Container build evidence or the deployment-locked VM base identity; contract/render and Web drift gates pass | connected clients and deployed schema identity remain pending |
 | Keycloak/OIDC and course-scoped authorization | A | implemented locally; previous head deployed | Access BFF, bearer/mTLS checks, PostgreSQL tests and retained Keycloak reconciliation; live probing of deployed source `da498a26` exposed that Web still required browser-side OIDC build variables and its generated SDK transport forced bearer mode, so the current source now derives identity from the BFF session and uses BFF cookies plus CSRF for SDK mutations | the BFF Web repair must be packaged, deployed and exercised with real teacher/student sessions |
 | Control material, AgentRun, candidate approval and release | A/B | implemented locally; older head deployed | PostgreSQL, MinIO, JetStream and mTLS integration tests; Control-owned candidate views reload approval history and fail closed on incomplete build evidence instead of relying on Web-only fields; the prior deployed head reached the material upload path | current-head deployment and complete dual-candidate replay are pending |
@@ -61,11 +63,11 @@ infrastructure was not deleted or rebuilt.
 | AccessGrant and session authorization | A | implemented locally | fixed local OpenSSH account, post-auth alias redemption, one-time token and session contracts; HTTP(S) grants use same-origin `/connect` paths with per-request Access and Environment revalidation and no direct runtime route | built Gateway image, connected HTTP/SSH denial, expiry and revocation replay are pending; Upgrade is explicitly outside Sprint 2 |
 | Freeze-only Evaluation Service | B | implemented locally | Evaluation-owned public API, Access BFF authorization, PostgreSQL command/outbox, Environment-issued PVC/299-second read-only VM binding, bounded Kubernetes Job/Secret/ConfigMap/NetworkPolicy reconciliation, immutable MinIO Object Lock, restart recovery and cleanup readback | connected deployment and real PVC/VM replay are pending; Runner, Checker, Aggregator and scoring are excluded |
 | Web teacher/student journeys | C | live path implemented; fixture verified | component/SDK tests and the Linux teacher/student Fixture matrix pass at the Draft PR head; live setup performs real Keycloak login from password files and live specs read approved Agent candidates plus frozen Container/VM evidence | current-head connected Playwright remains pending; local visual baselines were not rewritten for workstation-specific pixel drift |
-| Sprint 2 Helm deployment | A/D | implemented; previous head deployed | source `da498a2643a83e32b3ab6cab3465771a019d1882` passed connected package validation and two non-destructive reconciliations with identical package, migration and configuration hashes; live readback showed all ten workloads Ready, seven Harbor digest images, OpenSSH on the reviewed shared VIP and no TCPRoute | the BFF repair changes the source identity and must be repackaged and reconciled; real runtime verification remains pending |
+| Sprint 2 Helm deployment | A/D | implemented; d888 adopted non-destructively | source `d888a515ee089a77cca8253244ea54a8c17104f8` passed connected package validation and non-destructive application adoption; live readback showed all ten workloads Ready and seven Harbor digest images; retained infrastructure was not deleted or rebuilt | current-head Container replay, Gateway protocol replay, KubeVirt replay and Release Gate remain pending |
 | Sprint 2 data foundation | A/D | verified on adopted target | digest-locked PostgreSQL, NATS JetStream and MinIO StatefulSets; TLS, persistent storage, restricted Pod Security, default-deny NetworkPolicy, strict private bundle; a second reconciliation at source identity `4ced06d` changed nothing | this is retained-foundation evidence only, not application deployment or Sprint 2 E3 |
 | Demo replay and Release Gate | A/D | implemented locally | exact connected check set, evidence rehash, clean-HEAD/deployment/catalog/image/Run binding, tamper test and stable missing-input diagnostics | Linux infrastructure Verify, real Keycloak Playwright and same-build passing report remain pending |
 | Private Sigstore, Kyverno and Packer | A/D | removed from active product source | ADR 0006 is Superseded; active contracts, Chart and CI contain no trust-plane gate | retained installations are deliberately untouched and are not Sprint 2 evidence |
-| Sprint 2 retained-infrastructure adoption | A/D | previous head verified | `sprint2-buildkit` adopted retained BuildKit and exact mTLS Buildx; application runs `sprint2-application-da498a26-a2` and `sprint2-application-da498a26-b` retained all named infrastructure, reported `destructive_reset=false`, and reconciled the same ten-workload identity twice | the current source must repeat these checks after the BFF repair; retained infrastructure is not dual-runtime E3 evidence |
+| Sprint 2 retained-infrastructure adoption | A/D | d888 verified | `sprint2-buildkit` retained BuildKit and exact mTLS Buildx; application run `sprint2-application-d888a515-2215` retained all named infrastructure, reported `destructive_reset=false`, and reconciled the ten-workload identity | retained infrastructure is not dual-runtime E3 evidence |
 | Sprint 2 destructive reset | A/D | deferred maintenance path | cluster-bound confirmation and destructive report remain isolated behind `demo reset` | explicitly excluded from this delivery and must not be used for Sprint 2 deployment |
 
 ## Accepted Sprint 2 security exceptions
