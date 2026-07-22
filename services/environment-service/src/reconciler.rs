@@ -197,6 +197,13 @@ impl ReconcileWorker {
                     }
                     Err(error) => return Err(error.into()),
                 };
+                // A non-terminal observation must not be immediately claimed again.  The
+                // container and KubeVirt providers both return `operation_complete = false`
+                // while a resource is still converging; leaving `next_attempt_at` at the
+                // operation acceptance time creates a hot loop that repeatedly persists the
+                // same observation, inflates the public revision, and starves the cluster.
+                let updated =
+                    Self::defer_non_terminal_observation(&updated, now, self.retry_delay)?;
                 self.store.save_reconciled(&lease, &updated).await?;
                 Ok(ReconcileWorkerOutcome::Advanced {
                     state: updated.observed_state,
@@ -236,6 +243,26 @@ impl ReconcileWorker {
                 Ok(ReconcileWorkerOutcome::Failed { diagnostic_code })
             }
         }
+    }
+
+    fn defer_non_terminal_observation(
+        instance: &EnvironmentInstance,
+        now: UtcTimestamp,
+        retry_delay: Duration,
+    ) -> Result<EnvironmentInstance, ReconcileWorkerError> {
+        if matches!(
+            instance.operation.state,
+            OperationState::Succeeded | OperationState::Failed | OperationState::Cancelled
+        ) {
+            return Ok(instance.clone());
+        }
+        let mut updated = instance.clone();
+        let next_attempt_at = add_duration(now, retry_delay)?;
+        updated.operation.next_attempt_at = next_attempt_at.min(updated.operation.deadline_at);
+        updated.validate().map_err(|_| {
+            ReconcileWorkerError::Lifecycle(crate::LifecycleError::ProviderObservationInvalid)
+        })?;
+        Ok(updated)
     }
 
     fn cleanup_deadline(
@@ -421,4 +448,89 @@ pub enum ReconcileWorkerError {
     Store(#[from] EnvironmentStoreError),
     #[error("LW_ENVIRONMENT_RECONCILE_LIFECYCLE_FAILED: {0}")]
     Lifecycle(#[from] crate::LifecycleError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use contracts::authoring::{EnvironmentClass, RuntimeKind};
+    use contracts::environment::{
+        DesiredEnvironmentState, EnvironmentOperation, EnvironmentOperationKind,
+        ObservedEnvironmentState, OperationState,
+    };
+    use contracts::{
+        ActorId, CourseId, EnvironmentId, OperationId, ReleaseId, Revision, UtcTimestamp,
+    };
+    use std::str::FromStr;
+
+    fn timestamp(value: &str) -> UtcTimestamp {
+        UtcTimestamp::from_str(value).expect("test timestamp must be valid")
+    }
+
+    fn provisioning_instance() -> EnvironmentInstance {
+        let accepted_at = timestamp("2026-07-22T00:00:00.000Z");
+        EnvironmentInstance {
+            id: EnvironmentId::new(),
+            display_label: "reconcile test".to_owned(),
+            course_id: CourseId::new(),
+            owner_id: ActorId::new(),
+            class: EnvironmentClass::Experiment,
+            runtime_kind: RuntimeKind::Container,
+            release_id: ReleaseId::new(),
+            release_version: 1,
+            lease_id: None,
+            capacity_binding: None,
+            provider_binding: "container-primary-v1".to_owned(),
+            desired_state: DesiredEnvironmentState::Running,
+            observed_state: ObservedEnvironmentState::Provisioning,
+            revision: Revision::new(2).expect("revision"),
+            generation: 1,
+            observed_generation: 0,
+            operation: EnvironmentOperation {
+                id: OperationId::new(),
+                kind: EnvironmentOperationKind::Create,
+                state: OperationState::Running,
+                accepted_revision: Revision::new(1).expect("revision"),
+                attempt: 1,
+                provider_step: 2,
+                max_attempts: 3,
+                next_attempt_at: accepted_at,
+                actor_id: ActorId::new(),
+                trace_id: "trace-reconcile-test".to_owned(),
+                accepted_at,
+                deadline_at: timestamp("2026-07-22T00:10:00.000Z"),
+                cleanup_started_at: None,
+                diagnostic_code: None,
+                preserve_mutable_disk: false,
+                access_revocation_revision: None,
+                retry_from_phase: None,
+                reset_target: None,
+                lease_authorization: None,
+            },
+            eligibility_expires_at: timestamp("2026-07-23T00:00:00.000Z"),
+            endpoints: Vec::new(),
+            last_diagnostic_code: None,
+            failed_phase: None,
+            cleanup_evidence: None,
+        }
+    }
+
+    #[test]
+    fn non_terminal_observation_is_deferred_until_retry_delay() {
+        let current = provisioning_instance();
+        let now = timestamp("2026-07-22T00:01:00.000Z");
+        let deferred =
+            ReconcileWorker::defer_non_terminal_observation(&current, now, Duration::from_secs(1))
+                .expect("valid deferred observation");
+
+        assert_eq!(
+            deferred.operation.next_attempt_at,
+            timestamp("2026-07-22T00:01:01.000Z")
+        );
+        assert_eq!(
+            deferred.operation.provider_step,
+            current.operation.provider_step
+        );
+        assert_eq!(deferred.revision, current.revision);
+    }
 }
