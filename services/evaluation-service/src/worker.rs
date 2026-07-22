@@ -173,6 +173,17 @@ fn validate_configuration(configuration: &WorkerConfiguration) -> Result<(), Fre
             .as_ref()
             .is_some_and(|path| !path.is_absolute())
     {
+        tracing::error!(
+            event = "evaluation.freeze_worker.configuration_invalid",
+            database_max_connections = configuration.database_max_connections,
+            database_url_file_absolute = configuration.database_url_file.is_absolute(),
+            access_key_file_absolute = configuration.object_store_access_key_file.is_absolute(),
+            secret_key_file_absolute = configuration.object_store_secret_key_file.is_absolute(),
+            session_token_file_absolute = configuration
+                .object_store_session_token_file
+                .as_ref()
+                .is_none_or(|path| path.is_absolute()),
+        );
         return Err(FreezeWorkerError::ConfigurationInvalid);
     }
     Ok(())
@@ -186,17 +197,34 @@ fn bounded_duration(milliseconds: u64) -> Result<Duration, FreezeWorkerError> {
 }
 
 fn required_absolute_path(name: &'static str) -> Result<PathBuf, FreezeWorkerError> {
-    let value = std::env::var(name).map_err(|_| FreezeWorkerError::ConfigurationMissing(name))?;
+    let value = std::env::var(name).map_err(|_| {
+        tracing::error!(
+            event = "evaluation.freeze_worker.configuration_missing",
+            variable = name
+        );
+        FreezeWorkerError::ConfigurationMissing(name)
+    })?;
     let path = PathBuf::from(value);
     if !path.is_absolute() {
+        tracing::error!(
+            event = "evaluation.freeze_worker.configuration_path_invalid",
+            variable = name
+        );
         return Err(FreezeWorkerError::ConfigurationMissing(name));
     }
     Ok(path)
 }
 
 fn read_yaml<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, FreezeWorkerError> {
-    serde_yaml::from_slice(&read_mounted_file(path, MAX_CONFIGURATION_BYTES)?)
-        .map_err(|_| FreezeWorkerError::ConfigurationInvalid)
+    let bytes = read_mounted_file(path, MAX_CONFIGURATION_BYTES)?;
+    serde_yaml::from_slice(&bytes).map_err(|error| {
+        tracing::error!(
+            event = "evaluation.freeze_worker.configuration_parse_failed",
+            path = %path.display(),
+            error = %error,
+        );
+        FreezeWorkerError::ConfigurationInvalid
+    })
 }
 
 fn read_secret(path: &Path) -> Result<String, FreezeWorkerError> {
@@ -208,6 +236,7 @@ fn read_secret(path: &Path) -> Result<String, FreezeWorkerError> {
         .trim()
         .to_owned();
     if value.is_empty() || value.chars().any(char::is_control) {
+        tracing::error!(event = "evaluation.freeze_worker.secret_invalid", path = %path.display());
         return Err(FreezeWorkerError::ConfigurationInvalid);
     }
     Ok(value)
