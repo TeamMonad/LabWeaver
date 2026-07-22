@@ -15,7 +15,7 @@ test('teacher sees the ECNU policy and both approved AgentRun candidates', async
   const runId = requiredEnvironment('LABWEAVER_E2E_AGENT_RUN_ID')
   await page.goto(`/teacher/approvals?runId=${encodeURIComponent(runId)}`)
   await expect(page.getByRole('heading', { name: '候选审批与发布' })).toBeVisible()
-  await expect(page.locator('.run-id')).toHaveText(runId)
+  await expect(page.getByText(runId, { exact: true })).toBeVisible()
   await expect(page.locator('.candidate-card')).toHaveCount(2)
   await expect(page.locator('.approval-status')).toHaveCount(2)
   await expect(page.locator('.approval-status')).toHaveText([

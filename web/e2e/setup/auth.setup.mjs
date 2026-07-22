@@ -11,6 +11,7 @@ const actors = Object.freeze([
     passwordFileVariable: 'LABWEAVER_TEACHER_PASSWORD_FILE',
     destination: path.join(authDir, 'teacher.json'),
     landingPath: '/teacher/materials',
+    entryLabel: '教师入口',
     heading: '材料上传与 AgentRun',
   }),
   Object.freeze({
@@ -19,6 +20,7 @@ const actors = Object.freeze([
     passwordFileVariable: 'LABWEAVER_STUDENT_PASSWORD_FILE',
     destination: path.join(authDir, 'student.json'),
     landingPath: '/student/environments',
+    entryLabel: '学生入口',
     heading: '环境控制台',
   }),
 ])
@@ -55,7 +57,15 @@ async function authenticate({ browser, baseURL, actor }) {
       page.waitForURL((url) => url.origin === new URL(baseURL).origin),
       page.locator('#kc-login').click(),
     ])
-    await expect(page.getByRole('heading', { name: actor.heading })).toBeVisible()
+    // Keycloak returns to the authenticated role selector when no previous
+    // BFF session exists. Follow the explicit role entry before asserting the
+    // protected landing page; this keeps the auth setup aligned with the real
+    // teacher/student browser journey instead of assuming a hidden redirect.
+    if (!new URL(page.url()).pathname.startsWith(actor.landingPath)) {
+      await page.getByText(actor.entryLabel, { exact: true }).click()
+      await page.goto(actor.landingPath)
+    }
+    await expect(page.getByRole('heading', { name: actor.heading }).first()).toBeVisible()
     await expect(page).toHaveURL(new RegExp(`${actor.landingPath.replaceAll('/', '\\/')}(?:[?#].*)?$`))
     await context.storageState({ path: actor.destination })
   } catch (error) {

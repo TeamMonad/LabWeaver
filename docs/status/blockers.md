@@ -7,12 +7,16 @@ identity. Historical Issue evidence is not a current completion claim.
 
 - Local fixed-command Build Executor, persistent fences and digest/Trivy
   contracts are implemented.
-- The d888 package was built and validated against retained BuildKit/Harbor/Trivy;
-  application adoption run `sprint2-application-d888a515-2215` published seven
+- The 3a9 package was built and validated against retained BuildKit/Harbor/Trivy;
+  application adoption run `sprint2-application-3a9ac6c1-2315` published seven
   digest-bound images and reconciled the retained target without destructive
   reset.
-- Blocker: a real course build/publication replay and its negative cases have
-  not yet been executed on the d888 deployment.
+- Blocker: a fresh course build using a newly uploaded context currently
+  terminates with `LW_AGENT_BUILD_REJECTED` before publication. The retained
+  older context object was removed by its normal retention lifecycle, so it is
+  not a valid fallback. The executor currently redacts the provider's exact
+  object/validation cause from the machine-readable status and needs a focused
+  diagnostic fix before another replay.
 - Exit: duplicate/reordered command, cancel, deadline, scanner rejection,
   cleanup and private-pull negatives pass in the adopted environment.
 - Owner: B implementation review; D connected Verify; A release judgment.
@@ -65,7 +69,7 @@ admission boundary enforces the executor namespace/ServiceAccount fence.
   to sequence/revision 2. It is not yet packaged or replayed against the live
   cluster.
 - Container PVC freeze is verified on the retained prior worker build; a fresh
-  d888 same-identity freeze replay remains pending. VM/SFTP replay is
+  3a9 same-identity freeze replay remains pending. VM/SFTP replay is
   explicitly deferred this round.
 - Exit: duplicate/reordered commands, expired leases/certificates, PV identity
   mismatch, host-key mismatch, partial upload, worker restart and all residue
@@ -103,17 +107,19 @@ admission boundary enforces the executor namespace/ServiceAccount fence.
   public claims passed the checked-in fail-closed credential validator; no
   retained stream or account was reset.
 - Resolved prerequisite: `k8s-cp1` and kube-apiserver recovered. Source
-  `da498a2643a83e32b3ab6cab3465771a019d1882` then completed connected package
+  `3a9ac6c1a31040570a303b80309a23ce5ea635e1` then completed connected package
   validation and two non-destructive application reconciliations; all ten
   workloads were Ready with digest-only images.
-- Current blocker: the deployed Web image redirected protected routes to
-  `AUTH-NOT-CONFIGURED` because it incorrectly required browser-side OIDC build
-  variables while the approved deployment uses the Access BFF. Its generated
-  SDK transport also forced bearer mode, so browser mutations could not carry
-  the BFF cookie and synchronizer token.
-- Exit: package and reconcile the BFF repair, then complete fresh teacher and
-  student sessions plus the same-build Container/VM evidence without invoking
-  reset or deleting retained infrastructure.
+- Resolved in source identity `3a9ac6c1`: the deployed Web/Keycloak path now
+  reaches real teacher and student landing pages, and the teacher candidate
+  approval Playwright flow passes against the adopted deployment.
+- Current blocker: a current Container release cannot be published or started
+  from retained candidate data because Trivy evidence is stale; a new course
+  build currently fails closed with `LW_AGENT_BUILD_REJECTED` and must be
+  diagnosed without bypassing the gate.
+- Exit: repair the build/object diagnostic root cause, publish a fresh digest
+  with valid Trivy evidence, then complete the Container replay without reset
+  or deleting retained infrastructure.
 - Owner: A BFF/adoption execution; C frontend review; D independent Verify.
 
 The repository now has a separate `sprint2-foundation` reconciliation for the
@@ -133,8 +139,10 @@ dependency, but it is not Sprint 2 E3 evidence and does not authorize deletion.
 - Web SDK, local browser fixtures, real Keycloak auth setup and live
   teacher/student specifications exist. Passwords are read only from private
   files; live and Fixture specifications are mutually excluded.
-- Blocker: real Keycloak teacher/student sessions, `demo replay` and the
-  machine-readable `release-gate` are not closed under one deployment identity.
+- Teacher Keycloak setup and candidate approval now pass on the adopted 3a9
+  deployment. Student Container create/access is still blocked downstream by
+  stale image evidence and failed runtime publication, so the browser and
+  Release Gate remain open.
 - Operational blocker: the cluster and application endpoint are reachable, but
   real login currently stops at the deployed Web BFF mismatch described above.
   Retained Agent runs cannot substitute because their completion event did not

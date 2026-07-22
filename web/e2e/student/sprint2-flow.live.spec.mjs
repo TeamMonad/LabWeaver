@@ -16,7 +16,7 @@ async function loadEnvironment(page, id, runtimeLabel) {
   await expect(page.getByText('SHA-256', { exact: true })).toBeVisible()
 }
 
-test('student reads frozen Container and KubeVirt runtime evidence', async ({ page }) => {
+test('student reads frozen Container runtime evidence', async ({ page }) => {
   await page.goto('/student/environments')
   await expect(page.getByRole('heading', { name: '环境控制台', exact: true }).first()).toBeVisible()
 
@@ -25,6 +25,17 @@ test('student reads frozen Container and KubeVirt runtime evidence', async ({ pa
     requiredEnvironment('LABWEAVER_E2E_CONTAINER_ENVIRONMENT_ID'),
     '容器',
   )
+})
+
+test.skip(
+  () => process.env.LABWEAVER_E2E_SKIP_VM === 'true',
+  'KubeVirt verification is explicitly deferred for the current Container-only replay',
+)
+
+test('student reads frozen KubeVirt runtime evidence', async ({ page }) => {
+  await page.goto('/student/environments')
+  await expect(page.getByRole('heading', { name: '环境控制台', exact: true }).first()).toBeVisible()
+
   await loadEnvironment(
     page,
     requiredEnvironment('LABWEAVER_E2E_VM_ENVIRONMENT_ID'),

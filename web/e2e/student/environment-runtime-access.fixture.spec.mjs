@@ -16,7 +16,10 @@ async function expectNoA11yViolations(page, message) {
 async function createEnvironmentFromRelease(page, runtimeLabel) {
   await page.goto('/student/environments')
   await page.waitForSelector('.environment-entry')
-  await page.locator(`tr:has-text("${runtimeLabel}") button:has-text("创建环境")`).first().click()
+  // Releases are immutable and may legitimately expire while older rows remain
+  // visible.  The connected replay must choose the newest published release so
+  // it exercises the current approved artifact instead of an expired row.
+  await page.locator(`tr:has-text("${runtimeLabel}") button:has-text("创建环境")`).last().click()
   await expect(page).toHaveURL(/environmentId=/)
   await expect(page.locator('.env-state')).toHaveText('ready', { timeout: 15000 })
 }
