@@ -1155,13 +1155,69 @@ fn verify_namespace_identity(
         .and_then(Value::as_array)
         .ok_or_else(rejected)?;
     if finalizers.iter().any(|value| {
-        value
-            .as_str()
-            .is_some_and(|name| name != "labweaver.io/environment-cleanup")
+        value.as_str().is_some_and(|name| {
+            !matches!(
+                name,
+                "labweaver.io/environment-cleanup" | "finalizers.kubesphere.io/namespaces"
+            )
+        })
     }) {
         return Err(rejected());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod namespace_identity_tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn namespace_identity_accepts_retained_kubesphere_finalizer() {
+        let environment_id =
+            contracts::EnvironmentId::from_str("019f8b1a-f95f-7551-a5ce-33f4c26466fd")
+                .expect("fixture environment id");
+        let namespace = json!({
+            "metadata": {
+                "name": format!("lw-env-{environment_id}"),
+                "labels": {"labweaver.io/environment-id": environment_id.to_string()},
+                "finalizers": [
+                    "labweaver.io/environment-cleanup",
+                    "finalizers.kubesphere.io/namespaces"
+                ]
+            }
+        });
+        assert!(
+            verify_namespace_identity(
+                &namespace,
+                &format!("lw-env-{environment_id}"),
+                environment_id
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn namespace_identity_rejects_unowned_finalizer() {
+        let environment_id =
+            contracts::EnvironmentId::from_str("019f8b1a-f95f-7551-a5ce-33f4c26466fd")
+                .expect("fixture environment id");
+        let namespace = json!({
+            "metadata": {
+                "name": format!("lw-env-{environment_id}"),
+                "labels": {"labweaver.io/environment-id": environment_id.to_string()},
+                "finalizers": ["unexpected.example/finalizer"]
+            }
+        });
+        assert!(
+            verify_namespace_identity(
+                &namespace,
+                &format!("lw-env-{environment_id}"),
+                environment_id
+            )
+            .is_err()
+        );
+    }
 }
 
 fn read_secret(path: &PathBuf) -> Result<String, ProviderFailure> {
