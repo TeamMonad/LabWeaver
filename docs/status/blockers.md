@@ -24,17 +24,20 @@ the design-decision blocker, but not the missing deployment or connected replay.
 
 - Local restricted Kubernetes API executors, independent ServiceAccounts/RBAC,
   generation fences and cleanup tombstones are implemented.
-- Container create/readiness and same-build PVC freeze now pass on the current
-  retained cluster. Stop also reached `stopped`. The remaining Container replay
-  blocker is access, start/recover after release evidence refresh, and
-  residue-free delete. The current start attempt failed closed with
-  `LW_ENVIRONMENT_RELEASE_EVIDENCE_EXPIRED`; this is a real release-evidence
-  expiry, not a runtime fallback. KubeVirt is intentionally skipped in this
-  round and remains unverified.
-- Exit for the current Container slice: refresh/publish a valid Container
-  release, then create, access, stop, recover, freeze, delete and cleanup
-  readback under one package/deployment identity. The full Sprint 2 exit still
-  additionally requires the real KubeVirt replay.
+- Container create/readiness, student AccessGrant creation, workspace freeze,
+  stop, and start now pass on a fresh published Container release. The
+  Environment worker fix is `8c08fe4e`; it accepts the provider's immediate
+  `Stopped -> Ready` observation instead of converting it to a failure.
+- Delete was accepted with access revocation recorded, but cleanup is blocked by
+  the retained cluster's external `finalizers.kubesphere.io/namespaces`
+  metadata finalizer. The executor fails closed rather than removing an
+  external finalizer. The namespace remains active, so residue-free deletion is
+  not claimed. KubeVirt is intentionally skipped in this round and remains
+  unverified.
+- Exit for the current Container slice: obtain an approved cleanup policy for
+  the external namespace finalizer (or have the cluster owner remove it), then
+  rerun delete and namespace/PVC readback under the same identity. The full
+  Sprint 2 exit still additionally requires the real KubeVirt replay.
 - Owner: B implementation review; D connected Verify.
 
 The current broad Container/KubeVirt namespace CRUD ClusterRoles are an

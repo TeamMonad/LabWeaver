@@ -24,10 +24,13 @@ the presence of this document.
 
 ## Sprint 1 and Sprint 2
 
-## Current connected slice (2026-07-22)
+## Current connected slice (2026-07-23)
 
-The current source identity is `ee928895` on `release/sprint2`; the deployed
-Evaluation worker is the same implementation line at source `c14c5eda`.  The live
+The current source identity is `8c08fe4e` on `release/sprint2`; the deployed
+Environment worker contains the same source line as
+`harbor.lab.lan/labweaver-system/environment-service@sha256:c43101f7f042f879d34a6bc34ca9a14720629b00dfb88c132742c796026802d8`.
+The deployed Evaluation worker remains the same implementation line at source
+`c14c5eda`. The live
 cluster was reached through the direct architect kubeconfig; retained
 infrastructure was not deleted or rebuilt.
 
@@ -37,9 +40,12 @@ infrastructure was not deleted or rebuilt.
 | Freeze worker storage binding | verified prerequisite | `labweaver-frozen-submissions` is an additive Object Lock bucket with versioning; the live Evaluation ConfigMap points at it. The existing `labweaver-artifacts` bucket was not changed. |
 | Freeze worker network path | verified prerequisite | The retained data NetworkPolicy now permits the labelled environment namespace to reach PostgreSQL/NATS/MinIO; TLS and TCP probes passed. |
 | Freeze completion | verified on Container | Same-build Evaluation worker image `harbor.lab.lan/labweaver-system/evaluation-service@sha256:14ff7de5934660aced3efd0cb4c3443bdf7ab2bb4b4bbb8bd3780f17d55bdea3` completed frozen submission `019f8ae9-774d-7583-baa7-f1bc0756aad6`; Object Lock version `9f3fae6d-dbd2-4e84-957a-2a3459cccd03`, `cleanup_verified=true`, and the command reached `completed`. |
-| Container stop/start | partially verified | Stop accepted at revision 9 and reached `stopped` at revision 10. Start correctly failed closed at revision 12 with `LW_ENVIRONMENT_RELEASE_EVIDENCE_EXPIRED`; the published Container release's one-hour Trivy evidence window had expired. A fresh release is required before another start/recovery replay. |
+| Container access | verified prerequisite | A real student session created an AccessGrant for the fresh Container environment after endpoint discovery; the grant was course- and environment-scoped. Gateway protocol replay remains pending. |
+| Container freeze | verified | Fresh environment `019f8b1a-f95f-7551-a5ce-33f4c26466fd` froze submission `019f8b1b-e2e7-7212-9272-a5b89160cc98` from the mounted workspace; the immutable object was materialized by the Evaluation worker and the freeze command completed. |
+| Container stop/start | verified | The same fresh environment accepted stop (`stopped`, revision 10), then start (`ready`, revision 12) after the lifecycle fix allowing an immediate `Stopped → Ready` provider observation. |
+| Container delete/cleanup | blocked | Delete was accepted with access revocation recorded, but the retained cluster's namespace has an external `finalizers.kubesphere.io/namespaces` metadata finalizer. The executor fails closed instead of removing an external finalizer; the namespace remains active and no residue-free cleanup claim is made. |
 | KubeVirt | intentionally skipped | The user limited this round to Container runtime verification; no VM completion claim is made. |
-| Release Gate / Sprint 2 | blocked | Container freeze now passes, but access/start/recovery/delete replay is not closed and no machine-readable passing Release Gate exists. |
+| Release Gate / Sprint 2 | blocked | Container create/access/freeze/stop/start now pass on the current identity; delete cleanup is blocked by the external namespace finalizer, and no machine-readable passing Release Gate exists. |
 
 | Capability | Owner | State | Current evidence | Blocker or limitation |
 | --- | --- | --- | --- | --- |
