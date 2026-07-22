@@ -761,9 +761,18 @@ impl KubernetesContainerExecutor {
             )
             .await
             .map(|object| object.reference)
-            .map_err(|_| ProviderFailure {
-                code: ProviderFailureCode::CleanupFailed,
-                retryable: true,
+            .map_err(|error| {
+                tracing::warn!(
+                    event = "environment.runtime_executor.cleanup_evidence_store_failed",
+                    diagnostic = "LW_ENVIRONMENT_PROVIDER_CLEANUP_FAILED",
+                    environment_id = %environment_id,
+                    request_id = %request_id,
+                    error = %error
+                );
+                ProviderFailure {
+                    code: ProviderFailureCode::CleanupFailed,
+                    retryable: true,
+                }
             })
     }
 

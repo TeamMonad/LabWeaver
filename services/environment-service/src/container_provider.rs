@@ -347,7 +347,31 @@ impl ContainerProviderBackend for NatsContainerProviderBackend {
             } if plan_sha256 == plan.plan_sha256 && valid_artifact_ref(&cleanup_evidence) => {
                 Ok(cleanup_evidence)
             }
-            ContainerExecutorResponse::Failed { failure } => Err(failure),
+            ContainerExecutorResponse::Deleted {
+                plan_sha256,
+                cleanup_evidence,
+            } => {
+                tracing::warn!(
+                    event = "environment.container_provider.cleanup_response_invalid",
+                    diagnostic = "LW_ENVIRONMENT_PROVIDER_CLEANUP_FAILED",
+                    environment_id = %plan.environment_id,
+                    expected_plan_sha256 = %plan.plan_sha256,
+                    actual_plan_sha256 = %plan_sha256,
+                    artifact_size_bytes = cleanup_evidence.size_bytes
+                );
+                Err(ProviderFailure {
+                    code: ProviderFailureCode::CleanupFailed,
+                    retryable: true,
+                })
+            }
+            ContainerExecutorResponse::Failed { failure } => {
+                tracing::warn!(
+                    event = "environment.container_provider.cleanup_response_failed",
+                    diagnostic = ?failure.code,
+                    environment_id = %plan.environment_id
+                );
+                Err(failure)
+            }
             _ => Err(ProviderFailure {
                 code: ProviderFailureCode::CleanupFailed,
                 retryable: true,
