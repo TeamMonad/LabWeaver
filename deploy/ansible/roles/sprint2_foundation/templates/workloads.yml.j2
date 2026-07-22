@@ -247,6 +247,11 @@ spec:
         - podSelector: {}
         - namespaceSelector:
             matchLabels: {kubernetes.io/metadata.name: labweaver-system}
+        # Freeze workers run in per-environment namespaces and need the same
+        # owner-service read path as the evaluation owner. The worker Job
+        # remains bound to one immutable submission and has no write credentials.
+        - namespaceSelector:
+            matchLabels: {labweaver.io/environment: "true"}
   egress:
     - to:
         - podSelector: {}

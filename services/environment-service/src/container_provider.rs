@@ -1386,7 +1386,10 @@ where
                             "metadata":{"labels":{"app":app_name,"labweaver.io/environment-id":instance.id.to_string()}},
                             "spec":{
                                 "serviceAccountName":"runtime","automountServiceAccountToken":false,
-                                "securityContext":{"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}},
+                                // The shared NFS PVC is provisioned with the `nobody` owner.
+                                // Pinning the runtime identity to that non-root UID keeps the
+                                // student workspace writable without a privileged init step.
+                                "securityContext":{"runAsNonRoot":true,"runAsUser":65534,"runAsGroup":65534,"fsGroup":65534,"seccompProfile":{"type":"RuntimeDefault"}},
                                 "containers":[{
                                     "name":"runtime","image":image,"imagePullPolicy":"IfNotPresent",
                                     "ports":[{"name":"service","containerPort":service_port}],

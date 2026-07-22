@@ -3,7 +3,9 @@ databaseMaxConnections: 2
 objectStore:
   binding: minio-submissions-v1
   endpoint: https://minio.labweaver-data.svc:9000
-  bucket: labweaver-artifacts
+  # Dedicated Object-Lock-enabled bucket; the legacy shared bucket is versioned
+  # but was provisioned without Object Lock and cannot satisfy immutable freezes.
+  bucket: labweaver-frozen-submissions
   region: us-east-1
   objectPrefix: frozen-submissions
   uploadTtlSeconds: 300

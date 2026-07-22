@@ -178,6 +178,12 @@ impl FreezeService {
         {
             Ok(verified) => verified,
             Err(error) => {
+                tracing::error!(
+                    event = "evaluation.freeze.object_store_failed",
+                    frozen_submission_id = %lease.frozen_submission_id,
+                    diagnostic = error.diagnostic_code(),
+                    error = ?error,
+                );
                 self.fail_attempt(&lease, error.diagnostic_code(), false)
                     .await?;
                 return Err(FreezeServiceError::ObjectStore(error));
@@ -222,6 +228,11 @@ impl FreezeService {
             .complete(&lease, &object_key, &submission, &request.trace_id)
             .await
         {
+            tracing::error!(
+                event = "evaluation.freeze.persistence_failed",
+                frozen_submission_id = %lease.frozen_submission_id,
+                error = ?error,
+            );
             self.fail_attempt(&lease, error.diagnostic_code(), false)
                 .await?;
             return Err(FreezeServiceError::Store(error));
@@ -238,7 +249,15 @@ impl FreezeService {
         self.store
             .fail(lease, diagnostic_code, cleanup_verified)
             .await
-            .map_err(|_| FreezeServiceError::FailurePersistence)
+            .map_err(|error| {
+                tracing::error!(
+                    event = "evaluation.freeze.failure_persistence_failed",
+                    frozen_submission_id = %lease.frozen_submission_id,
+                    diagnostic = diagnostic_code,
+                    error = ?error,
+                );
+                FreezeServiceError::FailurePersistence
+            })
     }
 }
 
