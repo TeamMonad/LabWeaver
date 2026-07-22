@@ -52,8 +52,8 @@ control:
   evaluationSchemaSha256: "e6ccd10b1c34d8aa3024e29ec0884488f07a9be0df9f6b2c47605a1279d62cc7"
   containerBuild:
     builderBinding: "buildkit-primary-v1"
-    # Registry authority only. Control creates `course-<course UUID>` as the Harbor Project.
-    outputRepositoryPrefix: "harbor.example.invalid"
+    # Harbor registry and project scope used by the fixed build executor.
+    outputRepositoryPrefix: "harbor.example.invalid/labweaver-system"
     dockerfilePath: "Dockerfile"
     network:
       mode: "restricted"
