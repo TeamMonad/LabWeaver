@@ -174,6 +174,7 @@ impl KubernetesContainerExecutor {
     ) -> Result<(), ProviderFailure> {
         validate_resource(plan, resource)?;
         let url = self.resource_url(resource)?;
+        let api_path = url.path().to_owned();
         let response = self
             .authorized(
                 self.client
@@ -184,8 +185,35 @@ impl KubernetesContainerExecutor {
             )
             .send()
             .await
-            .map_err(|_| unavailable())?;
-        accept_mutation(response.status())
+            .map_err(|error| {
+                tracing::warn!(
+                    event = "environment.container_executor.kubernetes_request_failed",
+                    diagnostic = "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
+                    phase = "apply",
+                    environment_id = %plan.environment_id,
+                    resource_kind = %resource.kind,
+                    resource_name = %resource.name,
+                    api_path,
+                    error = %error
+                );
+                unavailable()
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            let failure = status_failure(status);
+            tracing::warn!(
+                event = "environment.container_executor.kubernetes_response_rejected",
+                diagnostic = ?failure.code,
+                phase = "apply",
+                environment_id = %plan.environment_id,
+                resource_kind = %resource.kind,
+                resource_name = %resource.name,
+                api_path,
+                status = status.as_u16()
+            );
+            return Err(failure);
+        }
+        Ok(())
     }
 
     async fn observe_plan(
@@ -202,7 +230,18 @@ impl KubernetesContainerExecutor {
             .authorized(self.client.get(self.resource_url(deployment)?))
             .send()
             .await
-            .map_err(|_| unavailable())?;
+            .map_err(|error| {
+                tracing::warn!(
+                    event = "environment.container_executor.kubernetes_request_failed",
+                    diagnostic = "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
+                    phase = "observe",
+                    environment_id = %plan.environment_id,
+                    resource_kind = %deployment.kind,
+                    resource_name = %deployment.name,
+                    error = %error
+                );
+                unavailable()
+            })?;
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(ContainerApplyObservation {
                 ready: false,
@@ -210,7 +249,17 @@ impl KubernetesContainerExecutor {
             });
         }
         if !response.status().is_success() {
-            return Err(status_failure(response.status()));
+            let failure = status_failure(response.status());
+            tracing::warn!(
+                event = "environment.container_executor.kubernetes_response_rejected",
+                diagnostic = ?failure.code,
+                phase = "observe",
+                environment_id = %plan.environment_id,
+                resource_kind = %deployment.kind,
+                resource_name = %deployment.name,
+                status = response.status().as_u16()
+            );
+            return Err(failure);
         }
         let value: Value = response.json().await.map_err(|_| invalid_observation())?;
         let generation = pointer_u64(&value, "/metadata/generation")?;
