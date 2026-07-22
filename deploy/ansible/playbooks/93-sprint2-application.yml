@@ -8,7 +8,8 @@
     labweaver_preflight_validate_remote_hosts: false
 
 - name: Adopt existing services and deploy the Sprint 2 application profile
-  hosts: control_plane
+  hosts: localhost
+  connection: local
   gather_facts: false
   become: true
   roles: [sprint2_application]

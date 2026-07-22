@@ -372,6 +372,9 @@ class AnsibleFixtureTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("labweaver_preflight_validate_remote_hosts: false", application)
         self.assertNotIn("91-sprint2-admin-tools.yml", application)
+        self.assertIn("hosts: localhost", application)
+        self.assertIn("connection: local", application)
+        self.assertNotIn("hosts: control_plane", application)
         self.assertEqual(
             preflight.count(
                 "labweaver_preflight_validate_remote_hosts | default(true) | bool"
