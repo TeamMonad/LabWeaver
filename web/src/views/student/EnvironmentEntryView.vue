@@ -431,9 +431,12 @@ watch(
 )
 
 watch(
-  () => env.instance.kind,
-  (kind, previousKind) => {
-    if (kind === 'success' && previousKind !== 'success') {
+  () =>
+    env.instance.kind === 'success'
+      ? `${env.instance.data.id}:${env.instance.data.revision}:${env.instance.data.observedState}`
+      : null,
+  (identity, previousIdentity) => {
+    if (identity && identity !== previousIdentity) {
       access.loadEndpoints()
     }
   },
