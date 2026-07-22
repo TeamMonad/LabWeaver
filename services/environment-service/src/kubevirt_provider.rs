@@ -575,6 +575,14 @@ impl PgKubeVirtExecutorFenceStore {
                 .and_then(Value::as_str)
                 == Some("deleted");
             if tombstoned && cleanup_succeeded {
+                if fence.action == ReconcileAction::Cleanup {
+                    let value = last_response
+                        .as_ref()
+                        .ok_or(KubeVirtExecutorFenceError::IdentityMismatch)?
+                        .clone();
+                    transaction.rollback().await?;
+                    return Ok(KubeVirtExecutorAdmission::Replay(value));
+                }
                 return Err(KubeVirtExecutorFenceError::Tombstoned);
             }
             if fence.environment_generation < highest_generation

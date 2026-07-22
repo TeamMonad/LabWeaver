@@ -514,6 +514,14 @@ impl PgContainerExecutorFenceStore {
                 .and_then(Value::as_str)
                 == Some("deleted");
             if tombstoned && cleanup_succeeded {
+                if fence.action == ReconcileAction::Cleanup {
+                    let value = last_response
+                        .as_ref()
+                        .ok_or(ContainerExecutorFenceError::IdentityMismatch)?
+                        .clone();
+                    transaction.rollback().await?;
+                    return Ok(ContainerExecutorAdmission::Replay(value));
+                }
                 return Err(ContainerExecutorFenceError::Tombstoned);
             }
             if fence.operation_generation < highest_generation
