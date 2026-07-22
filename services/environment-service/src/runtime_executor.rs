@@ -750,15 +750,21 @@ impl KubernetesContainerExecutor {
                 ),
         )
         .map_err(|_| rejected())?;
+        let key = self
+            .objects
+            .scoped_key(&format!("cleanup/{environment_id}/{request_id}.json"))
+            .map_err(|error| {
+                tracing::warn!(
+                    event = "environment.runtime_executor.cleanup_evidence_key_invalid",
+                    diagnostic = "LW_ENVIRONMENT_PROVIDER_CLEANUP_FAILED",
+                    environment_id = %environment_id,
+                    request_id = %request_id,
+                    error = %error
+                );
+                rejected()
+            })?;
         self.objects
-            .put_governance_locked(
-                &format!("cleanup/{environment_id}/{request_id}.json"),
-                &bytes,
-                sha256,
-                CLEANUP_MEDIA_TYPE,
-                now,
-                retain_until,
-            )
+            .put_governance_locked(&key, &bytes, sha256, CLEANUP_MEDIA_TYPE, now, retain_until)
             .await
             .map(|object| object.reference)
             .map_err(|error| {

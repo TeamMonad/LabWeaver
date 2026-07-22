@@ -198,6 +198,16 @@ impl S3ImmutableObjectStore {
         &self.config.binding
     }
 
+    /// Prefixes an application-relative key with the configured immutable
+    /// object namespace and validates the resulting locator.
+    pub fn scoped_key(&self, suffix: &str) -> Result<String, ObjectStoreError> {
+        let prefix = self.config.object_prefix.trim_matches('/');
+        let suffix = suffix.trim_start_matches('/');
+        let key = format!("{prefix}/{suffix}");
+        self.validate_key(&key)?;
+        Ok(key)
+    }
+
     fn validate_key(&self, key: &str) -> Result<(), ObjectStoreError> {
         let prefix = self.config.object_prefix.trim_matches('/');
         if key.is_empty()
