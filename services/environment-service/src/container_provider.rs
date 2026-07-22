@@ -1324,10 +1324,16 @@ where
                                     "ports":[{"name":"service","containerPort":service_port}],
                                     "resources":{"requests":{"cpu":cpu,"memory":memory},"limits":{"cpu":cpu,"memory":memory}},
                                     "securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"capabilities":{"drop":["ALL"]}},
-                                    "volumeMounts":[{"name":"workspace","mountPath":"/workspace"}],
+                                    "volumeMounts":[
+                                        {"name":"workspace","mountPath":"/workspace"},
+                                        {"name":"runtime-tmp","mountPath":"/tmp"}
+                                    ],
                                     "readinessProbe":{"tcpSocket":{"port":"service"},"periodSeconds":2,"failureThreshold":30}
                                 }],
-                                "volumes":[{"name":"workspace","persistentVolumeClaim":{"claimName":"workspace"}}]
+                                "volumes":[
+                                    {"name":"workspace","persistentVolumeClaim":{"claimName":"workspace"}},
+                                    {"name":"runtime-tmp","emptyDir":{"sizeLimit":"64Mi"}}
+                                ]
                             }
                         }
                     }

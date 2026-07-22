@@ -222,5 +222,6 @@ network:
   identityNamespaceSelector:
     matchLabels: {kubernetes.io/metadata.name: keycloak-system}
   kubernetesApiCidrs: []
+  kubernetesApiPorts: [443]
   gatewayIngressCidrs: []
   externalServiceEndpoints: []

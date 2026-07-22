@@ -89,10 +89,16 @@ spec:
     {{- if empty $root.Values.network.kubernetesApiCidrs }}
     {{- fail "network.kubernetesApiCidrs must identify the adopted API endpoint when runtime executors are enabled" }}
     {{- end }}
+    {{- if empty $root.Values.network.kubernetesApiPorts }}
+    {{- fail "network.kubernetesApiPorts must identify the adopted API endpoint ports when runtime executors are enabled" }}
+    {{- end }}
     {{- range $cidr := $root.Values.network.kubernetesApiCidrs }}
     - to:
         - ipBlock: {cidr: {{ $cidr | quote }}}
-      ports: [{protocol: TCP, port: 443}]
+      ports:
+        {{- range $port := $root.Values.network.kubernetesApiPorts }}
+        - {protocol: TCP, port: {{ $port }}}
+        {{- end }}
     {{- end }}
     {{- end }}
     {{- if eq $name "openssh-gateway" }}

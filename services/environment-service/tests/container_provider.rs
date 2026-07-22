@@ -167,24 +167,7 @@ fn plan_uses_digest_only_image_and_only_the_access_proxy() {
             .pointer("/spec/template/spec/containers/0/image"),
         Some(&json!(first.image))
     );
-    assert_eq!(
-        deployment
-            .document
-            .pointer("/spec/template/spec/containers/0/securityContext/readOnlyRootFilesystem"),
-        Some(&json!(true))
-    );
-    assert_eq!(
-        deployment
-            .document
-            .pointer("/spec/template/spec/containers/0/securityContext/allowPrivilegeEscalation"),
-        Some(&json!(false))
-    );
-    assert_eq!(
-        deployment
-            .document
-            .pointer("/spec/template/spec/containers/0/securityContext/capabilities/drop/0"),
-        Some(&json!("ALL"))
-    );
+    assert_runtime_security_and_tmp(&deployment.document);
     assert_eq!(
         resource(&first, "Service").document.pointer("/spec/type"),
         Some(&json!("ClusterIP"))
@@ -235,6 +218,31 @@ fn plan_uses_digest_only_image_and_only_the_access_proxy() {
             .document
             .pointer("/spec/ingress/0/from/0/podSelector/matchLabels/app.kubernetes.io~1name"),
         Some(&json!("access-service"))
+    );
+}
+
+fn assert_runtime_security_and_tmp(document: &serde_json::Value) {
+    assert_eq!(
+        document
+            .pointer("/spec/template/spec/containers/0/securityContext/readOnlyRootFilesystem",),
+        Some(&json!(true))
+    );
+    assert_eq!(
+        document
+            .pointer("/spec/template/spec/containers/0/securityContext/allowPrivilegeEscalation",),
+        Some(&json!(false))
+    );
+    assert_eq!(
+        document.pointer("/spec/template/spec/containers/0/securityContext/capabilities/drop/0"),
+        Some(&json!("ALL"))
+    );
+    assert_eq!(
+        document.pointer("/spec/template/spec/containers/0/volumeMounts/1/mountPath"),
+        Some(&json!("/tmp"))
+    );
+    assert_eq!(
+        document.pointer("/spec/template/spec/volumes/1/emptyDir/sizeLimit"),
+        Some(&json!("64Mi"))
     );
 }
 

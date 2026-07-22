@@ -24,3 +24,15 @@ specs:
         toPorts:
           - ports:
               - {port: "2222", protocol: TCP}
+  - endpointSelector:
+      matchExpressions:
+        - key: app.kubernetes.io/name
+          operator: In
+          values: [container-executor, kubevirt-executor]
+    egress:
+      - toEntities: [kube-apiserver]
+        toPorts:
+          - ports:
+              {{- range $port := .Values.network.kubernetesApiPorts }}
+              - {port: {{ $port | quote }}, protocol: TCP}
+              {{- end }}

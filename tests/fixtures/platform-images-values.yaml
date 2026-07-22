@@ -8,3 +8,4 @@ images:
   web: harbor.internal.example/labweaver-system/web@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 network:
   kubernetesApiCidrs: [10.96.0.1/32]
+  kubernetesApiPorts: [443, 6443]
