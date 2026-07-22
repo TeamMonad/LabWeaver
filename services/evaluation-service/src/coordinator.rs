@@ -129,9 +129,83 @@ impl FreezeCoordinator {
     /// Claims at most one command and reconciles every bounded in-flight Job.
     pub async fn reconcile_once(&self) -> Result<(), FreezeCoordinatorError> {
         let _ = self.store.claim_next().await?;
+        let authority_now = self.store.authority_now().await?;
         for command in self.store.running(32).await? {
-            self.reconcile(&command).await?;
+            if let Err(error) = self.reconcile(&command).await {
+                if error.is_systemic() {
+                    return Err(error);
+                }
+                let deadline_exceeded = command_deadline_exceeded(
+                    command.requested_at,
+                    authority_now,
+                    self.configuration.job_active_deadline_seconds,
+                );
+                let terminal = error.is_terminal_command_error() || deadline_exceeded;
+                tracing::warn!(
+                    event = "evaluation.freeze.reconcile.failed",
+                    frozen_submission_id = %command.frozen_submission_id,
+                    environment_id = %command.environment_id,
+                    diagnostic = error.diagnostic_code(),
+                    deadline_exceeded,
+                    retry = !terminal,
+                );
+                if terminal {
+                    let cleanup = self
+                        .fail_command_after_cleanup(
+                            &command,
+                            if deadline_exceeded {
+                                "LW_COLLECT_DEADLINE_EXCEEDED"
+                            } else {
+                                error.diagnostic_code()
+                            },
+                        )
+                        .await;
+                    if let Err(cleanup_error) = cleanup {
+                        if cleanup_error.is_systemic() {
+                            return Err(cleanup_error);
+                        }
+                        tracing::warn!(
+                            event = "evaluation.freeze.cleanup.failed",
+                            frozen_submission_id = %command.frozen_submission_id,
+                            environment_id = %command.environment_id,
+                            diagnostic = cleanup_error.diagnostic_code(),
+                            retry = true,
+                        );
+                    }
+                }
+            }
         }
+        Ok(())
+    }
+
+    async fn fail_command_after_cleanup(
+        &self,
+        command: &SubmissionFreezeCommand,
+        diagnostic: &'static str,
+    ) -> Result<(), FreezeCoordinatorError> {
+        let job_name = job_name(command);
+        let container_namespace = format!("lw-env-{}", command.environment_id);
+        for namespace in [&container_namespace, &self.configuration.vm_job_namespace] {
+            if !self.cleanup(namespace, &job_name).await? {
+                tracing::warn!(
+                    event = "evaluation.freeze.cleanup.pending",
+                    frozen_submission_id = %command.frozen_submission_id,
+                    environment_id = %command.environment_id,
+                    namespace,
+                );
+                return Ok(());
+            }
+        }
+        self.store
+            .mark_failed(command.frozen_submission_id, diagnostic)
+            .await?;
+        tracing::error!(
+            event = "evaluation.freeze.failed",
+            frozen_submission_id = %command.frozen_submission_id,
+            environment_id = %command.environment_id,
+            diagnostic,
+            cleanup_verified = true,
+        );
         Ok(())
     }
 
@@ -674,4 +748,72 @@ pub enum FreezeCoordinatorError {
     Ssh(#[from] russh::keys::ssh_key::Error),
     #[error(transparent)]
     Store(#[from] crate::FreezeCommandStoreError),
+}
+
+impl FreezeCoordinatorError {
+    const fn is_systemic(&self) -> bool {
+        matches!(
+            self,
+            Self::ConfigurationInvalid | Self::CertificateInvalid | Self::Io(_) | Self::Store(_)
+        )
+    }
+
+    const fn is_terminal_command_error(&self) -> bool {
+        matches!(self, Self::BindingInvalid | Self::Json(_) | Self::Ssh(_))
+    }
+
+    const fn diagnostic_code(&self) -> &'static str {
+        match self {
+            Self::ConfigurationInvalid => "LW_COLLECT_COORDINATOR_CONFIG_INVALID",
+            Self::CertificateInvalid => "LW_COLLECT_COORDINATOR_CERTIFICATE_INVALID",
+            Self::BindingInvalid => "LW_COLLECT_BINDING_INVALID",
+            Self::BindingUnavailable => "LW_COLLECT_BINDING_UNAVAILABLE",
+            Self::KubernetesRejected => "LW_COLLECT_KUBERNETES_REJECTED",
+            Self::Io(_) => "LW_COLLECT_IO_FAILED",
+            Self::Http(_) => "LW_COLLECT_HTTP_FAILED",
+            Self::Json(_) => "LW_COLLECT_JSON_FAILED",
+            Self::Ssh(_) => "LW_COLLECT_IDENTITY_INVALID",
+            Self::Store(_) => "LW_COLLECT_STORE_FAILED",
+        }
+    }
+}
+
+fn command_deadline_exceeded(
+    requested_at: UtcTimestamp,
+    authority_now: UtcTimestamp,
+    deadline_seconds: u64,
+) -> bool {
+    let Ok(deadline_seconds) = i64::try_from(deadline_seconds) else {
+        return true;
+    };
+    authority_now.get() >= requested_at.get() + time::Duration::seconds(deadline_seconds)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FreezeCoordinatorError, command_deadline_exceeded};
+    use contracts::UtcTimestamp;
+
+    #[test]
+    fn unavailable_binding_is_retried_until_the_command_deadline()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let error = FreezeCoordinatorError::BindingUnavailable;
+        assert!(!error.is_systemic());
+        assert!(!error.is_terminal_command_error());
+        assert_eq!(error.diagnostic_code(), "LW_COLLECT_BINDING_UNAVAILABLE");
+        let requested = "2026-07-22T00:00:00.000Z".parse::<UtcTimestamp>()?;
+        let before = "2026-07-22T00:04:58.000Z".parse::<UtcTimestamp>()?;
+        let deadline = "2026-07-22T00:04:59.000Z".parse::<UtcTimestamp>()?;
+        assert!(!command_deadline_exceeded(requested, before, 299));
+        assert!(command_deadline_exceeded(requested, deadline, 299));
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_binding_is_a_terminal_command_error() {
+        let error = FreezeCoordinatorError::BindingInvalid;
+        assert!(!error.is_systemic());
+        assert!(error.is_terminal_command_error());
+        assert_eq!(error.diagnostic_code(), "LW_COLLECT_BINDING_INVALID");
+    }
 }
