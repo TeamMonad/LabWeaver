@@ -28,7 +28,7 @@ specs:
       matchExpressions:
         - key: app.kubernetes.io/name
           operator: In
-          values: [container-executor, kubevirt-executor]
+          values: [container-executor, evaluation-service, kubevirt-executor]
     egress:
       - toEntities: [kube-apiserver]
         toPorts:

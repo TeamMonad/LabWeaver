@@ -316,6 +316,16 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertNotIn("-object-store\n", route)
         self.assertIn("include /etc/nginx/labweaver-conf.d/*.conf;", nginx)
 
+    def test_kubernetes_api_egress_includes_submission_freeze_owner(self) -> None:
+        policy = (
+            ROOT / "deploy/helm/labweaver/templates/cilium-ingress-policy.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "values: [container-executor, evaluation-service, kubevirt-executor]",
+            policy,
+        )
+        self.assertIn("toEntities: [kube-apiserver]", policy)
+
     def test_sprint2_application_reads_kubernetes_items_as_a_mapping_key(self) -> None:
         tasks = (
             ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
