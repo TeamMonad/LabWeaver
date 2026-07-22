@@ -361,7 +361,10 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("MIGRATION_PREFIX_INVALID", adoption)
         self.assertIn("MIGRATION_SET_INCOMPLETE", adoption)
         self.assertIn("migration.file | basename", adoption)
+        self.assertIn("sprint2_application_retained_baseline_sha256", adoption)
         self.assertNotIn("count(*) FROM {{ domain }}.schema_migrations) <> 1", adoption)
+        self.assertIn("SPRINT2_APPLICATION_RETAINED_BASELINE_IDENTITY_INVALID", tasks)
+        self.assertIn("sprint2_application_retained_baseline_sha256", defaults)
 
     def test_sprint2_application_preflight_does_not_requalify_retained_hosts(self) -> None:
         application = (

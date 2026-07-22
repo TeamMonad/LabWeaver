@@ -33,7 +33,7 @@ BEGIN
 {% for migration in domain_catalog.migrations %}
             (migration_id = {{ migration.id }}
              AND filename = '{{ migration.file | basename }}'
-             AND sha256 = '{{ migration.sha256 }}'
+             AND sha256 IN ('{{ migration.sha256 }}'{% if migration.id == 1 and domain in sprint2_application_retained_baseline_sha256 %}, '{{ sprint2_application_retained_baseline_sha256[domain] }}'{% endif %})
              AND outcome = 'applied'){% if not loop.last %} OR{% endif %}
 {% endfor %}
         )
@@ -45,7 +45,7 @@ BEGIN
         SELECT 1 FROM {{ domain }}.schema_migrations
         WHERE migration_id = {{ migration.id }}
           AND filename = '{{ migration.file | basename }}'
-          AND sha256 = '{{ migration.sha256 }}'
+          AND sha256 IN ('{{ migration.sha256 }}'{% if migration.id == 1 and domain in sprint2_application_retained_baseline_sha256 %}, '{{ sprint2_application_retained_baseline_sha256[domain] }}'{% endif %})
           AND outcome = 'applied'
     ) THEN
         RAISE EXCEPTION 'SPRINT2_{{ domain | upper }}_MIGRATION_PREFIX_INVALID';
@@ -83,7 +83,7 @@ BEGIN
            SELECT 1 FROM {{ domain }}.schema_migrations
            WHERE migration_id = {{ migration.id }}
              AND filename = '{{ migration.file | basename }}'
-             AND sha256 = '{{ migration.sha256 }}'
+             AND sha256 IN ('{{ migration.sha256 }}'{% if migration.id == 1 and domain in sprint2_application_retained_baseline_sha256 %}, '{{ sprint2_application_retained_baseline_sha256[domain] }}'{% endif %})
              AND outcome = 'applied'
        ){% endfor %}
     THEN

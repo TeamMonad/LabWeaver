@@ -69,6 +69,14 @@
       - sprint2_application_ssh_shared_ip_key is match('^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$')
     fail_msg: SPRINT2_APPLICATION_INPUT_INVALID
 
+- name: Validate retained baseline identity allowances
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_retained_baseline_sha256.keys() | difference(sprint2_application_domains) | length == 0
+      - item.value is match('^[0-9a-f]{64}$')
+    fail_msg: SPRINT2_APPLICATION_RETAINED_BASELINE_IDENTITY_INVALID
+  loop: "{{ sprint2_application_retained_baseline_sha256 | dict2items }}"
+
 - name: Validate remote application tools and credentials
   ansible.builtin.stat:
     path: "{{ item }}"

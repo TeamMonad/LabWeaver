@@ -13,6 +13,15 @@ sprint2_application_kcadm: /usr/local/bin/kcadm.sh
 sprint2_application_keytool: /usr/bin/keytool
 sprint2_application_report_root: /var/lib/labweaver/sprint2-application
 sprint2_application_domains: [control, access, environment, agent, evaluation, resource]
+# Exact migration-1 identities observed from the retained pre-reset Sprint 2
+# database. They are accepted without rewriting history; new installations
+# still record the catalog hash, and every later migration remains exact-only.
+sprint2_application_retained_baseline_sha256:
+  control: d6849ba453cace3cb7806d918b24ac3f923ca93283bbebb6b2a6fccaaf736f4b
+  access: b57bc3d29605a9986c211df809e6bcc391b987c846f647c66bb7a5d3600780c4
+  environment: 925bbcef2003f0f2764ebbb8b4304081b3287218ed5d03e5e803120386e60f69
+  evaluation: 5f1cf9d27b0bf4976d86dc23a7d65adbf8ac107ee6786ccf5db81d664adce884
+  resource: 3096083438fbb06d20c13a012663fbde4ad2f787771449adf1c52ca91696f380
 sprint2_application_runtime_passwords: {}
 sprint2_application_postgres_service_file: ""
 sprint2_application_postgres_service: sprint2-admin

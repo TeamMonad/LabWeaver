@@ -5,6 +5,7 @@
   "cluster_uid": {{ sprint2_application_cluster_uid.stdout | trim | to_json }},
   "package_manifest_sha256": {{ ('sha256:' + sprint2_application_identity_inputs.results[0].stat.checksum) | to_json }},
   "migration_catalog_sha256": {{ ('sha256:' + sprint2_application_identity_inputs.results[1].stat.checksum) | to_json }},
+  "retained_baseline_sha256": {{ sprint2_application_retained_baseline_sha256 | to_json }},
   "configuration_manifest_sha256": {{ ('sha256:' + sprint2_application_identity_inputs.results[2].stat.checksum) | to_json }},
   "configuration_bundle_sha256": {{ ('sha256:' + sprint2_application_identity_inputs.results[3].stat.checksum) | to_json }},
   "destructive_reset": false,
