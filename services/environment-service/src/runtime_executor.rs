@@ -263,7 +263,11 @@ impl KubernetesContainerExecutor {
         }
         let value: Value = response.json().await.map_err(|_| invalid_observation())?;
         let generation = pointer_u64(&value, "/metadata/generation")?;
-        let observed_generation = pointer_u64(&value, "/status/observedGeneration")?;
+        // Kubernetes omits `status.observedGeneration` until the deployment
+        // controller has observed the resource for the first time. Absence is
+        // therefore a valid pending observation; a present non-integer value
+        // remains a contract violation.
+        let observed_generation = pointer_u64_or_zero(&value, "/status/observedGeneration")?;
         let desired = pointer_u64(&value, "/spec/replicas")?;
         let available = pointer_u64_or_zero(&value, "/status/availableReplicas")?;
         let unavailable = pointer_u64_or_zero(&value, "/status/unavailableReplicas")?;
@@ -1176,6 +1180,19 @@ mod tests {
     fn executor_timestamp_is_normalized_to_contract_milliseconds() {
         let observed = timestamp().expect("current UTC time should normalize");
         assert_eq!(observed.get().nanosecond() % 1_000_000, 0);
+    }
+
+    #[test]
+    fn missing_kubernetes_status_counter_is_pending_but_wrong_type_is_invalid() {
+        let pending = json!({"metadata":{"generation":1},"spec":{"replicas":1}});
+        assert_eq!(
+            pointer_u64_or_zero(&pending, "/status/observedGeneration")
+                .expect("missing status is a valid pending observation"),
+            0
+        );
+
+        let invalid = json!({"status":{"observedGeneration":"one"}});
+        assert!(pointer_u64_or_zero(&invalid, "/status/observedGeneration").is_err());
     }
 
     #[test]
