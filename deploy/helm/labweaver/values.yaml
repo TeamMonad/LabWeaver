@@ -93,10 +93,13 @@ workloads:
     ports:
       - {name: health, containerPort: 8084, servicePort: 8084}
     readiness: {type: http, port: health, path: /health/ready}
-    tmpSizeLimit: 512Mi
+    # Trivy expands its vulnerability database and scan workspace under /tmp.
+    # Keep this workload-scoped: the executor still has no hostPath or host
+    # namespace access, while a 512 MiB EmptyDir is smaller than a real DB.
+    tmpSizeLimit: 2Gi
     resources:
-      requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 256Mi}
-      limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 1Gi}
+      requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 512Mi}
+      limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 3Gi}
   environment-service:
     enabled: true
     imageKey: environment_service
