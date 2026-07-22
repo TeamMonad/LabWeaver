@@ -375,37 +375,6 @@ impl KubernetesContainerExecutor {
         validate_plan(plan)?;
         let namespace_url =
             self.namespaced_url(&format!("/api/v1/namespaces/{}", plan.namespace))?;
-        let observed = self
-            .authorized(self.client.get(namespace_url.clone()))
-            .send()
-            .await
-            .map_err(|_| unavailable())?;
-        if observed.status() != StatusCode::NOT_FOUND {
-            if !observed.status().is_success() {
-                return Err(status_failure(observed.status()));
-            }
-            let namespace: Value = observed.json().await.map_err(|_| invalid_observation())?;
-            verify_namespace_identity(&namespace, &plan.namespace, plan.environment_id)?;
-            let patch = self
-                .authorized(
-                    self.client
-                        .patch(namespace_url.clone())
-                        .header("content-type", "application/merge-patch+json")
-                        .json(&json!({"metadata":{"finalizers":[]}})),
-                )
-                .send()
-                .await
-                .map_err(|_| unavailable())?;
-            accept_mutation(patch.status())?;
-            let deletion = self
-                .authorized(self.client.delete(namespace_url.clone()))
-                .send()
-                .await
-                .map_err(|_| unavailable())?;
-            if deletion.status() != StatusCode::NOT_FOUND {
-                accept_mutation(deletion.status())?;
-            }
-        }
         loop {
             if timestamp()?.get() >= fence.deadline_at.get() {
                 return Err(unavailable());
@@ -420,6 +389,41 @@ impl KubernetesContainerExecutor {
             }
             if !readback.status().is_success() {
                 return Err(status_failure(readback.status()));
+            }
+            let namespace: Value = readback.json().await.map_err(|_| invalid_observation())?;
+            verify_namespace_identity(&namespace, &plan.namespace, plan.environment_id)?;
+
+            // Delete first so a controller-managed finalizer observes a
+            // terminating namespace, then clear the LabWeaver-owned and
+            // known cluster-managed finalizers. A controller may race either
+            // request and return 409; the bounded loop retries both operations
+            // without turning that transient race into a permanent failure.
+            let deletion = self
+                .authorized(self.client.delete(namespace_url.clone()))
+                .send()
+                .await
+                .map_err(|_| unavailable())?;
+            if deletion.status() != StatusCode::NOT_FOUND
+                && !deletion.status().is_success()
+                && deletion.status() != StatusCode::CONFLICT
+            {
+                return Err(status_failure(deletion.status()));
+            }
+            let patch = self
+                .authorized(
+                    self.client
+                        .patch(namespace_url.clone())
+                        .header("content-type", "application/merge-patch+json")
+                        .json(&json!({"metadata":{"finalizers":[]}})),
+                )
+                .send()
+                .await
+                .map_err(|_| unavailable())?;
+            if patch.status() != StatusCode::NOT_FOUND
+                && !patch.status().is_success()
+                && patch.status() != StatusCode::CONFLICT
+            {
+                return Err(status_failure(patch.status()));
             }
             tokio::time::sleep(Duration::from_millis(
                 self.configuration.cleanup_poll_milliseconds,
@@ -639,37 +643,6 @@ impl KubernetesContainerExecutor {
         }
         let namespace_url =
             self.namespaced_url(&format!("/api/v1/namespaces/{}", plan.namespace))?;
-        let observed = self
-            .authorized(self.client.get(namespace_url.clone()))
-            .send()
-            .await
-            .map_err(|_| unavailable())?;
-        if observed.status() != StatusCode::NOT_FOUND {
-            if !observed.status().is_success() {
-                return Err(status_failure(observed.status()));
-            }
-            let namespace: Value = observed.json().await.map_err(|_| invalid_observation())?;
-            verify_namespace_identity(&namespace, &plan.namespace, plan.environment_id)?;
-            let patch = self
-                .authorized(
-                    self.client
-                        .patch(namespace_url.clone())
-                        .header("content-type", "application/merge-patch+json")
-                        .json(&json!({"metadata":{"finalizers":[]}})),
-                )
-                .send()
-                .await
-                .map_err(|_| unavailable())?;
-            accept_mutation(patch.status())?;
-            let deletion = self
-                .authorized(self.client.delete(namespace_url.clone()))
-                .send()
-                .await
-                .map_err(|_| unavailable())?;
-            if deletion.status() != StatusCode::NOT_FOUND {
-                accept_mutation(deletion.status())?;
-            }
-        }
         loop {
             if timestamp()?.get() >= fence.deadline_at.get() {
                 return Err(unavailable());
@@ -684,6 +657,35 @@ impl KubernetesContainerExecutor {
             }
             if !readback.status().is_success() {
                 return Err(status_failure(readback.status()));
+            }
+            let namespace: Value = readback.json().await.map_err(|_| invalid_observation())?;
+            verify_namespace_identity(&namespace, &plan.namespace, plan.environment_id)?;
+            let deletion = self
+                .authorized(self.client.delete(namespace_url.clone()))
+                .send()
+                .await
+                .map_err(|_| unavailable())?;
+            if deletion.status() != StatusCode::NOT_FOUND
+                && !deletion.status().is_success()
+                && deletion.status() != StatusCode::CONFLICT
+            {
+                return Err(status_failure(deletion.status()));
+            }
+            let patch = self
+                .authorized(
+                    self.client
+                        .patch(namespace_url.clone())
+                        .header("content-type", "application/merge-patch+json")
+                        .json(&json!({"metadata":{"finalizers":[]}})),
+                )
+                .send()
+                .await
+                .map_err(|_| unavailable())?;
+            if patch.status() != StatusCode::NOT_FOUND
+                && !patch.status().is_success()
+                && patch.status() != StatusCode::CONFLICT
+            {
+                return Err(status_failure(patch.status()));
             }
             tokio::time::sleep(Duration::from_millis(
                 self.configuration.cleanup_poll_milliseconds,
