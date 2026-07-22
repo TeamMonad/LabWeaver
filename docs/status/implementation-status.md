@@ -26,7 +26,8 @@ the presence of this document.
 
 ## Current connected slice (2026-07-22)
 
-The current source identity is `12069bbb` on `release/sprint2`.  The live
+The current source identity is `ee928895` on `release/sprint2`; the deployed
+Evaluation worker is the same implementation line at source `c14c5eda`.  The live
 cluster was reached through the direct architect kubeconfig; retained
 infrastructure was not deleted or rebuilt.
 
