@@ -375,7 +375,7 @@ class AnsibleFixtureTests(unittest.TestCase):
             preflight.count(
                 "labweaver_preflight_validate_remote_hosts | default(true) | bool"
             ),
-            3,
+            6,
         )
 
     def test_sprint2_application_reconciles_the_exact_durable_consumers(self) -> None:
