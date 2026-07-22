@@ -67,8 +67,8 @@ class FoundationAuthoringTests(unittest.TestCase):
         self.assertIn("labweaver.agent.quarantine.>", control_publish)
 
         access_publish, access_subscribe, access_response = FOUNDATION.NATS_USERS["access-service"]
-        self.assertEqual(access_publish, ("labweaver.access.>",))
-        self.assertEqual(access_subscribe, ("labweaver.service.access.revoke.v1",))
+        self.assertEqual(access_publish, ("$JS.API.>", "$JS.ACK.>", "labweaver.access.>"))
+        self.assertEqual(access_subscribe, ("_INBOX.>", "labweaver.service.access.revoke.v1"))
         self.assertTrue(access_response)
         self.assertFalse(access_subscribe[0].startswith("labweaver.access."))
 
@@ -84,7 +84,6 @@ class FoundationAuthoringTests(unittest.TestCase):
             publish, _, _ = FOUNDATION.NATS_USERS[consumer]
             self.assertIn("$JS.ACK.>", publish)
         for non_consumer in (
-            "access-service",
             "build-executor",
             "container-executor",
             "kubevirt-executor",
@@ -100,7 +99,7 @@ class FoundationAuthoringTests(unittest.TestCase):
                 "--js-disk-storage",
                 "8G",
                 "--js-mem-storage",
-                "256M",
+                "64M",
                 "--js-streams",
                 "16",
                 "--js-consumer",

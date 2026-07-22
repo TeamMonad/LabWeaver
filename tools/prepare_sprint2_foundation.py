@@ -32,8 +32,8 @@ NATS_USERS: dict[str, tuple[tuple[str, ...], tuple[str, ...], bool]] = {
         False,
     ),
     "access-service": (
-        ("labweaver.access.>",),
-        ("labweaver.service.access.revoke.v1",),
+        ("$JS.API.>", "$JS.ACK.>", "labweaver.access.>"),
+        ("_INBOX.>", "labweaver.service.access.revoke.v1"),
         True,
     ),
     "agent-service": (
@@ -46,7 +46,7 @@ NATS_USERS: dict[str, tuple[tuple[str, ...], tuple[str, ...], bool]] = {
         ("_INBOX.>", "labweaver.control.agent_build.requested.v1"),
         False,
     ),
-    "build-executor": ((), ("labweaver.provider.container_build.execute.v1",), True),
+    "build-executor": ((), ("_INBOX.>", "labweaver.provider.container_build.execute.v1"), True),
     "environment-service": (
         (
             "$JS.API.>",
@@ -74,8 +74,8 @@ NATS_USERS: dict[str, tuple[tuple[str, ...], tuple[str, ...], bool]] = {
         ("_INBOX.>", "labweaver.evaluation.submission.freeze_requested.v1"),
         False,
     ),
-    "container-executor": ((), ("labweaver.provider.kubernetes.container.v1",), True),
-    "kubevirt-executor": ((), ("labweaver.provider.kubevirt.vm.v1",), True),
+    "container-executor": ((), ("_INBOX.>", "labweaver.provider.kubernetes.container.v1"), True),
+    "kubevirt-executor": ((), ("_INBOX.>", "labweaver.provider.kubevirt.vm.v1"), True),
 }
 
 PLATFORM_IDENTITIES: dict[str, tuple[tuple[str, ...], str]] = {
@@ -120,7 +120,7 @@ NATS_ACCOUNT_JETSTREAM_LIMITS = (
     "--js-disk-storage",
     "8G",
     "--js-mem-storage",
-    "256M",
+    "64M",
     "--js-streams",
     "16",
     "--js-consumer",
