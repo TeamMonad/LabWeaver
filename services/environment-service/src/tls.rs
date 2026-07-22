@@ -221,7 +221,7 @@ fn verified_identity(
         .general_names
         .iter()
         .filter_map(|name| match name {
-            GeneralName::DNSName(value) => Some((*value).to_owned()),
+            GeneralName::DNSName(value) | GeneralName::URI(value) => Some((*value).to_owned()),
             _ => None,
         });
     VerifiedCallerIdentity::from_mtls_peer_sans(sans).map_err(|_| MtlsServerError::PeerSanInvalid)

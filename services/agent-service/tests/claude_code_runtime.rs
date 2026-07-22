@@ -1286,9 +1286,9 @@ async fn evaluation_prompt_enforces_supported_schema_variants_and_semantics()
     }
     let example = prompt
         .lines()
-        .find(|line| line.starts_with("{\"apiVersion\":\"environment.labweaver.io/v1\""))
-        .ok_or_else(|| std::io::Error::other("environment prompt example is missing"))?;
-    serde_json::from_str::<EnvironmentSpec>(example)?;
+        .find(|line| line.starts_with("{\"apiVersion\":\"evaluation.labweaver.io/v1\""))
+        .ok_or_else(|| std::io::Error::other("evaluation prompt example is missing"))?;
+    serde_json::from_str::<EvaluationSpec>(example)?;
     Ok(())
 }
 

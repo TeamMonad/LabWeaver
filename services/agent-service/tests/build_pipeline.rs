@@ -221,7 +221,14 @@ async fn successful_build_preserves_digest_identity_and_high_warning() {
     );
     assert_eq!(first.high_severity_warnings, 3);
     assert!(matches!(first.artifact, ImageArtifact::Container { .. }));
-    assert!(!calls.calls().contains(&Call::Cleanup));
+    assert_eq!(
+        calls
+            .calls()
+            .iter()
+            .filter(|call| **call == Call::Cleanup)
+            .count(),
+        2
+    );
     let contexts = calls.contexts();
     assert!(contexts.iter().all(|context| {
         context.protocol_version == BUILD_EXECUTOR_PROTOCOL_VERSION
@@ -231,12 +238,33 @@ async fn successful_build_preserves_digest_identity_and_high_warning() {
     assert_eq!(
         contexts
             .iter()
-            .take(4)
+            .take(5)
             .map(|context| context.stage_request_id)
             .collect::<std::collections::HashSet<_>>()
             .len(),
-        4
+        5
     );
+}
+
+#[tokio::test]
+async fn successful_publication_is_blocked_when_candidate_cleanup_fails() {
+    let provider = FakeProvider {
+        cleanup_fails: true,
+        ..FakeProvider::default()
+    };
+    let pipeline = pipeline(provider);
+    let error = pipeline
+        .execute(
+            &command(60_000),
+            now(),
+            fence(60_000),
+            &BuildCancellation::new(),
+        )
+        .await
+        .expect_err("publication without verified candidate cleanup is blocked");
+
+    assert_eq!(error.code, BuildFailureCode::CleanupFailed);
+    assert!(!error.cleanup_verified);
 }
 
 #[tokio::test]
@@ -265,8 +293,8 @@ async fn retry_generation_changes_every_remote_stage_identity() {
         .expect("second generation succeeds");
 
     let contexts = recorded.contexts();
-    assert_eq!(contexts.len(), 8);
-    for (first, second) in contexts.iter().take(4).zip(contexts.iter().skip(4)) {
+    assert_eq!(contexts.len(), 10);
+    for (first, second) in contexts.iter().take(5).zip(contexts.iter().skip(5)) {
         assert_eq!(first.stage, second.stage);
         assert_eq!(first.build_request_id, second.build_request_id);
         assert_ne!(first.fence_generation, second.fence_generation);

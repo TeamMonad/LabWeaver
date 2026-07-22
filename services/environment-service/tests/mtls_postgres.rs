@@ -19,7 +19,7 @@ use environment_service::{
 };
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
-    KeyUsagePurpose,
+    KeyUsagePurpose, SanType, string::Ia5String,
 };
 use reqwest::{Certificate, Client, Identity, StatusCode};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -29,7 +29,7 @@ use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
-const ALLOWED_CALLER_SAN: &str = "access-service.internal";
+const ALLOWED_CALLER_SAN: &str = "spiffe://labweaver/access-service";
 
 #[tokio::test]
 async fn resolver_uses_real_postgres_and_verified_rotatable_mtls_identity()
@@ -439,8 +439,16 @@ fn leaf_certificate(
     ca: &CertifiedIssuer<'static, KeyPair>,
     san: &str,
     client: bool,
-) -> Result<(String, String), rcgen::Error> {
-    let mut parameters = CertificateParams::new(vec![san.to_owned()])?;
+) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let mut parameters = if san.starts_with("spiffe://") {
+        let mut parameters = CertificateParams::new(Vec::<String>::new())?;
+        parameters
+            .subject_alt_names
+            .push(SanType::URI(Ia5String::try_from(san)?));
+        parameters
+    } else {
+        CertificateParams::new(vec![san.to_owned()])?
+    };
     parameters.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     parameters.extended_key_usages = vec![if client {
         ExtendedKeyUsagePurpose::ClientAuth

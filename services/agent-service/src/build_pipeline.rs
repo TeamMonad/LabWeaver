@@ -556,7 +556,11 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
             })
         })();
         match output {
-            Ok(output) => Ok(output),
+            Ok(output) => {
+                self.cleanup_success(command.request.id, identity, fence)
+                    .await?;
+                Ok(output)
+            }
             Err(error) => Err(self
                 .cleanup(command.request.id, identity, fence, error)
                 .await),
@@ -617,6 +621,29 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
             Ok(Err(_)) | Err(_) => {
                 BuildPipelineError::new(BuildFailureCode::CleanupFailed, false, false)
             }
+        }
+    }
+
+    async fn cleanup_success(
+        &self,
+        build_request_id: BuildRequestId,
+        identity: BuildIdentity,
+        fence: BuildExecutionFence,
+    ) -> Result<(), BuildPipelineError> {
+        let context = fence.request_context(build_request_id, BuildProviderStage::Cleanup);
+        match tokio::time::timeout(
+            self.policy.stage_timeout,
+            self.provider
+                .cleanup_candidate(&context, build_request_id, identity),
+        )
+        .await
+        {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) | Err(_) => Err(BuildPipelineError::new(
+                BuildFailureCode::CleanupFailed,
+                false,
+                false,
+            )),
         }
     }
 }
