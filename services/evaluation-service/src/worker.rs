@@ -52,20 +52,30 @@ struct FreezeWorkerCommand {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum FreezeWorkerSource {
     Pvc {
+        #[serde(rename = "workspaceRoot")]
         workspace_root: PathBuf,
+        #[serde(rename = "sourceIdentity")]
         source_identity: Sha256Digest,
     },
     Ssh {
         host: IpAddr,
         port: u16,
         username: String,
+        #[serde(rename = "workspaceRoot")]
         workspace_root: String,
+        #[serde(rename = "privateKeyPath")]
         private_key_path: PathBuf,
+        #[serde(rename = "certificatePath")]
         certificate_path: PathBuf,
+        #[serde(rename = "expectedHostKeySha256")]
         expected_host_key_sha256: Sha256Digest,
+        #[serde(rename = "sourceIdentity")]
         source_identity: Sha256Digest,
+        #[serde(rename = "expiresAt")]
         expires_at: UtcTimestamp,
+        #[serde(rename = "connectTimeoutMilliseconds")]
         connect_timeout_milliseconds: u64,
+        #[serde(rename = "operationTimeoutMilliseconds")]
         operation_timeout_milliseconds: u64,
     },
 }
@@ -286,7 +296,7 @@ pub enum FreezeWorkerError {
 
 #[cfg(test)]
 mod tests {
-    use super::{FreezeWorkerError, bounded_duration};
+    use super::{FreezeWorkerError, FreezeWorkerSource, bounded_duration};
 
     #[test]
     fn worker_timeouts_are_strictly_bounded() {
@@ -300,6 +310,17 @@ mod tests {
             bounded_duration(30_001),
             Err(FreezeWorkerError::SourceBindingInvalid)
         ));
+    }
+
+    #[test]
+    fn worker_command_uses_public_camel_case_source_fields() {
+        let source: FreezeWorkerSource = serde_json::from_value(serde_json::json!({
+            "kind": "pvc",
+            "workspaceRoot": "/workspace",
+            "sourceIdentity": contracts::Sha256Digest::of_bytes(b"source").to_string(),
+        }))
+        .expect("worker command source must match the public contract");
+        assert!(matches!(source, FreezeWorkerSource::Pvc { .. }));
     }
 
     #[cfg(unix)]
