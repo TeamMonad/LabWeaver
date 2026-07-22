@@ -24,14 +24,17 @@ the design-decision blocker, but not the missing deployment or connected replay.
 
 - Local restricted Kubernetes API executors, independent ServiceAccounts/RBAC,
   generation fences and cleanup tombstones are implemented.
-- Container create/readiness has now passed on the current retained cluster,
-  including a fresh approved environment without revision churn. The remaining
-  Container blocker is the same-build freeze, access, stop/recover and
-  residue-free delete replay. KubeVirt is intentionally skipped in this round
-  and remains unverified.
-- Exit for the current Container slice: create, access, stop, recover, freeze,
-  delete and cleanup readback under one package/deployment identity. The full
-  Sprint 2 exit still additionally requires the real KubeVirt replay.
+- Container create/readiness and same-build PVC freeze now pass on the current
+  retained cluster. Stop also reached `stopped`. The remaining Container replay
+  blocker is access, start/recover after release evidence refresh, and
+  residue-free delete. The current start attempt failed closed with
+  `LW_ENVIRONMENT_RELEASE_EVIDENCE_EXPIRED`; this is a real release-evidence
+  expiry, not a runtime fallback. KubeVirt is intentionally skipped in this
+  round and remains unverified.
+- Exit for the current Container slice: refresh/publish a valid Container
+  release, then create, access, stop, recover, freeze, delete and cleanup
+  readback under one package/deployment identity. The full Sprint 2 exit still
+  additionally requires the real KubeVirt replay.
 - Owner: B implementation review; D connected Verify.
 
 The current broad Container/KubeVirt namespace CRUD ClusterRoles are an
@@ -56,8 +59,8 @@ admission boundary enforces the executor namespace/ServiceAccount fence.
   `LW_COLLECT_DATABASE_FAILED`. Commit `12069bbb` advances the completion event
   to sequence/revision 2. It is not yet packaged or replayed against the live
   cluster.
-- Blocker: package/deploy `12069bbb`, then complete the Container PVC freeze,
-  restart and cleanup replay. VM/SFTP replay is explicitly deferred this round.
+- Container PVC freeze is now verified with the `c14c5eda` worker build and the
+  new Object Lock bucket. VM/SFTP replay is explicitly deferred this round.
 - Exit: duplicate/reordered commands, expired leases/certificates, PV identity
   mismatch, host-key mismatch, partial upload, worker restart and all residue
   checks fail closed under B review and D connected Verify.

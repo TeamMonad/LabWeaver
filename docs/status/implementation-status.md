@@ -35,9 +35,10 @@ infrastructure was not deleted or rebuilt.
 | Container environment reconcile | verified | A fresh approved Container environment reached `ready` without revision churn; the runtime Pod is Running and the workspace PVC is mounted. |
 | Freeze worker storage binding | verified prerequisite | `labweaver-frozen-submissions` is an additive Object Lock bucket with versioning; the live Evaluation ConfigMap points at it. The existing `labweaver-artifacts` bucket was not changed. |
 | Freeze worker network path | verified prerequisite | The retained data NetworkPolicy now permits the labelled environment namespace to reach PostgreSQL/NATS/MinIO; TLS and TCP probes passed. |
-| Freeze completion | fixed in source, not yet redeployed | The previous worker failure was caused by `SubmissionFreezeRequested` and `SubmissionFrozen` both using aggregate sequence 1, which violated the outbox uniqueness fence. `12069bbb` advances the completion event to sequence/revision 2. A new package and connected replay are still required. |
+| Freeze completion | verified on Container | Same-build Evaluation worker image `harbor.lab.lan/labweaver-system/evaluation-service@sha256:14ff7de5934660aced3efd0cb4c3443bdf7ab2bb4b4bbb8bd3780f17d55bdea3` completed frozen submission `019f8ae9-774d-7583-baa7-f1bc0756aad6`; Object Lock version `9f3fae6d-dbd2-4e84-957a-2a3459cccd03`, `cleanup_verified=true`, and the command reached `completed`. |
+| Container stop/start | partially verified | Stop accepted at revision 9 and reached `stopped` at revision 10. Start correctly failed closed at revision 12 with `LW_ENVIRONMENT_RELEASE_EVIDENCE_EXPIRED`; the published Container release's one-hour Trivy evidence window had expired. A fresh release is required before another start/recovery replay. |
 | KubeVirt | intentionally skipped | The user limited this round to Container runtime verification; no VM completion claim is made. |
-| Release Gate / Sprint 2 | blocked | No same-build Container freeze/delete replay or machine-readable passing Release Gate exists yet. |
+| Release Gate / Sprint 2 | blocked | Container freeze now passes, but access/start/recovery/delete replay is not closed and no machine-readable passing Release Gate exists. |
 
 | Capability | Owner | State | Current evidence | Blocker or limitation |
 | --- | --- | --- | --- | --- |
