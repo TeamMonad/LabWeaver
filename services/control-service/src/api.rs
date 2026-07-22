@@ -877,15 +877,7 @@ fn current_timestamp() -> Result<UtcTimestamp, ()> {
 }
 
 fn accepted(run: &AgentRun) -> Response {
-    (
-        StatusCode::ACCEPTED,
-        Json(OperationAccepted {
-            operation_id: OperationId::new(),
-            revision: run.revision,
-            status_url: format!("/api/v1/courses/{}/agent-runs/{}", run.course_id, run.id),
-        }),
-    )
-        .into_response()
+    (StatusCode::ACCEPTED, Json(run)).into_response()
 }
 
 fn with_etag<T: serde::Serialize>(status: StatusCode, value: &T, revision: Revision) -> Response {
