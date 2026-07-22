@@ -299,6 +299,19 @@ class AnsibleFixtureTests(unittest.TestCase):
             workloads,
         )
 
+    def test_environment_owner_rollout_does_not_require_surge_capacity(self) -> None:
+        values = (ROOT / "deploy/helm/labweaver/values.yaml").read_text(encoding="utf-8")
+        workloads = (
+            ROOT / "deploy/helm/labweaver/templates/workloads.yaml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("with $configuration.strategy", workloads)
+        environment = values.split("  environment-service:", maxsplit=1)[1].split(
+            "  container-executor:", maxsplit=1
+        )[0]
+        self.assertIn("maxSurge: 0", environment)
+        self.assertIn("maxUnavailable: 1", environment)
+
     def test_object_store_route_uses_existing_web_workload_with_verified_tls(self) -> None:
         backend = (
             ROOT / "deploy/helm/labweaver/templates/object-store-backend.yaml"
