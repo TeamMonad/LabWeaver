@@ -93,6 +93,10 @@ workloads:
     ports:
       - {name: health, containerPort: 8084, servicePort: 8084}
     readiness: {type: http, port: health, path: /health/ready}
+    tmpSizeLimit: 512Mi
+    resources:
+      requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 256Mi}
+      limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 1Gi}
   environment-service:
     enabled: true
     imageKey: environment_service

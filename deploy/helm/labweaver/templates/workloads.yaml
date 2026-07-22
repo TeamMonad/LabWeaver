@@ -111,7 +111,7 @@ spec:
             capabilities: {drop: ["ALL"]}
             {{- end }}
           resources:
-            {{- toYaml $root.Values.resources | nindent 12 }}
+            {{- toYaml (default $root.Values.resources $configuration.resources) | nindent 12 }}
           volumeMounts:
             {{- if $configuration.configMap }}
             - {name: config, mountPath: /etc/labweaver/config, readOnly: true}
@@ -141,7 +141,7 @@ spec:
             defaultMode: 0440
         {{- end }}
         - name: tmp
-          emptyDir: {sizeLimit: 64Mi}
+          emptyDir: {sizeLimit: {{ default "64Mi" $configuration.tmpSizeLimit }}}
         {{- if $configuration.gateway }}
         - name: sshd-run
           emptyDir: {sizeLimit: 8Mi}
