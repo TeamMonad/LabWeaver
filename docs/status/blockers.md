@@ -11,20 +11,19 @@ identity. Historical Issue evidence is not a current completion claim.
   digest-pinned kind cluster, Experimental Gateway API, Cilium, local-path,
   PostgreSQL, NATS and MinIO are Ready/Bound, and the Sprint 2 foundation
   reconcile completed successfully.
-- Harbor and BuildKit/Trivy have reconciled through the local Gateway/NodePort
-  path. Identity-foundation created its namespaces, certificates and workload,
-  but the current Keycloak/PostgreSQL rollout is still blocked by intermittent
-  Cilium endpoint creation failures while the local kind node is converging.
-  Cilium L7 proxy must be restored enabled after recovery; the local-path
-  provisioner uses the node network because this kind cluster has no MetalLB or
-  NFS.
-- The application layer remains blocked by missing operator-provided private
-  configuration and ECNU credential inputs. `cargo xtask package` also requires
-  a clean source tree before it can produce the seven-image package manifest;
-  the current implementation worktree is intentionally dirty. No #130 Fixture
-  package, image or report is permitted as a substitute.
-- Exit: supply the ignored application inputs, package from the validated clean
-  Issue #131 commit, then run application and verify with one Run ID and capture
+- Source `e9b875a0368a3aa34f554a0c1a3aa88812c3b511` reconciled Harbor,
+  Trivy, Keycloak and the rootless BuildKit Service through the local
+  Gateway/NodePort path. Foundation and identity verification pass, and the
+  worktree used to establish this baseline is clean.
+- The application layer is blocked before deployment. A real package attempt
+  reaches rootless BuildKit but inner `runc` fails with
+  `no cgroup mount found in mountinfo` on the Docker Desktop/kind node. The
+  seven-image package manifest therefore does not exist. The rejected
+  `hostUsers=false` experiment was rolled back; privileged, HostPath and #130
+  Fixture images are not permitted substitutes.
+- Exit: repair the kind/rootless OCI execution boundary without widening the
+  accepted BuildKit security exception, package all seven images from one clean
+  source identity, then run application and verify with one Run ID and capture
   the second-reconcile and fail-closed Container evidence.
 
 ## Connected supply-chain replay

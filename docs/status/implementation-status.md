@@ -9,16 +9,16 @@ is read from Git/PR metadata rather than duplicated as a stale status value.
 
 ## Issue #131 local single-node-kind profile
 
-The `feature/131-single-node-kind` worktree contains an `ex3` deployment profile
-with a digest-pinned kind configuration, local inventory, fail-fast Docker/kind
-preflight, and local bootstrap branches. Alpine WSL manually ran the base,
-identity, Harbor and BuildKit entrypoints against `labweaver-ex3`; the connected
-base services, Harbor and rootless BuildKit were Ready on the local cluster, and
-the identity resources were created but their current Keycloak rollout still
-needs Cilium endpoint convergence. Remote-cluster MetalLB, NFS, Rocky, KubeVirt
-and CDI prerequisites are not applied. The application and final verify layers remain blocked on private
-operator inputs and a clean package-producing commit. Issue #130 Fixture assets
-are intentionally not used.
+Source `e9b875a0368a3aa34f554a0c1a3aa88812c3b511` contains the `ex3`
+deployment profile with a digest-pinned kind configuration, local inventory,
+fail-fast Docker/kind preflight and local bootstrap branches. Alpine WSL ran
+the base, identity, Harbor and BuildKit entrypoints against `labweaver-ex3`;
+the connected base services, Harbor, Keycloak and the rootless BuildKit Service
+are Ready, and foundation/identity verification passes. A real package attempt
+is blocked when inner `runc` reports `no cgroup mount found in mountinfo`; no
+seven-image manifest or application deployment exists. Remote-cluster MetalLB,
+NFS, Rocky, KubeVirt and CDI prerequisites are not applied. Issue #130 Fixture
+assets are intentionally not used.
 
 ## Sprint 3 runnable Demo contract
 
@@ -101,7 +101,7 @@ out. This is a network blocker, not a passing Container result.
 | Container runtime | B | connected Container slice verified | deterministic plan, persistent fence, restricted Kubernetes SSA/observe/scale/restart/delete backend, finalizer-race handling and versioned cleanup evidence | KubeVirt replay and Gateway protocol replay remain pending; the retained artifact bucket does not provide Object Lock |
 | KubeVirt runtime | B | implemented locally; retained platform recovered | deterministic VM/CDI plan, independent persistent fence, restricted API/subresource backend and SSH host-key probe; KubeVirt is `Deployed`, current API/controller/operator/handler replicas and CDI deployments are Ready after the control-plane recovery | real base-disk/guest-agent/SSH/cleanup replay is pending; readiness alone is not VM evidence |
 | AccessGrant and session authorization | A | implemented locally | fixed local OpenSSH account, post-auth alias redemption, one-time token and session contracts; HTTP(S) grants use same-origin `/connect` paths; Issue #131 adds an explicit Container-only terminal route with database-backed global admission, five-second authorization heartbeat and no transcript | connected HTTP/SSH/terminal denial, expiry, revocation and crash-recovery replay are pending |
-| Container browser terminal | A/B/C/D | implemented on feature branch; deployment blocked | optional approved `TerminalSpec`, `browser_terminal` capability, Access→Environment→container-executor mTLS WebSocket chain, explicit kube 0.99.0 PTY exec, executor-only `pods/exec`, xterm.js 6.0.0 UI; Contracts/Auth/Access/Environment unit checks, real PostgreSQL migration test, all Web tests/build/typecheck/lint, config render tests and Helm render pass locally | requires rebase onto the completed ex3 infrastructure head, dedicated terminal certificates, same-identity seven-image deployment and D Verify; no connected evidence yet |
+| Container browser terminal | A/B/C/D | implemented on rebased feature branch; deployment blocked | optional approved `TerminalSpec`, `browser_terminal` capability, Access→Environment→container-executor mTLS WebSocket chain, explicit kube 0.99.0 PTY exec, executor-only `pods/exec`, xterm.js 6.0.0 UI; rebased onto ex3 source `e9b875a0`, then Contracts/Auth/Access/Environment checks, real PostgreSQL migrations, all Web tests/build/typecheck/lint, config render tests and Helm render passed | rootless BuildKit cannot produce the same-identity seven-image package because inner `runc` cannot find a cgroup mount; application deployment, connected terminal evidence and D Verify remain open |
 | Freeze-only Evaluation Service | B | implemented locally | Evaluation-owned public API, Access BFF authorization, PostgreSQL command/outbox, Environment-issued PVC/299-second read-only VM binding, bounded Kubernetes Job/Secret/ConfigMap/NetworkPolicy reconciliation, immutable MinIO Object Lock, restart recovery and cleanup readback | connected deployment and real PVC/VM replay are pending; Runner, Checker, Aggregator and scoring are excluded |
 | Web teacher/student journeys | C | connected partially on 3a9 | component/SDK tests and live auth setup pass; teacher candidate approval is connected, while student Container create/access remains blocked by release evidence freshness | KubeVirt and final same-identity Container replay remain pending; local visual baselines were not rewritten |
 | Sprint 2 Helm deployment | A/D | implemented; e062 adopted non-destructively | source `e062d34f` passed connected package validation and non-destructive application adoption run `sprint2-application-e062d34f-0001`; retained infrastructure was not deleted or rebuilt | post-permission Container replay, Gateway protocol replay, KubeVirt replay and Release Gate remain pending |
@@ -109,7 +109,7 @@ out. This is a network blocker, not a passing Container result.
 | Demo replay and Release Gate | A/D | implemented locally | exact connected check set, evidence rehash, clean-HEAD/deployment/catalog/image/Run binding, tamper test and stable missing-input diagnostics | Linux infrastructure Verify, real Keycloak Playwright and same-build passing report remain pending |
 | Private Sigstore, Kyverno and Packer | A/D | removed from active product source | ADR 0006 is Superseded; active contracts, Chart and CI contain no trust-plane gate | retained installations are deliberately untouched and are not Sprint 2 evidence |
 | Sprint 2 retained-infrastructure adoption | A/D | 1122 verified | application run `sprint2-application-1122ef6e-0022` retained all named infrastructure and reconciled the application image identity without destructive reset | retained infrastructure is not dual-runtime E3 evidence |
-| Issue #131 single-node-kind base | A/D | connected foundation verified locally | Alpine WSL manual Ansible runs created the digest-pinned `labweaver-ex3` kind cluster and reconciled Experimental Gateway API, Cilium, local-path, PostgreSQL, NATS, MinIO, Keycloak, Harbor and rootless BuildKit; the foundation and identity readbacks completed successfully | Application package/configuration inputs and final Container/verify evidence remain blocked; this is not #130 Fixture evidence |
+| Issue #131 single-node-kind base | A/D | connected foundation verified locally | source `e9b875a0`; Alpine WSL manual Ansible runs created the digest-pinned `labweaver-ex3` kind cluster and reconciled Experimental Gateway API, Cilium, local-path, PostgreSQL, NATS, MinIO, Keycloak, Harbor and rootless BuildKit; foundation and identity readbacks completed successfully | rootless inner `runc` fails with `no cgroup mount found in mountinfo`, so package/application/final Container verification remain blocked; this is not #130 Fixture evidence |
 | Sprint 2 destructive reset | A/D | deferred maintenance path | cluster-bound confirmation and destructive report remain isolated behind `demo reset` | explicitly excluded from this delivery and must not be used for Sprint 2 deployment |
 
 ## Accepted Sprint 2 security exceptions
