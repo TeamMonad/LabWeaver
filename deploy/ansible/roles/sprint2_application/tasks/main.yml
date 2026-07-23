@@ -532,7 +532,7 @@
       - add
       - "{{ item.item.name }}"
       - --subjects
-      - "{{ item.item.subjects }}"
+      - "{{ item.item.subjects | join(',') }}"
       - --storage
       - file
       - --retention
@@ -564,13 +564,13 @@
       - edit
       - "{{ item.item.name }}"
       - --subjects
-      - "{{ item.item.subjects }}"
+      - "{{ item.item.subjects | join(',') }}"
       - --force
   loop: "{{ sprint2_application_stream_info_before.results }}"
   when:
     - item.rc == 0
     - item.item.adopted_subjects is defined
-    - (item.stdout | from_json).config.subjects == [item.item.adopted_subjects]
+    - ((item.stdout | from_json).config.subjects | sort) == (item.item.adopted_subjects | sort)
   changed_when: true
 
 - name: Read back exact Sprint 2 streams
@@ -599,7 +599,7 @@
   ansible.builtin.assert:
     that:
       - (item.stdout | from_json).config.name == item.item.name
-      - (item.stdout | from_json).config.subjects == [item.item.subjects]
+      - ((item.stdout | from_json).config.subjects | sort) == (item.item.subjects | sort)
       - (item.stdout | from_json).config.storage == 'file'
       - (item.stdout | from_json).config.retention == 'limits'
       - (item.stdout | from_json).config.discard == 'old'

@@ -752,6 +752,26 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("validate_nats_user_credentials.py", defaults)
         self.assertIn("sprint2_application_control_nats_credentials", tasks)
 
+    def test_environment_quarantine_subjects_are_retained_by_application_streams(self) -> None:
+        defaults = yaml.safe_load(
+            (
+                ROOT
+                / "deploy/ansible/roles/sprint2_application/defaults/main.yml"
+            ).read_text(encoding="utf-8")
+        )
+        streams = {
+            stream["name"]: stream
+            for stream in defaults["sprint2_application_nats_streams"]
+        }
+        self.assertIn(
+            "labweaver.environment.command.quarantine.v1",
+            streams["LABWEAVER_ENVIRONMENT_COMMANDS"]["subjects"],
+        )
+        self.assertIn(
+            "labweaver.environment.release.quarantine.v1",
+            streams["LABWEAVER_RELEASES"]["subjects"],
+        )
+
     def test_deploy_starts_with_preflight(self) -> None:
         site = (ROOT / "deploy/ansible/playbooks/site.yml").read_text(encoding="utf-8")
         self.assertEqual(site.splitlines()[1], "- import_playbook: 00-preflight.yml")

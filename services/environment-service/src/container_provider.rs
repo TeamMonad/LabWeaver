@@ -1024,7 +1024,7 @@ impl PgReleaseProjectionStore {
         {
             return Err(ReleaseProjectionError::IdentityMismatch);
         }
-        let provider_binding = container_provider_binding(&event.data)?;
+        let provider_binding = release_provider_binding(&event.data.environment_spec.runtime);
         let payload =
             serde_json::to_value(event).map_err(|_| ReleaseProjectionError::ContractInvalid)?;
         let payload_sha256 = canonical_hash(&payload)?;
@@ -1725,6 +1725,17 @@ fn container_provider_binding(
     }
 }
 
+fn release_provider_binding(runtime: &EnvironmentRuntimeSpec) -> &str {
+    match runtime {
+        EnvironmentRuntimeSpec::Container {
+            provider_binding, ..
+        }
+        | EnvironmentRuntimeSpec::VirtualMachine {
+            provider_binding, ..
+        } => provider_binding,
+    }
+}
+
 fn projection_failure(error: &ReleaseProjectionError) -> ProviderFailure {
     match error {
         ReleaseProjectionError::Database(_) | ReleaseProjectionError::PersistenceFailed => {
@@ -1862,4 +1873,62 @@ pub enum ReleaseProjectionError {
     PersistenceFailed,
     #[error("LW_ENVIRONMENT_RELEASE_DATABASE_FAILED")]
     Database(#[from] sqlx::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::release_provider_binding;
+    use contracts::authoring::EnvironmentRuntimeSpec;
+    use serde_json::json;
+
+    fn runtime(kind: &str) -> EnvironmentRuntimeSpec {
+        let runtime = match kind {
+            "container" => json!({
+                "kind": "container",
+                "provider_binding": "container-primary-v1",
+                "build_context": {
+                    "artifactId": "00000000-0000-7000-8000-000000000001",
+                    "storeBinding": "minio-primary-v1",
+                    "objectVersion": "1",
+                    "sha256":
+                        "d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5",
+                    "sizeBytes": 1,
+                    "mediaType": "application/vnd.labweaver.build-context.v1+tar"
+                },
+                "base_image_digest": concat!(
+                    "sha256:",
+                    "d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
+                ),
+                "service_port": 8080
+            }),
+            "virtual_machine" => json!({
+                "kind": "virtual_machine",
+                "provider_binding": "kubevirt-primary-v1",
+                "base_disk": {
+                    "binding": "ubuntu-24.04-v1",
+                    "sourceRegistryDigest": concat!(
+                        "docker://quay.io/containerdisks/ubuntu@",
+                        "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
+                    ),
+                    "diskSha256":
+                        "d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5",
+                    "capacityBytes": 10_737_418_240_u64
+                },
+                "storage_class_binding": "vm-rwo-primary-v1",
+                "ssh_port": 22
+            }),
+            _ => unreachable!("test runtime kind"),
+        };
+        serde_json::from_value(runtime).expect("valid runtime")
+    }
+
+    #[test]
+    fn release_projection_accepts_both_runtime_provider_bindings() {
+        for (kind, expected) in [
+            ("container", "container-primary-v1"),
+            ("virtual_machine", "kubevirt-primary-v1"),
+        ] {
+            assert_eq!(release_provider_binding(&runtime(kind)), expected);
+        }
+    }
 }
