@@ -387,19 +387,17 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
         {
             return Err(ObjectStoreError::ObjectIdentityMismatch);
         }
-        let body = match response.body.collect().await {
-            Ok(body) => body.into_bytes().to_vec(),
-            Err(_) => {
-                tracing::warn!(
-                    event = "artifact_store.get_object_body_failed",
-                    endpoint = %self.config.endpoint,
-                    bucket = %self.config.bucket,
-                    object_key = %key,
-                    object_version = %version,
-                );
-                return Err(ObjectStoreError::ObjectUnavailable);
-            }
+        let Ok(body) = response.body.collect().await else {
+            tracing::warn!(
+                event = "artifact_store.get_object_body_failed",
+                endpoint = %self.config.endpoint,
+                bucket = %self.config.bucket,
+                object_key = %key,
+                object_version = %version,
+            );
+            return Err(ObjectStoreError::ObjectUnavailable);
         };
+        let body = body.into_bytes().to_vec();
         if u64::try_from(body.len()).ok() != Some(expected_size)
             || Sha256Digest::of_bytes(&body) != expected_sha256
         {
