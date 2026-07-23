@@ -674,12 +674,17 @@ impl KubernetesContainerExecutor {
             "/apis/subresources.kubevirt.io/v1/namespaces/{}/virtualmachines/{}/{}",
             plan.namespace, plan.virtual_machine_name, action
         ))?;
+        let request_body = if action == "start" {
+            json!({})
+        } else {
+            json!({"gracePeriod":30})
+        };
         let response = self
             .authorized(
                 self.client
                     .put(url)
                     .header("content-type", "application/json")
-                    .json(&json!({"gracePeriod":0})),
+                    .json(&request_body),
             )
             .send()
             .await
