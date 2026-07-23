@@ -1317,6 +1317,8 @@ async fn environment_prompt_preserves_mixed_case_variant_contract() -> Result<()
         "\"base_image_digest\"",
         "\"service_port\":8080",
         "\"storeBinding\":\"minio-primary-v1\"",
+        "authoritative artifactId, storeBinding, objectVersion, sha256, sizeBytes, and mediaType",
+        "copy all six identity fields from exactly one input file",
     ] {
         assert!(
             prompt.contains(required),
