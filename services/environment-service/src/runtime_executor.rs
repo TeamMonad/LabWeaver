@@ -689,7 +689,7 @@ impl KubernetesContainerExecutor {
             .send()
             .await
             .map_err(|_| unavailable())?;
-        if response.status() == StatusCode::CONFLICT && action == "start" {
+        if response.status() == StatusCode::CONFLICT && matches!(action, "start" | "stop") {
             return Ok(());
         }
         accept_mutation(response.status())?;
