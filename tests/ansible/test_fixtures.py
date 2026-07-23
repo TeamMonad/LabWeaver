@@ -600,6 +600,25 @@ class AnsibleFixtureTests(unittest.TestCase):
         )
         self.assertIn("type: kubernetes.io/dockerconfigjson", tasks)
 
+    def test_exact_retained_cdi_policy_is_adopted_before_helm(self) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "SPRINT2_APPLICATION_CDI_CLONE_SOURCE_POLICY_CONFLICT",
+            tasks,
+        )
+        self.assertIn(
+            "Adopt the exact retained CDI clone source network policy into the Helm release",
+            tasks,
+        )
+        self.assertIn("meta.helm.sh/release-name", tasks)
+        self.assertLess(
+            tasks.index("Adopt the exact retained CDI clone source network policy"),
+            tasks.index("Atomically deploy the immutable Sprint 2 profile"),
+        )
+
     def test_sprint2_application_uses_supported_nats_account_probe(self) -> None:
         tasks = (
             ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
