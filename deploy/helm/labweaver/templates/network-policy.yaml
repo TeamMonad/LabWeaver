@@ -107,6 +107,14 @@ spec:
             {{- toYaml $root.Values.network.environmentNamespaceSelector | nindent 12 }}
       ports: [{protocol: TCP, port: 22}]
     {{- end }}
+    {{- if eq $name "kubevirt-executor" }}
+    # The executor verifies the guest SSH host key before publishing a VM as
+    # ready. Environment ingress remains restricted to this exact workload.
+    - to:
+        - namespaceSelector:
+            {{- toYaml $root.Values.network.environmentNamespaceSelector | nindent 12 }}
+      ports: [{protocol: TCP, port: 22}]
+    {{- end }}
     {{- if eq $name "access-service" }}
     - to:
         - namespaceSelector:

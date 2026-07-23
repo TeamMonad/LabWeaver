@@ -1614,7 +1614,10 @@ where
                 json!({
                     "apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
                     "metadata":{"name":"openssh-gateway-ingress","namespace":namespace,"labels":labels},
-                    "spec":{"podSelector":{"matchLabels":{"labweaver.io/environment-id":instance.id.to_string()}},"policyTypes":["Ingress"],"ingress":[{"from":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":self.configuration.ssh.gateway_namespace}},"podSelector":{"matchLabels":{GATEWAY_LABEL_KEY:self.configuration.ssh.gateway_pod_label}}}],"ports":[{"protocol":"TCP","port":ssh_port}]}]}
+                    "spec":{"podSelector":{"matchLabels":{"labweaver.io/environment-id":instance.id.to_string()}},"policyTypes":["Ingress"],"ingress":[{"from":[
+                        {"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":self.configuration.ssh.gateway_namespace}},"podSelector":{"matchLabels":{GATEWAY_LABEL_KEY:self.configuration.ssh.gateway_pod_label}}},
+                        {"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":self.configuration.storage.data_source_namespace}},"podSelector":{"matchLabels":{GATEWAY_LABEL_KEY:"kubevirt-executor"}}}
+                    ],"ports":[{"protocol":"TCP","port":ssh_port}]}]}
                 }),
             ),
             resource(

@@ -447,6 +447,18 @@ fn plan_is_deterministic_private_and_digest_bound() {
         ),
         Some(&json!("access-system"))
     );
+    assert_eq!(
+        ingress
+            .document
+            .pointer("/spec/ingress/0/from/1/podSelector/matchLabels/app.kubernetes.io~1name"),
+        Some(&json!("kubevirt-executor"))
+    );
+    assert_eq!(
+        ingress.document.pointer(
+            "/spec/ingress/0/from/1/namespaceSelector/matchLabels/kubernetes.io~1metadata.name"
+        ),
+        Some(&json!("labweaver-system"))
+    );
     let cdi_ingress = named_resource(&first, "NetworkPolicy", "cdi-clone-ingress");
     assert_eq!(
         cdi_ingress
