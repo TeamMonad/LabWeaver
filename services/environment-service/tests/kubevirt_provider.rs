@@ -417,6 +417,8 @@ fn plan_is_deterministic_private_and_digest_bound() {
     assert!(cloud_init.contains("AuthenticationMethods publickey"));
     assert!(cloud_init.contains("AllowUsers lab"));
     assert!(cloud_init.contains("PasswordAuthentication no"));
+    assert!(cloud_init.contains("AllowAgentForwarding no"));
+    assert!(!cloud_init.contains("PermitAgentForwarding"));
     assert!(cloud_init.contains("- [sshd, -t]"));
     assert!(cloud_init.contains("- [systemctl, restart, ssh.socket]"));
     assert!(!cloud_init.contains("ssh_authorized_keys"));
