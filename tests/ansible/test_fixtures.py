@@ -772,6 +772,22 @@ class AnsibleFixtureTests(unittest.TestCase):
             streams["LABWEAVER_RELEASES"]["subjects"],
         )
 
+    def test_kubevirt_executor_can_apply_its_planned_resource_quota(self) -> None:
+        service_account = (
+            ROOT / "deploy/helm/labweaver/templates/service-account.yaml"
+        ).read_text(encoding="utf-8")
+        kubevirt_profile = service_account.split(
+            '{{- else if eq $configuration.rbacProfile "kubevirt" }}',
+            maxsplit=1,
+        )[1].split(
+            '{{- else if eq $configuration.rbacProfile "evaluation" }}',
+            maxsplit=1,
+        )[0]
+        self.assertIn('"resourcequotas"', kubevirt_profile)
+        self.assertIn('resources: ["datavolumes/source"]', service_account)
+        self.assertIn("name: {{ $name }}-datasource", service_account)
+        self.assertIn("kind: RoleBinding", service_account)
+
     def test_deploy_starts_with_preflight(self) -> None:
         site = (ROOT / "deploy/ansible/playbooks/site.yml").read_text(encoding="utf-8")
         self.assertEqual(site.splitlines()[1], "- import_playbook: 00-preflight.yml")
