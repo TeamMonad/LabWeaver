@@ -18,6 +18,7 @@ hyper-util = { version = "0.1.20", features = ["server", "service", "tokio"] }
 futures-util = "0.3.31"
 k8s-openapi = { version = "=0.24.0", features = ["v1_31"] }
 kube = { version = "=0.99.0", default-features = false, features = ["client", "rustls-tls", "ws"] }
+kube-tokio-tungstenite = { package = "tokio-tungstenite", version = "=0.26.2", default-features = false }
 persistence-sqlx = { path = "../../crates/persistence-sqlx" }
 rand.workspace = true
 reqwest.workspace = true

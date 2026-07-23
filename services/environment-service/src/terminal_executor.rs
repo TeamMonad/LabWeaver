@@ -8,7 +8,7 @@ use axum::{
         Extension, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::{HeaderMap, StatusCode, header},
+    http::{self, HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
 };
@@ -17,10 +17,10 @@ use futures_util::{SinkExt, StreamExt};
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
     Api, Client, Config,
-    api::{AttachParams, ListParams, TerminalSize},
+    api::{ListParams, TerminalSize},
 };
+use kube_tokio_tungstenite::tungstenite::protocol::Message as KubernetesMessage;
 use serde::Deserialize;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{
     MtlsConfig, RuntimeExecutorConfiguration, VerifiedCallerIdentity, serve_owner_resolver_mtls,
@@ -29,6 +29,11 @@ use crate::{
 const SUBPROTOCOL: &str = "labweaver.terminal.v1";
 const ENVIRONMENT_SERVICE_SAN: &str = "spiffe://labweaver/environment-service";
 const MAX_FRAME_BYTES: usize = 64 * 1024;
+const STDIN_CHANNEL: u8 = 0;
+const STDOUT_CHANNEL: u8 = 1;
+const STATUS_CHANNEL: u8 = 3;
+const RESIZE_CHANNEL: u8 = 4;
+const CLOSE_CHANNEL: u8 = 255;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -192,7 +197,7 @@ async fn execute_terminal(
         return Err("LW_CONTAINER_TERMINAL_SIZE_INVALID");
     }
     let namespace = format!("lw-env-{}", request.environment_id);
-    let pods: Api<Pod> = Api::namespaced(state.client, &namespace);
+    let pods: Api<Pod> = Api::namespaced(state.client.clone(), &namespace);
     let labels = format!(
         "app=runtime,labweaver.io/environment-id={},labweaver.io/course-id={}",
         request.environment_id, request.course_id
@@ -219,82 +224,133 @@ async fn execute_terminal(
     let mut command = Vec::with_capacity(request.terminal.args.len() + 1);
     command.push(request.terminal.executable.clone());
     command.extend(request.terminal.args);
-    let params = AttachParams::interactive_tty()
-        .container("runtime")
-        .max_stdin_buf_size(MAX_FRAME_BYTES)
-        .max_stdout_buf_size(MAX_FRAME_BYTES);
-    let mut process = pods
-        .exec(pod_name, command, &params)
+    let mut exec_request = kubernetes_exec_request(&namespace, pod_name, &command)
+        .map_err(|_| "LW_CONTAINER_TERMINAL_EXEC_REQUEST_INVALID")?;
+    exec_request.extensions_mut().insert("exec");
+    let connection = state.client.connect(exec_request).await.map_err(|error| {
+        tracing::warn!(
+            event = "environment.container_terminal.exec_failed",
+            diagnostic = "LW_CONTAINER_TERMINAL_EXEC_FAILED",
+            error = %error
+        );
+        "LW_CONTAINER_TERMINAL_EXEC_FAILED"
+    })?;
+    let supports_stream_close = connection.supports_stream_close();
+    let (mut kubernetes_tx, mut kubernetes_rx) = connection.into_stream().split();
+    send_terminal_size(&mut kubernetes_tx, request.cols, request.rows).await?;
+    socket
+        .send(Message::Text(r#"{"type":"ready"}"#.into()))
         .await
-        .map_err(|_| "LW_CONTAINER_TERMINAL_EXEC_FAILED")?;
-    let mut stdin = process
-        .stdin()
-        .ok_or("LW_CONTAINER_TERMINAL_STDIN_UNAVAILABLE")?;
-    let mut stdout = process
-        .stdout()
-        .ok_or("LW_CONTAINER_TERMINAL_STDOUT_UNAVAILABLE")?;
-    let mut terminal_size = process
-        .terminal_size()
-        .ok_or("LW_CONTAINER_TERMINAL_RESIZE_UNAVAILABLE")?;
-    terminal_size
-        .send(TerminalSize {
-            width: request.cols,
-            height: request.rows,
-        })
-        .await
-        .map_err(|_| "LW_CONTAINER_TERMINAL_RESIZE_FAILED")?;
-    let result = async {
-        socket
-            .send(Message::Text(r#"{"type":"ready"}"#.into()))
-            .await
-            .map_err(|_| "LW_CONTAINER_TERMINAL_CLIENT_DISCONNECTED")?;
-        let (mut sender, mut receiver) = socket.split();
-        let mut output = vec![0_u8; 16 * 1024];
-        loop {
-            tokio::select! {
-                read = stdout.read(&mut output) => {
-                    let count = read.map_err(|_| "LW_CONTAINER_TERMINAL_STDOUT_FAILED")?;
-                    if count == 0 {
-                        sender.send(Message::Text(r#"{"type":"exit"}"#.into())).await
+        .map_err(|_| "LW_CONTAINER_TERMINAL_CLIENT_DISCONNECTED")?;
+    let (mut browser_tx, mut browser_rx) = socket.split();
+    loop {
+        tokio::select! {
+            message = kubernetes_rx.next() => {
+                let Some(message) = message else {
+                    browser_tx.send(Message::Text(r#"{"type":"exit"}"#.into())).await
+                        .map_err(|_| "LW_CONTAINER_TERMINAL_CLIENT_DISCONNECTED")?;
+                    break;
+                };
+                match message.map_err(|_| "LW_CONTAINER_TERMINAL_EXEC_STREAM_FAILED")? {
+                    KubernetesMessage::Binary(frame) if frame.first() == Some(&STDOUT_CHANNEL) => {
+                        browser_tx.send(Message::Binary(frame[1..].to_vec().into())).await
+                            .map_err(|_| "LW_CONTAINER_TERMINAL_CLIENT_DISCONNECTED")?;
+                    }
+                    KubernetesMessage::Binary(frame) if frame.first() == Some(&STATUS_CHANNEL) => {
+                        browser_tx.send(Message::Text(r#"{"type":"exit"}"#.into())).await
                             .map_err(|_| "LW_CONTAINER_TERMINAL_CLIENT_DISCONNECTED")?;
                         break;
                     }
-                    sender.send(Message::Binary(output[..count].to_vec().into())).await
-                        .map_err(|_| "LW_CONTAINER_TERMINAL_CLIENT_DISCONNECTED")?;
+                    KubernetesMessage::Ping(value) => {
+                        kubernetes_tx.send(KubernetesMessage::Pong(value)).await
+                            .map_err(|_| "LW_CONTAINER_TERMINAL_EXEC_STREAM_FAILED")?;
+                    }
+                    KubernetesMessage::Close(_) => break,
+                    _ => {}
                 }
-                message = receiver.next() => {
-                    let Some(message) = message else { break; };
-                    match message.map_err(|_| "LW_CONTAINER_TERMINAL_CLIENT_DISCONNECTED")? {
-                        Message::Binary(bytes) => {
-                            stdin.write_all(&bytes).await
-                                .map_err(|_| "LW_CONTAINER_TERMINAL_STDIN_FAILED")?;
-                        }
-                        Message::Text(text) => {
-                            match serde_json::from_str::<TerminalControl>(&text)
-                                .map_err(|_| "LW_CONTAINER_TERMINAL_CONTROL_INVALID")? {
-                                TerminalControl::Open { cols, rows }
-                                | TerminalControl::Resize { cols, rows } => {
-                                    if cols == 0 || rows == 0 || cols > 500 || rows > 200 {
-                                        return Err("LW_CONTAINER_TERMINAL_SIZE_INVALID");
-                                    }
-                                    terminal_size.send(TerminalSize { width: cols, height: rows }).await
-                                        .map_err(|_| "LW_CONTAINER_TERMINAL_RESIZE_FAILED")?;
+            }
+            message = browser_rx.next() => {
+                let Some(message) = message else { break; };
+                match message.map_err(|_| "LW_CONTAINER_TERMINAL_CLIENT_DISCONNECTED")? {
+                    Message::Binary(bytes) => {
+                        kubernetes_tx.send(KubernetesMessage::Binary(
+                            channel_frame(STDIN_CHANNEL, &bytes).into()
+                        )).await.map_err(|_| "LW_CONTAINER_TERMINAL_STDIN_FAILED")?;
+                    }
+                    Message::Text(text) => {
+                        match serde_json::from_str::<TerminalControl>(&text)
+                            .map_err(|_| "LW_CONTAINER_TERMINAL_CONTROL_INVALID")? {
+                            TerminalControl::Open { cols, rows }
+                            | TerminalControl::Resize { cols, rows } => {
+                                if cols == 0 || rows == 0 || cols > 500 || rows > 200 {
+                                    return Err("LW_CONTAINER_TERMINAL_SIZE_INVALID");
                                 }
+                                send_terminal_size(&mut kubernetes_tx, cols, rows).await?;
                             }
                         }
-                        Message::Close(_) => break,
-                        Message::Ping(value) => sender.send(Message::Pong(value)).await
-                            .map_err(|_| "LW_CONTAINER_TERMINAL_CLIENT_DISCONNECTED")?,
-                        Message::Pong(_) => {}
                     }
+                    Message::Close(_) => {
+                        if supports_stream_close {
+                            kubernetes_tx.send(KubernetesMessage::Binary(
+                                vec![CLOSE_CHANNEL, STDIN_CHANNEL].into()
+                            )).await.map_err(|_| "LW_CONTAINER_TERMINAL_EXEC_STREAM_FAILED")?;
+                        }
+                        break;
+                    }
+                    Message::Ping(value) => browser_tx.send(Message::Pong(value)).await
+                        .map_err(|_| "LW_CONTAINER_TERMINAL_CLIENT_DISCONNECTED")?,
+                    Message::Pong(_) => {}
                 }
             }
         }
-        Ok(())
     }
-    .await;
-    process.abort();
-    result
+    let _ = kubernetes_tx.close().await;
+    Ok(())
+}
+
+fn kubernetes_exec_request(
+    namespace: &str,
+    pod_name: &str,
+    command: &[String],
+) -> Result<http::Request<Vec<u8>>, http::Error> {
+    let target = format!("/api/v1/namespaces/{namespace}/pods/{pod_name}/exec?");
+    let mut query = url::form_urlencoded::Serializer::new(target);
+    for (name, value) in [
+        ("stdin", "true"),
+        ("stdout", "true"),
+        ("stderr", "false"),
+        ("tty", "true"),
+        ("container", "runtime"),
+    ] {
+        query.append_pair(name, value);
+    }
+    for argument in command {
+        query.append_pair("command", argument);
+    }
+    http::Request::post(query.finish()).body(Vec::new())
+}
+
+fn channel_frame(channel: u8, payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(payload.len() + 1);
+    frame.push(channel);
+    frame.extend_from_slice(payload);
+    frame
+}
+
+async fn send_terminal_size<S>(sink: &mut S, cols: u16, rows: u16) -> Result<(), &'static str>
+where
+    S: futures_util::Sink<KubernetesMessage> + Unpin,
+{
+    let size = serde_json::to_vec(&TerminalSize {
+        width: cols,
+        height: rows,
+    })
+    .map_err(|_| "LW_CONTAINER_TERMINAL_RESIZE_FAILED")?;
+    sink.send(KubernetesMessage::Binary(
+        channel_frame(RESIZE_CHANNEL, &size).into(),
+    ))
+    .await
+    .map_err(|_| "LW_CONTAINER_TERMINAL_RESIZE_FAILED")
 }
 
 fn ready_runtime_pod(pod: &Pod) -> bool {
@@ -344,9 +400,26 @@ impl IntoResponse for TerminalExecutorServerError {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
+    use axum::http::Method;
     use k8s_openapi::api::core::v1::Pod;
 
-    use super::ready_runtime_pod;
+    use super::{STDIN_CHANNEL, channel_frame, kubernetes_exec_request, ready_runtime_pod};
+
+    #[test]
+    fn exec_uses_post_and_direct_channel_framing() {
+        let request = kubernetes_exec_request(
+            "lw-env-00000000-0000-7000-8000-000000000401",
+            "runtime",
+            &["/bin/sh".to_owned(), "-l".to_owned()],
+        )
+        .expect("exec request");
+        assert_eq!(request.method(), Method::POST);
+        let uri = request.uri().to_string();
+        assert!(uri.contains("/pods/runtime/exec?"));
+        assert!(uri.contains("container=runtime"));
+        assert!(uri.contains("command=%2Fbin%2Fsh"));
+        assert_eq!(channel_frame(STDIN_CHANNEL, b"pwd\n"), b"\0pwd\n");
+    }
 
     #[test]
     fn only_a_running_ready_runtime_container_is_eligible() {
