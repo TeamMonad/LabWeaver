@@ -64,3 +64,30 @@ test('a changed provisional baseline is a fail-fast diagnostic', async () => {
   const result = await validateConfiguration({ requirementsBaselineHead: 'stale-head' })
   assert.deepEqual(result.diagnostics, ['PW_REQUIREMENTS_BASELINE_CHANGED'])
 })
+
+test('external web-server mode is explicit and never starts a local preview fallback', () => {
+  const previousExternal = process.env.LABWEAVER_EXTERNAL_WEB_SERVER
+  const previousBaseUrl = process.env.LABWEAVER_BASE_URL
+  try {
+    delete process.env.LABWEAVER_BASE_URL
+    delete process.env.LABWEAVER_EXTERNAL_WEB_SERVER
+    assert.equal(createPlaywrightConfig({ ci: true }).webServer.command.includes('preview'), true)
+
+    process.env.LABWEAVER_EXTERNAL_WEB_SERVER = 'true'
+    assert.equal(createPlaywrightConfig({ ci: true }).webServer, undefined)
+
+    process.env.LABWEAVER_EXTERNAL_WEB_SERVER = 'false'
+    assert.equal(createPlaywrightConfig({ ci: true }).webServer.command.includes('preview'), true)
+
+    process.env.LABWEAVER_EXTERNAL_WEB_SERVER = '1'
+    assert.throws(
+      () => createPlaywrightConfig({ ci: true }),
+      /LABWEAVER_EXTERNAL_WEB_SERVER=1/,
+    )
+  } finally {
+    if (previousExternal === undefined) delete process.env.LABWEAVER_EXTERNAL_WEB_SERVER
+    else process.env.LABWEAVER_EXTERNAL_WEB_SERVER = previousExternal
+    if (previousBaseUrl === undefined) delete process.env.LABWEAVER_BASE_URL
+    else process.env.LABWEAVER_BASE_URL = previousBaseUrl
+  }
+})

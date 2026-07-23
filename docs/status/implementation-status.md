@@ -22,6 +22,28 @@ This is an implemented documentation contract, not connected runtime evidence.
 Verify work. No Sprint 3 Demo, Release Gate pass or `outcome:go` is claimed by
 the presence of this document.
 
+## EX3 Fixture Demo (#130)
+
+The EX3 fallback demonstration is implemented as a separate Fixture Web image
+and the pre-existing Host Fixture path. Both use the same deterministic browser
+Fixture, visible `FIXTURE MODE` banner, Playwright projects and source identity;
+they do not introduce a mock backend, new product API, schema, migration or
+Release Gate input. The Docker image is loopback-only and labelled
+`org.labweaver.mode=fixture` plus `org.labweaver.ex3=true`.
+
+The documented Playwright replay is a visible, sequential execution of the
+existing teacher material/AgentRun, dual Candidate approval, student lifecycle
+and grant/revoke, and Container HTTPS-entry tests. It is an interactive
+presentation path only; the complete existing Fixture suite remains the
+browser-regression evidence source. External-server mode is explicit through
+`LABWEAVER_EXTERNAL_WEB_SERVER=true`; an unavailable Docker fixture or occupied
+port fails rather than starting a Host preview.
+
+This capability may satisfy only the EX3 `demo_ready` Fixture demonstration
+condition after its current-branch Host and Docker evidence is recorded. It
+does not change `local_container`, connected verification, KubeVirt status, or
+the Sprint 2 Release decision, which remains blocked.
+
 ## Sprint 1 and Sprint 2
 
 ## Current connected slice (2026-07-23)

@@ -102,3 +102,78 @@ pnpm --dir web test:e2e:live
 Fixture specifications are excluded from this live invocation. Conversely,
 the fixture gate excludes the live specifications, so neither evidence class
 can silently satisfy the other.
+
+## EX3 Fixture Demo replay (#130)
+
+The EX3 Fixture Demo is a local, deterministic browser demonstration. It is
+not connected Container evidence and cannot satisfy a Release Gate input. The
+same existing Fixture specifications are used for the visible replay and the
+full regression suite; no second mock backend or Playwright suite exists.
+
+Build and run the Docker fixture image from a clean build cache. The image is
+deliberately bound to loopback only:
+
+```sh
+export SOURCE_COMMIT="$(git rev-parse HEAD)"
+export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+export SOURCE_TAG="$(printf '%.12s' "$SOURCE_COMMIT")"
+docker build --no-cache --file containers/Containerfile.web-fixture \
+  --build-arg SOURCE_COMMIT="$SOURCE_COMMIT" \
+  --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
+  --tag "labweaver-web-fixture:ex3-$SOURCE_TAG" .
+docker run --rm --name labweaver-web-fixture-ex3 \
+  --publish 127.0.0.1:4173:8080 \
+  "labweaver-web-fixture:ex3-$SOURCE_TAG"
+```
+
+If Docker is unavailable, the operator must explicitly choose the existing
+Host fixture path; no command performs this fallback automatically:
+
+```sh
+pnpm --dir web build:fixture
+pnpm --dir web preview:fixture
+```
+
+For a visible, automatic P0 replay, run the existing tests in this order. Use
+the first environment block for Host preview, or the second for the running
+Docker fixture. `--headed --workers=1` is the only presentation control; the
+test bodies, Fixture identity and reports remain unchanged.
+
+```sh
+export LABWEAVER_DATA_MODE=fixture
+export VITE_DATA_MODE=fixture
+pnpm --dir web exec playwright test e2e/teacher/material-upload.fixture.spec.mjs --config=playwright.config.mjs --project=teacher --headed --workers=1 --grep 'material upload package, agent run succeeds' && \
+pnpm --dir web exec playwright test e2e/teacher/candidate-approval.fixture.spec.mjs --config=playwright.config.mjs --project=teacher --headed --workers=1 --grep 'candidate approval flow publishes release' && \
+pnpm --dir web exec playwright test e2e/student/environment-console.fixture.spec.mjs --config=playwright.config.mjs --project=student --headed --workers=1 --grep 'environment console create, lifecycle, grant and revoke' && \
+pnpm --dir web exec playwright test e2e/student/environment-runtime-access.fixture.spec.mjs --config=playwright.config.mjs --project=student --headed --workers=1 --grep 'student container HTTPS entry'
+```
+
+```sh
+export LABWEAVER_DATA_MODE=fixture
+export LABWEAVER_EXTERNAL_WEB_SERVER=true
+export LABWEAVER_BASE_URL=http://localhost:4173
+pnpm --dir web exec playwright test e2e/teacher/material-upload.fixture.spec.mjs --config=playwright.config.mjs --project=teacher --headed --workers=1 --grep 'material upload package, agent run succeeds' && \
+pnpm --dir web exec playwright test e2e/teacher/candidate-approval.fixture.spec.mjs --config=playwright.config.mjs --project=teacher --headed --workers=1 --grep 'candidate approval flow publishes release' && \
+pnpm --dir web exec playwright test e2e/student/environment-console.fixture.spec.mjs --config=playwright.config.mjs --project=student --headed --workers=1 --grep 'environment console create, lifecycle, grant and revoke' && \
+pnpm --dir web exec playwright test e2e/student/environment-runtime-access.fixture.spec.mjs --config=playwright.config.mjs --project=student --headed --workers=1 --grep 'student container HTTPS entry'
+```
+
+After either replay, run the complete existing Fixture suite for the report,
+HTML result, and retained failure artifacts:
+
+```sh
+pnpm --dir web test:e2e:fixture
+LABWEAVER_EXTERNAL_WEB_SERVER=true pnpm --dir web test:e2e:fixture
+```
+
+The second command requires the Docker fixture to be reachable at the explicit
+`LABWEAVER_BASE_URL`; if it is not reachable, Playwright fails without starting
+a Host preview. Evidence remains under `web/playwright-report-fixture/` and
+`web/test-results/fixture/` and is referenced only by relative locator and
+image digest.
+
+Fixture visual baselines are pinned to the repository's Linux Playwright image
+(`mcr.microsoft.com/playwright:v1.61.1-noble`). Native Windows browser runs may
+produce font-rasterization differences and must not rewrite those baselines.
+Use the existing `playwright-fixture-runtime` CI environment, or that same
+image, for an authoritative complete 112-test Host or Docker Fixture result.

@@ -7,7 +7,17 @@ const isFixture = dataMode === 'fixture'
 const evidenceLabel = isFixture ? 'fixture' : 'live'
 const evidenceMetadata = resolveEvidenceMetadata({ dataMode, evidenceLabel })
 
+function parseExternalWebServer(raw) {
+  if (raw === undefined || raw === '') return false
+  if (raw === 'true') return true
+  if (raw === 'false') return false
+  throw new Error(
+    `[playwright] 非法的 LABWEAVER_EXTERNAL_WEB_SERVER=${String(raw)}，仅允许 true 或 false`,
+  )
+}
+
 export function createPlaywrightConfig({ ci = Boolean(process.env.CI) } = {}) {
+  const externalWebServer = parseExternalWebServer(process.env.LABWEAVER_EXTERNAL_WEB_SERVER)
   const projects = ROLE_PROJECTS.map((project) => {
     const base = {
       name: project.name,
@@ -69,7 +79,7 @@ export function createPlaywrightConfig({ ci = Boolean(process.env.CI) } = {}) {
     },
     projects,
     metadata: evidenceMetadata,
-    ...(isFixture || !process.env.LABWEAVER_BASE_URL
+    ...(!externalWebServer && (isFixture || !process.env.LABWEAVER_BASE_URL)
       ? {
           webServer: {
             command: isFixture ? 'pnpm preview:fixture' : 'pnpm preview --port 4173',
