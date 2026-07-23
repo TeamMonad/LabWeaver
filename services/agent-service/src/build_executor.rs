@@ -540,7 +540,15 @@ impl ProductionBuildExecutor {
                         | StatusCode::NO_CONTENT
                         | StatusCode::NOT_FOUND
                 ) => {}
-            Ok(Ok(_)) => return Err(unavailable()),
+            Ok(Ok(response)) => {
+                tracing::warn!(
+                    event = "agent.build_executor.harbor_tag_delete_rejected",
+                    build_request_id = %build_request_id,
+                    status = %response.status(),
+                    diagnostic = "LW_AGENT_BUILD_CLEANUP_DELETE_REJECTED",
+                );
+                return Err(unavailable());
+            }
             Ok(Err(_)) | Err(_) => tracing::warn!(
                 event = "agent.build_executor.harbor_tag_delete_indeterminate",
                 build_request_id = %build_request_id,
@@ -570,6 +578,34 @@ impl ProductionBuildExecutor {
     }
 
     async fn registry_tag_absent(
+        &self,
+        project: &str,
+        repository: &str,
+        tag: &str,
+    ) -> Result<bool, BuildProviderFailure> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if self
+                .registry_tag_absent_once(project, repository, tag)
+                .await?
+            {
+                return Ok(true);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    event = "agent.build_executor.harbor_tag_delete_pending",
+                    project,
+                    repository,
+                    tag,
+                    diagnostic = "LW_AGENT_BUILD_CLEANUP_DELETE_PENDING",
+                );
+                return Ok(false);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    }
+
+    async fn registry_tag_absent_once(
         &self,
         project: &str,
         repository: &str,
