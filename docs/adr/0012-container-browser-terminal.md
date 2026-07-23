@@ -59,8 +59,12 @@ security failures.
 
 - Terminal bytes never enter PostgreSQL, NATS, ordinary logs, traces, reports
   or evidence. Browser scrollback is ephemeral UI state.
-- `pods get/list/watch` and `pods/exec create` are granted only to
-  container-executor. Access and Environment receive no Kubernetes token.
+- `pods get/list/watch` and `pods/exec get/create` are granted only to
+  container-executor. `kube` 0.99.0 implements its v4/v5 channel transport as
+  an HTTP GET WebSocket Upgrade, while POST/create remains the Kubernetes
+  remote-command authorization used by SPDY-capable operational clients. Both
+  verbs are therefore explicit and confined to the exec subresource. Access
+  and Environment receive no Kubernetes token.
 - Every internal hop requires a dedicated reviewed mTLS identity and fixed
   destination. The browser cannot select namespace, Pod, container,
   executable, arguments or working directory.

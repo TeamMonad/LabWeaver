@@ -345,6 +345,17 @@ class AnsibleFixtureTests(unittest.TestCase):
         )
         self.assertIn("toEntities: [kube-apiserver]", policy)
 
+    def test_container_executor_rbac_supports_kube_websocket_exec(self) -> None:
+        service_account = (
+            ROOT / "deploy/helm/labweaver/templates/service-account.yaml"
+        ).read_text(encoding="utf-8")
+        exec_rule = service_account.split(
+            'resources: ["pods/exec"]', maxsplit=1
+        )[1].split("- apiGroups:", maxsplit=1)[0]
+        self.assertIn('verbs: ["get", "create"]', exec_rule)
+        self.assertNotIn("patch", exec_rule)
+        self.assertNotIn("delete", exec_rule)
+
     def test_sprint2_application_reads_kubernetes_items_as_a_mapping_key(self) -> None:
         tasks = (
             ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"

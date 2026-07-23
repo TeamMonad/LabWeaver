@@ -226,7 +226,14 @@ async fn execute_terminal(
     let mut process = pods
         .exec(pod_name, command, &params)
         .await
-        .map_err(|_| "LW_CONTAINER_TERMINAL_EXEC_FAILED")?;
+        .map_err(|error| {
+            tracing::warn!(
+                event = "environment.container_terminal.exec_failed",
+                diagnostic = "LW_CONTAINER_TERMINAL_EXEC_FAILED",
+                error = %error
+            );
+            "LW_CONTAINER_TERMINAL_EXEC_FAILED"
+        })?;
     let mut stdin = process
         .stdin()
         .ok_or("LW_CONTAINER_TERMINAL_STDIN_UNAVAILABLE")?;
