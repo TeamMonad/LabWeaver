@@ -1323,6 +1323,11 @@ async fn environment_prompt_preserves_mixed_case_variant_contract() -> Result<()
             "missing prompt invariant: {required}"
         );
     }
+    let example = prompt
+        .lines()
+        .find(|line| line.starts_with("{\"apiVersion\":\"environment.labweaver.io/v1\""))
+        .ok_or_else(|| std::io::Error::other("environment prompt example is missing"))?;
+    serde_json::from_str::<EnvironmentSpec>(example)?;
     Ok(())
 }
 

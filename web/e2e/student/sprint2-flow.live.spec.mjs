@@ -27,12 +27,11 @@ test('student reads frozen Container runtime evidence', async ({ page }) => {
   )
 })
 
-test.skip(
-  () => process.env.LABWEAVER_E2E_SKIP_VM === 'true',
-  'KubeVirt verification is explicitly deferred for the current Container-only replay',
-)
-
 test('student reads frozen KubeVirt runtime evidence', async ({ page }) => {
+  test.skip(
+    process.env.LABWEAVER_E2E_SKIP_VM === 'true',
+    'KubeVirt verification is explicitly deferred for the current Container-only replay',
+  )
   await page.goto('/student/environments')
   await expect(page.getByRole('heading', { name: '环境控制台', exact: true }).first()).toBeVisible()
 

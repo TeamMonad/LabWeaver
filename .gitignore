@@ -9,6 +9,7 @@ artifacts/
 
 # Environment files
 .env
+.auth/
 .env.*
 .env.local
 .env.*.local
