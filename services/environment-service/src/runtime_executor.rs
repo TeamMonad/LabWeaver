@@ -710,8 +710,6 @@ impl KubernetesContainerExecutor {
         }
         let namespace_url =
             self.namespaced_url(&format!("/api/v1/namespaces/{}", plan.namespace))?;
-        let namespace_finalize_url =
-            self.namespaced_url(&format!("/api/v1/namespaces/{}/finalize", plan.namespace))?;
         loop {
             if timestamp()?.get() >= fence.deadline_at.get() {
                 return Err(unavailable());
@@ -746,32 +744,33 @@ impl KubernetesContainerExecutor {
             {
                 return Err(status_failure(deletion.status()));
             }
-            let finalize = self
+            // Remove only metadata finalizers owned by the application after
+            // deletion starts. The Namespace controller retains its
+            // `kubernetes` spec finalizer until all namespaced resources are
+            // gone. Calling the `/finalize` subresource with an empty spec
+            // would bypass that cleanup and orphan VMs, VMIs and launcher
+            // pods in a namespace that no longer exists.
+            let patch = self
                 .authorized(
                     self.client
-                        .put(namespace_finalize_url.clone())
-                        .header("content-type", "application/json")
-                        .json(&json!({
-                            "apiVersion":"v1",
-                            "kind":"Namespace",
-                            "metadata":{"name":plan.namespace},
-                            "spec":{"finalizers":[]}
-                        })),
+                        .patch(namespace_url.clone())
+                        .header("content-type", "application/merge-patch+json")
+                        .json(&json!({"metadata":{"finalizers":[]}})),
                 )
                 .send()
                 .await
                 .map_err(|_| unavailable())?;
             tracing::info!(
-                event = "environment.kubevirt_executor.namespace_finalized",
+                event = "environment.kubevirt_executor.namespace_finalizers_patch",
                 environment_id = %plan.environment_id,
                 namespace = %plan.namespace,
-                status = finalize.status().as_u16()
+                status = patch.status().as_u16()
             );
-            if finalize.status() != StatusCode::NOT_FOUND
-                && !finalize.status().is_success()
-                && finalize.status() != StatusCode::CONFLICT
+            if patch.status() != StatusCode::NOT_FOUND
+                && !patch.status().is_success()
+                && patch.status() != StatusCode::CONFLICT
             {
-                return Err(status_failure(finalize.status()));
+                return Err(status_failure(patch.status()));
             }
             tokio::time::sleep(Duration::from_millis(
                 self.configuration.cleanup_poll_milliseconds,
