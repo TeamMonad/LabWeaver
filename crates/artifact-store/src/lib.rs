@@ -360,11 +360,7 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
             Ok(response) => response,
             Err(error) => {
                 let rendered_error = error.to_string();
-                let error_class = rendered_error
-                    .split(':')
-                    .next()
-                    .unwrap_or("unknown")
-                    .trim();
+                let error_class = rendered_error.split(':').next().unwrap_or("unknown").trim();
                 tracing::warn!(
                     event = "artifact_store.get_object_failed",
                     endpoint = %self.config.endpoint,
