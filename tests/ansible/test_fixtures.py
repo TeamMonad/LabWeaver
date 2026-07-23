@@ -618,6 +618,7 @@ class AnsibleFixtureTests(unittest.TestCase):
             tasks.index("Adopt the exact retained CDI clone source network policy"),
             tasks.index("Atomically deploy the immutable Sprint 2 profile"),
         )
+        self.assertEqual(tasks.count("'--take-ownership'"), 2)
 
     def test_sprint2_application_uses_supported_nats_account_probe(self) -> None:
         tasks = (

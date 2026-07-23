@@ -1925,7 +1925,7 @@
       {{ [sprint2_application_helm, '--kubeconfig', sprint2_application_kubeconfig,
           'upgrade', '--install', sprint2_application_release_name,
           sprint2_application_report_root + '/' + sprint2_application_run_id + '/chart',
-          '--namespace', sprint2_application_namespace, '--atomic', '--wait',
+          '--namespace', sprint2_application_namespace, '--take-ownership', '--atomic', '--wait',
           '--timeout', sprint2_application_rollout_timeout]
           + sprint2_application_values_argv + sprint2_application_image_argv
           + sprint2_application_route_argv }}
@@ -1937,7 +1937,7 @@
       {{ [sprint2_application_helm, '--kubeconfig', sprint2_application_kubeconfig,
           'upgrade', '--install', sprint2_application_release_name,
           sprint2_application_report_root + '/' + sprint2_application_run_id + '/chart',
-          '--namespace', sprint2_application_namespace, '--atomic', '--wait',
+          '--namespace', sprint2_application_namespace, '--take-ownership', '--atomic', '--wait',
           '--timeout', sprint2_application_rollout_timeout]
           + sprint2_application_values_argv + sprint2_application_image_argv
           + sprint2_application_route_argv }}
