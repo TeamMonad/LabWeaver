@@ -1254,10 +1254,20 @@ fn verify_namespace_identity(
     {
         return Err(rejected());
     }
-    let finalizers = namespace
+    let deletion_started = namespace
+        .pointer("/metadata/deletionTimestamp")
+        .and_then(Value::as_str)
+        .is_some();
+    let Some(finalizers) = namespace
         .pointer("/metadata/finalizers")
         .and_then(Value::as_array)
-        .ok_or_else(rejected)?;
+    else {
+        return if deletion_started {
+            Ok(())
+        } else {
+            Err(rejected())
+        };
+    };
     if finalizers.iter().any(|value| {
         value.as_str().is_some_and(|name| {
             !matches!(
@@ -1326,6 +1336,31 @@ mod namespace_identity_tests {
                 environment_id
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn namespace_identity_accepts_removed_application_finalizer_during_deletion() {
+        let environment_id =
+            contracts::EnvironmentId::from_str("019f8b1a-f95f-7551-a5ce-33f4c26466fd")
+                .unwrap_or_else(|error| {
+                    eprintln!("fixture environment id: {error}");
+                    std::process::abort();
+                });
+        let namespace = json!({
+            "metadata": {
+                "name": format!("lw-env-{environment_id}"),
+                "labels": {"labweaver.io/environment-id": environment_id.to_string()},
+                "deletionTimestamp": "2026-07-24T00:00:00Z"
+            }
+        });
+        assert!(
+            verify_namespace_identity(
+                &namespace,
+                &format!("lw-env-{environment_id}"),
+                environment_id
+            )
+            .is_ok()
         );
     }
 }
