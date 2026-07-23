@@ -29,7 +29,7 @@ RUN --mount=type=cache,id=labweaver-cargo-registry,target=/usr/local/cargo/regis
 RUN --network=none \
     --mount=type=cache,id=labweaver-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=labweaver-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=labweaver-cargo-target,target=/src/target,sharing=locked \
+    --mount=type=cache,id=labweaver-cargo-target-${SOURCE_COMMIT},target=/src/target,sharing=locked \
     test -n "${SERVICE}" && test -n "${SOURCE_DATE_EPOCH}" && test -n "${SOURCE_COMMIT}" && \
     cargo build --release --locked --package "${SERVICE}" && \
     install -D -m 0555 "target/release/${SERVICE}" /out/labweaver-service

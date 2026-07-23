@@ -1478,9 +1478,12 @@ mod tests {
         assert!(containerfile.contains("@anthropic-ai/claude-code-linux-x64@"));
         assert!(containerfile.contains("sha512sum --check --strict"));
         assert!(containerfile.contains("/usr/local/bin/claude"));
+        assert!(containerfile.contains("id=labweaver-cargo-target-${SOURCE_COMMIT}"));
+        let gateway_containerfile =
+            std::fs::read_to_string(root.join("access-gateway/Dockerfile"))?;
+        assert!(gateway_containerfile.contains("RUSTUP_TOOLCHAIN=${RUST_TOOLCHAIN}"));
         assert!(
-            std::fs::read_to_string(root.join("access-gateway/Dockerfile"))?
-                .contains("RUSTUP_TOOLCHAIN=${RUST_TOOLCHAIN}")
+            gateway_containerfile.contains("id=labweaver-gateway-cargo-target-${SOURCE_COMMIT}")
         );
         Ok(())
     }
