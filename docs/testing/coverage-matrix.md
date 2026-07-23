@@ -19,7 +19,7 @@ this matrix.
 | Boundary | Positive coverage | Required negative coverage | Connected status |
 | --- | --- | --- | --- |
 | Contract | approved Container `TerminalSpec` and capability propagation | relative/unnormalized executable, control characters, argument bounds, non-`/workspace`, VM/no-spec capability | local implementation; connected N/A |
-| Access | same-origin authenticated Upgrade and durable bounded session | Origin/subprotocol, cross-course, revoked/expired/stale revision, capacity, orphan recovery | local implementation; PostgreSQL and ex3 replay pending |
-| Environment | exact instance/release/revision and terminal binding | stopped/deleted/withdrawn/wrong runtime/wrong endpoint | local implementation; ex3 replay pending |
-| container-executor | unique Ready owned runtime Pod, exec PTY, resize and exit | zero/multiple/not-Ready/deleting/wrong-label Pod, exec failure, disconnect cleanup | local unit/compile checks; real Kubernetes exec pending |
-| Web | connect/disconnect/manual reconnect/resize/fullscreen/status | cross-origin URL, protocol mismatch, transport close without automatic retry | component tests; connected Playwright pending |
+| Access | same-origin authenticated Upgrade and durable bounded session | Origin/subprotocol, cross-course, revoked/expired/stale revision, capacity, orphan recovery | connected mixed-source revoke and post-revoke denial pass; remaining negatives and same-source replay pending |
+| Environment | exact instance/release/revision and terminal binding | stopped/deleted/withdrawn/wrong runtime/wrong endpoint | connected authoritative Container bridge pass; lifecycle negatives and same-source replay pending |
+| container-executor | unique Ready owned runtime Pod, exec PTY, resize and exit | zero/multiple/not-Ready/deleting/wrong-label Pod, exec failure, disconnect cleanup | real Kubernetes PTY/write/exit and mTLS pass at source `96d9ca3d`; same-source package pending |
+| Web | connect/disconnect/manual reconnect/resize/fullscreen/status | cross-origin URL, protocol mismatch, transport close without automatic retry | real browser login, xterm write, reconnect, fullscreen and revoke pass; no transcript evidence captured |

@@ -21,6 +21,13 @@ identity. Historical Issue evidence is not a current completion claim.
   seven-image package manifest therefore does not exist. The rejected
   `hostUsers=false` experiment was rolled back; privileged, HostPath and #130
   Fixture images are not permitted substitutes.
+- A deliberately separate mixed-source demonstration deployed the Issue #131
+  terminal path and passed real browser login, PTY write, reconnect, full-screen
+  and revoke-denial behavior. It is not the application-layer exit: six images
+  predate Environment/container-executor source `96d9ca3d`, no seven-image
+  package manifest exists, and infrastructure Secret material entered
+  transient local diagnostic output. Recycle the local cluster and regenerate
+  its private bundle before using it for security, D Verify or Release evidence.
 - Exit: repair the kind/rootless OCI execution boundary without widening the
   accepted BuildKit security exception, package all seven images from one clean
   source identity, then run application and verify with one Run ID and capture

@@ -1,6 +1,6 @@
 # ADR 0012: Access-bound Container Browser Terminal
 
-Status: Accepted for Issue #131 implementation; connected verification pending
+Status: Accepted; mixed-source connected demonstration verified, release verification pending
 
 Date: 2026-07-23
 
