@@ -89,6 +89,10 @@ pub fn environment_api_router(state: EnvironmentApiState) -> Router {
             post(restart_environment),
         )
         .route(
+            "/api/v1/environments/{environment_id}/retry",
+            post(retry_environment),
+        )
+        .route(
             "/api/v1/environments/{environment_id}",
             axum::routing::delete(delete_environment),
         )
@@ -354,6 +358,12 @@ lifecycle_handler!(
     restart_environment,
     EnvironmentOperationKind::Restart,
     Some("environment_restarted"),
+    true
+);
+lifecycle_handler!(
+    retry_environment,
+    EnvironmentOperationKind::Retry,
+    None,
     true
 );
 lifecycle_handler!(
