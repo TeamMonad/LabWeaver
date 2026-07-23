@@ -243,6 +243,10 @@
                             打开容器实验
                           </button>
                           <p v-if="!connectUrl(g)" class="access-card__hint">连接地址缺失，无法打开。</p>
+                          <BrowserTerminal
+                            v-if="terminalGrant(g)"
+                            :terminal-url="terminalGrant(g)?.terminalUrl ?? null"
+                          />
                         </div>
 
                         <div v-if="sshGrant(g)" class="access-card">
@@ -347,6 +351,7 @@ import DataTable from '@/components/common/DataTable.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import EventTimeline from '@/components/common/EventTimeline.vue'
+import BrowserTerminal from '@/components/environment/BrowserTerminal.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import { formatTimestamp, idempotencyKey, ifMatch } from '@/utils/format'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
@@ -469,6 +474,12 @@ function endpointGrantOf(g: AccessGrantWithGateway, protocol: 'https' | 'ssh') {
 
 function httpsGrant(g: AccessGrantWithGateway) {
   return endpointGrantOf(g, 'https')
+}
+
+function terminalGrant(g: AccessGrantWithGateway) {
+  return g.endpointGrants.find(
+    (eg) => eg.health === 'healthy' && eg.capabilities.includes('browser_terminal'),
+  ) ?? null
 }
 
 function sshGrant(g: AccessGrantWithGateway) {

@@ -1199,6 +1199,7 @@ async fn activate_grant(
             "endpointRevision": endpoint.revision,
             "protocol": endpoint.protocol,
             "health": endpoint.health,
+            "capabilities": endpoint.capabilities,
             "sshGatewayHostname": ssh_gateway_hostname,
             "sshGatewayPort": ssh_gateway_port,
             "sshGatewayHostKeyFingerprint": ssh_gateway_host_key_fingerprint,
@@ -1685,6 +1686,16 @@ async fn endpoint_grants(
             let ssh_gateway_port = optional_contract_u16(&contract, "sshGatewayPort")?;
             let ssh_gateway_host_key_fingerprint =
                 optional_contract_string(&contract, "sshGatewayHostKeyFingerprint")?;
+            let capabilities: Vec<contracts::environment::EndpointCapability> =
+                serde_json::from_value(
+                    contract
+                        .get("capabilities")
+                        .cloned()
+                        .unwrap_or_else(|| json!([])),
+                )
+                .map_err(|_| ApiError::unavailable("LW_ACCESS_CONTRACT_INVALID"))?;
+            let terminal_enabled =
+                capabilities.contains(&contracts::environment::EndpointCapability::BrowserTerminal);
             Ok(EndpointGrant {
                 id,
                 access_grant_id: grant_id,
@@ -1693,9 +1704,11 @@ async fn endpoint_grants(
                 protocol,
                 action: EndpointAction::Connect,
                 health: parse_health(&row.get::<String, _>("health"))?,
+                capabilities,
                 alias: row.get("alias"),
                 connect_url: matches!(protocol, EndpointProtocol::Http | EndpointProtocol::Https)
                     .then(|| format!("/connect/{id}/")),
+                terminal_url: terminal_enabled.then(|| format!("/connect/{id}/terminal")),
                 ssh_gateway_hostname,
                 ssh_gateway_port,
                 ssh_gateway_host_key_fingerprint,

@@ -18,6 +18,8 @@ mod resolver;
 mod runtime;
 mod runtime_executor;
 mod store;
+mod terminal_bridge;
+mod terminal_executor;
 mod tls;
 
 pub use api::{EnvironmentApiState, environment_api_router};
@@ -70,5 +72,9 @@ pub use runtime_executor::{KubernetesContainerExecutor, RuntimeExecutorConfigura
 pub use store::{
     EnvironmentStoreError, InboundCommandDecision, InboundLifecycleCommand, LeasedEnvironment,
     PgEnvironmentStore, StoredEnvironmentInventory,
+};
+pub use terminal_bridge::TerminalBridgeError;
+pub use terminal_executor::{
+    TerminalExecutorServer, TerminalExecutorServerConfig, TerminalExecutorServerError,
 };
 pub use tls::{MtlsConfig, MtlsServerError, serve_owner_resolver_mtls};

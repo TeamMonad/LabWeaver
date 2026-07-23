@@ -5,6 +5,7 @@ use std::str::FromStr;
 use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
 
+use crate::terminal_bridge::{TerminalExecutorGateway, terminal_bridge_router};
 use crate::{
     EnvironmentApiState, MtlsConfig, MtlsServerError, OwnerResolver, OwnerResolverPolicy,
     PgEnvironmentStore, environment_api_router, owner_resolver_router, serve_owner_resolver_mtls,
@@ -63,9 +64,12 @@ impl OwnerResolverRuntime {
             .await
             .map_err(OwnerResolverRuntimeError::Bind)?;
         let resolver = OwnerResolver::new(PgEnvironmentStore::new(pool), policy);
+        let terminal_gateway = TerminalExecutorGateway::from_env()?;
         Ok(Self {
             listener,
-            router: owner_resolver_router(resolver).merge(environment_api_router(api)),
+            router: owner_resolver_router(resolver)
+                .merge(environment_api_router(api.clone()))
+                .merge(terminal_bridge_router(api, terminal_gateway)),
             tls,
         })
     }
@@ -141,4 +145,6 @@ pub enum OwnerResolverRuntimeError {
     Bind(#[source] std::io::Error),
     #[error(transparent)]
     Tls(#[from] MtlsServerError),
+    #[error(transparent)]
+    Terminal(#[from] crate::terminal_bridge::TerminalBridgeError),
 }

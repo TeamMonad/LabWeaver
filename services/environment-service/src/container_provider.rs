@@ -1433,7 +1433,11 @@ where
                         "replicas":1,
                         "selector":{"matchLabels":{"app":app_name}},
                         "template":{
-                            "metadata":{"labels":{"app":app_name,"labweaver.io/environment-id":instance.id.to_string()}},
+                            "metadata":{"labels":{
+                                "app":app_name,
+                                "labweaver.io/environment-id":instance.id.to_string(),
+                                "labweaver.io/course-id":instance.course_id.to_string()
+                            }},
                             "spec":{
                                 "serviceAccountName":"runtime","automountServiceAccountToken":false,
                                 // The shared NFS PVC is provisioned with the `nobody` owner.
@@ -1442,6 +1446,7 @@ where
                                 "securityContext":{"runAsNonRoot":true,"runAsUser":65534,"runAsGroup":65534,"fsGroup":65534,"seccompProfile":{"type":"RuntimeDefault"}},
                                 "containers":[{
                                     "name":"runtime","image":image,"imagePullPolicy":"IfNotPresent",
+                                    "workingDir":"/workspace",
                                     "ports":[{"name":"service","containerPort":service_port}],
                                     "resources":{"requests":{"cpu":cpu,"memory":memory},"limits":{"cpu":cpu,"memory":memory}},
                                     "securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"capabilities":{"drop":["ALL"]}},
@@ -1605,6 +1610,13 @@ where
             log_projection_failure(&error, instance, action, "plan");
             projection_failure(&error)
         })?;
+        let terminal_enabled = matches!(
+            &resolved.projection.environment_spec.runtime,
+            EnvironmentRuntimeSpec::Container {
+                terminal: Some(_),
+                ..
+            }
+        );
         let no_endpoints = |next_state, operation_complete| ProviderObservation {
             next_state,
             endpoints: Vec::new(),
@@ -1626,22 +1638,22 @@ where
                 ObservedEnvironmentState::Provisioning,
             ) => {
                 let observed = self.backend.apply(&fence, &plan).await?;
-                ready_observation(instance, observed)
+                ready_observation(instance, observed, terminal_enabled)
             }
             (ReconcileAction::Observe, _) => {
                 let observed = self.backend.observe(&fence, &plan).await?;
-                ready_observation(instance, observed)
+                ready_observation(instance, observed, terminal_enabled)
             }
             (ReconcileAction::Start, ObservedEnvironmentState::Stopped) => {
                 let observed = self.backend.scale(&fence, &plan, 1).await?;
-                ready_observation(instance, observed)
+                ready_observation(instance, observed, terminal_enabled)
             }
             (ReconcileAction::Restart, ObservedEnvironmentState::Provisioning) => {
                 let observed = self
                     .backend
                     .restart(&fence, &plan, instance.revision)
                     .await?;
-                ready_observation(instance, observed)
+                ready_observation(instance, observed, terminal_enabled)
             }
             (
                 ReconcileAction::Stop,
@@ -1661,6 +1673,7 @@ where
 fn ready_observation(
     instance: &EnvironmentInstance,
     observed: ContainerApplyObservation,
+    terminal_enabled: bool,
 ) -> Result<ProviderObservation, ProviderFailure> {
     if !observed.ready {
         return Ok(ProviderObservation {
@@ -1686,6 +1699,14 @@ fn ready_observation(
             protocol: contracts::environment::EndpointProtocol::Http,
             revision,
             health: EndpointHealth::Healthy,
+            capabilities: if terminal_enabled {
+                vec![
+                    contracts::environment::EndpointCapability::BrowserHttp,
+                    contracts::environment::EndpointCapability::BrowserTerminal,
+                ]
+            } else {
+                vec![contracts::environment::EndpointCapability::BrowserHttp]
+            },
             ssh_host_key_identity_sha256: None,
             observed_at: observed.observed_at,
         }],

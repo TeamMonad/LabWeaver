@@ -4,6 +4,22 @@ The Sprint 2 terminal gate and its evidence contract are documented in
 [`release-gate.md`](release-gate.md). A local or Fixture pass cannot satisfy a
 check whose gate mode is `connected`.
 
+## Issue #131 Container browser terminal
+
+The browser terminal is a distinct high-risk acceptance path. Local gates cover
+`TerminalSpec` and capability schema rejection, Access admission/session
+metadata, Environment identity and release checks, unique Ready Pod selection,
+PTY resize/exit/cleanup, and Web same-origin/subprotocol/manual-reconnect
+behavior. Migration catalog, Helm render, RBAC and private-bundle checks are
+mandatory after rebasing onto the final ex3 baseline.
+
+Connected acceptance must use one clean commit, package manifest, seven-image
+digest set and Run ID. Playwright waits for observable state and exercises
+write under `/workspace`, disconnect/reconnect, stop/start, freeze, revoke,
+cross-course denial and delete cleanup. It must not capture terminal content in
+screenshots, traces, video, reports or logs. Fixture behavior is never accepted
+as connected evidence.
+
 Tests are grouped by the boundary they actually exercise. Reports must name the
 source identity and must not promote Fixture or static evidence to a connected
 runtime claim.

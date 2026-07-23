@@ -173,10 +173,17 @@ No runtime `HTTPRoute` is created. Browser requests use the same-origin
 Service checks the BFF session, current membership, grant expiry and exact
 Environment endpoint revision on every request before deriving the internal
 Service DNS name. Cookies and arbitrary upstream redirects are never forwarded.
-Sprint 2 permits bounded HTTP request/response applications only; an Upgrade
-request fails with `LW_ACCESS_RUNTIME_UPGRADE_UNSUPPORTED`. Interactive
-code-server and WorkConfig remain outside this slice instead of weakening the
-Access boundary with an unauthenticated direct route.
+Generic runtime forwarding permits bounded HTTP request/response applications
+only; an Upgrade request still fails with
+`LW_ACCESS_RUNTIME_UPGRADE_UNSUPPORTED`. Issue #131 adds one separate,
+versioned `/connect/{endpointGrantId}/terminal` WebSocket for Container
+endpoints carrying `browser_terminal`. It requires same-origin browser
+authentication, an active exact-revision AccessGrant and
+`labweaver.terminal.v1`, then crosses mTLS Environment and container-executor
+boundaries. The executable, arguments and `/workspace` working directory come
+only from the approved release `TerminalSpec`. No terminal transcript is
+persisted. Interactive code-server, WorkConfig, noVNC and VM terminals remain
+outside this slice.
 
 SSH clients likewise use only the public Gateway binding copied by Access
 Service into the active `EndpointGrant`: the reviewed DNS name, fixed port

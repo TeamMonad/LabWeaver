@@ -70,7 +70,10 @@
       "nats-client.key",
       "nats.creds",
       "postgres-ca.pem",
-      "registry-pull-config.json"
+      "registry-pull-config.json",
+      "terminal-ca.pem",
+      "terminal-server.crt",
+      "terminal-server.key"
     ],
     "control-service-secrets": [
       "database-url",
@@ -98,7 +101,10 @@
       "postgres-ca.pem",
       "system-actor-id",
       "tls.crt",
-      "tls.key"
+      "tls.key",
+      "terminal-ca.pem",
+      "terminal-client.crt",
+      "terminal-client.key"
     ],
     "evaluation-service-secrets": [
       "database-url",

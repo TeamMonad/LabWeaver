@@ -233,6 +233,12 @@ pub(super) async fn forward_runtime(
     let (endpoint_grant_id, runtime_path) = parse_runtime_path(uri.path())?;
     let session = authenticated_session(&state, &headers).await?;
     let target = authorize_runtime(&state, session.actor_id, endpoint_grant_id).await?;
+    if !target
+        .capabilities
+        .contains(&contracts::environment::EndpointCapability::BrowserHttp)
+    {
+        return Err(ApiError::forbidden("LW_ACCESS_RUNTIME_CAPABILITY_DENIED"));
+    }
     let mut upstream = Url::parse(&format!(
         "http://runtime.lw-env-{}.svc.cluster.local:8080/",
         target.environment_id
@@ -308,19 +314,30 @@ pub(super) async fn forward_runtime(
         .map_err(|_| ApiError::internal("LW_ACCESS_RUNTIME_RESPONSE_INVALID"))
 }
 
-struct RuntimeTarget {
-    environment_id: contracts::EnvironmentId,
+pub(super) struct RuntimeTarget {
+    pub(super) access_grant_id: contracts::AccessGrantId,
+    pub(super) course_id: contracts::CourseId,
+    pub(super) environment_id: contracts::EnvironmentId,
+    pub(super) environment_revision: contracts::Revision,
+    pub(super) endpoint_id: contracts::EndpointId,
+    pub(super) endpoint_revision: contracts::Revision,
+    pub(super) capabilities: Vec<contracts::environment::EndpointCapability>,
+    pub(super) expires_at: OffsetDateTime,
 }
 
-async fn authorize_runtime(
+#[allow(
+    clippy::too_many_lines,
+    reason = "authorization keeps the Access and Environment identity checks in one auditable transaction boundary"
+)]
+pub(super) async fn authorize_runtime(
     state: &AppState,
     actor_id: uuid::Uuid,
     endpoint_grant_id: contracts::EndpointGrantId,
 ) -> Result<RuntimeTarget, ApiError> {
     let now = OffsetDateTime::now_utc();
     let row = sqlx::query(
-        "SELECT g.course_id,g.environment_id,g.environment_revision,g.contract,\
-                eg.endpoint_id,eg.endpoint_revision,eg.protocol,eg.expires_at,\
+        "SELECT g.grant_id,g.course_id,g.environment_id,g.environment_revision,g.contract,\
+                g.expires_at AS grant_expires_at,eg.endpoint_id,eg.endpoint_revision,eg.protocol,eg.expires_at,\
                 cm.expires_at AS membership_expires_at \
          FROM access.endpoint_grants eg JOIN access.access_grants g ON g.grant_id=eg.grant_id \
          JOIN access.course_memberships cm ON cm.course_id=g.course_id AND cm.actor_id=g.actor_id \
@@ -340,6 +357,11 @@ async fn authorize_runtime(
     .ok_or_else(|| ApiError::forbidden("LW_ACCESS_RUNTIME_DENIED"))?;
     let environment_id = row
         .get::<uuid::Uuid, _>("environment_id")
+        .to_string()
+        .parse()
+        .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?;
+    let access_grant_id = row
+        .get::<uuid::Uuid, _>("grant_id")
         .to_string()
         .parse()
         .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?;
@@ -412,7 +434,16 @@ async fn authorize_runtime(
     {
         return Err(ApiError::forbidden("LW_ACCESS_RUNTIME_DENIED"));
     }
-    Ok(RuntimeTarget { environment_id })
+    Ok(RuntimeTarget {
+        access_grant_id,
+        course_id,
+        environment_id,
+        environment_revision: expected_revision,
+        endpoint_id,
+        endpoint_revision,
+        capabilities: endpoint.capabilities.clone(),
+        expires_at: std::cmp::min(row.get("grant_expires_at"), row.get("expires_at")),
+    })
 }
 
 async fn forward(

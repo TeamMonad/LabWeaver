@@ -95,12 +95,18 @@ export type CourseId = string;
 export type EndpointAction = 'connect';
 
 /**
+ * Explicit operations supported by one endpoint revision.
+ */
+export type EndpointCapability = 'browser_http' | 'browser_terminal' | 'ssh';
+
+/**
  * Child grant for one exact endpoint revision.
  */
 export type EndpointGrant = {
     accessGrantId: AccessGrantId;
     action: EndpointAction;
     alias?: string | null;
+    capabilities?: Array<EndpointCapability>;
     /**
      * Same-origin, Access Service-authorized browser entry point. Present only
      * for HTTP(S) grants and derived from this immutable endpoint grant ID.
@@ -124,6 +130,10 @@ export type EndpointGrant = {
      * Public OpenSSH Gateway listener port for SSH grants.
      */
     sshGatewayPort?: number | null;
+    /**
+     * Same-origin browser terminal WebSocket URL for this exact endpoint revision.
+     */
+    terminalUrl?: string | null;
 };
 
 /**
@@ -795,6 +805,7 @@ export type CsrfTokenResponseSchemaUtcTimestamp = string;
  * Sanitized Environment-owned endpoint metadata.
  */
 export type EnvironmentEndpointSchema = {
+    capabilities?: Array<EnvironmentEndpointSchemaEndpointCapability>;
     health: EnvironmentEndpointSchemaEndpointHealth;
     id: EnvironmentEndpointSchemaEndpointId;
     observedAt: EnvironmentEndpointSchemaUtcTimestamp;
@@ -806,6 +817,11 @@ export type EnvironmentEndpointSchema = {
      */
     sshHostKeyIdentitySha256?: EnvironmentEndpointSchemaSha256Digest | null;
 };
+
+/**
+ * Explicit operations supported by one endpoint revision.
+ */
+export type EnvironmentEndpointSchemaEndpointCapability = 'browser_http' | 'browser_terminal' | 'ssh';
 
 /**
  * Endpoint health gates new AccessGrants.
@@ -918,6 +934,11 @@ export type EnvironmentInstanceSchemaCourseId = string;
 export type DesiredEnvironmentState = 'running' | 'stopped' | 'deleted';
 
 /**
+ * Explicit operations supported by one endpoint revision.
+ */
+export type EnvironmentInstanceSchemaEndpointCapability = 'browser_http' | 'browser_terminal' | 'ssh';
+
+/**
  * Endpoint health gates new AccessGrants.
  */
 export type EnvironmentInstanceSchemaEndpointHealth = 'pending' | 'healthy' | 'unhealthy' | 'removed';
@@ -941,6 +962,7 @@ export type EnvironmentClass = 'experiment' | 'work';
  * Sanitized Environment-owned endpoint metadata.
  */
 export type EnvironmentEndpoint = {
+    capabilities?: Array<EnvironmentInstanceSchemaEndpointCapability>;
     health: EnvironmentInstanceSchemaEndpointHealth;
     id: EnvironmentInstanceSchemaEndpointId;
     observedAt: EnvironmentInstanceSchemaUtcTimestamp;
@@ -1790,6 +1812,7 @@ export type EnvironmentRuntimeSpec = {
     kind: 'container';
     provider_binding: string;
     service_port: number;
+    terminal?: TerminalSpec | null;
 } | {
     base_disk: VirtualMachineBaseDisk;
     kind: 'virtual_machine';
@@ -1943,6 +1966,18 @@ export type RuntimeUserPolicy = 'non_root_required';
  * Canonical lowercase SHA-256 digest.
  */
 export type EnvironmentCandidateViewSchemaSha256Digest = string;
+
+/**
+ * Approved interactive process for a browser terminal.
+ *
+ * The executable and arguments are passed directly to the runtime without a
+ * shell expansion step. An absent specification disables browser terminals.
+ */
+export type TerminalSpec = {
+    args?: Array<string>;
+    executable: string;
+    workingDirectory: string;
+};
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
@@ -3468,6 +3503,7 @@ export type InternalAgentRunOutcomeSchemaEnvironmentRuntimeSpec = {
     kind: 'container';
     provider_binding: string;
     service_port: number;
+    terminal?: InternalAgentRunOutcomeSchemaTerminalSpec | null;
 } | {
     base_disk: InternalAgentRunOutcomeSchemaVirtualMachineBaseDisk;
     kind: 'virtual_machine';
@@ -3743,6 +3779,18 @@ export type InternalAgentRunOutcomeSchemaSha256Digest = string;
 export type InternalAgentRunOutcomeSchemaSubmissionSpec = {
     collector: InternalAgentRunOutcomeSchemaCollectorSpec;
     llmReadable: Array<string>;
+};
+
+/**
+ * Approved interactive process for a browser terminal.
+ *
+ * The executable and arguments are passed directly to the runtime without a
+ * shell expansion step. An absent specification disables browser terminals.
+ */
+export type InternalAgentRunOutcomeSchemaTerminalSpec = {
+    args?: Array<string>;
+    executable: string;
+    workingDirectory: string;
 };
 
 /**

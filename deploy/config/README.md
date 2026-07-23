@@ -40,6 +40,20 @@ Copy and specialize the examples as follows:
 - `runtime-executor.yaml.example` → both runtime executor `config.yaml` files
 - `web-deployment.json.example` → `web-config/deployment.json`
 
+The Container browser-terminal mTLS material comes from the same ignored
+foundation output and platform CA as the existing service identities:
+
+- copy the platform CA to `environment-service-secrets/terminal-ca.pem` and
+  `container-executor-secrets/terminal-ca.pem`;
+- copy the `environment-service` platform certificate/key to
+  `environment-service-secrets/terminal-client.crt` and
+  `terminal-client.key`;
+- copy the `container-executor` platform certificate/key to
+  `container-executor-secrets/terminal-server.crt` and
+  `terminal-server.key`.
+
+The renderer requires those exact files and rejects extra or missing keys.
+
 Sprint 2 binds the pinned Claude Code CLI to ECNU's Anthropic-compatible endpoint. Put the
 operator-provided `ECNU_API_KEY` value in
 `secrets/agent-service-secrets/anthropic-auth-token` with mode `0600`; never put it in YAML, a

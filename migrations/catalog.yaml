@@ -15,6 +15,9 @@ domains:
       - id: 1
         file: access/0001_sprint2_baseline.sql
         sha256: b8cd92479a7e5f314a2b79fcc578845c149be38334d344a84b784bad0ebafe5b
+      - id: 2
+        file: access/0002_browser_terminal_sessions.sql
+        sha256: 4bec54abc98de48ffe50adf8b5421bc03060ac98d5ace3573e5520ab8e1cf5a0
   - name: environment
     migrations:
       - id: 1

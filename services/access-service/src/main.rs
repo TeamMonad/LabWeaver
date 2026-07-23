@@ -2,6 +2,7 @@
 
 mod grants;
 mod proxy;
+mod terminal;
 
 use std::{collections::BTreeSet, net::SocketAddr, str::FromStr, sync::Arc};
 
@@ -52,6 +53,7 @@ struct AppState {
     environment_proxy: proxy::ControlGatewayProxy,
     evaluation_proxy: proxy::ControlGatewayProxy,
     runtime_proxy: proxy::RuntimeGatewayProxy,
+    terminal_gateway: terminal::TerminalGateway,
     metrics: telemetry::PrometheusHandle,
     nats: async_nats::Client,
 }
@@ -157,6 +159,10 @@ fn browser_router(state: Arc<AppState>) -> Router {
             get(proxy::forward_environment),
         )
         .route(
+            "/connect/{endpoint_grant_id}/terminal",
+            get(terminal::connect_terminal),
+        )
+        .route(
             "/connect/{endpoint_grant_id}/",
             axum::routing::any(proxy::forward_runtime),
         )
@@ -187,6 +193,10 @@ fn internal_router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "startup constructs every fail-closed dependency before either listener reports ready"
+)]
 async fn build_app_state(
     deployment: AccessAuthFile,
     metrics: telemetry::PrometheusHandle,
@@ -267,6 +277,25 @@ async fn build_app_state(
     let environment_proxy = build_service_proxy(&deployment, &deployment.environment_gateway)?;
     let evaluation_proxy = build_service_proxy(&deployment, &deployment.evaluation_gateway)?;
     let runtime_proxy = proxy::RuntimeGatewayProxy::new(&deployment.environment_gateway)?;
+    let terminal_ca = resolver_secret(
+        &deployment,
+        &deployment.environment_gateway.ca_certificate_locator,
+    )?;
+    let terminal_certificate = resolver_secret(
+        &deployment,
+        &deployment.environment_gateway.client_certificate_locator,
+    )?;
+    let terminal_key = resolver_secret(
+        &deployment,
+        &deployment.environment_gateway.client_private_key_locator,
+    )?;
+    let terminal_gateway = terminal::TerminalGateway::new(
+        &deployment.environment_gateway,
+        &terminal_ca,
+        &terminal_certificate,
+        &terminal_key,
+    )
+    .map_err(|_| StartupError::Config)?;
     let nats = grants::connect_nats(&deployment.nats).await?;
     Ok(Arc::new(AppState {
         config,
@@ -283,6 +312,7 @@ async fn build_app_state(
         environment_proxy,
         evaluation_proxy,
         runtime_proxy,
+        terminal_gateway,
         metrics,
         nats,
     }))

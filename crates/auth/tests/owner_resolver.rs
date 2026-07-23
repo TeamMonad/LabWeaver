@@ -252,6 +252,7 @@ async fn resolve_endpoint_eligibility(
             protocol: EndpointProtocol::Ssh,
             revision: request.expected_revision,
             health,
+            capabilities: vec![contracts::environment::EndpointCapability::Ssh],
             ssh_host_key_identity_sha256: Some(contracts::Sha256Digest::of_bytes(
                 b"SHA256:test-host-key",
             )),

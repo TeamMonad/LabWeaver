@@ -42,8 +42,8 @@ const OPERATION_DEADLINE: Duration = Duration::from_secs(15 * 60);
 /// Environment-owned dependencies used by the public API.
 #[derive(Clone)]
 pub struct EnvironmentApiState {
-    store: PgEnvironmentStore,
-    releases: PgReleaseProjectionStore,
+    pub(crate) store: PgEnvironmentStore,
+    pub(crate) releases: PgReleaseProjectionStore,
     access_revoker: NatsAccessRevoker,
     freeze_bindings: FreezeBindingService,
 }

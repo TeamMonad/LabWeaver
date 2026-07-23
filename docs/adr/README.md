@@ -34,3 +34,6 @@ No ADR is accepted in ARC-01a; this directory establishes the review process wit
 - [ADR 0010: Immutable PVC and Certificate-bound SSH Collector](0010-immutable-dual-runtime-collector.md)
   defines bounded dual-runtime snapshots, read-only short-lived SFTP,
   Object Lock publication and durable freeze-attempt fencing for Issue #54.
+- [ADR 0012: Access-bound Container Browser Terminal](0012-container-browser-terminal.md)
+  records the Issue #131 post-freeze exception, same-origin xterm path,
+  Environment-owned validation, executor-only `pods/exec` and rollback order.

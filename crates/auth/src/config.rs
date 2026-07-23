@@ -90,6 +90,7 @@ pub struct GrantRuntimeFileConfig {
     pub worker_lease_seconds: u64,
     pub max_keys_per_actor: u16,
     pub max_endpoints_per_grant: u16,
+    pub max_browser_terminal_sessions: u16,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -371,6 +372,7 @@ impl AccessAuthFile {
             && (5..=300).contains(&self.grants.worker_lease_seconds)
             && (1..=100).contains(&self.grants.max_keys_per_actor)
             && (1..=100).contains(&self.grants.max_endpoints_per_grant)
+            && (1..=10_000).contains(&self.grants.max_browser_terminal_sessions)
             && self.nats.server.starts_with("tls://")
             && [
                 self.nats.ca_certificate_file.as_str(),
@@ -775,6 +777,7 @@ grants:
   worker_lease_seconds: 30
   max_keys_per_actor: 10
   max_endpoints_per_grant: 16
+  max_browser_terminal_sessions: 128
 nats:
   server: tls://nats.example.test:4222
   ca_certificate_file: nats-ca

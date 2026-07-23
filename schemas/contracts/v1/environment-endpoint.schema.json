@@ -1,5 +1,14 @@
 {
   "$defs": {
+    "EndpointCapability": {
+      "description": "Explicit operations supported by one endpoint revision.",
+      "enum": [
+        "browser_http",
+        "browser_terminal",
+        "ssh"
+      ],
+      "type": "string"
+    },
     "EndpointHealth": {
       "description": "Endpoint health gates new AccessGrants.",
       "enum": [
@@ -42,6 +51,13 @@
   "additionalProperties": false,
   "description": "Sanitized Environment-owned endpoint metadata.",
   "properties": {
+    "capabilities": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/EndpointCapability"
+      },
+      "type": "array"
+    },
     "health": {
       "$ref": "#/$defs/EndpointHealth"
     },

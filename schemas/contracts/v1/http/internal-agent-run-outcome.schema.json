@@ -734,6 +734,16 @@
               "maximum": 65535,
               "minimum": 0,
               "type": "integer"
+            },
+            "terminal": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TerminalSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -1491,6 +1501,30 @@
       "required": [
         "collector",
         "llmReadable"
+      ],
+      "type": "object"
+    },
+    "TerminalSpec": {
+      "additionalProperties": false,
+      "description": "Approved interactive process for a browser terminal.\n\nThe executable and arguments are passed directly to the runtime without a\nshell expansion step. An absent specification disables browser terminals.",
+      "properties": {
+        "args": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "executable": {
+          "type": "string"
+        },
+        "workingDirectory": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "executable",
+        "workingDirectory"
       ],
       "type": "object"
     },

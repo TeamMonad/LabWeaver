@@ -100,7 +100,18 @@ PLATFORM_IDENTITIES: dict[str, tuple[tuple[str, ...], str]] = {
         "serverAuth",
     ),
     "environment-service": (
-        ("DNS:environment-service", "DNS:environment-service.labweaver-system.svc"),
+        (
+            "DNS:environment-service",
+            "DNS:environment-service.labweaver-system.svc",
+            "URI:spiffe://labweaver/environment-service",
+        ),
+        "serverAuth,clientAuth",
+    ),
+    "container-executor": (
+        (
+            "DNS:container-executor",
+            "DNS:container-executor.labweaver-system.svc",
+        ),
         "serverAuth",
     ),
     "evaluation-service": (

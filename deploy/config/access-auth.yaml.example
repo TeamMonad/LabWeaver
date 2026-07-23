@@ -112,6 +112,7 @@ grants:
   worker_lease_seconds: 30
   max_keys_per_actor: 10
   max_endpoints_per_grant: 16
+  max_browser_terminal_sessions: 128
 nats:
   server: "tls://nats.labweaver-data.svc:4222"
   ca_certificate_file: "/etc/labweaver/secrets/nats-ca.pem"

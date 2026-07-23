@@ -30,6 +30,15 @@
       ],
       "type": "string"
     },
+    "EndpointCapability": {
+      "description": "Explicit operations supported by one endpoint revision.",
+      "enum": [
+        "browser_http",
+        "browser_terminal",
+        "ssh"
+      ],
+      "type": "string"
+    },
     "EndpointGrant": {
       "additionalProperties": false,
       "description": "Child grant for one exact endpoint revision.",
@@ -45,6 +54,13 @@
             "string",
             "null"
           ]
+        },
+        "capabilities": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EndpointCapability"
+          },
+          "type": "array"
         },
         "connectUrl": {
           "description": "Same-origin, Access Service-authorized browser entry point. Present only\nfor HTTP(S) grants and derived from this immutable endpoint grant ID.",
@@ -92,6 +108,13 @@
           "minimum": 0,
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "terminalUrl": {
+          "description": "Same-origin browser terminal WebSocket URL for this exact endpoint revision.",
+          "type": [
+            "string",
             "null"
           ]
         }

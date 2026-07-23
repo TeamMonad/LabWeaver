@@ -22,8 +22,9 @@ async fn access_schema_enforces_unique_keys_single_live_grant_and_hashed_tokens(
         .connect(&url)
         .await?;
     let migrations = format!(
-        "CREATE SCHEMA access; SET search_path TO access;\n{}",
-        include_str!("../../../migrations/access/0001_sprint2_baseline.sql")
+        "CREATE SCHEMA access; SET search_path TO access;\n{}\n{}",
+        include_str!("../../../migrations/access/0001_sprint2_baseline.sql"),
+        include_str!("../../../migrations/access/0002_browser_terminal_sessions.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;
 
@@ -56,6 +57,50 @@ async fn access_schema_enforces_unique_keys_single_live_grant_and_hashed_tokens(
     let endpoint_grant_id = Uuid::now_v7();
     sqlx::query("INSERT INTO access.endpoint_grants (endpoint_grant_id,grant_id,endpoint_id,endpoint_revision,protocol,health,alias,expires_at,contract) VALUES ($1,$2,$3,1,'ssh','healthy','lw-abcdefghijklmnopqrst',now()+interval '30 minutes','{}')")
         .bind(endpoint_grant_id).bind(grant_id).bind(Uuid::now_v7()).execute(&pool).await?;
+    let terminal_session_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO access.browser_terminal_sessions \
+         (session_id,endpoint_grant_id,access_grant_id,actor_id,course_id,environment_id,\
+          environment_revision,endpoint_revision,state,opened_at,last_heartbeat_at,expires_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,1,1,'opening',now(),now(),now()+interval '30 minutes')",
+    )
+    .bind(terminal_session_id)
+    .bind(endpoint_grant_id)
+    .bind(grant_id)
+    .bind(actor)
+    .bind(course)
+    .bind(environment)
+    .execute(&pool)
+    .await?;
+    let terminal_columns: Vec<String> = sqlx::query_scalar(
+        "SELECT column_name FROM information_schema.columns \
+         WHERE table_schema='access' AND table_name='browser_terminal_sessions'",
+    )
+    .fetch_all(&pool)
+    .await?;
+    for forbidden in ["transcript", "stdin", "stdout", "payload", "content"] {
+        assert!(
+            !terminal_columns
+                .iter()
+                .any(|column| column.contains(forbidden))
+        );
+    }
+    assert!(
+        sqlx::query(
+            "UPDATE access.browser_terminal_sessions SET state='closed' WHERE session_id=$1"
+        )
+        .bind(terminal_session_id)
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+    sqlx::query(
+        "UPDATE access.browser_terminal_sessions SET state='closed',closed_at=now() \
+         WHERE session_id=$1",
+    )
+    .bind(terminal_session_id)
+    .execute(&pool)
+    .await?;
     let authorization_id = Uuid::now_v7();
     sqlx::query("INSERT INTO access.ssh_authorizations (authorization_id,token_sha256,actor_id,key_id,gateway_identity,connection_id,source_address_sha256,issued_at,expires_at) VALUES ($1,$2,$3,$4,'spiffe://labweaver/gateway','connection-1',$5,now(),now()+interval '30 seconds')")
         .bind(authorization_id)

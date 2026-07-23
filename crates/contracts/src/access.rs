@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ssh_key::{Algorithm, HashAlg, PublicKey, public::KeyData};
 
-use crate::environment::{EndpointHealth, EndpointProtocol};
+use crate::environment::{EndpointCapability, EndpointHealth, EndpointProtocol};
 use crate::{
     AccessGrantId, ActorId, CourseId, EndpointGrantId, EndpointId, EnvironmentId, GatewaySessionId,
     Revision, SshPublicKeyId, UtcTimestamp,
@@ -238,10 +238,14 @@ pub struct EndpointGrant {
     pub protocol: EndpointProtocol,
     pub action: EndpointAction,
     pub health: EndpointHealth,
+    #[serde(default)]
+    pub capabilities: Vec<EndpointCapability>,
     pub alias: Option<String>,
     /// Same-origin, Access Service-authorized browser entry point. Present only
     /// for HTTP(S) grants and derived from this immutable endpoint grant ID.
     pub connect_url: Option<String>,
+    /// Same-origin browser terminal WebSocket URL for this exact endpoint revision.
+    pub terminal_url: Option<String>,
     /// Public OpenSSH Gateway DNS name for SSH grants. Never a runtime target.
     pub ssh_gateway_hostname: Option<String>,
     /// Public OpenSSH Gateway listener port for SSH grants.
@@ -259,7 +263,7 @@ impl EndpointGrant {
         }
         match self.protocol {
             EndpointProtocol::Ssh => {
-                if self.connect_url.is_some() {
+                if self.connect_url.is_some() || self.terminal_url.is_some() {
                     return Err(AccessError::InvalidConnectUrl);
                 }
                 let hostname = self
@@ -303,6 +307,15 @@ impl EndpointGrant {
                 }
                 let expected = format!("/connect/{}/", self.id);
                 if self.connect_url.as_deref() != Some(expected.as_str()) {
+                    return Err(AccessError::InvalidConnectUrl);
+                }
+                let terminal_enabled = self
+                    .capabilities
+                    .contains(&EndpointCapability::BrowserTerminal);
+                let expected_terminal = format!("/connect/{}/terminal", self.id);
+                if terminal_enabled
+                    != (self.terminal_url.as_deref() == Some(expected_terminal.as_str()))
+                {
                     return Err(AccessError::InvalidConnectUrl);
                 }
             }
@@ -681,8 +694,10 @@ mod tests {
             protocol: EndpointProtocol::Https,
             action: EndpointAction::Connect,
             health: EndpointHealth::Healthy,
+            capabilities: vec![EndpointCapability::BrowserHttp],
             alias: None,
             connect_url: Some(format!("/connect/{id}/")),
+            terminal_url: None,
             ssh_gateway_hostname: None,
             ssh_gateway_port: None,
             ssh_gateway_host_key_fingerprint: None,
@@ -692,9 +707,20 @@ mod tests {
         endpoint.connect_url = Some("https://runtime.invalid/".to_owned());
         assert_eq!(endpoint.validate(), Err(AccessError::InvalidConnectUrl));
 
+        endpoint.connect_url = Some(format!("/connect/{id}/"));
+        endpoint
+            .capabilities
+            .push(EndpointCapability::BrowserTerminal);
+        endpoint.terminal_url = Some(format!("/connect/{id}/terminal"));
+        assert!(endpoint.validate().is_ok());
+        endpoint.terminal_url = None;
+        assert_eq!(endpoint.validate(), Err(AccessError::InvalidConnectUrl));
+
         endpoint.protocol = EndpointProtocol::Ssh;
+        endpoint.capabilities = vec![EndpointCapability::Ssh];
         endpoint.alias = Some("lw-abcdefghijklmnopqrst".to_owned());
         endpoint.connect_url = None;
+        endpoint.terminal_url = None;
         endpoint.ssh_gateway_hostname = Some("demo.lab.lan".to_owned());
         endpoint.ssh_gateway_port = Some(2222);
         endpoint.ssh_gateway_host_key_fingerprint =

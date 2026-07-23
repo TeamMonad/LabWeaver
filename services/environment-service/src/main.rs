@@ -6,7 +6,8 @@ use artifact_store::{S3Credential, S3ImmutableObjectStore, S3StoreConfig};
 use environment_service::{
     FencedContainerExecutor, FencedKubeVirtExecutor, KubernetesContainerExecutor,
     NatsContainerExecutorServer, NatsKubeVirtExecutorServer, PgContainerExecutorFenceStore,
-    PgKubeVirtExecutorFenceStore, RuntimeExecutorConfiguration, connect_nats_mtls,
+    PgKubeVirtExecutorFenceStore, RuntimeExecutorConfiguration, TerminalExecutorServer,
+    TerminalExecutorServerConfig, connect_nats_mtls,
 };
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
@@ -25,6 +26,7 @@ struct RuntimeExecutorDeployment {
     object_store_session_token_file: Option<String>,
     nats: RuntimeExecutorNats,
     executor: RuntimeExecutorConfiguration,
+    terminal: TerminalExecutorServerConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -119,6 +121,12 @@ async fn run_runtime_executor(kind: RuntimeKind) -> Result<(), MainError> {
         deployment.nats.credentials_file.into(),
     )
     .await?;
+    let terminal_server = match kind {
+        RuntimeKind::Container => {
+            Some(TerminalExecutorServer::new(&deployment.terminal, &deployment.executor).await?)
+        }
+        RuntimeKind::KubeVirt => None,
+    };
     let backend = KubernetesContainerExecutor::new(deployment.executor, objects)
         .map_err(|_| MainError::Configuration)?;
     match kind {
@@ -132,6 +140,13 @@ async fn run_runtime_executor(kind: RuntimeKind) -> Result<(), MainError> {
             )?;
             tokio::try_join!(
                 async { server.serve().await.map_err(MainError::Executor) },
+                async {
+                    terminal_server
+                        .ok_or(MainError::Configuration)?
+                        .serve()
+                        .await
+                        .map_err(MainError::TerminalExecutor)
+                },
                 async {
                     service_runtime::run("container-executor")
                         .await
@@ -193,6 +208,8 @@ enum MainError {
     Executor(#[from] environment_service::ContainerExecutorFenceError),
     #[error(transparent)]
     KubeVirtExecutor(#[from] environment_service::KubeVirtExecutorFenceError),
+    #[error(transparent)]
+    TerminalExecutor(#[from] environment_service::TerminalExecutorServerError),
     #[error(transparent)]
     Store(#[from] artifact_store::ObjectStoreError),
     #[error(transparent)]

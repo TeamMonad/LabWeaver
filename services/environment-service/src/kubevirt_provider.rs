@@ -1927,6 +1927,7 @@ fn ready_observation(
             protocol: contracts::environment::EndpointProtocol::Ssh,
             revision,
             health: EndpointHealth::Healthy,
+            capabilities: vec![contracts::environment::EndpointCapability::Ssh],
             ssh_host_key_identity_sha256: Some(observed.ssh_host_key_sha256),
             observed_at: observed.observed_at,
         }],

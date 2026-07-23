@@ -293,6 +293,54 @@ pub enum PublicExposurePolicy {
     Deny,
 }
 
+/// Approved interactive process for a browser terminal.
+///
+/// The executable and arguments are passed directly to the runtime without a
+/// shell expansion step. An absent specification disables browser terminals.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TerminalSpec {
+    pub executable: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub working_directory: String,
+}
+
+impl TerminalSpec {
+    /// Validates the bounded, shell-free terminal invocation.
+    pub fn validate(&self) -> Result<(), AuthoringError> {
+        if !normalized_absolute_posix_path(&self.executable) || self.executable.len() > 256 {
+            return Err(AuthoringError::InvalidEnvironmentSpec(
+                "terminal executable must be a normalized absolute POSIX path".to_owned(),
+            ));
+        }
+        if self.args.len() > 32
+            || self.args.iter().any(|argument| {
+                argument.len() > 1024 || argument.bytes().any(|byte| byte.is_ascii_control())
+            })
+        {
+            return Err(AuthoringError::InvalidEnvironmentSpec(
+                "terminal arguments exceed the bounded direct-exec contract".to_owned(),
+            ));
+        }
+        if self.working_directory != "/workspace" {
+            return Err(AuthoringError::InvalidEnvironmentSpec(
+                "terminal workingDirectory must be /workspace".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn normalized_absolute_posix_path(path: &str) -> bool {
+    path.starts_with('/')
+        && path.len() > 1
+        && !path.ends_with('/')
+        && !path.contains("//")
+        && !path.split('/').any(|segment| matches!(segment, "." | ".."))
+        && !path.bytes().any(|byte| byte.is_ascii_control())
+}
+
 /// Strict runtime-specific environment shape.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -302,6 +350,8 @@ pub enum EnvironmentRuntimeSpec {
         build_context: ArtifactRef,
         base_image_digest: String,
         service_port: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminal: Option<TerminalSpec>,
     },
     VirtualMachine {
         provider_binding: String,
@@ -423,6 +473,7 @@ impl EnvironmentSpec {
                 build_context,
                 base_image_digest,
                 service_port,
+                terminal,
             } => {
                 if provider_binding.trim().is_empty()
                     || base_image_digest.trim().is_empty()
@@ -439,6 +490,9 @@ impl EnvironmentSpec {
                     ));
                 }
                 validate_artifact_ref(build_context)?;
+                if let Some(terminal) = terminal {
+                    terminal.validate()?;
+                }
             }
             EnvironmentRuntimeSpec::VirtualMachine {
                 provider_binding,
@@ -861,6 +915,42 @@ impl AuthoringError {
             Self::InvalidPackage(_) | Self::InvalidArtifactReference | Self::InvalidAgentRun(_) => {
                 diagnostic::CONTRACT_DOCUMENT_INVALID
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::TerminalSpec;
+
+    #[test]
+    fn terminal_spec_is_direct_bounded_and_workspace_scoped() {
+        let valid = TerminalSpec {
+            executable: "/bin/sh".to_owned(),
+            args: vec!["-l".to_owned()],
+            working_directory: "/workspace".to_owned(),
+        };
+        assert!(valid.validate().is_ok());
+
+        for invalid in [
+            TerminalSpec {
+                executable: "sh".to_owned(),
+                ..valid.clone()
+            },
+            TerminalSpec {
+                executable: "/bin/../bin/sh".to_owned(),
+                ..valid.clone()
+            },
+            TerminalSpec {
+                working_directory: "/tmp".to_owned(),
+                ..valid.clone()
+            },
+            TerminalSpec {
+                args: vec!["line\nbreak".to_owned()],
+                ..valid
+            },
+        ] {
+            assert!(invalid.validate().is_err());
         }
     }
 }

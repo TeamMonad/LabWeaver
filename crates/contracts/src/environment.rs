@@ -410,10 +410,23 @@ pub struct EnvironmentEndpoint {
     pub protocol: EndpointProtocol,
     pub revision: Revision,
     pub health: EndpointHealth,
+    #[serde(default)]
+    pub capabilities: Vec<EndpointCapability>,
     /// SHA-256 of the OpenSSH host-key fingerprint string observed by the
     /// runtime executor. Required for SSH and absent for non-SSH endpoints.
     pub ssh_host_key_identity_sha256: Option<crate::Sha256Digest>,
     pub observed_at: UtcTimestamp,
+}
+
+/// Explicit operations supported by one endpoint revision.
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointCapability {
+    BrowserHttp,
+    BrowserTerminal,
+    Ssh,
 }
 
 /// Supported controlled protocols.

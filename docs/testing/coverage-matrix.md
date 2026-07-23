@@ -14,3 +14,12 @@
 Evaluation execution/scoring, WorkConfig, Resource approval, Tailnet, Guacamole,
 OpenAI Runtime, multi-provider routing, Sigstore, Kyverno and Packer are outside
 this matrix.
+# Issue #131 terminal coverage
+
+| Boundary | Positive coverage | Required negative coverage | Connected status |
+| --- | --- | --- | --- |
+| Contract | approved Container `TerminalSpec` and capability propagation | relative/unnormalized executable, control characters, argument bounds, non-`/workspace`, VM/no-spec capability | local implementation; connected N/A |
+| Access | same-origin authenticated Upgrade and durable bounded session | Origin/subprotocol, cross-course, revoked/expired/stale revision, capacity, orphan recovery | local implementation; PostgreSQL and ex3 replay pending |
+| Environment | exact instance/release/revision and terminal binding | stopped/deleted/withdrawn/wrong runtime/wrong endpoint | local implementation; ex3 replay pending |
+| container-executor | unique Ready owned runtime Pod, exec PTY, resize and exit | zero/multiple/not-Ready/deleting/wrong-label Pod, exec failure, disconnect cleanup | local unit/compile checks; real Kubernetes exec pending |
+| Web | connect/disconnect/manual reconnect/resize/fullscreen/status | cross-origin URL, protocol mismatch, transport close without automatic retry | component tests; connected Playwright pending |

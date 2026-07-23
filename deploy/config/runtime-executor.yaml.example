@@ -30,3 +30,9 @@ executor:
   sshHandshakeTimeoutMilliseconds: 5000
   registryPullSecretFile: "/etc/labweaver/secrets/registry-pull-config.json"
   registryPullSecretName: "harbor-course-pull"
+terminal:
+  bindAddr: "0.0.0.0:9450"
+  clientCaFile: "/etc/labweaver/secrets/terminal-ca.pem"
+  serverCertificateFile: "/etc/labweaver/secrets/terminal-server.crt"
+  serverPrivateKeyFile: "/etc/labweaver/secrets/terminal-server.key"
+  allowedCallerSan: "spiffe://labweaver/environment-service"
