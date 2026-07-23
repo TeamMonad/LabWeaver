@@ -389,10 +389,15 @@ impl client::Handler for HostKeyVerifier {
         &mut self,
         server_public_key: &russh::keys::ssh_key::PublicKey,
     ) -> Result<bool, Self::Error> {
-        Ok(server_public_key
-            .to_bytes()
-            .is_ok_and(|bytes| Sha256Digest::of_bytes(&bytes) == self.expected))
+        Ok(host_key_identity(server_public_key) == self.expected)
     }
+}
+
+fn host_key_identity(server_public_key: &russh::keys::ssh_key::PublicKey) -> Sha256Digest {
+    let fingerprint = server_public_key
+        .fingerprint(russh::keys::HashAlg::Sha256)
+        .to_string();
+    Sha256Digest::of_bytes(fingerprint.as_bytes())
 }
 
 fn sftp_metadata(metadata: &FileAttributes) -> SourceMetadata {
@@ -455,7 +460,9 @@ fn safe_component(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{SshSnapshotConfig, private_ip, safe_remote_root, validate_certificate};
+    use super::{
+        SshSnapshotConfig, host_key_identity, private_ip, safe_remote_root, validate_certificate,
+    };
     use contracts::{Sha256Digest, UtcTimestamp};
     use russh::keys::ssh_key::{PrivateKey, certificate, private::Ed25519Keypair};
     use std::net::{IpAddr, Ipv4Addr};
@@ -493,6 +500,20 @@ mod tests {
         assert!(private_ip("fd00::8".parse()?));
         assert!(safe_remote_root("/srv/workspace"));
         Ok(())
+    }
+
+    #[test]
+    fn host_key_identity_matches_the_runtime_executor_fingerprint_contract() {
+        let key = PrivateKey::from(Ed25519Keypair::from_seed(&[7_u8; 32]));
+        let public_key = key.public_key();
+        let fingerprint = public_key
+            .fingerprint(russh::keys::HashAlg::Sha256)
+            .to_string();
+
+        assert_eq!(
+            host_key_identity(public_key),
+            Sha256Digest::of_bytes(fingerprint.as_bytes())
+        );
     }
 
     #[test]
