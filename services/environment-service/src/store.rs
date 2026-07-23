@@ -408,7 +408,10 @@ impl PgEnvironmentStore {
         let mut transaction = self.pool.begin().await?;
         let snapshot_at = database_now(&mut transaction).await?;
         let rows = sqlx::query(
-            "SELECT i.contract,i.created_at,i.updated_at,COALESCE(max(o.public_sequence),1) AS stream_sequence \
+            "SELECT i.contract, \
+                    date_trunc('milliseconds',i.created_at) AS created_at, \
+                    date_trunc('milliseconds',i.updated_at) AS updated_at, \
+                    COALESCE(max(o.public_sequence),1) AS stream_sequence \
              FROM environment.environment_instances i LEFT JOIN environment.outbox_events o ON o.aggregate_id=i.environment_id \
              WHERE i.course_id=$1 AND i.owner_actor_id=$2 \
              GROUP BY i.environment_id,i.contract,i.created_at,i.updated_at \

@@ -95,6 +95,25 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
     let replay = store.create("create-key-0001", &instance).await?;
     assert_eq!(accepted, replay);
 
+    sqlx::query(
+        "UPDATE environment.environment_instances \
+         SET created_at='2026-07-24T00:00:00.123456Z'::timestamptz, \
+             updated_at='2026-07-24T00:00:01.654321Z'::timestamptz \
+         WHERE environment_id=$1",
+    )
+    .bind(instance.id.as_uuid())
+    .execute(&pool)
+    .await?;
+    let (inventory, _) = store
+        .list_owned(instance.course_id, instance.owner_id, 100)
+        .await?;
+    let listed = inventory
+        .iter()
+        .find(|record| record.instance.id == instance.id)
+        .ok_or("expected the created environment in owned inventory")?;
+    assert_eq!(listed.created_at.to_string(), "2026-07-24T00:00:00.123Z");
+    assert_eq!(listed.updated_at.to_string(), "2026-07-24T00:00:01.654Z");
+
     let mut conflicting = instance.clone();
     conflicting.release_version += 1;
     assert!(matches!(
