@@ -443,6 +443,23 @@ fn plan_is_deterministic_private_and_digest_bound() {
         ),
         Some(&json!("access-system"))
     );
+    let cdi_ingress = named_resource(&first, "NetworkPolicy", "cdi-clone-ingress");
+    assert_eq!(
+        cdi_ingress
+            .document
+            .pointer("/spec/podSelector/matchLabels/cdi.kubevirt.io"),
+        Some(&json!("cdi-upload-server"))
+    );
+    assert_eq!(
+        cdi_ingress.document.pointer(
+            "/spec/ingress/0/from/0/namespaceSelector/matchLabels/kubernetes.io~1metadata.name"
+        ),
+        Some(&json!("labweaver-system"))
+    );
+    assert_eq!(
+        cdi_ingress.document.pointer("/spec/ingress/0/ports/0/port"),
+        Some(&json!(8443))
+    );
 }
 
 #[tokio::test]

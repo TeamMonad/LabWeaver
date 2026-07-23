@@ -153,7 +153,31 @@ fn browser_router(state: Arc<AppState>) -> Router {
             post(proxy::forward_environment),
         )
         .route(
+            "/api/v1/environments/{environment_id}/cancel",
+            post(proxy::forward_environment),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/recover",
+            post(proxy::forward_environment),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/reset",
+            post(proxy::forward_environment),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/retry",
+            post(proxy::forward_environment),
+        )
+        .route(
             "/api/v1/environments/{environment_id}/endpoints",
+            get(proxy::forward_environment),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/operations",
+            get(proxy::forward_environment),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/operations/{operation_id}",
             get(proxy::forward_environment),
         )
         .route(

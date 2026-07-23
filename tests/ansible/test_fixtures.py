@@ -788,6 +788,16 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("name: {{ $name }}-datasource", service_account)
         self.assertIn("kind: RoleBinding", service_account)
 
+    def test_cdi_clone_network_is_bounded_to_dns_and_upload_server(self) -> None:
+        network_policy = (
+            ROOT / "deploy/helm/labweaver/templates/network-policy.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("name: cdi-clone-source", network_policy)
+        self.assertIn("cdi.kubevirt.io: cdi-clone-source", network_policy)
+        self.assertIn("cdi.kubevirt.io: cdi-upload-server", network_policy)
+        self.assertIn("{protocol: TCP, port: 8443}", network_policy)
+        self.assertIn("{protocol: UDP, port: 53}", network_policy)
+
     def test_deploy_starts_with_preflight(self) -> None:
         site = (ROOT / "deploy/ansible/playbooks/site.yml").read_text(encoding="utf-8")
         self.assertEqual(site.splitlines()[1], "- import_playbook: 00-preflight.yml")

@@ -1618,6 +1618,26 @@ where
                 }),
             ),
             resource(
+                "NetworkPolicy",
+                Some(&namespace),
+                "cdi-clone-ingress",
+                json!({
+                    "apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
+                    "metadata":{"name":"cdi-clone-ingress","namespace":namespace,"labels":labels},
+                    "spec":{
+                        "podSelector":{"matchLabels":{"cdi.kubevirt.io":"cdi-upload-server"}},
+                        "policyTypes":["Ingress"],
+                        "ingress":[{
+                            "from":[{
+                                "namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":self.configuration.storage.data_source_namespace}},
+                                "podSelector":{"matchLabels":{"cdi.kubevirt.io":"cdi-clone-source"}}
+                            }],
+                            "ports":[{"protocol":"TCP","port":8443}]
+                        }]
+                    }
+                }),
+            ),
+            resource(
                 "Secret",
                 Some(&namespace),
                 "cloud-init",
