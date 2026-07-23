@@ -90,6 +90,7 @@ workloads:
       LABWEAVER_BUILD_EXECUTOR_CONFIG_FILE: /etc/labweaver/config/config.yaml
       LABWEAVER_BIND_ADDR: 0.0.0.0:8084
       SSL_CERT_FILE: /etc/labweaver/secrets/outbound-ca.pem
+      AWS_CA_BUNDLE: /etc/labweaver/secrets/outbound-ca.pem
     ports:
       - {name: health, containerPort: 8084, servicePort: 8084}
     readiness: {type: http, port: health, path: /health/ready}

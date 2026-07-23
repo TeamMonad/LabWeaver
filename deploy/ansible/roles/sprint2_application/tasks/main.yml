@@ -1644,6 +1644,67 @@
   loop: "{{ sprint2_application_configuration_objects }}"
   no_log: true
 
+- name: Reconcile the retained MinIO transport policy for Sprint 2 platform clients
+  kubernetes.core.k8s:
+    kubeconfig: "{{ sprint2_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: cilium.io/v2
+      kind: CiliumNetworkPolicy
+      metadata:
+        name: admin-probes
+        namespace: "{{ sprint2_application_data_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver
+          labweaver.io/sprint: sprint2
+      spec:
+        endpointSelector:
+          matchExpressions:
+            - key: app.kubernetes.io/name
+              operator: In
+              values: [postgres, nats, minio]
+        ingress:
+          - fromEntities: [host, remote-node]
+            toPorts:
+              - ports:
+                  - port: "5432"
+                    protocol: TCP
+                  - port: "4222"
+                    protocol: TCP
+                  - port: "9000"
+                    protocol: TCP
+          - fromEndpoints:
+              - matchLabels:
+                  k8s:io.kubernetes.pod.namespace: "{{ sprint2_application_namespace }}"
+                  app.kubernetes.io/name: control-service
+              - matchLabels:
+                  k8s:io.kubernetes.pod.namespace: "{{ sprint2_application_namespace }}"
+                  app.kubernetes.io/name: agent-service
+              - matchLabels:
+                  k8s:io.kubernetes.pod.namespace: "{{ sprint2_application_namespace }}"
+                  app.kubernetes.io/name: build-executor
+              - matchLabels:
+                  k8s:io.kubernetes.pod.namespace: "{{ sprint2_application_namespace }}"
+                  app.kubernetes.io/name: environment-service
+              - matchLabels:
+                  k8s:io.kubernetes.pod.namespace: "{{ sprint2_application_namespace }}"
+                  app.kubernetes.io/name: container-executor
+              - matchLabels:
+                  k8s:io.kubernetes.pod.namespace: "{{ sprint2_application_namespace }}"
+                  app.kubernetes.io/name: evaluation-service
+              - matchLabels:
+                  k8s:io.kubernetes.pod.namespace: "{{ sprint2_application_namespace }}"
+                  app.kubernetes.io/name: kubevirt-executor
+            toPorts:
+              - ports:
+                  - port: "5432"
+                    protocol: TCP
+                  - port: "4222"
+                    protocol: TCP
+                  - port: "9000"
+                    protocol: TCP
+
 - name: Copy reviewed Sprint 2 Helm chart
   ansible.builtin.copy:
     src: "{{ sprint2_application_chart_source }}/"

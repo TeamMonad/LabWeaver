@@ -440,16 +440,38 @@ impl ProductionBuildExecutor {
             "artifacts",
             &candidate.digest,
         ])?;
-        let artifact: Value = self
-            .authorized(self.client.get(url))
+        let response = self
+            .authorized(self.client.get(url.clone()))
             .send()
             .await
-            .map_err(network)?
-            .error_for_status()
-            .map_err(network)?
-            .json()
-            .await
-            .map_err(|_| output_invalid())?;
+            .map_err(|error| {
+                tracing::error!(
+                    event = "agent.build_executor.harbor_publish_request_failed",
+                    endpoint = %url,
+                    error = %error,
+                );
+                unavailable()
+            })?;
+        let status = response.status();
+        let body = response.text().await.map_err(|error| {
+            tracing::error!(
+                event = "agent.build_executor.harbor_publish_response_read_failed",
+                endpoint = %url,
+                status = %status,
+                error = %error,
+            );
+            unavailable()
+        })?;
+        if !status.is_success() {
+            tracing::error!(
+                event = "agent.build_executor.harbor_publish_rejected",
+                endpoint = %url,
+                status = %status,
+                body = %sanitize_diagnostic(&body),
+            );
+            return Err(unavailable());
+        }
+        let artifact: Value = serde_json::from_str(&body).map_err(|_| output_invalid())?;
         if artifact.get("digest").and_then(Value::as_str) != Some(candidate.digest.as_str()) {
             return Err(output_invalid());
         }
@@ -890,6 +912,14 @@ fn prepare_private_directory(directory: &Path) -> Result<(), BuildProviderFailur
 
 fn network<T>(_error: T) -> BuildProviderFailure {
     unavailable()
+}
+
+fn sanitize_diagnostic(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
+        .take(512)
+        .collect()
 }
 
 const fn rejected() -> BuildProviderFailure {
