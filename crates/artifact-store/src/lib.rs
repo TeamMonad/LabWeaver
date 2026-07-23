@@ -359,12 +359,19 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
         {
             Ok(response) => response,
             Err(error) => {
+                let rendered_error = error.to_string();
+                let error_class = rendered_error
+                    .split(':')
+                    .next()
+                    .unwrap_or("unknown")
+                    .trim();
                 tracing::warn!(
                     event = "artifact_store.get_object_failed",
                     endpoint = %self.config.endpoint,
                     bucket = %self.config.bucket,
                     object_key = %key,
                     object_version = %version,
+                    error_class = %error_class,
                     service_error_code = ?error.as_service_error().and_then(|service| service.code()),
                 );
                 return Err(ObjectStoreError::ObjectUnavailable);
