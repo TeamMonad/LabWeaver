@@ -44,6 +44,19 @@ freeze Worker with its PostgreSQL CA and Object-Lock bucket. These are
 connected runtime facts for the deployed package plus named live configuration
 reconciles; the pending source commit is not yet a same-identity Release Gate.
 
+The live application is currently a deliberately recorded mixed-identity
+diagnostic deployment: Access Service uses digest
+`sha256:fd51b8e88f3045ab3eb841ea5a7877aed761c4ea831a6fd532fb8cb5fc85d250`
+and Environment Service plus both runtime executors use digest
+`sha256:599bf1a14109a3e10707c1ba01fea3d7fdb7f516324b61afc31b59a5db63bd7f`;
+the remaining application workloads retain the `e062d34f` package images.
+These hotfixes passed a Critical-only Trivy gate and rollout readback, but they
+are not a same-source package and cannot upgrade the connected Container
+evidence to a Release Gate pass. At the Owner's direction, the immediate
+handoff prioritizes the Container slice and defers VM replay, full Demo replay
+and the complete machine-readable Release Gate. This acceleration does not
+change the final Sprint 2 gate below.
+
 | Check | Result | Evidence / limitation |
 | --- | --- | --- |
 | Container environment reconcile | verified on connected runtime | AgentRun `019f8de6-9316-7ef0-a84f-d3b4284132f6` published release `019f8de7-417d-7902-a56c-94fc854f7ba6` at immutable digest `sha256:81299f24573365f8f1349902a76f2411b0eef4bf14ac2fa793641d5a359cce84`; environment `019f8df5-2010-7300-b5cf-3a926ba12d57` reached `ready`. |
@@ -54,7 +67,7 @@ reconciles; the pending source commit is not yet a same-identity Release Gate.
 | Container freeze | verified | Fresh environment `019f8b1a-f95f-7551-a5ce-33f4c26466fd` froze submission `019f8b1b-e2e7-7212-9272-a5b89160cc98` from the mounted workspace; the immutable object was materialized by the Evaluation worker and the freeze command completed. |
 | Container stop/start | verified | Environment `019f8df5-2010-7300-b5cf-3a926ba12d57` reached `stopped` at revision 11 and returned to `ready` at revision 13 through the public student session. |
 | Container delete/cleanup | verified | The same environment accepted application-owned deletion and namespace `lw-env-019f8df5-2010-7300-b5cf-3a926ba12d57` became absent. |
-| KubeVirt | intentionally skipped | The user limited this round to Container runtime verification; no VM completion claim is made. |
+| KubeVirt | deferred after diagnostic progress | A real VM reached KubeVirt `Ready=True` after CDI clone, SSH cloud-init and resource-pressure fixes; the Environment authority did not reach a final verified VM lifecycle, so no VM completion claim is made. |
 | Release Gate / Sprint 2 | blocked | KubeVirt is intentionally skipped this round; Gateway protocol negatives, idempotent deployment replay and a same-source machine-readable passing Release Gate remain absent. |
 
 | Capability | Owner | State | Current evidence | Blocker or limitation |
