@@ -313,14 +313,15 @@ mod tests {
     }
 
     #[test]
-    fn worker_command_uses_public_camel_case_source_fields() {
+    fn worker_command_uses_public_camel_case_source_fields()
+    -> Result<(), Box<dyn std::error::Error>> {
         let source: FreezeWorkerSource = serde_json::from_value(serde_json::json!({
             "kind": "pvc",
             "workspaceRoot": "/workspace",
             "sourceIdentity": contracts::Sha256Digest::of_bytes(b"source").to_string(),
-        }))
-        .expect("worker command source must match the public contract");
+        }))?;
         assert!(matches!(source, FreezeWorkerSource::Pvc { .. }));
+        Ok(())
     }
 
     #[cfg(unix)]

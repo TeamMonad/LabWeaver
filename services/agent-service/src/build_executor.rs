@@ -297,6 +297,19 @@ impl ProductionBuildExecutor {
             .filter(|value| valid_digest(value))
             .ok_or_else(output_invalid)?
             .to_owned();
+        self.persist_built_candidate(context, command, identity, &repository, &tag, &digest)
+            .await
+    }
+
+    async fn persist_built_candidate(
+        &self,
+        context: &BuildProviderRequestContext,
+        command: &AgentBuildRequested,
+        identity: BuildIdentity,
+        repository: &RepositoryIdentity,
+        tag: &str,
+        digest: &str,
+    ) -> Result<BuiltCandidate, BuildProviderFailure> {
         sqlx::query(
             "INSERT INTO agent.build_executor_artifacts \
              (build_request_id,build_identity,repository,project_name,repository_name,candidate_tag,digest) \
@@ -312,8 +325,8 @@ impl ProductionBuildExecutor {
         .bind(&command.request.output_repository)
         .bind(&repository.project)
         .bind(&repository.repository)
-        .bind(&tag)
-        .bind(&digest)
+        .bind(tag)
+        .bind(digest)
         .execute(&self.pool)
         .await
         .map_err(|_| unavailable())?;
@@ -321,7 +334,7 @@ impl ProductionBuildExecutor {
             build_request_id: command.request.id,
             build_identity: identity,
             repository: command.request.output_repository.clone(),
-            digest,
+            digest: digest.to_owned(),
         })
     }
 
