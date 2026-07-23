@@ -27,6 +27,8 @@ async function createEnvironmentFromRelease(page, runtimeLabel) {
 async function issueGrant(page) {
   await page.locator('button:has-text("签发访问授权")').click()
   await expect(page.locator('.grant-card')).toBeVisible()
+  await expect(page.locator('.grant-card')).toContainText('active')
+  await expect(page.locator('.grant-card')).not.toContainText('已过期')
 }
 
 test('student VM single-line SSH command, freeze evidence, and operations timeline', async ({ page }) => {

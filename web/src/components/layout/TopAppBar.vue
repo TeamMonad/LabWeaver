@@ -137,6 +137,13 @@ function cycleTheme() {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.top-app-bar__leading {
+  min-width: 0;
+}
+
+.top-app-bar__trailing {
   flex-shrink: 0;
 }
 
@@ -180,6 +187,8 @@ function cycleTheme() {
 .brand-link {
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
   line-height: 1.2;
   text-decoration: none;
   color: var(--md-sys-color-on-surface);
@@ -187,6 +196,9 @@ function cycleTheme() {
 
 .brand-name {
   font: var(--md-sys-title-medium);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .brand-subtitle {
@@ -228,6 +240,11 @@ function cycleTheme() {
   border-radius: var(--md-sys-shape-full);
   background: var(--md-sys-color-secondary-container);
   color: var(--md-sys-color-on-secondary-container);
+  overflow: hidden;
+}
+
+.user-name {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -288,9 +305,17 @@ function cycleTheme() {
 
 @media (max-width: 599px) {
   .brand-subtitle,
+  .user-name,
   .text-button__label,
   .filled-button__label {
     display: none;
+  }
+
+  .user-chip {
+    justify-content: center;
+    width: 32px;
+    min-width: 32px;
+    padding: 0;
   }
 }
 </style>

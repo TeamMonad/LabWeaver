@@ -218,10 +218,6 @@
                           <span>{{ formatTimestamp(g.issuedAt) }} → {{ formatTimestamp(g.expiresAt) }}</span>
                         </div>
                         <div class="grant-row">
-                          <span>过期</span>
-                          <span>{{ formatExpiry(g.expiresAt) }}</span>
-                        </div>
-                        <div class="grant-row">
                           <span>入口授权</span>
                           <div class="endpoint-grants">
                             <span v-for="eg in g.endpointGrants" :key="eg.id" class="tag">
@@ -261,7 +257,7 @@
                           </div>
                           <div v-if="sshCommand(g)" class="ssh-meta">
                             <span>Gateway fingerprint：<code>{{ sshFingerprint(g) ?? 'unavailable' }}</code></span>
-                            <span>Grant：{{ formatExpiry(g.expiresAt) }}</span>
+                            <span>Grant：{{ grantStateLabel(g.state) }}</span>
                           </div>
                           <p v-else class="access-card__hint">SSH 别名或 Gateway 缺失，无法生成命令。</p>
                         </div>
@@ -365,7 +361,6 @@ import type {
 import type { TimelineEvent } from '@/components/common/EventTimeline.vue'
 import {
   buildSshCommand,
-  formatExpiry,
   resolveConnectUrl,
   type AccessGrantWithGateway,
   type EnvironmentInstanceWithFreeze,
@@ -497,6 +492,19 @@ function sshCommand(g: AccessGrantWithGateway): string | null {
 
 function sshFingerprint(g: AccessGrantWithGateway): string | null {
   return sshGrant(g)?.sshGatewayHostKeyFingerprint ?? null
+}
+
+function grantStateLabel(state: AccessGrantWithGateway['state']): string {
+  switch (state) {
+    case 'active':
+      return '有效'
+    case 'expired':
+      return '已过期'
+    case 'revoked':
+      return '已撤销'
+    default:
+      return state
+  }
 }
 
 function canFreeze(data: EnvironmentInstanceSchema): boolean {

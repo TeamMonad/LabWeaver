@@ -157,6 +157,7 @@ const isActive = computed(() => (path: string) => route.path.startsWith(path))
   gap: 4px;
   padding: 12px;
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
 }
 
@@ -165,6 +166,8 @@ const isActive = computed(() => (path: string) => route.path.startsWith(path))
   align-items: center;
   gap: 16px;
   height: 48px;
+  min-height: 48px;
+  flex-shrink: 0;
   padding: 0 16px;
   border-radius: var(--md-sys-shape-full);
   color: var(--md-sys-color-on-surface-variant);
@@ -243,7 +246,7 @@ const isActive = computed(() => (path: string) => route.path.startsWith(path))
     position: static;
     top: auto;
     left: auto;
-    grid-row: 2;
+    grid-row: 3;
     grid-column: 1;
     transform: none;
   }

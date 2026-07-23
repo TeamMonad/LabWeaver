@@ -23,7 +23,12 @@ import SvgIcon from '@/components/common/SvgIcon.vue'
   color: var(--md-sys-color-warning);
   font: var(--md-sys-label-large);
   text-align: center;
-  overflow: hidden;
+  min-width: 0;
+}
+
+.fixture-banner span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 390px) {
