@@ -158,7 +158,8 @@ where
                     match timeout(
                         HTTP_CONNECTION_TIMEOUT,
                         http1::Builder::new()
-                            .serve_connection(TokioIo::new(tls_stream), service),
+                            .serve_connection(TokioIo::new(tls_stream), service)
+                            .with_upgrades(),
                     )
                     .await
                     {

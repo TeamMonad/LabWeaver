@@ -6,28 +6,42 @@
 
 mod support;
 
+use std::io::Cursor;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+use axum::{
+    Extension,
+    extract::ws::{Message, WebSocketUpgrade},
+    http::{StatusCode as AxumStatusCode, header},
+    response::Response,
+    routing::get,
+};
 use contracts::environment::{
     EnvironmentInstance, EnvironmentOperationKind, EnvironmentOwnerResolutionRequest,
 };
 use contracts::{ActorId, CourseId};
 use environment_service::{
     LifecycleCommand, MtlsConfig, MtlsServerError, OwnerResolver, OwnerResolverPolicy,
-    PgEnvironmentStore, authorize_owner_resolution, owner_resolver_router, plan_command,
-    serve_owner_resolver_mtls,
+    PgEnvironmentStore, VerifiedCallerIdentity, authorize_owner_resolution, owner_resolver_router,
+    plan_command, serve_owner_resolver_mtls,
 };
+use futures_util::{SinkExt, StreamExt};
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
     KeyUsagePurpose, SanType, string::Ia5String,
 };
 use reqwest::{Certificate, Client, Identity, StatusCode};
+use rustls::{ClientConfig, RootCertStore};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
+use tokio_tungstenite::{
+    Connector, connect_async_tls_with_config,
+    tungstenite::{client::IntoClientRequest, protocol::Message as ClientMessage},
+};
 
 const ALLOWED_CALLER_SAN: &str = "spiffe://labweaver/access-service";
 
@@ -267,6 +281,80 @@ async fn shutdown_future_failure_is_propagated_as_a_typed_server_error()
     .await;
     assert!(matches!(result, Err(MtlsServerError::ShutdownSignal(_))));
     Ok(())
+}
+
+#[tokio::test]
+async fn mtls_server_retains_websocket_upgrades() -> Result<(), Box<dyn std::error::Error>> {
+    let ca = test_ca()?;
+    let (server_certificate, server_key) = leaf_certificate(&ca, "localhost", false)?;
+    let (client_certificate, client_key) = leaf_certificate(&ca, ALLOWED_CALLER_SAN, true)?;
+    let router = axum::Router::new().route("/upgrade", get(upgrade_echo));
+    let (address, shutdown, server) =
+        start_server(router, &ca.pem(), &server_certificate, &server_key).await?;
+    let mut request =
+        format!("wss://localhost:{}/upgrade", address.port()).into_client_request()?;
+    request
+        .headers_mut()
+        .insert(header::SEC_WEBSOCKET_PROTOCOL, "labweaver.test.v1".parse()?);
+    let connector = mtls_websocket_connector(&ca.pem(), &client_certificate, &client_key)?;
+    let (mut socket, response) =
+        connect_async_tls_with_config(request, None, true, Some(connector)).await?;
+    assert_eq!(response.status(), AxumStatusCode::SWITCHING_PROTOCOLS);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::SEC_WEBSOCKET_PROTOCOL)
+            .and_then(|value| value.to_str().ok()),
+        Some("labweaver.test.v1")
+    );
+    socket
+        .send(ClientMessage::Text("upgrade-retained".into()))
+        .await?;
+    assert_eq!(
+        socket.next().await.transpose()?,
+        Some(ClientMessage::Text("upgrade-retained".into()))
+    );
+    socket.close(None).await?;
+    shutdown
+        .send(())
+        .map_err(|()| "mTLS WebSocket server shutdown receiver disappeared")?;
+    server.await??;
+    Ok(())
+}
+
+async fn upgrade_echo(
+    Extension(identity): Extension<VerifiedCallerIdentity>,
+    upgrade: WebSocketUpgrade,
+) -> Result<Response, AxumStatusCode> {
+    if !identity.contains_san(ALLOWED_CALLER_SAN) {
+        return Err(AxumStatusCode::FORBIDDEN);
+    }
+    Ok(upgrade
+        .protocols(["labweaver.test.v1"])
+        .on_upgrade(|mut socket| async move {
+            if let Some(Ok(Message::Text(value))) = socket.next().await {
+                let _ = socket.send(Message::Text(value)).await;
+            }
+        }))
+}
+
+fn mtls_websocket_connector(
+    ca_pem: &str,
+    certificate_pem: &str,
+    private_key_pem: &str,
+) -> Result<Connector, Box<dyn std::error::Error>> {
+    let mut roots = RootCertStore::empty();
+    for certificate in rustls_pemfile::certs(&mut Cursor::new(ca_pem)) {
+        roots.add(certificate?)?;
+    }
+    let certificates =
+        rustls_pemfile::certs(&mut Cursor::new(certificate_pem)).collect::<Result<Vec<_>, _>>()?;
+    let private_key = rustls_pemfile::private_key(&mut Cursor::new(private_key_pem))?
+        .ok_or("client private key missing")?;
+    let config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_client_auth_cert(certificates, private_key)?;
+    Ok(Connector::Rustls(std::sync::Arc::new(config)))
 }
 
 async fn migrate(pool: &PgPool) -> Result<(), sqlx::Error> {
