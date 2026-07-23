@@ -1881,6 +1881,10 @@ mod tests {
     use contracts::authoring::EnvironmentRuntimeSpec;
     use serde_json::json;
 
+    #[allow(
+        clippy::expect_used,
+        reason = "the static JSON fixtures are asserted through deserialization in this unit test"
+    )]
     fn runtime(kind: &str) -> EnvironmentRuntimeSpec {
         let runtime = match kind {
             "container" => json!({
