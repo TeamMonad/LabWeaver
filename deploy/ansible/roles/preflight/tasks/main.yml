@@ -4,10 +4,47 @@
     that: >-
       (labweaver_preflight_scope | default('cluster')) in
       ['cluster', 'identity-foundation', 'sprint2-foundation',
-       'sprint2-buildkit', 'sprint2-harbor-route', 'sprint2-application', 'sprint2-reset']
+       'sprint2-buildkit', 'sprint2-harbor-route', 'sprint2-application', 'sprint2-reset',
+       'single-node-kind']
     fail_msg: PREFLIGHT_SCOPE_INVALID
   run_once: true
   delegate_to: localhost
+
+- name: Validate the single-node-kind inventory boundary
+  ansible.builtin.assert:
+    that:
+      - (labweaver_preflight_scope | default('cluster')) == 'single-node-kind'
+      - groups.get('control_plane', []) | length == 1
+      - groups.get('workers', []) | length == 0
+      - groups.get('nfs_servers', []) | length == 0
+      - ansible_connection == 'local'
+      - labweaver_local_kind | default(false) | bool
+    fail_msg: EX3_KIND_INVENTORY_SCOPE_INVALID
+  run_once: true
+  delegate_to: localhost
+  when:
+    - (labweaver_preflight_scope | default('cluster')) == 'single-node-kind'
+    - not (labweaver_local_cluster_adopted | default(false) | bool)
+
+- name: Require Docker Desktop for the single-node-kind profile
+  ansible.builtin.command:
+    argv: ["{{ docker_binary | default('docker') }}", info]
+  changed_when: false
+  run_once: true
+  delegate_to: localhost
+  when:
+    - (labweaver_preflight_scope | default('cluster')) == 'single-node-kind'
+    - not (labweaver_local_cluster_adopted | default(false) | bool)
+
+- name: Require the pinned kind version for the single-node-kind profile
+  ansible.builtin.command:
+    argv: ["{{ kind_binary | default('kind') }}", version]
+  register: ex3_kind_version
+  changed_when: false
+  failed_when: ex3_kind_version.rc != 0 or 'v0.31.0' not in ex3_kind_version.stdout
+  run_once: true
+  delegate_to: localhost
+  when: (labweaver_preflight_scope | default('cluster')) == 'single-node-kind'
 
 - name: Assert required full-cluster inventory groups
   ansible.builtin.assert:
@@ -92,6 +129,7 @@
     fail_msg: "only Rocky/RHEL 10+ nodes are supported by this playbook"
   when:
     - inventory_hostname != 'localhost'
+    - not (labweaver_local_kind | default(false) | bool)
     - not (labweaver_direct_kubernetes_controller | default(false) | bool)
 
 - name: Require local-only hosts for direct Kubernetes controller mode
@@ -129,6 +167,7 @@
     - "{{ router_lan_interface }}"
   when:
     - inventory_hostname in groups['routers']
+    - not (labweaver_local_kind | default(false) | bool)
     - not (labweaver_direct_kubernetes_controller | default(false) | bool)
 
 - name: Assert Kubernetes node SELinux is enforcing
@@ -139,13 +178,16 @@
   failed_when: preflight_selinux_mode.stdout != 'Enforcing'
   when:
     - inventory_hostname in groups['k8s_cluster']
+    - not (labweaver_local_kind | default(false) | bool)
     - not (labweaver_direct_kubernetes_controller | default(false) | bool)
 
 - name: Assert workers expose the KVM device
   ansible.builtin.stat:
     path: /dev/kvm
   register: preflight_kvm_device
-  when: inventory_hostname in groups.get('workers', [])
+  when:
+    - inventory_hostname in groups.get('workers', [])
+    - not (labweaver_local_kind | default(false) | bool)
 
 - name: Reject workers without KVM
   ansible.builtin.assert:

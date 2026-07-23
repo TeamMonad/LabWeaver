@@ -82,7 +82,9 @@
       - "{{ sprint2_admin_tools_lock.system_packages.postgresql }}"
       - "{{ sprint2_admin_tools_lock.system_packages.java }}"
     state: present
-  when: sprint2_admin_tools_profile == 'execution'
+  when:
+    - sprint2_admin_tools_profile == 'execution'
+    - not (labweaver_local_kind | default(false) | bool)
 
 - name: Download locked execution tool archives
   ansible.builtin.get_url:

@@ -1,0 +1,97 @@
+---
+- name: Require the local single-node-kind profile
+  ansible.builtin.assert:
+    that:
+      - deployment_profile | default('') == 'single-node-kind'
+      - labweaver_local_kind | default(false) | bool
+      - kind_node_image is match('^[^@]+@sha256:[0-9a-f]{64}$')
+      - labweaver_kubeconfig | length > 0
+    fail_msg: EX3_KIND_PROFILE_INVALID
+
+- name: Check Docker Desktop connectivity
+  ansible.builtin.command:
+    argv: ["{{ docker_binary }}", info]
+  changed_when: false
+
+- name: Check the pinned kind tool
+  ansible.builtin.command:
+    argv: ["{{ kind_binary }}", version]
+  changed_when: false
+  register: kind_version
+  failed_when: kind_version.rc != 0 or 'v0.31.0' not in kind_version.stdout
+
+- name: Inspect the pinned node image cache
+  ansible.builtin.command:
+    argv: ["{{ docker_binary }}", image, inspect, "{{ kind_node_image }}"]
+  changed_when: false
+  failed_when: false
+  register: kind_node_image_cache
+
+- name: Pull the pinned node image when it is not cached
+  ansible.builtin.command:
+    argv: ["{{ docker_binary }}", pull, "{{ kind_node_image }}"]
+  changed_when: true
+  when: kind_node_image_cache.rc != 0
+
+- name: Check the pinned node image identity
+  ansible.builtin.command:
+    argv: ["{{ docker_binary }}", image, inspect, "{{ kind_node_image }}"]
+  changed_when: false
+
+- name: Read local kind clusters
+  ansible.builtin.command:
+    argv: ["{{ kind_binary }}", get, clusters]
+  changed_when: false
+  register: kind_clusters
+
+- name: Create the local kind cluster when absent
+  ansible.builtin.command:
+    argv:
+      - "{{ kind_binary }}"
+      - create
+      - cluster
+      - --name
+      - "{{ kind_cluster_name }}"
+      - --config
+      - "{{ kind_config }}"
+      - --image
+      - "{{ kind_node_image }}"
+  when: kind_cluster_name not in kind_clusters.stdout_lines
+
+- name: Export the local kind kubeconfig
+  ansible.builtin.command:
+    argv:
+      - "{{ kind_binary }}"
+      - export
+      - kubeconfig
+      - --name
+      - "{{ kind_cluster_name }}"
+      - --kubeconfig
+      - "{{ labweaver_kubeconfig }}"
+  changed_when: false
+
+- name: Require the selected kubeconfig to be usable
+  ansible.builtin.command:
+    argv: [kubectl, --kubeconfig, "{{ labweaver_kubeconfig }}", get, nodes]
+  changed_when: false
+
+- name: Read the kind control-plane container IP for in-cluster API access
+  ansible.builtin.command:
+    argv:
+      - "{{ docker_binary }}"
+      - inspect
+      - --format
+      - "{{ '{{' }}.NetworkSettings.Networks.kind.IPAddress{{ '}}' }}"
+      - "{{ kind_cluster_name }}-control-plane"
+  changed_when: false
+  register: kind_control_plane_ip
+
+- name: Require a concrete kind control-plane IP
+  ansible.builtin.assert:
+    that:
+      - kind_control_plane_ip.stdout | trim is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
+    fail_msg: EX3_KIND_CONTROL_PLANE_IP_INVALID
+
+- name: Bind the local Cilium API endpoint to the kind control-plane IP
+  ansible.builtin.set_fact:
+    local_kind_node_ip: "{{ kind_control_plane_ip.stdout | trim }}"

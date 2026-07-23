@@ -1,7 +1,9 @@
 ---
 - import_playbook: 00-preflight.yml
   vars:
-    labweaver_preflight_scope: identity-foundation
+    labweaver_preflight_scope: >-
+      {{ 'single-node-kind' if deployment_profile | default('') == 'single-node-kind'
+         else 'identity-foundation' }}
 
 - name: Reconcile the private identity foundation
   hosts: control_plane

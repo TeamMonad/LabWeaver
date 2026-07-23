@@ -41,7 +41,7 @@ spec:
         options: [{name: ndots, value: "5"}]
       hostAliases:
         - ip: {{ sprint2_buildkit_harbor_service_ip }}
-          hostnames: [harbor.lab.lan]
+          hostnames: [{{ sprint2_buildkit_harbor_hostname }}]
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000

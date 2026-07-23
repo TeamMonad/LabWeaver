@@ -3,6 +3,30 @@
 This file contains only blockers for the current `release/sprint2` source
 identity. Historical Issue evidence is not a current completion claim.
 
+## Issue #131 local single-node-kind deployment
+
+- The repository now contains the initial `ex3` profile, pinned kind node
+  configuration, local inventory template, and bootstrap role.
+- The base connected layer is now deployed manually from Alpine WSL: the
+  digest-pinned kind cluster, Experimental Gateway API, Cilium, local-path,
+  PostgreSQL, NATS and MinIO are Ready/Bound, and the Sprint 2 foundation
+  reconcile completed successfully.
+- Harbor and BuildKit/Trivy have reconciled through the local Gateway/NodePort
+  path. Identity-foundation created its namespaces, certificates and workload,
+  but the current Keycloak/PostgreSQL rollout is still blocked by intermittent
+  Cilium endpoint creation failures while the local kind node is converging.
+  Cilium L7 proxy must be restored enabled after recovery; the local-path
+  provisioner uses the node network because this kind cluster has no MetalLB or
+  NFS.
+- The application layer remains blocked by missing operator-provided private
+  configuration and ECNU credential inputs. `cargo xtask package` also requires
+  a clean source tree before it can produce the seven-image package manifest;
+  the current implementation worktree is intentionally dirty. No #130 Fixture
+  package, image or report is permitted as a substitute.
+- Exit: supply the ignored application inputs, package from the validated clean
+  Issue #131 commit, then run application and verify with one Run ID and capture
+  the second-reconcile and fail-closed Container evidence.
+
 ## Connected supply-chain replay
 
 - Local fixed-command Build Executor, persistent fences and digest/Trivy

@@ -1,7 +1,9 @@
 ---
 - import_playbook: 00-preflight.yml
   vars:
-    labweaver_preflight_scope: sprint2-application
+    labweaver_preflight_scope: >-
+      {{ 'single-node-kind' if deployment_profile | default('') == 'single-node-kind'
+         else 'sprint2-application' }}
     # This entrypoint adopts an already validated cluster. It verifies the
     # controller API and retained services, but does not re-run node/router/NFS
     # infrastructure qualification or mutate those hosts.

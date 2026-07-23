@@ -1,0 +1,6 @@
+kind_cluster_name: labweaver-ex3
+kind_config: "{{ playbook_dir }}/../../config/single-node-kind.yaml"
+kind_node_image: ""
+kind_binary: kind
+docker_binary: docker
+labweaver_kubeconfig: "{{ lookup('env', 'KUBECONFIG') }}"

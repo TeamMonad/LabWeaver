@@ -46,11 +46,17 @@ metadata:
   namespace: {{ harbor_namespace }}
   labels:
     app.kubernetes.io/part-of: labweaver-infrastructure
+{% if harbor_local_kind | default(false) | bool %}
+  annotations:
+    service.cilium.io/type: NodePort
+{% endif %}
 spec:
-  gatewayClassName: cilium
+  gatewayClassName: {{ harbor_gateway_class if harbor_local_kind | default(false) | bool else 'cilium' }}
+{% if not harbor_local_kind | default(false) | bool %}
   infrastructure:
     annotations:
       metallb.io/loadBalancerIPs: {{ harbor_gateway_vip }}
+{% endif %}
   listeners:
     - name: https
       protocol: HTTPS

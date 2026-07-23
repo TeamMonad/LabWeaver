@@ -1,0 +1,25 @@
+---
+- name: Validate and create the explicitly selected local kind cluster
+  hosts: control_plane
+  gather_facts: false
+  roles: [local_kind]
+
+- name: Install Cilium and Gateway API for single-node-kind
+  hosts: control_plane
+  gather_facts: false
+  roles: [cluster_network]
+
+- name: Install cert-manager for local TLS resources
+  hosts: control_plane
+  gather_facts: false
+  roles: [cluster_addons]
+
+- name: Configure local-path storage for single-node-kind
+  hosts: control_plane
+  gather_facts: false
+  roles: [storage_controllers]
+
+- name: Reconcile single-node-kind Harbor
+  hosts: control_plane
+  gather_facts: false
+  roles: [harbor]

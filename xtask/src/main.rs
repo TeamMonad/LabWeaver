@@ -538,7 +538,19 @@ fn deploy(args: &EnvironmentArgs) -> Result<(), AppError> {
         });
     }
     validate_environment_name(&args.env)?;
-    run_infrastructure(&args.env, "95-harbor.yml", "deploy --infra")
+    run_infrastructure(
+        &args.env,
+        infrastructure_deploy_playbook(&args.env),
+        "deploy --infra",
+    )
+}
+
+fn infrastructure_deploy_playbook(environment: &str) -> &'static str {
+    if environment == "ex3" {
+        "94-single-node-kind.yml"
+    } else {
+        "95-harbor.yml"
+    }
 }
 
 fn preflight(args: &EnvironmentArgs) -> Result<(), AppError> {
@@ -1314,8 +1326,8 @@ fn not_implemented(command: impl Into<String>) -> Result<(), AppError> {
 mod tests {
     use super::{
         EnvironmentArgs, IdentityFoundationAction, IdentityFoundationArgs, deploy,
-        identity_foundation, sprint2_application, sprint2_buildkit, sprint2_foundation,
-        sprint2_harbor_route,
+        identity_foundation, infrastructure_deploy_playbook, sprint2_application, sprint2_buildkit,
+        sprint2_foundation, sprint2_harbor_route,
     };
 
     fn identity_args(env: &str, infra: bool, yes: bool) -> IdentityFoundationArgs {
@@ -1328,6 +1340,15 @@ mod tests {
             },
             action: IdentityFoundationAction::Deploy,
         }
+    }
+
+    #[test]
+    fn ex3_deploy_selects_only_the_local_kind_playbook() {
+        assert_eq!(
+            infrastructure_deploy_playbook("ex3"),
+            "94-single-node-kind.yml"
+        );
+        assert_eq!(infrastructure_deploy_playbook("dev"), "95-harbor.yml");
     }
 
     #[test]

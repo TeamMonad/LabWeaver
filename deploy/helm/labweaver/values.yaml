@@ -235,6 +235,8 @@ network:
   identityNamespaceSelector:
     matchLabels: {kubernetes.io/metadata.name: keycloak-system}
   kubernetesApiCidrs: []
-  kubernetesApiPorts: [443]
+  # The in-cluster Service is addressed on 443, while CNI enforcement can
+  # observe the adopted control-plane endpoint after DNAT on 6443.
+  kubernetesApiPorts: [443, 6443]
   gatewayIngressCidrs: []
   externalServiceEndpoints: []

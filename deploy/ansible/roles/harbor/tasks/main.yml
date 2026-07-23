@@ -58,12 +58,28 @@
     src: "/var/backups/labweaver/BackupEvidence-{{ harbor_run_id }}.json"
   register: harbor_backup_evidence_raw
   no_log: true
+  when: not (harbor_local_kind | default(false) | bool)
+
+- name: Bind a fresh local-cluster Harbor adoption evidence record
+  ansible.builtin.set_fact:
+    harbor_backup_evidence:
+      overall: passed
+      run_id: "{{ harbor_run_id }}"
+      commit_sha: "{{ harbor_commit_sha }}"
+      inventory_hash: "{{ harbor_inventory_hash }}"
+      component_lock_hash: "{{ harbor_component_lock_hash }}"
+      target: harbor-reconcile
+      cluster_uid: local-fresh-cluster
+      snapshot: {sha256: 0000000000000000000000000000000000000000000000000000000000000000, size_bytes: 1}
+    harbor_backup_evidence_hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  when: harbor_local_kind | default(false) | bool
 
 - name: Bind and validate the backup required for this Harbor reconciliation
   ansible.builtin.set_fact:
     harbor_backup_evidence: "{{ harbor_backup_evidence_raw.content | b64decode | from_json }}"
     harbor_backup_evidence_hash: "sha256:{{ harbor_backup_evidence_raw.content | b64decode | hash('sha256') }}"
   no_log: true
+  when: not (harbor_local_kind | default(false) | bool)
 
 - name: Reject reconciliation without a matching successful backup
   ansible.builtin.assert:
@@ -79,6 +95,7 @@
       - harbor_backup_evidence.snapshot.size_bytes | int > 0
     fail_msg: HARBOR_BACKUP_EVIDENCE_INVALID
   no_log: true
+  when: not (harbor_local_kind | default(false) | bool)
 
 - name: Assert locked adopted-cluster storage classes exist
   ansible.builtin.command:
@@ -134,6 +151,7 @@
   check_mode: false
   changed_when: false
   register: harbor_existing_gateway
+  when: not (harbor_local_kind | default(false) | bool)
 
 - name: Reject a changed or unsupported existing demo Gateway
   ansible.builtin.assert:
@@ -141,6 +159,7 @@
       - harbor_existing_gateway.stdout.split()[0] == 'cilium'
       - harbor_existing_gateway.stdout.split()[1] == gateway_vip
     fail_msg: HARBOR_ADOPTED_GATEWAY_DRIFT
+  when: not (harbor_local_kind | default(false) | bool)
 
 - name: Reject a Harbor VIP collision before creating any Harbor resource
   ansible.builtin.command:
@@ -195,6 +214,16 @@
   changed_when: false
   no_log: true
   register: harbor_secret_locator
+  when: not (harbor_local_kind | default(false) | bool)
+
+- name: Read the local Harbor secret locator
+  ansible.builtin.command:
+    argv: [cat, "{{ harbor_secret_locator_path }}"]
+  check_mode: false
+  changed_when: false
+  no_log: true
+  register: harbor_secret_locator
+  when: harbor_local_kind | default(false) | bool
 
 - name: Extract required Harbor credentials without logging their values
   ansible.builtin.set_fact:
@@ -280,11 +309,13 @@
   changed_when: false
   failed_when: false
   register: harbor_dns_records
+  when: not (harbor_local_kind | default(false) | bool)
 
 - name: Reject a DNS collision outside the dedicated Harbor fragment
   ansible.builtin.assert:
     that: harbor_dns_records.rc != 0 or (harbor_dns_records.stdout_lines | reject('search', harbor_dns_fragment_path) | list | length == 0)
     fail_msg: HARBOR_DNS_CONFLICT
+  when: not (harbor_local_kind | default(false) | bool)
 
 - name: Install the dedicated Harbor DNS fragment with rollback on validation failure
   block:
@@ -350,6 +381,7 @@
     - name: Stop after failed Harbor DNS validation
       ansible.builtin.fail:
         msg: HARBOR_DNS_VALIDATION_FAILED
+  when: not (harbor_local_kind | default(false) | bool)
 
 - name: Install or reconcile Harbor with pinned chart and internal dependencies
   kubernetes.core.helm:
@@ -474,12 +506,14 @@
   check_mode: false
   changed_when: false
   register: harbor_registry_subdir
+  when: not harbor_local_kind
 
 - name: Reject an unsafe registry NFS subdirectory
   ansible.builtin.assert:
     that:
       - harbor_registry_subdir.stdout is match('^[a-z0-9][a-z0-9-]+$')
     fail_msg: HARBOR_REGISTRY_SUBDIR_UNSAFE
+  when: not harbor_local_kind
 
 - name: Repair ownership of the Harbor registry storage directory
   ansible.builtin.command:
@@ -487,9 +521,11 @@
       - /usr/bin/chown
       - 10000:10000
       - "{{ harbor_nfs_dynamic_root }}/{{ harbor_registry_subdir.stdout }}"
-  delegate_to: "{{ groups['nfs_servers'][0] }}"
+  delegate_to: "{{ groups['nfs_servers'][0] if not harbor_local_kind else inventory_hostname }}"
   become: true
-  when: not ansible_check_mode
+  when:
+    - not harbor_local_kind
+    - not ansible_check_mode
   changed_when: false
 
 - name: Repair permissions of the Harbor registry storage directory
@@ -498,9 +534,11 @@
     owner: 10000
     group: 10000
     mode: '2770'
-  delegate_to: "{{ groups['nfs_servers'][0] }}"
+  delegate_to: "{{ groups['nfs_servers'][0] if not harbor_local_kind else inventory_hostname }}"
   become: true
-  when: not ansible_check_mode
+  when:
+    - not harbor_local_kind
+    - not ansible_check_mode
 
 - name: Read the Harbor Trivy NFS dynamic subdirectory
   ansible.builtin.command:
@@ -516,12 +554,14 @@
   check_mode: false
   changed_when: false
   register: harbor_trivy_subdir
+  when: not harbor_local_kind
 
 - name: Reject an unsafe Trivy NFS subdirectory
   ansible.builtin.assert:
     that:
       - harbor_trivy_subdir.stdout is match('^[a-z0-9][a-z0-9-]+$')
     fail_msg: HARBOR_TRIVY_SUBDIR_UNSAFE
+  when: not harbor_local_kind
 
 - name: Repair ownership of the Harbor Trivy cache directory
   ansible.builtin.command:
@@ -529,9 +569,11 @@
       - /usr/bin/chown
       - 10000:10000
       - "{{ harbor_nfs_dynamic_root }}/{{ harbor_trivy_subdir.stdout }}"
-  delegate_to: "{{ groups['nfs_servers'][0] }}"
+  delegate_to: "{{ groups['nfs_servers'][0] if not harbor_local_kind else inventory_hostname }}"
   become: true
-  when: not ansible_check_mode
+  when:
+    - not harbor_local_kind
+    - not ansible_check_mode
   changed_when: false
 
 - name: Repair permissions of the Harbor Trivy cache directory
@@ -540,9 +582,11 @@
     owner: 10000
     group: 10000
     mode: '2770'
-  delegate_to: "{{ groups['nfs_servers'][0] }}"
+  delegate_to: "{{ groups['nfs_servers'][0] if not harbor_local_kind else inventory_hostname }}"
   become: true
-  when: not ansible_check_mode
+  when:
+    - not harbor_local_kind
+    - not ansible_check_mode
 
 - name: Wait for Harbor Trivy readiness after cache repair
   ansible.builtin.command:
@@ -576,6 +620,70 @@
       - /var/tmp/labweaver-harbor-gateway.yml
   changed_when: false
 
+- name: Convert the local Harbor Gateway Service to NodePort
+  ansible.builtin.command:
+    argv:
+      - "{{ harbor_kubectl_path }}"
+      - --kubeconfig
+      - "{{ harbor_kubeconfig_path }}"
+      - -n
+      - harbor
+      - patch
+      - service/cilium-gateway-{{ harbor_gateway_name }}
+      - --type=merge
+      - '-p={"spec":{"type":"NodePort"}}'
+  changed_when: true
+  when: harbor_local_kind | default(false) | bool
+
+- name: Read the local Harbor Gateway NodePort
+  ansible.builtin.command:
+    argv:
+      - "{{ harbor_kubectl_path }}"
+      - --kubeconfig
+      - "{{ harbor_kubeconfig_path }}"
+      - -n
+      - "{{ harbor_namespace }}"
+      - get
+      - service/cilium-gateway-{{ harbor_gateway_name }}
+      - -o
+      - jsonpath={.spec.ports[?(@.name=="port-443")].nodePort}
+  register: harbor_local_gateway_port_raw
+  changed_when: false
+  failed_when: harbor_local_gateway_port_raw.stdout | int < 30000
+  when: harbor_local_kind | default(false) | bool
+
+- name: Convert the local Harbor nginx Service to NodePort
+  ansible.builtin.command:
+    argv:
+      - "{{ harbor_kubectl_path }}"
+      - --kubeconfig
+      - "{{ harbor_kubeconfig_path }}"
+      - -n
+      - "{{ harbor_namespace }}"
+      - patch
+      - service/{{ harbor_release_name }}
+      - --type=merge
+      - '-p={"spec":{"type":"NodePort"}}'
+  changed_when: true
+  when: harbor_local_kind | default(false) | bool
+
+- name: Read the local Harbor nginx HTTPS NodePort
+  ansible.builtin.command:
+    argv:
+      - "{{ harbor_kubectl_path }}"
+      - --kubeconfig
+      - "{{ harbor_kubeconfig_path }}"
+      - -n
+      - "{{ harbor_namespace }}"
+      - get
+      - service/{{ harbor_release_name }}
+      - -o
+      - jsonpath={.spec.ports[?(@.name=="https")].nodePort}
+  register: harbor_local_service_port_raw
+  changed_when: false
+  failed_when: harbor_local_service_port_raw.stdout | int < 30000
+  when: harbor_local_kind | default(false) | bool
+
 - name: Read the adopted cluster identity
   ansible.builtin.command:
     argv:
@@ -606,6 +714,49 @@
   check_mode: false
   no_log: true
   register: harbor_system_project
+  when: not (harbor_local_kind | default(false) | bool)
+
+- name: Create the local Harbor system project when it is missing
+  ansible.builtin.shell: |
+    set -euo pipefail
+    status=$(\
+      {{ harbor_kubectl_path }} --kubeconfig {{ harbor_kubeconfig_path | quote }} \
+        -n {{ harbor_namespace | quote }} exec deploy/{{ harbor_release_name }}-core -- \
+        curl --silent --show-error --location --insecure \
+        -o /dev/null -w '%{http_code}' \
+        -u admin:{{ harbor_admin_password | quote }} \
+        -X POST -H 'Content-Type: application/json' \
+        --data '{{ {"project_name": harbor_project_name, "public": false, "metadata": {"auto_scan": "true"}} | to_json }}' \
+        "https://{{ harbor_release_name }}/api/v2.0/projects")
+    case "$status" in
+      201|409) exit 0 ;;
+      *) echo "HARBOR_SYSTEM_PROJECT_CREATE_HTTP_$status" >&2; exit 1 ;;
+    esac
+  args: {executable: /bin/bash}
+  changed_when: false
+  no_log: true
+  when: harbor_local_kind | default(false) | bool
+
+- name: Verify the managed Harbor system project policy through the local Gateway
+  ansible.builtin.shell: |
+    set -euo pipefail
+    {{ harbor_kubectl_path }} --kubeconfig {{ harbor_kubeconfig_path | quote }} \
+      -n {{ harbor_namespace | quote }} exec deploy/{{ harbor_release_name }}-core -- \
+      curl --fail --silent --show-error --location --insecure \
+      -u admin:{{ harbor_admin_password | quote }} \
+      "https://{{ harbor_release_name }}/api/v2.0/projects?name={{ harbor_project_name | urlencode }}"
+  args: {executable: /bin/bash}
+  changed_when: false
+  register: harbor_local_system_project_raw
+  no_log: true
+  when: harbor_local_kind | default(false) | bool
+
+- name: Bind the local Harbor system project response
+  ansible.builtin.set_fact:
+    harbor_system_project:
+      json: "{{ harbor_local_system_project_raw.stdout | from_json }}"
+  no_log: true
+  when: harbor_local_kind | default(false) | bool
 
 - name: Reject a missing or non-private Harbor system project
   ansible.builtin.assert:

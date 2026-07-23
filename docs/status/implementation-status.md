@@ -7,6 +7,19 @@ not runtime completion evidence.
 Current source line: Draft PR #121 on `release/sprint2`; the exact reviewed head
 is read from Git/PR metadata rather than duplicated as a stale status value.
 
+## Issue #131 local single-node-kind profile
+
+The `feature/131-single-node-kind` worktree contains an `ex3` deployment profile
+with a digest-pinned kind configuration, local inventory, fail-fast Docker/kind
+preflight, and local bootstrap branches. Alpine WSL manually ran the base,
+identity, Harbor and BuildKit entrypoints against `labweaver-ex3`; the connected
+base services, Harbor and rootless BuildKit were Ready on the local cluster, and
+the identity resources were created but their current Keycloak rollout still
+needs Cilium endpoint convergence. Remote-cluster MetalLB, NFS, Rocky, KubeVirt
+and CDI prerequisites are not applied. The application and final verify layers remain blocked on private
+operator inputs and a clean package-producing commit. Issue #130 Fixture assets
+are intentionally not used.
+
 ## Sprint 3 runnable Demo contract
 
 Issue #122 freezes the shared execution/evidence contract for Issues #123
@@ -95,6 +108,7 @@ out. This is a network blocker, not a passing Container result.
 | Demo replay and Release Gate | A/D | implemented locally | exact connected check set, evidence rehash, clean-HEAD/deployment/catalog/image/Run binding, tamper test and stable missing-input diagnostics | Linux infrastructure Verify, real Keycloak Playwright and same-build passing report remain pending |
 | Private Sigstore, Kyverno and Packer | A/D | removed from active product source | ADR 0006 is Superseded; active contracts, Chart and CI contain no trust-plane gate | retained installations are deliberately untouched and are not Sprint 2 evidence |
 | Sprint 2 retained-infrastructure adoption | A/D | 1122 verified | application run `sprint2-application-1122ef6e-0022` retained all named infrastructure and reconciled the application image identity without destructive reset | retained infrastructure is not dual-runtime E3 evidence |
+| Issue #131 single-node-kind base | A/D | connected foundation verified locally | Alpine WSL manual Ansible runs created the digest-pinned `labweaver-ex3` kind cluster and reconciled Experimental Gateway API, Cilium, local-path, PostgreSQL, NATS, MinIO, Keycloak, Harbor and rootless BuildKit; the foundation and identity readbacks completed successfully | Application package/configuration inputs and final Container/verify evidence remain blocked; this is not #130 Fixture evidence |
 | Sprint 2 destructive reset | A/D | deferred maintenance path | cluster-bound confirmation and destructive report remain isolated behind `demo reset` | explicitly excluded from this delivery and must not be used for Sprint 2 deployment |
 
 ## Accepted Sprint 2 security exceptions

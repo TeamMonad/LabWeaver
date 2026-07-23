@@ -8,6 +8,12 @@ Tests are grouped by the boundary they actually exercise. Reports must name the
 source identity and must not promote Fixture or static evidence to a connected
 runtime claim.
 
+Issue #131 local validation uses the existing deployment entrypoints with
+`--env ex3 --infra`; it must use the digest-pinned kind node image and must not
+invoke the Issue #130 Fixture build or Fixture Playwright suite. A missing kind
+binary, unavailable Docker daemon, missing private bundle, or failed local
+readback is a blocking diagnostic rather than a fallback to Fixture mode.
+
 ## Pull request gate
 
 Target duration: less than ten minutes.

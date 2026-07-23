@@ -10,6 +10,9 @@
       - sprint2_application_run_id is match('^[a-z0-9][a-z0-9-]{2,62}$')
       - sprint2_application_source_commit is match('^[0-9a-f]{40,64}$')
       - sprint2_application_package_manifest | length > 0
+      - >-
+        not (sprint2_application_local_kind | bool) or
+        not (sprint2_application_enable_kubevirt | bool)
       - sprint2_application_postgres_service_file | length > 0
       - sprint2_application_postgres_database is match('^[a-z][a-z0-9_]{0,62}$')
       - sprint2_application_nats_server | length > 0
@@ -753,6 +756,7 @@
   register: sprint2_application_harbor_ca_bundle
   changed_when: false
   no_log: true
+  when: not (sprint2_application_local_kind | bool)
 
 - name: Create Harbor trust directories on every Kubernetes node
   ansible.builtin.file:
@@ -767,6 +771,7 @@
        | product(['/etc/pki/ca-trust/source/anchors',
                   '/etc/containers/certs.d/' + sprint2_application_harbor_registry])
        | list }}
+  when: not (sprint2_application_local_kind | bool)
 
 - name: Install the adopted Harbor CA in every Kubernetes node system trust
   ansible.builtin.copy:
@@ -779,6 +784,7 @@
   loop: "{{ groups['k8s_cluster'] }}"
   notify: Refresh Kubernetes node Harbor trust
   no_log: true
+  when: not (sprint2_application_local_kind | bool)
 
 - name: Install the adopted Harbor CA for every Kubernetes container runtime
   ansible.builtin.copy:
@@ -790,9 +796,11 @@
   delegate_to: "{{ item }}"
   loop: "{{ groups['k8s_cluster'] }}"
   no_log: true
+  when: not (sprint2_application_local_kind | bool)
 
 - name: Apply changed Kubernetes node Harbor trust before workload rollout
   ansible.builtin.meta: flush_handlers
+  when: not (sprint2_application_local_kind | bool)
 
 - name: Bind the reviewed Keycloak hostname to its retained Gateway address
   ansible.builtin.copy:
@@ -1247,6 +1255,7 @@
     namespace: "{{ sprint2_application_namespace }}"
     name: "{{ sprint2_application_lock.sprint2_vm_base.seed_data_volume_name }}"
   register: sprint2_application_vm_base_dv
+  when: sprint2_application_enable_kubevirt | bool
 
 - name: Reject a conflicting Sprint 2 VM base DataVolume
   ansible.builtin.assert:
@@ -1265,6 +1274,7 @@
         sprint2_application_vm_base_dv.resources[0].metadata.annotations['labweaver.io/disk-sha256'] ==
         sprint2_application_lock.sprint2_vm_base.disk_sha256
     fail_msg: SPRINT2_VM_BASE_DATAVOLUME_CONFLICT
+  when: sprint2_application_enable_kubevirt | bool
 
 - name: Import the immutable Sprint 2 VM base disk when absent
   kubernetes.core.k8s:
@@ -1295,7 +1305,9 @@
           resources:
             requests:
               storage: "{{ sprint2_application_lock.sprint2_vm_base.storage_request }}"
-  when: sprint2_application_vm_base_dv.resources | length == 0
+  when:
+    - sprint2_application_enable_kubevirt | bool
+    - sprint2_application_vm_base_dv.resources | length == 0
 
 - name: Reconcile immediate binding for the immutable Sprint 2 VM base
   kubernetes.core.k8s:
@@ -1309,6 +1321,7 @@
         namespace: "{{ sprint2_application_namespace }}"
         annotations:
           cdi.kubevirt.io/storage.bind.immediate.requested: "true"
+  when: sprint2_application_enable_kubevirt | bool
 
 - name: Wait for the immutable Sprint 2 VM base claim
   kubernetes.core.k8s_info:
@@ -1321,6 +1334,7 @@
   until: sprint2_application_vm_base_claim.resources | length == 1
   retries: 30
   delay: 2
+  when: sprint2_application_enable_kubevirt | bool
 
 - name: Reconcile immediate binding on the immutable Sprint 2 VM base claim
   kubernetes.core.k8s:
@@ -1334,6 +1348,7 @@
         namespace: "{{ sprint2_application_namespace }}"
         annotations:
           cdi.kubevirt.io/storage.bind.immediate.requested: "true"
+  when: sprint2_application_enable_kubevirt | bool
 
 - name: Wait for the immutable Sprint 2 VM base import
   kubernetes.core.k8s_info:
@@ -1348,6 +1363,7 @@
     sprint2_application_vm_base_ready.resources[0].status.phase | default('') == 'Succeeded'
   retries: 120
   delay: 5
+  when: sprint2_application_enable_kubevirt | bool
 
 - name: Read the immutable Sprint 2 VM base DataSource
   kubernetes.core.k8s_info:
@@ -1357,6 +1373,7 @@
     namespace: "{{ sprint2_application_namespace }}"
     name: "{{ sprint2_application_lock.sprint2_vm_base.data_source_name }}"
   register: sprint2_application_vm_base_source
+  when: sprint2_application_enable_kubevirt | bool
 
 - name: Reject a conflicting Sprint 2 VM base DataSource
   ansible.builtin.assert:
@@ -1369,6 +1386,7 @@
          sprint2_application_vm_base_source.resources[0].spec.source.pvc.namespace ==
          sprint2_application_namespace)
     fail_msg: SPRINT2_VM_BASE_DATASOURCE_CONFLICT
+  when: sprint2_application_enable_kubevirt | bool
 
 - name: Publish the immutable Sprint 2 VM base DataSource when absent
   kubernetes.core.k8s:
@@ -1392,7 +1410,9 @@
           pvc:
             name: "{{ sprint2_application_lock.sprint2_vm_base.seed_data_volume_name }}"
             namespace: "{{ sprint2_application_namespace }}"
-  when: sprint2_application_vm_base_source.resources | length == 0
+  when:
+    - sprint2_application_enable_kubevirt | bool
+    - sprint2_application_vm_base_source.resources | length == 0
 
 - name: Read back the immutable Sprint 2 VM base DataSource
   kubernetes.core.k8s_info:
@@ -1402,6 +1422,7 @@
     namespace: "{{ sprint2_application_namespace }}"
     name: "{{ sprint2_application_lock.sprint2_vm_base.data_source_name }}"
   register: sprint2_application_vm_base_source_readback
+  when: sprint2_application_enable_kubevirt | bool
 
 - name: Require the immutable Sprint 2 VM base identity
   ansible.builtin.assert:
@@ -1418,6 +1439,7 @@
         .metadata.annotations['labweaver.io/disk-sha256'] ==
         sprint2_application_lock.sprint2_vm_base.disk_sha256
     fail_msg: SPRINT2_VM_BASE_IDENTITY_INVALID
+  when: sprint2_application_enable_kubevirt | bool
 
 - name: Reconcile the application Harbor pull credential
   kubernetes.core.k8s:

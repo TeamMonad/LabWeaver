@@ -9,6 +9,44 @@
     state: present
     definition: "{{ lookup('template', 'local-path.yml.j2') | from_yaml_all | list }}"
 
+- name: Read the local-path provisioner arguments for local helper safety
+  ansible.builtin.command: >-
+    kubectl -n local-path-storage get deployment local-path-provisioner
+    -o jsonpath={.spec.template.spec.containers[0].args}
+  register: local_path_provisioner_args
+  changed_when: false
+  when: labweaver_local_kind | default(false) | bool
+
+- name: Allow the explicitly reviewed host-network local-path helper
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - -n
+      - local-path-storage
+      - patch
+      - deployment
+      - local-path-provisioner
+      - --type=json
+      - '-p=[{"op":"add","path":"/spec/template/spec/containers/0/command/-","value":"--allow-unsafe-helper-pod-template"}]'
+  when:
+    - labweaver_local_kind | default(false) | bool
+    - "'--allow-unsafe-helper-pod-template' not in local_path_provisioner_args.stdout"
+  changed_when: true
+
+- name: Run the local-path controller on the node network in single-node-kind
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - -n
+      - local-path-storage
+      - patch
+      - deployment
+      - local-path-provisioner
+      - --type=merge
+      - '-p={"spec":{"template":{"spec":{"hostNetwork":true,"dnsPolicy":"ClusterFirstWithHostNet"}}}}'
+  changed_when: false
+  when: labweaver_local_kind | default(false) | bool
+
 - name: Make Local Path the explicit default StorageClass
   ansible.builtin.command: >-
     kubectl annotate storageclass {{ storageclass_local_path }}
@@ -19,6 +57,7 @@
   kubernetes.core.helm_repository:
     name: csi-driver-nfs
     repo_url: https://raw.githubusercontent.com/kubernetes-csi/csi-driver-nfs/master/charts
+  when: not (labweaver_local_kind | default(false) | bool)
 
 - name: Install pinned NFS CSI
   kubernetes.core.helm:
@@ -27,8 +66,10 @@
     chart_version: "{{ nfs_csi_chart_version }}"
     release_namespace: kube-system
     create_namespace: false
+  when: not (labweaver_local_kind | default(false) | bool)
 
 - name: Configure the NFS RWX StorageClass after its CSI driver exists
   kubernetes.core.k8s:
     state: present
     definition: "{{ lookup('template', 'nfs-rwx.yml.j2') | from_yaml_all | list }}"
+  when: not (labweaver_local_kind | default(false) | bool)

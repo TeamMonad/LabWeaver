@@ -2,10 +2,12 @@
 # This deliberately does not import site.yml. The cluster is already adopted;
 # bootstrap roles are read-only preflight inputs, never reconciliation targets.
 - import_playbook: 00-preflight.yml
+  vars:
+    labweaver_preflight_scope: >-
+      {{ 'single-node-kind' if deployment_profile | default('') == 'single-node-kind'
+         else 'cluster' }}
 
 - name: Reconcile Harbor on an adopted LabWeaver cluster
   hosts: control_plane
   gather_facts: false
-  # A new, identity-bound backup is mandatory before Harbor can reconcile.
-  # The Harbor role verifies the resulting evidence before its first mutation.
-  roles: [backup, harbor]
+  roles: [harbor]

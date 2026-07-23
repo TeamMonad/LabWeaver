@@ -1,11 +1,15 @@
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
-metadata: {name: identity-gateway, namespace: {{ identity_namespace }}}
+metadata:
+  name: identity-gateway
+  namespace: "{{ identity_namespace }}"
+{% if labweaver_local_kind | default(false) | bool %}
+  annotations: {service.cilium.io/type: NodePort}
+{% else %}
+  annotations: {metallb.io/loadBalancerIPs: {{ identity_gateway_vip }}}
+{% endif %}
 spec:
   gatewayClassName: {{ identity_gateway_class }}
-  infrastructure:
-    annotations:
-      metallb.io/loadBalancerIPs: {{ identity_gateway_vip }}
   listeners:
     - name: https
       protocol: HTTPS

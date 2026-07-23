@@ -90,6 +90,7 @@ spec:
             - {name: KC_HEALTH_ENABLED, value: "true"}
             - {name: KC_METRICS_ENABLED, value: "true"}
             - {name: KC_CACHE, value: ispn}
+            - {name: JAVA_OPTS_APPEND, value: "{{ identity_keycloak_java_opts_append }}"}
             - name: KC_BOOTSTRAP_ADMIN_USERNAME
               valueFrom: {secretKeyRef: {name: {{ identity_bootstrap_secret_name }}, key: username}}
             - name: KC_BOOTSTRAP_ADMIN_PASSWORD
@@ -98,7 +99,7 @@ spec:
           startupProbe: {httpGet: {path: /health/started, port: management}, failureThreshold: 60, periodSeconds: 5}
           readinessProbe: {httpGet: {path: /health/ready, port: management}, periodSeconds: 10}
           livenessProbe: {httpGet: {path: /health/live, port: management}, periodSeconds: 20}
-          resources: {requests: {cpu: 500m, memory: 768Mi}, limits: {cpu: "2", memory: 2Gi}}
+          resources: {requests: {cpu: {{ identity_keycloak_cpu_request }}, memory: {{ identity_keycloak_memory_request }}}, limits: {cpu: "{{ identity_keycloak_cpu_limit }}", memory: {{ identity_keycloak_memory_limit }}}}
           securityContext: {runAsUser: 1000, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
           volumeMounts: [{name: realm, mountPath: /opt/keycloak/data/import, readOnly: true}]
       volumes: [{name: realm, configMap: {name: identity-realm-bootstrap}}]

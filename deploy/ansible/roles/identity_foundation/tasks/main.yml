@@ -18,7 +18,7 @@
       - identity_inventory_hash is match('^sha256:[0-9a-f]{64}$')
       - identity_component_lock_hash is match('^sha256:[0-9a-f]{64}$')
       - identity_hostname == 'keycloak.labweaver.internal'
-      - identity_gateway_vip == '10.20.0.222'
+      - (identity_gateway_vip == '10.20.0.222' or (labweaver_local_kind | default(false) | bool))
       - identity_realm == 'workloads'
       - identity_workload_client_id == identity_workload_audience
       - identity_secret_locator | length > 0
@@ -33,7 +33,7 @@
     path: "{{ identity_secret_locator }}"
     checksum_algorithm: sha256
   become: true
-  delegate_to: edge-router
+  delegate_to: "{{ 'localhost' if labweaver_local_kind | default(false) | bool else 'edge-router' }}"
   register: identity_locator_stat
   no_log: true
 
@@ -50,7 +50,7 @@
   ansible.builtin.slurp:
     src: "{{ identity_secret_locator }}"
   become: true
-  delegate_to: edge-router
+  delegate_to: "{{ 'localhost' if labweaver_local_kind | default(false) | bool else 'edge-router' }}"
   register: identity_locator_raw
   no_log: true
 
@@ -116,6 +116,7 @@
       ansible.builtin.dnf:
         name: "{{ identity_lock.python_kubernetes_rpm }}"
         state: present
+      when: not (labweaver_local_kind | default(false) | bool)
 
     - name: Verify the locked Kubernetes Python client identity
       ansible.builtin.command:
@@ -123,6 +124,7 @@
       changed_when: false
       register: identity_python_kubernetes_rpm
       failed_when: identity_python_kubernetes_rpm.stdout != identity_lock.python_kubernetes_rpm
+      when: not (labweaver_local_kind | default(false) | bool)
 
     - name: Create the restricted identity namespace
       kubernetes.core.k8s:
@@ -137,6 +139,18 @@
               pod-security.kubernetes.io/enforce: restricted
               pod-security.kubernetes.io/audit: restricted
               pod-security.kubernetes.io/warn: restricted
+
+    - name: Create local namespaces required by the shared operator RBAC
+      kubernetes.core.k8s:
+        kubeconfig: "{{ identity_kubeconfig_path }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ item }}"
+      loop: [labweaver-demo, harbor]
+      when: labweaver_local_kind | default(false) | bool
 
     - name: Reconcile time-limited operator credential RBAC
       kubernetes.core.k8s:
@@ -237,12 +251,60 @@
       changed_when: false
       loop: [statefulset/identity-postgres, "deployment/{{ identity_name }}"]
 
+    - name: Inspect the previous workload-only OIDC provision Job
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ identity_kubeconfig_path }}"
+        api_version: batch/v1
+        kind: Job
+        namespace: "{{ identity_namespace }}"
+        name: "identity-provision-{{ identity_run_suffix }}"
+      register: identity_provision_job_before
+
+    - name: Remove only a failed local identity provision Job before retry
+      kubernetes.core.k8s:
+        kubeconfig: "{{ identity_kubeconfig_path }}"
+        state: absent
+        api_version: batch/v1
+        kind: Job
+        namespace: "{{ identity_namespace }}"
+        name: "identity-provision-{{ identity_run_suffix }}"
+      when:
+        - labweaver_local_kind | default(false) | bool
+        - identity_provision_job_before.resources | length == 1
+        - identity_provision_job_before.resources[0].status.failed | default(0) | int > 0
+
     - name: Provision the workload-only OIDC client
       kubernetes.core.k8s:
         kubeconfig: "{{ identity_kubeconfig_path }}"
         state: present
         definition: "{{ lookup('template', 'provision-job.yml.j2') | from_yaml }}"
       no_log: true
+
+    - name: Configure a local NodePort GatewayClass
+      kubernetes.core.k8s:
+        kubeconfig: "{{ identity_kubeconfig_path }}"
+        state: present
+        definition:
+          - apiVersion: cilium.io/v2alpha1
+            kind: CiliumGatewayClassConfig
+            metadata:
+              name: labweaver-ex3-gateway-config
+              namespace: "{{ identity_namespace }}"
+            spec:
+              service:
+                type: NodePort
+          - apiVersion: gateway.networking.k8s.io/v1
+            kind: GatewayClass
+            metadata:
+              name: labweaver-ex3
+            spec:
+              controllerName: io.cilium/gateway-controller
+              parametersRef:
+                group: cilium.io
+                kind: CiliumGatewayClassConfig
+                name: labweaver-ex3-gateway-config
+                namespace: "{{ identity_namespace }}"
+      when: labweaver_local_kind | default(false) | bool
 
     - name: Wait for workload client provisioning
       ansible.builtin.command:
@@ -265,14 +327,69 @@
         definition: "{{ lookup('template', item) | from_yaml_all | list }}"
       loop: [gateway.yml.j2, policy.yml.j2]
 
+    - name: Read stale external LoadBalancer parameters from the local Gateway
+      ansible.builtin.command:
+        argv: ["{{ identity_kubectl_path }}", --kubeconfig, "{{ identity_kubeconfig_path }}", -n, "{{ identity_namespace }}", get, gateway/identity-gateway, -o, 'jsonpath={.spec.infrastructure}{.spec.addresses}']
+      register: identity_local_gateway_parameters
+      changed_when: false
+      when: labweaver_local_kind | default(false) | bool
+
+    - name: Remove stale external LoadBalancer parameters from the local Gateway
+      ansible.builtin.command:
+        argv:
+          - "{{ identity_kubectl_path }}"
+          - --kubeconfig
+          - "{{ identity_kubeconfig_path }}"
+          - -n
+          - "{{ identity_namespace }}"
+          - patch
+          - gateway/identity-gateway
+          - --type=merge
+          - '-p={"spec":{"infrastructure":null,"addresses":null}}'
+      register: identity_local_gateway_patch
+      changed_when: true
+      when:
+        - labweaver_local_kind | default(false) | bool
+        - identity_local_gateway_parameters.stdout | length > 0
+      failed_when: identity_local_gateway_patch.rc != 0
+
+    - name: Convert the local Gateway Service to NodePort
+      ansible.builtin.command:
+        argv:
+          - "{{ identity_kubectl_path }}"
+          - --kubeconfig
+          - "{{ identity_kubeconfig_path }}"
+          - -n
+          - "{{ identity_namespace }}"
+          - patch
+          - service/cilium-gateway-identity-gateway
+          - --type=merge
+          - '-p={"spec":{"type":"NodePort"}}'
+      register: identity_local_gateway_service_patch
+      changed_when: true
+      when: labweaver_local_kind | default(false) | bool
+      failed_when: identity_local_gateway_service_patch.rc != 0
+
+    - name: Bind the local Gateway NodePort
+      ansible.builtin.command:
+        argv: ["{{ identity_kubectl_path }}", --kubeconfig, "{{ identity_kubeconfig_path }}", -n, "{{ identity_namespace }}", get, service/cilium-gateway-identity-gateway, -o, 'jsonpath={.spec.ports[?(@.name=="port-443")].nodePort}']
+      register: identity_local_gateway_port_raw
+      changed_when: false
+      when: labweaver_local_kind | default(false) | bool
+
+    - name: Set the identity Gateway verification port
+      ansible.builtin.set_fact:
+        identity_gateway_port: "{{ identity_local_gateway_port_raw.stdout if labweaver_local_kind | default(false) | bool else '443' }}"
+
     - name: Read existing Keycloak DNS records
       ansible.builtin.command:
         argv: [grep, -R, --fixed-strings, "{{ identity_hostname }}", /etc/dnsmasq.conf, /etc/dnsmasq.d]
-      delegate_to: edge-router
+      delegate_to: "{{ 'localhost' if labweaver_local_kind | default(false) | bool else 'edge-router' }}"
       become: true
       changed_when: false
       failed_when: false
       register: identity_dns_records
+      when: not (labweaver_local_kind | default(false) | bool)
 
     - name: Reject a Keycloak DNS collision outside the owned fragment
       ansible.builtin.assert:
@@ -280,6 +397,7 @@
           identity_dns_records.rc != 0 or
           (identity_dns_records.stdout_lines | reject('search', identity_dns_fragment_path) | list | length == 0)
         fail_msg: IDENTITY_DNS_CONFLICT
+      when: not (labweaver_local_kind | default(false) | bool)
 
     - name: Install the Keycloak-only DNS fragment with rollback
       block:
@@ -348,6 +466,7 @@
 
         - name: Stop after failed Keycloak DNS validation
           ansible.builtin.fail: {msg: IDENTITY_DNS_VALIDATION_FAILED}
+      when: not (labweaver_local_kind | default(false) | bool)
 
 - name: Wait for the identity Gateway
   ansible.builtin.command:
@@ -362,6 +481,26 @@
       - --for=condition=Programmed
       - --timeout=5m
   changed_when: false
+  when: not (labweaver_local_kind | default(false) | bool)
+
+- name: Verify the local identity Gateway NodePort
+  ansible.builtin.command:
+    argv:
+      - "{{ identity_kubectl_path }}"
+      - --kubeconfig
+      - "{{ identity_kubeconfig_path }}"
+      - -n
+      - "{{ identity_namespace }}"
+      - get
+      - service/cilium-gateway-identity-gateway
+      - -o
+      - jsonpath={.spec.ports[?(@.name=="port-443")].nodePort}
+  changed_when: false
+  register: identity_local_gateway_port_readback
+  failed_when:
+    - labweaver_local_kind | default(false) | bool
+    - identity_local_gateway_port_readback.stdout | int < 30000
+  when: labweaver_local_kind | default(false) | bool
 
 - name: Verify the exact OIDC issuer over the internal CA
   ansible.builtin.shell: |
@@ -373,11 +512,34 @@
       -n {{ identity_namespace | quote }} get secret {{ identity_ca_secret_name | quote }} \
       -o jsonpath='{.data.tls\.crt}' | base64 -d > "$ca_file"
     curl --fail --silent --show-error --cacert "$ca_file" \
-      --resolve {{ identity_hostname }}:443:{{ identity_gateway_vip }} \
-      https://{{ identity_hostname }}/realms/{{ identity_realm }}/.well-known/openid-configuration \
+      --resolve {{ identity_hostname }}:{{ identity_gateway_port }}:{{ identity_gateway_vip }} \
+      https://{{ identity_hostname }}:{{ identity_gateway_port }}/realms/{{ identity_realm }}/.well-known/openid-configuration \
       | grep -F '"issuer":"https://{{ identity_hostname }}/realms/{{ identity_realm }}"' >/dev/null
   args: {executable: /bin/bash}
   changed_when: false
+  when: not (labweaver_local_kind | default(false) | bool)
+
+- name: Verify the local OIDC issuer through the in-cluster Keycloak Service
+  ansible.builtin.shell: |
+    set -euo pipefail
+    port_file=$(mktemp)
+    {{ identity_kubectl_path }} --kubeconfig {{ identity_kubeconfig_path | quote }} \
+      -n {{ identity_namespace | quote }} port-forward service/{{ identity_name }}-http 18081:8080 \
+      >"$port_file" 2>&1 &
+    port_forward_pid=$!
+    trap 'kill "$port_forward_pid" 2>/dev/null || true; rm -f "$port_file"' EXIT
+    for attempt in $(seq 1 30); do
+      curl --fail --silent --show-error \
+        http://127.0.0.1:18081/realms/{{ identity_realm }}/.well-known/openid-configuration \
+        | grep -F 'https://{{ identity_hostname }}/realms/{{ identity_realm }}' >/dev/null && exit 0
+      sleep 1
+    done
+    cat "$port_file"
+    exit 1
+  args: {executable: /bin/bash}
+  changed_when: false
+  no_log: true
+  when: labweaver_local_kind | default(false) | bool
 
 - name: Verify workload token identity without exposing the credential or token
   ansible.builtin.shell: |
@@ -390,22 +552,17 @@
       -n {{ identity_namespace | quote }} get secret {{ identity_workload_secret_name | quote }} \
       -o jsonpath='{.data.client-secret}' | base64 -d > "$work_dir/client-secret"
     chmod 0600 "$work_dir/client-secret"
-    {
-      printf 'url = "https://{{ identity_hostname }}/realms/{{ identity_realm }}/protocol/openid-connect/token"\n'
-      printf 'cacert = "%s"\n' "$work_dir/ca.crt"
-      printf 'resolve = "{{ identity_hostname }}:443:{{ identity_gateway_vip }}"\n'
-      printf 'request = "POST"\n'
-      printf 'data = "grant_type=client_credentials"\n'
-      printf 'data = "client_id={{ identity_workload_client_id }}"\n'
-      printf 'data = "client_secret=%s"\n' "$(cat "$work_dir/client-secret")"
-      printf 'fail\n silent\n show-error\n'
-    } > "$work_dir/curl.conf"
-    chmod 0600 "$work_dir/curl.conf"
     {{ identity_kubectl_path }} \
       --kubeconfig {{ identity_kubeconfig_path | quote }} \
       -n {{ identity_namespace | quote }} get secret {{ identity_ca_secret_name | quote }} \
       -o jsonpath='{.data.tls\.crt}' | base64 -d > "$work_dir/ca.crt"
-    curl --config "$work_dir/curl.conf" > "$work_dir/token.json"
+    curl --fail --silent --show-error --cacert "$work_dir/ca.crt" \
+      --resolve {{ identity_hostname }}:{{ identity_gateway_port }}:{{ identity_gateway_vip }} \
+      --data-urlencode grant_type=client_credentials \
+      --data-urlencode client_id={{ identity_workload_client_id | quote }} \
+      --data-urlencode client_secret="$(cat "$work_dir/client-secret")" \
+      "https://{{ identity_hostname }}:{{ identity_gateway_port }}/realms/{{ identity_realm }}/protocol/openid-connect/token" \
+      > "$work_dir/token.json"
     python3 - "$work_dir/token.json" <<'PY'
     import base64
     import json
@@ -434,6 +591,62 @@
   changed_when: false
   failed_when: false
   no_log: true
+  when: not (labweaver_local_kind | default(false) | bool)
+
+- name: Verify local workload token identity through the in-cluster Keycloak Service
+  ansible.builtin.shell: |
+    set -euo pipefail
+    work_dir=$(mktemp -d)
+    trap 'rm -rf "$work_dir"' EXIT
+    chmod 0700 "$work_dir"
+    {{ identity_kubectl_path }} --kubeconfig {{ identity_kubeconfig_path | quote }} \
+      -n {{ identity_namespace | quote }} get secret {{ identity_workload_secret_name | quote }} \
+      -o jsonpath='{.data.client-secret}' | base64 -d > "$work_dir/client-secret"
+    {{ identity_kubectl_path }} --kubeconfig {{ identity_kubeconfig_path | quote }} \
+      -n {{ identity_namespace | quote }} port-forward service/{{ identity_name }}-http 18081:8080 \
+      >"$work_dir/port-forward.log" 2>&1 &
+    port_forward_pid=$!
+    trap 'kill "$port_forward_pid" 2>/dev/null || true; rm -rf "$work_dir"' EXIT
+    for attempt in $(seq 1 30); do
+      curl --silent --fail http://127.0.0.1:18081/health/ready >/dev/null && break
+      sleep 1
+    done
+    token_file="$work_dir/token.json"
+    curl --fail --silent --show-error \
+      --data-urlencode grant_type=client_credentials \
+      --data-urlencode client_id={{ identity_workload_client_id | quote }} \
+      --data-urlencode client_secret="$(cat "$work_dir/client-secret")" \
+      http://127.0.0.1:18081/realms/{{ identity_realm }}/protocol/openid-connect/token \
+      > "$token_file"
+    python3 - "$token_file" <<'PY'
+    import base64
+    import json
+    import pathlib
+    import sys
+
+    token = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["access_token"]
+    payload = token.split(".")[1]
+    payload += "=" * (-len(payload) % 4)
+    claims = json.loads(base64.urlsafe_b64decode(payload))
+    audience = claims.get("aud", [])
+    if isinstance(audience, str):
+        audience = [audience]
+    expected = {
+        "iss": "https://{{ identity_hostname }}/realms/{{ identity_realm }}",
+        "azp": "{{ identity_workload_client_id }}",
+        "preferred_username": "service-account-{{ identity_workload_client_id }}",
+    }
+    if any(claims.get(key) != value for key, value in expected.items()):
+        raise SystemExit(2)
+    if "{{ identity_workload_audience }}" not in audience:
+        raise SystemExit(3)
+    PY
+  args: {executable: /bin/bash}
+  register: identity_token_claims_check
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when: labweaver_local_kind | default(false) | bool
 
 - name: Reject an invalid workload token identity
   ansible.builtin.assert:

@@ -4,6 +4,8 @@ sprint2_application_source_commit: "{{ lookup('ansible.builtin.env', 'LABWEAVER_
 sprint2_application_package_manifest: "{{ lookup('ansible.builtin.env', 'LABWEAVER_PACKAGE_MANIFEST') }}"
 sprint2_application_migration_catalog: "{{ playbook_dir }}/../../../migrations/catalog.yaml"
 sprint2_application_kubeconfig: /etc/kubernetes/admin.conf
+sprint2_application_local_kind: false
+sprint2_application_enable_kubevirt: true
 sprint2_application_kubectl: /usr/bin/kubectl
 sprint2_application_helm: /usr/local/bin/helm
 sprint2_application_psql: /usr/bin/psql

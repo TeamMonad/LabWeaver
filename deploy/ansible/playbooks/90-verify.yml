@@ -2,7 +2,11 @@
 - name: Verify deployed cluster infrastructure
   hosts: control_plane
   gather_facts: false
+  vars:
+    labweaver_preflight_scope: >-
+      {{ 'single-node-kind' if deployment_profile | default('') == 'single-node-kind'
+         else 'cluster' }}
   environment:
     PATH: /usr/local/bin:/usr/bin:/bin
-    KUBECONFIG: /etc/kubernetes/admin.conf
+    KUBECONFIG: "{{ labweaver_kubeconfig | default('/etc/kubernetes/admin.conf') }}"
   roles: [verify]

@@ -1,0 +1,4 @@
+---
+cert_manager_version: v1.17.2
+cluster_addons_kubeconfig: "{{ labweaver_kubeconfig | default('/etc/kubernetes/admin.conf') }}"
+cluster_addons_local_kind: false

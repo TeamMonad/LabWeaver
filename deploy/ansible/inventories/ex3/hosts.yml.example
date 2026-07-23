@@ -1,0 +1,21 @@
+all:
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  hosts:
+    ex3-controller:
+      ansible_host: 127.0.0.1
+  children:
+    routers:
+      hosts:
+        ex3-controller: {}
+    control_plane:
+      hosts:
+        ex3-controller: {}
+    workers:
+      hosts: {}
+    nfs_servers:
+      hosts: {}
+    k8s_cluster:
+      hosts:
+        ex3-controller: {}

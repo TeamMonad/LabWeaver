@@ -12,7 +12,10 @@
       - sprint2_buildkit_bundle | length > 0
       - sprint2_buildkit_storage_class | length > 0
       - sprint2_buildkit_registry_cidr is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}/(?:[0-9]|[12][0-9]|3[0-2])$')
-      - sprint2_buildkit_operator_client_path == '/home/rocky/.config/labweaver/buildkit'
+      - >-
+        (labweaver_local_kind | default(false) | bool and
+         sprint2_buildkit_operator_client_path | length > 0) or
+        sprint2_buildkit_operator_client_path == '/home/rocky/.config/labweaver/buildkit'
       - sprint2_buildkit_lock.sprint2_foundation.buildkit_rootless is match('^[^\s]+@sha256:[0-9a-f]{64}$')
     fail_msg: SPRINT2_BUILDKIT_INPUT_INVALID
 
@@ -233,16 +236,16 @@
   ansible.builtin.file:
     path: "{{ sprint2_buildkit_operator_client_path }}"
     state: directory
-    owner: rocky
-    group: rocky
+    owner: "{{ 'root' if labweaver_local_kind | default(false) | bool else 'rocky' }}"
+    group: "{{ 'root' if labweaver_local_kind | default(false) | bool else 'rocky' }}"
     mode: '0700'
 
 - name: Install the current BuildKit operator mTLS client
   ansible.builtin.copy:
     src: "{{ sprint2_buildkit_bundle | dirname }}/build-executor-client/{{ item }}"
     dest: "{{ sprint2_buildkit_operator_client_path }}/{{ item }}"
-    owner: rocky
-    group: rocky
+    owner: "{{ 'root' if labweaver_local_kind | default(false) | bool else 'rocky' }}"
+    group: "{{ 'root' if labweaver_local_kind | default(false) | bool else 'rocky' }}"
     mode: '0600'
   loop: [ca.crt, tls.crt, tls.key]
   no_log: true
