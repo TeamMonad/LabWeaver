@@ -130,6 +130,7 @@ sprint2_application_required_secrets:
   - openssh-gateway-secrets
 sprint2_application_release_name: labweaver
 sprint2_application_namespace: labweaver-system
+sprint2_application_evaluation_namespace: labweaver-evaluation
 sprint2_application_rollout_timeout: 10m
 sprint2_application_portal_route_namespace: ""
 sprint2_application_portal_route_name: ""

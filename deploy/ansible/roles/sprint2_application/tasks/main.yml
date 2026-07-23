@@ -1696,6 +1696,9 @@
               - matchLabels:
                   k8s:io.kubernetes.pod.namespace: "{{ sprint2_application_namespace }}"
                   app.kubernetes.io/name: kubevirt-executor
+              - matchLabels:
+                  k8s:io.kubernetes.pod.namespace: "{{ sprint2_application_evaluation_namespace }}"
+                  app.kubernetes.io/name: evaluation-freeze-worker
             toPorts:
               - ports:
                   - port: "5432"

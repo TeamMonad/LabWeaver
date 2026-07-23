@@ -720,7 +720,12 @@ fn job_name(command: &SubmissionFreezeCommand) -> String {
 }
 
 fn resource_labels(command: &SubmissionFreezeCommand) -> Value {
-    json!({"app.kubernetes.io/managed-by":FIELD_MANAGER,"labweaver.io/frozen-submission-id":command.frozen_submission_id.to_string(),"labweaver.io/environment-id":command.environment_id.to_string()})
+    json!({
+        "app.kubernetes.io/managed-by":FIELD_MANAGER,
+        "app.kubernetes.io/name":"evaluation-freeze-worker",
+        "labweaver.io/frozen-submission-id":command.frozen_submission_id.to_string(),
+        "labweaver.io/environment-id":command.environment_id.to_string()
+    })
 }
 
 fn verify_owned(
