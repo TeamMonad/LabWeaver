@@ -26,7 +26,7 @@ the presence of this document.
 
 ## Current connected slice (2026-07-23)
 
-The current source identity is `e062d34fc136e5868b5a3484bd670f36abc0a9af` on
+The deployed source identity remains `e062d34fc136e5868b5a3484bd670f36abc0a9af` on
 `release/sprint2`. Its seven-image package
 `pkg-demo-sprint2-e062d34fc136` passed connected validation and was applied by
 non-destructive run `sprint2-application-e062d34f-0001`; it retained the existing PostgreSQL,
@@ -34,25 +34,28 @@ NATS, MinIO, Harbor, Keycloak, Kubernetes, KubeVirt, Kyverno and Private
 Sigstore service bodies. No namespace, schema, stream, bucket, image or CRD was
 deleted or rebuilt. The adoption completed its application reconcile. The
 subsequent connected replay proved material upload, ECNU AgentRun, independent
-candidate generation/approval, BuildKit build, Trivy scan and digest
-publication. Harbor then rejected the candidate-tag cleanup with `403
-Forbidden`. The robot was granted the bounded `artifact:delete` permission and
-the worker credential was reconciled, but the required replay could not be
-verified because the Kubernetes API, router SSH and demo HTTPS entry all timed
-out. This is a network blocker, not a passing Container result.
+candidate generation/approval, BuildKit build, Trivy scan, digest publication
+and candidate-tag cleanup after adding the exact Harbor `tag:delete`
+permission. The same published digest then completed Container creation,
+course-scoped AccessGrant creation, immutable workspace freeze, stop/start and
+application-owned deletion. The live application reconcile also restored the
+Access NATS reply inbox, added the adopted API endpoint port, and aligned the
+freeze Worker with its PostgreSQL CA and Object-Lock bucket. These are
+connected runtime facts for the deployed package plus named live configuration
+reconciles; the pending source commit is not yet a same-identity Release Gate.
 
 | Check | Result | Evidence / limitation |
 | --- | --- | --- |
-| Container environment reconcile | blocked on final replay | MinIO CA/policy and Trivy DB transport defects were repaired; a fresh connected build reached digest publication. Candidate-tag cleanup then failed closed with Harbor `403`; bounded delete permission was reconciled, but the post-fix replay is unavailable because all current control paths time out. |
+| Container environment reconcile | verified on connected runtime | AgentRun `019f8de6-9316-7ef0-a84f-d3b4284132f6` published release `019f8de7-417d-7902-a56c-94fc854f7ba6` at immutable digest `sha256:81299f24573365f8f1349902a76f2411b0eef4bf14ac2fa793641d5a359cce84`; environment `019f8df5-2010-7300-b5cf-3a926ba12d57` reached `ready`. |
 | Freeze worker storage binding | verified prerequisite | `labweaver-frozen-submissions` is an additive Object Lock bucket with versioning; the live Evaluation ConfigMap points at it. The existing `labweaver-artifacts` bucket was not changed. |
 | Freeze worker network path | verified prerequisite | The retained data NetworkPolicy now permits the labelled environment namespace to reach PostgreSQL/NATS/MinIO; TLS and TCP probes passed. |
-| Freeze completion | verified on Container | Same-build Evaluation worker image `harbor.lab.lan/labweaver-system/evaluation-service@sha256:14ff7de5934660aced3efd0cb4c3443bdf7ab2bb4b4bbb8bd3780f17d55bdea3` completed frozen submission `019f8ae9-774d-7583-baa7-f1bc0756aad6`; Object Lock version `9f3fae6d-dbd2-4e84-957a-2a3459cccd03`, `cleanup_verified=true`, and the command reached `completed`. |
+| Freeze completion | verified on Container | Frozen submission `019f8e0e-e391-7fe3-a88e-0ed8f7ec452f` bound the environment/release/build identities, one workspace file, manifest hash `e9f2fb2ff7c0a0bd339f35e3b48fdd221bf010b1a461b2d175d2e3bf84feae15`, immutable object hash `9d09be32601d84b2aa5b4cf64dc9ffaeb22800aedc4211b1db3c646825587678` and Object Lock version `d2b2119c-5de2-43f6-a915-9fd592c5c485`. |
 | Container access | verified prerequisite | A real student session created an AccessGrant for the fresh Container environment after endpoint discovery; the grant was course- and environment-scoped. Gateway protocol replay remains pending. |
 | Container freeze | verified | Fresh environment `019f8b1a-f95f-7551-a5ce-33f4c26466fd` froze submission `019f8b1b-e2e7-7212-9272-a5b89160cc98` from the mounted workspace; the immutable object was materialized by the Evaluation worker and the freeze command completed. |
-| Container stop/start | verified | The same fresh environment accepted stop (`stopped`, revision 10), then start (`ready`, revision 12) after the lifecycle fix allowing an immediate `Stopped → Ready` provider observation. |
-| Container delete/cleanup | verified | After the cleanup-plan, fence replay, finalizer-race and MinIO-prefix fixes, environment `019f8b1a-f95f-7551-a5ce-33f4c26466fd` reached `deleted` (revision 42) with cleanup artifact version `d7cfd573-6d27-48d9-8ea2-1e6407cd3da0`; the namespace and its runtime resources are absent. The retained `labweaver-artifacts` bucket has versioning but no Object Lock, so this evidence uses conditional versioned immutable storage rather than Governance Lock. |
+| Container stop/start | verified | Environment `019f8df5-2010-7300-b5cf-3a926ba12d57` reached `stopped` at revision 11 and returned to `ready` at revision 13 through the public student session. |
+| Container delete/cleanup | verified | The same environment accepted application-owned deletion and namespace `lw-env-019f8df5-2010-7300-b5cf-3a926ba12d57` became absent. |
 | KubeVirt | intentionally skipped | The user limited this round to Container runtime verification; no VM completion claim is made. |
-| Release Gate / Sprint 2 | blocked | KubeVirt is intentionally skipped this round; the post-Harbor-permission Container replay and machine-readable passing Release Gate do not exist because connected verification is unavailable. |
+| Release Gate / Sprint 2 | blocked | KubeVirt is intentionally skipped this round; Gateway protocol negatives, idempotent deployment replay and a same-source machine-readable passing Release Gate remain absent. |
 
 | Capability | Owner | State | Current evidence | Blocker or limitation |
 | --- | --- | --- | --- | --- |

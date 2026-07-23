@@ -367,6 +367,26 @@ def prepare(output: Path, openssl: Path, ssh_keygen: Path, nsc: Path, days: int)
         if response:
             arguments.append("--allow-pub-response")
         _nsc(nsc, nsc_store, arguments, private_home)
+        # `nsc add user --allow-pub-response` normalizes away an explicitly
+        # supplied `_INBOX.>` subscription. Access Service also uses the NATS
+        # request API for JetStream and must retain its bounded reply inbox
+        # subscription, so restore it after response permissions are applied.
+        if response and "_INBOX.>" in subscribe:
+            _nsc(
+                nsc,
+                nsc_store,
+                [
+                    "edit",
+                    "user",
+                    "--account",
+                    "WORKLOADS",
+                    "--name",
+                    name,
+                    "--allow-sub",
+                    "_INBOX.>",
+                ],
+                private_home,
+            )
         credentials = clients / name / "nats.creds"
         credentials.parent.mkdir(mode=0o700)
         _nsc(nsc, nsc_store, ["generate", "creds", "--account", "WORKLOADS", "--name", name, "--output-file", str(credentials)], private_home)

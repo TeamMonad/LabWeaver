@@ -15,16 +15,14 @@ identity. Historical Issue evidence is not a current completion claim.
   bundle through both Rustls AWS SDK and process TLS bindings; the retained
   Cilium policy has separate valid host and platform-client ingress rules; the
   pinned Trivy DB exists in the worker-readable repository.
-- Last exact application failure: a fresh course build completed BuildKit,
-  Trivy and digest publication, then Harbor rejected candidate-tag deletion
-  with `403 Forbidden`. The worker robot was granted only
-  `artifact:delete`, its Secret was reconciled, and the worker rolled out.
-- Current blocker: the required post-permission replay cannot be observed.
-  Direct Kubernetes API access, router SSH and `https://demo.lab.lan` all time
-  out. Per fail-fast policy no further mutation or completion claim is made
-  until one control path is restored. The bounded diagnostic Pod
-  `harbor/harbor-admin-probe` may remain in terminal state and must be removed
-  before final residue verification.
+- The exact Harbor requirement was `tag:delete`, not `artifact:delete`. After
+  applying that bounded permission, AgentRun
+  `019f8de6-9316-7ef0-a84f-d3b4284132f6` completed cleanup and published
+  immutable digest
+  `sha256:81299f24573365f8f1349902a76f2411b0eef4bf14ac2fa793641d5a359cce84`.
+- The prior connectivity blocker is resolved. The remaining supply-chain exit
+  is the negative/replay matrix and same-source machine-readable Release Gate;
+  no diagnostic Pod remains.
 - Exit: duplicate/reordered command, cancel, deadline, scanner rejection,
   cleanup and private-pull negatives pass in the adopted environment.
 - Owner: B implementation review; D connected Verify; A release judgment.
@@ -70,14 +68,14 @@ admission boundary enforces the executor namespace/ServiceAccount fence.
   read-only SFTP certificate.
 - The coordinator, namespace-local immutable inputs, dedicated tokenless Worker
   ServiceAccount, NetworkPolicy and cleanup readback are implemented locally.
-- The first connected Container freeze attempts reached the worker and exposed
-  a source defect: the request and completion events reused aggregate sequence
-  1, so PostgreSQL rejected the completion outbox insert and the attempt became
-  `LW_COLLECT_DATABASE_FAILED`. Commit `12069bbb` advances the completion event
-  to sequence/revision 2. It is not yet packaged or replayed against the live
-  cluster.
-- Container PVC freeze is verified on the retained prior worker build; a fresh
-  3a9 same-identity freeze replay remains pending. VM/SFTP replay is
+- The connected coordinator initially exposed two stale application bindings:
+  the Worker Secret omitted the PostgreSQL CA consumed by the database URL,
+  and `worker.yaml` still selected the legacy shared bucket. The live
+  ConfigMap was reconciled to the repository definitions without changing
+  retained infrastructure.
+- Container PVC freeze is now verified as frozen submission
+  `019f8e0e-e391-7fe3-a88e-0ed8f7ec452f`, including file, manifest, runtime
+  artifact and immutable Object-Lock version identities. VM/SFTP replay is
   explicitly deferred this round.
 - Exit: duplicate/reordered commands, expired leases/certificates, PV identity
   mismatch, host-key mismatch, partial upload, worker restart and all residue
