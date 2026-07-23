@@ -429,6 +429,13 @@ fn plan_is_deterministic_private_and_digest_bound() {
         resource(&first, "Service").document.pointer("/spec/type"),
         Some(&json!("ClusterIP"))
     );
+    assert_eq!(
+        resource(&first, "VirtualMachine")
+            .document
+            .pointer("/spec/template/spec/readinessProbe"),
+        None,
+        "executor-owned SSH verification is the single readiness authority"
+    );
     assert!(first.resources.iter().all(|resource| {
         resource.kind != "Ingress"
             && resource.document.pointer("/spec/type") != Some(&json!("NodePort"))

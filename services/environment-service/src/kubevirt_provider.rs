@@ -1693,8 +1693,7 @@ where
                                 "volumes":[
                                     {"name":"rootdisk","persistentVolumeClaim":{"claimName":data_volume_name}},
                                     {"name":"cloudinit","cloudInitNoCloud":{"secretRef":{"name":"cloud-init"}}}
-                                ],
-                                "readinessProbe":{"tcpSocket":{"port":ssh_port},"periodSeconds":2,"failureThreshold":60}
+                                ]
                             }
                         }
                     }
