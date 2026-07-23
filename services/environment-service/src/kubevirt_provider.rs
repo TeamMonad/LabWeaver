@@ -1577,6 +1577,9 @@ where
         });
         let cloud_init = self.cloud_init_user_data();
         let cloud_init_data = BASE64_STANDARD.encode(cloud_init.as_bytes());
+        let cloud_init_network_data = BASE64_STANDARD.encode(
+            b"version: 2\nethernets:\n  default:\n    match:\n      name: \"en*\"\n    dhcp4: true\n",
+        );
         let mut documents = vec![
             resource(
                 "Namespace",
@@ -1647,7 +1650,7 @@ where
                 json!({
                     "apiVersion":"v1","kind":"Secret","type":"Opaque",
                     "metadata":{"name":"cloud-init","namespace":namespace,"labels":labels,"annotations":annotations},
-                    "data":{"userdata":cloud_init_data}
+                    "data":{"userdata":cloud_init_data,"networkdata":cloud_init_network_data}
                 }),
             ),
             resource(
@@ -1692,7 +1695,10 @@ where
                                 "networks":[{"name":"default","pod":{}}],
                                 "volumes":[
                                     {"name":"rootdisk","persistentVolumeClaim":{"claimName":data_volume_name}},
-                                    {"name":"cloudinit","cloudInitNoCloud":{"secretRef":{"name":"cloud-init"}}}
+                                    {"name":"cloudinit","cloudInitNoCloud":{
+                                        "secretRef":{"name":"cloud-init"},
+                                        "networkDataSecretRef":{"name":"cloud-init"}
+                                    }}
                                 ]
                             }
                         }

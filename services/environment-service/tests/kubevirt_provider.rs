@@ -424,6 +424,24 @@ fn plan_is_deterministic_private_and_digest_bound() {
     assert!(cloud_init.contains("- [systemctl, enable, --now, ssh.service]"));
     assert!(!cloud_init.contains("ssh_authorized_keys"));
     assert!(!cloud_init.contains("PRIVATE KEY"));
+    let network_data_encoded = cloud_init_secret
+        .document
+        .pointer("/data/networkdata")
+        .and_then(serde_json::Value::as_str)
+        .expect("cloud-init data.networkdata");
+    let network_data = BASE64_STANDARD
+        .decode(network_data_encoded)
+        .expect("base64 cloud-init networkdata");
+    assert_eq!(
+        std::str::from_utf8(&network_data).expect("UTF-8 cloud-init networkdata"),
+        "version: 2\nethernets:\n  default:\n    match:\n      name: \"en*\"\n    dhcp4: true\n"
+    );
+    assert_eq!(
+        resource(&first, "VirtualMachine")
+            .document
+            .pointer("/spec/template/spec/volumes/1/cloudInitNoCloud/networkDataSecretRef/name"),
+        Some(&json!("cloud-init"))
+    );
 
     assert_eq!(
         resource(&first, "Service").document.pointer("/spec/type"),
