@@ -549,9 +549,10 @@ impl KubernetesContainerExecutor {
                     && condition.get("status").and_then(Value::as_str) == Some("True")
             })
         };
-        if !condition_true("Ready") || !condition_true("AgentConnected") {
+        if !condition_true("Ready") {
             return Err(unavailable());
         }
+        let guest_agent_connected = condition_true("AgentConnected");
         let ssh_host_key_sha256 = self.probe_ssh_host_key(service_cluster_ip).await?;
         Ok(KubeVirtRunningObservation {
             observed_environment_generation: fence.environment_generation,
@@ -563,7 +564,7 @@ impl KubernetesContainerExecutor {
             guest_ip,
             service_cluster_ip,
             ssh_host_key_sha256,
-            guest_agent_connected: true,
+            guest_agent_connected,
             ssh_ready: true,
             observed_at: timestamp()?,
         })

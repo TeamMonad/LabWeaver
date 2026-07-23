@@ -1975,7 +1975,6 @@ fn valid_running_observation(
         && private_route_ip(observed.guest_ip)
         && private_route_ip(observed.service_cluster_ip)
         && observed.ssh_host_key_sha256 != Sha256Digest::of_bytes(&[])
-        && observed.guest_agent_connected
         && observed.ssh_ready
 }
 

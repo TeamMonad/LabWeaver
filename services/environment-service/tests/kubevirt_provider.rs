@@ -75,6 +75,7 @@ struct FixtureBackend {
     fences: Mutex<Vec<KubeVirtBackendFence>>,
     objects: Mutex<BTreeSet<(String, String, String)>>,
     incomplete_readiness: bool,
+    guest_agent_disconnected: bool,
     public_route: bool,
 }
 
@@ -153,7 +154,7 @@ impl FixtureBackend {
                 "10.96.0.17".parse().expect("service IP")
             },
             ssh_host_key_sha256: Sha256Digest::of_bytes(b"vm-host-key"),
-            guest_agent_connected: !self.incomplete_readiness,
+            guest_agent_connected: !self.guest_agent_disconnected,
             ssh_ready: !self.incomplete_readiness,
             observed_at: timestamp("2026-07-16T08:01:00.000Z"),
         }
@@ -466,7 +467,7 @@ fn plan_is_deterministic_private_and_digest_bound() {
 }
 
 #[tokio::test]
-async fn readiness_requires_vm_guest_agent_ssh_and_current_generation() {
+async fn readiness_requires_vm_ssh_and_current_generation() {
     let release_projection = projection();
     let mut instance = instance_for(&release_projection);
     instance.observed_state = ObservedEnvironmentState::Provisioning;
@@ -501,6 +502,26 @@ async fn readiness_requires_vm_guest_agent_ssh_and_current_generation() {
         ObservedEnvironmentState::Provisioning
     );
     assert!(observation.endpoints.is_empty());
+}
+
+#[tokio::test]
+async fn readiness_accepts_ssh_proof_without_guest_agent() {
+    let release_projection = projection();
+    let mut instance = instance_for(&release_projection);
+    instance.observed_state = ObservedEnvironmentState::Provisioning;
+    let backend = Arc::new(FixtureBackend {
+        guest_agent_disconnected: true,
+        ..FixtureBackend::default()
+    });
+    let provider = provider(release_projection, backend);
+
+    let observation = provider
+        .execute(ReconcileAction::Provision, &instance)
+        .await
+        .expect("SSH readiness is authoritative without a guest agent");
+    assert_eq!(observation.next_state, ObservedEnvironmentState::Ready);
+    assert!(observation.operation_complete);
+    assert_eq!(observation.endpoints.len(), 1);
 }
 
 #[tokio::test]
