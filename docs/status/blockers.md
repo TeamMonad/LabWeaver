@@ -7,17 +7,24 @@ identity. Historical Issue evidence is not a current completion claim.
 
 - Local fixed-command Build Executor, persistent fences and digest/Trivy
   contracts are implemented.
-- The `1122ef6e` package was built and validated against retained
+- The `e062d34f` seven-image package was built and validated against retained
   BuildKit/Harbor/Trivy; application adoption run
-  `sprint2-application-1122ef6e-0022` reconciled the retained target without
+  `sprint2-application-e062d34f-0001` reconciled the retained target without
   destructive reset.
-- Blocker: a fresh course build using a newly uploaded context currently
-  terminates with `LW_AGENT_BUILD_REJECTED` before publication. The object is
-  present in MinIO with the expected immutable version, size and media type,
-  but the build worker's exact S3 `GetObject` request fails as a dispatch
-  failure. The code now emits endpoint/bucket/key/version plus a sanitized
-  transport source for the next connected replay; it never logs credentials or
-  bypasses verification.
+- Resolved causes: the build worker now receives the combined MinIO/Harbor CA
+  bundle through both Rustls AWS SDK and process TLS bindings; the retained
+  Cilium policy has separate valid host and platform-client ingress rules; the
+  pinned Trivy DB exists in the worker-readable repository.
+- Last exact application failure: a fresh course build completed BuildKit,
+  Trivy and digest publication, then Harbor rejected candidate-tag deletion
+  with `403 Forbidden`. The worker robot was granted only
+  `artifact:delete`, its Secret was reconciled, and the worker rolled out.
+- Current blocker: the required post-permission replay cannot be observed.
+  Direct Kubernetes API access, router SSH and `https://demo.lab.lan` all time
+  out. Per fail-fast policy no further mutation or completion claim is made
+  until one control path is restored. The bounded diagnostic Pod
+  `harbor/harbor-admin-probe` may remain in terminal state and must be removed
+  before final residue verification.
 - Exit: duplicate/reordered command, cancel, deadline, scanner rejection,
   cleanup and private-pull negatives pass in the adopted environment.
 - Owner: B implementation review; D connected Verify; A release judgment.
