@@ -922,6 +922,8 @@ impl KubeVirtStorageBinding {
 pub struct KubeVirtSshBootstrap {
     pub gateway_namespace: String,
     pub gateway_pod_label: String,
+    pub collector_namespace: String,
+    pub collector_pod_label: String,
     pub guest_user: String,
     pub user_ca_public_key: String,
 }
@@ -930,6 +932,8 @@ impl KubeVirtSshBootstrap {
     pub fn new(
         gateway_namespace: String,
         gateway_pod_label: String,
+        collector_namespace: String,
+        collector_pod_label: String,
         guest_user: String,
         user_ca_public_key: &str,
     ) -> Result<Self, ReleaseProjectionError> {
@@ -937,6 +941,8 @@ impl KubeVirtSshBootstrap {
             .map_err(|_| ReleaseProjectionError::ConfigurationInvalid)?;
         if !valid_dns_label(&gateway_namespace)
             || !valid_dns_label(&gateway_pod_label)
+            || !valid_dns_label(&collector_namespace)
+            || !valid_dns_label(&collector_pod_label)
             || !valid_guest_user(&guest_user)
         {
             return Err(ReleaseProjectionError::ConfigurationInvalid);
@@ -944,6 +950,8 @@ impl KubeVirtSshBootstrap {
         Ok(Self {
             gateway_namespace,
             gateway_pod_label,
+            collector_namespace,
+            collector_pod_label,
             guest_user,
             user_ca_public_key: public_key.normalized_openssh,
         })
@@ -1619,6 +1627,7 @@ where
                     "metadata":{"name":"openssh-gateway-ingress","namespace":namespace,"labels":labels},
                     "spec":{"podSelector":{"matchLabels":{"labweaver.io/environment-id":instance.id.to_string()}},"policyTypes":["Ingress"],"ingress":[{"from":[
                         {"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":self.configuration.ssh.gateway_namespace}},"podSelector":{"matchLabels":{GATEWAY_LABEL_KEY:self.configuration.ssh.gateway_pod_label}}},
+                        {"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":self.configuration.ssh.collector_namespace}},"podSelector":{"matchLabels":{GATEWAY_LABEL_KEY:self.configuration.ssh.collector_pod_label}}},
                         {"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":self.configuration.storage.data_source_namespace}},"podSelector":{"matchLabels":{GATEWAY_LABEL_KEY:"kubevirt-executor"}}}
                     ],"ports":[{"protocol":"TCP","port":ssh_port}]}]}
                 }),

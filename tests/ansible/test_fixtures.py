@@ -578,6 +578,28 @@ class AnsibleFixtureTests(unittest.TestCase):
             for locator in re.findall(r"/etc/labweaver/config/([a-z0-9.-]+)", configuration):
                 self.assertIn(locator, manifest["configMaps"][config_map])
 
+    def test_evaluation_freeze_worker_pull_secret_is_reconciled(self) -> None:
+        manifest = json.loads(
+            (ROOT / "deploy/config/sprint2-bundle-manifest.json").read_text(encoding="utf-8")
+        )
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "registry-pull-config.json",
+            manifest["secrets"]["evaluation-service-secrets"],
+        )
+        self.assertIn(
+            "Reconcile the evaluation freeze worker registry pull secret",
+            tasks,
+        )
+        self.assertIn(
+            "SPRINT2_APPLICATION_EVALUATION_REGISTRY_PULL_CONFIG_INVALID",
+            tasks,
+        )
+        self.assertIn("type: kubernetes.io/dockerconfigjson", tasks)
+
     def test_sprint2_application_uses_supported_nats_account_probe(self) -> None:
         tasks = (
             ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"

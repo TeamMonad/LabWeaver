@@ -111,6 +111,7 @@
       "nats-client.key",
       "nats.creds",
       "postgres-ca.pem",
+      "registry-pull-config.json",
       "tls.crt",
       "tls.key"
     ],

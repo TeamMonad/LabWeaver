@@ -55,6 +55,9 @@
               "const": "virtual_machine",
               "type": "string"
             },
+            "namespace": {
+              "type": "string"
+            },
             "port": {
               "format": "uint16",
               "maximum": 65535,
@@ -73,6 +76,7 @@
           },
           "required": [
             "kind",
+            "namespace",
             "host",
             "port",
             "username",

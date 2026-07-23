@@ -18,6 +18,8 @@
     "providerKind": "kubevirt",
     "gatewayNamespace": "access-system",
     "gatewayPodLabel": "openssh-gateway",
+    "collectorNamespace": "labweaver-evaluation",
+    "collectorPodLabel": "evaluation-freeze-worker",
     "storageClassBinding": "vm-rwo-primary-v1",
     "storageClassName": "local-path",
     "dataSourceNamespace": "labweaver-system",

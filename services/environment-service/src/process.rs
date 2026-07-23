@@ -244,6 +244,14 @@ impl EnvironmentProcessRuntime {
                                     .clone()
                                     .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
                                 configuration
+                                    .collector_namespace
+                                    .clone()
+                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                                configuration
+                                    .collector_pod_label
+                                    .clone()
+                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                                configuration
                                     .guest_user
                                     .clone()
                                     .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
@@ -665,6 +673,8 @@ struct ProviderBindingConfiguration {
     data_source_namespace: Option<String>,
     data_source_name: Option<String>,
     gateway_pod_label: Option<String>,
+    collector_namespace: Option<String>,
+    collector_pod_label: Option<String>,
     guest_user: Option<String>,
     ssh_user_ca_public_key: Option<String>,
     ssh_user_ca_private_key_path: Option<PathBuf>,
@@ -737,6 +747,8 @@ impl ProviderBindingConfiguration {
             || self.data_source_namespace.is_some()
             || self.data_source_name.is_some()
             || self.gateway_pod_label.is_some()
+            || self.collector_namespace.is_some()
+            || self.collector_pod_label.is_some()
             || self.guest_user.is_some()
             || self.ssh_user_ca_public_key.is_some()
             || self.ssh_user_ca_private_key_path.is_some()
@@ -756,6 +768,8 @@ impl ProviderBindingConfiguration {
             && self.data_source_namespace.is_some()
             && self.data_source_name.is_some()
             && self.gateway_pod_label.is_some()
+            && self.collector_namespace.is_some()
+            && self.collector_pod_label.is_some()
             && self.guest_user.is_some()
             && self.ssh_user_ca_public_key.is_some()
             && self.ssh_user_ca_private_key_path.is_some()

@@ -185,6 +185,7 @@ impl FreezeBindingService {
         let source_identity = Sha256Digest::of_canonical(&serde_json::json!({
             "environmentId": environment_id,
             "generation": generation,
+            "namespace": format!("lw-env-{environment_id}"),
             "vmUid": vm_uid,
             "rootDiskUid": root_disk_uid,
             "serviceClusterIp": host,
@@ -203,6 +204,7 @@ impl FreezeBindingService {
             expires_at,
         )?;
         Ok(EnvironmentFreezeSourceBinding::VirtualMachine {
+            namespace: format!("lw-env-{environment_id}"),
             host,
             port: 22,
             username: self.configuration.vm_username.clone(),

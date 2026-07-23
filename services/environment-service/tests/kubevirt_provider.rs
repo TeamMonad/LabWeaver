@@ -476,11 +476,23 @@ fn plan_is_deterministic_private_and_digest_bound() {
         ingress
             .document
             .pointer("/spec/ingress/0/from/1/podSelector/matchLabels/app.kubernetes.io~1name"),
-        Some(&json!("kubevirt-executor"))
+        Some(&json!("evaluation-freeze-worker"))
     );
     assert_eq!(
         ingress.document.pointer(
             "/spec/ingress/0/from/1/namespaceSelector/matchLabels/kubernetes.io~1metadata.name"
+        ),
+        Some(&json!("labweaver-evaluation"))
+    );
+    assert_eq!(
+        ingress
+            .document
+            .pointer("/spec/ingress/0/from/2/podSelector/matchLabels/app.kubernetes.io~1name"),
+        Some(&json!("kubevirt-executor"))
+    );
+    assert_eq!(
+        ingress.document.pointer(
+            "/spec/ingress/0/from/2/namespaceSelector/matchLabels/kubernetes.io~1metadata.name"
         ),
         Some(&json!("labweaver-system"))
     );
@@ -720,6 +732,8 @@ fn invalid_release_storage_or_ssh_bootstrap_fails_closed() {
         KubeVirtSshBootstrap::new(
             "access-system".to_owned(),
             "openssh-gateway".to_owned(),
+            "labweaver-evaluation".to_owned(),
+            "evaluation-freeze-worker".to_owned(),
             "lab".to_owned(),
             "not-a-public-key",
         )
@@ -825,6 +839,8 @@ fn provider_with_budget(
             KubeVirtSshBootstrap::new(
                 "access-system".to_owned(),
                 "openssh-gateway".to_owned(),
+                "labweaver-evaluation".to_owned(),
+                "evaluation-freeze-worker".to_owned(),
                 "lab".to_owned(),
                 "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDIhz2GK/XCUj4i6Q5yQJNL1MKDXETe1aM1lHYMGt2SQ",
             )

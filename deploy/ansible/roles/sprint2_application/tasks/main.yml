@@ -1644,6 +1644,77 @@
   loop: "{{ sprint2_application_configuration_objects }}"
   no_log: true
 
+- name: Reconcile the evaluation worker namespace without deleting retained state
+  kubernetes.core.k8s:
+    kubeconfig: "{{ sprint2_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ sprint2_application_evaluation_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver
+          labweaver.io/managed: "true"
+          pod-security.kubernetes.io/enforce: restricted
+          pod-security.kubernetes.io/audit: restricted
+          pod-security.kubernetes.io/warn: restricted
+
+- name: Select the reviewed evaluation registry pull configuration
+  ansible.builtin.set_fact:
+    sprint2_application_evaluation_registry_pull_config: >-
+      {{
+        (
+          sprint2_application_configuration_objects
+          | selectattr('kind', 'equalto', 'Secret')
+          | selectattr('metadata.name', 'equalto', 'evaluation-service-secrets')
+          | first
+        ).data['registry-pull-config.json']
+      }}
+  no_log: true
+
+- name: Require a valid evaluation registry pull configuration
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_evaluation_pull_secret_name == 'harbor-course-pull'
+      - sprint2_application_evaluation_registry_pull_config | length > 0
+      - >-
+        (
+          sprint2_application_evaluation_registry_pull_config
+          | b64decode
+          | from_json
+        ).auths is mapping
+      - >-
+        sprint2_application_harbor_registry
+        in (
+          sprint2_application_evaluation_registry_pull_config
+          | b64decode
+          | from_json
+        ).auths
+    fail_msg: SPRINT2_APPLICATION_EVALUATION_REGISTRY_PULL_CONFIG_INVALID
+  no_log: true
+
+- name: Reconcile the evaluation freeze worker registry pull secret
+  kubernetes.core.k8s:
+    kubeconfig: "{{ sprint2_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{ sprint2_application_evaluation_pull_secret_name }}"
+        namespace: "{{ sprint2_application_evaluation_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver
+          app.kubernetes.io/managed-by: ansible
+          labweaver.io/sprint: sprint2
+      type: kubernetes.io/dockerconfigjson
+      data:
+        .dockerconfigjson: "{{ sprint2_application_evaluation_registry_pull_config }}"
+  no_log: true
+
 - name: Reconcile the retained MinIO transport policy for Sprint 2 platform clients
   kubernetes.core.k8s:
     kubeconfig: "{{ sprint2_application_kubeconfig }}"

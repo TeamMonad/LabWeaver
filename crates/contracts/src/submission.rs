@@ -203,6 +203,7 @@ pub enum EnvironmentFreezeSourceBinding {
         storage_class_name: String,
     },
     VirtualMachine {
+        namespace: String,
         host: String,
         port: u16,
         username: String,

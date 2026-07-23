@@ -327,7 +327,7 @@ impl FreezeCoordinator {
             } => Some(collector_certificate_openssh.clone()),
             EnvironmentFreezeSourceBinding::Container { .. } => None,
         };
-        let (source, volume, vm_egress_cidr) = match binding.source {
+        let (source, volume, vm_egress) = match binding.source {
             EnvironmentFreezeSourceBinding::Container {
                 namespace: source_namespace,
                 persistent_volume_claim,
@@ -350,6 +350,7 @@ impl FreezeCoordinator {
                 )
             }
             EnvironmentFreezeSourceBinding::VirtualMachine {
+                namespace: source_namespace,
                 host,
                 port,
                 username,
@@ -359,13 +360,12 @@ impl FreezeCoordinator {
                 collector_certificate_openssh: _,
                 expires_at,
             } => {
-                let address: std::net::IpAddr = host
+                let _: std::net::IpAddr = host
                     .parse()
                     .map_err(|_| FreezeCoordinatorError::BindingInvalid)?;
-                let cidr = match address {
-                    std::net::IpAddr::V4(_) => format!("{address}/32"),
-                    std::net::IpAddr::V6(_) => format!("{address}/128"),
-                };
+                if source_namespace != format!("lw-env-{}", command.environment_id) {
+                    return Err(FreezeCoordinatorError::BindingInvalid);
+                }
                 (
                     json!({
                     "kind":"ssh","host":host,"port":port,"username":username,
@@ -377,7 +377,17 @@ impl FreezeCoordinator {
                     "connectTimeoutMilliseconds":5000,"operationTimeoutMilliseconds":30000
                     }),
                     None,
-                    Some((cidr, port)),
+                    Some((
+                        json!({
+                            "namespaceSelector":{"matchLabels":{
+                                "kubernetes.io/metadata.name":source_namespace
+                            }},
+                            "podSelector":{"matchLabels":{
+                                "labweaver.io/environment-id":command.environment_id.to_string()
+                            }}
+                        }),
+                        port,
+                    )),
                 )
             }
         };
@@ -429,10 +439,8 @@ impl FreezeCoordinator {
                 "podSelector":{"matchLabels":self.configuration.dns_pod_labels}}],
                 "ports":[{"protocol":"UDP","port":53},{"protocol":"TCP","port":53}]}),
         ];
-        if let Some((cidr, port)) = vm_egress_cidr {
-            egress.push(
-                json!({"to":[{"ipBlock":{"cidr":cidr}}],"ports":[{"protocol":"TCP","port":port}]}),
-            );
+        if let Some((peer, port)) = vm_egress {
+            egress.push(json!({"to":[peer],"ports":[{"protocol":"TCP","port":port}]}));
         }
         self.apply(
             namespace,
