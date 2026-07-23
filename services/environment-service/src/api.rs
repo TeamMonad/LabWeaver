@@ -391,6 +391,11 @@ async fn accept_lifecycle(
     }
     let access_revocation_revision = if let Some(reason) = revocation_reason {
         Some(state.access_revoker.revoke(&instance, reason).await?)
+    } else if matches!(
+        kind,
+        EnvironmentOperationKind::Retry | EnvironmentOperationKind::Recover
+    ) {
+        instance.operation.access_revocation_revision
     } else {
         None
     };
