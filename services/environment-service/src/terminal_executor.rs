@@ -1,6 +1,6 @@
 //! mTLS-only browser terminal executor backed by Kubernetes exec PTY.
 
-use std::{net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
+use std::{io::Cursor, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
 
 use axum::{
     Router,
@@ -120,7 +120,14 @@ fn explicit_kube_client(
         .parse()
         .map_err(|_| TerminalExecutorServerError::Configuration)?;
     let mut config = Config::new(cluster_url);
-    config.root_cert = Some(vec![std::fs::read(&configuration.cluster_ca_file)?]);
+    let ca = std::fs::read(&configuration.cluster_ca_file)?;
+    let root_cert = rustls_pemfile::certs(&mut Cursor::new(ca))
+        .map(|certificate| certificate.map(|certificate| certificate.as_ref().to_vec()))
+        .collect::<Result<Vec<_>, _>>()?;
+    if root_cert.is_empty() {
+        return Err(TerminalExecutorServerError::Configuration);
+    }
+    config.root_cert = Some(root_cert);
     config.auth_info.token_file = Some(
         configuration
             .bearer_token_file
@@ -132,7 +139,7 @@ fn explicit_kube_client(
     config.connect_timeout = Some(timeout);
     config.read_timeout = Some(timeout);
     config.write_timeout = Some(timeout);
-    Client::try_from(config).map_err(|_| TerminalExecutorServerError::KubernetesClient)
+    Client::try_from(config).map_err(TerminalExecutorServerError::KubernetesClient)
 }
 
 async fn upgrade_terminal(
@@ -316,7 +323,7 @@ pub enum TerminalExecutorServerError {
     #[error("LW_CONTAINER_TERMINAL_SUBPROTOCOL_REQUIRED")]
     SubprotocolRequired,
     #[error("LW_CONTAINER_TERMINAL_KUBERNETES_CLIENT_FAILED")]
-    KubernetesClient,
+    KubernetesClient(#[source] kube::Error),
     #[error("LW_CONTAINER_TERMINAL_IO_FAILED")]
     Io(#[from] std::io::Error),
     #[error(transparent)]
