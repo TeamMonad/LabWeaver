@@ -144,8 +144,10 @@ deployment manifest, migration catalog, image set, and run ID.
 ## Consequences
 
 - Sigstore, Kyverno, and Packer are absent from the Sprint 2 product profile and
-  Release Gate. Existing infrastructure installations are not deleted or
-  reconciled by this delivery.
+  Release Gate. The normal adoption path never deletes or reconciles them. A
+  separate, explicitly authorized maintenance action may remove a deprecated
+  installation only after inventory proves that no retained workload or policy
+  depends on it.
 - The adopted cluster is consumed in place. Kubernetes, KubeVirt, PostgreSQL,
   NATS, MinIO, Harbor, Keycloak, namespaces, volumes, realms, projects, streams,
   buckets, and schemas are retained. Adoption may create a missing LabWeaver
@@ -167,7 +169,8 @@ deployment manifest, migration catalog, image set, and run ID.
 
 ## Rollback
 
-Rollback is a normal revert of this branch plus a server-side apply of the last
-reviewed application and route manifests. Because this delivery does not delete
-infrastructure or business data, rollback does not depend on reconstructing
-Harbor, Keycloak, PostgreSQL, NATS, MinIO, Sigstore, or Kyverno state.
+Rollback of the application delivery is a normal revert of this branch plus a
+server-side apply of the last reviewed application and route manifests. The
+separately authorized removal of deprecated Sigstore and Kyverno state is
+irreversible and is not restored by application rollback. Harbor, Keycloak,
+PostgreSQL, NATS, MinIO, Kubernetes and KubeVirt remain retained infrastructure.

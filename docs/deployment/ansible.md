@@ -111,6 +111,15 @@ realms/clients. The reset implementation remains an explicitly destructive
 maintenance command outside this delivery and is not an installation
 prerequisite or Release Gate step.
 
+An operator may separately authorize removal of infrastructure that is no
+longer part of the product profile. That maintenance operation must first prove
+that no retained workload or policy depends on the target, remove admission
+webhooks before their controller disappears, and verify that namespaces, CRDs,
+cluster RBAC, routes and persistent volumes leave no residue. The 2026-07-24
+connected cleanup used this boundary to remove Private Sigstore and Kyverno;
+Packer was already absent. This does not change the non-destructive semantics of
+`sprint2-application` or count as Release Gate evidence.
+
 The foundation command reconciles the retained PostgreSQL, NATS JetStream and
 MinIO service bodies in `labweaver-data` before application adoption. All images are digest
 locked, all three workloads use TLS, persistent volumes, restricted Pod Security

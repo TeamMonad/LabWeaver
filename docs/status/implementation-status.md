@@ -24,15 +24,20 @@ the presence of this document.
 
 ## Sprint 1 and Sprint 2
 
-## Current connected slice (2026-07-23)
+## Current connected slice (2026-07-24)
 
 The deployed source identity remains `e062d34fc136e5868b5a3484bd670f36abc0a9af` on
 `release/sprint2`. Its seven-image package
 `pkg-demo-sprint2-e062d34fc136` passed connected validation and was applied by
-non-destructive run `sprint2-application-e062d34f-0001`; it retained the existing PostgreSQL,
-NATS, MinIO, Harbor, Keycloak, Kubernetes, KubeVirt, Kyverno and Private
-Sigstore service bodies. No namespace, schema, stream, bucket, image or CRD was
-deleted or rebuilt. The adoption completed its application reconcile. The
+non-destructive run `sprint2-application-e062d34f-0001`; that adoption retained
+the existing PostgreSQL, NATS, MinIO, Harbor, Keycloak, Kubernetes, KubeVirt,
+Kyverno and Private Sigstore service bodies and deleted no infrastructure. On
+2026-07-24, a separate explicitly authorized maintenance action inventoried
+dependencies, found no Kyverno policies or active application references, and
+removed the deprecated Private Sigstore and Kyverno installations. Packer was
+absent. PostgreSQL, NATS, MinIO, Harbor, Keycloak, BuildKit, Kubernetes,
+KubeVirt and the two retained diagnostic environments were not changed. The
+adoption completed its application reconcile. The
 subsequent connected replay proved material upload, ECNU AgentRun, independent
 candidate generation/approval, BuildKit build, Trivy scan, digest publication
 and candidate-tag cleanup after adding the exact Harbor `tag:delete`
@@ -87,7 +92,7 @@ change the final Sprint 2 gate below.
 | Sprint 2 Helm deployment | A/D | implemented; e062 adopted non-destructively | source `e062d34f` passed connected package validation and non-destructive application adoption run `sprint2-application-e062d34f-0001`; retained infrastructure was not deleted or rebuilt | post-permission Container replay, Gateway protocol replay, KubeVirt replay and Release Gate remain pending |
 | Sprint 2 data foundation | A/D | verified on adopted target | digest-locked PostgreSQL, NATS JetStream and MinIO StatefulSets; TLS, persistent storage, restricted Pod Security, default-deny NetworkPolicy, strict private bundle; a second reconciliation at source identity `4ced06d` changed nothing | this is retained-foundation evidence only, not application deployment or Sprint 2 E3 |
 | Demo replay and Release Gate | A/D | implemented locally | exact connected check set, evidence rehash, clean-HEAD/deployment/catalog/image/Run binding, tamper test and stable missing-input diagnostics | Linux infrastructure Verify, real Keycloak Playwright and same-build passing report remain pending |
-| Private Sigstore, Kyverno and Packer | A/D | removed from active product source | ADR 0006 is Superseded; active contracts, Chart and CI contain no trust-plane gate | retained installations are deliberately untouched and are not Sprint 2 evidence |
+| Private Sigstore, Kyverno and Packer | A/D | removed from product and connected cluster | ADR 0006 is Superseded; active contracts, Chart and CI contain no trust-plane gate; the explicitly authorized 2026-07-24 cleanup removed the Private Sigstore Helm release, its namespace/PVC/routes, and Kyverno controllers/webhooks/CRDs/RBAC after a zero-policy dependency check; Packer was absent | deletion is irreversible and is maintenance evidence, not Sprint 2 acceptance |
 | Sprint 2 retained-infrastructure adoption | A/D | 1122 verified | application run `sprint2-application-1122ef6e-0022` retained all named infrastructure and reconciled the application image identity without destructive reset | retained infrastructure is not dual-runtime E3 evidence |
 | Sprint 2 destructive reset | A/D | deferred maintenance path | cluster-bound confirmation and destructive report remain isolated behind `demo reset` | explicitly excluded from this delivery and must not be used for Sprint 2 deployment |
 
