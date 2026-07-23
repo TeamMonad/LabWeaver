@@ -7,16 +7,17 @@ identity. Historical Issue evidence is not a current completion claim.
 
 - Local fixed-command Build Executor, persistent fences and digest/Trivy
   contracts are implemented.
-- The 3a9 package was built and validated against retained BuildKit/Harbor/Trivy;
-  application adoption run `sprint2-application-3a9ac6c1-2315` published seven
-  digest-bound images and reconciled the retained target without destructive
-  reset.
+- The `1122ef6e` package was built and validated against retained
+  BuildKit/Harbor/Trivy; application adoption run
+  `sprint2-application-1122ef6e-0022` reconciled the retained target without
+  destructive reset.
 - Blocker: a fresh course build using a newly uploaded context currently
-  terminates with `LW_AGENT_BUILD_REJECTED` before publication. The retained
-  older context object was removed by its normal retention lifecycle, so it is
-  not a valid fallback. The executor currently redacts the provider's exact
-  object/validation cause from the machine-readable status and needs a focused
-  diagnostic fix before another replay.
+  terminates with `LW_AGENT_BUILD_REJECTED` before publication. The object is
+  present in MinIO with the expected immutable version, size and media type,
+  but the build worker's exact S3 `GetObject` request fails as a dispatch
+  failure. The code now emits endpoint/bucket/key/version plus a sanitized
+  transport source for the next connected replay; it never logs credentials or
+  bypasses verification.
 - Exit: duplicate/reordered command, cancel, deadline, scanner rejection,
   cleanup and private-pull negatives pass in the adopted environment.
 - Owner: B implementation review; D connected Verify; A release judgment.
@@ -107,17 +108,16 @@ admission boundary enforces the executor namespace/ServiceAccount fence.
   public claims passed the checked-in fail-closed credential validator; no
   retained stream or account was reset.
 - Resolved prerequisite: `k8s-cp1` and kube-apiserver recovered. Source
-  `3a9ac6c1a31040570a303b80309a23ce5ea635e1` then completed connected package
-  validation and two non-destructive application reconciliations; all ten
-  workloads were Ready with digest-only images.
+  `1122ef6e` completed connected package validation and a non-destructive
+  application reconciliation; retained infrastructure was not deleted or
+  rebuilt.
 - Resolved in source identity `3a9ac6c1`: the deployed Web/Keycloak path now
   reaches real teacher and student landing pages, and the teacher candidate
   approval Playwright flow passes against the adopted deployment.
 - Current blocker: a current Container release cannot be published or started
-  from retained candidate data because Trivy evidence is stale; a new course
-  build currently fails closed with `LW_AGENT_BUILD_REJECTED` and must be
-  diagnosed without bypassing the gate.
-- Exit: repair the build/object diagnostic root cause, publish a fresh digest
+  until the S3 dispatch failure is repaired without bypassing immutable object
+  verification.
+- Exit: repair the build/object transport root cause, publish a fresh digest
   with valid Trivy evidence, then complete the Container replay without reset
   or deleting retained infrastructure.
 - Owner: A BFF/adoption execution; C frontend review; D independent Verify.
