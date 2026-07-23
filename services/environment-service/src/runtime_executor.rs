@@ -474,6 +474,7 @@ impl KubernetesContainerExecutor {
         for resource in &plan.resources {
             validate_kubevirt_resource(plan, resource)?;
             let url = self.kubevirt_resource_url(resource)?;
+            let api_path = url.path().to_owned();
             let response = self
                 .authorized(
                     self.client
@@ -484,8 +485,34 @@ impl KubernetesContainerExecutor {
                 )
                 .send()
                 .await
-                .map_err(|_| unavailable())?;
-            accept_mutation(response.status())?;
+                .map_err(|error| {
+                    tracing::warn!(
+                        event = "environment.kubevirt_executor.kubernetes_request_failed",
+                        diagnostic = "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
+                        phase = "apply",
+                        environment_id = %plan.environment_id,
+                        resource_kind = %resource.kind,
+                        resource_name = %resource.name,
+                        api_path,
+                        error = %error
+                    );
+                    unavailable()
+                })?;
+            let status = response.status();
+            if !status.is_success() {
+                let failure = status_failure(status);
+                tracing::warn!(
+                    event = "environment.kubevirt_executor.kubernetes_response_rejected",
+                    diagnostic = ?failure.code,
+                    phase = "apply",
+                    environment_id = %plan.environment_id,
+                    resource_kind = %resource.kind,
+                    resource_name = %resource.name,
+                    api_path,
+                    status = status.as_u16()
+                );
+                return Err(failure);
+            }
         }
         Ok(())
     }

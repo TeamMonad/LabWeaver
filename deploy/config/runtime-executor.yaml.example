@@ -24,7 +24,7 @@ executor:
   apiServer: "https://kubernetes.default.svc/"
   bearerTokenFile: "/var/run/secrets/kubernetes.io/serviceaccount/token"
   clusterCaFile: "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-  requestTimeoutMilliseconds: 10000
+  requestTimeoutMilliseconds: 30000
   cleanupPollMilliseconds: 500
   cleanupRetentionSeconds: 86400
   sshHandshakeTimeoutMilliseconds: 5000
