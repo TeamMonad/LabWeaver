@@ -597,6 +597,28 @@ impl KubernetesContainerExecutor {
         })
     }
 
+    async fn wait_kubevirt_running(
+        &self,
+        fence: &KubeVirtBackendFence,
+        plan: &KubeVirtResourcePlan,
+    ) -> Result<KubeVirtRunningObservation, ProviderFailure> {
+        loop {
+            match self.observe_kubevirt_running(fence, plan).await {
+                Ok(observation) => return Ok(observation),
+                Err(error)
+                    if error.code == ProviderFailureCode::Unavailable
+                        && timestamp()?.get() < fence.deadline_at.get() =>
+                {
+                    tokio::time::sleep(Duration::from_millis(
+                        self.configuration.cleanup_poll_milliseconds,
+                    ))
+                    .await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     async fn observe_kubevirt_stopped(
         &self,
         fence: &KubeVirtBackendFence,
@@ -975,7 +997,7 @@ impl KubeVirtExecutorBackend for KubernetesContainerExecutor {
         let result = match request {
             KubeVirtExecutorRequest::Apply { plan } => async {
                 self.apply_kubevirt_plan(plan).await?;
-                self.observe_kubevirt_running(fence, plan).await
+                self.wait_kubevirt_running(fence, plan).await
             }
             .await
             .map(|observation| KubeVirtExecutorResponse::Running {
@@ -991,7 +1013,7 @@ impl KubeVirtExecutorBackend for KubernetesContainerExecutor {
                 }),
             KubeVirtExecutorRequest::Start { plan } => async {
                 self.kubevirt_subresource(fence, plan, "start").await?;
-                self.observe_kubevirt_running(fence, plan).await
+                self.wait_kubevirt_running(fence, plan).await
             }
             .await
             .map(|observation| KubeVirtExecutorResponse::Running {
@@ -1022,7 +1044,7 @@ impl KubeVirtExecutorBackend for KubernetesContainerExecutor {
             }),
             KubeVirtExecutorRequest::Restart { plan } => async {
                 self.kubevirt_subresource(fence, plan, "restart").await?;
-                self.observe_kubevirt_running(fence, plan).await
+                self.wait_kubevirt_running(fence, plan).await
             }
             .await
             .map(|observation| KubeVirtExecutorResponse::Running {
