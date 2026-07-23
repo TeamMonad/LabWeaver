@@ -372,6 +372,7 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
                     object_key = %key,
                     object_version = %version,
                     error_class = %error_class,
+                    error_source = ?std::error::Error::source(&error).map(ToString::to_string),
                     service_error_code = ?error.as_service_error().and_then(|service| service.code()),
                 );
                 return Err(ObjectStoreError::ObjectUnavailable);
