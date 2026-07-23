@@ -8,6 +8,7 @@ use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::{Builder as S3ConfigBuilder, Region};
+use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::{ByteStream, DateTime};
 use aws_sdk_s3::types::ObjectLockMode;
@@ -347,7 +348,7 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
         if version.trim().is_empty() || expected_size == 0 || media_type.trim().is_empty() {
             return Err(ObjectStoreError::ObjectIdentityInvalid);
         }
-        let response = self
+        let response = match self
             .client
             .get_object()
             .bucket(&self.config.bucket)
@@ -355,7 +356,20 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
             .version_id(version)
             .send()
             .await
-            .map_err(|_| ObjectStoreError::ObjectUnavailable)?;
+        {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(
+                    event = "artifact_store.get_object_failed",
+                    endpoint = %self.config.endpoint,
+                    bucket = %self.config.bucket,
+                    object_key = %key,
+                    object_version = %version,
+                    service_error_code = ?error.as_service_error().and_then(|service| service.code()),
+                );
+                return Err(ObjectStoreError::ObjectUnavailable);
+            }
+        };
         let observed_size = response
             .content_length()
             .and_then(|observed| u64::try_from(observed).ok());
@@ -369,13 +383,19 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
         {
             return Err(ObjectStoreError::ObjectIdentityMismatch);
         }
-        let body = response
-            .body
-            .collect()
-            .await
-            .map_err(|_| ObjectStoreError::ObjectUnavailable)?
-            .into_bytes()
-            .to_vec();
+        let body = match response.body.collect().await {
+            Ok(body) => body.into_bytes().to_vec(),
+            Err(_) => {
+                tracing::warn!(
+                    event = "artifact_store.get_object_body_failed",
+                    endpoint = %self.config.endpoint,
+                    bucket = %self.config.bucket,
+                    object_key = %key,
+                    object_version = %version,
+                );
+                return Err(ObjectStoreError::ObjectUnavailable);
+            }
+        };
         if u64::try_from(body.len()).ok() != Some(expected_size)
             || Sha256Digest::of_bytes(&body) != expected_sha256
         {
