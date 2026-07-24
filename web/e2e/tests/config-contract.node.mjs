@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createPlaywrightConfig } from '../../playwright.config.mjs'
+import { parseDemoSlowMo } from '../config/demo.mjs'
 import { PROJECT_NAMES, REQUIREMENTS_BASELINE, ROLE_PROJECTS_BY_NAME } from '../config/role-projects.mjs'
 import { buildReport, validateConfiguration } from '../../scripts/verify-config.mjs'
 
@@ -89,5 +90,29 @@ test('external web-server mode is explicit and never starts a local preview fall
     else process.env.LABWEAVER_EXTERNAL_WEB_SERVER = previousExternal
     if (previousBaseUrl === undefined) delete process.env.LABWEAVER_BASE_URL
     else process.env.LABWEAVER_BASE_URL = previousBaseUrl
+  }
+})
+
+test('demo pacing is explicit, bounded and isolated from normal browser gates', () => {
+  assert.equal(parseDemoSlowMo(undefined), 0)
+  assert.equal(parseDemoSlowMo(''), 0)
+  assert.equal(parseDemoSlowMo('1000'), 1000)
+  assert.throws(() => parseDemoSlowMo('-1'), /PW_DEMO_SLOW_MO_INVALID/)
+  assert.throws(() => parseDemoSlowMo('5001'), /PW_DEMO_SLOW_MO_INVALID/)
+  assert.throws(() => parseDemoSlowMo('one second'), /PW_DEMO_SLOW_MO_INVALID/)
+
+  const previousSlowMo = process.env.LABWEAVER_DEMO_SLOW_MO_MS
+  try {
+    delete process.env.LABWEAVER_DEMO_SLOW_MO_MS
+    assert.equal(createPlaywrightConfig({ ci: false }).use.launchOptions, undefined)
+
+    process.env.LABWEAVER_DEMO_SLOW_MO_MS = '1000'
+    assert.deepEqual(
+      createPlaywrightConfig({ ci: false }).use.launchOptions,
+      { slowMo: 1000 },
+    )
+  } finally {
+    if (previousSlowMo === undefined) delete process.env.LABWEAVER_DEMO_SLOW_MO_MS
+    else process.env.LABWEAVER_DEMO_SLOW_MO_MS = previousSlowMo
   }
 })

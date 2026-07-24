@@ -1,4 +1,5 @@
 import { defineConfig, devices } from '@playwright/test'
+import { parseDemoSlowMo } from './e2e/config/demo.mjs'
 import { ROLE_PROJECTS } from './e2e/config/role-projects.mjs'
 import { resolveEvidenceMetadata } from './e2e/evidence.mjs'
 
@@ -18,6 +19,7 @@ function parseExternalWebServer(raw) {
 
 export function createPlaywrightConfig({ ci = Boolean(process.env.CI) } = {}) {
   const externalWebServer = parseExternalWebServer(process.env.LABWEAVER_EXTERNAL_WEB_SERVER)
+  const demoSlowMo = parseDemoSlowMo(process.env.LABWEAVER_DEMO_SLOW_MO_MS)
   const projects = ROLE_PROJECTS.map((project) => {
     const base = {
       name: project.name,
@@ -68,6 +70,7 @@ export function createPlaywrightConfig({ ci = Boolean(process.env.CI) } = {}) {
       video: 'retain-on-failure',
       actionTimeout: 10_000,
       navigationTimeout: 15_000,
+      ...(demoSlowMo > 0 ? { launchOptions: { slowMo: demoSlowMo } } : {}),
     },
     expect: {
       timeout: 10_000,

@@ -1,19 +1,10 @@
 import { expect, test } from '@playwright/test'
 import { readFile, stat } from 'node:fs/promises'
+import { parseDemoSlowMo } from '../config/demo.mjs'
 
 const TERMINAL_PATH = '/student/environments'
 const WRITE_ACK = 'LW_DEMO_WRITE_ACK'
 const RECONNECT_ACK = 'LW_DEMO_RECONNECT_ACK'
-
-function demoSlowMo() {
-  const raw = process.env.LABWEAVER_DEMO_SLOW_MO_MS?.trim()
-  if (!raw) return 0
-  const value = Number(raw)
-  if (!Number.isSafeInteger(value) || value < 0 || value > 5_000) {
-    throw new Error('PW_TERMINAL_DEMO_SLOW_MO_INVALID')
-  }
-  return value
-}
 
 test.use({
   storageState: 'e2e/fixtures/empty.json',
@@ -23,7 +14,7 @@ test.use({
   screenshot: 'off',
   video: 'off',
   launchOptions: {
-    slowMo: demoSlowMo(),
+    slowMo: parseDemoSlowMo(process.env.LABWEAVER_DEMO_SLOW_MO_MS),
     args: [
       '--no-proxy-server',
       '--host-resolver-rules=MAP portal.labweaver.internal 127.0.0.1, MAP keycloak.labweaver.internal 127.0.0.1',

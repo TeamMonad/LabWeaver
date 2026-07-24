@@ -164,6 +164,7 @@ test bodies, Fixture identity and reports remain unchanged.
 ```sh
 export LABWEAVER_DATA_MODE=fixture
 export VITE_DATA_MODE=fixture
+export LABWEAVER_DEMO_SLOW_MO_MS=1000
 pnpm --dir web exec playwright test e2e/teacher/material-upload.fixture.spec.mjs --config=playwright.config.mjs --project=teacher --headed --workers=1 --grep 'material upload package, agent run succeeds' && \
 pnpm --dir web exec playwright test e2e/teacher/candidate-approval.fixture.spec.mjs --config=playwright.config.mjs --project=teacher --headed --workers=1 --grep 'candidate approval flow publishes release' && \
 pnpm --dir web exec playwright test e2e/student/environment-console.fixture.spec.mjs --config=playwright.config.mjs --project=student --headed --workers=1 --grep 'environment console create, lifecycle, grant and revoke' && \
@@ -174,11 +175,17 @@ pnpm --dir web exec playwright test e2e/student/environment-runtime-access.fixtu
 export LABWEAVER_DATA_MODE=fixture
 export LABWEAVER_EXTERNAL_WEB_SERVER=true
 export LABWEAVER_BASE_URL=http://localhost:4173
+export LABWEAVER_DEMO_SLOW_MO_MS=1000
 pnpm --dir web exec playwright test e2e/teacher/material-upload.fixture.spec.mjs --config=playwright.config.mjs --project=teacher --headed --workers=1 --grep 'material upload package, agent run succeeds' && \
 pnpm --dir web exec playwright test e2e/teacher/candidate-approval.fixture.spec.mjs --config=playwright.config.mjs --project=teacher --headed --workers=1 --grep 'candidate approval flow publishes release' && \
 pnpm --dir web exec playwright test e2e/student/environment-console.fixture.spec.mjs --config=playwright.config.mjs --project=student --headed --workers=1 --grep 'environment console create, lifecycle, grant and revoke' && \
 pnpm --dir web exec playwright test e2e/student/environment-runtime-access.fixture.spec.mjs --config=playwright.config.mjs --project=student --headed --workers=1 --grep 'student container HTTPS entry'
 ```
+
+`LABWEAVER_DEMO_SLOW_MO_MS=1000` only paces headed presentation actions.
+It is bounded to 0–5000 ms, fails closed on invalid input, and is omitted from
+normal Fixture regression and live Release Gate runs. It does not replace
+observable-state assertions with fixed sleeps.
 
 After either replay, run the complete existing Fixture suite for the report,
 HTML result, and retained failure artifacts:
