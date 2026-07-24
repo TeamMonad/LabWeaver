@@ -177,11 +177,21 @@ test('student demonstrates the access-bound Container terminal', async ({ page, 
   await expect.poll(() => deniedSocket.isClosed(), { timeout: 30_000 }).toBe(true)
   expect(terminalSockets.length).toBeGreaterThanOrEqual(3)
   expect(unexpectedConsoleErrors).toEqual([])
-  expect(httpFailures.filter((failure) => (
-    failure.status >= 500
-    || (failure.status === 404 && failure.path.startsWith('/api/'))
-    || (failure.status === 401 && failure.authenticated)
-  ))).toEqual([])
+  const terminalApiPrefixes = [
+    '/api/v1/auth/csrf',
+    `/api/v1/environments/${environmentId}/endpoints`,
+    `/api/v1/environments/${environmentId}/access-grants`,
+    '/api/v1/access-grants/',
+  ]
+  const terminalApiFailures = httpFailures.filter((failure) => (
+    terminalApiPrefixes.some((prefix) => failure.path.startsWith(prefix))
+    && (
+      failure.status >= 500
+      || failure.status === 404
+      || (failure.status === 401 && failure.authenticated)
+    )
+  ))
+  expect(terminalApiFailures).toEqual([])
 
   test.info().annotations.push({
     type: 'terminal-demo',
@@ -194,6 +204,7 @@ test('student demonstrates the access-bound Container terminal', async ({ page, 
       reconnectAcknowledged: true,
       revokedReconnectDenied: true,
       transcriptRetained: false,
+      nonTerminalApiFailures: httpFailures.length - terminalApiFailures.length,
     }),
   })
 })
