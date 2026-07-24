@@ -359,6 +359,13 @@ pub fn next_action(
             Operation::Create | Operation::Retry | Operation::Recover | Operation::Reset,
             State::Building,
         ) => Ok(ReconcileAction::Build),
+        (Operation::Retry | Operation::Recover, State::Provisioning)
+            if instance.operation.retry_from_phase == Some(State::Stopped)
+                && instance.desired_state
+                    == contracts::environment::DesiredEnvironmentState::Running =>
+        {
+            Ok(ReconcileAction::Start)
+        }
         (Operation::Create | Operation::Retry | Operation::Recover, State::Provisioning) => {
             Ok(ReconcileAction::Provision)
         }

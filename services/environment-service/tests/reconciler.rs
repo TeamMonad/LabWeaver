@@ -197,6 +197,11 @@ fn retry_and_recover_resume_the_persisted_failed_phase() -> Result<(), Box<dyn s
             ReconcileAction::Provision,
         ),
         (
+            ObservedEnvironmentState::Stopped,
+            ObservedEnvironmentState::Provisioning,
+            ReconcileAction::Start,
+        ),
+        (
             ObservedEnvironmentState::Stopping,
             ObservedEnvironmentState::Stopping,
             ReconcileAction::Stop,
