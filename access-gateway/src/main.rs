@@ -399,10 +399,7 @@ fn parse_connect_command(value: &str) -> Result<&str, GatewayError> {
 fn validate_connection_id(value: &str) -> Result<(), GatewayError> {
     (value.starts_with("ssh-")
         && value.len() == 68
-        && value
-            .bytes()
-            .skip(4)
-            .all(|byte| byte.is_ascii_hexdigit()))
+        && value.bytes().skip(4).all(|byte| byte.is_ascii_hexdigit()))
     .then_some(())
     .ok_or(GatewayError::InvalidInput)
 }
