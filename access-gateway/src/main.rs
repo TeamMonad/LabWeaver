@@ -401,7 +401,8 @@ fn validate_connection_id(value: &str) -> Result<(), GatewayError> {
         && value.len() == 68
         && value
             .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-'))
+            .skip(4)
+            .all(|byte| byte.is_ascii_hexdigit()))
     .then_some(())
     .ok_or(GatewayError::InvalidInput)
 }
@@ -439,6 +440,15 @@ mod tests {
         ] {
             assert!(parse_connect_command(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn connection_id_requires_the_fixed_prefix_and_sha256_hex() {
+        let valid = format!("ssh-{}", "a5".repeat(32));
+        assert!(validate_connection_id(&valid).is_ok());
+        assert!(validate_connection_id(&format!("ssh-{}", "z5".repeat(32))).is_err());
+        assert!(validate_connection_id(&format!("http-{}", "a5".repeat(32))).is_err());
+        assert!(validate_connection_id("ssh-deadbeef").is_err());
     }
 
     #[test]
