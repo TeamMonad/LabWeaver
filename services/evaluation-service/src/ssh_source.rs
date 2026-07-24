@@ -389,7 +389,16 @@ impl client::Handler for HostKeyVerifier {
         &mut self,
         server_public_key: &russh::keys::ssh_key::PublicKey,
     ) -> Result<bool, Self::Error> {
-        Ok(host_key_identity(server_public_key) == self.expected)
+        let observed = host_key_identity(server_public_key);
+        let matches = observed == self.expected;
+        if !matches {
+            tracing::warn!(
+                event = "evaluation.collector.ssh_host_key_mismatch",
+                expected_host_key_sha256 = %self.expected,
+                observed_host_key_sha256 = %observed,
+            );
+        }
+        Ok(matches)
     }
 }
 
