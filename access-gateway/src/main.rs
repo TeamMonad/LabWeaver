@@ -109,12 +109,10 @@ async fn run() -> Result<(), GatewayError> {
     match args.next().as_deref() {
         Some("authorized-keys") => {
             let local_user = args.next().ok_or(GatewayError::InvalidInput)?;
-            let key_type = args.next().ok_or(GatewayError::InvalidInput)?;
-            let key_blob = args.next().ok_or(GatewayError::InvalidInput)?;
+            let key = args.next().ok_or(GatewayError::InvalidInput)?;
             if args.next().is_some() {
                 return Err(GatewayError::InvalidInput);
             }
-            let key = presented_key(&key_type, &key_blob)?;
             let connection_id = connection_id()?;
             authorized_keys(&GatewayConfig::load()?, &local_user, &key, &connection_id).await
         }
@@ -144,14 +142,6 @@ async fn run() -> Result<(), GatewayError> {
         }
         _ => Err(GatewayError::InvalidInput),
     }
-}
-
-fn presented_key(key_type: &str, key_blob: &str) -> Result<String, GatewayError> {
-    let key = format!("{key_type} {key_blob}");
-    PublicKey::from_openssh(&key)
-        .map_err(|_| GatewayError::InvalidInput)?
-        .to_openssh()
-        .map_err(|_| GatewayError::InvalidInput)
 }
 
 async fn authorized_keys(
@@ -435,19 +425,6 @@ mod tests {
         ] {
             assert!(parse_connect_command(invalid).is_err(), "{invalid}");
         }
-    }
-
-    #[test]
-    fn authorized_keys_tokens_form_a_canonical_openssh_key() -> Result<(), GatewayError> {
-        let key = presented_key(
-            "ssh-ed25519",
-            "AAAAC3NzaC1lZDI1NTE5AAAAIOkgQv9Rnen5ObQbJHzKhZzqePM+0R11u7A8G3BIXMMG",
-        )?;
-        assert_eq!(
-            key,
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOkgQv9Rnen5ObQbJHzKhZzqePM+0R11u7A8G3BIXMMG"
-        );
-        Ok(())
     }
 
     #[test]
