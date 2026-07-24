@@ -568,7 +568,11 @@ async function freeze(data: EnvironmentInstanceSchema) {
       break
     }
     const problem = extractProblemDetails(frozen.error)
-    if (problem && !problem.retryable) {
+    if (
+      problem &&
+      problem.diagnosticCode !== 'LW_COLLECT_SUBMISSION_NOT_FOUND' &&
+      !problem.retryable
+    ) {
       freezeState.value = {
         kind: 'error',
         diagnostic: makeDiagnostic(
