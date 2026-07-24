@@ -80,7 +80,7 @@ export LABWEAVER_EXTERNAL_WEB_SERVER=true
 export LABWEAVER_BASE_URL=https://portal.labweaver.internal
 export LABWEAVER_E2E_CONTAINER_ENVIRONMENT_ID=00000000-0000-7000-8000-000000000401
 
-pnpm --dir web test:e2e:terminal-demo -- --headed
+pnpm --dir web test:e2e:terminal-demo:headed
 ```
 
 演示依次执行：
