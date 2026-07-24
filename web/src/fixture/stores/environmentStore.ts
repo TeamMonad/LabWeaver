@@ -5,6 +5,8 @@ import type {
   EnvironmentOperationAcceptedSchema,
   EnvironmentOperationKind,
   EnvironmentSummary,
+  FrozenSubmissionSchema,
+  OperationAccepted,
   ObservedEnvironmentState,
 } from '@/generated/contracts'
 import { nowIso } from '../utils/clock'
@@ -30,6 +32,8 @@ interface StoredEnvironment {
 
 const environments = new Map<string, StoredEnvironment>()
 const idempotencyMap = new Map<string, EnvironmentOperationAcceptedSchema>()
+const frozenSubmissions = new Map<string, FrozenSubmissionSchema>()
+const freezeIdempotencyMap = new Map<string, OperationAccepted>()
 
 const RELEASE_ID = 'release-fixture-001'
 const PROVIDER_BINDING = 'fixture-capacity-provider'
@@ -37,6 +41,8 @@ const PROVIDER_BINDING = 'fixture-capacity-provider'
 export function seedEnvironments(): string[] {
   environments.clear()
   idempotencyMap.clear()
+  frozenSubmissions.clear()
+  freezeIdempotencyMap.clear()
 
   const ready = createEnvironmentInternal({
     courseId: 'course-101',
@@ -356,8 +362,8 @@ export function freezeEnvironment(
   environmentId: string,
   ifMatch: string,
   idempotencyKey: string,
-): EnvironmentOperationAcceptedSchema | null {
-  const cached = idempotencyMap.get(idempotencyKey)
+): OperationAccepted | null {
+  const cached = freezeIdempotencyMap.get(idempotencyKey)
   if (cached) return cached
 
   const stored = environments.get(environmentId)
@@ -374,13 +380,15 @@ export function freezeEnvironment(
   appendEnvironmentChanged(stored.instance)
   appendOperationChanged(stored.instance, op)
 
-  const accepted: EnvironmentOperationAcceptedSchema = {
-    environmentId,
+  // The production status URL is parsed as a UUIDv7 identity by the browser.
+  // Keep the fixture on that same contract instead of using a readable prefix.
+  const submissionId = nextUuid7()
+  const accepted: OperationAccepted = {
     operationId: op.operationId,
     revision: stored.instance.revision,
-    statusUrl: `/api/v1/environments/${environmentId}/operations/${op.operationId}`,
+    statusUrl: `/api/v1/frozen-submissions/${submissionId}`,
   }
-  idempotencyMap.set(idempotencyKey, accepted)
+  freezeIdempotencyMap.set(idempotencyKey, accepted)
   transitionOperationToCompleted(stored, op, 'stopped')
 
   // Freeze evidence: the frozen submission is archived to the object store with
@@ -389,7 +397,7 @@ export function freezeEnvironment(
   const instance = stored.instance as EnvironmentInstanceSchema & {
     freezeEvidence?: EnvironmentInstanceSchema['cleanupEvidence']
   }
-  instance.freezeEvidence = {
+  const object = {
     artifactId: nextUuid7('artifact'),
     mediaType: 'application/vnd.labweaver.submission+tar',
     objectVersion: `freeze-${op.operationId}`,
@@ -397,7 +405,48 @@ export function freezeEnvironment(
     sizeBytes: 4096,
     storeBinding: 'fixture-store',
   }
+  instance.freezeEvidence = object
+  frozenSubmissions.set(submissionId, {
+    id: submissionId,
+    actorId: stored.instance.ownerId,
+    agentRunId: nextUuid7('agent-run'),
+    attempt: 1,
+    courseId: stored.instance.courseId,
+    environment: {
+      environmentId,
+      environmentRevision: stored.instance.revision,
+      releaseId: stored.instance.releaseId,
+      releaseVersion: stored.instance.releaseVersion,
+      runtimeArtifactSha256: 'e'.repeat(64),
+      runtimeKind: stored.instance.runtimeKind,
+    },
+    files: [
+      {
+        mediaType: 'text/markdown',
+        path: 'README.md',
+        sha256: 'd'.repeat(64),
+        sizeBytes: 128,
+      },
+    ],
+    frozenAt: nowIso(),
+    manifestRevision: 1,
+    manifestSha256: 'c'.repeat(64),
+    object,
+    retention: {
+      class: 'student_submission',
+      disposition: 'retain_sanitized_receipt',
+      policyId: nextUuid7('policy'),
+      policyRevision: 1,
+      retainUntil: nowIso(),
+    },
+    submissionManifestSha256: 'b'.repeat(64),
+    systemFacts: {},
+  })
   return accepted
+}
+
+export function getFrozenSubmission(submissionId: string): FrozenSubmissionSchema | undefined {
+  return frozenSubmissions.get(submissionId)
 }
 
 function transitionOperationToCompleted(
