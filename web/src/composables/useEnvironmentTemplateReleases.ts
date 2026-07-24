@@ -22,14 +22,14 @@ export function useEnvironmentTemplateReleases(courseId: Ref<string | undefined>
 
     releases.value = { kind: 'loading', message: '加载已发布版本…' }
     const result = await listEnvironmentTemplateReleases({ path: { courseId: id } })
-    if (result.error) {
+    if (result.error || !result.data) {
       const problem = extractProblemDetails(result.error)
       releases.value = {
         kind: 'error',
         diagnostic: makeDiagnostic(
-          problem?.diagnosticCode ?? 'RELEASE_LIST_FAILED',
-          problem?.detail ?? '加载环境模板版本失败',
-          problem?.retryable ?? true,
+          problem?.diagnosticCode ?? (result.error ? 'RELEASE_LIST_FAILED' : 'RELEASE_LIST_RESPONSE_INVALID'),
+          problem?.detail ?? (result.error ? '加载环境模板版本失败' : '环境模板版本响应缺少数据。'),
+          problem?.retryable ?? Boolean(result.error),
         ),
       }
       return

@@ -14,14 +14,14 @@ export function useEnvironmentOperations(environmentId: Ref<string | undefined>)
     }
     operations.value = { kind: 'loading', message: '加载环境操作历史…' }
     const result = await listEnvironmentOperations({ path: { environmentId: id } })
-    if (result.error) {
+    if (result.error || !result.data) {
       const problem = extractProblemDetails(result.error)
       operations.value = {
         kind: 'error',
         diagnostic: makeDiagnostic(
-          problem?.diagnosticCode ?? 'OPERATION_LIST_FAILED',
-          problem?.detail ?? '加载环境操作历史失败',
-          problem?.retryable ?? true,
+          problem?.diagnosticCode ?? (result.error ? 'OPERATION_LIST_FAILED' : 'OPERATION_LIST_RESPONSE_INVALID'),
+          problem?.detail ?? (result.error ? '加载环境操作历史失败' : '环境操作历史响应缺少数据。'),
+          problem?.retryable ?? Boolean(result.error),
         ),
       }
       return

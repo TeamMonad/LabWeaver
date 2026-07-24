@@ -18,14 +18,14 @@ export function useEnvironmentInstance(environmentId: Ref<string | undefined>) {
       instance.value = { kind: 'loading', message: '加载环境状态…' }
     }
     const result = await getEnvironment({ path: { environmentId: id } })
-    if (result.error) {
+    if (result.error || !result.data) {
       const problem = extractProblemDetails(result.error)
       instance.value = {
         kind: 'error',
         diagnostic: makeDiagnostic(
-          problem?.diagnosticCode ?? 'ENVIRONMENT_LOAD_FAILED',
-          problem?.detail ?? '加载环境状态失败',
-          problem?.retryable ?? true,
+          problem?.diagnosticCode ?? (result.error ? 'ENVIRONMENT_LOAD_FAILED' : 'ENVIRONMENT_RESPONSE_INVALID'),
+          problem?.detail ?? (result.error ? '加载环境状态失败' : '环境状态响应缺少数据。'),
+          problem?.retryable ?? Boolean(result.error),
         ),
       }
       polling.value = false
