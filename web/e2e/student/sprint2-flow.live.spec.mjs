@@ -11,7 +11,8 @@ async function loadEnvironment(page, id, runtimeLabel) {
   await page.getByRole('button', { name: '加载', exact: true }).click()
   await expect(page.locator('.env-id')).toHaveText(id)
   await expect(page.locator('.env-runtime')).toHaveText(runtimeLabel)
-  await expect(page.getByRole('table', { name: '环境入口' })).toBeVisible()
+  await expect(page.getByRole('region', { name: '环境入口' }).getByRole('table')).toBeVisible()
+  await page.getByRole('button', { name: '冻结提交', exact: true }).click()
   await expect(page.getByText('Object Version', { exact: true })).toBeVisible()
   await expect(page.getByText('SHA-256', { exact: true })).toBeVisible()
 }

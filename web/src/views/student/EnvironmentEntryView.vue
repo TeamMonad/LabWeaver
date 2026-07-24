@@ -344,7 +344,7 @@ import { useEnvironmentInstance } from '@/composables/useEnvironmentInstance'
 import { useEnvironmentLifecycle } from '@/composables/useEnvironmentLifecycle'
 import { useEnvironmentAccess } from '@/composables/useEnvironmentAccess'
 import { useEnvironmentOperations } from '@/composables/useEnvironmentOperations'
-import { freezeSubmission } from '@/generated/contracts'
+import { freezeSubmission, getFrozenSubmission } from '@/generated/contracts'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import CopyButton from '@/components/common/CopyButton.vue'
 import DataTable from '@/components/common/DataTable.vue'
@@ -545,7 +545,55 @@ async function freeze(data: EnvironmentInstanceSchema) {
     return
   }
   freezeState.value = { kind: 'success', data: result.data }
+  const submissionId = result.data.statusUrl.match(
+    /^\/api\/v1\/frozen-submissions\/([0-9a-f-]{36})$/,
+  )?.[1]
+  if (!submissionId) {
+    freezeState.value = {
+      kind: 'error',
+      diagnostic: makeDiagnostic(
+        'FREEZE_STATUS_IDENTITY_INVALID',
+        '冻结提交返回了无法验证的状态地址',
+        false,
+      ),
+    }
+    freezeDiagnostic.value = freezeState.value.diagnostic
+    return
+  }
+  let frozenObject: EnvironmentInstanceWithFreeze['freezeEvidence']
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const frozen = await getFrozenSubmission({ path: { submissionId } })
+    if (frozen.data) {
+      frozenObject = frozen.data.object
+      break
+    }
+    const problem = extractProblemDetails(frozen.error)
+    if (problem && !problem.retryable) {
+      freezeState.value = {
+        kind: 'error',
+        diagnostic: makeDiagnostic(
+          problem.diagnosticCode ?? 'FREEZE_READBACK_FAILED',
+          problem.detail ?? '冻结提交读取失败',
+          false,
+        ),
+      }
+      freezeDiagnostic.value = freezeState.value.diagnostic
+      return
+    }
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 1000))
+  }
+  if (!frozenObject) {
+    freezeState.value = {
+      kind: 'error',
+      diagnostic: makeDiagnostic('FREEZE_READBACK_TIMEOUT', '冻结提交读取超时', true),
+    }
+    freezeDiagnostic.value = freezeState.value.diagnostic
+    return
+  }
   await env.load()
+  if (env.instance.kind === 'success' && env.instance.data.id === data.id) {
+    ;(env.instance.data as EnvironmentInstanceWithFreeze).freezeEvidence = frozenObject
+  }
   await operations.load()
 }
 
