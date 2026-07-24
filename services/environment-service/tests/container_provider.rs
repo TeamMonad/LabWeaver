@@ -467,6 +467,12 @@ fn withdrawn_expired_or_rotated_release_is_rejected_before_apply() {
         provider.plan(&instance, &expired, ReconcileAction::Provision),
         Err(ReleaseProjectionError::EvidenceExpired)
     ));
+    provider
+        .plan(&instance, &expired, ReconcileAction::Start)
+        .expect("an existing immutable environment can resume after scan expiry");
+    provider
+        .plan(&instance, &expired, ReconcileAction::Observe)
+        .expect("an existing immutable environment remains observable after scan expiry");
 
     let mut withdrawn = resolved(projection.clone());
     withdrawn.withdrawn_at = Some(timestamp("2026-07-16T08:20:00.000Z"));
