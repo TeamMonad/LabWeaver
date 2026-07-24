@@ -36,6 +36,7 @@ RUN apk add --no-cache \
       openssh-server=9.9_p2-r0 \
     && adduser -D -H -s /sbin/nologin gateway-auth \
     && adduser -D -H -s /bin/sh gateway \
+    && passwd -d gateway \
     && addgroup gateway gateway-auth \
     && mkdir -p /run/sshd /etc/labweaver
 COPY --from=builder /out/labweaver-gateway /usr/local/bin/labweaver-gateway
