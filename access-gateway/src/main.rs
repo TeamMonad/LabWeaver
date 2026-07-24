@@ -414,7 +414,11 @@ fn shell_token(value: &str) -> Result<&str, GatewayError> {
 }
 
 fn now() -> Result<UtcTimestamp, GatewayError> {
-    UtcTimestamp::from_utc(OffsetDateTime::now_utc()).map_err(|_| GatewayError::Configuration)
+    let value = OffsetDateTime::now_utc();
+    let normalized = value
+        .replace_nanosecond((value.nanosecond() / 1_000_000) * 1_000_000)
+        .map_err(|_| GatewayError::Configuration)?;
+    UtcTimestamp::from_utc(normalized).map_err(|_| GatewayError::Configuration)
 }
 
 #[cfg(test)]
@@ -446,6 +450,13 @@ mod tests {
         assert!(validate_connection_id(&format!("ssh-{}", "z5".repeat(32))).is_err());
         assert!(validate_connection_id(&format!("http-{}", "a5".repeat(32))).is_err());
         assert!(validate_connection_id("ssh-deadbeef").is_err());
+    }
+
+    #[test]
+    fn gateway_timestamp_is_normalized_to_contract_milliseconds() -> Result<(), GatewayError> {
+        let observed = now()?;
+        assert_eq!(observed.get().nanosecond() % 1_000_000, 0);
+        Ok(())
     }
 
     #[test]
