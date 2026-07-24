@@ -28,6 +28,8 @@ enum GatewayError {
     Configuration,
     #[error("gateway input is invalid")]
     InvalidInput,
+    #[error("gateway input is invalid at {0}")]
+    InputStage(&'static str),
     #[error("access authority rejected or failed the request")]
     Authority,
     #[error("target session failed")]
@@ -108,12 +110,17 @@ async fn run() -> Result<(), GatewayError> {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
         Some("authorized-keys") => {
-            let local_user = args.next().ok_or(GatewayError::InvalidInput)?;
-            let key = args.next().ok_or(GatewayError::InvalidInput)?;
+            let local_user = args
+                .next()
+                .ok_or(GatewayError::InputStage("authorized_keys.local_user"))?;
+            let key = args
+                .next()
+                .ok_or(GatewayError::InputStage("authorized_keys.presented_key"))?;
             if args.next().is_some() {
-                return Err(GatewayError::InvalidInput);
+                return Err(GatewayError::InputStage("authorized_keys.extra_argument"));
             }
-            let connection_id = connection_id()?;
+            let connection_id = connection_id()
+                .map_err(|_| GatewayError::InputStage("authorized_keys.connection"))?;
             authorized_keys(&GatewayConfig::load()?, &local_user, &key, &connection_id).await
         }
         Some("force-command") => {
@@ -151,16 +158,19 @@ async fn authorized_keys(
     connection_id: &str,
 ) -> Result<(), GatewayError> {
     if local_user != "gateway" {
-        return Err(GatewayError::InvalidInput);
+        return Err(GatewayError::InputStage("authorized_keys.local_user"));
     }
-    validate_connection_id(connection_id)?;
-    let key = PublicKey::from_openssh(presented_key).map_err(|_| GatewayError::InvalidInput)?;
+    validate_connection_id(connection_id)
+        .map_err(|_| GatewayError::InputStage("authorized_keys.connection_id"))?;
+    let key = PublicKey::from_openssh(presented_key)
+        .map_err(|_| GatewayError::InputStage("authorized_keys.key_parse"))?;
     let request = SshAuthorizationRequest {
         presented_key_fingerprint_sha256: key.fingerprint(HashAlg::Sha256).to_string(),
         gateway_identity: config.gateway_identity.clone(),
         connection_id: connection_id.to_owned(),
-        source_address_hash: source_address_hash()?,
-        requested_at: now()?,
+        source_address_hash: source_address_hash()
+            .map_err(|_| GatewayError::InputStage("authorized_keys.source_address"))?,
+        requested_at: now().map_err(|_| GatewayError::InputStage("authorized_keys.timestamp"))?,
     };
     let response = config.post(AUTHORIZE_PATH, &request, None, None).await?;
     if response.status() != StatusCode::OK {
@@ -171,14 +181,18 @@ async fn authorized_keys(
         .await
         .map_err(|_| GatewayError::Authority)?;
     if authorization.normalized_authorized_key
-        != key.to_openssh().map_err(|_| GatewayError::InvalidInput)?
+        != key
+            .to_openssh()
+            .map_err(|_| GatewayError::InputStage("authorized_keys.key_serialize"))?
     {
         return Err(GatewayError::Authority);
     }
     println!(
         "restrict,command=\"/usr/local/bin/labweaver-gateway force-command {} {} {}\" {}",
-        shell_token(&authorization.authorization_id)?,
-        shell_token(&authorization.force_command_token)?,
+        shell_token(&authorization.authorization_id)
+            .map_err(|_| GatewayError::InputStage("authorized_keys.authorization_id"))?,
+        shell_token(&authorization.force_command_token)
+            .map_err(|_| GatewayError::InputStage("authorized_keys.force_command_token"))?,
         connection_id,
         authorization.normalized_authorized_key
     );
