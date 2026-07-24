@@ -26,6 +26,7 @@ RUN --network=none \
     --mount=type=cache,id=labweaver-gateway-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=labweaver-gateway-cargo-target,target=/src/target,sharing=locked \
     test -n "${SOURCE_COMMIT}" && test -n "${SOURCE_DATE_EPOCH}" && \
+    cargo clean --package access-gateway && \
     cargo build --release --locked --offline --package access-gateway && \
     install -D -m 0555 target/release/access-gateway /out/labweaver-gateway
 
