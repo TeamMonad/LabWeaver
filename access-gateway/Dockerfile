@@ -24,11 +24,12 @@ RUN --mount=type=cache,id=labweaver-gateway-cargo-registry,target=/usr/local/car
 RUN --network=none \
     --mount=type=cache,id=labweaver-gateway-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=labweaver-gateway-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=labweaver-gateway-cargo-target,target=/src/target,sharing=locked \
     test -n "${SOURCE_COMMIT}" && test -n "${SOURCE_DATE_EPOCH}" && \
-    cargo clean --package access-gateway && \
-    cargo build --release --locked --offline --package access-gateway && \
-    install -D -m 0555 target/release/access-gateway /out/labweaver-gateway
+    CARGO_TARGET_DIR=/tmp/labweaver-gateway-target \
+      cargo build --release --locked --offline --package access-gateway && \
+    install -D -m 0555 \
+      /tmp/labweaver-gateway-target/release/access-gateway \
+      /out/labweaver-gateway
 
 FROM ${GATEWAY_RUNTIME} AS runtime
 ARG SOURCE_COMMIT
