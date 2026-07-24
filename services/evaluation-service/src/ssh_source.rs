@@ -1,5 +1,6 @@
 //! SSH Collector transport restricted to the SFTP subsystem.
 
+use std::borrow::Cow;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -124,6 +125,10 @@ impl SshSnapshotSource {
             .map_err(|_| CollectError::SshCredentialInvalid)?;
         validate_certificate(&certificate, &config, now)?;
         let client_config = Arc::new(client::Config {
+            preferred: russh::Preferred {
+                key: Cow::Borrowed(&[russh::keys::Algorithm::Ed25519]),
+                ..russh::Preferred::default()
+            },
             inactivity_timeout: Some(config.operation_timeout),
             ..client::Config::default()
         });
