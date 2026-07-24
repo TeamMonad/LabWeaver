@@ -29,14 +29,14 @@ export function useEnvironmentAccess(
     }
     endpoints.value = { kind: 'loading', message: '加载环境入口…' }
     const result = await listEnvironmentEndpoints({ path: { environmentId: id } })
-    if (result.error) {
+    if (result.error || !result.data) {
       const problem = extractProblemDetails(result.error)
       endpoints.value = {
         kind: 'error',
         diagnostic: makeDiagnostic(
-          problem?.diagnosticCode ?? 'ENDPOINT_LIST_FAILED',
-          problem?.detail ?? '加载环境入口失败',
-          problem?.retryable ?? true,
+          problem?.diagnosticCode ?? (result.error ? 'ENDPOINT_LIST_FAILED' : 'ENDPOINT_LIST_RESPONSE_INVALID'),
+          problem?.detail ?? (result.error ? '加载环境入口失败' : '环境入口响应缺少数据。'),
+          problem?.retryable ?? Boolean(result.error),
         ),
       }
       return

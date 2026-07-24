@@ -53,6 +53,23 @@ afterEach(() => {
 })
 
 describe('useEnvironmentAccess', () => {
+  it('fails closed when endpoint discovery returns no data or typed error', async () => {
+    vi.mocked(listEnvironmentEndpoints).mockResolvedValue({} as never)
+    const access = useEnvironmentAccess(
+      ref('01900000-0000-7000-8000-000000000013'),
+      ref(1),
+      ref('01900000-0000-7000-8000-000000000012'),
+    )
+
+    await access.loadEndpoints()
+
+    expect(access.endpoints.kind).toBe('error')
+    if (access.endpoints.kind === 'error') {
+      expect(access.endpoints.diagnostic.code).toBe('ENDPOINT_LIST_RESPONSE_INVALID')
+      expect(access.endpoints.diagnostic.retryable).toBe(false)
+    }
+  })
+
   it('waits for the authoritative active grant before exposing a connect URL', async () => {
     vi.useFakeTimers()
     vi.mocked(listEnvironmentEndpoints).mockResolvedValue({
