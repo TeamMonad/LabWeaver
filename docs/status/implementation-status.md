@@ -26,70 +26,58 @@ the presence of this document.
 
 ## Current connected slice (2026-07-24)
 
-The deployed source identity remains `e062d34fc136e5868b5a3484bd670f36abc0a9af` on
-`release/sprint2`. Its seven-image package
-`pkg-demo-sprint2-e062d34fc136` passed connected validation and was applied by
-non-destructive run `sprint2-application-e062d34f-0001`; that adoption retained
-the existing PostgreSQL, NATS, MinIO, Harbor, Keycloak, Kubernetes, KubeVirt,
-Kyverno and Private Sigstore service bodies and deleted no infrastructure. On
-2026-07-24, a separate explicitly authorized maintenance action inventoried
-dependencies, found no Kyverno policies or active application references, and
-removed the deprecated Private Sigstore and Kyverno installations. Packer was
-absent. PostgreSQL, NATS, MinIO, Harbor, Keycloak, BuildKit, Kubernetes,
-KubeVirt and the two retained diagnostic environments were not changed. The
-adoption completed its application reconcile. The
-subsequent connected replay proved material upload, ECNU AgentRun, independent
-candidate generation/approval, BuildKit build, Trivy scan, digest publication
-and candidate-tag cleanup after adding the exact Harbor `tag:delete`
-permission. The same published digest then completed Container creation,
-course-scoped AccessGrant creation, immutable workspace freeze, stop/start and
-application-owned deletion. The live application reconcile also restored the
-Access NATS reply inbox, added the adopted API endpoint port, and aligned the
-freeze Worker with its PostgreSQL CA and Object-Lock bucket. These are
-connected runtime facts for the deployed package plus named live configuration
-reconciles; the pending source commit is not yet a same-identity Release Gate.
+The connected application deployment is bound to source
+`ec6587cbb1639451540aacdae1402f8002f4d20f`. Its seven-image package
+`pkg-demo-sprint2-ec6587cbb163` passed static and connected package validation
+and was applied twice by the non-destructive Ansible application run
+`deploy-sprint2-ec6587cb`; testflight run `testflight-sprint2-ec6587cb` passed.
+The adoption retained PostgreSQL, NATS, MinIO, Harbor, Keycloak, BuildKit,
+Kubernetes and KubeVirt service bodies. It did not reset domain data or claim
+the historical infrastructure deployment identity as current.
 
-The live application is currently a deliberately recorded mixed-identity
-diagnostic deployment: Access Service uses digest
-`sha256:fd51b8e88f3045ab3eb841ea5a7877aed761c4ea831a6fd532fb8cb5fc85d250`
-and Environment Service plus both runtime executors use digest
-`sha256:599bf1a14109a3e10707c1ba01fea3d7fdb7f516324b61afc31b59a5db63bd7f`;
-the remaining application workloads retain the `e062d34f` package images.
-These hotfixes passed a Critical-only Trivy gate and rollout readback, but they
-are not a same-source package and cannot upgrade the connected Container
-evidence to a Release Gate pass. At the Owner's direction, the immediate
-handoff prioritizes the Container slice and defers VM replay, full Demo replay
-and the complete machine-readable Release Gate. This acceleration does not
-change the final Sprint 2 gate below.
+The current PR head is newer than the connected deployment because
+`bdedb772` only repairs the deterministic browser Fixture's
+`FrozenSubmission` readback contract. Its targeted Fixture browser test,
+Web typecheck and lint pass, but this source-only fix does not change the
+connected-runtime conclusion.
+
+On the `ec6587cb` deployment, one fresh production ECNU AgentRun completed
+Environment and Evaluation candidate generation; the teacher approved both
+candidates. BuildKit built and pushed the Container image to private Harbor,
+Trivy 0.72.0 reported zero Critical findings, and Control published the
+immutable digest. A real Container reached `ready`, served its HTTP endpoint
+and produced an immutable frozen submission. Real Keycloak teacher/student
+Playwright completed with three passed tests and one explicitly skipped VM
+test. The workspace file used by this replay was seeded with an administrative
+`kubectl exec` because Sprint 2 has no student workspace writer; this is a demo
+setup limitation, not a verified student editing path.
 
 | Check | Result | Evidence / limitation |
 | --- | --- | --- |
-| Container environment reconcile | verified on connected runtime | AgentRun `019f8de6-9316-7ef0-a84f-d3b4284132f6` published release `019f8de7-417d-7902-a56c-94fc854f7ba6` at immutable digest `sha256:81299f24573365f8f1349902a76f2411b0eef4bf14ac2fa793641d5a359cce84`; environment `019f8df5-2010-7300-b5cf-3a926ba12d57` reached `ready`. |
-| Freeze worker storage binding | verified prerequisite | `labweaver-frozen-submissions` is an additive Object Lock bucket with versioning; the live Evaluation ConfigMap points at it. The existing `labweaver-artifacts` bucket was not changed. |
-| Freeze worker network path | verified prerequisite | The retained data NetworkPolicy now permits the labelled environment namespace to reach PostgreSQL/NATS/MinIO; TLS and TCP probes passed. |
-| Freeze completion | verified on Container | Frozen submission `019f8e0e-e391-7fe3-a88e-0ed8f7ec452f` bound the environment/release/build identities, one workspace file, manifest hash `e9f2fb2ff7c0a0bd339f35e3b48fdd221bf010b1a461b2d175d2e3bf84feae15`, immutable object hash `9d09be32601d84b2aa5b4cf64dc9ffaeb22800aedc4211b1db3c646825587678` and Object Lock version `d2b2119c-5de2-43f6-a915-9fd592c5c485`. |
-| Container access | verified prerequisite | A real student session created an AccessGrant for the fresh Container environment after endpoint discovery; the grant was course- and environment-scoped. Gateway protocol replay remains pending. |
-| Container freeze | verified | Fresh environment `019f8b1a-f95f-7551-a5ce-33f4c26466fd` froze submission `019f8b1b-e2e7-7212-9272-a5b89160cc98` from the mounted workspace; the immutable object was materialized by the Evaluation worker and the freeze command completed. |
-| Container stop/start | verified | Environment `019f8df5-2010-7300-b5cf-3a926ba12d57` reached `stopped` at revision 11 and returned to `ready` at revision 13 through the public student session. |
-| Container delete/cleanup | verified | The same environment accepted application-owned deletion and namespace `lw-env-019f8df5-2010-7300-b5cf-3a926ba12d57` became absent. |
-| KubeVirt | blocked after connected lifecycle repair | Final image source `b0922bd1` created real VM `019f906d-1f11-7ea1-910e-410cf1443e2e`, which reached Environment authority `ready` with a healthy SSH endpoint and then completed an API-driven stop at revision 13. Restart recreated a KubeVirt Ready VMI, but guest TCP/22 did not return and the authority correctly remained failed with `LW_ENVIRONMENT_PROVIDER_UNAVAILABLE`. The replay also fixed executor-to-guest NetworkPolicy, bounded observation, Namespace finalize RBAC/path, retry revocation inheritance and idempotent stop. |
-| Release Gate / Sprint 2 | blocked | Gateway protocol negatives, idempotent deployment replay, the final clean KubeVirt lifecycle and a same-source machine-readable passing Release Gate remain absent. |
+| Agent and approval | verified on connected runtime | AgentRun `019f9161-8e50-7dd0-ac63-073e5f4f1733`; Environment candidate `019f9161-bb3f-7690-b42c-a162a6375c3b`; Evaluation candidate `019f9161-acbe-71c2-b103-bdd85d771d63`; both have teacher approval. |
+| Build and publication | verified on connected runtime | Artifact `019f9162-9486-7412-a504-325a8df42254`; immutable digest `sha256:02f173cda04d3567bb7fb348e6b9fa3630a491697031ba5b4faad783f0abf7d2`; Trivy Critical count 0; release `019f916c-b4d8-7623-8bf6-9c893fc191e2`. High findings remain and are not described as zero vulnerabilities. |
+| Container create and access | verified for demo | Environment `019f916d-169b-7061-b7b5-c8fce0e7ce7e` reached authoritative `ready` and its HTTP endpoint was healthy. Current same-identity protocol denial/expiry/revocation replay remains open. |
+| Container freeze | verified on connected runtime | Submission `019f9171-b23b-7a43-86f4-8f914caf4ec7` contains one file and immutable object digest `1c730c71a98b9ceb985ee19e55498312787c8ed4f211aabac73df534889b097b`; the browser also read back Object Version and SHA evidence. |
+| Real browser flow | verified for Container slice | Real Keycloak teacher and student sessions: 3 passed, 1 VM test explicitly skipped; no Fixture result is used as connected evidence. |
+| KubeVirt | blocked for final identity | An earlier source identity completed real VM create, SSH, stop/start, freeze and cleanup, but it is not the `ec6587cb` deployment identity and cannot close the terminal gate. |
+| Infrastructure Verify | blocked by identity drift | Generic `cargo xtask verify --infra` correctly rejects the retained historical deployment manifest because its commit/inventory/component-lock identity differs from the current private inventory. Application-specific adoption and testflight passed. |
+| Release Gate / Sprint 2 | blocked | Same-identity VM, Access/Gateway negative matrix, current Container stop/start/delete cleanup readback, rollback drill and the complete machine-readable Release Gate remain absent. |
 
 | Capability | Owner | State | Current evidence | Blocker or limitation |
 | --- | --- | --- | --- | --- |
 | Six service and six PostgreSQL domain boundaries | A | implemented | Cargo workspace, service crates, deterministic catalog and one `0001_sprint2_baseline.sql` per domain; 3a9 non-destructive adoption verified the exact retained ledger across all six domains | Resource has no Sprint 2 production path |
 | Contracts, OpenAPI and Web SDK | A/C | implemented locally | one ADR 0011 v1 Rust source with generated JSON Schema, Public/Internal OpenAPI and Web SDK; publication accepts only candidate/approval/runtime identity, while Control resolves Container build evidence or the deployment-locked VM base identity; contract/render and Web drift gates pass | connected clients and deployed schema identity remain pending |
-| Keycloak/OIDC and course-scoped authorization | A | connected on 3a9 | Access BFF, bearer/mTLS checks, PostgreSQL tests and retained Keycloak reconciliation; real teacher/student landing and teacher candidate-approval browser flows now pass through the adopted BFF session and CSRF transport | current Container publication remains blocked by stale build evidence |
+| Keycloak/OIDC and course-scoped authorization | A | connected on ec6587 | Access BFF, bearer/mTLS checks, PostgreSQL tests and retained Keycloak reconciliation; real teacher/student sessions and teacher candidate approval pass through the adopted BFF session and CSRF transport | Access/Gateway protocol denial, expiry and revocation replay remains open |
 | Control material, AgentRun, candidate approval and release | A/B | connected partially on 3a9 | PostgreSQL, MinIO, JetStream and mTLS integration tests; a real ECNU AgentRun completed both candidates and teacher approval was exercised on the adopted deployment | fresh BuildKit/Trivy evidence and release publication remain blocked |
 | Claude Code Agent runtime | B | implemented; previous head deployed | bounded process runtime, leases, cancellation, candidate validation and explicit ECNU Anthropic-compatible endpoint/Secret binding; retained data proves two real ECNU runs completed both tracks, while their completion projection exhausted redelivery before producing Control candidates | the current BFF repair must be deployed before a fresh same-head dual-candidate replay; retained runs are diagnostic evidence only |
-| BuildKit/Harbor/Trivy supply chain | B | package verified; cleanup replay blocked | fixed-command `build-executor`, persistent fence and negative tests; the e062 package passed connected `package-validate`; a fresh course build reached BuildKit, Trivy and digest publication | Harbor candidate-tag deletion returned `403`; the bounded robot permission and credential were reconciled, but the post-fix replay is blocked by loss of all connected control paths |
+| BuildKit/Harbor/Trivy supply chain | B | connected for Container | fixed-command `build-executor`, persistent fence and negative tests; the ec6587 package passed connected `package-validate`; a fresh course build reached BuildKit, Trivy, candidate cleanup and immutable digest publication | full duplicate/reorder/cancel/deadline connected replay and terminal Release Gate remain open |
 | Environment lifecycle and owner resolver | B/A | implemented locally | lifecycle, PostgreSQL, JetStream, mTLS and typed executor tests | deployed owner/executor API path is pending |
 | Container runtime | B | connected Container slice verified | deterministic plan, persistent fence, restricted Kubernetes SSA/observe/scale/restart/delete backend, finalizer-race handling and versioned cleanup evidence | KubeVirt replay and Gateway protocol replay remain pending; the retained artifact bucket does not provide Object Lock |
-| KubeVirt runtime | B | connected create/stop verified; resume blocked | deterministic VM/CDI plan, independent persistent fence, restricted API/subresource backend and executor-owned SSH host-key probe; final image `sha256:cc93c95529f58d145509a5c60b5f1b0b3fe6101a48829252395632d9149490e1` was locally Trivy-scanned with zero Critical findings, and a real VM reached authoritative `ready` then `stopped` | VMI recreation succeeds but guest SSH does not return after restart; freeze/delete and the final dual-runtime gate remain blocked |
+| KubeVirt runtime | B | verified only on an older identity | deterministic VM/CDI plan, independent persistent fence, restricted API/subresource backend and executor-owned SSH host-key probe; an earlier source identity completed a real create/SSH/stop/start/freeze/delete lifecycle | the final ec6587 same-identity VM replay and dual-runtime gate remain blocked |
 | AccessGrant and session authorization | A | implemented locally | fixed local OpenSSH account, post-auth alias redemption, one-time token and session contracts; HTTP(S) grants use same-origin `/connect` paths with per-request Access and Environment revalidation and no direct runtime route | built Gateway image, connected HTTP/SSH denial, expiry and revocation replay are pending; Upgrade is explicitly outside Sprint 2 |
 | Freeze-only Evaluation Service | B | implemented locally | Evaluation-owned public API, Access BFF authorization, PostgreSQL command/outbox, Environment-issued PVC/299-second read-only VM binding, bounded Kubernetes Job/Secret/ConfigMap/NetworkPolicy reconciliation, immutable MinIO Object Lock, restart recovery and cleanup readback | connected deployment and real PVC/VM replay are pending; Runner, Checker, Aggregator and scoring are excluded |
-| Web teacher/student journeys | C | connected partially on 3a9 | component/SDK tests and live auth setup pass; teacher candidate approval is connected, while student Container create/access remains blocked by release evidence freshness | KubeVirt and final same-identity Container replay remain pending; local visual baselines were not rewritten |
-| Sprint 2 Helm deployment | A/D | implemented; e062 adopted non-destructively | source `e062d34f` passed connected package validation and non-destructive application adoption run `sprint2-application-e062d34f-0001`; retained infrastructure was not deleted or rebuilt | post-permission Container replay, Gateway protocol replay, KubeVirt replay and Release Gate remain pending |
+| Web teacher/student journeys | C | connected Container slice | component/SDK tests, live auth setup, teacher approval and student Container freeze evidence readback pass; deterministic Fixture freeze readback is aligned at PR head `bdedb772` | KubeVirt and the full same-identity lifecycle/negative matrix remain pending |
+| Sprint 2 Helm deployment | A/D | ec6587 adopted non-destructively | source `ec6587cb` passed static/connected package validation, two application reconciles and testflight; retained infrastructure was not reset | generic infrastructure identity Verify, rollback drill, KubeVirt and Release Gate remain pending |
 | Sprint 2 data foundation | A/D | verified on adopted target | digest-locked PostgreSQL, NATS JetStream and MinIO StatefulSets; TLS, persistent storage, restricted Pod Security, default-deny NetworkPolicy, strict private bundle; a second reconciliation at source identity `4ced06d` changed nothing | this is retained-foundation evidence only, not application deployment or Sprint 2 E3 |
 | Demo replay and Release Gate | A/D | implemented locally | exact connected check set, evidence rehash, clean-HEAD/deployment/catalog/image/Run binding, tamper test and stable missing-input diagnostics | Linux infrastructure Verify, real Keycloak Playwright and same-build passing report remain pending |
 | Private Sigstore, Kyverno and Packer | A/D | removed from product and connected cluster | ADR 0006 is Superseded; active contracts, Chart and CI contain no trust-plane gate; the explicitly authorized 2026-07-24 cleanup removed the Private Sigstore Helm release, its namespace/PVC/routes, and Kyverno controllers/webhooks/CRDs/RBAC after a zero-policy dependency check; Packer was absent | deletion is irreversible and is maintenance evidence, not Sprint 2 acceptance |
