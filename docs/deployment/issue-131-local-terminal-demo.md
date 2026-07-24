@@ -83,6 +83,10 @@ export LABWEAVER_E2E_CONTAINER_ENVIRONMENT_ID=00000000-0000-7000-8000-0000000004
 pnpm --dir web test:e2e:terminal-demo:headed
 ```
 
+headed 演示通过 Playwright `slowMo` 在浏览器操作之间加入 1 秒展示节奏。
+它不使用固定 sleep，状态等待和失败判断仍由可观察的 UI、HTTP 与 WebSocket
+事件驱动。非 headed 自动验收不启用该延迟。
+
 演示依次执行：
 
 1. 真实 Keycloak 学生登录；

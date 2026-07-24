@@ -29,7 +29,7 @@
     "test:e2e:fixture": "cross-env VITE_DATA_MODE=fixture LABWEAVER_DATA_MODE=fixture pnpm build:fixture && cross-env VITE_DATA_MODE=fixture LABWEAVER_DATA_MODE=fixture LABWEAVER_BASE_URL=http://localhost:4173 playwright test --config=playwright.config.mjs",
     "test:e2e:live": "cross-env LABWEAVER_DATA_MODE=live node scripts/run-e2e.mjs",
     "test:e2e:terminal-demo": "playwright test e2e/student/container-terminal.live.spec.mjs --config=playwright.config.mjs --project=student --no-deps --workers=1 --reporter=line",
-    "test:e2e:terminal-demo:headed": "playwright test e2e/student/container-terminal.live.spec.mjs --config=playwright.config.mjs --project=student --no-deps --workers=1 --reporter=line --headed"
+    "test:e2e:terminal-demo:headed": "cross-env LABWEAVER_DEMO_SLOW_MO_MS=1000 playwright test e2e/student/container-terminal.live.spec.mjs --config=playwright.config.mjs --project=student --no-deps --workers=1 --reporter=line --headed"
   },
   "dependencies": {
     "@fontsource-variable/noto-sans-sc": "^5.2.10",
