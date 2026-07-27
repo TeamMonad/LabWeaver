@@ -133,7 +133,7 @@ async fn run() -> Result<(), GatewayError> {
                 &local_user,
                 &key,
                 &connection_id,
-                &source_address,
+                source_address,
             )
             .await
         }
