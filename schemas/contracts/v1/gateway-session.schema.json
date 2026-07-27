@@ -98,6 +98,10 @@
       "description": "Server-generated DNS alias selected by the fixed `connect` command.",
       "type": "string"
     },
+    "targetHost": {
+      "description": "Environment-owned in-cluster SSH Service DNS name. This is returned only\nto the mTLS-authenticated Gateway and never to the browser grant model.",
+      "type": "string"
+    },
     "targetSshHostKeyIdentitySha256": {
       "$ref": "#/$defs/Sha256Digest",
       "description": "Environment-authoritative digest of the exact OpenSSH host-key\nfingerprint expected from the selected target."
@@ -130,6 +134,7 @@
     "endpointGrantId",
     "sshPublicKeyId",
     "targetAlias",
+    "targetHost",
     "targetSshHostKeyIdentitySha256",
     "gatewayIdentity",
     "connectionId",

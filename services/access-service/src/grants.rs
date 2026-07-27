@@ -954,6 +954,7 @@ pub async fn create_gateway_session(
       .bind(now).bind(expires_at).bind(json!({
           "authorizationId": authorization_id,
           "alias": request.alias,
+          "targetHost": format!("ssh.lw-env-{}.svc", candidate.get::<Uuid,_>("environment_id")),
           "sshHostKeyIdentitySha256": target_ssh_host_key_identity_sha256,
       }))
       .bind(&principal.san_uri).bind(&request.connection_id)
@@ -1755,6 +1756,11 @@ async fn load_session_tx(
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?
         .to_owned();
+    let target_host = contract
+        .get("targetHost")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?
+        .to_owned();
     let target_ssh_host_key_identity_sha256 = contract
         .get("sshHostKeyIdentitySha256")
         .and_then(Value::as_str)
@@ -1768,6 +1774,7 @@ async fn load_session_tx(
         endpoint_grant_id: typed_id(row.get("endpoint_grant_id"))?,
         ssh_public_key_id: typed_id(row.get("key_id"))?,
         target_alias,
+        target_host,
         target_ssh_host_key_identity_sha256,
         gateway_identity: row.get("gateway_identity"),
         connection_id: row.get("connection_id"),

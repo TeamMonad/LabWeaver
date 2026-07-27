@@ -232,6 +232,10 @@ async fn force_command(
         .args([
             "-F",
             "/etc/labweaver/target-ssh.conf",
+            "-o",
+            &format!("HostName={}", session.target_host),
+            "-o",
+            &format!("HostKeyAlias={alias}"),
             &format!("lab@{alias}"),
         ])
         .env("LABWEAVER_TARGET_ALIAS", &session.target_alias)

@@ -502,6 +502,9 @@ pub struct GatewaySession {
     pub ssh_public_key_id: SshPublicKeyId,
     /// Server-generated DNS alias selected by the fixed `connect` command.
     pub target_alias: String,
+    /// Environment-owned in-cluster SSH Service DNS name. This is returned only
+    /// to the mTLS-authenticated Gateway and never to the browser grant model.
+    pub target_host: String,
     /// Environment-authoritative digest of the exact OpenSSH host-key
     /// fingerprint expected from the selected target.
     pub target_ssh_host_key_identity_sha256: crate::Sha256Digest,
@@ -529,6 +532,7 @@ impl GatewaySession {
                 .bytes()
                 .skip(3)
                 .all(|byte| byte.is_ascii_lowercase() || matches!(byte, b'2'..=b'7'))
+            || !valid_gateway_target_host(&self.target_host)
             || self.last_heartbeat_at < self.opened_at
         {
             return Err(AccessError::InvalidSession);
@@ -572,6 +576,13 @@ impl GatewaySession {
             | GatewaySessionState::Active => Ok(()),
         }
     }
+}
+
+fn valid_gateway_target_host(value: &str) -> bool {
+    value
+        .strip_prefix("ssh.lw-env-")
+        .and_then(|value| value.strip_suffix(".svc"))
+        .is_some_and(|environment_id| uuid::Uuid::parse_str(environment_id).is_ok())
 }
 
 /// Access contract failure.
@@ -718,6 +729,7 @@ mod tests {
             endpoint_grant_id: EndpointGrantId::new(),
             ssh_public_key_id: SshPublicKeyId::new(),
             target_alias: "lw-abcdefghijklmnopqrst".to_owned(),
+            target_host: format!("ssh.lw-env-{}.svc", uuid::Uuid::now_v7()),
             target_ssh_host_key_identity_sha256: crate::Sha256Digest::of_bytes(
                 b"SHA256:target-host-key",
             ),
