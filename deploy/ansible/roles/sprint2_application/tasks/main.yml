@@ -155,6 +155,37 @@
       - sprint2_application_package.images | map(attribute='scan.critical') | map('int') | max == 0
     fail_msg: SPRINT2_APPLICATION_PACKAGE_INVALID
 
+- name: Bind the evaluation freeze worker to the immutable package image
+  ansible.builtin.set_fact:
+    sprint2_application_evaluation_configuration_object: >-
+      {{
+        sprint2_application_configuration_objects
+        | selectattr('kind', 'equalto', 'ConfigMap')
+        | selectattr('metadata.name', 'equalto', 'evaluation-service-config')
+        | first
+      }}
+    sprint2_application_evaluation_worker_image: >-
+      {{
+        (
+          sprint2_application_package.images
+          | selectattr('component', 'equalto', 'evaluation-service')
+          | first
+        ).reference
+      }}
+  no_log: true
+
+- name: Require the evaluation freeze worker package binding
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_evaluation_worker_image is match('^[^@]+@sha256:[0-9a-f]{64}$')
+      - >-
+        (
+          sprint2_application_evaluation_configuration_object.data['config.yaml']
+          | from_yaml
+        ).coordinator.workerImage is match('^[^@]+@sha256:[0-9a-f]{64}$')
+    fail_msg: SPRINT2_APPLICATION_EVALUATION_WORKER_IMAGE_INVALID
+  no_log: true
+
 - name: Validate private configuration object boundary
   ansible.builtin.assert:
     that:
@@ -1642,6 +1673,48 @@
     apply: true
     definition: "{{ item }}"
   loop: "{{ sprint2_application_configuration_objects }}"
+  when: item.metadata.name != 'evaluation-service-config'
+  no_log: true
+
+- name: Apply the package-bound evaluation configuration
+  kubernetes.core.k8s:
+    kubeconfig: "{{ sprint2_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata: >-
+        {{ sprint2_application_evaluation_configuration_object.metadata }}
+      data:
+        config.yaml: >-
+          {{
+            (
+              sprint2_application_evaluation_configuration_object.data['config.yaml']
+              | from_yaml
+              | combine(
+                  {
+                    'coordinator': (
+                      (
+                        sprint2_application_evaluation_configuration_object.data['config.yaml']
+                        | from_yaml
+                      ).coordinator
+                      | combine(
+                          {
+                            'workerImage':
+                              sprint2_application_evaluation_worker_image
+                          }
+                        )
+                    )
+                  }
+                )
+              | to_nice_yaml(indent=2, sort_keys=false)
+            )
+          }}
+        worker.yaml: >-
+          {{
+            sprint2_application_evaluation_configuration_object.data['worker.yaml']
+          }}
   no_log: true
 
 - name: Reconcile the evaluation worker namespace without deleting retained state
@@ -1661,37 +1734,10 @@
           pod-security.kubernetes.io/audit: restricted
           pod-security.kubernetes.io/warn: restricted
 
-- name: Select the reviewed evaluation registry pull configuration
-  ansible.builtin.set_fact:
-    sprint2_application_evaluation_registry_pull_config: >-
-      {{
-        (
-          sprint2_application_configuration_objects
-          | selectattr('kind', 'equalto', 'Secret')
-          | selectattr('metadata.name', 'equalto', 'evaluation-service-secrets')
-          | first
-        ).data['registry-pull-config.json']
-      }}
-  no_log: true
-
-- name: Require a valid evaluation registry pull configuration
+- name: Require the evaluation worker to use the platform image pull identity
   ansible.builtin.assert:
     that:
-      - sprint2_application_evaluation_pull_secret_name == 'harbor-course-pull'
-      - sprint2_application_evaluation_registry_pull_config | length > 0
-      - >-
-        (
-          sprint2_application_evaluation_registry_pull_config
-          | b64decode
-          | from_json
-        ).auths is mapping
-      - >-
-        sprint2_application_harbor_registry
-        in (
-          sprint2_application_evaluation_registry_pull_config
-          | b64decode
-          | from_json
-        ).auths
+      - sprint2_application_evaluation_pull_secret_name == sprint2_application_image_pull_secret_name
     fail_msg: SPRINT2_APPLICATION_EVALUATION_REGISTRY_PULL_CONFIG_INVALID
   no_log: true
 
@@ -1712,7 +1758,12 @@
           labweaver.io/sprint: sprint2
       type: kubernetes.io/dockerconfigjson
       data:
-        .dockerconfigjson: "{{ sprint2_application_evaluation_registry_pull_config }}"
+        .dockerconfigjson: >-
+          {{ {'auths': {sprint2_application_harbor_registry: {
+               'username': sprint2_application_harbor_username,
+               'password': sprint2_application_harbor_password,
+               'auth': (sprint2_application_harbor_username + ':' + sprint2_application_harbor_password)
+                 | b64encode}}} | to_json | b64encode }}
   no_log: true
 
 - name: Reconcile the retained MinIO transport policy for Sprint 2 platform clients

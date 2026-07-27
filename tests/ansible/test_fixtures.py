@@ -299,6 +299,33 @@ class AnsibleFixtureTests(unittest.TestCase):
             workloads,
         )
 
+    def test_sprint2_application_binds_freeze_worker_to_packaged_evaluation_image(
+        self,
+    ) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "Bind the evaluation freeze worker to the immutable package image",
+            tasks,
+        )
+        self.assertIn(
+            "SPRINT2_APPLICATION_EVALUATION_WORKER_IMAGE_INVALID",
+            tasks,
+        )
+        self.assertIn(
+            "'component', 'equalto', 'evaluation-service'",
+            tasks,
+        )
+        self.assertIn(
+            "'workerImage':\n                              sprint2_application_evaluation_worker_image",
+            tasks,
+        )
+        self.assertIn(
+            "when: item.metadata.name != 'evaluation-service-config'",
+            tasks,
+        )
+
     def test_environment_owner_rollout_does_not_require_surge_capacity(self) -> None:
         values = (ROOT / "deploy/helm/labweaver/values.yaml").read_text(encoding="utf-8")
         workloads = (

@@ -181,7 +181,10 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
         },
         policy()?,
     )?;
-    let lease_duration = Duration::from_millis(120);
+    // Keep the lease comfortably above normal CI scheduler and PostgreSQL
+    // round-trip jitter. The assertion below observes an actual renewal rather
+    // than relying on a fixed sleep near the expiry boundary.
+    let lease_duration = Duration::from_secs(1);
     let worker = BuildWorker::new(
         store.clone(),
         pipeline,
@@ -193,7 +196,13 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
     let worker_task = tokio::spawn(async move { worker.run_once(now()).await });
 
     wait_until_running(&pool, command.request.id).await?;
-    tokio::time::sleep(lease_duration * 3).await;
+    let initial_lease_expires_at: time::OffsetDateTime = sqlx::query_scalar(
+        "SELECT lease_expires_at FROM agent.build_commands WHERE build_request_id=$1",
+    )
+    .bind(command.request.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    wait_until_lease_renewed(&pool, command.request.id, initial_lease_expires_at).await?;
     let lease_current: bool = sqlx::query_scalar(
         "SELECT lease_expires_at>clock_timestamp() FROM agent.build_commands WHERE build_request_id=$1",
     )
@@ -635,6 +644,29 @@ async fn wait_until_running(
             .fetch_optional(pool)
             .await?;
             if state.as_deref() == Some("running") {
+                return Ok::<_, sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    Ok(())
+}
+
+async fn wait_until_lease_renewed(
+    pool: &sqlx::PgPool,
+    build_request_id: BuildRequestId,
+    initial_lease_expires_at: time::OffsetDateTime,
+) -> Result<(), Box<dyn std::error::Error>> {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let lease_expires_at: time::OffsetDateTime = sqlx::query_scalar(
+                "SELECT lease_expires_at FROM agent.build_commands WHERE build_request_id=$1",
+            )
+            .bind(build_request_id.as_uuid())
+            .fetch_one(pool)
+            .await?;
+            if lease_expires_at > initial_lease_expires_at {
                 return Ok::<_, sqlx::Error>(());
             }
             tokio::time::sleep(Duration::from_millis(10)).await;

@@ -24,6 +24,8 @@ use crate::{
     FreezeCommandStoreError, FreezeRequest, PgFreezeCommandStore, SubmissionFreezeCommand,
 };
 
+const WORKER_IMAGE_PULL_SECRET_NAME: &str = "harbor-labweaver-system-pull";
+
 const FIELD_MANAGER: &str = "labweaver-freeze-coordinator";
 const MAX_BOUND_FILE_BYTES: u64 = 1024 * 1024;
 
@@ -430,7 +432,7 @@ impl FreezeCoordinator {
             json!({"apiVersion":"v1","kind":"ServiceAccount","metadata":{"name":self.configuration.worker_service_account_name,
                 "namespace":namespace,"labels":{"app.kubernetes.io/managed-by":FIELD_MANAGER,"app.kubernetes.io/name":"evaluation-freeze-worker"}},
                 "automountServiceAccountToken":false,
-                "imagePullSecrets":[{"name":"harbor-course-pull"}]}),
+                "imagePullSecrets":[{"name":WORKER_IMAGE_PULL_SECRET_NAME}]}),
         )
         .await?;
         let mut egress = vec![
