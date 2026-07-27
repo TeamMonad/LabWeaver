@@ -116,12 +116,25 @@ async fn run() -> Result<(), GatewayError> {
             let key = args
                 .next()
                 .ok_or(GatewayError::InputStage("authorized_keys.presented_key"))?;
+            let connection = args
+                .next()
+                .ok_or(GatewayError::InputStage("authorized_keys.connection"))?;
+            let source_address = args
+                .next()
+                .ok_or(GatewayError::InputStage("authorized_keys.source_address"))?;
             if args.next().is_some() {
                 return Err(GatewayError::InputStage("authorized_keys.extra_argument"));
             }
-            let connection_id = connection_id()
+            let connection_id = connection_id(&connection)
                 .map_err(|_| GatewayError::InputStage("authorized_keys.connection"))?;
-            authorized_keys(&GatewayConfig::load()?, &local_user, &key, &connection_id).await
+            authorized_keys(
+                &GatewayConfig::load()?,
+                &local_user,
+                &key,
+                &connection_id,
+                &source_address,
+            )
+            .await
         }
         Some("force-command") => {
             let authorization_id = args.next().ok_or(GatewayError::InvalidInput)?;
@@ -157,6 +170,7 @@ async fn authorized_keys(
     local_user: &str,
     presented_key: &str,
     connection_id: &str,
+    source_address: &str,
 ) -> Result<(), GatewayError> {
     if local_user != "gateway" {
         return Err(GatewayError::InputStage("authorized_keys.local_user"));
@@ -169,7 +183,7 @@ async fn authorized_keys(
         presented_key_fingerprint_sha256: key.fingerprint(HashAlg::Sha256).to_string(),
         gateway_identity: config.gateway_identity.clone(),
         connection_id: connection_id.to_owned(),
-        source_address_hash: source_address_hash()
+        source_address_hash: source_address_hash(source_address)
             .map_err(|_| GatewayError::InputStage("authorized_keys.source_address"))?,
         requested_at: now().map_err(|_| GatewayError::InputStage("authorized_keys.timestamp"))?,
     };
@@ -383,19 +397,22 @@ fn required_env(name: &str) -> Result<String, GatewayError> {
         .ok_or(GatewayError::Configuration)
 }
 
-fn connection_id() -> Result<String, GatewayError> {
-    let connection = required_env("SSH_CONNECTION")?;
+fn connection_id(connection: &str) -> Result<String, GatewayError> {
+    if connection.trim().is_empty()
+        || connection.len() > 512
+        || connection.chars().any(char::is_control)
+    {
+        return Err(GatewayError::InvalidInput);
+    }
     let mut hasher = Sha256::new();
     hasher.update(connection.as_bytes());
     Ok(format!("ssh-{:x}", hasher.finalize()))
 }
 
-fn source_address_hash() -> Result<String, GatewayError> {
-    let source = required_env("SSH_CONNECTION")?
-        .split_whitespace()
-        .next()
-        .ok_or(GatewayError::InvalidInput)?
-        .to_owned();
+fn source_address_hash(source: &str) -> Result<String, GatewayError> {
+    source
+        .parse::<std::net::IpAddr>()
+        .map_err(|_| GatewayError::InvalidInput)?;
     let mut hasher = Sha256::new();
     hasher.update(source.as_bytes());
     Ok(format!("{:x}", hasher.finalize()))
@@ -478,6 +495,10 @@ mod tests {
         assert!(validate_connection_id(&format!("ssh-{}", "z5".repeat(32))).is_err());
         assert!(validate_connection_id(&format!("http-{}", "a5".repeat(32))).is_err());
         assert!(validate_connection_id("ssh-deadbeef").is_err());
+        assert!(connection_id("10.20.0.1 52790 10.244.1.233 2222").is_ok());
+        assert!(connection_id("").is_err());
+        assert!(source_address_hash("10.20.0.1").is_ok());
+        assert!(source_address_hash("not-an-ip").is_err());
     }
 
     #[test]
