@@ -189,7 +189,7 @@ async fn authorized_keys(
         return Err(GatewayError::Authority);
     }
     println!(
-        "restrict,command=\"/usr/local/bin/labweaver-gateway force-command {} {} {}\" {}",
+        "restrict,command=\"/usr/local/bin/labweaver-gateway-command force-command {} {} {}\" {}",
         shell_token(&authorization.authorization_id)
             .map_err(|_| GatewayError::InputStage("authorized_keys.authorization_id"))?,
         shell_token(&authorization.force_command_token)

@@ -45,6 +45,7 @@ COPY --from=builder /out/labweaver-gateway /usr/local/bin/labweaver-gateway
 COPY access-gateway/sshd_config /etc/ssh/sshd_config
 COPY access-gateway/target-ssh.conf /etc/labweaver/target-ssh.conf
 COPY --chmod=0555 access-gateway/entrypoint.sh /usr/local/bin/labweaver-gateway-entrypoint
+COPY --chmod=0555 access-gateway/command-wrapper.sh /usr/local/bin/labweaver-gateway-command
 LABEL org.opencontainers.image.source="https://github.com/TeamMonad/LabWeaver" \
       org.opencontainers.image.revision="${SOURCE_COMMIT}" \
       org.opencontainers.image.title="openssh-gateway"

@@ -6,7 +6,7 @@ KbdInteractiveAuthentication no
 PermitRootLogin no
 PubkeyAuthentication yes
 AuthorizedKeysFile none
-AuthorizedKeysCommand /usr/local/bin/labweaver-gateway authorized-keys %u "%t %k"
+AuthorizedKeysCommand /usr/local/bin/labweaver-gateway-command authorized-keys %u "%t %k"
 AuthorizedKeysCommandUser gateway-auth
 AllowTcpForwarding no
 PermitOpen none
