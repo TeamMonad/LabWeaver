@@ -1596,6 +1596,11 @@ fn parse_stream_output(stdout: &[u8]) -> Result<ParsedClaudeCodeStream, ClaudeCo
                     }
                 }
             }
+            Some("user") => {
+                if !valid_synthetic_user_event(&event) {
+                    return Err(ClaudeCodeRuntimeError::ProtocolInvalid);
+                }
+            }
             Some("result") => {
                 envelope = Some(
                     serde_json::from_value::<ClaudeCodeResultEnvelope>(event)
@@ -1609,6 +1614,23 @@ fn parse_stream_output(stdout: &[u8]) -> Result<ParsedClaudeCodeStream, ClaudeCo
         envelope: envelope.ok_or(ClaudeCodeRuntimeError::ProtocolInvalid)?,
         candidate: (!candidate.is_empty()).then_some(candidate),
     })
+}
+
+fn valid_synthetic_user_event(event: &Value) -> bool {
+    let Some(message) = event.get("message").and_then(Value::as_object) else {
+        return false;
+    };
+    event.get("isSynthetic").and_then(Value::as_bool) == Some(true)
+        && message.get("role").and_then(Value::as_str) == Some("user")
+        && message
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|content| {
+                content.iter().all(|block| {
+                    block.get("type").and_then(Value::as_str) == Some("text")
+                        && block.get("text").is_some_and(Value::is_string)
+                })
+            })
 }
 
 fn failure_with_audit(
@@ -1677,7 +1699,7 @@ fn tool_policy_sha256() -> Sha256Digest {
         "builtinTools": [],
         "mcpServers": [],
         "maxTurnsPerCandidate": 1,
-        "outputProtocol": "stream_json_single_candidate_with_non_authoritative_system_telemetry",
+        "outputProtocol": "stream_json_single_candidate_with_non_authoritative_system_and_synthetic_user_telemetry",
         "permissionMode": "dontAsk",
         "slashCommands": false,
         "sessionPersistence": false

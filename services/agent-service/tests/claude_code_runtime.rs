@@ -377,6 +377,15 @@ fn stream_output(
             "session_id": session_id,
             "status": "running"
         }),
+        json!({
+            "type": "user",
+            "session_id": session_id,
+            "isSynthetic": true,
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "runtime retry notice"}]
+            }
+        }),
     ];
     if let Some(candidate) = candidate {
         events.push(json!({
