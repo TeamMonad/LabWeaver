@@ -9,7 +9,7 @@
   "configuration_manifest_sha256": {{ ('sha256:' + sprint2_application_identity_inputs.results[2].stat.checksum) | to_json }},
   "configuration_bundle_sha256": {{ ('sha256:' + sprint2_application_identity_inputs.results[3].stat.checksum) | to_json }},
   "destructive_reset": false,
-  "retained": ["kubernetes", "kubevirt", "postgresql", "nats", "minio", "harbor", "keycloak", "kyverno", "private-sigstore"],
+  "retained": ["kubernetes", "kubevirt", "postgresql", "nats", "minio", "harbor", "keycloak"],
   "adopted": {
     "postgres_domains": {{ sprint2_application_domains | to_json }},
     "nats_streams": {{ sprint2_application_nats_streams | map(attribute='name') | list | to_json }},

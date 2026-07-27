@@ -236,6 +236,24 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("data_source_name: ubuntu-lab-base-v1", lock)
         self.assertNotIn("state: absent", tasks)
 
+    def test_sprint2_application_report_excludes_removed_product_dependencies(self) -> None:
+        report = (
+            ROOT
+            / "deploy/ansible/roles/sprint2_application/templates/application-report.json.j2"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn('"kyverno"', report)
+        self.assertNotIn('"private-sigstore"', report)
+        for retained in (
+            "kubernetes",
+            "kubevirt",
+            "postgresql",
+            "nats",
+            "minio",
+            "harbor",
+            "keycloak",
+        ):
+            self.assertIn(f'"{retained}"', report)
+
     def test_sprint2_application_ssh_service_port_is_an_integer(self) -> None:
         values = (ROOT / "deploy/helm/labweaver/values.yaml").read_text(encoding="utf-8")
         self.assertIn("containerPort: 2222, servicePort: 2222", values)
