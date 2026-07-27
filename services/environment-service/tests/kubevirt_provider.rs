@@ -414,6 +414,9 @@ fn plan_is_deterministic_private_and_digest_bound() {
     let cloud_init = std::str::from_utf8(&cloud_init_bytes).expect("UTF-8 cloud-init userdata");
     assert!(cloud_init.contains("TrustedUserCAKeys /etc/ssh/labweaver_user_ca.pub"));
     assert!(cloud_init.contains("labweaver-gateway\n      labweaver-collector"));
+    assert!(
+        cloud_init.contains("[install, -d, -o, lab, -g, lab, -m, '0700', /home/lab/workspace]")
+    );
     assert!(cloud_init.contains("AuthorizedKeysFile none"));
     assert!(cloud_init.contains("AuthenticationMethods publickey"));
     assert!(cloud_init.contains("AllowUsers lab"));
