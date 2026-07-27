@@ -129,7 +129,7 @@ impl AgentOutboxDispatcher {
     }
 }
 
-/// Durable `JetStream` consumer for approved v2 build commands.
+/// Durable `JetStream` consumer for approved v1 build commands.
 pub struct AgentBuildCommandConsumer {
     consumer_name: String,
     quarantine_subject: String,

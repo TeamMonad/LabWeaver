@@ -167,7 +167,7 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
     let store = PgBuildStore::new(pool.clone());
     assert_eq!(
         store
-            .accept_command("agent-build-command-v2", &event)
+            .accept_command("agent-build-command-v1", &event)
             .await?,
         BuildCommandDecision::Accepted
     );
@@ -276,7 +276,7 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
     assert_eq!(
         store
             .accept_command(
-                "agent-build-command-v2",
+                "agent-build-command-v1",
                 &command_event(successful_command.clone())?,
             )
             .await?,
@@ -326,7 +326,7 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
     assert_eq!(
         store
             .accept_command(
-                "agent-build-command-v2",
+                "agent-build-command-v1",
                 &command_event(repeated_content_command.clone())?,
             )
             .await?,
@@ -363,7 +363,7 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
     assert_eq!(
         store
             .accept_command(
-                "agent-build-command-v2",
+                "agent-build-command-v1",
                 &command_event(retry_command.clone())?,
             )
             .await?,
@@ -744,7 +744,7 @@ fn command_event(
         .iter()
         .copied()
         .find(|contract| contract.subject == subjects::AGENT_BUILD_REQUESTED)
-        .ok_or("missing v2 build contract")?;
+        .ok_or("missing v1 build contract")?;
     Ok(CloudEvent {
         specversion: SPEC_VERSION.to_owned(),
         id: EventId::new(),

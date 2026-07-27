@@ -736,7 +736,7 @@ async fn release_withdrawal_is_projected_in_aggregate_order()
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;
 
-    let consumer = "environment-release-v2";
+    let consumer = "environment-release-v1";
     let release_id = ReleaseId::new();
     let course_id = CourseId::new();
     let publication_event_id = EventId::new();

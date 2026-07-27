@@ -314,7 +314,7 @@ impl PgFreezeStore {
             .await
     }
 
-    /// Atomically writes the authoritative result and matching v2 Outbox event.
+    /// Atomically writes the authoritative result and matching v1 Outbox event.
     ///
     /// # Errors
     ///

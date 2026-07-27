@@ -1,7 +1,7 @@
 //! Typed NATS adapter for the deployment-owned BuildKit/Harbor/Trivy executor.
 #![allow(
     missing_docs,
-    reason = "the build pipeline trait and v2 event contracts document the integration semantics"
+    reason = "the build pipeline trait and v1 event contracts document the integration semantics"
 )]
 
 use async_trait::async_trait;
