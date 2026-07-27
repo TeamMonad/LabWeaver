@@ -119,14 +119,15 @@ async fn run() -> Result<(), GatewayError> {
             let connection = args
                 .next()
                 .ok_or(GatewayError::InputStage("authorized_keys.connection"))?;
-            let source_address = args
-                .next()
-                .ok_or(GatewayError::InputStage("authorized_keys.source_address"))?;
             if args.next().is_some() {
                 return Err(GatewayError::InputStage("authorized_keys.extra_argument"));
             }
             let connection_id = connection_id(&connection)
                 .map_err(|_| GatewayError::InputStage("authorized_keys.connection"))?;
+            let source_address = connection
+                .split_ascii_whitespace()
+                .next()
+                .ok_or(GatewayError::InputStage("authorized_keys.source_address"))?;
             authorized_keys(
                 &GatewayConfig::load()?,
                 &local_user,
