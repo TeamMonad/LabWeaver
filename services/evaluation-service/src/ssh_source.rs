@@ -20,6 +20,15 @@ use crate::collector::{
 
 const MAX_CREDENTIAL_TTL_SECONDS: i64 = 300;
 
+fn source_unavailable(stage: &'static str, error: &impl std::fmt::Debug) -> CollectError {
+    tracing::error!(
+        event = "evaluation.collector.ssh_source_unavailable",
+        stage,
+        error = ?error
+    );
+    CollectError::SourceUnavailable
+}
+
 /// One short-lived, single-environment, certificate-authenticated SFTP binding.
 #[derive(Clone)]
 pub struct SshSnapshotConfig {
@@ -138,7 +147,9 @@ impl SshSnapshotSource {
             Ok(Err(russh::Error::UnknownKey)) => {
                 return Err(CollectError::SshHostKeyMismatch);
             }
-            Ok(Err(_)) => return Err(CollectError::SourceUnavailable),
+            Ok(Err(error)) => {
+                return Err(source_unavailable("connect", &error));
+            }
             Ok(Ok(session)) => session,
         };
         let authentication = tokio::time::timeout(
@@ -151,7 +162,7 @@ impl SshSnapshotSource {
         )
         .await
         .map_err(|_| CollectError::SshTimeout)?
-        .map_err(|_| CollectError::SourceUnavailable)?;
+        .map_err(|error| source_unavailable("authenticate_certificate", &error))?;
         if !authentication.success() {
             return Err(CollectError::SshCredentialInvalid);
         }
@@ -159,28 +170,28 @@ impl SshSnapshotSource {
             tokio::time::timeout(config.operation_timeout, session.channel_open_session())
                 .await
                 .map_err(|_| CollectError::SshTimeout)?
-                .map_err(|_| CollectError::SourceUnavailable)?;
+                .map_err(|error| source_unavailable("open_session_channel", &error))?;
         tokio::time::timeout(
             config.operation_timeout,
             channel.request_subsystem(true, "sftp"),
         )
         .await
         .map_err(|_| CollectError::SshTimeout)?
-        .map_err(|_| CollectError::SourceUnavailable)?;
+        .map_err(|error| source_unavailable("request_sftp_subsystem", &error))?;
         let sftp = tokio::time::timeout(
             config.operation_timeout,
             SftpSession::new(channel.into_stream()),
         )
         .await
         .map_err(|_| CollectError::SshTimeout)?
-        .map_err(|_| CollectError::SourceUnavailable)?;
+        .map_err(|error| source_unavailable("initialize_sftp", &error))?;
         let canonical = tokio::time::timeout(
             config.operation_timeout,
             sftp.canonicalize(config.workspace_root.clone()),
         )
         .await
         .map_err(|_| CollectError::SshTimeout)?
-        .map_err(|_| CollectError::SourceUnavailable)?;
+        .map_err(|error| source_unavailable("canonicalize_workspace_root", &error))?;
         if canonical.trim_end_matches('/') != config.workspace_root.trim_end_matches('/') {
             return Err(CollectError::UnsafePath);
         }
@@ -190,7 +201,7 @@ impl SshSnapshotSource {
         )
         .await
         .map_err(|_| CollectError::SshTimeout)?
-        .map_err(|_| CollectError::SourceUnavailable)?;
+        .map_err(|error| source_unavailable("stat_workspace_root", &error))?;
         if !root_metadata.is_dir() || root_metadata.is_symlink() {
             return Err(CollectError::UnsafePath);
         }
