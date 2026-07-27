@@ -1,6 +1,5 @@
 //! Restricted Kubernetes API backend for the deployment-owned runtime executor.
 
-use std::borrow::Cow;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -872,10 +871,10 @@ impl KubernetesContainerExecutor {
             observed: Arc::clone(&observed),
         };
         let configuration = Arc::new(russh::client::Config {
-            preferred: russh::Preferred {
-                key: Cow::Borrowed(&[russh::keys::Algorithm::Ed25519]),
-                ..russh::Preferred::default()
-            },
+            // Keep Russh's complete safe preference set so the observed identity is compatible
+            // with the collector's OpenSSH-certificate session. HostKeyProbe still records the
+            // exact negotiated host-key SHA-256 identity.
+            preferred: russh::Preferred::default(),
             ..russh::client::Config::default()
         });
         let connection = tokio::time::timeout(

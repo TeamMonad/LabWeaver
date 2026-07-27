@@ -1,6 +1,5 @@
 //! SSH Collector transport restricted to the SFTP subsystem.
 
-use std::borrow::Cow;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -124,14 +123,7 @@ impl SshSnapshotSource {
         let certificate = load_openssh_certificate(&config.certificate_path)
             .map_err(|_| CollectError::SshCredentialInvalid)?;
         validate_certificate(&certificate, &config, now)?;
-        let client_config = Arc::new(client::Config {
-            preferred: russh::Preferred {
-                key: Cow::Borrowed(&[russh::keys::Algorithm::Ed25519]),
-                ..russh::Preferred::default()
-            },
-            inactivity_timeout: Some(config.operation_timeout),
-            ..client::Config::default()
-        });
+        let client_config = ssh_client_configuration(config.operation_timeout);
         let verifier = HostKeyVerifier {
             expected: config.expected_host_key_sha256,
         };
@@ -268,6 +260,18 @@ impl SshSnapshotSource {
         }
         Ok(())
     }
+}
+
+fn ssh_client_configuration(operation_timeout: Duration) -> Arc<client::Config> {
+    Arc::new(client::Config {
+        // Russh uses this shared preference set for host-key negotiation and certificate
+        // authentication. Reducing it to one host-key algorithm makes a valid Ed25519 OpenSSH
+        // user certificate fail authentication. HostKeyVerifier still fail-closes on the exact
+        // observed host-key SHA-256 identity.
+        preferred: russh::Preferred::default(),
+        inactivity_timeout: Some(operation_timeout),
+        ..client::Config::default()
+    })
 }
 
 fn validate_certificate(
@@ -475,7 +479,8 @@ fn safe_component(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        SshSnapshotConfig, host_key_identity, private_ip, safe_remote_root, validate_certificate,
+        SshSnapshotConfig, host_key_identity, private_ip, safe_remote_root,
+        ssh_client_configuration, validate_certificate,
     };
     use contracts::{Sha256Digest, UtcTimestamp};
     use russh::keys::ssh_key::{PrivateKey, certificate, private::Ed25519Keypair};
@@ -528,6 +533,13 @@ mod tests {
             host_key_identity(public_key),
             Sha256Digest::of_bytes(fingerprint.as_bytes())
         );
+    }
+
+    #[test]
+    fn certificate_authentication_keeps_russh_safe_key_preferences() {
+        let configuration = ssh_client_configuration(Duration::from_secs(5));
+        assert_eq!(configuration.preferred.key, russh::Preferred::default().key);
+        assert!(configuration.preferred.key.len() > 1);
     }
 
     #[test]
