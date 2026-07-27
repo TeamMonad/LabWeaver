@@ -71,7 +71,29 @@ async fn public_acceptance_is_atomic_idempotent_and_enqueues_one_command()
     let claimed = store.claim_next().await?.expect("queued command");
     assert_eq!(claimed.frozen_submission_id, command.frozen_submission_id);
     assert!(store.claim_next().await?.is_none());
-    assert_eq!(store.running(32).await?, vec![command]);
+    assert_eq!(store.running(32).await?, vec![command.clone()]);
+    store
+        .mark_failed_pending_cleanup(
+            first.frozen_submission_id,
+            "LW_COLLECT_SSH_CREDENTIAL_INVALID",
+        )
+        .await?;
+    assert!(store.running(32).await?.is_empty());
+    assert_eq!(store.cleanup_pending(32).await?, vec![command.clone()]);
+    assert_eq!(
+        sqlx::query_as::<_, (String, bool)>(
+            "SELECT diagnostic_code,cleanup_verified \
+             FROM evaluation.submission_freeze_commands WHERE frozen_submission_id=$1",
+        )
+        .bind(first.frozen_submission_id.as_uuid())
+        .fetch_one(&fixture.pool)
+        .await?,
+        ("LW_COLLECT_SSH_CREDENTIAL_INVALID".to_owned(), false)
+    );
+    store
+        .mark_cleanup_verified(first.frozen_submission_id)
+        .await?;
+    assert!(store.cleanup_pending(32).await?.is_empty());
     Ok(())
 }
 

@@ -294,6 +294,25 @@ pub enum FreezeWorkerError {
     Store(#[from] crate::freeze_store::FreezeStoreError),
 }
 
+impl FreezeWorkerError {
+    /// Returns the bounded diagnostic that may be persisted in a Kubernetes termination message.
+    #[must_use]
+    pub const fn diagnostic_code(&self) -> &'static str {
+        match self {
+            Self::ConfigurationMissing(_) => "LW_EVALUATION_CONFIG_MISSING",
+            Self::ConfigurationInvalid => "LW_EVALUATION_CONFIG_INVALID",
+            Self::SourceBindingInvalid => "LW_COLLECT_SOURCE_IDENTITY_MISMATCH",
+            Self::Io(_) => "LW_EVALUATION_IO_FAILED",
+            Self::Database(_) => "LW_EVALUATION_DATABASE_FAILED",
+            Self::Telemetry(_) => "LW_EVALUATION_TELEMETRY_FAILED",
+            Self::ObjectStore(error) => error.diagnostic_code(),
+            Self::Collect(error) => error.diagnostic_code(),
+            Self::Freeze(error) => error.diagnostic_code(),
+            Self::Store(error) => error.diagnostic_code(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{FreezeWorkerError, FreezeWorkerSource, bounded_duration};

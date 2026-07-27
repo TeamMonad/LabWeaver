@@ -149,6 +149,32 @@ impl PgFreezeCommandStore {
             .collect()
     }
 
+    /// Loads failed commands whose Kubernetes residue still requires verified cleanup.
+    pub async fn cleanup_pending(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<SubmissionFreezeCommand>, FreezeCommandStoreError> {
+        if !(1..=64).contains(&limit) {
+            return Err(FreezeCommandStoreError::ContractInvalid);
+        }
+        let rows = sqlx::query(
+            "SELECT contract FROM evaluation.submission_freeze_commands \
+             WHERE state='failed' AND cleanup_verified=false \
+             ORDER BY updated_at,frozen_submission_id LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let command: SubmissionFreezeCommand =
+                    serde_json::from_value(row.try_get("contract")?)?;
+                command.validate()?;
+                Ok(command)
+            })
+            .collect()
+    }
+
     /// Completes a command only after the immutable result exists and all Job residue is gone.
     pub async fn mark_completed(
         &self,
@@ -170,9 +196,54 @@ impl PgFreezeCommandStore {
     pub async fn mark_failed(
         &self,
         frozen_submission_id: FrozenSubmissionId,
-        diagnostic: &'static str,
+        diagnostic: &str,
     ) -> Result<(), FreezeCommandStoreError> {
+        contracts::DiagnosticCode::parse(diagnostic)
+            .map_err(|_| FreezeCommandStoreError::ContractInvalid)?;
         terminal_update(&self.pool, frozen_submission_id, "failed", Some(diagnostic)).await
+    }
+
+    /// Fences a failed worker before asynchronous Kubernetes cleanup begins.
+    pub async fn mark_failed_pending_cleanup(
+        &self,
+        frozen_submission_id: FrozenSubmissionId,
+        diagnostic: &str,
+    ) -> Result<(), FreezeCommandStoreError> {
+        contracts::DiagnosticCode::parse(diagnostic)
+            .map_err(|_| FreezeCommandStoreError::ContractInvalid)?;
+        let updated = sqlx::query(
+            "UPDATE evaluation.submission_freeze_commands \
+             SET state='failed',diagnostic_code=$2,cleanup_verified=false,\
+             completed_at=clock_timestamp(),updated_at=clock_timestamp() \
+             WHERE frozen_submission_id=$1 AND state='running'",
+        )
+        .bind(frozen_submission_id.as_uuid())
+        .bind(diagnostic)
+        .execute(&self.pool)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(FreezeCommandStoreError::FenceConflict);
+        }
+        Ok(())
+    }
+
+    /// Marks cleanup complete only after every owned Kubernetes object is absent.
+    pub async fn mark_cleanup_verified(
+        &self,
+        frozen_submission_id: FrozenSubmissionId,
+    ) -> Result<(), FreezeCommandStoreError> {
+        let updated = sqlx::query(
+            "UPDATE evaluation.submission_freeze_commands \
+             SET cleanup_verified=true,updated_at=clock_timestamp() \
+             WHERE frozen_submission_id=$1 AND state='failed' AND cleanup_verified=false",
+        )
+        .bind(frozen_submission_id.as_uuid())
+        .execute(&self.pool)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(FreezeCommandStoreError::FenceConflict);
+        }
+        Ok(())
     }
 
     pub async fn accept(
@@ -240,7 +311,7 @@ async fn terminal_update(
     pool: &PgPool,
     frozen_submission_id: FrozenSubmissionId,
     state: &'static str,
-    diagnostic: Option<&'static str>,
+    diagnostic: Option<&str>,
 ) -> Result<(), FreezeCommandStoreError> {
     let updated = sqlx::query(
         "UPDATE evaluation.submission_freeze_commands SET state=$2,diagnostic_code=$3,cleanup_verified=true,\

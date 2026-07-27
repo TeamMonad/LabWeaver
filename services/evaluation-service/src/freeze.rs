@@ -349,3 +349,21 @@ pub enum FreezeServiceError {
     #[error("LW_COLLECT_FAILURE_PERSIST_FAILED")]
     FailurePersistence,
 }
+
+impl FreezeServiceError {
+    /// Returns the stable diagnostic without exposing source paths or provider payloads.
+    #[must_use]
+    pub const fn diagnostic_code(&self) -> &'static str {
+        match self {
+            Self::ConfigurationInvalid => "LW_COLLECT_CONFIG_INVALID",
+            Self::ContractInvalid => "LW_COLLECT_CONTRACT_INVALID",
+            Self::IdempotencyConflict => "LW_COLLECT_IDEMPOTENCY_CONFLICT",
+            Self::InProgress => "LW_COLLECT_IN_PROGRESS",
+            Self::Collect(error) => error.diagnostic_code(),
+            Self::ObjectStore(error) => error.diagnostic_code(),
+            Self::Store(error) => error.diagnostic_code(),
+            Self::ObjectIdentityMismatch => "LW_OBJECT_LOCK_IDENTITY_MISMATCH",
+            Self::FailurePersistence => "LW_COLLECT_FAILURE_PERSIST_FAILED",
+        }
+    }
+}

@@ -9,7 +9,8 @@ use std::{collections::BTreeMap, fs, path::PathBuf, time::Duration};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use contracts::{
-    PolicyId, RetentionClass, RetentionDisposition, RetentionSnapshot, Revision, UtcTimestamp,
+    DiagnosticCode, PolicyId, RetentionClass, RetentionDisposition, RetentionSnapshot, Revision,
+    UtcTimestamp,
     submission::{
         EnvironmentFreezeBinding, EnvironmentFreezeBindingRequest, EnvironmentFreezeSourceBinding,
     },
@@ -20,9 +21,7 @@ use russh::keys::ssh_key::{LineEnding, PrivateKey, private::Ed25519Keypair};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{
-    FreezeCommandStoreError, FreezeRequest, PgFreezeCommandStore, SubmissionFreezeCommand,
-};
+use crate::{FreezeRequest, PgFreezeCommandStore, SubmissionFreezeCommand};
 
 const WORKER_IMAGE_PULL_SECRET_NAME: &str = "harbor-labweaver-system-pull";
 
@@ -133,6 +132,9 @@ impl FreezeCoordinator {
     /// Claims at most one command and reconciles every bounded in-flight Job.
     pub async fn reconcile_once(&self) -> Result<(), FreezeCoordinatorError> {
         let _ = self.store.claim_next().await?;
+        for command in self.store.cleanup_pending(32).await? {
+            self.cleanup_failed_command(&command).await?;
+        }
         let authority_now = self.store.authority_now().await?;
         for command in self.store.running(32).await? {
             if let Err(error) = self.reconcile(&command).await {
@@ -182,6 +184,34 @@ impl FreezeCoordinator {
         Ok(())
     }
 
+    async fn cleanup_failed_command(
+        &self,
+        command: &SubmissionFreezeCommand,
+    ) -> Result<(), FreezeCoordinatorError> {
+        let job_name = job_name(command);
+        let container_namespace = format!("lw-env-{}", command.environment_id);
+        for namespace in [&container_namespace, &self.configuration.vm_job_namespace] {
+            if !self.cleanup(namespace, &job_name).await? {
+                tracing::warn!(
+                    event = "evaluation.freeze.cleanup.pending",
+                    frozen_submission_id = %command.frozen_submission_id,
+                    environment_id = %command.environment_id,
+                    namespace,
+                );
+                return Ok(());
+            }
+        }
+        self.store
+            .mark_cleanup_verified(command.frozen_submission_id)
+            .await?;
+        tracing::info!(
+            event = "evaluation.freeze.cleanup.verified",
+            frozen_submission_id = %command.frozen_submission_id,
+            environment_id = %command.environment_id,
+        );
+        Ok(())
+    }
+
     async fn fail_command_after_cleanup(
         &self,
         command: &SubmissionFreezeCommand,
@@ -227,7 +257,22 @@ impl FreezeCoordinator {
                 .and_then(Value::as_u64)
                 .unwrap_or(0)
                 > 0;
-            if (succeeded || failed) && self.cleanup(&namespace, &job_name).await? {
+            let worker_diagnostic = if failed {
+                self.worker_failure_diagnostic(&namespace, command).await?
+            } else {
+                None
+            };
+            if failed {
+                let diagnostic = worker_diagnostic
+                    .as_ref()
+                    .map_or("LW_COLLECT_JOB_FAILED", DiagnosticCode::as_str);
+                self.store
+                    .mark_failed_pending_cleanup(command.frozen_submission_id, diagnostic)
+                    .await?;
+                self.cleanup_failed_command(command).await?;
+                return Ok(());
+            }
+            if succeeded && self.cleanup(&namespace, &job_name).await? {
                 // The worker persists the immutable result before exiting. A
                 // Job can still be observed as failed after that durable write
                 // (for example when the kubelet reports a terminal transition
@@ -239,17 +284,38 @@ impl FreezeCoordinator {
                     .await
                 {
                     Ok(()) => {}
-                    Err(FreezeCommandStoreError::ResultMissing) if failed => {
-                        self.store
-                            .mark_failed(command.frozen_submission_id, "LW_COLLECT_JOB_FAILED")
-                            .await?;
-                    }
                     Err(error) => return Err(error.into()),
                 }
             }
             return Ok(());
         }
         self.create_resources(command, &namespace, &job_name).await
+    }
+
+    async fn worker_failure_diagnostic(
+        &self,
+        namespace: &str,
+        command: &SubmissionFreezeCommand,
+    ) -> Result<Option<DiagnosticCode>, FreezeCoordinatorError> {
+        let response = self
+            .authorized(
+                self.kubernetes
+                    .get(self.collection_url(namespace, "v1", "pods")?),
+            )
+            .query(&[(
+                "labelSelector",
+                format!(
+                    "labweaver.io/frozen-submission-id={}",
+                    command.frozen_submission_id
+                ),
+            )])
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(FreezeCoordinatorError::KubernetesRejected);
+        }
+        let pods: Value = response.json().await?;
+        Ok(pod_failure_diagnostic(&pods))
     }
 
     async fn job_namespace(
@@ -483,6 +549,7 @@ impl FreezeCoordinator {
                             {"name":"LABWEAVER_EVALUATION_CONFIG_FILE","value":"/etc/labweaver/worker/worker.yaml"},
                             {"name":"LABWEAVER_FREEZE_COMMAND_FILE","value":"/etc/labweaver/worker/command.json"},
                             {"name":"SSL_CERT_FILE","value":self.configuration.worker_tls_ca_file}],
+                        "terminationMessagePath":"/dev/termination-log","terminationMessagePolicy":"File",
                         "securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}},
                         "resources":{"requests":{"cpu":"100m","memory":"128Mi"},"limits":{"cpu":"1","memory":"1Gi"}},"volumeMounts":mounts}],"volumes":volumes}}}
         });
@@ -638,6 +705,43 @@ impl FreezeCoordinator {
             .join(&format!("{prefix}/namespaces/{namespace}/{plural}/{name}"))
             .map_err(|_| FreezeCoordinatorError::ConfigurationInvalid)
     }
+
+    fn collection_url(
+        &self,
+        namespace: &str,
+        api_version: &str,
+        plural: &str,
+    ) -> Result<Url, FreezeCoordinatorError> {
+        validate_key(namespace)?;
+        validate_key(plural)?;
+        let prefix = if api_version == "v1" {
+            "/api/v1".to_owned()
+        } else {
+            format!("/apis/{api_version}")
+        };
+        self.configuration
+            .kubernetes_api_server
+            .join(&format!("{prefix}/namespaces/{namespace}/{plural}"))
+            .map_err(|_| FreezeCoordinatorError::ConfigurationInvalid)
+    }
+}
+
+fn pod_failure_diagnostic(pods: &Value) -> Option<DiagnosticCode> {
+    pods.pointer("/items")?
+        .as_array()?
+        .iter()
+        .flat_map(|pod| {
+            pod.pointer("/status/containerStatuses")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|status| {
+            status
+                .pointer("/state/terminated/message")
+                .and_then(Value::as_str)
+        })
+        .find_map(|message| DiagnosticCode::parse(message.trim()).ok())
 }
 
 fn validate_configuration(
@@ -827,8 +931,9 @@ fn command_deadline_exceeded(
 
 #[cfg(test)]
 mod tests {
-    use super::{FreezeCoordinatorError, command_deadline_exceeded};
+    use super::{FreezeCoordinatorError, command_deadline_exceeded, pod_failure_diagnostic};
     use contracts::UtcTimestamp;
+    use serde_json::json;
 
     #[test]
     fn unavailable_binding_is_retried_until_the_command_deadline()
@@ -851,5 +956,43 @@ mod tests {
         assert!(!error.is_systemic());
         assert!(error.is_terminal_command_error());
         assert_eq!(error.diagnostic_code(), "LW_COLLECT_BINDING_INVALID");
+    }
+
+    #[test]
+    fn worker_termination_message_accepts_only_bounded_diagnostics() {
+        let pods = json!({
+            "items": [{
+                "status": {
+                    "containerStatuses": [{
+                        "state": {
+                            "terminated": {
+                                "message": "LW_COLLECT_SSH_CREDENTIAL_INVALID\n"
+                            }
+                        }
+                    }]
+                }
+            }]
+        });
+        assert_eq!(
+            pod_failure_diagnostic(&pods)
+                .as_ref()
+                .map(contracts::DiagnosticCode::as_str),
+            Some("LW_COLLECT_SSH_CREDENTIAL_INVALID")
+        );
+
+        let unsafe_message = json!({
+            "items": [{
+                "status": {
+                    "containerStatuses": [{
+                        "state": {
+                            "terminated": {
+                                "message": "database failed: password=secret"
+                            }
+                        }
+                    }]
+                }
+            }]
+        });
+        assert!(pod_failure_diagnostic(&unsafe_message).is_none());
     }
 }
