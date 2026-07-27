@@ -303,18 +303,34 @@ fn known_host(
     encoded_key: &str,
 ) -> Result<(), GatewayError> {
     let expected_host = required_env("LABWEAVER_TARGET_ALIAS")?;
-    validate_known_host_invocation(invocation, host, &expected_host)?;
     if invocation == "ORDER" {
+        validate_known_host_invocation(invocation, host, &expected_host)?;
         return Ok(());
     }
+    if invocation == "HOSTNAME" {
+        validate_known_host_invocation(invocation, host, &expected_host)?;
+    } else if invocation == "ADDRESS" {
+        let address = host
+            .parse::<std::net::IpAddr>()
+            .map_err(|_| GatewayError::InvalidInput)?;
+        if !private_ip(address) {
+            return Err(GatewayError::Authority);
+        }
+    } else {
+        return Err(GatewayError::InvalidInput);
+    }
     let expected_identity = required_env("LABWEAVER_TARGET_HOST_KEY_IDENTITY_SHA256")?;
-    let line = verified_known_host_line(
-        host,
-        fingerprint,
-        encoded_key,
-        &expected_host,
-        &expected_identity,
-    )?;
+    let line = if invocation == "HOSTNAME" {
+        verified_known_host_line(
+            host,
+            fingerprint,
+            encoded_key,
+            &expected_host,
+            &expected_identity,
+        )?
+    } else {
+        verified_host_key_line(host, fingerprint, encoded_key, &expected_identity)?
+    };
     println!("{line}");
     Ok(())
 }
@@ -344,6 +360,15 @@ fn verified_known_host_line(
     if expected_host != host {
         return Err(GatewayError::Authority);
     }
+    verified_host_key_line(host, fingerprint, encoded_key, expected_identity)
+}
+
+fn verified_host_key_line(
+    host: &str,
+    fingerprint: &str,
+    encoded_key: &str,
+    expected_identity: &str,
+) -> Result<String, GatewayError> {
     let key = PublicKey::from_openssh(&format!("ssh-ed25519 {encoded_key}"))
         .map_err(|_| GatewayError::InvalidInput)?;
     let observed_fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
@@ -355,6 +380,18 @@ fn verified_known_host_line(
         return Err(GatewayError::Authority);
     }
     Ok(format!("{host} ssh-ed25519 {encoded_key}"))
+}
+
+const fn private_ip(address: std::net::IpAddr) -> bool {
+    match address {
+        std::net::IpAddr::V4(address) => {
+            address.is_private() && !address.is_unspecified() && !address.is_broadcast()
+        }
+        std::net::IpAddr::V6(address) => {
+            (address.is_unique_local() || address.is_unicast_link_local())
+                && !address.is_unspecified()
+        }
+    }
 }
 
 async fn close_session(
@@ -546,5 +583,38 @@ mod tests {
         assert!(validate_known_host_invocation("ORDER", alias, alias).is_ok());
         assert!(validate_known_host_invocation("ORDER", "lw-bbcdefghijklmnopqrst", alias).is_err());
         assert!(validate_known_host_invocation("UNKNOWN", alias, alias).is_err());
+    }
+
+    #[test]
+    fn known_host_address_accepts_only_private_target_addresses() {
+        assert!(private_ip(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+            10, 101, 251, 15
+        ))));
+        assert!(private_ip(std::net::IpAddr::V6(std::net::Ipv6Addr::new(
+            0xfd00, 0, 0, 0, 0, 0, 0, 0x15
+        ))));
+        assert!(!private_ip(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+            8, 8, 8, 8
+        ))));
+        assert!(!private_ip(std::net::IpAddr::V6(
+            std::net::Ipv6Addr::UNSPECIFIED
+        )));
+    }
+
+    #[test]
+    fn known_host_address_preserves_the_authoritative_key_identity() -> Result<(), ssh_key::Error> {
+        let encoded_key = "AAAAC3NzaC1lZDI1NTE5AAAAIFuGX5eSWJQm3kb+Jv4H0jHnI9I8FvkCcP9p3u3Cz5yz";
+        let key = PublicKey::from_openssh(&format!("ssh-ed25519 {encoded_key}"))?;
+        let fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
+        let identity = format!("{:x}", Sha256::digest(fingerprint.as_bytes()));
+        let line = verified_host_key_line("10.101.251.15", &fingerprint, encoded_key, &identity);
+        assert_eq!(
+            line.as_deref().ok(),
+            Some(format!("10.101.251.15 ssh-ed25519 {encoded_key}").as_str())
+        );
+        assert!(
+            verified_host_key_line("10.101.251.15", &fingerprint, encoded_key, "wrong").is_err()
+        );
+        Ok(())
     }
 }
