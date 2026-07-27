@@ -139,13 +139,14 @@ async fn run() -> Result<(), GatewayError> {
             .await
         }
         Some("known-host") => {
+            let invocation = args.next().ok_or(GatewayError::InvalidInput)?;
             let host = args.next().ok_or(GatewayError::InvalidInput)?;
             let fingerprint = args.next().ok_or(GatewayError::InvalidInput)?;
             let encoded_key = args.next().ok_or(GatewayError::InvalidInput)?;
             if args.next().is_some() {
                 return Err(GatewayError::InvalidInput);
             }
-            known_host(&host, &fingerprint, &encoded_key)
+            known_host(&invocation, &host, &fingerprint, &encoded_key)
         }
         _ => Err(GatewayError::InvalidInput),
     }
@@ -276,8 +277,17 @@ async fn force_command(
     result
 }
 
-fn known_host(host: &str, fingerprint: &str, encoded_key: &str) -> Result<(), GatewayError> {
+fn known_host(
+    invocation: &str,
+    host: &str,
+    fingerprint: &str,
+    encoded_key: &str,
+) -> Result<(), GatewayError> {
     let expected_host = required_env("LABWEAVER_TARGET_ALIAS")?;
+    validate_known_host_invocation(invocation, host, &expected_host)?;
+    if invocation == "ORDER" {
+        return Ok(());
+    }
     let expected_identity = required_env("LABWEAVER_TARGET_HOST_KEY_IDENTITY_SHA256")?;
     let line = verified_known_host_line(
         host,
@@ -288,6 +298,20 @@ fn known_host(host: &str, fingerprint: &str, encoded_key: &str) -> Result<(), Ga
     )?;
     println!("{line}");
     Ok(())
+}
+
+fn validate_known_host_invocation(
+    invocation: &str,
+    host: &str,
+    expected_host: &str,
+) -> Result<(), GatewayError> {
+    validate_alias(host)?;
+    if expected_host != host {
+        return Err(GatewayError::Authority);
+    }
+    matches!(invocation, "ORDER" | "HOSTNAME" | "ADDRESS")
+        .then_some(())
+        .ok_or(GatewayError::InvalidInput)
 }
 
 fn verified_known_host_line(
@@ -488,5 +512,13 @@ mod tests {
             .is_err()
         );
         Ok(())
+    }
+
+    #[test]
+    fn known_host_order_probe_accepts_only_the_authoritative_alias() {
+        let alias = "lw-abcdefghijklmnopqrst";
+        assert!(validate_known_host_invocation("ORDER", alias, alias).is_ok());
+        assert!(validate_known_host_invocation("ORDER", "lw-bbcdefghijklmnopqrst", alias).is_err());
+        assert!(validate_known_host_invocation("UNKNOWN", alias, alias).is_err());
     }
 }
