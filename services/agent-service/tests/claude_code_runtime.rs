@@ -371,6 +371,12 @@ fn stream_output(
             "estimated_tokens": 64,
             "estimated_tokens_delta": 64
         }),
+        json!({
+            "type": "system",
+            "subtype": "status",
+            "session_id": session_id,
+            "status": "running"
+        }),
     ];
     if let Some(candidate) = candidate {
         events.push(json!({

@@ -1561,12 +1561,12 @@ fn parse_stream_output(stdout: &[u8]) -> Result<ParsedClaudeCodeStream, ClaudeCo
         }
         match event.get("type").and_then(Value::as_str) {
             Some("system") => {
-                if event.get("subtype").and_then(Value::as_str) != Some("thinking_tokens")
-                    || !event.get("estimated_tokens").is_some_and(Value::is_number)
-                    || !event
-                        .get("estimated_tokens_delta")
-                        .is_some_and(Value::is_number)
-                {
+                let subtype = event
+                    .get("subtype")
+                    .and_then(Value::as_str)
+                    .filter(|subtype| !subtype.is_empty())
+                    .ok_or(ClaudeCodeRuntimeError::ProtocolInvalid)?;
+                if subtype == "init" {
                     return Err(ClaudeCodeRuntimeError::ProtocolInvalid);
                 }
             }
@@ -1677,7 +1677,7 @@ fn tool_policy_sha256() -> Sha256Digest {
         "builtinTools": [],
         "mcpServers": [],
         "maxTurnsPerCandidate": 1,
-        "outputProtocol": "stream_json_single_candidate_with_exact_schema_prompt",
+        "outputProtocol": "stream_json_single_candidate_with_non_authoritative_system_telemetry",
         "permissionMode": "dontAsk",
         "slashCommands": false,
         "sessionPersistence": false
