@@ -91,12 +91,22 @@ where
             .validate(contract)
             .map_err(|_| OutboxDispatchError::PayloadContractInvalid)?;
 
-        timeout(
+        let publish_result = timeout(
             self.publish_timeout,
             self.publisher.publish(&subject, &event),
         )
-        .await
-        .map_err(|_| OutboxDispatchError::PublishTimeout)??;
+        .await;
+        match publish_result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                transaction.rollback().await?;
+                return Err(OutboxDispatchError::Publish(error));
+            }
+            Err(_) => {
+                transaction.rollback().await?;
+                return Err(OutboxDispatchError::PublishTimeout);
+            }
+        }
         let updated = sqlx::query(
             "UPDATE environment.outbox_events \
              SET published_at=date_trunc('milliseconds', clock_timestamp()) \
