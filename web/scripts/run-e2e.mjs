@@ -18,6 +18,16 @@ const PASSWORD_FILES = Object.freeze([
   'LABWEAVER_TEACHER_PASSWORD_FILE',
   'LABWEAVER_STUDENT_PASSWORD_FILE',
 ])
+export const LIVE_PROJECTS = Object.freeze(['setup', 'teacher', 'student'])
+
+export function livePlaywrightArguments() {
+  return [
+    'node_modules/@playwright/test/cli.js',
+    'test',
+    '--config=playwright.config.mjs',
+    ...LIVE_PROJECTS.flatMap((project) => ['--project', project]),
+  ]
+}
 
 function fail(code, diagnostics) {
   if (!diagnostics.includes(code)) diagnostics.push(code)
@@ -54,7 +64,7 @@ function executePlaywright(environment) {
   return new Promise((resolve) => {
     const child = spawn(
       process.execPath,
-      ['node_modules/@playwright/test/cli.js', 'test', '--config=playwright.config.mjs'],
+      livePlaywrightArguments(),
       { cwd: WEB_ROOT, env: environment, stdio: 'inherit' },
     )
     child.once('error', (error) => resolve({ exitCode: 1, error: error.message }))

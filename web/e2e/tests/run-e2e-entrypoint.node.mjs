@@ -5,7 +5,11 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { runE2e } from '../../scripts/run-e2e.mjs'
+import {
+  LIVE_PROJECTS,
+  livePlaywrightArguments,
+  runE2e,
+} from '../../scripts/run-e2e.mjs'
 
 const WEB_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const ENTRYPOINT = path.join(WEB_ROOT, 'scripts', 'run-e2e.mjs')
@@ -40,6 +44,21 @@ test('run-e2e entrypoint blocks without a base URL and cleans its isolated repor
   assert.equal(result.report.overall, 'blocked')
   assert.deepEqual(result.report.diagnostics, ['PW_BASE_URL_REQUIRED'])
   await assert.rejects(stat(result.temporaryDirectory))
+})
+
+test('live replay selects only connected role projects', () => {
+  assert.deepEqual(LIVE_PROJECTS, ['setup', 'teacher', 'student'])
+  assert.deepEqual(livePlaywrightArguments(), [
+    'node_modules/@playwright/test/cli.js',
+    'test',
+    '--config=playwright.config.mjs',
+    '--project',
+    'setup',
+    '--project',
+    'teacher',
+    '--project',
+    'student',
+  ])
 })
 
 test('run-e2e entrypoint blocks placeholder URLs without browser or network execution', async () => {
