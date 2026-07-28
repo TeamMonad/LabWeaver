@@ -38,6 +38,7 @@ coordinator:
     minio-access-key: /etc/labweaver/secrets/minio-access-key
     minio-ca.pem: /etc/labweaver/secrets/minio-ca.pem
     minio-secret-key: /etc/labweaver/secrets/minio-secret-key
+  workerRegistryPullConfigFile: /etc/labweaver/secrets/registry-pull-config.json
   workerTlsCaFile: /etc/labweaver/secrets/minio-ca.pem
   infrastructureNamespaceLabels:
     labweaver.io/infrastructure: "true"

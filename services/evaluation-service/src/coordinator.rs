@@ -44,6 +44,7 @@ pub struct FreezeCoordinatorConfiguration {
     pub vm_job_namespace: String,
     pub worker_configuration_file: PathBuf,
     pub worker_secret_files: BTreeMap<String, PathBuf>,
+    pub worker_registry_pull_config_file: PathBuf,
     pub worker_tls_ca_file: PathBuf,
     pub infrastructure_namespace_labels: BTreeMap<String, String>,
     pub dns_namespace_labels: BTreeMap<String, String>,
@@ -64,6 +65,7 @@ pub struct FreezeCoordinator {
     kubernetes_token: String,
     worker_configuration: String,
     worker_secrets: BTreeMap<String, Vec<u8>>,
+    worker_registry_pull_config: Vec<u8>,
 }
 
 impl FreezeCoordinator {
@@ -118,6 +120,8 @@ impl FreezeCoordinator {
                 Ok((name.clone(), read_bound_file(path)?))
             })
             .collect::<Result<_, FreezeCoordinatorError>>()?;
+        let worker_registry_pull_config =
+            read_registry_pull_config(&configuration.worker_registry_pull_config_file)?;
         Ok(Self {
             configuration,
             store,
@@ -126,6 +130,7 @@ impl FreezeCoordinator {
             kubernetes_token,
             worker_configuration,
             worker_secrets,
+            worker_registry_pull_config,
         })
     }
 
@@ -493,6 +498,29 @@ impl FreezeCoordinator {
         self.apply(
             namespace,
             "v1",
+            "secrets",
+            WORKER_IMAGE_PULL_SECRET_NAME,
+            json!({
+                "apiVersion":"v1",
+                "kind":"Secret",
+                "metadata":{
+                    "name":WORKER_IMAGE_PULL_SECRET_NAME,
+                    "namespace":namespace,
+                    "labels":{
+                        "app.kubernetes.io/managed-by":FIELD_MANAGER,
+                        "app.kubernetes.io/name":"evaluation-freeze-worker"
+                    }
+                },
+                "type":"kubernetes.io/dockerconfigjson",
+                "data":{
+                    ".dockerconfigjson":STANDARD.encode(&self.worker_registry_pull_config)
+                }
+            }),
+        )
+        .await?;
+        self.apply(
+            namespace,
+            "v1",
             "serviceaccounts",
             &self.configuration.worker_service_account_name,
             json!({"apiVersion":"v1","kind":"ServiceAccount","metadata":{"name":self.configuration.worker_service_account_name,
@@ -767,6 +795,7 @@ fn validate_configuration(
         || !(100..=30_000).contains(&configuration.request_timeout_milliseconds)
         || !(1..=3650).contains(&configuration.retention_days)
         || configuration.worker_secret_files.is_empty()
+        || !configuration.worker_registry_pull_config_file.is_absolute()
         || !configuration.worker_tls_ca_file.is_absolute()
         || !configuration
             .worker_secret_files
@@ -824,6 +853,32 @@ fn read_bound_file(path: &PathBuf) -> Result<Vec<u8>, FreezeCoordinatorError> {
 fn read_bound_text(path: &PathBuf) -> Result<String, FreezeCoordinatorError> {
     String::from_utf8(read_bound_file(path)?)
         .map_err(|_| FreezeCoordinatorError::ConfigurationInvalid)
+}
+
+fn read_registry_pull_config(path: &PathBuf) -> Result<Vec<u8>, FreezeCoordinatorError> {
+    let payload = read_bound_file(path)?;
+    let value: Value = serde_json::from_slice(&payload)
+        .map_err(|_| FreezeCoordinatorError::ConfigurationInvalid)?;
+    let auths = value
+        .as_object()
+        .filter(|root| root.len() == 1)
+        .and_then(|root| root.get("auths"))
+        .and_then(Value::as_object)
+        .filter(|auths| !auths.is_empty());
+    if auths.is_none_or(|auths| {
+        auths.iter().any(|(registry, credentials)| {
+            registry.is_empty()
+                || credentials.as_object().is_none_or(|credentials| {
+                    credentials
+                        .get("auth")
+                        .and_then(Value::as_str)
+                        .is_none_or(str::is_empty)
+                })
+        })
+    }) {
+        return Err(FreezeCoordinatorError::ConfigurationInvalid);
+    }
+    Ok(payload)
 }
 
 fn job_name(command: &SubmissionFreezeCommand) -> String {
@@ -931,9 +986,13 @@ fn command_deadline_exceeded(
 
 #[cfg(test)]
 mod tests {
-    use super::{FreezeCoordinatorError, command_deadline_exceeded, pod_failure_diagnostic};
+    use super::{
+        FreezeCoordinatorError, command_deadline_exceeded, pod_failure_diagnostic,
+        read_registry_pull_config,
+    };
     use contracts::UtcTimestamp;
     use serde_json::json;
+    use std::fs;
 
     #[test]
     fn unavailable_binding_is_retried_until_the_command_deadline()
@@ -994,5 +1053,22 @@ mod tests {
             }]
         });
         assert!(pod_failure_diagnostic(&unsafe_message).is_none());
+    }
+
+    #[test]
+    fn registry_pull_config_requires_one_non_empty_auth_map()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("registry.json");
+        fs::write(
+            &path,
+            br#"{"auths":{"harbor.lab.lan":{"auth":"cm9ib3Q6c2VjcmV0"}}}"#,
+        )?;
+        assert!(read_registry_pull_config(&path).is_ok());
+        fs::write(&path, br#"{"auths":{"harbor.lab.lan":{}}}"#)?;
+        assert!(read_registry_pull_config(&path).is_err());
+        fs::write(&path, br#"{"auths":{}}"#)?;
+        assert!(read_registry_pull_config(&path).is_err());
+        Ok(())
     }
 }
