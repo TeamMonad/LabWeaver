@@ -53,6 +53,7 @@ export function createPlaywrightConfig({ ci = Boolean(process.env.CI) } = {}) {
     ],
     use: {
       baseURL: process.env.LABWEAVER_BASE_URL || 'http://localhost:4173',
+      ignoreHTTPSErrors: process.env.LABWEAVER_E2E_IGNORE_HTTPS_ERRORS === 'true',
       trace: 'retain-on-failure',
       screenshot: 'only-on-failure',
       video: 'retain-on-failure',
