@@ -167,6 +167,7 @@ fn plan_uses_digest_only_image_and_only_the_access_proxy() {
             .pointer("/spec/template/spec/containers/0/image"),
         Some(&json!(first.image))
     );
+    assert_workspace_seed(&deployment.document, &first.image);
     assert_runtime_security_and_tmp(&deployment.document);
     assert_eq!(
         resource(&first, "Service").document.pointer("/spec/type"),
@@ -219,6 +220,46 @@ fn plan_uses_digest_only_image_and_only_the_access_proxy() {
             .document
             .pointer("/spec/ingress/0/from/0/podSelector/matchLabels/app.kubernetes.io~1name"),
         Some(&json!("access-service"))
+    );
+}
+
+fn assert_workspace_seed(document: &serde_json::Value, image: &str) {
+    assert_eq!(
+        document.pointer("/spec/template/spec/initContainers/0/name"),
+        Some(&json!("workspace-seed"))
+    );
+    assert_eq!(
+        document.pointer("/spec/template/spec/initContainers/0/image"),
+        Some(&json!(image))
+    );
+    assert_eq!(
+        document.pointer("/spec/template/spec/initContainers/0/command/0"),
+        Some(&json!("/bin/sh"))
+    );
+    let command = document
+        .pointer("/spec/template/spec/initContainers/0/command/2")
+        .and_then(serde_json::Value::as_str)
+        .expect("workspace seed command");
+    assert!(command.contains("/opt/labweaver/workspace-seed"));
+    assert!(command.contains("LW_ENVIRONMENT_WORKSPACE_SEED_MISSING"));
+    assert!(command.contains("find /workspace"));
+    assert_eq!(
+        document.pointer("/spec/template/spec/initContainers/0/securityContext/runAsNonRoot"),
+        Some(&json!(true))
+    );
+    assert_eq!(
+        document
+            .pointer("/spec/template/spec/initContainers/0/securityContext/readOnlyRootFilesystem"),
+        Some(&json!(true))
+    );
+    assert_eq!(
+        document
+            .pointer("/spec/template/spec/initContainers/0/securityContext/capabilities/drop/0"),
+        Some(&json!("ALL"))
+    );
+    assert_eq!(
+        document.pointer("/spec/template/spec/initContainers/0/volumeMounts/0/mountPath"),
+        Some(&json!("/workspace"))
     );
 }
 

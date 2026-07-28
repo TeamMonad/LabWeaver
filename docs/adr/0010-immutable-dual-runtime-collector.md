@@ -68,6 +68,15 @@ mounts a HostPath and never copies Evaluation credentials into a student
 namespace. The worker opens the mount as a `cap-std` capability before
 collection.
 
+An approved Container runtime image must provide POSIX `/bin/sh`, `find`, and
+`cp`, and place the initial student workspace below the fixed
+`/opt/labweaver/workspace-seed` directory. Environment mounts the persistent
+PVC at `/workspace` and runs the same digest-pinned image as a non-root init
+container with a fixed command. It copies the seed only when the PVC is empty,
+fails closed if the seed directory is absent, and never overwrites retained
+student data during restart or pod replacement. No candidate field controls
+the command or either path.
+
 For KubeVirt environments, the coordinator generates an ephemeral user key and
 asks the Environment owner over mTLS to sign its public key for one exact
 running environment. Environment verifies course, owner, revision, runtime

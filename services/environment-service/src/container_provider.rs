@@ -39,6 +39,14 @@ const FREEZE_REQUEST_CPU_MILLICORES: u32 = 100;
 const FREEZE_LIMIT_CPU_MILLICORES: u32 = 1_000;
 const FREEZE_REQUEST_MEMORY_BYTES: u64 = 128 * 1024 * 1024;
 const FREEZE_LIMIT_MEMORY_BYTES: u64 = 1024 * 1024 * 1024;
+const WORKSPACE_ROOT: &str = "/workspace";
+const WORKSPACE_SEED_COMMAND: &str = concat!(
+    "set -eu; ",
+    "if [ -n \"$(find /workspace -mindepth 1 -maxdepth 1 -print -quit)\" ]; then exit 0; fi; ",
+    "if [ ! -d /opt/labweaver/workspace-seed ]; then ",
+    "echo 'LW_ENVIRONMENT_WORKSPACE_SEED_MISSING' >&2; exit 64; fi; ",
+    "cp -R /opt/labweaver/workspace-seed/. /workspace/"
+);
 
 /// One server-side-apply document. The name is deterministic and never user-controlled.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -1438,15 +1446,26 @@ where
                                 "serviceAccountName":"runtime","automountServiceAccountToken":false,
                                 // The shared NFS PVC is provisioned with the `nobody` owner.
                                 // Pinning the runtime identity to that non-root UID keeps the
-                                // student workspace writable without a privileged init step.
+                                // student workspace writable. The fixed init command copies the
+                                // approved image's seed exactly once and preserves an existing
+                                // workspace across stop/start and pod replacement.
                                 "securityContext":{"runAsNonRoot":true,"runAsUser":65534,"runAsGroup":65534,"fsGroup":65534,"seccompProfile":{"type":"RuntimeDefault"}},
+                                "initContainers":[{
+                                    "name":"workspace-seed",
+                                    "image":image,
+                                    "imagePullPolicy":"IfNotPresent",
+                                    "command":["/bin/sh","-c",WORKSPACE_SEED_COMMAND],
+                                    "resources":{"requests":{"cpu":"50m","memory":"64Mi"},"limits":{"cpu":"100m","memory":"128Mi"}},
+                                    "securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"capabilities":{"drop":["ALL"]}},
+                                    "volumeMounts":[{"name":"workspace","mountPath":WORKSPACE_ROOT}]
+                                }],
                                 "containers":[{
                                     "name":"runtime","image":image,"imagePullPolicy":"IfNotPresent",
                                     "ports":[{"name":"service","containerPort":service_port}],
                                     "resources":{"requests":{"cpu":cpu,"memory":memory},"limits":{"cpu":cpu,"memory":memory}},
                                     "securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"capabilities":{"drop":["ALL"]}},
                                     "volumeMounts":[
-                                        {"name":"workspace","mountPath":"/workspace"},
+                                        {"name":"workspace","mountPath":WORKSPACE_ROOT},
                                         {"name":"runtime-tmp","mountPath":"/tmp"}
                                     ],
                                     "readinessProbe":{"tcpSocket":{"port":"service"},"periodSeconds":2,"failureThreshold":30}

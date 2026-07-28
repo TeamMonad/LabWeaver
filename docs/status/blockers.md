@@ -51,10 +51,12 @@ BuildKit/Harbor/Trivy publication, Container readiness, HTTP endpoint health and
 immutable freeze. The final same-identity evidence set does not yet include
 stop/start and application-owned delete/cleanup readback.
 
-The replay workspace file was seeded with an administrative `kubectl exec`
-because Sprint 2 has no student workspace writer. This is acceptable only as a
-declared demo setup limitation and must not be described as a verified student
-editing path.
+The older replay workspace file was seeded with an administrative `kubectl
+exec` and remains only historical demo evidence. The current resource plan
+initializes an empty PVC from the approved image's fixed
+`/opt/labweaver/workspace-seed` directory without overwriting retained data.
+Exit additionally requires connected proof that this initializer populated the
+PVC and that the resulting submission froze without administrative mutation.
 
 Exit: complete stop/start/delete and prove no application-owned runtime
 resources remain. Do not substitute older lifecycle evidence.

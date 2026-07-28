@@ -54,9 +54,14 @@ Trivy 0.72.0 reported zero Critical findings, and Control published the
 immutable digest. A real Container reached `ready`, served its HTTP endpoint
 and produced an immutable frozen submission. Real Keycloak teacher/student
 Playwright completed with three passed tests and one explicitly skipped VM
-test. The workspace file used by this replay was seeded with an administrative
-`kubectl exec` because Sprint 2 has no student workspace writer; this is a demo
-setup limitation, not a verified student editing path.
+test. The older replay workspace file was seeded with an administrative
+`kubectl exec`; that evidence remains a declared demo setup limitation. The
+current Container resource plan instead initializes an empty persistent
+workspace once from the approved image's fixed
+`/opt/labweaver/workspace-seed` directory. The initializer is non-root, uses a
+fixed command, fails closed when the seed is missing, and does not overwrite an
+existing workspace. Connected verification of this corrected path is still
+required for the current build identity.
 
 Two fresh AgentRuns on `f9305c4a` and `807a4c59` failed closed before producing
 candidates. A direct, payload-free Anthropic compatibility probe returned HTTP
