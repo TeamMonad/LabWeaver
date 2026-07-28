@@ -2,8 +2,10 @@
 
 `cargo xtask release-gate` is the only command that can produce a passing
 Sprint 2 report. It does not run a Fixture and it does not upgrade partial
-evidence. `cargo xtask demo replay` first runs the allowlisted infrastructure
-Verify and live Playwright command, then invokes the same gate.
+evidence. `cargo xtask demo replay` first runs the allowlisted,
+non-destructive Sprint 2 application adoption for the exact package, then live
+Playwright, and finally invokes the same gate. It does not reconcile Harbor or
+rebind the retained infrastructure installation to the application commit.
 
 The Sprint 3 manual Demo, downstream implementation and evidence payloads use
 the identity, resource-readback and No-Go contract in
@@ -19,6 +21,7 @@ project-relative locator:
 ```sh
 export LABWEAVER_RELEASE_GATE_INPUT=artifacts/release-gate/input.json
 export LABWEAVER_DEMO_ENV=demo
+export LABWEAVER_DEMO_PACKAGE_MANIFEST=artifacts/package/pkg-demo-sprint2/PlatformImagePackageManifest.json
 cargo xtask demo replay
 ```
 

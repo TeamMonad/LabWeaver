@@ -160,6 +160,11 @@ deployment manifest, migration catalog, image set, and run ID.
 - `sprint2-application` creates only missing application-owned state, verifies
   exact migration and service identities when state already exists, and deploys
   the manifest-bound image profile without invoking the destructive reset path.
+- `demo replay` reuses that non-destructive application adoption and requires
+  the exact package manifest. It does not run the broad Harbor reconciliation
+  or require the retained infrastructure installation manifest to adopt every
+  application commit. The latter remains infrastructure maintenance evidence,
+  not a Sprint 2 application release identity.
 - The Sprint 2 Release Gate requires both Container and real KubeVirt paths.
 - Release evidence must expose the accepted broad-runtime-RBAC risk and must
   not report least-privilege verification while the exception remains.

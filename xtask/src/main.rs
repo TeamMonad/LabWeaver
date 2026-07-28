@@ -695,11 +695,21 @@ fn demo_replay() -> Result<(), AppError> {
         detail: "LABWEAVER_DEMO_ENV is required".to_owned(),
     })?;
     validate_environment_name(&environment)?;
-    verify(&EnvironmentArgs {
+    let package_manifest =
+        std::env::var("LABWEAVER_DEMO_PACKAGE_MANIFEST").map_err(|_| AppError::ReleaseGate {
+            code: "LW_DEMO_PACKAGE_MANIFEST_MISSING",
+            detail: "LABWEAVER_DEMO_PACKAGE_MANIFEST is required".to_owned(),
+        })?;
+    // Sprint 2 adopts retained infrastructure. Re-running the broad Harbor
+    // installation verifier would bind the application replay to a historical
+    // infrastructure-install commit and would require an unrelated Harbor data
+    // backup/reconciliation. Reconcile and verify the current application
+    // package through the allowlisted non-destructive adoption path instead.
+    sprint2_application(&EnvironmentArgs {
         env: environment,
         infra: true,
         yes: true,
-        package_manifest: None,
+        package_manifest: Some(PathBuf::from(package_manifest)),
     })?;
     let status = ProcessCommand::new("pnpm")
         .args(["--dir=web", "test:e2e:live"])

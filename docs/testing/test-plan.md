@@ -76,7 +76,8 @@ catalog, image digest set and Run ID. It must execute:
 3. invalid, expired, revoked and cross-course AccessGrant cases;
 4. a second idempotent Ansible deploy;
 5. real teacher and student Playwright projects without fixed sleeps;
-6. `cargo xtask demo replay` twice;
+6. `cargo xtask demo replay` twice, each time using the exact connected package
+   through the non-destructive `sprint2-application` adoption path;
 7. `cargo xtask release-gate` and report-schema validation.
 
 Failed browser runs retain Trace, screenshot and video. Failed deployment or
@@ -96,6 +97,7 @@ export LABWEAVER_STUDENT_PASSWORD_FILE="$LABWEAVER_E2E_PRIVATE_DIR/student-passw
 export LABWEAVER_E2E_AGENT_RUN_ID=<approved-agent-run-id>
 export LABWEAVER_E2E_CONTAINER_ENVIRONMENT_ID=<frozen-container-environment-id>
 export LABWEAVER_E2E_VM_ENVIRONMENT_ID=<frozen-kubevirt-environment-id>
+export LABWEAVER_DEMO_PACKAGE_MANIFEST=<current-package-manifest>
 pnpm --dir web test:e2e:live
 ```
 
