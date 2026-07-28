@@ -14,22 +14,11 @@ Historical evidence cannot satisfy a current same-identity gate.
   Harbor digests. Retained infrastructure was not reset.
 - Current-identity Container Agent, approval, build, publication, access,
   freeze, stop/start/delete and cluster absence readback pass.
-- Current-identity Playwright timed out without a report and remains blocked.
-
-## Same-identity KubeVirt replay
-
-The current deployment has no complete same-identity VM create, SSH,
-stop/start, freeze and cleanup replay. An older source identity completed that
-real lifecycle, but it cannot be joined to the current Container evidence.
-
-Exit:
-
-1. deploy the final reviewed package identity;
-2. complete the real KubeVirt lifecycle without fallback;
-3. bind resource readback, frozen submission and cleanup evidence to the same
-   commit, deployment manifest, migration catalog, image set and Run ID.
-
-Owner: B implementation review; D connected Verify; A release judgment.
+- Current-source KubeVirt create, Gateway access, freeze, stop/start/delete and
+  cluster absence readback pass.
+- Real Keycloak teacher and student setup, the teacher policy/candidate view,
+  and both student runtime freeze journeys pass. Earlier browser timeouts are
+  retained only as diagnostic history.
 
 ## Access and Gateway negative matrix
 
@@ -65,9 +54,9 @@ Owner: D connected Verify; A release judgment.
 ## Release Gate and human review
 
 `cargo xtask release-gate` has not produced a passing Sprint 2 report for the
-current identity. It remains blocked by the same-identity VM, Access/Gateway
-negative matrix, current Container lifecycle cleanup, infrastructure identity
-and rollback items above.
+current identity. Dual-runtime lifecycle, cleanup and browser evidence now
+pass; the gate remains blocked by the Access/Gateway negative matrix,
+infrastructure identity, rollback and human-review items above.
 
 PR #121 is `risk:high`, remains Draft and must not use auto-merge. A and B must
 approve the high-risk Contract/Schema/Migration/security paths, C must review

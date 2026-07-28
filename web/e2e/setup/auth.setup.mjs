@@ -49,13 +49,17 @@ async function authenticate({ browser, baseURL, actor }) {
   const context = await browser.newContext({ baseURL })
   const page = await context.newPage()
   try {
-    await page.goto(actor.landingPath)
+    await page.goto(`/auth/login?return_to=${encodeURIComponent(actor.landingPath)}`, {
+      waitUntil: 'domcontentloaded',
+    })
     await expect(page.locator('#username')).toBeVisible()
     await page.locator('#username').fill(username)
     await page.locator('#password').fill(password)
     await Promise.all([
-      page.waitForURL((url) => url.origin === new URL(baseURL).origin),
-      page.locator('#kc-login').click(),
+      page.waitForURL((url) => url.origin === new URL(baseURL).origin, {
+        waitUntil: 'domcontentloaded',
+      }),
+      page.locator('#kc-login').click({ noWaitAfter: true }),
     ])
     // Keycloak returns to the authenticated role selector when no previous
     // BFF session exists. Follow the explicit role entry before asserting the
@@ -63,7 +67,7 @@ async function authenticate({ browser, baseURL, actor }) {
     // teacher/student browser journey instead of assuming a hidden redirect.
     if (!new URL(page.url()).pathname.startsWith(actor.landingPath)) {
       await page.getByText(actor.entryLabel, { exact: true }).click()
-      await page.goto(actor.landingPath)
+      await page.goto(actor.landingPath, { waitUntil: 'domcontentloaded' })
     }
     await expect(page.getByRole('heading', { name: actor.heading }).first()).toBeVisible()
     await expect(page).toHaveURL(new RegExp(`${actor.landingPath.replaceAll('/', '\\/')}(?:[?#].*)?$`))
@@ -75,8 +79,10 @@ async function authenticate({ browser, baseURL, actor }) {
   }
 }
 
-test('prepare real Keycloak teacher and student auth states', async ({ browser, baseURL }) => {
-  if (!baseURL) throw new Error('PW_BASE_URL_REQUIRED')
-  await mkdir(authDir, { recursive: true })
-  for (const actor of actors) await authenticate({ browser, baseURL, actor })
-})
+for (const actor of actors) {
+  test(`prepare real Keycloak ${actor.role} auth state`, async ({ browser, baseURL }) => {
+    if (!baseURL) throw new Error('PW_BASE_URL_REQUIRED')
+    await mkdir(authDir, { recursive: true })
+    await authenticate({ browser, baseURL, actor })
+  })
+}

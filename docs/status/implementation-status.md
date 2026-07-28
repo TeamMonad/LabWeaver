@@ -49,15 +49,23 @@ returned 200. The non-root fixed initializer populated an empty PVC from
 SHA-256 `46332fd3cb4658ef82efdb62a3f7ff87feacc30d30b8b4ddffa6ee4ccbfde818`.
 Stop, start, application-owned delete and cluster absence readback passed.
 
-The immediately preceding `f4be2776` deployment completed a real KubeVirt
-access, freeze and lifecycle replay. An external OpenSSH client passed
-public-key authentication, grant authorization, target Service resolution and
-exact target host-key validation. Submission
-`019fa701-3801-75d1-8538-189df95b1055` froze one file with immutable object
-SHA-256 `026de733a9c1cdc34e7e2fac7f541b854a031d39b80da0777b15498fa18953d5`.
-Stop, start, delete and cluster absence readback passed. This proves the real
-VM path on `f4be2776`, but it is not promoted to the final `24928e8f`
-same-identity Release Gate.
+The current deployment also completed a real KubeVirt replay. VM
+`019fa74b-8c59-7f31-9c83-53aad5eccc8b` reached `ready`; an external OpenSSH
+client passed public-key authentication, grant authorization, target Service
+resolution and exact target host-key validation. Submission
+`019fa752-eff7-7ca0-a949-7f3411acd9d1` froze one file with immutable object
+SHA-256 `dc50b0056ccd06a156d1b8c54d8875265d347bd7713ccb433412dca548fe8bfe`.
+Stop, start, application-owned delete and cluster absence readback passed.
+
+A fresh current-source AgentRun `019fa775-0ec4-7a01-aa64-538af281c16b`
+renewed the expired Container build evidence, produced and approved both
+candidates, and published release `019fa776-0c8f-7b52-b798-4528f9741044`.
+Container `019fa776-6050-75b0-87a4-5c670f59422c` and KubeVirt VM
+`019fa776-d1fa-7933-90b8-e01e03892bcf` then completed the real student
+Playwright freeze journey. The connected run passed both Keycloak setup tests,
+the teacher journey, and both student runtime tests. Both environments were
+subsequently deleted through the application API and cluster readback found
+no environment namespace or runtime object.
 
 On the older `ec6587cb` deployment, one production ECNU AgentRun completed
 Environment and Evaluation candidate generation; the teacher approved both
@@ -85,10 +93,10 @@ Fixture or release.
 | Build and publication | verified on current connected runtime | BuildKit, Harbor and Trivy completed before immutable release `019fa72a-94ca-7cf2-8c75-024415ff19b6` was published. |
 | Container create and access | verified on current connected runtime | Environment `019fa72a-c932-7b13-9ab1-a10531d7b5b7` reached authoritative `ready`; HTTP AccessGrant `019fa72b-6d17-7b12-99b6-73df9c46dec4` returned 200. |
 | Container freeze and lifecycle | verified on current connected runtime | Automatic non-root PVC seeding produced submission `019fa72b-2b44-7b43-b917-c3feefbce4d6`; stop/start/delete and cluster absence readback passed. |
-| Real browser flow | blocked on current identity | Real Keycloak API sessions completed teacher/student mutations, but two bounded current-identity Playwright attempts timed out without a report and are not counted as browser evidence. |
-| KubeVirt | verified on immediate predecessor; blocked for final identity | Source `f4be2776` completed real VM Gateway access, immutable freeze, stop/start/delete and cleanup readback. The final `24928e8f` identity has not repeated the complete VM lifecycle and cannot close the terminal gate. |
+| Real browser flow | verified on current connected runtime | Real Keycloak teacher setup and teacher candidate view passed; a subsequent connected run passed teacher/student setup plus both Container and KubeVirt student freeze journeys. Earlier timeouts remain diagnostic history only. |
+| KubeVirt | verified on current connected runtime | VM `019fa74b-8c59-7f31-9c83-53aad5eccc8b` completed Gateway access, immutable freeze, stop/start/delete and cleanup readback on source `24928e8f`. A second VM completed the student browser freeze journey and application cleanup. |
 | Infrastructure Verify | blocked by identity drift | Generic `cargo xtask verify --infra` correctly rejects the retained historical deployment manifest because its commit/inventory/component-lock identity differs from the current private inventory. Application-specific adoption and testflight passed. |
-| Release Gate / Sprint 2 | blocked | Current-identity Container closure is complete. Same-identity VM, Access/Gateway negative matrix, rollback drill, current browser report, human review and the complete machine-readable Release Gate remain absent. |
+| Release Gate / Sprint 2 | blocked | Current-source dual-runtime and browser closure are complete. Access/Gateway negative matrix, rollback drill, infrastructure identity reconciliation, human review and the complete machine-readable Release Gate remain absent. |
 
 | Capability | Owner | State | Current evidence | Blocker or limitation |
 | --- | --- | --- | --- | --- |
@@ -100,10 +108,10 @@ Fixture or release.
 | BuildKit/Harbor/Trivy supply chain | B | connected for Container | fixed-command `build-executor`, persistent fence and negative tests; the ec6587 package passed connected `package-validate`; a fresh course build reached BuildKit, Trivy, candidate cleanup and immutable digest publication | full duplicate/reorder/cancel/deadline connected replay and terminal Release Gate remain open |
 | Environment lifecycle and owner resolver | B/A | implemented locally | lifecycle, PostgreSQL, JetStream, mTLS and typed executor tests | deployed owner/executor API path is pending |
 | Container runtime | B | connected Container slice verified | deterministic plan, persistent fence, restricted Kubernetes SSA/observe/scale/restart/delete backend, finalizer-race handling and versioned cleanup evidence | KubeVirt replay and Gateway protocol replay remain pending; the retained artifact bucket does not provide Object Lock |
-| KubeVirt runtime | B | connected on f9305c4a; final identity pending | deterministic VM/CDI plan, independent persistent fence, restricted API/subresource backend and executor-owned SSH host-key probe; `f9305c4a` completed real Gateway access and VM freeze after preserving workspace creation | the final `807a4c59` stop/recover/freeze/delete replay and dual-runtime gate remain blocked |
-| AccessGrant and session authorization | A | connected on f9305c4a; negative matrix pending | external OpenSSH passed key authentication, grant authorization, target Service resolution and exact host-key identity; fixed local account, one-time token and session close remained enforced | final-identity denial, expiry, revocation and 60-second termination replay remain pending; Upgrade is explicitly outside Sprint 2 |
-| Freeze-only Evaluation Service | B | connected Container freeze at 24928e8f and VM freeze at f4be2776 | Evaluation-owned public API, Access BFF authorization, PostgreSQL command/outbox, PVC/SFTP collection, immutable MinIO publication, restart recovery and cleanup readback | final-identity VM replay remains pending; Runner, Checker, Aggregator and scoring are excluded |
-| Web teacher/student journeys | C | connected Container slice | component/SDK tests, live auth setup, teacher approval and student Container freeze evidence readback pass; deterministic Fixture freeze readback is aligned at PR head `bdedb772` | KubeVirt and the full same-identity lifecycle/negative matrix remain pending |
+| KubeVirt runtime | B | connected at 24928e8f | deterministic VM/CDI plan, independent persistent fence, restricted API/subresource backend and executor-owned SSH host-key probe; current-source VM completed real Gateway access, freeze, stop/recover/delete and no-residue readback | Access negative matrix and terminal Release Gate remain blocked |
+| AccessGrant and session authorization | A | connected at 24928e8f; negative matrix pending | external OpenSSH passed key authentication, grant authorization, target Service resolution, exact host-key identity, interactive file write and session close | complete illegal-key, cross-course, expiry, revocation, forwarding and Access-outage replay remains pending; Upgrade is explicitly outside Sprint 2 |
+| Freeze-only Evaluation Service | B | connected dual runtime at 24928e8f | Evaluation-owned public API, Access BFF authorization, PostgreSQL command/outbox, PVC/SFTP collection, immutable MinIO publication, restart recovery and cleanup readback | Runner, Checker, Aggregator and scoring are excluded |
+| Web teacher/student journeys | C | connected dual runtime at 24928e8f | real Keycloak setup, teacher policy/candidate approval view, and student Container/KubeVirt freeze evidence readback pass; no fixed sleep is used | Access negative matrix and terminal Release Gate remain pending |
 | Sprint 2 Helm deployment | A/D | 24928e8f adopted non-destructively twice | package and both application reconciles exited zero; ten Deployments are ready on digest references; retained infrastructure was not reset | generic infrastructure identity Verify, rollback drill and Release Gate remain pending |
 | Sprint 2 data foundation | A/D | verified on adopted target | digest-locked PostgreSQL, NATS JetStream and MinIO StatefulSets; TLS, persistent storage, restricted Pod Security, default-deny NetworkPolicy, strict private bundle; a second reconciliation at source identity `4ced06d` changed nothing | this is retained-foundation evidence only, not application deployment or Sprint 2 E3 |
 | Demo replay and Release Gate | A/D | implemented locally | exact connected check set, evidence rehash, clean-HEAD/deployment/catalog/image/Run binding, tamper test and stable missing-input diagnostics | Linux infrastructure Verify, real Keycloak Playwright and same-build passing report remain pending |
