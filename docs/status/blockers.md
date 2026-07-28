@@ -5,16 +5,16 @@ Historical evidence cannot satisfy a current same-identity gate.
 
 ## Current evidence identity
 
-- Current PR head: `bdedb772`; this source-only commit aligns the deterministic
-  browser Fixture with the production `FrozenSubmission` readback contract.
-- Connected application source: `ec6587cbb1639451540aacdae1402f8002f4d20f`.
-- Connected package: `pkg-demo-sprint2-ec6587cbb163`.
-- Ansible application run: `deploy-sprint2-ec6587cb`; testflight:
-  `testflight-sprint2-ec6587cb`.
-- The package passed static and connected validation. Both application
-  reconciles and testflight passed without resetting retained infrastructure.
-- Real Keycloak teacher/student Playwright on that deployment passed three
-  Container-slice tests; the VM test was explicitly skipped.
+- Current PR head is read from Git/PR metadata; the connected application
+  source is `24928e8f06e1bc9709c4c493b7d95b2b007f522c`.
+- Connected package: `pkg-demo-sprint2-24928e8f-24928e8f06e1`.
+- Non-destructive application runs: `deploy-24928e8f` and
+  `deploy-24928e8f-replay`.
+- Both reconciles completed and all ten workloads read back ready on immutable
+  Harbor digests. Retained infrastructure was not reset.
+- Current-identity Container Agent, approval, build, publication, access,
+  freeze, stop/start/delete and cluster absence readback pass.
+- Current-identity Playwright timed out without a report and remains blocked.
 
 ## Same-identity KubeVirt replay
 
@@ -43,25 +43,6 @@ session, endpoint and trace identity. Revocation/expiry must reject new
 connections and terminate affected sessions within the declared bound.
 
 Owner: A authorization semantics; B security review; D Verify.
-
-## Container lifecycle closure
-
-The `ec6587cb` deployment has verified Agent generation, independent approval,
-BuildKit/Harbor/Trivy publication, Container readiness, HTTP endpoint health and
-immutable freeze. The final same-identity evidence set does not yet include
-stop/start and application-owned delete/cleanup readback.
-
-The older replay workspace file was seeded with an administrative `kubectl
-exec` and remains only historical demo evidence. The current resource plan
-initializes an empty PVC from the approved image's fixed
-`/opt/labweaver/workspace-seed` directory without overwriting retained data.
-Exit additionally requires connected proof that this initializer populated the
-PVC and that the resulting submission froze without administrative mutation.
-
-Exit: complete stop/start/delete and prove no application-owned runtime
-resources remain. Do not substitute older lifecycle evidence.
-
-Owner: B implementation review; D connected Verify.
 
 ## Infrastructure identity and rollback
 
