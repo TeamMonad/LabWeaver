@@ -25,6 +25,7 @@ export function livePlaywrightArguments() {
     'node_modules/@playwright/test/cli.js',
     'test',
     '--config=playwright.config.mjs',
+    '--workers=1',
     ...LIVE_PROJECTS.flatMap((project) => ['--project', project]),
   ]
 }

@@ -52,6 +52,7 @@ test('live replay selects only connected role projects', () => {
     'node_modules/@playwright/test/cli.js',
     'test',
     '--config=playwright.config.mjs',
+    '--workers=1',
     '--project',
     'setup',
     '--project',
