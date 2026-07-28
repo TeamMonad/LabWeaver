@@ -8,8 +8,8 @@
 use std::str::FromStr;
 
 use contracts::{
-    ActorId, CourseId, EnvironmentId, EventId, FrozenSubmissionId, OperationId, Revision, Sequence,
-    Sha256Digest, UtcTimestamp,
+    ActorId, CourseId, DiagnosticCode, EnvironmentId, EventId, FrozenSubmissionId, OperationId,
+    Revision, Sequence, Sha256Digest, UtcTimestamp,
     events::{
         CloudEvent, EVENT_CONTRACTS, EventContract, SPEC_VERSION, SubmissionFreezeRequested,
         subjects,
@@ -82,6 +82,33 @@ impl PgFreezeCommandStore {
                 .fetch_one(&self.pool)
                 .await?;
         UtcTimestamp::from_utc(value).map_err(|_| FreezeCommandStoreError::ContractInvalid)
+    }
+
+    /// Returns the stable terminal diagnostic for an actor-owned failed command.
+    ///
+    /// Pending and completed commands return `None`; callers continue reading the immutable
+    /// submission as the result authority. Failed commands are exposed only after cleanup is
+    /// verified so clients never observe a terminal failure while worker residue remains.
+    pub async fn terminal_failure(
+        &self,
+        frozen_submission_id: FrozenSubmissionId,
+        actor_id: ActorId,
+    ) -> Result<Option<DiagnosticCode>, FreezeCommandStoreError> {
+        let diagnostic: Option<String> = sqlx::query_scalar(
+            "SELECT diagnostic_code FROM evaluation.submission_freeze_commands \
+             WHERE frozen_submission_id=$1 AND actor_id=$2 AND state='failed' \
+             AND cleanup_verified=true",
+        )
+        .bind(frozen_submission_id.as_uuid())
+        .bind(actor_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten();
+        diagnostic
+            .map(|value| {
+                DiagnosticCode::parse(value).map_err(|_| FreezeCommandStoreError::ContractInvalid)
+            })
+            .transpose()
     }
 
     /// Atomically claims the oldest queued command for one deterministic Kubernetes Job.

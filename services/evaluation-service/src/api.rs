@@ -127,12 +127,28 @@ async fn get_frozen_submission(
 ) -> Result<Json<FrozenSubmission>, EvaluationApiError> {
     require_access(principal)?;
     require_session(&headers)?;
-    Ok(Json(
-        state
-            .submissions
-            .load_completed(submission_id, actor(&headers)?)
-            .await?,
-    ))
+    let actor_id = actor(&headers)?;
+    match state
+        .submissions
+        .load_completed(submission_id, actor_id)
+        .await
+    {
+        Ok(submission) => Ok(Json(submission)),
+        Err(FreezeStoreError::NotFound) => {
+            if let Some(diagnostic) = state
+                .commands
+                .terminal_failure(submission_id, actor_id)
+                .await?
+            {
+                Err(EvaluationApiError::FreezeFailed(
+                    diagnostic.as_str().to_owned(),
+                ))
+            } else {
+                Err(EvaluationApiError::Submission(FreezeStoreError::NotFound))
+            }
+        }
+        Err(error) => Err(EvaluationApiError::Submission(error)),
+    }
 }
 
 fn require_access(
@@ -246,6 +262,8 @@ pub enum EvaluationApiError {
     RevisionRequired,
     #[error("LW_ENVIRONMENT_REVISION_CONFLICT")]
     RevisionInvalid,
+    #[error("{0}")]
+    FreezeFailed(String),
     #[error(transparent)]
     Command(#[from] FreezeCommandStoreError),
     #[error(transparent)]
@@ -262,7 +280,9 @@ impl IntoResponse for EvaluationApiError {
             }
             Self::RevisionRequired => StatusCode::PRECONDITION_REQUIRED,
             Self::RevisionInvalid => StatusCode::PRECONDITION_FAILED,
-            Self::Command(FreezeCommandStoreError::IdempotencyConflict) => StatusCode::CONFLICT,
+            Self::FreezeFailed(_) | Self::Command(FreezeCommandStoreError::IdempotencyConflict) => {
+                StatusCode::CONFLICT
+            }
             Self::Submission(FreezeStoreError::NotFound) => StatusCode::NOT_FOUND,
             _ => StatusCode::SERVICE_UNAVAILABLE,
         };
@@ -285,5 +305,20 @@ impl IntoResponse for EvaluationApiError {
             }),
         )
             .into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::response::IntoResponse;
+
+    use super::EvaluationApiError;
+
+    #[test]
+    fn terminal_freeze_failure_is_a_conflict() {
+        let response = EvaluationApiError::FreezeFailed("LW_COLLECT_SOURCE_UNAVAILABLE".to_owned())
+            .into_response();
+
+        assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
     }
 }
