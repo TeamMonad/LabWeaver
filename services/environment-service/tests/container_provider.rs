@@ -11,12 +11,13 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use contracts::authoring::{CandidateApproval, CandidateDecision, EnvironmentSpec, RuntimeKind};
+use contracts::authoring::{
+    CandidateApproval, CandidateDecision, EnvironmentSpec, NetworkPolicySpec, RuntimeKind,
+};
 use contracts::environment::{DesiredEnvironmentState, EndpointProtocol, ObservedEnvironmentState};
-use contracts::events::ReleasePublishedV2;
+use contracts::events::ReleasePublished;
 use contracts::supply_chain::{
-    EnvironmentTemplateRelease, ImageArtifact, ImagePolicyEvaluation, SigstoreEvidence,
-    VulnerabilitySummary,
+    EnvironmentTemplateRelease, ImageArtifact, ImagePolicyEvaluation, VulnerabilitySummary,
 };
 use contracts::{
     ActorId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId, ImageArtifactId,
@@ -32,7 +33,7 @@ use serde_json::json;
 
 #[derive(Clone)]
 struct FixtureResolver {
-    projection: ReleasePublishedV2,
+    projection: ReleasePublished,
     authority_now: UtcTimestamp,
     withdrawn_at: Option<UtcTimestamp>,
 }
@@ -131,7 +132,7 @@ impl ContainerProviderBackend for FixtureBackend {
 }
 
 #[test]
-fn plan_uses_digest_only_image_and_only_the_protected_gateway() {
+fn plan_uses_digest_only_image_and_only_the_access_proxy() {
     let projection = projection();
     let instance = instance_for(&projection);
     let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
@@ -152,6 +153,12 @@ fn plan_uses_digest_only_image_and_only_the_protected_gateway() {
             .pointer("/metadata/finalizers/0"),
         Some(&json!("labweaver.io/environment-cleanup"))
     );
+    assert_eq!(
+        resource(&first, "Namespace")
+            .document
+            .pointer("/metadata/labels/labweaver.io~1environment"),
+        Some(&json!("true"))
+    );
 
     let deployment = resource(&first, "Deployment");
     assert_eq!(
@@ -160,24 +167,8 @@ fn plan_uses_digest_only_image_and_only_the_protected_gateway() {
             .pointer("/spec/template/spec/containers/0/image"),
         Some(&json!(first.image))
     );
-    assert_eq!(
-        deployment
-            .document
-            .pointer("/spec/template/spec/containers/0/securityContext/readOnlyRootFilesystem"),
-        Some(&json!(true))
-    );
-    assert_eq!(
-        deployment
-            .document
-            .pointer("/spec/template/spec/containers/0/securityContext/allowPrivilegeEscalation"),
-        Some(&json!(false))
-    );
-    assert_eq!(
-        deployment
-            .document
-            .pointer("/spec/template/spec/containers/0/securityContext/capabilities/drop/0"),
-        Some(&json!("ALL"))
-    );
+    assert_workspace_seed(&deployment.document, &first.image);
+    assert_runtime_security_and_tmp(&deployment.document);
     assert_eq!(
         resource(&first, "Service").document.pointer("/spec/type"),
         Some(&json!("ClusterIP"))
@@ -188,6 +179,16 @@ fn plan_uses_digest_only_image_and_only_the_protected_gateway() {
             .pointer("/imagePullSecrets/0/name"),
         Some(&json!("harbor-course-pull"))
     );
+    let workspace = resource(&first, "PersistentVolumeClaim");
+    assert_eq!(
+        workspace.document.pointer("/spec/storageClassName"),
+        Some(&json!("nfs-rwx"))
+    );
+    assert_eq!(
+        workspace.document.pointer("/spec/accessModes/0"),
+        Some(&json!("ReadWriteMany"))
+    );
+    assert_freeze_quota(resource(&first, "ResourceQuota"));
     assert!(
         first
             .resources
@@ -195,42 +196,186 @@ fn plan_uses_digest_only_image_and_only_the_protected_gateway() {
             .all(|resource| resource.kind != "Ingress")
     );
 
-    let route = resource(&first, "HTTPRoute");
+    assert!(
+        first
+            .resources
+            .iter()
+            .all(|resource| resource.kind != "HTTPRoute")
+    );
     assert_eq!(
-        route
+        resource(&first, "Service")
             .document
-            .pointer("/metadata/annotations/labweaver.io~1access-controlled"),
-        Some(&json!("true"))
-    );
-    assert_eq!(
-        route.document.pointer("/spec/parentRefs/0/namespace"),
-        Some(&json!("access-system"))
-    );
-    assert_eq!(
-        route.document.pointer("/spec/parentRefs/0/name"),
-        Some(&json!("protected-gateway"))
-    );
-    assert_eq!(
-        route.document.pointer("/spec/rules/0/matches/0/path/value"),
-        Some(&json!(format!("/environments/{}/", instance.id)))
+            .pointer("/spec/ports/0/port"),
+        Some(&json!(8080))
     );
     let gateway_policy = first
         .resources
         .iter()
         .find(|resource| {
-            resource.kind == "NetworkPolicy" && resource.name == "protected-gateway-ingress"
+            resource.kind == "NetworkPolicy" && resource.name == "access-service-ingress"
         })
-        .expect("protected Gateway policy exists");
+        .expect("Access Service ingress policy exists");
     assert_eq!(
-        gateway_policy.document.pointer(
-            "/spec/ingress/0/from/0/podSelector/matchLabels/gateway.networking.k8s.io~1gateway-name"
-        ),
-        Some(&json!("protected-gateway"))
+        gateway_policy
+            .document
+            .pointer("/spec/ingress/0/from/0/podSelector/matchLabels/app.kubernetes.io~1name"),
+        Some(&json!("access-service"))
+    );
+}
+
+fn assert_workspace_seed(document: &serde_json::Value, image: &str) {
+    assert_eq!(
+        document.pointer("/spec/template/spec/initContainers/0/name"),
+        Some(&json!("workspace-seed"))
+    );
+    assert_eq!(
+        document.pointer("/spec/template/spec/initContainers/0/image"),
+        Some(&json!(image))
+    );
+    assert_eq!(
+        document.pointer("/spec/template/spec/initContainers/0/command/0"),
+        Some(&json!("/bin/sh"))
+    );
+    let command = document
+        .pointer("/spec/template/spec/initContainers/0/command/2")
+        .and_then(serde_json::Value::as_str)
+        .expect("workspace seed command");
+    assert!(command.contains("/opt/labweaver/workspace-seed"));
+    assert!(command.contains("LW_ENVIRONMENT_WORKSPACE_SEED_MISSING"));
+    assert!(command.contains("find /workspace"));
+    assert_eq!(
+        document.pointer("/spec/template/spec/initContainers/0/securityContext/runAsNonRoot"),
+        Some(&json!(true))
+    );
+    assert_eq!(
+        document
+            .pointer("/spec/template/spec/initContainers/0/securityContext/readOnlyRootFilesystem"),
+        Some(&json!(true))
+    );
+    assert_eq!(
+        document
+            .pointer("/spec/template/spec/initContainers/0/securityContext/capabilities/drop/0"),
+        Some(&json!("ALL"))
+    );
+    assert_eq!(
+        document.pointer("/spec/template/spec/initContainers/0/volumeMounts/0/mountPath"),
+        Some(&json!("/workspace"))
+    );
+}
+
+fn assert_freeze_quota(quota: &environment_service::ContainerResource) {
+    assert_eq!(
+        quota.document.pointer("/spec/hard/requests.cpu"),
+        Some(&json!("1100m"))
+    );
+    assert_eq!(
+        quota.document.pointer("/spec/hard/limits.cpu"),
+        Some(&json!("2000m"))
+    );
+    assert_eq!(
+        quota.document.pointer("/spec/hard/requests.memory"),
+        Some(&json!(1_207_959_552_u64.to_string()))
+    );
+    assert_eq!(
+        quota.document.pointer("/spec/hard/limits.memory"),
+        Some(&json!(2_147_483_648_u64.to_string()))
+    );
+    assert_eq!(quota.document.pointer("/spec/hard/pods"), Some(&json!("2")));
+    assert_eq!(
+        quota
+            .document
+            .pointer("/metadata/annotations/labweaver.io~1freeze-request-cpu-millicores"),
+        Some(&json!("100"))
+    );
+}
+
+fn assert_runtime_security_and_tmp(document: &serde_json::Value) {
+    assert_eq!(
+        document
+            .pointer("/spec/template/spec/containers/0/securityContext/readOnlyRootFilesystem",),
+        Some(&json!(true))
+    );
+    assert_eq!(
+        document
+            .pointer("/spec/template/spec/containers/0/securityContext/allowPrivilegeEscalation",),
+        Some(&json!(false))
+    );
+    assert_eq!(
+        document.pointer("/spec/template/spec/containers/0/securityContext/capabilities/drop/0"),
+        Some(&json!("ALL"))
+    );
+    assert_eq!(
+        document.pointer("/spec/template/spec/containers/0/volumeMounts/1/mountPath"),
+        Some(&json!("/tmp"))
+    );
+    assert_eq!(
+        document.pointer("/spec/template/spec/volumes/1/emptyDir/sizeLimit"),
+        Some(&json!("64Mi"))
     );
 }
 
 #[test]
-fn non_https_container_entry_cannot_be_projected_as_a_gateway_endpoint() {
+fn deny_all_container_network_keeps_ingress_and_egress_isolation() {
+    let projection = projection();
+    let instance = instance_for(&projection);
+    let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
+    let plan = provider
+        .plan(&instance, &resolved(projection), ReconcileAction::Provision)
+        .expect("deny_all plan");
+
+    assert_eq!(
+        resource(&plan, "NetworkPolicy").name,
+        "default-deny-ingress"
+    );
+    assert!(plan.resources.iter().any(|resource| {
+        resource.kind == "NetworkPolicy" && resource.name == "deny-all-egress"
+    }));
+}
+
+#[test]
+fn allow_all_container_network_leaves_egress_unisolated() {
+    let mut projection = projection();
+    projection.environment_spec.network = NetworkPolicySpec::AllowAll;
+    let spec_sha256 = Sha256Digest::of_canonical(&projection.environment_spec).expect("spec hash");
+    projection.release.environment_spec_sha256 = spec_sha256;
+    projection.release.approval.candidate_sha256 = spec_sha256;
+    projection.projection_sha256 = Sha256Digest::of_canonical(&json!({
+        "release": &projection.release,
+        "environmentSpec": &projection.environment_spec,
+    }))
+    .expect("projection hash");
+    projection
+        .validate()
+        .expect("allow_all container projection");
+
+    let instance = instance_for(&projection);
+    let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
+    let plan = provider
+        .plan(&instance, &resolved(projection), ReconcileAction::Provision)
+        .expect("allow_all plan");
+
+    assert!(plan.resources.iter().all(|resource| {
+        resource.kind != "NetworkPolicy"
+            || !matches!(
+                resource.name.as_str(),
+                "deny-all-egress" | "restricted-egress"
+            )
+    }));
+    let ingress = plan
+        .resources
+        .iter()
+        .find(|resource| {
+            resource.kind == "NetworkPolicy" && resource.name == "default-deny-ingress"
+        })
+        .expect("ingress isolation remains");
+    assert_eq!(
+        ingress.document.pointer("/spec/policyTypes"),
+        Some(&json!(["Ingress"]))
+    );
+}
+
+#[test]
+fn non_http_container_entry_cannot_be_projected_as_a_gateway_endpoint() {
     let mut projection = projection();
     projection.environment_spec.entries[0].protocol = EndpointProtocol::Ssh;
     let spec_sha256 = Sha256Digest::of_canonical(&projection.environment_spec).expect("spec hash");
@@ -248,6 +393,28 @@ fn non_https_container_entry_cannot_be_projected_as_a_gateway_endpoint() {
     assert!(matches!(
         provider.plan(&instance, &resolved(projection), ReconcileAction::Provision),
         Err(ReleaseProjectionError::SecurityPostureInvalid)
+    ));
+}
+
+#[test]
+fn release_from_a_different_harbor_prefix_is_rejected() {
+    let mut projection = projection();
+    let ImageArtifact::Container { repository, .. } = &mut projection.release.artifact else {
+        panic!("fixture must use a container artifact");
+    };
+    *repository = repository.replacen("labweaver-system", "unreviewed-project", 1);
+    projection.projection_sha256 = Sha256Digest::of_canonical(&json!({
+        "release": &projection.release,
+        "environmentSpec": &projection.environment_spec,
+    }))
+    .expect("projection hash");
+    projection.validate().expect("internally valid projection");
+    let instance = instance_for(&projection);
+    let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
+
+    assert!(matches!(
+        provider.plan(&instance, &resolved(projection), ReconcileAction::Provision),
+        Err(ReleaseProjectionError::IdentityMismatch)
     ));
 }
 
@@ -271,6 +438,7 @@ async fn provision_returns_one_stable_healthy_endpoint() {
     assert_eq!(first.next_state, ObservedEnvironmentState::Ready);
     assert!(first.operation_complete);
     assert_eq!(first.endpoints.len(), 1);
+    assert_eq!(first.endpoints[0].protocol, EndpointProtocol::Http);
     assert_eq!(first.endpoints[0].id, second.endpoints[0].id);
     assert_eq!(
         backend
@@ -330,11 +498,22 @@ fn withdrawn_expired_or_rotated_release_is_rejected_before_apply() {
     let provider = provider(projection.clone(), backend.clone());
 
     let mut expired = resolved(projection.clone());
-    expired.authority_now = projection.release.image_policy_evaluation.valid_until;
+    expired.authority_now = projection
+        .release
+        .image_policy_evaluation
+        .as_ref()
+        .expect("container release evidence")
+        .valid_until;
     assert!(matches!(
         provider.plan(&instance, &expired, ReconcileAction::Provision),
         Err(ReleaseProjectionError::EvidenceExpired)
     ));
+    provider
+        .plan(&instance, &expired, ReconcileAction::Start)
+        .expect("an existing immutable environment can resume after scan expiry");
+    provider
+        .plan(&instance, &expired, ReconcileAction::Observe)
+        .expect("an existing immutable environment remains observable after scan expiry");
 
     let mut withdrawn = resolved(projection.clone());
     withdrawn.withdrawn_at = Some(timestamp("2026-07-16T08:20:00.000Z"));
@@ -351,7 +530,6 @@ fn withdrawn_expired_or_rotated_release_is_rejected_before_apply() {
         PolicyId::new(),
         revision(2),
         revision(2),
-        Sha256Digest::of_bytes(b"rotated-trust-bundle"),
     );
     assert!(matches!(
         rotated.plan(&instance, &resolved(projection), ReconcileAction::Provision),
@@ -364,7 +542,12 @@ fn course_approval_policy_revision_is_independent_from_image_policy_identity() {
     let projection = projection();
     assert_ne!(
         projection.release.approval.policy_revision,
-        projection.release.image_policy_evaluation.policy_revision
+        projection
+            .release
+            .image_policy_evaluation
+            .as_ref()
+            .expect("container release evidence")
+            .policy_revision
     );
     let instance = instance_for(&projection);
     let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
@@ -384,12 +567,13 @@ fn same_revision_different_image_policy_id_is_rejected() {
         timestamp("2026-07-16T08:30:00.000Z"),
         None,
         PolicyId::new(),
-        projection.release.image_policy_evaluation.policy_revision,
-        projection.release.approval.trust_revision,
         projection
             .release
             .image_policy_evaluation
-            .trust_bundle_sha256,
+            .as_ref()
+            .expect("container release evidence")
+            .policy_revision,
+        projection.release.approval.trust_revision,
     );
 
     assert!(matches!(
@@ -410,10 +594,19 @@ async fn withdrawal_blocks_new_use_but_still_allows_stop() {
         backend.clone(),
         timestamp("2026-07-16T10:00:00.000Z"),
         Some(timestamp("2026-07-16T09:30:00.000Z")),
-        projection.release.image_policy_evaluation.policy_id,
-        projection.release.image_policy_evaluation.policy_revision,
+        projection
+            .release
+            .image_policy_evaluation
+            .as_ref()
+            .expect("container release evidence")
+            .policy_id,
+        projection
+            .release
+            .image_policy_evaluation
+            .as_ref()
+            .expect("container release evidence")
+            .policy_revision,
         projection.release.approval.trust_revision,
-        Sha256Digest::of_bytes(b"trust-bundle"),
     );
 
     let observation = provider
@@ -432,16 +625,17 @@ async fn withdrawal_blocks_new_use_but_still_allows_stop() {
 }
 
 fn provider(
-    projection: ReleasePublishedV2,
+    projection: ReleasePublished,
     backend: Arc<FixtureBackend>,
 ) -> ContainerProvider<FixtureBackend, FixtureResolver> {
-    let image_policy_id = projection.release.image_policy_evaluation.policy_id;
-    let image_policy_revision = projection.release.image_policy_evaluation.policy_revision;
-    let trust_revision = projection.release.approval.trust_revision;
-    let trust_bundle_sha256 = projection
+    let evaluation = projection
         .release
         .image_policy_evaluation
-        .trust_bundle_sha256;
+        .as_ref()
+        .expect("container release evidence");
+    let image_policy_id = evaluation.policy_id;
+    let image_policy_revision = evaluation.policy_revision;
+    let trust_revision = projection.release.approval.trust_revision;
     provider_with_state(
         projection,
         backend,
@@ -450,7 +644,6 @@ fn provider(
         image_policy_id,
         image_policy_revision,
         trust_revision,
-        trust_bundle_sha256,
     )
 }
 
@@ -459,14 +652,13 @@ fn provider(
     reason = "negative tests vary each trust authority independently"
 )]
 fn provider_with_state(
-    projection: ReleasePublishedV2,
+    projection: ReleasePublished,
     backend: Arc<FixtureBackend>,
     authority_now: UtcTimestamp,
     withdrawn_at: Option<UtcTimestamp>,
     image_policy_id: PolicyId,
     image_policy_revision: Revision,
     trust_revision: Revision,
-    trust_bundle_sha256: Sha256Digest,
 ) -> ContainerProvider<FixtureBackend, FixtureResolver> {
     ContainerProvider::new(
         "container-primary-v1".to_owned(),
@@ -477,24 +669,20 @@ fn provider_with_state(
             withdrawn_at,
         }),
         ContainerProviderConfiguration::new(
-            ContainerReleasePolicy::new(
-                image_policy_id,
-                image_policy_revision,
-                trust_revision,
-                trust_bundle_sha256,
-            )
-            .expect("release policy"),
-            "access-system".to_owned(),
-            "protected-gateway".to_owned(),
-            "protected-https".to_owned(),
+            ContainerReleasePolicy::new(image_policy_id, image_policy_revision, trust_revision)
+                .expect("release policy"),
+            "harbor.internal/labweaver-system".to_owned(),
+            "labweaver-sprint2".to_owned(),
+            "access-service".to_owned(),
             "harbor-course-pull".to_owned(),
+            "nfs-rwx".to_owned(),
         )
         .expect("container configuration"),
     )
     .expect("provider configuration")
 }
 
-fn resolved(projection: ReleasePublishedV2) -> ResolvedContainerRelease {
+fn resolved(projection: ReleasePublished) -> ResolvedContainerRelease {
     ResolvedContainerRelease {
         projection,
         authority_now: timestamp("2026-07-16T08:30:00.000Z"),
@@ -512,7 +700,7 @@ fn resource<'a>(
         .unwrap_or_else(|| panic!("missing {kind}"))
 }
 
-fn instance_for(projection: &ReleasePublishedV2) -> contracts::environment::EnvironmentInstance {
+fn instance_for(projection: &ReleasePublished) -> contracts::environment::EnvironmentInstance {
     let mut instance = support::requested_instance();
     instance.course_id = projection.release.course_id;
     instance.release_id = projection.release.id;
@@ -525,7 +713,7 @@ fn instance_for(projection: &ReleasePublishedV2) -> contracts::environment::Envi
     clippy::too_many_lines,
     reason = "the fixture deliberately constructs the complete immutable release identity"
 )]
-fn projection() -> ReleasePublishedV2 {
+fn projection() -> ReleasePublished {
     let environment_spec: EnvironmentSpec = serde_json::from_value(json!({
         "apiVersion":"environment.labweaver.io/v1",
         "kind":"EnvironmentSpec",
@@ -533,7 +721,7 @@ fn projection() -> ReleasePublishedV2 {
         "class":"experiment",
         "resources":{"cpuMillicores":1000,"memoryBytes":1_073_741_824_u64,"storageBytes":1_073_741_824_u64},
         "network":{"mode":"deny_all"},
-        "entries":[{"name":"web","protocol":"https","servicePort":8080}],
+        "entries":[{"name":"web","protocol":"http","servicePort":8080}],
         "security":{
             "userPolicy":"non_root_required",
             "rootFilesystemPolicy":"read_only_required",
@@ -556,7 +744,6 @@ fn projection() -> ReleasePublishedV2 {
     .expect("valid EnvironmentSpec");
     let environment_spec_sha256 = Sha256Digest::of_canonical(&environment_spec).expect("spec hash");
     let artifact_sha256 = Sha256Digest::of_bytes(b"container-image");
-    let trust_bundle_sha256 = Sha256Digest::of_bytes(b"trust-bundle");
     let artifact_id = ImageArtifactId::new();
     let course_id = contracts::CourseId::new();
     let candidate_id = CandidateId::new();
@@ -566,6 +753,7 @@ fn projection() -> ReleasePublishedV2 {
         course_id,
         version: 1,
         candidate_id,
+        agent_run_id: contracts::AgentRunId::new(),
         candidate_revision: revision(1),
         environment_spec_sha256,
         runtime_kind: RuntimeKind::Container,
@@ -585,27 +773,12 @@ fn projection() -> ReleasePublishedV2 {
         artifact: ImageArtifact::Container {
             id: artifact_id,
             build_request_id: BuildRequestId::new(),
-            repository: format!("harbor.internal/course-{course_id}/{candidate_id}"),
-            immutable_tag: "build-aabbccdd".to_owned(),
+            repository: format!(
+                "harbor.internal/labweaver-system/course-{course_id}-{candidate_id}"
+            ),
             digest: format!("sha256:{artifact_sha256}"),
-            sbom: artifact_ref("application/spdx+json"),
-            provenance: artifact_ref("application/vnd.in-toto+json"),
-            signature: SigstoreEvidence {
-                trust_bundle_sha256,
-                fulcio_issuer: "https://fulcio.internal".to_owned(),
-                certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
-                subject_digest: artifact_sha256,
-                certificate_sha256: Sha256Digest::of_bytes(b"certificate"),
-                signature_sha256: Sha256Digest::of_bytes(b"signature"),
-                rekor_log_id: "rekor-private-v1".to_owned(),
-                rekor_log_index: 1,
-                rekor_inclusion_proof_sha256: Sha256Digest::of_bytes(b"rekor-proof"),
-                ct_log_id: "ct-private-v1".to_owned(),
-                sct_sha256: Sha256Digest::of_bytes(b"sct"),
-                verified_at: published_at,
-            },
         },
-        image_policy_evaluation: ImagePolicyEvaluation {
+        image_policy_evaluation: Some(ImagePolicyEvaluation {
             artifact_id,
             artifact_sha256,
             policy_id: PolicyId::new(),
@@ -620,16 +793,11 @@ fn projection() -> ReleasePublishedV2 {
                 high: 1,
                 critical: 0,
             },
-            trust_bundle_sha256,
-            expected_fulcio_issuer: "https://fulcio.internal".to_owned(),
-            expected_certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
-            require_rekor_inclusion: true,
-            require_ct_sct: true,
             evaluated_at: published_at,
             max_evidence_age_milliseconds: 3_600_000,
             valid_until: timestamp("2026-07-16T09:00:00.000Z"),
             passed: true,
-        },
+        }),
         published_by: ActorId::new(),
         published_at,
     };
@@ -638,7 +806,7 @@ fn projection() -> ReleasePublishedV2 {
         "environmentSpec": &environment_spec,
     }))
     .expect("projection hash");
-    let projection = ReleasePublishedV2 {
+    let projection = ReleasePublished {
         release,
         environment_spec,
         projection_sha256,

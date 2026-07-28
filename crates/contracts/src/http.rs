@@ -102,6 +102,47 @@ pub struct CandidateDecisionRequest {
     pub reason: String,
 }
 
+/// Public state of the deterministic Container build attached to one approved candidate.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateBuildState {
+    Requested,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+/// Control-owned build projection exposed for teacher review without leaking object keys or
+/// executor internals.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CandidateBuildView {
+    pub state: CandidateBuildState,
+    pub artifact: Option<crate::supply_chain::ImageArtifact>,
+    pub image_policy_evaluation: Option<crate::supply_chain::ImagePolicyEvaluation>,
+    pub diagnostic_code: Option<DiagnosticCode>,
+    pub cleanup_verified: Option<bool>,
+}
+
+/// Control-owned teacher read model for one immutable Environment candidate.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentCandidateView {
+    pub candidate: crate::authoring::EnvironmentCandidate,
+    pub approvals: Vec<crate::authoring::CandidateApproval>,
+    pub build: Option<CandidateBuildView>,
+    pub trust_revision: Revision,
+}
+
+/// Control-owned teacher read model for one immutable Evaluation candidate.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EvaluationCandidateView {
+    pub candidate: crate::authoring::EvaluationCandidate,
+    pub approvals: Vec<crate::authoring::CandidateApproval>,
+    pub trust_revision: Revision,
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateEnvironmentTemplateReleaseRequest {
@@ -110,8 +151,6 @@ pub struct CreateEnvironmentTemplateReleaseRequest {
     pub environment_spec_sha256: Sha256Digest,
     pub runtime_kind: crate::authoring::RuntimeKind,
     pub approval_id: ApprovalId,
-    pub artifact: crate::supply_chain::ImageArtifact,
-    pub image_policy_evaluation: crate::supply_chain::ImagePolicyEvaluation,
 }
 
 /// Append-only reason supplied when withdrawing an immutable release.
@@ -294,6 +333,7 @@ pub use crate::environment::{EnvironmentOwnerResolution, EnvironmentOwnerResolut
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FreezeSubmissionRequest {
+    pub course_id: CourseId,
     pub manifest: crate::submission::SubmissionManifest,
 }
 

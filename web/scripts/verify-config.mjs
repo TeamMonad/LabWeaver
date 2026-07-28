@@ -75,7 +75,14 @@ export async function validateConfiguration({ requirementsBaselineHead } = {}) {
   return { diagnostics: [...new Set(diagnostics)], fixedSleeps }
 }
 
-export function buildReport({ diagnostics, overall, checks, generatedAt = new Date().toISOString() }) {
+export function buildReport({
+  diagnostics,
+  overall,
+  checks,
+  runtimeE2e = 'not_executed',
+  evidenceLevel = 'E1',
+  generatedAt = new Date().toISOString(),
+}) {
   const event = overall === 'passed'
     ? 'playwright_role_config_verified'
     : overall === 'blocked'
@@ -97,8 +104,8 @@ export function buildReport({ diagnostics, overall, checks, generatedAt = new Da
     },
     trace: 'retain-on-failure',
     fixed_sleep_scan: diagnostics.includes('PW_FIXED_SLEEP_DETECTED') ? 'failed' : 'passed',
-    runtime_e2e: 'not_executed',
-    evidenceLevel: 'E1',
+    runtime_e2e: runtimeE2e,
+    evidenceLevel,
     generatedAt,
     diagnostics,
     ...(checks ? { checks } : {}),

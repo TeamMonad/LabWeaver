@@ -12,14 +12,14 @@ import type {
   AgentRunSchema,
   CandidateApprovalSchema,
   CandidateDecision,
+  EnvironmentCandidateViewSchema,
+  EvaluationCandidateViewSchema,
   OperationAccepted,
 } from '@/generated/contracts'
 import { extractProblemDetails, makeDiagnostic, type AsyncState } from '@/types/async'
 import {
   evaluateImageGate,
   type CandidateKind,
-  type EnvironmentCandidateWithEvidence,
-  type EvaluationCandidateWithApprovals,
 } from '@/types/candidate'
 import type { DiffChange } from '@/components/common/StructuredDiff.vue'
 import { idempotencyKey, ifMatch } from '@/utils/format'
@@ -71,8 +71,8 @@ function errorDiagnostic(err: unknown, fallbackCode: string, fallbackDetail: str
 
 export function useCandidateApproval(courseId: Ref<string | undefined>, runId: Ref<string | undefined>) {
   const run = ref<AsyncState<AgentRunSchema>>({ kind: 'idle' })
-  const environmentCandidate = ref<AsyncState<EnvironmentCandidateWithEvidence>>({ kind: 'idle' })
-  const evaluationCandidate = ref<AsyncState<EvaluationCandidateWithApprovals>>({ kind: 'idle' })
+  const environmentCandidate = ref<AsyncState<EnvironmentCandidateViewSchema>>({ kind: 'idle' })
+  const evaluationCandidate = ref<AsyncState<EvaluationCandidateViewSchema>>({ kind: 'idle' })
   const previousEnvironmentSpec = ref<AsyncState<unknown>>({ kind: 'idle' })
   const publish = ref<AsyncState<OperationAccepted>>({ kind: 'idle' })
   const deciding = ref<CandidateKind | null>(null)
@@ -108,7 +108,7 @@ export function useCandidateApproval(courseId: Ref<string | undefined>, runId: R
       environmentCandidate.value = { kind: 'error', diagnostic: errorDiagnostic(result.error, 'CANDIDATE_LOAD_FAILED', '加载 Environment 候选失败') }
       return
     }
-    environmentCandidate.value = { kind: 'success', data: result.data as EnvironmentCandidateWithEvidence }
+    environmentCandidate.value = { kind: 'success', data: result.data }
   }
 
   async function loadEvaluationCandidate(runData: AgentRunSchema) {
@@ -125,7 +125,7 @@ export function useCandidateApproval(courseId: Ref<string | undefined>, runId: R
       evaluationCandidate.value = { kind: 'error', diagnostic: errorDiagnostic(result.error, 'CANDIDATE_LOAD_FAILED', '加载 Evaluation 候选失败') }
       return
     }
-    evaluationCandidate.value = { kind: 'success', data: result.data as EvaluationCandidateWithApprovals }
+    evaluationCandidate.value = { kind: 'success', data: result.data }
   }
 
   async function loadPreviousEnvironmentSpec() {
@@ -142,43 +142,47 @@ export function useCandidateApproval(courseId: Ref<string | undefined>, runId: R
       previousEnvironmentSpec.value = { kind: 'error', diagnostic: errorDiagnostic(result.error, 'PREVIOUS_CANDIDATE_LOAD_FAILED', '加载上一版本候选失败') }
       return
     }
-    previousEnvironmentSpec.value = { kind: 'success', data: (result.data as EnvironmentCandidateWithEvidence).spec }
+    previousEnvironmentSpec.value = { kind: 'success', data: result.data.candidate.spec }
   }
 
   const environmentDiff = computed(() => {
     if (environmentCandidate.value.kind !== 'success') return []
-    const after = environmentCandidate.value.data.spec
+    const after = environmentCandidate.value.data.candidate.spec
     const before = previousEnvironmentSpec.value.kind === 'success' ? previousEnvironmentSpec.value.data : null
     return computeDiff(before, after)
   })
 
   const evaluationDiff = computed(() => {
     if (evaluationCandidate.value.kind !== 'success') return []
-    return computeDiff(null, evaluationCandidate.value.data.spec)
+    return computeDiff(null, evaluationCandidate.value.data.candidate.spec)
   })
 
   const latestEnvironmentApproval = computed<CandidateApprovalSchema | null>(() => {
     if (environmentCandidate.value.kind !== 'success') return null
-    const approvals = environmentCandidate.value.data.approvals ?? []
+    const approvals = environmentCandidate.value.data.approvals
     return approvals.length > 0 ? approvals[approvals.length - 1] : null
   })
 
   const latestEvaluationApproval = computed<CandidateApprovalSchema | null>(() => {
     if (evaluationCandidate.value.kind !== 'success') return null
-    const approvals = evaluationCandidate.value.data.approvals ?? []
+    const approvals = evaluationCandidate.value.data.approvals
     return approvals.length > 0 ? approvals[approvals.length - 1] : null
   })
 
   const imageGate = computed(() => {
     if (environmentCandidate.value.kind !== 'success') return { status: 'blocked' as const, reasons: ['候选未加载'] }
-    return evaluateImageGate(environmentCandidate.value.data.imageArtifact, environmentCandidate.value.data.imagePolicyEvaluation)
+    const build = environmentCandidate.value.data.build
+    return evaluateImageGate(build?.artifact ?? undefined, build?.imagePolicyEvaluation ?? undefined)
   })
 
   const canPublish = computed(() => {
+    const runtimeKind = environmentCandidate.value.kind === 'success'
+      ? environmentCandidate.value.data.candidate.spec.runtime.kind
+      : undefined
     return (
       environmentCandidate.value.kind === 'success' &&
       latestEnvironmentApproval.value?.decision === 'approved' &&
-      imageGate.value.status !== 'blocked' &&
+      (runtimeKind === 'virtual_machine' || imageGate.value.status !== 'blocked') &&
       publish.value.kind !== 'loading'
     )
   })
@@ -190,9 +194,11 @@ export function useCandidateApproval(courseId: Ref<string | undefined>, runId: R
     try {
       if (kind === 'environment') {
         if (environmentCandidate.value.kind !== 'success') return
-        const candidate = environmentCandidate.value.data
+        const view = environmentCandidate.value.data
+        const candidate = view.candidate
         const result = await appendEnvironmentCandidateDecision({
           path: { courseId: id, candidateId: candidate.id },
+          headers: { 'Idempotency-Key': idempotencyKey(), 'If-Match': ifMatch(candidate.revision) },
           body: {
             candidateRevision: candidate.revision,
             candidateSha256: candidate.specSha256,
@@ -200,20 +206,22 @@ export function useCandidateApproval(courseId: Ref<string | undefined>, runId: R
             policyRevision: candidate.policyRevision,
             reason,
             schemaSha256: candidate.schemaSha256,
-            trustRevision: candidate.trustRevision ?? 1,
+            trustRevision: view.trustRevision,
           },
         })
         if (result.error) {
           environmentCandidate.value = { kind: 'error', diagnostic: errorDiagnostic(result.error, 'DECISION_FAILED', '提交审批失败') }
           return
         }
-        const approvals = [...(candidate.approvals ?? []), result.data]
-        environmentCandidate.value = { kind: 'success', data: { ...candidate, approvals } }
+        const approvals = [...view.approvals, result.data]
+        environmentCandidate.value = { kind: 'success', data: { ...view, approvals } }
       } else {
         if (evaluationCandidate.value.kind !== 'success') return
-        const candidate = evaluationCandidate.value.data
+        const view = evaluationCandidate.value.data
+        const candidate = view.candidate
         const result = await appendEvaluationCandidateDecision({
           path: { courseId: id, candidateId: candidate.id },
+          headers: { 'Idempotency-Key': idempotencyKey(), 'If-Match': ifMatch(candidate.revision) },
           body: {
             candidateRevision: candidate.revision,
             candidateSha256: candidate.specSha256,
@@ -221,15 +229,15 @@ export function useCandidateApproval(courseId: Ref<string | undefined>, runId: R
             policyRevision: candidate.policyRevision,
             reason,
             schemaSha256: candidate.schemaSha256,
-            trustRevision: candidate.trustRevision ?? 1,
+            trustRevision: view.trustRevision,
           },
         })
         if (result.error) {
           evaluationCandidate.value = { kind: 'error', diagnostic: errorDiagnostic(result.error, 'DECISION_FAILED', '提交审批失败') }
           return
         }
-        const approvals = [...(candidate.approvals ?? []), result.data]
-        evaluationCandidate.value = { kind: 'success', data: { ...candidate, approvals } }
+        const approvals = [...view.approvals, result.data]
+        evaluationCandidate.value = { kind: 'success', data: { ...view, approvals } }
       }
     } finally {
       deciding.value = null
@@ -240,10 +248,14 @@ export function useCandidateApproval(courseId: Ref<string | undefined>, runId: R
     const id = courseId.value
     if (!id) return
     if (environmentCandidate.value.kind !== 'success') return
-    const candidate = environmentCandidate.value.data
+    const view = environmentCandidate.value.data
+    const candidate = view.candidate
     const approval = latestEnvironmentApproval.value
     if (!approval || approval.decision !== 'approved') return
-    if (!candidate.imageArtifact || !candidate.imagePolicyEvaluation) return
+    if (
+      candidate.spec.runtime.kind === 'container' &&
+      (!view.build?.artifact || !view.build.imagePolicyEvaluation)
+    ) return
 
     publish.value = { kind: 'loading', message: '发布 EnvironmentTemplateRelease…' }
     const result = await createEnvironmentTemplateRelease({
@@ -251,11 +263,9 @@ export function useCandidateApproval(courseId: Ref<string | undefined>, runId: R
       headers: { 'Idempotency-Key': idempotencyKey(), 'If-Match': ifMatch(candidate.revision) },
       body: {
         approvalId: approval.id,
-        artifact: candidate.imageArtifact,
         candidateId: candidate.id,
         candidateRevision: candidate.revision,
         environmentSpecSha256: candidate.specSha256,
-        imagePolicyEvaluation: candidate.imagePolicyEvaluation,
         runtimeKind: candidate.spec.runtime.kind,
       },
     })

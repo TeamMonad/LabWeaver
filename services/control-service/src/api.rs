@@ -24,7 +24,7 @@ use contracts::http::{
 };
 use contracts::{
     ActorId, AgentRunId, AuthorizationDecisionRequest, AuthorizationScope, BffSessionId,
-    CandidateId, CourseId, DiagnosticCode, OperationId, ProblemDetails, ProblemPackageId,
+    CandidateId, CourseId, DiagnosticCode, EventId, OperationId, ProblemDetails, ProblemPackageId,
     ReleaseId, Revision, StreamSequence, UploadSessionId, UtcTimestamp,
 };
 use futures_util::stream;
@@ -326,6 +326,10 @@ async fn create_agent_run(
             &key,
         )
         .await?;
+    state
+        .control
+        .project_agent_run(EventId::new(), &run)
+        .await?;
     Ok(accepted(&run))
 }
 
@@ -425,9 +429,9 @@ async fn get_environment_candidate(
     .await?;
     let value = state
         .control
-        .environment_candidate(course_id, candidate_id)
+        .environment_candidate_view(course_id, candidate_id)
         .await?;
-    Ok(with_etag(StatusCode::OK, &value, value.revision))
+    Ok(with_etag(StatusCode::OK, &value, value.candidate.revision))
 }
 
 async fn get_evaluation_candidate(
@@ -446,9 +450,9 @@ async fn get_evaluation_candidate(
     .await?;
     let value = state
         .control
-        .evaluation_candidate(course_id, candidate_id)
+        .evaluation_candidate_view(course_id, candidate_id)
         .await?;
-    Ok(with_etag(StatusCode::OK, &value, value.revision))
+    Ok(with_etag(StatusCode::OK, &value, value.candidate.revision))
 }
 
 async fn decide_environment_candidate(
@@ -853,12 +857,7 @@ fn current_timestamp() -> Result<UtcTimestamp, ()> {
 }
 
 fn accepted(run: &AgentRun) -> Response {
-    Json(OperationAccepted {
-        operation_id: OperationId::new(),
-        revision: run.revision,
-        status_url: format!("/api/v1/courses/{}/agent-runs/{}", run.course_id, run.id),
-    })
-    .into_response()
+    (StatusCode::ACCEPTED, Json(run)).into_response()
 }
 
 fn with_etag<T: serde::Serialize>(status: StatusCode, value: &T, revision: Revision) -> Response {

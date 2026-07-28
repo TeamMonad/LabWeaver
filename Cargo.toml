@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "access-gateway",
   "crates/agent-core",
   "crates/artifact-store",
   "crates/auth",
@@ -43,12 +44,12 @@ metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest"] }
 rand = "0.9.1"
-reqwest = { version = "0.12.28", default-features = false, features = ["cookies", "json", "rustls-tls"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["cookies", "json", "rustls-tls", "stream"] }
 russh = { version = "0.62.2", default-features = false, features = ["ring"] }
 russh-sftp = "2.3.0"
 scraper = "0.24.0"
-rcgen = "0.14.8"
-rustls = "0.23.42"
+rcgen = "=0.14.7"
+rustls = { version = "0.23.42", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2.2.0"
 schemars = "1.0.4"
 serde = { version = "1.0.219", features = ["derive"] }
@@ -56,14 +57,14 @@ serde_jcs = "0.2.0"
 serde_json = "1.0.140"
 serde_yaml = "0.9.34"
 sha2 = "0.10.9"
-sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "postgres", "json", "uuid", "time"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "json", "uuid", "time"] }
 ssh-key = { version = "0.6.7", default-features = false, features = ["std"] }
 subtle = "2.6.1"
 thiserror = "2.0.12"
 tempfile = "3.27.0"
 time = { version = "=0.3.41", features = ["formatting", "parsing", "serde"] }
 tokio = { version = "1.45.1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
-tokio-rustls = "0.26.4"
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12"] }
 tower = { version = "0.5.2", features = ["util"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt", "json"] }

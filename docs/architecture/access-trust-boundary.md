@@ -1,6 +1,6 @@
 # Access Trust Boundary
 
-Status: the current P0 is `ssh alias@gateway`. Issue #49 owns Access authorization and session facts, #53 owns real VM endpoints, and #63 owns the OpenSSH Gateway/ForceCommand process. `DirectAccessGrant`, Headscale/Router direct access and Guacamole are deferred proposals. Current local evidence does not prove native SSH-to-VM or a deployed production path.
+Status: the current P0 is `ssh gateway@gateway connect <server-alias>`. Issue #49 owns Access authorization and session facts, #53 owns real VM endpoints, and #63 owns the OpenSSH Gateway/ForceCommand process. `DirectAccessGrant`, Headscale/Router direct access and Guacamole are deferred proposals. Current local evidence does not prove native SSH-to-VM or a deployed production path.
 
 ## Purpose and non-goals
 
@@ -32,7 +32,7 @@ PostgreSQL is the planned durable source of truth for Access Service state. Head
 
 ## Issue #47 identity and internal service defaults
 
-All deployment-variable values are in `deploy/config/access-auth.yaml.example`; code must not embed issuer URLs, audiences, claim paths, Keycloak role names, certificate locations, Gateway SANs, listener addresses, cookie names, lifetimes, or runtime-pool sizing. The production configuration manager supplies the corresponding non-secret values and secret-file locators. The example uses the recommended `realm_access.roles` source, maps `teacher`, `student`, and `platform-admin`, uses a host-only `__Host-labweaver_session` cookie and `X-CSRF-Token`, and sets a 15-minute absolute / 5-minute idle session lifetime with a 5-minute OIDC transaction lifetime. These are deployment defaults, not protocol constants: role claim path and Keycloak-to-platform role mapping are explicit configuration and are validated at startup. Every browser mutation must have both a live BFF session and a constant-time synchronizer token, and the request `Origin` must exactly match the configured HTTPS origin allowlist.
+All deployment-variable values are in `deploy/config/access-auth.yaml.example`; code must not embed issuer URLs, audiences, claim paths, Keycloak role names, certificate locations, Gateway SANs, listener addresses, cookie names, lifetimes, or runtime-pool sizing. The production configuration manager supplies the corresponding non-secret values and secret-file locators. The example uses the recommended `realm_access.roles` source, maps `teacher`, `student`, and `platform-admin`, uses a host-only `__Host-labweaver_session` cookie and `X-CSRF-Token`, and sets a 15-minute absolute / 5-minute idle session lifetime with a 5-minute OIDC transaction lifetime. These are deployment defaults, not protocol constants: role claim path and Keycloak-to-platform role mapping are explicit configuration and are validated at startup. Every browser mutation must have both a live BFF session and a constant-time synchronizer token, and the request `Origin` must exactly match the configured HTTPS origin allowlist. The browser BFF uses the `spiffe://labweaver/access-service` identity when forwarding to Control and Environment; Access internal routes separately allowlist `spiffe://labweaver/control-service` and `spiffe://labweaver/openssh-gateway`.
 
 The same file fixes the bearer-token issuer, API audience, asymmetric signing-algorithm allowlist, and JWKS refresh/retry intervals. The Access runtime validates `exp`, `nbf`, issuer, audience and `azp`, refreshes the JWKS only on an unknown `kid`, and rejects a bearer request when discovery, refresh, signature, claim, or role mapping validation fails. The audited `jwt-authorizer` 0.15.0 patch retains the deployment-configured HTTP client during refresh, merges concurrent refreshes with its mutex and rate-bounds repeated misses by the retry interval, so private-CA rotation cannot silently fall back to a different trust store. No token, cookie, PKCE verifier, or certificate body is permitted in the configuration file or ordinary logs.
 
@@ -68,7 +68,14 @@ flowchart LR
     A --> R
 ```
 
-The current P0 uses `ssh alias@gateway`. The alias is a strict database lookup key and never contains or derives host/port. Access authorizes exactly the fingerprint presented by OpenSSH, issues a short-lived one-time token bound to Gateway/connection/key/grant revision/endpoint, and owns the session lifecycle. Environment eligibility returns only endpoint identity, protocol, health, revision and deadline; route resolution stays in #53/#63.
+The current P0 authenticates the fixed `gateway` Unix account, then accepts only `connect <server-alias>` as `SSH_ORIGINAL_COMMAND`. This ordering is required because OpenSSH rejects an unknown Unix account before `AuthorizedKeysCommand` can run. The alias is a strict database lookup key and never contains or derives host/port. The first phase binds a short-lived one-time token to Gateway, connection, actor and key; redemption binds it to the exact grant revision and endpoint after a fresh Environment eligibility decision. Route resolution stays in #53/#63.
+
+The same redemption returns only the selected alias and the digest of the
+Environment-observed host-key fingerprint. The Gateway's local
+`KnownHostsCommand` validates the key offered by the target against that digest
+before OpenSSH can start the terminal. This closes the dynamic VM host-key
+boundary without copying target addresses into Access or maintaining a stale
+cluster-wide `known_hosts` file.
 
 The following `DirectAccessGrant` and Guacamole sections are retained only as a deferred future proposal and are not requirements or completion evidence for #49/#53/#63.
 

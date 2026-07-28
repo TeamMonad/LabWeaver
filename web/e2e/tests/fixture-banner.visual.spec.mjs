@@ -1,6 +1,10 @@
 import { test, expect } from '@playwright/test'
 
 test('fixture banner is not clipped at 390px', async ({ page }) => {
+  test.skip(
+    (process.env.LABWEAVER_DATA_MODE || process.env.VITE_DATA_MODE || 'live') !== 'fixture',
+    'The fixture banner is intentionally absent from the connected live portal',
+  )
   await page.emulateMedia({ colorScheme: 'light' })
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/')

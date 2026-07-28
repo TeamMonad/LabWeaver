@@ -20,7 +20,7 @@ const COMPONENTS: [&str; 7] = [
     "control-service",
     "environment-service",
     "evaluation-service",
-    "resource-service",
+    "openssh-gateway",
     "web",
 ];
 const PACKAGE_SCHEMA: &str = "platform-image-package-manifest.v1";
@@ -31,20 +31,46 @@ const DEPLOYMENT_SCHEMA: &str = "platform-image-deployment-manifest.v1";
 #[derive(Debug, Deserialize)]
 struct VersionLock {
     platform_images: PlatformImageLock,
+    sprint2_foundation: Sprint2FoundationLock,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Deserialize)]
+struct Sprint2FoundationLock {
+    buildkit_rootless: String,
 }
 
 #[cfg(target_os = "linux")]
 #[derive(Debug, Deserialize)]
 struct PlatformImageLock {
     platform: String,
+    rust_toolchain: String,
     buildkit: String,
     buildkit_image: String,
     buildx: String,
-    sbom_generator: String,
     trivy: String,
-    cosign: String,
-    kyverno_cli: String,
     helm: String,
+    claude_code: String,
+    claude_code_linux_x64_sha512: String,
+    ci_images: CiImageLock,
+    bases: BaseImageLock,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Deserialize)]
+struct CiImageLock {
+    trivy: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Deserialize)]
+struct BaseImageLock {
+    rust_builder: String,
+    rust_runtime: String,
+    node_builder: String,
+    web_runtime: String,
+    gateway_builder: String,
+    gateway_runtime: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -58,7 +84,6 @@ pub(crate) struct PackageManifest {
     platform: String,
     registry: String,
     builder: BuilderIdentity,
-    trust: TrustIdentity,
     images: Vec<ImageEvidence>,
     overall: String,
 }
@@ -70,22 +95,11 @@ struct BuilderIdentity {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct TrustIdentity {
-    bundle_sha256: String,
-    revision: String,
-    issuer: String,
-    subject: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
 struct ImageEvidence {
     component: String,
     reference: String,
     digest: String,
-    sbom: String,
-    provenance: String,
     scan: ScanEvidence,
-    signature: SignatureEvidence,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -98,15 +112,6 @@ struct ScanEvidence {
     report_sha256: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct SignatureEvidence {
-    bundle: String,
-    certificate_identity: String,
-    certificate_oidc_issuer: String,
-    transparency_log_verified: bool,
-    ct_verified: bool,
-}
-
 #[cfg(target_os = "linux")]
 #[derive(Debug, Serialize)]
 struct DeploymentManifest<'a> {
@@ -114,8 +119,10 @@ struct DeploymentManifest<'a> {
     environment: &'a str,
     package_manifest_sha256: String,
     source_commit: &'a str,
+    run_id: String,
     cluster_uid: String,
     helm_revision: u64,
+    migration_catalog_sha256: String,
     images: Vec<DeploymentImage<'a>>,
     previous_verified_manifest_sha256: Option<String>,
 }
@@ -229,10 +236,6 @@ fn validate_manifest(manifest: &PackageManifest) -> Result<(), AppError> {
         || manifest.platform != "linux/amd64"
         || !is_commit(&manifest.source_commit)
         || !is_digest(&manifest.component_lock_hash)
-        || !is_digest(&manifest.trust.bundle_sha256)
-        || manifest.trust.revision.is_empty()
-        || !manifest.trust.issuer.starts_with("https://")
-        || manifest.trust.subject.is_empty()
     {
         return manifest_invalid("top-level identity is incomplete or incompatible");
     }
@@ -248,34 +251,25 @@ fn validate_manifest(manifest: &PackageManifest) -> Result<(), AppError> {
             "{}/labweaver-system/{}@{}",
             manifest.registry, image.component, image.digest
         );
-        let locator_prefix = format!("oci://{expected}#");
         if !is_digest(&image.digest)
             || image.scan.critical != 0
             || !is_digest(&image.scan.database_digest)
             || !is_digest(&image.scan.report_sha256)
-            || !image.signature.transparency_log_verified
-            || !image.signature.ct_verified
-            || image.signature.certificate_identity != manifest.trust.subject
-            || image.signature.certificate_oidc_issuer != manifest.trust.issuer
-            || image.sbom.is_empty()
-            || image.provenance.is_empty()
             || image.scan.report.is_empty()
-            || image.signature.bundle.is_empty()
-            || !image.sbom.starts_with(&locator_prefix)
-            || !image.provenance.starts_with(&locator_prefix)
-            || !image.scan.report.starts_with(&locator_prefix)
-            || !image.signature.bundle.starts_with(&locator_prefix)
+            || !image.scan.report.starts_with("artifact://")
         {
             return manifest_invalid(
                 "image evidence is incomplete, critical, or identity-mismatched",
             );
         }
         if image.reference != expected || image.reference.contains(":latest") {
-            return manifest_invalid("image reference is not the expected GHCR digest reference");
+            return manifest_invalid("image reference is not the expected Harbor digest reference");
         }
     }
     if names.len() != COMPONENTS.len() || COMPONENTS.iter().any(|name| !names.contains(name)) {
-        return manifest_invalid("manifest must contain exactly the seven platform images");
+        return manifest_invalid(
+            "manifest must contain exactly the seven Sprint 2 platform images",
+        );
     }
     Ok(())
 }
@@ -322,11 +316,18 @@ fn validate_release(value: &str) -> Result<(), AppError> {
 }
 
 fn validate_registry(value: &str) -> Result<(), AppError> {
-    if value == "ghcr.io/teammonad" {
+    if !value.is_empty()
+        && value.len() <= 253
+        && !value.contains("//")
+        && !value.contains('@')
+        && !value.contains('/')
+        && !value.contains(char::is_whitespace)
+        && value.contains('.')
+    {
         Ok(())
     } else {
         Err(AppError::InvalidArgument {
-            role: "GitHub Packages registry namespace",
+            role: "Harbor registry host",
         })
     }
 }
@@ -433,19 +434,11 @@ fn package_linux(environment: &str, release: &str, root: &Path) -> Result<(), Ap
         role: "parse component lock",
         detail: error.to_string(),
     })?;
-    verify_tools(&lock.platform_images)?;
+    verify_tools(&lock)?;
+    verify_rust_toolchain(root, &lock.platform_images)?;
     let registry = required_env("LABWEAVER_PLATFORM_REGISTRY")?;
     validate_registry(&registry)?;
-    let trust_bundle = PathBuf::from(required_env("LABWEAVER_SIGSTORE_TRUST_BUNDLE")?);
-    let trust_bytes =
-        fs::read(&trust_bundle).map_err(|error| io_error("read trust bundle", error))?;
-    let trust = TrustIdentity {
-        bundle_sha256: sha256(&trust_bytes),
-        revision: required_env("LABWEAVER_SIGSTORE_TRUST_REVISION")?,
-        issuer: required_env("LABWEAVER_SIGSTORE_OIDC_ISSUER")?,
-        subject: required_env("LABWEAVER_SIGSTORE_EXPECTED_SUBJECT")?,
-    };
-    let database_digest = verified_trivy_database()?;
+    let (database_reference, database_digest) = verified_trivy_database()?;
     let run_id = format!("pkg-{environment}-{release}-{}", &source_commit[..12]);
     let run_dir = root.join("artifacts/package").join(&run_id);
     fs::create_dir_all(&run_dir)
@@ -453,15 +446,15 @@ fn package_linux(environment: &str, release: &str, root: &Path) -> Result<(), Ap
     scan_build_context(root, &run_dir)?;
     let mut images = Vec::with_capacity(COMPONENTS.len());
     for component in COMPONENTS {
-        images.push(build_scan_sign(
+        images.push(build_scan(
             root,
             &run_dir,
             &registry,
             component,
             &source_commit,
             source_date_epoch,
+            &database_reference,
             &database_digest,
-            &trust,
             &lock.platform_images,
         )?);
     }
@@ -478,7 +471,6 @@ fn package_linux(environment: &str, release: &str, root: &Path) -> Result<(), Ap
             buildkit: lock.platform_images.buildkit,
             buildx: lock.platform_images.buildx,
         },
-        trust,
         images,
         overall: "passed".to_owned(),
     };
@@ -568,15 +560,15 @@ fn scan_build_context(root: &Path, run_dir: &Path) -> Result<(), AppError> {
 
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
-fn build_scan_sign(
+fn build_scan(
     root: &Path,
     run_dir: &Path,
     registry: &str,
     component: &str,
     source_commit: &str,
     source_date_epoch: u64,
+    database_reference: &str,
     database_digest: &str,
-    trust: &TrustIdentity,
     lock: &PlatformImageLock,
 ) -> Result<ImageEvidence, AppError> {
     let tag = format!(
@@ -590,7 +582,8 @@ fn build_scan_sign(
         source_commit,
         source_date_epoch,
         &tag,
-        &lock.sbom_generator,
+        registry,
+        lock,
     )?;
     build_image(
         root,
@@ -598,7 +591,8 @@ fn build_scan_sign(
         source_commit,
         source_date_epoch,
         &reproducibility_tag,
-        &lock.sbom_generator,
+        registry,
+        lock,
     )?;
     let first = inspect_platform_digest(&tag)?;
     let second = inspect_platform_digest(&reproducibility_tag)?;
@@ -609,35 +603,19 @@ fn build_scan_sign(
         });
     }
     let reference = format!("{registry}/labweaver-system/{component}@{first}");
-    let (scan_bytes, critical, high) = scan_image(run_dir, component, &reference)?;
-    sign_and_attest(
-        run_dir,
-        component,
-        &tag,
-        &reference,
-        &scan_path(run_dir, component),
-        trust,
-    )?;
+    let (scan_bytes, critical, high) =
+        scan_image(run_dir, component, &reference, database_reference)?;
     Ok(ImageEvidence {
         component: component.to_owned(),
         reference: reference.clone(),
         digest: first,
-        sbom: format!("oci://{reference}#sbom-spdx"),
-        provenance: format!("oci://{reference}#slsa-provenance"),
         scan: ScanEvidence {
             scanner: format!("trivy:{}", lock.trivy),
             database_digest: database_digest.to_owned(),
             critical,
             high,
-            report: format!("oci://{reference}#trivy-vulnerability-report"),
+            report: format!("artifact://package/{component}/trivy.json"),
             report_sha256: sha256(&scan_bytes),
-        },
-        signature: SignatureEvidence {
-            bundle: format!("oci://{reference}#sigstore-bundle"),
-            certificate_identity: trust.subject.clone(),
-            certificate_oidc_issuer: trust.issuer.clone(),
-            transparency_log_verified: true,
-            ct_verified: true,
         },
     })
 }
@@ -647,12 +625,15 @@ fn scan_image(
     run_dir: &Path,
     component: &str,
     reference: &str,
+    database_reference: &str,
 ) -> Result<(Vec<u8>, u64, u64), AppError> {
     let scan_path = scan_path(run_dir, component);
     run_checked(
         Command::new("trivy")
             .args([
                 "image",
+                "--db-repository",
+                database_reference,
                 "--format",
                 "json",
                 "--scanners",
@@ -691,91 +672,125 @@ fn scan_path(run_dir: &Path, component: &str) -> PathBuf {
 }
 
 #[cfg(target_os = "linux")]
-fn sign_and_attest(
-    run_dir: &Path,
-    component: &str,
-    build_reference: &str,
-    reference: &str,
-    scan: &Path,
-    trust: &TrustIdentity,
-) -> Result<(), AppError> {
-    let trusted_root = required_env("LABWEAVER_SIGSTORE_TRUST_BUNDLE")?;
-    let fulcio = required_env("LABWEAVER_SIGSTORE_FULCIO_URL")?;
-    let rekor = required_env("LABWEAVER_SIGSTORE_REKOR_URL")?;
-    let token = required_env("LABWEAVER_SIGSTORE_IDENTITY_TOKEN_FILE")?;
-    run_checked(
-        Command::new("cosign").args([
-            "sign",
-            "--yes",
-            "--use-signing-config=false",
-            "--identity-token",
-            &token,
-            "--trusted-root",
-            &trusted_root,
-            "--fulcio-url",
-            &fulcio,
-            "--rekor-url",
-            &rekor,
-            reference,
-        ]),
-        "Cosign keyless sign",
-    )?;
-    let sbom_path = run_dir.join(format!("sbom-{component}.json"));
-    let provenance_path = run_dir.join(format!("provenance-{component}.json"));
-    extract_attestation(build_reference, "{{ json .SBOM.SPDX }}", &sbom_path)?;
-    extract_attestation(
-        build_reference,
-        "{{ json .Provenance.SLSA }}",
-        &provenance_path,
-    )?;
-    cosign_attest(reference, "spdxjson", &sbom_path)?;
-    cosign_attest(reference, "slsaprovenance", &provenance_path)?;
-    cosign_attest(reference, "vuln", scan)?;
-    cosign_verify(reference, trust)
-}
-
-#[cfg(target_os = "linux")]
 fn build_image(
     root: &Path,
     component: &str,
     source_commit: &str,
     source_date_epoch: u64,
     tag: &str,
-    sbom_generator: &str,
+    registry: &str,
+    lock: &PlatformImageLock,
 ) -> Result<(), AppError> {
-    let file = if component == "web" {
-        "containers/Containerfile.web"
-    } else {
-        "containers/Containerfile.rust"
+    let file = match component {
+        "web" => "containers/Containerfile.web",
+        "openssh-gateway" => "access-gateway/Dockerfile",
+        _ => "containers/Containerfile.rust",
     };
-    let mut command = Command::new("docker");
+    let mut command = Command::new("docker-buildx");
     command.current_dir(root).args([
-        "buildx",
         "build",
         "--file",
         file,
         "--platform",
         "linux/amd64",
-        "--provenance=mode=max",
-        "--attest",
-        &format!("type=sbom,generator={sbom_generator}"),
+        "--provenance=false",
         "--output=type=registry,rewrite-timestamp=true,oci-mediatypes=true",
         "--build-arg",
         &format!("SOURCE_COMMIT={source_commit}"),
         "--build-arg",
         &format!("SOURCE_DATE_EPOCH={source_date_epoch}"),
     ]);
-    if component != "web" {
+    if component != "web" && component != "openssh-gateway" {
         command.args(["--build-arg", &format!("SERVICE={component}")]);
+        command.args([
+            "--target",
+            if component == "agent-service" {
+                "agent-runtime"
+            } else {
+                "runtime"
+            },
+        ]);
     }
-    command.args(["--tag", tag, "."]);
+    if component != "web" {
+        command.args([
+            "--build-arg",
+            &format!("RUST_TOOLCHAIN={}", lock.rust_toolchain),
+        ]);
+    }
+    if component == "agent-service" {
+        command.args([
+            "--build-arg",
+            &format!("CLAUDE_CODE_VERSION={}", lock.claude_code),
+            "--build-arg",
+            &format!(
+                "CLAUDE_CODE_LINUX_X64_SHA512={}",
+                lock.claude_code_linux_x64_sha512
+            ),
+        ]);
+    }
+    command.args(["--tag", tag]);
+    for (name, source) in build_base_images(component, lock) {
+        command.args([
+            "--build-arg",
+            &format!("{name}={}", pinned_mirror(registry, name, source)?),
+        ]);
+    }
+    command.arg(".");
     run_checked(&mut command, "BuildKit platform image build").map(|_| ())
+}
+
+#[cfg(target_os = "linux")]
+fn build_base_images<'a>(
+    component: &str,
+    lock: &'a PlatformImageLock,
+) -> Vec<(&'static str, &'a str)> {
+    match component {
+        "web" => vec![
+            ("NODE_BUILDER", lock.bases.node_builder.as_str()),
+            ("WEB_RUNTIME", lock.bases.web_runtime.as_str()),
+        ],
+        "openssh-gateway" => vec![
+            ("RUST_BUILDER", lock.bases.gateway_builder.as_str()),
+            ("GATEWAY_RUNTIME", lock.bases.gateway_runtime.as_str()),
+        ],
+        "agent-service" => vec![
+            ("RUST_BUILDER", lock.bases.rust_builder.as_str()),
+            ("RUST_RUNTIME", lock.bases.rust_runtime.as_str()),
+            ("NODE_BUILDER", lock.bases.node_builder.as_str()),
+            ("BUILDKIT_IMAGE", lock.buildkit_image.as_str()),
+            ("TRIVY_IMAGE", lock.ci_images.trivy.as_str()),
+        ],
+        _ => vec![
+            ("RUST_BUILDER", lock.bases.rust_builder.as_str()),
+            ("RUST_RUNTIME", lock.bases.rust_runtime.as_str()),
+            ("BUILDKIT_IMAGE", lock.buildkit_image.as_str()),
+            ("TRIVY_IMAGE", lock.ci_images.trivy.as_str()),
+        ],
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn pinned_mirror(registry: &str, name: &str, source: &str) -> Result<String, AppError> {
+    let (_, digest) = source.rsplit_once('@').ok_or(AppError::PlatformImage {
+        code: "LW_PACKAGE_MANIFEST_INVALID",
+        detail: format!("{name} base image is not digest pinned"),
+    })?;
+    if !is_digest(digest) {
+        return Err(AppError::PlatformImage {
+            code: "LW_PACKAGE_MANIFEST_INVALID",
+            detail: format!("{name} base image digest is invalid"),
+        });
+    }
+    Ok(format!(
+        "{registry}/labweaver-system/base-{}@{digest}",
+        name.to_ascii_lowercase().replace('_', "-")
+    ))
 }
 
 #[cfg(target_os = "linux")]
 fn inspect_digest(reference: &str) -> Result<String, AppError> {
     let output = run_checked(
-        Command::new("docker").args(["buildx", "imagetools", "inspect", reference]),
+        Command::new("docker-buildx").args(["imagetools", "inspect", reference]),
         "inspect OCI image",
     )?;
     let digest = output
@@ -795,8 +810,7 @@ fn inspect_digest(reference: &str) -> Result<String, AppError> {
 #[cfg(target_os = "linux")]
 fn inspect_platform_digest(reference: &str) -> Result<String, AppError> {
     let output = run_checked(
-        Command::new("docker").args([
-            "buildx",
+        Command::new("docker-buildx").args([
             "imagetools",
             "inspect",
             reference,
@@ -810,14 +824,37 @@ fn inspect_platform_digest(reference: &str) -> Result<String, AppError> {
             code: "LW_PACKAGE_DIGEST_MISSING",
             detail: error.to_string(),
         })?;
-    platform_digest_from_index(&value, reference)
+    platform_digest_from_manifest(&value, reference)
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn platform_digest_from_index(
+fn platform_digest_from_manifest(
     value: &serde_json::Value,
     reference: &str,
 ) -> Result<String, AppError> {
+    let single_manifest = matches!(
+        value.get("mediaType").and_then(serde_json::Value::as_str),
+        Some(
+            "application/vnd.oci.image.manifest.v1+json"
+                | "application/vnd.docker.distribution.manifest.v2+json"
+        )
+    );
+    if single_manifest {
+        let digest = value
+            .get("digest")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(AppError::PlatformImage {
+                code: "LW_PACKAGE_DIGEST_MISSING",
+                detail: format!("{reference} single-platform manifest has no digest"),
+            })?;
+        if is_digest(digest) {
+            return Ok(digest.to_owned());
+        }
+        return Err(AppError::PlatformImage {
+            code: "LW_PACKAGE_DIGEST_MISSING",
+            detail: "single-platform manifest digest is invalid".to_owned(),
+        });
+    }
     let digest = value
         .get("manifests")
         .and_then(serde_json::Value::as_array)
@@ -849,22 +886,28 @@ fn platform_digest_from_index(
 }
 
 #[cfg(target_os = "linux")]
-fn verified_trivy_database() -> Result<String, AppError> {
+fn verified_trivy_database() -> Result<(String, String), AppError> {
     let reference = required_env("LABWEAVER_TRIVY_DATABASE_REFERENCE")?;
     let expected = required_env("LABWEAVER_TRIVY_DATABASE_DIGEST")?;
-    if !is_digest(&expected) || !reference.ends_with(&format!("@{expected}")) {
-        return Err(AppError::PlatformImage {
-            code: "LW_PACKAGE_MANIFEST_INVALID",
-            detail: "Trivy database must be an exact OCI digest reference".to_owned(),
-        });
-    }
+    validate_trivy_database_reference(&reference, &expected)?;
     if inspect_digest(&reference)? != expected {
         return Err(AppError::PlatformImage {
             code: "LW_PACKAGE_CONNECTED_IDENTITY_MISMATCH",
             detail: "Trivy database registry identity differs from configuration".to_owned(),
         });
     }
-    Ok(expected)
+    Ok((reference, expected))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn validate_trivy_database_reference(reference: &str, expected: &str) -> Result<(), AppError> {
+    if !is_digest(expected) || !reference.ends_with(&format!("@{expected}")) {
+        return Err(AppError::PlatformImage {
+            code: "LW_PACKAGE_MANIFEST_INVALID",
+            detail: "Trivy database must be an exact OCI digest reference".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -906,13 +949,12 @@ fn vulnerability_counts(bytes: &[u8]) -> Result<(u64, u64, u64), AppError> {
 }
 
 #[cfg(target_os = "linux")]
-fn verify_tools(lock: &PlatformImageLock) -> Result<(), AppError> {
+fn verify_tools(lock: &VersionLock) -> Result<(), AppError> {
+    let platform = &lock.platform_images;
     let checks = [
-        ("docker", vec!["buildx", "version"], lock.buildx.as_str()),
-        ("trivy", vec!["--version"], lock.trivy.as_str()),
-        ("cosign", vec!["version"], lock.cosign.as_str()),
-        ("kyverno", vec!["version"], lock.kyverno_cli.as_str()),
-        ("helm", vec!["version", "--short"], lock.helm.as_str()),
+        ("docker-buildx", vec!["version"], platform.buildx.as_str()),
+        ("trivy", vec!["--version"], platform.trivy.as_str()),
+        ("helm", vec!["version", "--short"], platform.helm.as_str()),
     ];
     for (program, arguments, expected) in checks {
         let output = run_checked(
@@ -927,94 +969,95 @@ fn verify_tools(lock: &PlatformImageLock) -> Result<(), AppError> {
         }
     }
     let buildkit = run_checked(
-        Command::new("docker").args(["buildx", "inspect", "--bootstrap"]),
+        Command::new("docker-buildx").args(["inspect", "--bootstrap"]),
         "verify BuildKit daemon identity",
     )?;
-    if !buildkit.contains(&lock.buildkit) {
+    if !buildkit.contains(&platform.buildkit) {
         return Err(AppError::PlatformImage {
             code: "LW_PACKAGE_TOOL_IDENTITY_MISMATCH",
-            detail: format!("BuildKit does not match {}", lock.buildkit),
+            detail: format!("BuildKit does not match {}", platform.buildkit),
         });
     }
-    if !buildkit.contains(&lock.buildkit_image) {
-        return Err(AppError::PlatformImage {
-            code: "LW_PACKAGE_TOOL_IDENTITY_MISMATCH",
-            detail: "BuildKit driver image digest differs from the component lock".to_owned(),
-        });
+    if buildkit.contains(&platform.buildkit_image) {
+        return Ok(());
     }
-    let Some((_, expected_generator_digest)) = lock.sbom_generator.rsplit_once('@') else {
-        return Err(AppError::PlatformImage {
-            code: "LW_PACKAGE_TOOL_IDENTITY_MISMATCH",
-            detail: "SBOM generator is not pinned by digest".to_owned(),
-        });
-    };
-    if !is_digest(expected_generator_digest)
-        || inspect_digest(&lock.sbom_generator)? != expected_generator_digest
+
+    verify_remote_buildkit_deployment(&lock.sprint2_foundation.buildkit_rootless)
+}
+
+#[cfg(target_os = "linux")]
+fn verify_rust_toolchain(root: &Path, platform: &PlatformImageLock) -> Result<(), AppError> {
+    let toolchain = fs::read_to_string(root.join("rust-toolchain.toml"))
+        .map_err(|error| io_error("read Rust toolchain lock", error))?;
+    let expected = format!("channel = \"{}\"", platform.rust_toolchain);
+    let channels = toolchain
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("channel"))
+        .collect::<Vec<_>>();
+    let builder_marker = format!("rust:{}-", platform.rust_toolchain);
+    if channels != [expected.as_str()]
+        || !platform.bases.rust_builder.contains(&builder_marker)
+        || !platform.bases.gateway_builder.contains(&builder_marker)
     {
         return Err(AppError::PlatformImage {
-            code: "LW_PACKAGE_TOOL_IDENTITY_MISMATCH",
-            detail: "SBOM generator registry identity differs from the component lock".to_owned(),
+            code: "LW_PACKAGE_RUST_TOOLCHAIN_IDENTITY_MISMATCH",
+            detail: "rust-toolchain.toml and both locked Rust builder images must use the same explicit version".to_owned(),
         });
     }
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn extract_attestation(reference: &str, format: &str, destination: &Path) -> Result<(), AppError> {
+fn verify_remote_buildkit_deployment(expected_image: &str) -> Result<(), AppError> {
+    let kubeconfig = required_env("LABWEAVER_KUBECONFIG")?;
     let output = run_checked(
-        Command::new("docker").args([
-            "buildx",
-            "imagetools",
-            "inspect",
-            reference,
-            "--format",
-            format,
+        Command::new("kubectl").args([
+            "--kubeconfig",
+            &kubeconfig,
+            "--namespace",
+            "labweaver-build",
+            "get",
+            "deployment",
+            "buildkit",
+            "--output",
+            "json",
         ]),
-        "extract BuildKit attestation",
+        "read remote BuildKit deployment identity",
     )?;
-    let value: serde_json::Value =
-        serde_json::from_str(&output).map_err(|error| AppError::PlatformImage {
-            code: "LW_PACKAGE_ATTESTATION_INVALID",
-            detail: error.to_string(),
-        })?;
-    if value.is_null() {
+    let value: serde_json::Value = serde_json::from_str(&output).map_err(|error| AppError::Io {
+        role: "parse remote BuildKit deployment identity",
+        detail: error.to_string(),
+    })?;
+    let image = value
+        .pointer("/spec/template/spec/containers/0/image")
+        .and_then(serde_json::Value::as_str);
+    let configured = value
+        .pointer("/spec/template/metadata/annotations/labweaver.io~1configuration-sha256")
+        .and_then(serde_json::Value::as_str);
+    let ready = value
+        .pointer("/status/readyReplicas")
+        .and_then(serde_json::Value::as_u64);
+    let updated = value
+        .pointer("/status/updatedReplicas")
+        .and_then(serde_json::Value::as_u64);
+    let configuration_is_sha256 = configured.is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    });
+    if image != Some(expected_image)
+        || ready != Some(1)
+        || updated != Some(1)
+        || !configuration_is_sha256
+    {
         return Err(AppError::PlatformImage {
-            code: "LW_PACKAGE_ATTESTATION_INVALID",
-            detail: reference.to_owned(),
+            code: "LW_PACKAGE_TOOL_IDENTITY_MISMATCH",
+            detail: "remote BuildKit deployment image, configuration, or readiness differs from the component lock".to_owned(),
         });
     }
-    fs::write(destination, output).map_err(|error| io_error("write BuildKit attestation", error))
-}
-
-#[cfg(target_os = "linux")]
-fn cosign_attest(reference: &str, kind: &str, predicate: &Path) -> Result<(), AppError> {
-    let trusted_root = required_env("LABWEAVER_SIGSTORE_TRUST_BUNDLE")?;
-    let fulcio = required_env("LABWEAVER_SIGSTORE_FULCIO_URL")?;
-    let rekor = required_env("LABWEAVER_SIGSTORE_REKOR_URL")?;
-    let token = required_env("LABWEAVER_SIGSTORE_IDENTITY_TOKEN_FILE")?;
-    run_checked(
-        Command::new("cosign")
-            .args([
-                "attest",
-                "--yes",
-                "--use-signing-config=false",
-                "--identity-token",
-                &token,
-                "--trusted-root",
-                &trusted_root,
-                "--fulcio-url",
-                &fulcio,
-                "--rekor-url",
-                &rekor,
-                "--type",
-                kind,
-                "--predicate",
-            ])
-            .arg(predicate)
-            .arg(reference),
-        "Cosign signed attestation publication",
-    )
-    .map(|_| ())
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -1025,41 +1068,26 @@ fn connected_validate(manifest: &PackageManifest, root: &Path) -> Result<(), App
         role: "parse component lock",
         detail: error.to_string(),
     })?;
-    verify_tools(&lock.platform_images)?;
+    verify_tools(&lock)?;
+    verify_rust_toolchain(root, &lock.platform_images)?;
     if sha256(&lock_bytes) != manifest.component_lock_hash {
         return manifest_invalid("component lock identity changed");
     }
-    verify_connected_evidence_identity(manifest)?;
+    let (_, database_digest) = verified_trivy_database()?;
+    if manifest
+        .images
+        .iter()
+        .any(|image| image.scan.database_digest != database_digest)
+    {
+        return Err(AppError::PlatformImage {
+            code: "LW_PACKAGE_CONNECTED_IDENTITY_MISMATCH",
+            detail: "scanner database identity differs from package evidence".to_owned(),
+        });
+    }
     for image in &manifest.images {
         if inspect_digest(&image.reference)? != image.digest {
             return manifest_invalid("registry digest no longer matches package evidence");
         }
-        cosign_verify(&image.reference, &manifest.trust)?;
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn verify_connected_evidence_identity(manifest: &PackageManifest) -> Result<(), AppError> {
-    let trust_bundle = fs::read(required_env("LABWEAVER_SIGSTORE_TRUST_BUNDLE")?)
-        .map_err(|error| io_error("read connected trust bundle", error))?;
-    let revision = required_env("LABWEAVER_SIGSTORE_TRUST_REVISION")?;
-    let issuer = required_env("LABWEAVER_SIGSTORE_OIDC_ISSUER")?;
-    let subject = required_env("LABWEAVER_SIGSTORE_EXPECTED_SUBJECT")?;
-    let database = verified_trivy_database()?;
-    if sha256(&trust_bundle) != manifest.trust.bundle_sha256
-        || revision != manifest.trust.revision
-        || issuer != manifest.trust.issuer
-        || subject != manifest.trust.subject
-        || manifest
-            .images
-            .iter()
-            .any(|image| image.scan.database_digest != database)
-    {
-        return Err(AppError::PlatformImage {
-            code: "LW_PACKAGE_CONNECTED_IDENTITY_MISMATCH",
-            detail: "trust or scanner identity differs from package evidence".to_owned(),
-        });
     }
     Ok(())
 }
@@ -1069,42 +1097,6 @@ fn connected_validate(_manifest: &PackageManifest, _root: &Path) -> Result<(), A
     Err(AppError::UnsupportedPlatform {
         command: "package-validate --mode connected",
     })
-}
-
-#[cfg(target_os = "linux")]
-fn cosign_verify(reference: &str, trust: &TrustIdentity) -> Result<(), AppError> {
-    let trusted_root = required_env("LABWEAVER_SIGSTORE_TRUST_BUNDLE")?;
-    run_checked(
-        Command::new("cosign").args([
-            "verify",
-            "--trusted-root",
-            &trusted_root,
-            "--certificate-identity",
-            &trust.subject,
-            "--certificate-oidc-issuer",
-            &trust.issuer,
-            reference,
-        ]),
-        "Cosign signature and transparency verification",
-    )?;
-    for kind in ["spdxjson", "slsaprovenance", "vuln"] {
-        run_checked(
-            Command::new("cosign").args([
-                "verify-attestation",
-                "--trusted-root",
-                &trusted_root,
-                "--certificate-identity",
-                &trust.subject,
-                "--certificate-oidc-issuer",
-                &trust.issuer,
-                "--type",
-                kind,
-                reference,
-            ]),
-            "Cosign attestation verification",
-        )?;
-    }
-    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -1118,8 +1110,7 @@ fn deploy_linux(
     let kubeconfig = required_env("LABWEAVER_KUBECONFIG")?;
     let values = root.join("deploy/helm/labweaver/values.yaml");
     let environment_values = PathBuf::from(required_env("LABWEAVER_PLATFORM_VALUES_FILE")?);
-    let fulcio_roots = PathBuf::from(required_env("LABWEAVER_SIGSTORE_FULCIO_ROOTS_FILE")?);
-    let rekor_url = required_env("LABWEAVER_SIGSTORE_REKOR_URL")?;
+    let configuration_bundle_sha256 = required_env("LABWEAVER_CONFIGURATION_BUNDLE_SHA256")?;
     let mut command = Command::new("helm");
     command
         .env("KUBECONFIG", &kubeconfig)
@@ -1140,19 +1131,9 @@ fn deploy_linux(
         .arg(values)
         .arg("--values")
         .arg(environment_values)
-        .arg("--set-file")
-        .arg(format!("trust.fulcioRoots={}", fulcio_roots.display()))
         .args([
             "--set-string",
-            &format!("trust.registry={}", manifest.registry),
-            "--set-string",
-            &format!("trust.revision={}", manifest.trust.revision),
-            "--set-string",
-            &format!("trust.issuer={}", manifest.trust.issuer),
-            "--set-string",
-            &format!("trust.subject={}", manifest.trust.subject),
-            "--set-string",
-            &format!("trust.rekorUrl={rekor_url}"),
+            &format!("deploymentIdentity.configurationBundleSha256={configuration_bundle_sha256}"),
         ]);
     for image in &manifest.images {
         command.args([
@@ -1169,13 +1150,25 @@ fn deploy_linux(
     let revision = helm_revision(&kubeconfig)?;
     let manifest_bytes =
         fs::read(manifest_path).map_err(|error| io_error("read package manifest", error))?;
+    let run_id = std::env::var("LABWEAVER_RUN_ID").map_err(|_| AppError::PlatformImage {
+        code: "LW_PACKAGE_DEPLOYMENT_RUN_ID_MISSING",
+        detail: "LABWEAVER_RUN_ID is required".to_owned(),
+    })?;
+    uuid::Uuid::parse_str(&run_id).map_err(|_| AppError::PlatformImage {
+        code: "LW_PACKAGE_DEPLOYMENT_RUN_ID_INVALID",
+        detail: "LABWEAVER_RUN_ID must be a UUID".to_owned(),
+    })?;
+    let migration_catalog = fs::read(root.join("migrations/catalog.yaml"))
+        .map_err(|error| io_error("read migration catalog", error))?;
     let deployment = DeploymentManifest {
         schema_version: DEPLOYMENT_SCHEMA,
         environment,
         package_manifest_sha256: sha256(&manifest_bytes),
         source_commit: &manifest.source_commit,
+        run_id,
         cluster_uid,
         helm_revision: revision,
+        migration_catalog_sha256: sha256(&migration_catalog),
         images: manifest
             .images
             .iter()
@@ -1307,16 +1300,10 @@ mod tests {
                 .map_or(1, |duration| duration.as_secs()),
             component_lock_hash: digest('b'),
             platform: "linux/amd64".to_owned(),
-            registry: "ghcr.io/teammonad".to_owned(),
+            registry: "harbor.internal.example".to_owned(),
             builder: BuilderIdentity {
                 buildkit: "v0.31.1".to_owned(),
                 buildx: "v0.35.0".to_owned(),
-            },
-            trust: TrustIdentity {
-                bundle_sha256: digest('c'),
-                revision: "trust-v1".to_owned(),
-                issuer: "https://identity.internal.example/realms/labweaver".to_owned(),
-                subject: "system:serviceaccount:labweaver-build:platform-builder".to_owned(),
             },
             images: COMPONENTS
                 .iter()
@@ -1324,30 +1311,20 @@ mod tests {
                 .map(|(index, component)| {
                     let digest_char = ['3', '4', '5', '6', '7', '8', '9'][index];
                     let image_digest = digest(digest_char);
-                    let reference =
-                        format!("ghcr.io/teammonad/labweaver-system/{component}@{image_digest}");
+                    let reference = format!(
+                        "harbor.internal.example/labweaver-system/{component}@{image_digest}"
+                    );
                     ImageEvidence {
                         component: (*component).to_owned(),
                         reference: reference.clone(),
                         digest: image_digest,
-                        sbom: format!("oci://{reference}#sbom-spdx"),
-                        provenance: format!("oci://{reference}#slsa-provenance"),
                         scan: ScanEvidence {
                             scanner: "trivy:0.72.0".to_owned(),
                             database_digest: digest('1'),
                             critical: 0,
                             high: 2,
-                            report: format!("oci://{reference}#trivy-vulnerability-report"),
+                            report: format!("artifact://package/{component}/trivy.json"),
                             report_sha256: digest('2'),
-                        },
-                        signature: SignatureEvidence {
-                            bundle: format!("oci://{reference}#sigstore-bundle"),
-                            certificate_identity:
-                                "system:serviceaccount:labweaver-build:platform-builder".to_owned(),
-                            certificate_oidc_issuer:
-                                "https://identity.internal.example/realms/labweaver".to_owned(),
-                            transparency_log_verified: true,
-                            ct_verified: true,
                         },
                     }
                 })
@@ -1380,24 +1357,24 @@ mod tests {
     }
 
     #[test]
-    fn static_manifest_rejects_critical_or_unverified_evidence() {
+    fn static_manifest_rejects_critical_or_invalid_scan_evidence() {
         let mut critical = valid_manifest();
         critical.images[0].scan.critical = 1;
         assert!(validate_manifest(&critical).is_err());
 
-        let mut unsigned = valid_manifest();
-        unsigned.images[0].signature.transparency_log_verified = false;
-        assert!(validate_manifest(&unsigned).is_err());
+        let mut unpinned_database = valid_manifest();
+        unpinned_database.images[0].scan.database_digest = "latest".to_owned();
+        assert!(validate_manifest(&unpinned_database).is_err());
 
-        let mut wrong_subject = valid_manifest();
-        wrong_subject.images[0].signature.certificate_identity = "someone-else".to_owned();
-        assert!(validate_manifest(&wrong_subject).is_err());
+        let mut unbound_report = valid_manifest();
+        unbound_report.images[0].scan.report = "trivy.json".to_owned();
+        assert!(validate_manifest(&unbound_report).is_err());
     }
 
     #[test]
-    fn platform_digest_ignores_run_specific_attestation_manifest() -> Result<(), String> {
+    fn platform_digest_ignores_non_runtime_index_entries() -> Result<(), String> {
         let subject = digest('a');
-        for attestation in [digest('b'), digest('c')] {
+        for auxiliary in [digest('b'), digest('c')] {
             let index = serde_json::json!({
                 "manifests": [
                     {
@@ -1405,22 +1382,120 @@ mod tests {
                         "platform": {"os": "linux", "architecture": "amd64"}
                     },
                     {
-                        "digest": attestation,
+                        "digest": auxiliary,
                         "platform": {"os": "unknown", "architecture": "unknown"}
                     }
                 ]
             });
-            let actual =
-                platform_digest_from_index(&index, "fixture").map_err(|error| error.to_string())?;
+            let actual = platform_digest_from_manifest(&index, "fixture")
+                .map_err(|error| error.to_string())?;
             assert_eq!(actual, subject);
         }
         Ok(())
     }
 
     #[test]
-    fn package_registry_is_exactly_the_github_organization_namespace() {
-        assert!(validate_registry("ghcr.io/teammonad").is_ok());
-        assert!(validate_registry("ghcr.io/other-owner").is_err());
-        assert!(validate_registry("harbor.internal.example").is_err());
+    fn platform_digest_accepts_single_platform_manifest_descriptor() -> Result<(), String> {
+        let expected = digest('a');
+        let manifest = serde_json::json!({
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": expected,
+            "size": 3978
+        });
+        let actual = platform_digest_from_manifest(&manifest, "fixture")
+            .map_err(|error| error.to_string())?;
+        assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn package_registry_requires_a_bare_harbor_host() {
+        assert!(validate_registry("harbor.internal.example").is_ok());
+        assert!(validate_registry("harbor.internal.example:5443").is_ok());
+        assert!(validate_registry("https://harbor.internal.example").is_err());
+        assert!(validate_registry("harbor.internal.example/project").is_err());
+    }
+
+    #[test]
+    fn pinned_mirror_preserves_the_reviewed_digest() -> Result<(), String> {
+        let expected = digest('a');
+        let actual = pinned_mirror(
+            "harbor.lab.lan",
+            "RUST_BUILDER",
+            &format!("docker.io/library/rust:locked@{expected}"),
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            actual,
+            format!("harbor.lab.lan/labweaver-system/base-rust-builder@{expected}")
+        );
+        assert!(pinned_mirror("harbor.lab.lan", "RUST_BUILDER", "rust:latest").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn trivy_database_reference_requires_the_exact_digest() {
+        let expected = digest('a');
+        assert!(
+            validate_trivy_database_reference(
+                &format!("harbor.lab.lan/cache/trivy-db@{expected}"),
+                &expected,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_trivy_database_reference("harbor.lab.lan/cache/trivy-db:2", &expected,)
+                .is_err()
+        );
+        assert!(
+            validate_trivy_database_reference(
+                &format!("harbor.lab.lan/cache/trivy-db@{}", digest('b')),
+                &expected,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rust_container_build_context_includes_every_workspace_member() -> std::io::Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let dockerignore = std::fs::read_to_string(root.join(".dockerignore"))?;
+        let containerfile =
+            std::fs::read_to_string(root.join("containers").join("Containerfile.rust"))?;
+        for directory in ["access-gateway", "crates", "services", "xtask"] {
+            assert!(
+                dockerignore
+                    .lines()
+                    .any(|line| line == format!("!{directory}/**")),
+                "{directory} must be included in the Docker build context"
+            );
+            assert!(
+                containerfile.contains(&format!("COPY {directory} {directory}")),
+                "{directory} must be copied by the Rust Containerfile"
+            );
+        }
+        assert!(containerfile.contains("RUSTUP_TOOLCHAIN=${RUST_TOOLCHAIN}"));
+        assert!(containerfile.contains("@anthropic-ai/claude-code-linux-x64@"));
+        assert!(containerfile.contains("sha512sum --check --strict"));
+        assert!(containerfile.contains("/usr/local/bin/claude"));
+        assert!(
+            std::fs::read_to_string(root.join("access-gateway/Dockerfile"))?
+                .contains("RUSTUP_TOOLCHAIN=${RUST_TOOLCHAIN}")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn image_ci_scans_the_extracted_oci_layout() -> std::io::Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let workflow = std::fs::read_to_string(
+            root.join(".github")
+                .join("workflows")
+                .join("platform-images.yml"),
+        )?;
+        assert!(workflow.contains("tar -xf \"$RUNNER_TEMP/$COMPONENT-first.tar\""));
+        assert!(workflow.contains("image --input \"/evidence/$COMPONENT-oci\""));
+        assert!(workflow.contains("LW_PACKAGE_OCI_LAYOUT_INVALID"));
+        Ok(())
     }
 }

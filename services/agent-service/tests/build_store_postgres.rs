@@ -26,16 +26,12 @@ use agent_service::build_store::{
 };
 use async_trait::async_trait;
 use contracts::authoring::{CandidateApproval, CandidateDecision};
-use contracts::events::{
-    AgentBuildRequestedV2, CloudEvent, EVENT_CONTRACTS, SPEC_VERSION, subjects,
-};
+use contracts::events::{AgentBuildRequested, CloudEvent, EVENT_CONTRACTS, SPEC_VERSION, subjects};
 use contracts::http::{
     IdempotencyKey, InternalAgentBuildCancellationRequest, InternalAgentBuildState,
     InternalAgentBuildStatusQuery,
 };
-use contracts::supply_chain::{
-    BuildNetworkPolicy, BuildRequest, SigstoreEvidence, VulnerabilitySummary,
-};
+use contracts::supply_chain::{BuildNetworkPolicy, BuildRequest, VulnerabilitySummary};
 use contracts::{
     ActorId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId, CourseId, EventId,
     PolicyId, Revision, Sequence, Sha256Digest, UtcTimestamp,
@@ -61,10 +57,6 @@ impl BuildSupplyChainProvider for SlowProvider {
         "trivy-primary-v1"
     }
 
-    fn signer_binding(&self) -> &'static str {
-        "sigstore-private-v1"
-    }
-
     fn registry_binding(&self) -> &'static str {
         "harbor-primary-v1"
     }
@@ -72,13 +64,13 @@ impl BuildSupplyChainProvider for SlowProvider {
     async fn ensure_private_project(
         &self,
         _context: &BuildProviderRequestContext,
-        command: &AgentBuildRequestedV2,
+        command: &AgentBuildRequested,
         identity: BuildIdentity,
     ) -> Result<PrivateRegistryProject, BuildProviderFailure> {
         Ok(PrivateRegistryProject {
             build_request_id: command.request.id,
             build_identity: identity,
-            repository_prefix: format!("harbor.internal/course-{}", command.request.course_id),
+            repository_prefix: "harbor.internal/labweaver-system".to_owned(),
             private: true,
             storage_quota_bytes: 10 * 1024 * 1024 * 1024,
             robot_subject: format!("robot$course-{}+runtime-puller", command.request.course_id),
@@ -88,7 +80,7 @@ impl BuildSupplyChainProvider for SlowProvider {
     async fn build_candidate(
         &self,
         _context: &BuildProviderRequestContext,
-        command: &AgentBuildRequestedV2,
+        command: &AgentBuildRequested,
         identity: BuildIdentity,
     ) -> Result<BuiltCandidate, BuildProviderFailure> {
         if !self.build_delay.is_zero() {
@@ -105,8 +97,6 @@ impl BuildSupplyChainProvider for SlowProvider {
             build_identity: identity,
             repository: command.request.output_repository.clone(),
             digest: digest(),
-            sbom: artifact_ref("application/spdx+json"),
-            provenance: artifact_ref("application/vnd.in-toto+json"),
         })
     }
 
@@ -131,32 +121,6 @@ impl BuildSupplyChainProvider for SlowProvider {
         })
     }
 
-    async fn sign_and_verify(
-        &self,
-        _context: &BuildProviderRequestContext,
-        candidate: &BuiltCandidate,
-    ) -> Result<SigstoreEvidence, BuildProviderFailure> {
-        Ok(SigstoreEvidence {
-            trust_bundle_sha256: Sha256Digest::of_bytes(b"trust-bundle"),
-            fulcio_issuer: "https://fulcio.internal".to_owned(),
-            certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
-            subject_digest: candidate
-                .digest
-                .strip_prefix("sha256:")
-                .expect("sha256 digest")
-                .parse()
-                .expect("valid digest"),
-            certificate_sha256: Sha256Digest::of_bytes(b"certificate"),
-            signature_sha256: Sha256Digest::of_bytes(b"signature"),
-            rekor_log_id: "rekor-private-v1".to_owned(),
-            rekor_log_index: 7,
-            rekor_inclusion_proof_sha256: Sha256Digest::of_bytes(b"rekor-proof"),
-            ct_log_id: "ct-private-v1".to_owned(),
-            sct_sha256: Sha256Digest::of_bytes(b"sct"),
-            verified_at: now(),
-        })
-    }
-
     async fn publish_immutable(
         &self,
         _context: &BuildProviderRequestContext,
@@ -165,7 +129,6 @@ impl BuildSupplyChainProvider for SlowProvider {
         Ok(PublishedImage {
             build_identity: candidate.build_identity,
             digest: candidate.digest.clone(),
-            immutable_tag: "build-cancel-test".to_owned(),
         })
     }
 
@@ -192,48 +155,19 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
         .max_connections(4)
         .connect(&url)
         .await?;
-    let base_migrations = format!(
-        "CREATE SCHEMA agent; SET search_path TO agent;\n{}\n{}\n{}\n{}",
-        include_str!("../../../migrations/agent/0001_initial.sql"),
-        include_str!("../../../migrations/agent/0002_track_leases.sql"),
-        include_str!("../../../migrations/agent/0003_control_dispatch.sql"),
-        include_str!("../../../migrations/agent/0004_build_pipeline.sql")
+    let baseline = format!(
+        "CREATE SCHEMA agent; SET search_path TO agent;\n{}\n{}",
+        include_str!("../../../migrations/agent/0001_sprint2_baseline.sql"),
+        include_str!("../../../migrations/agent/0002_allow_content_addressed_image_reuse.sql")
     );
-    sqlx::raw_sql(&base_migrations).execute(&pool).await?;
-    let legacy_build_request_id = BuildRequestId::new();
-    sqlx::query(
-        "INSERT INTO agent.build_commands \
-         (build_request_id,course_id,command_sha256,idempotency_key,state,command, \
-          cancellation_requested,diagnostic_code,retryable,cleanup_verified,completed_at) \
-         VALUES ($1,$2,$3,$4,'cancelled','{}'::jsonb,true,'LW_AGENT_BUILD_CANCELLED',false,true,clock_timestamp())",
-    )
-    .bind(legacy_build_request_id.as_uuid())
-    .bind(CourseId::new().as_uuid())
-    .bind(Sha256Digest::of_bytes(b"legacy-command").to_string())
-    .bind(format!("legacy:{legacy_build_request_id}"))
-    .execute(&pool)
-    .await?;
-    let upgrade = format!(
-        "SET search_path TO agent;\n{}",
-        include_str!("../../../migrations/agent/0005_build_cancellation_fence.sql")
-    );
-    sqlx::raw_sql(&upgrade).execute(&pool).await?;
-    let (legacy_audit_version, legacy_actor): (i16, Option<uuid::Uuid>) = sqlx::query_as(
-        "SELECT cancellation_audit_version,cancellation_actor_id \
-         FROM agent.build_commands WHERE build_request_id=$1",
-    )
-    .bind(legacy_build_request_id.as_uuid())
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(legacy_audit_version, 0);
-    assert!(legacy_actor.is_none());
+    sqlx::raw_sql(&baseline).execute(&pool).await?;
 
     let command = build_command()?;
     let event = command_event(command.clone())?;
     let store = PgBuildStore::new(pool.clone());
     assert_eq!(
         store
-            .accept_command("agent-build-command-v2", &event)
+            .accept_command("agent-build-command-v1", &event)
             .await?,
         BuildCommandDecision::Accepted
     );
@@ -247,7 +181,10 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
         },
         policy()?,
     )?;
-    let lease_duration = Duration::from_millis(120);
+    // Keep the lease comfortably above normal CI scheduler and PostgreSQL
+    // round-trip jitter. The assertion below observes an actual renewal rather
+    // than relying on a fixed sleep near the expiry boundary.
+    let lease_duration = Duration::from_secs(1);
     let worker = BuildWorker::new(
         store.clone(),
         pipeline,
@@ -259,7 +196,13 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
     let worker_task = tokio::spawn(async move { worker.run_once(now()).await });
 
     wait_until_running(&pool, command.request.id).await?;
-    tokio::time::sleep(lease_duration * 3).await;
+    let initial_lease_expires_at: time::OffsetDateTime = sqlx::query_scalar(
+        "SELECT lease_expires_at FROM agent.build_commands WHERE build_request_id=$1",
+    )
+    .bind(command.request.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    wait_until_lease_renewed(&pool, command.request.id, initial_lease_expires_at).await?;
     let lease_current: bool = sqlx::query_scalar(
         "SELECT lease_expires_at>clock_timestamp() FROM agent.build_commands WHERE build_request_id=$1",
     )
@@ -324,7 +267,7 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
         "SELECT count(*) FROM agent.outbox_events WHERE aggregate_id=$1 AND subject=$2",
     )
     .bind(command.request.id.as_uuid())
-    .bind(subjects::AGENT_BUILD_FAILED_V2)
+    .bind(subjects::AGENT_BUILD_FAILED)
     .fetch_one(&pool)
     .await?;
     assert_eq!(terminal_events, 1);
@@ -333,7 +276,7 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
     assert_eq!(
         store
             .accept_command(
-                "agent-build-command-v2",
+                "agent-build-command-v1",
                 &command_event(successful_command.clone())?,
             )
             .await?,
@@ -366,7 +309,7 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
          WHERE c.build_request_id=$1",
     )
     .bind(successful_command.request.id.as_uuid())
-    .bind(subjects::AGENT_BUILD_COMPLETED_V2)
+    .bind(subjects::AGENT_BUILD_COMPLETED)
     .fetch_one(&pool)
     .await?;
     assert_eq!(state, "succeeded");
@@ -379,11 +322,48 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
     );
     assert_eq!(completed_events, 1);
 
+    let repeated_content_command = build_command()?;
+    assert_eq!(
+        store
+            .accept_command(
+                "agent-build-command-v1",
+                &command_event(repeated_content_command.clone())?,
+            )
+            .await?,
+        BuildCommandDecision::Accepted
+    );
+    let repeated_content_worker = BuildWorker::new(
+        store.clone(),
+        BuildPipeline::new(
+            SlowProvider {
+                cleanup_called: Arc::new(AtomicBool::new(false)),
+                build_delay: Duration::ZERO,
+                fail_build: false,
+            },
+            policy()?,
+        )?,
+        "build-worker-repeated-content".to_owned(),
+        Duration::from_secs(1),
+        Duration::from_millis(10),
+        2,
+    )?;
+    assert!(matches!(
+        repeated_content_worker.run_once(now()).await?,
+        BuildWorkerOutcome::Completed { build_request_id }
+            if build_request_id == repeated_content_command.request.id
+    ));
+    let repeated_digest_artifacts: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM agent.image_artifacts WHERE image_digest=$1")
+            .bind(digest())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(repeated_digest_artifacts, 2);
+
     let retry_command = build_command()?;
     assert_eq!(
         store
             .accept_command(
-                "agent-build-command-v2",
+                "agent-build-command-v1",
                 &command_event(retry_command.clone())?,
             )
             .await?,
@@ -442,10 +422,7 @@ impl BuildExecutorBackend for CountingBuildExecutor {
                     project: PrivateRegistryProject {
                         build_request_id: command.request.id,
                         build_identity: *identity,
-                        repository_prefix: format!(
-                            "harbor.internal/course-{}",
-                            command.request.course_id
-                        ),
+                        repository_prefix: "harbor.internal/labweaver-system".to_owned(),
                         private: true,
                         storage_quota_bytes: 1,
                         robot_subject: "robot$runtime".to_owned(),
@@ -482,12 +459,9 @@ async fn executor_fence_survives_restart_and_cleanup_dominates_its_generation()
         .connect(&url)
         .await?;
     let migrations = format!(
-        "CREATE SCHEMA agent; SET search_path TO agent;\n{}\n{}\n{}\n{}\n{}",
-        include_str!("../../../migrations/agent/0001_initial.sql"),
-        include_str!("../../../migrations/agent/0002_track_leases.sql"),
-        include_str!("../../../migrations/agent/0003_control_dispatch.sql"),
-        include_str!("../../../migrations/agent/0004_build_pipeline.sql"),
-        include_str!("../../../migrations/agent/0005_build_cancellation_fence.sql")
+        "CREATE SCHEMA agent; SET search_path TO agent;\n{}\n{}",
+        include_str!("../../../migrations/agent/0001_sprint2_baseline.sql"),
+        include_str!("../../../migrations/agent/0002_allow_content_addressed_image_reuse.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;
     let command = build_command()?;
@@ -605,7 +579,7 @@ async fn executor_fence_survives_restart_and_cleanup_dominates_its_generation()
 }
 
 fn build_executor_envelope(
-    command: &AgentBuildRequestedV2,
+    command: &AgentBuildRequested,
     generation: u32,
     lease_token: uuid::Uuid,
     stage: BuildProviderStage,
@@ -679,6 +653,29 @@ async fn wait_until_running(
     Ok(())
 }
 
+async fn wait_until_lease_renewed(
+    pool: &sqlx::PgPool,
+    build_request_id: BuildRequestId,
+    initial_lease_expires_at: time::OffsetDateTime,
+) -> Result<(), Box<dyn std::error::Error>> {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let lease_expires_at: time::OffsetDateTime = sqlx::query_scalar(
+                "SELECT lease_expires_at FROM agent.build_commands WHERE build_request_id=$1",
+            )
+            .bind(build_request_id.as_uuid())
+            .fetch_one(pool)
+            .await?;
+            if lease_expires_at > initial_lease_expires_at {
+                return Ok::<_, sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    Ok(())
+}
+
 async fn database_now(pool: &sqlx::PgPool) -> Result<UtcTimestamp, Box<dyn std::error::Error>> {
     let value: time::OffsetDateTime =
         sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
@@ -687,7 +684,7 @@ async fn database_now(pool: &sqlx::PgPool) -> Result<UtcTimestamp, Box<dyn std::
     Ok(UtcTimestamp::from_utc(value)?)
 }
 
-fn build_command() -> Result<AgentBuildRequestedV2, Box<dyn std::error::Error>> {
+fn build_command() -> Result<AgentBuildRequested, Box<dyn std::error::Error>> {
     let course_id = CourseId::new();
     let candidate_id = CandidateId::new();
     let candidate_sha256 = Sha256Digest::of_bytes(b"environment-spec");
@@ -701,9 +698,12 @@ fn build_command() -> Result<AgentBuildRequestedV2, Box<dyn std::error::Error>> 
         approval_id,
         builder_binding: "buildkit-primary-v1".to_owned(),
         context: artifact_ref("application/vnd.oci.image.layer.v1.tar+gzip"),
+        context_object_key: "build-contexts/context.tar.gz".to_owned(),
         dockerfile_path: "Dockerfile".to_owned(),
         base_image_digest: format!("sha256:{}", "c".repeat(64)),
-        output_repository: format!("harbor.internal/course-{course_id}/{candidate_id}"),
+        output_repository: format!(
+            "harbor.internal/labweaver-system/course-{course_id}-{candidate_id}"
+        ),
         network: BuildNetworkPolicy::DenyAll,
         max_duration_milliseconds: 2_000,
         max_cpu_millicores: 2_000,
@@ -729,7 +729,7 @@ fn build_command() -> Result<AgentBuildRequestedV2, Box<dyn std::error::Error>> 
         "approval":approval,
         "idempotencyKey":idempotency_key,
     }))?;
-    Ok(AgentBuildRequestedV2 {
+    Ok(AgentBuildRequested {
         request,
         approval,
         idempotency_key,
@@ -738,13 +738,13 @@ fn build_command() -> Result<AgentBuildRequestedV2, Box<dyn std::error::Error>> 
 }
 
 fn command_event(
-    command: AgentBuildRequestedV2,
-) -> Result<CloudEvent<AgentBuildRequestedV2>, Box<dyn std::error::Error>> {
+    command: AgentBuildRequested,
+) -> Result<CloudEvent<AgentBuildRequested>, Box<dyn std::error::Error>> {
     let contract = EVENT_CONTRACTS
         .iter()
         .copied()
-        .find(|contract| contract.subject == subjects::AGENT_BUILD_REQUESTED_V2)
-        .ok_or("missing v2 build contract")?;
+        .find(|contract| contract.subject == subjects::AGENT_BUILD_REQUESTED)
+        .ok_or("missing v1 build contract")?;
     Ok(CloudEvent {
         specversion: SPEC_VERSION.to_owned(),
         id: EventId::new(),
@@ -766,16 +766,12 @@ fn policy() -> Result<BuildPipelinePolicy, Box<dyn std::error::Error>> {
     Ok(BuildPipelinePolicy {
         builder_binding: "buildkit-primary-v1".to_owned(),
         scanner_binding: "trivy-primary-v1".to_owned(),
-        signer_binding: "sigstore-private-v1".to_owned(),
         registry_binding: "harbor-primary-v1".to_owned(),
         policy_id: PolicyId::new(),
         policy_revision: revision(1)?,
         scanner_name: "trivy".to_owned(),
         scanner_version: "0.58.0".to_owned(),
         scanner_database_sha256: Sha256Digest::of_bytes(b"trivy-db"),
-        trust_bundle_sha256: Sha256Digest::of_bytes(b"trust-bundle"),
-        expected_fulcio_issuer: "https://fulcio.internal".to_owned(),
-        expected_certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
         registry_robot_name: "runtime-puller".to_owned(),
         evidence_ttl_milliseconds: 3_600_000,
         stage_timeout: Duration::from_secs(1),

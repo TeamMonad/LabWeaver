@@ -1,0 +1,13 @@
+---
+- name: Run Sprint 2 foundation preflight
+  import_playbook: 00-preflight.yml
+  vars:
+    labweaver_preflight_scope: sprint2-foundation
+
+- import_playbook: 91-sprint2-admin-tools.yml
+
+- name: Reconcile the Sprint 2 data foundation
+  hosts: control_plane
+  gather_facts: false
+  become: true
+  roles: [sprint2_foundation]

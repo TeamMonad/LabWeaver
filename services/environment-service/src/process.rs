@@ -6,21 +6,21 @@ use std::time::Duration;
 
 use async_nats::connection::State as NatsConnectionState;
 use contracts::environment::EnvironmentOperationKind;
-use contracts::{ActorId, PolicyId, Revision, Sha256Digest, UtcTimestamp};
+use contracts::{ActorId, PolicyId, Revision, UtcTimestamp};
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::watch;
 
 use crate::{
     ContainerProvider, ContainerProviderConfiguration, ContainerReleasePolicy,
-    EnvironmentStoreError, JetStreamCommandConsumer, JetStreamEventPublisher,
-    JetStreamReleaseConsumer, KubeVirtProvider, KubeVirtProviderConfiguration,
-    KubeVirtResourceBudget, KubeVirtSshBootstrap, KubeVirtStorageBinding, LifecycleCommand,
-    NatsAccessRevoker, NatsContainerProviderBackend, NatsEnvironmentProvider,
-    NatsKubeVirtProviderBackend, NatsMessagingError, NatsResourceLeaseVerifier,
-    OutboxDispatchError, OutboxDispatcher, PgEnvironmentStore, PgKubeVirtObservationStore,
-    PgReleaseProjectionStore, ProviderRegistry, ReconcileError, ReconcileWorker,
-    ReconcileWorkerError, Reconciler, connect_nats_mtls,
+    EnvironmentStoreError, FreezeBindingConfiguration, FreezeBindingService,
+    JetStreamCommandConsumer, JetStreamEventPublisher, JetStreamReleaseConsumer, KubeVirtProvider,
+    KubeVirtProviderConfiguration, KubeVirtResourceBudget, KubeVirtSshBootstrap,
+    KubeVirtStorageBinding, LifecycleCommand, NatsAccessRevoker, NatsContainerProviderBackend,
+    NatsEnvironmentProvider, NatsKubeVirtProviderBackend, NatsMessagingError,
+    NatsResourceLeaseVerifier, OutboxDispatchError, OutboxDispatcher, PgEnvironmentStore,
+    PgKubeVirtObservationStore, PgReleaseProjectionStore, ProviderRegistry, ReconcileError,
+    ReconcileWorker, ReconcileWorkerError, Reconciler, connect_nats_mtls,
 };
 
 const DATABASE_URL: &str = "LABWEAVER_DATABASE_URL";
@@ -41,8 +41,9 @@ const RESOURCE_LEASE_VERIFICATION_SUBJECT: &str = "LABWEAVER_RESOURCE_LEASE_VERI
 const WORKER_ID: &str = "LABWEAVER_ENVIRONMENT_WORKER_ID";
 const SYSTEM_ACTOR_ID: &str = "LABWEAVER_ENVIRONMENT_SYSTEM_ACTOR_ID";
 
-const PROVIDER_TIMEOUT: Duration = Duration::from_secs(10);
-const RECONCILE_LEASE: Duration = Duration::from_secs(15);
+const PROVIDER_TIMEOUT: Duration = Duration::from_secs(150);
+const EXECUTOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const RECONCILE_LEASE: Duration = Duration::from_secs(180);
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 const OUTBOX_TIMEOUT: Duration = Duration::from_secs(5);
 const ACCESS_REVOCATION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -67,6 +68,7 @@ pub struct EnvironmentProcessRuntime {
     system_actor_id: ActorId,
     readiness: Arc<AtomicBool>,
     expiry_ready: Arc<AtomicBool>,
+    freeze_bindings: FreezeBindingService,
 }
 
 impl EnvironmentProcessRuntime {
@@ -109,6 +111,36 @@ impl EnvironmentProcessRuntime {
         .await?;
 
         let provider_bindings = load_provider_bindings(&required_path(PROVIDER_BINDINGS_PATH)?)?;
+        let container_freeze_configuration =
+            single_provider_configuration(&provider_bindings, "container")?;
+        let vm_freeze_configuration =
+            single_provider_configuration(&provider_bindings, "kubevirt")?;
+        let freeze_bindings = FreezeBindingService::new(
+            pool.clone(),
+            release_store.clone(),
+            FreezeBindingConfiguration {
+                container_workspace_storage_class: container_freeze_configuration
+                    .workspace_storage_class_name
+                    .clone()
+                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                vm_username: vm_freeze_configuration
+                    .guest_user
+                    .clone()
+                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                vm_workspace_root: vm_freeze_configuration
+                    .collector_workspace_root
+                    .clone()
+                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                ssh_user_ca_public_key: vm_freeze_configuration
+                    .ssh_user_ca_public_key
+                    .clone()
+                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                ssh_user_ca_private_key_path: vm_freeze_configuration
+                    .ssh_user_ca_private_key_path
+                    .clone()
+                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+            },
+        )?;
         let mut registry = ProviderRegistry::default();
         for configuration in provider_bindings {
             match configuration.provider_kind.as_deref().unwrap_or("remote") {
@@ -123,12 +155,15 @@ impl EnvironmentProcessRuntime {
                     )?))?;
                 }
                 "container" => {
-                    if configuration.has_kubevirt_fields() {
+                    if configuration.has_kubevirt_fields()
+                        || !configuration.has_complete_container_fields()
+                    {
                         return Err(EnvironmentProcessRuntimeError::ConfigParse);
                     }
                     let backend = Arc::new(NatsContainerProviderBackend::new(
                         nats.clone(),
                         configuration.subject.clone(),
+                        EXECUTOR_REQUEST_TIMEOUT,
                     )?);
                     let provider = ContainerProvider::new(
                         configuration.binding.clone(),
@@ -137,19 +172,23 @@ impl EnvironmentProcessRuntime {
                         ContainerProviderConfiguration::new(
                             configuration.release_policy()?,
                             configuration
-                                .gateway_namespace
+                                .image_repository_prefix
                                 .clone()
                                 .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
                             configuration
-                                .gateway_name
+                                .access_namespace
                                 .clone()
                                 .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
                             configuration
-                                .gateway_section
+                                .access_pod_label
                                 .clone()
                                 .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
                             configuration
                                 .image_pull_secret_name
+                                .clone()
+                                .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                            configuration
+                                .workspace_storage_class_name
                                 .clone()
                                 .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
                         )?,
@@ -166,6 +205,7 @@ impl EnvironmentProcessRuntime {
                         NatsKubeVirtProviderBackend::new(
                             nats.clone(),
                             configuration.subject.clone(),
+                            EXECUTOR_REQUEST_TIMEOUT,
                         )
                         .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)?,
                     );
@@ -175,7 +215,7 @@ impl EnvironmentProcessRuntime {
                         Arc::new(release_store.clone()),
                         Arc::new(PgKubeVirtObservationStore::new(pool.clone())),
                         KubeVirtProviderConfiguration::new(
-                            configuration.release_policy()?,
+                            configuration.trust_revision()?,
                             KubeVirtStorageBinding::new(
                                 configuration
                                     .storage_class_binding
@@ -201,6 +241,14 @@ impl EnvironmentProcessRuntime {
                                     .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
                                 configuration
                                     .gateway_pod_label
+                                    .clone()
+                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                                configuration
+                                    .collector_namespace
+                                    .clone()
+                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                                configuration
+                                    .collector_pod_label
                                     .clone()
                                     .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
                                 configuration
@@ -278,12 +326,24 @@ impl EnvironmentProcessRuntime {
             system_actor_id,
             readiness: Arc::new(AtomicBool::new(true)),
             expiry_ready: Arc::new(AtomicBool::new(true)),
+            freeze_bindings,
         })
     }
 
     #[must_use]
     pub fn readiness(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.readiness)
+    }
+
+    /// Clones only the owner dependencies required by the authenticated public API.
+    #[must_use]
+    pub fn api_state(&self) -> crate::EnvironmentApiState {
+        crate::EnvironmentApiState::new(
+            self.store.clone(),
+            self.release_store.clone(),
+            self.access_revoker.clone(),
+            self.freeze_bindings.clone(),
+        )
     }
 
     /// Runs all durable loops until SIGINT/SIGTERM; any unhandled loop failure stops the process.
@@ -302,6 +362,7 @@ impl EnvironmentProcessRuntime {
             system_actor_id,
             readiness,
             expiry_ready,
+            freeze_bindings: _,
         } = self;
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         tokio::try_join!(
@@ -564,10 +625,11 @@ async fn require_schema(pool: &sqlx::PgPool) -> Result<(), EnvironmentProcessRun
 fn required(name: &'static str) -> Result<String, EnvironmentProcessRuntimeError> {
     let value =
         std::env::var(name).map_err(|_| EnvironmentProcessRuntimeError::Configuration(name))?;
-    if value.trim().is_empty() {
+    let value = value.trim();
+    if value.is_empty() {
         return Err(EnvironmentProcessRuntimeError::Configuration(name));
     }
-    Ok(value)
+    Ok(value.to_owned())
 }
 
 fn required_path(name: &'static str) -> Result<PathBuf, EnvironmentProcessRuntimeError> {
@@ -595,21 +657,28 @@ struct ProviderBindingConfiguration {
     binding: String,
     subject: String,
     provider_kind: Option<String>,
+    access_namespace: Option<String>,
+    access_pod_label: Option<String>,
     gateway_namespace: Option<String>,
     gateway_name: Option<String>,
     gateway_section: Option<String>,
     image_pull_secret_name: Option<String>,
+    image_repository_prefix: Option<String>,
+    workspace_storage_class_name: Option<String>,
     active_image_policy_id: Option<String>,
     active_image_policy_revision: Option<u64>,
     active_trust_revision: Option<u64>,
-    active_trust_bundle_sha256: Option<String>,
     storage_class_binding: Option<String>,
     storage_class_name: Option<String>,
     data_source_namespace: Option<String>,
     data_source_name: Option<String>,
     gateway_pod_label: Option<String>,
+    collector_namespace: Option<String>,
+    collector_pod_label: Option<String>,
     guest_user: Option<String>,
     ssh_user_ca_public_key: Option<String>,
+    ssh_user_ca_private_key_path: Option<PathBuf>,
+    collector_workspace_root: Option<String>,
     vmi_memory_overhead_bytes: Option<u64>,
     cdi_importer_cpu_request_millicores: Option<u32>,
     cdi_importer_cpu_limit_millicores: Option<u32>,
@@ -619,6 +688,14 @@ struct ProviderBindingConfiguration {
 }
 
 impl ProviderBindingConfiguration {
+    fn trust_revision(&self) -> Result<Revision, EnvironmentProcessRuntimeError> {
+        Revision::new(
+            self.active_trust_revision
+                .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+        )
+        .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)
+    }
+
     fn release_policy(&self) -> Result<ContainerReleasePolicy, EnvironmentProcessRuntimeError> {
         ContainerReleasePolicy::new(
             PolicyId::from_str(
@@ -637,20 +714,31 @@ impl ProviderBindingConfiguration {
                     .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
             )
             .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)?,
-            Sha256Digest::from_str(
-                self.active_trust_bundle_sha256
-                    .as_deref()
-                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
-            )
-            .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)?,
         )
         .map_err(EnvironmentProcessRuntimeError::from)
     }
 
     fn has_container_only_fields(&self) -> bool {
-        self.gateway_name.is_some()
+        self.access_namespace.is_some()
+            || self.access_pod_label.is_some()
+            || self.gateway_name.is_some()
             || self.gateway_section.is_some()
             || self.image_pull_secret_name.is_some()
+            || self.image_repository_prefix.is_some()
+            || self.workspace_storage_class_name.is_some()
+    }
+
+    fn has_complete_container_fields(&self) -> bool {
+        self.access_namespace.is_some()
+            && self.access_pod_label.is_some()
+            && self.gateway_name.is_none()
+            && self.gateway_section.is_none()
+            && self.image_pull_secret_name.is_some()
+            && self.image_repository_prefix.is_some()
+            && self.workspace_storage_class_name.is_some()
+            && self.active_image_policy_id.is_some()
+            && self.active_image_policy_revision.is_some()
+            && self.active_trust_revision.is_some()
     }
 
     fn has_kubevirt_fields(&self) -> bool {
@@ -659,8 +747,12 @@ impl ProviderBindingConfiguration {
             || self.data_source_namespace.is_some()
             || self.data_source_name.is_some()
             || self.gateway_pod_label.is_some()
+            || self.collector_namespace.is_some()
+            || self.collector_pod_label.is_some()
             || self.guest_user.is_some()
             || self.ssh_user_ca_public_key.is_some()
+            || self.ssh_user_ca_private_key_path.is_some()
+            || self.collector_workspace_root.is_some()
             || self.vmi_memory_overhead_bytes.is_some()
             || self.cdi_importer_cpu_request_millicores.is_some()
             || self.cdi_importer_cpu_limit_millicores.is_some()
@@ -676,28 +768,32 @@ impl ProviderBindingConfiguration {
             && self.data_source_namespace.is_some()
             && self.data_source_name.is_some()
             && self.gateway_pod_label.is_some()
+            && self.collector_namespace.is_some()
+            && self.collector_pod_label.is_some()
             && self.guest_user.is_some()
             && self.ssh_user_ca_public_key.is_some()
+            && self.ssh_user_ca_private_key_path.is_some()
+            && self.collector_workspace_root.is_some()
             && self.vmi_memory_overhead_bytes.is_some()
             && self.cdi_importer_cpu_request_millicores.is_some()
             && self.cdi_importer_cpu_limit_millicores.is_some()
             && self.cdi_importer_memory_request_bytes.is_some()
             && self.cdi_importer_memory_limit_bytes.is_some()
             && self.cdi_scratch_storage_bytes.is_some()
-            && self.active_image_policy_id.is_some()
-            && self.active_image_policy_revision.is_some()
+            && self.active_image_policy_id.is_none()
+            && self.active_image_policy_revision.is_none()
             && self.active_trust_revision.is_some()
-            && self.active_trust_bundle_sha256.is_some()
     }
 
     fn has_provider_specific_fields(&self) -> bool {
-        self.gateway_namespace.is_some()
+        self.access_namespace.is_some()
+            || self.access_pod_label.is_some()
+            || self.gateway_namespace.is_some()
             || self.has_container_only_fields()
             || self.has_kubevirt_fields()
             || self.active_image_policy_id.is_some()
             || self.active_image_policy_revision.is_some()
             || self.active_trust_revision.is_some()
-            || self.active_trust_bundle_sha256.is_some()
     }
 }
 
@@ -711,6 +807,42 @@ fn load_provider_bindings(
         return Err(EnvironmentProcessRuntimeError::ConfigParse);
     }
     Ok(bindings)
+}
+
+fn single_provider_configuration<'a>(
+    bindings: &'a [ProviderBindingConfiguration],
+    provider_kind: &str,
+) -> Result<&'a ProviderBindingConfiguration, EnvironmentProcessRuntimeError> {
+    let matches = bindings
+        .iter()
+        .filter(|binding| binding.provider_kind.as_deref() == Some(provider_kind))
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [configuration] => Ok(configuration),
+        _ => Err(EnvironmentProcessRuntimeError::ConfigParse),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::case_sensitive_file_extension_comparisons)]
+mod deployment_contract_tests {
+    use super::ProviderBindingConfiguration;
+
+    #[test]
+    fn checked_in_sprint2_provider_example_has_no_legacy_contract() {
+        let example = include_str!("../../../deploy/config/environment-providers.json.example");
+        let bindings: Vec<ProviderBindingConfiguration> =
+            serde_json::from_str(example).expect("provider example must deserialize");
+
+        assert_eq!(bindings.len(), 2);
+        assert!(
+            bindings
+                .iter()
+                .all(|binding| binding.subject.ends_with(".v1"))
+        );
+        assert!(!example.contains(".v2"));
+        assert!(!example.contains("activeTrustBundleSha256"));
+    }
 }
 
 fn add_time(
@@ -757,4 +889,6 @@ pub enum EnvironmentProcessRuntimeError {
     Outbox(#[from] OutboxDispatchError),
     #[error(transparent)]
     ReleaseProjection(#[from] crate::ReleaseProjectionError),
+    #[error(transparent)]
+    FreezeBinding(#[from] crate::FreezeBindingError),
 }

@@ -80,13 +80,12 @@ original timeout diagnostic, and finishes as failed even after cleanup evidence
 is durably recorded. Existing endpoints require an Access revocation revision
 before destructive or timeout cleanup. A superseding destructive command cannot
 begin Provider cleanup until the older Provider call's fenced lease has
-expired. Migration
-`environment/0002_reconcile_leases.sql` adds the durable
+expired. The destructive Sprint 2 reset applies
+`environment/0001_sprint2_baseline.sql`, which creates the durable
 retry/deadline/reconcile-lease, Provider-step, capacity-binding and failed-phase
-columns, upgrades populated v1 JSON contracts fail-closed and adds the
-due-operation index. Because v1 did not retain a failed phase or reset target,
-legacy rows that require either value remain ineligible for retry/recover/reset
-instead of receiving a guessed Provider action.
+columns together with the due-operation index. Pre-reset development rows are
+not upgraded or inferred; the reset removes them before this baseline is
+applied.
 
 The internal mTLS owner-resolver contract returns only `environmentId`,
 `courseId`, `ownerActorId`, authoritative revision and earliest expiry. Its
@@ -144,27 +143,48 @@ non-secret routing configuration. The formal Container Provider uses:
 [
   {
     "binding": "container-primary-v1",
-    "subject": "labweaver.provider.kubernetes.container.v2",
+    "subject": "labweaver.provider.kubernetes.container.v1",
     "providerKind": "container",
-    "gatewayNamespace": "access-system",
-    "gatewayName": "protected-gateway",
-    "gatewaySection": "protected-https",
+    "accessNamespace": "labweaver-system",
+    "accessPodLabel": "access-service",
+    "imageRepositoryPrefix": "harbor.internal/labweaver-system",
     "imagePullSecretName": "harbor-course-pull",
+    "workspaceStorageClassName": "nfs-rwx",
     "activeImagePolicyId": "01900000-0000-7000-8000-000000000001",
     "activeImagePolicyRevision": 1,
-    "activeTrustRevision": 1,
-    "activeTrustBundleSha256": "d58414fc98a5de1ad8c269290835b407ff258b3f567dab3399fbc2911454a981"
+    "activeTrustRevision": 1
   }
 ]
 ```
 
 The complete example is `deploy/config/environment-providers.json.example`.
 Omitting `providerKind` selects the existing remote provider; remote entries
-must not contain Gateway, image-pull or trust-policy fields. Container entries
-require every Gateway field, the exact same-namespace Harbor pull Secret name,
-and the active image-policy ID/revision, trust revision and trust-bundle SHA-256. They use
-the immutable publication plus append-only withdrawal projection described in
-`docs/contracts/container-supply-chain-v2.md`.
+must not contain Access proxy, image-repository, image-pull or trust-policy fields. Container entries
+require the exact Access Service namespace and pod label, the exact same-namespace Harbor pull Secret name,
+the reviewed Harbor registry/project prefix, the `nfs-rwx` workspace StorageClass, and the active image-policy
+ID/revision and trust revision. Container workspaces are provisioned as RWX so
+the same PVC can be mounted read-only by the bounded freeze Job. They use the
+immutable publication plus append-only withdrawal projection described in
+`docs/contracts/container-supply-chain-v1.md`.
+
+Container Services expose only the fixed cluster port `8080` to Access Service.
+No runtime `HTTPRoute` is created. Browser requests use the same-origin
+`/connect/{endpointGrantId}/` URL embedded in an active `EndpointGrant`; Access
+Service checks the BFF session, current membership, grant expiry and exact
+Environment endpoint revision on every request before deriving the internal
+Service DNS name. Cookies and arbitrary upstream redirects are never forwarded.
+Sprint 2 permits bounded HTTP request/response applications only; an Upgrade
+request fails with `LW_ACCESS_RUNTIME_UPGRADE_UNSUPPORTED`. Interactive
+code-server and WorkConfig remain outside this slice instead of weakening the
+Access boundary with an unauthenticated direct route.
+
+SSH clients likewise use only the public Gateway binding copied by Access
+Service into the active `EndpointGrant`: the reviewed DNS name, fixed port
+`2222`, server-generated alias and OpenSSH `SHA256:` Gateway host-key
+fingerprint. The Web portal renders a command only from these authoritative
+fields and never derives a private VM host, port or Gateway identity from UI
+configuration. Runtime target resolution and authorization remain inside the
+OpenSSH Gateway and Access Service path.
 
 ## Desired and observed state
 

@@ -46,6 +46,13 @@
             "null"
           ]
         },
+        "connectUrl": {
+          "description": "Same-origin, Access Service-authorized browser entry point. Present only\nfor HTTP(S) grants and derived from this immutable endpoint grant ID.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "endpointId": {
           "$ref": "#/$defs/EndpointId"
         },
@@ -63,6 +70,30 @@
         },
         "protocol": {
           "$ref": "#/$defs/EndpointProtocol"
+        },
+        "sshGatewayHostKeyFingerprint": {
+          "description": "OpenSSH SHA-256 host-key fingerprint for the public Gateway.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sshGatewayHostname": {
+          "description": "Public OpenSSH Gateway DNS name for SSH grants. Never a runtime target.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sshGatewayPort": {
+          "description": "Public OpenSSH Gateway listener port for SSH grants.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [

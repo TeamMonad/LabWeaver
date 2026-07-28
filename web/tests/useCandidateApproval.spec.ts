@@ -9,6 +9,7 @@ import {
   getEvaluationCandidate,
   listEnvironmentTemplateReleases,
 } from '@/generated/contracts'
+import type { EnvironmentCandidateViewSchema } from '@/generated/contracts'
 
 vi.mock('@/generated/contracts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/generated/contracts')>()
@@ -43,62 +44,44 @@ function makeRun() {
 
 function makeEnvCandidate() {
   return {
-    id: 'env-cand-1',
-    runId: 'run-1',
-    courseId: 'course-1',
-    model: 'claude-sonnet-4-5',
-    policyRevision: 1,
-    revision: 2,
-    schemaSha256: 'sha256:schema',
-    spec: {
-      name: 'env',
-      runtime: { kind: 'container', provider_binding: 'x', build_context: {}, base_image_digest: 'x', service_port: 8080 },
-    },
-    specSha256: 'sha256:spec',
-    createdAt: '2026-07-16T08:00:00.000Z',
-    approvals: [],
-    imageArtifact: {
-      kind: 'container',
-      id: 'image-1',
-      build_request_id: 'build-1',
-      repository: 'registry.labweaver.local/candidate-1',
-      immutable_tag: 'release-1',
-      digest: 'sha256:image',
-      provenance: { artifactId: 'a', mediaType: 'm', objectVersion: 'v', sha256: 'sha256:p', sizeBytes: 1, storeBinding: 's' },
-      sbom: { artifactId: 'a2', mediaType: 'm', objectVersion: 'v', sha256: 'sha256:s', sizeBytes: 1, storeBinding: 's' },
-      signature: {
-        certificateSha256: 'sha256:cert',
-        certificateSubject: 'spiffe://labweaver/image-builder',
-        ctLogId: 'ct',
-        fulcioIssuer: 'https://fixture.fulcio.dev',
-        rekorInclusionProofSha256: 'sha256:proof',
-        rekorLogId: 'rekor',
-        rekorLogIndex: 1,
-        sctSha256: 'sha256:sct',
-        signatureSha256: 'sha256:sig',
-        subjectDigest: 'sha256:image',
-        trustBundleSha256: 'sha256:trust',
-        verifiedAt: '2026-07-16T08:00:00.000Z',
-      },
-    },
-    imagePolicyEvaluation: {
-      artifactId: 'image-1',
-      artifactSha256: 'sha256:image',
-      evaluatedAt: '2026-07-16T08:00:00.000Z',
-      expectedCertificateSubject: 'spiffe://labweaver/image-builder',
-      expectedFulcioIssuer: 'https://fixture.fulcio.dev',
-      maxEvidenceAgeMilliseconds: 3600000,
-      passed: true,
-      policyId: 'policy-1',
+    candidate: {
+      id: 'env-cand-1',
+      runId: 'run-1',
+      model: 'claude-sonnet-4-5',
       policyRevision: 1,
-      requireCtSct: true,
-      requireRekorInclusion: true,
-      scannerDatabaseSha256: 'sha256:scanner-db',
-      scannerName: 'trivy',
-      scannerVersion: '1.0.0',
-      trustBundleSha256: 'sha256:trust',
-      validUntil: '2026-07-16T10:00:00.000Z',
-      vulnerabilities: { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 },
+      revision: 2,
+      schemaSha256: 'sha256:schema',
+      spec: {
+        name: 'env',
+        runtime: { kind: 'container', provider_binding: 'x', build_context: {}, base_image_digest: 'x', service_port: 8080 },
+      },
+      specSha256: 'sha256:spec',
+      createdAt: '2026-07-16T08:00:00.000Z',
+    },
+    approvals: [],
+    build: {
+      state: 'succeeded' as const,
+      artifact: {
+        kind: 'container' as const,
+        id: 'image-1',
+        build_request_id: 'build-1',
+        repository: 'registry.labweaver.local/candidate-1',
+        digest: 'sha256:image',
+      },
+      imagePolicyEvaluation: {
+        artifactId: 'image-1',
+        artifactSha256: 'image',
+        evaluatedAt: '2026-07-16T08:00:00.000Z',
+        maxEvidenceAgeMilliseconds: 3600000,
+        passed: true,
+        policyId: 'policy-1',
+        policyRevision: 1,
+        scannerDatabaseSha256: 'sha256:scanner-db',
+        scannerName: 'trivy',
+        scannerVersion: '1.0.0',
+        validUntil: '2026-07-16T10:00:00.000Z',
+        vulnerabilities: { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 },
+      },
     },
     trustRevision: 1,
   }
@@ -106,19 +89,38 @@ function makeEnvCandidate() {
 
 function makeEvalCandidate() {
   return {
-    id: 'eval-cand-1',
-    runId: 'run-1',
-    courseId: 'course-1',
-    model: 'claude-sonnet-4-5',
-    policyRevision: 1,
-    revision: 1,
-    schemaSha256: 'sha256:schema',
-    spec: { name: 'eval' },
-    specSha256: 'sha256:spec',
-    createdAt: '2026-07-16T08:00:00.000Z',
+    candidate: {
+      id: 'eval-cand-1',
+      runId: 'run-1',
+      model: 'claude-sonnet-4-5',
+      policyRevision: 1,
+      revision: 1,
+      schemaSha256: 'sha256:schema',
+      spec: { name: 'eval' },
+      specSha256: 'sha256:spec',
+      createdAt: '2026-07-16T08:00:00.000Z',
+    },
     approvals: [],
     trustRevision: 1,
   }
+}
+
+function makeVmCandidate(): EnvironmentCandidateViewSchema {
+  const view = structuredClone(makeEnvCandidate()) as EnvironmentCandidateViewSchema
+  view.candidate.spec.runtime = {
+    kind: 'virtual_machine',
+    provider_binding: 'kubevirt-primary-v1',
+    storage_class_binding: 'vm-rwo-primary-v1',
+    ssh_port: 22,
+    base_disk: {
+      binding: 'ubuntu-24.04-v1',
+      source_registry_digest: `docker://registry.invalid/ubuntu@sha256:${'a'.repeat(64)}`,
+      disk_sha256: 'b'.repeat(64),
+      capacity_bytes: 10_737_418_240,
+    },
+  }
+  delete view.build
+  return view
 }
 
 describe('useCandidateApproval', () => {
@@ -168,7 +170,7 @@ describe('useCandidateApproval', () => {
     expect(approval.canPublish).toBe(true)
   })
 
-  it('publishes release with candidate identity and image evidence', async () => {
+  it('publishes release with candidate identity while Control resolves evidence', async () => {
     const courseId = ref('course-1')
     const runId = ref('run-1')
     const approval = useCandidateApproval(courseId, runId)
@@ -211,6 +213,43 @@ describe('useCandidateApproval', () => {
     expect(approval.publish.kind).toBe('success')
   })
 
+  it('allows an approved VM release without fabricated Container scan evidence', async () => {
+    vi.mocked(getEnvironmentCandidate).mockResolvedValue({ data: makeVmCandidate(), error: undefined as never })
+    const approval = useCandidateApproval(ref('course-1'), ref('run-1'))
+    await vi.waitFor(() => expect(approval.environmentCandidate.kind).toBe('success'))
+
+    vi.mocked(appendEnvironmentCandidateDecision).mockResolvedValue({
+      data: {
+        id: 'approval-vm-1',
+        actorId: 'teacher',
+        candidateId: 'env-cand-1',
+        candidateRevision: 2,
+        candidateSha256: 'sha256:spec',
+        decidedAt: '2026-07-16T09:00:00.000Z',
+        decision: 'approved',
+        policyRevision: 1,
+        reason: 'approved VM base',
+        schemaSha256: 'sha256:schema',
+        trustRevision: 1,
+      },
+      error: undefined as never,
+    })
+    await approval.decide('environment', 'approved', 'approved VM base')
+    expect(approval.imageGate.status).toBe('blocked')
+    expect(approval.canPublish).toBe(true)
+
+    vi.mocked(createEnvironmentTemplateRelease).mockResolvedValue({
+      data: { operationId: 'op-vm-1', revision: 1, statusUrl: '/x' },
+      error: undefined as never,
+    })
+    await approval.publishRelease()
+    expect(createEnvironmentTemplateRelease).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({ runtimeKind: 'virtual_machine' }),
+      }),
+    )
+  })
+
   it('does not publish when image gate is blocked', async () => {
     const courseId = ref('course-1')
     const runId = ref('run-1')
@@ -218,7 +257,7 @@ describe('useCandidateApproval', () => {
     await vi.waitFor(() => expect(approval.environmentCandidate.kind).toBe('success'))
 
     const blocked = makeEnvCandidate()
-    blocked.imagePolicyEvaluation.vulnerabilities.critical = 1
+    blocked.build.imagePolicyEvaluation.vulnerabilities.critical = 1
     vi.mocked(getEnvironmentCandidate).mockResolvedValue({ data: blocked, error: undefined as never })
     await approval.load()
     await vi.waitFor(() => expect(approval.environmentCandidate.kind).toBe('success'))

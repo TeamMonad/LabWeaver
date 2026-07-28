@@ -9,6 +9,7 @@ import * as environmentEndpoints from './environmentEndpoints'
 import * as environmentOperations from './environmentOperations'
 import * as environments from './environments'
 import * as events from './events'
+import * as frozenSubmissions from './frozenSubmissions'
 import * as llmPolicy from './llmPolicy'
 import * as problemPackages from './problemPackages'
 import * as sshKeys from './sshKeys'
@@ -57,6 +58,7 @@ const routes: RouteEntry[] = [
   { method: 'POST', match: (url) => /^\/api\/v1\/environments\/[^/]+\/retry$/.test(url), handler: environments.retryEnvironment },
   { method: 'POST', match: (url) => /^\/api\/v1\/environments\/[^/]+\/cancel$/.test(url), handler: environments.cancelEnvironmentHandler },
   { method: 'POST', match: (url) => /^\/api\/v1\/environments\/[^/]+\/freeze$/.test(url), handler: environments.freezeEnvironmentHandler },
+  { method: 'GET', match: (url) => /^\/api\/v1\/frozen-submissions\/[^/]+$/.test(url), handler: frozenSubmissions.getFrozenSubmissionHandler },
 
   // Environment endpoints
   { method: 'GET', match: (url) => /^\/api\/v1\/environments\/[^/]+\/endpoints$/.test(url), handler: environmentEndpoints.listEnvironmentEndpoints },

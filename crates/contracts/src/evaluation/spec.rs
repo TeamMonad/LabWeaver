@@ -816,13 +816,11 @@ impl CheckerSpec {
         let compatible = matches!(
             (runner, self),
             (
-                DeterministicRunnerSpec::FileAssertion { .. },
-                Self::ExitCode { .. }
-            ) | (
-                DeterministicRunnerSpec::Program {
-                    phase: ProgramPhase::Compile,
-                    ..
-                },
+                DeterministicRunnerSpec::FileAssertion { .. }
+                    | DeterministicRunnerSpec::Program {
+                        phase: ProgramPhase::Compile,
+                        ..
+                    },
                 Self::ExitCode { .. }
             ) | (
                 DeterministicRunnerSpec::Program {

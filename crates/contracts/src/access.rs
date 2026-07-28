@@ -213,6 +213,20 @@ pub enum EndpointAction {
     Connect,
 }
 
+fn valid_dns_name(value: &str) -> bool {
+    value.len() <= 253
+        && value.contains('.')
+        && value.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        })
+}
+
 /// Child grant for one exact endpoint revision.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -225,6 +239,15 @@ pub struct EndpointGrant {
     pub action: EndpointAction,
     pub health: EndpointHealth,
     pub alias: Option<String>,
+    /// Same-origin, Access Service-authorized browser entry point. Present only
+    /// for HTTP(S) grants and derived from this immutable endpoint grant ID.
+    pub connect_url: Option<String>,
+    /// Public OpenSSH Gateway DNS name for SSH grants. Never a runtime target.
+    pub ssh_gateway_hostname: Option<String>,
+    /// Public OpenSSH Gateway listener port for SSH grants.
+    pub ssh_gateway_port: Option<u16>,
+    /// OpenSSH SHA-256 host-key fingerprint for the public Gateway.
+    pub ssh_gateway_host_key_fingerprint: Option<String>,
     pub expires_at: UtcTimestamp,
 }
 
@@ -236,6 +259,28 @@ impl EndpointGrant {
         }
         match self.protocol {
             EndpointProtocol::Ssh => {
+                if self.connect_url.is_some() {
+                    return Err(AccessError::InvalidConnectUrl);
+                }
+                let hostname = self
+                    .ssh_gateway_hostname
+                    .as_deref()
+                    .ok_or(AccessError::InvalidGatewayEndpoint)?;
+                if !valid_dns_name(hostname)
+                    || self.ssh_gateway_port != Some(2222)
+                    || self
+                        .ssh_gateway_host_key_fingerprint
+                        .as_deref()
+                        .is_none_or(|value| {
+                            value.len() != 50
+                                || !value.starts_with("SHA256:")
+                                || !value.bytes().skip(7).all(|byte| {
+                                    byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/')
+                                })
+                        })
+                {
+                    return Err(AccessError::InvalidGatewayEndpoint);
+                }
                 let alias = self.alias.as_deref().ok_or(AccessError::InvalidAlias)?;
                 if alias.len() != 23
                     || !alias.starts_with("lw-")
@@ -249,6 +294,16 @@ impl EndpointGrant {
             EndpointProtocol::Http | EndpointProtocol::Https => {
                 if self.alias.is_some() {
                     return Err(AccessError::InvalidAlias);
+                }
+                if self.ssh_gateway_hostname.is_some()
+                    || self.ssh_gateway_port.is_some()
+                    || self.ssh_gateway_host_key_fingerprint.is_some()
+                {
+                    return Err(AccessError::InvalidGatewayEndpoint);
+                }
+                let expected = format!("/connect/{}/", self.id);
+                if self.connect_url.as_deref() != Some(expected.as_str()) {
+                    return Err(AccessError::InvalidConnectUrl);
                 }
             }
         }
@@ -342,11 +397,11 @@ impl AccessGrant {
     }
 }
 
-/// Request from AuthorizedKeysCommand over mTLS. It deliberately has no target field.
+/// Request from `AuthorizedKeysCommand` over mTLS. Target selection happens only after
+/// public-key authentication, through the fixed command grammar.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SshAuthorizationRequest {
-    pub alias: String,
     pub presented_key_fingerprint_sha256: String,
     pub gateway_identity: String,
     pub connection_id: String,
@@ -359,10 +414,6 @@ pub struct SshAuthorizationRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SshAuthorization {
     pub authorization_id: String,
-    pub access_grant_id: AccessGrantId,
-    pub access_grant_revision: Revision,
-    pub endpoint_grant_id: EndpointGrantId,
-    pub endpoint_id: EndpointId,
     pub ssh_public_key_id: SshPublicKeyId,
     pub normalized_authorized_key: String,
     pub force_command_token: String,
@@ -374,10 +425,6 @@ impl fmt::Debug for SshAuthorization {
         formatter
             .debug_struct("SshAuthorization")
             .field("authorization_id", &self.authorization_id)
-            .field("access_grant_id", &self.access_grant_id)
-            .field("access_grant_revision", &self.access_grant_revision)
-            .field("endpoint_grant_id", &self.endpoint_grant_id)
-            .field("endpoint_id", &self.endpoint_id)
             .field("ssh_public_key_id", &self.ssh_public_key_id)
             .field("normalized_authorized_key", &"[REDACTED]")
             .field("force_command_token", &"[REDACTED]")
@@ -392,6 +439,8 @@ impl fmt::Debug for SshAuthorization {
 pub struct CreateGatewaySessionRequest {
     pub authorization_id: String,
     pub force_command_token: String,
+    /// Exact server-generated SSH endpoint alias parsed from `connect <alias>`.
+    pub alias: String,
     pub gateway_identity: String,
     pub connection_id: String,
     pub opened_at: UtcTimestamp,
@@ -403,6 +452,7 @@ impl fmt::Debug for CreateGatewaySessionRequest {
             .debug_struct("CreateGatewaySessionRequest")
             .field("authorization_id", &self.authorization_id)
             .field("force_command_token", &"[REDACTED]")
+            .field("alias", &self.alias)
             .field("gateway_identity", &self.gateway_identity)
             .field("connection_id", &self.connection_id)
             .field("opened_at", &self.opened_at)
@@ -450,6 +500,14 @@ pub struct GatewaySession {
     pub access_grant_revision: Revision,
     pub endpoint_grant_id: EndpointGrantId,
     pub ssh_public_key_id: SshPublicKeyId,
+    /// Server-generated DNS alias selected by the fixed `connect` command.
+    pub target_alias: String,
+    /// Environment-owned in-cluster SSH Service DNS name. This is returned only
+    /// to the mTLS-authenticated Gateway and never to the browser grant model.
+    pub target_host: String,
+    /// Environment-authoritative digest of the exact OpenSSH host-key
+    /// fingerprint expected from the selected target.
+    pub target_ssh_host_key_identity_sha256: crate::Sha256Digest,
     pub gateway_identity: String,
     pub connection_id: String,
     pub revision: Revision,
@@ -467,6 +525,14 @@ impl GatewaySession {
     pub fn validate(&self) -> Result<(), AccessError> {
         if self.gateway_identity.trim().is_empty()
             || self.connection_id.trim().is_empty()
+            || self.target_alias.len() != 23
+            || !self.target_alias.starts_with("lw-")
+            || !self
+                .target_alias
+                .bytes()
+                .skip(3)
+                .all(|byte| byte.is_ascii_lowercase() || matches!(byte, b'2'..=b'7'))
+            || !valid_gateway_target_host(&self.target_host)
             || self.last_heartbeat_at < self.opened_at
         {
             return Err(AccessError::InvalidSession);
@@ -512,6 +578,13 @@ impl GatewaySession {
     }
 }
 
+fn valid_gateway_target_host(value: &str) -> bool {
+    value
+        .strip_prefix("ssh.lw-env-")
+        .and_then(|value| value.strip_suffix(".svc"))
+        .is_some_and(|environment_id| uuid::Uuid::parse_str(environment_id).is_ok())
+}
+
 /// Access contract failure.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum AccessError {
@@ -534,6 +607,10 @@ pub enum AccessError {
     EndpointUnhealthy,
     #[error("SSH alias is not a server-generated v1 alias")]
     InvalidAlias,
+    #[error("HTTP endpoint connect URL is not the server-generated v1 path")]
+    InvalidConnectUrl,
+    #[error("SSH Gateway endpoint is not the reviewed Sprint 2 binding")]
+    InvalidGatewayEndpoint,
     #[error("GatewaySession is internally inconsistent")]
     InvalidSession,
     #[error("GatewaySession termination deadline exceeds 60 seconds")]
@@ -605,6 +682,43 @@ mod tests {
     }
 
     #[test]
+    fn http_endpoint_grant_requires_its_exact_same_origin_connect_path() {
+        let id = EndpointGrantId::new();
+        let mut endpoint = EndpointGrant {
+            id,
+            access_grant_id: AccessGrantId::new(),
+            endpoint_id: EndpointId::new(),
+            endpoint_revision: revision(1),
+            protocol: EndpointProtocol::Https,
+            action: EndpointAction::Connect,
+            health: EndpointHealth::Healthy,
+            alias: None,
+            connect_url: Some(format!("/connect/{id}/")),
+            ssh_gateway_hostname: None,
+            ssh_gateway_port: None,
+            ssh_gateway_host_key_fingerprint: None,
+            expires_at: timestamp("2026-07-16T00:30:00.000Z"),
+        };
+        assert!(endpoint.validate().is_ok());
+        endpoint.connect_url = Some("https://runtime.invalid/".to_owned());
+        assert_eq!(endpoint.validate(), Err(AccessError::InvalidConnectUrl));
+
+        endpoint.protocol = EndpointProtocol::Ssh;
+        endpoint.alias = Some("lw-abcdefghijklmnopqrst".to_owned());
+        endpoint.connect_url = None;
+        endpoint.ssh_gateway_hostname = Some("demo.lab.lan".to_owned());
+        endpoint.ssh_gateway_port = Some(2222);
+        endpoint.ssh_gateway_host_key_fingerprint =
+            Some("SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned());
+        assert!(endpoint.validate().is_ok());
+        endpoint.ssh_gateway_port = Some(22);
+        assert_eq!(
+            endpoint.validate(),
+            Err(AccessError::InvalidGatewayEndpoint)
+        );
+    }
+
+    #[test]
     fn termination_deadline_and_overdue_state_are_explicit() {
         let opened = timestamp("2026-07-16T00:00:00.000Z");
         let heartbeat = timestamp("2026-07-16T00:01:00.000Z");
@@ -614,6 +728,11 @@ mod tests {
             access_grant_revision: revision(2),
             endpoint_grant_id: EndpointGrantId::new(),
             ssh_public_key_id: SshPublicKeyId::new(),
+            target_alias: "lw-abcdefghijklmnopqrst".to_owned(),
+            target_host: format!("ssh.lw-env-{}.svc", uuid::Uuid::now_v7()),
+            target_ssh_host_key_identity_sha256: crate::Sha256Digest::of_bytes(
+                b"SHA256:target-host-key",
+            ),
             gateway_identity: "spiffe://labweaver/gateway".to_owned(),
             connection_id: "connection-1".to_owned(),
             revision: revision(3),
@@ -640,10 +759,6 @@ mod tests {
     fn authorization_debug_output_redacts_key_and_one_time_token() {
         let authorization = SshAuthorization {
             authorization_id: "authorization-1".to_owned(),
-            access_grant_id: AccessGrantId::new(),
-            access_grant_revision: revision(1),
-            endpoint_grant_id: EndpointGrantId::new(),
-            endpoint_id: crate::EndpointId::new(),
             ssh_public_key_id: SshPublicKeyId::new(),
             normalized_authorized_key: "ssh-ed25519 SECRET_KEY_BODY".to_owned(),
             force_command_token: "secret-token".to_owned(),

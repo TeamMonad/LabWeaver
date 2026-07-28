@@ -1,35 +1,11 @@
 images:
-  access_service: ghcr.io/teammonad/labweaver-system/access-service@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-  agent_service: ghcr.io/teammonad/labweaver-system/agent-service@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-  control_service: ghcr.io/teammonad/labweaver-system/control-service@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-  environment_service: ghcr.io/teammonad/labweaver-system/environment-service@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-  evaluation_service: ghcr.io/teammonad/labweaver-system/evaluation-service@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
-  resource_service: ghcr.io/teammonad/labweaver-system/resource-service@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-  web: ghcr.io/teammonad/labweaver-system/web@sha256:1111111111111111111111111111111111111111111111111111111111111111
-workloads:
-  access-service: {configMap: access-service-runtime, configSecret: access-service-runtime, replicas: 2}
-  agent-service: {configMap: agent-service-runtime, configSecret: agent-service-runtime, replicas: 2}
-  control-service: {configMap: control-service-runtime, configSecret: control-service-runtime, replicas: 2}
-  environment-service: {configMap: environment-service-runtime, configSecret: environment-service-runtime, replicas: 2}
-  evaluation-service: {configMap: evaluation-service-runtime, configSecret: evaluation-service-runtime, replicas: 2}
-  resource-service: {configMap: resource-service-runtime, configSecret: resource-service-runtime, replicas: 2}
-  web: {configMap: web-runtime, configSecret: web-runtime, replicas: 2}
-trust:
-  registry: ghcr.io/teammonad
-  revision: trust-v2
-  issuer: https://identity.invalid/realms/labweaver
-  subject: system:serviceaccount:labweaver-build:platform-builder
-  fulcioRoots: |
-    -----BEGIN CERTIFICATE-----
-    Zml4dHVyZS1vbmx5
-    -----END CERTIFICATE-----
-  rekorUrl: https://sigstore.invalid
-  previous:
-    revision: trust-v1
-    issuer: https://identity.invalid/realms/labweaver
-    subject: system:serviceaccount:labweaver-build:platform-builder-v1
-    fulcioRoots: |
-      -----BEGIN CERTIFICATE-----
-      cHJldmlvdXMtZml4dHVyZS1vbmx5
-      -----END CERTIFICATE-----
-    rekorUrl: https://sigstore.invalid
+  access_service: harbor.internal.example/labweaver-system/access-service@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  agent_service: harbor.internal.example/labweaver-system/agent-service@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  control_service: harbor.internal.example/labweaver-system/control-service@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+  environment_service: harbor.internal.example/labweaver-system/environment-service@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+  evaluation_service: harbor.internal.example/labweaver-system/evaluation-service@sha256:1111111111111111111111111111111111111111111111111111111111111111
+  openssh_gateway: harbor.internal.example/labweaver-system/openssh-gateway@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  web: harbor.internal.example/labweaver-system/web@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+network:
+  kubernetesApiCidrs: [10.96.0.1/32]
+  kubernetesApiPorts: [443, 6443]

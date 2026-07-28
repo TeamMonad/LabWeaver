@@ -1,0 +1,4 @@
+{
+  "apiVersion": "deploy.labweaver.io/web-runtime/v1",
+  "accessBaseUrl": "https://portal.example.invalid/api"
+}

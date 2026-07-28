@@ -13,7 +13,7 @@ use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
 use contracts::submission::{FrozenFile, SubmissionManifest};
 use contracts::{PathRule, Sha256Digest};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const ARCHIVE_MEDIA_TYPE: &str = "application/vnd.labweaver.frozen-submission.v1+json";
 const DEFAULT_MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
@@ -234,7 +234,8 @@ pub struct FrozenArchive {
 }
 
 /// Explicit service-side limits independent from teacher-authored manifest limits.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CollectorLimits {
     /// Maximum raw bytes read across selected files.
     pub max_source_bytes: u64,

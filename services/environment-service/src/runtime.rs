@@ -6,8 +6,8 @@ use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
 
 use crate::{
-    MtlsConfig, MtlsServerError, OwnerResolver, OwnerResolverPolicy, PgEnvironmentStore,
-    owner_resolver_router, serve_owner_resolver_mtls,
+    EnvironmentApiState, MtlsConfig, MtlsServerError, OwnerResolver, OwnerResolverPolicy,
+    PgEnvironmentStore, environment_api_router, owner_resolver_router, serve_owner_resolver_mtls,
 };
 
 const DATABASE_URL: &str = "LABWEAVER_DATABASE_URL";
@@ -26,7 +26,7 @@ pub struct OwnerResolverRuntime {
 
 impl OwnerResolverRuntime {
     /// Loads explicit environment configuration, connects `PostgreSQL`, and binds the mTLS port.
-    pub async fn from_env() -> Result<Self, OwnerResolverRuntimeError> {
+    pub async fn from_env(api: EnvironmentApiState) -> Result<Self, OwnerResolverRuntimeError> {
         let database_url = required(DATABASE_URL)?;
         let bind_address = SocketAddr::from_str(&required(BIND_ADDRESS)?)
             .map_err(|_| OwnerResolverRuntimeError::Configuration(BIND_ADDRESS))?;
@@ -65,7 +65,7 @@ impl OwnerResolverRuntime {
         let resolver = OwnerResolver::new(PgEnvironmentStore::new(pool), policy);
         Ok(Self {
             listener,
-            router: owner_resolver_router(resolver),
+            router: owner_resolver_router(resolver).merge(environment_api_router(api)),
             tls,
         })
     }

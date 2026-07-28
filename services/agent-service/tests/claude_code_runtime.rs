@@ -1,6 +1,6 @@
 //! Black-box regression coverage for the Claude Code worker boundary.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -19,8 +19,8 @@ use agent_service::run_store::{
 };
 use async_trait::async_trait;
 use contracts::authoring::{
-    AgentRunState, AgentTrackKind, CourseLlmEgressPolicy, DeniedDataClass, PackageFile,
-    ProblemPackage, RuntimeKind,
+    AgentRunState, AgentTrackKind, CourseLlmEgressPolicy, DeniedDataClass, EnvironmentSpec,
+    PackageFile, ProblemPackage, RuntimeKind,
 };
 use contracts::evaluation::EvaluationSpec;
 use contracts::http::{CreateAgentRunRequest, IdempotencyKey};
@@ -298,12 +298,13 @@ fn environment_candidate() -> Value {
             "kind": "virtual_machine",
             "provider_binding": "kubevirt-primary",
             "base_disk": {
-                "artifactId": ArtifactId::new(),
-                "storeBinding": "minio-primary",
-                "objectVersion": "version-1",
-                "sha256": "33".repeat(32),
-                "sizeBytes": 1_073_741_824_u64,
-                "mediaType": "application/octet-stream"
+                "binding": "linux-lab-base-v1",
+                "sourceRegistryDigest": format!(
+                    "docker://harbor.labweaver.internal/labweaver-vm/linux-lab@sha256:{}",
+                    "44".repeat(32)
+                ),
+                "diskSha256": "33".repeat(32),
+                "capacityBytes": 1_073_741_824_u64
             },
             "storage_class_binding": "rwx-primary",
             "ssh_port": 22
@@ -316,6 +317,14 @@ fn environment_candidate() -> Value {
             "disposition": "delete"
         }
     })
+}
+
+#[test]
+fn virtual_machine_candidate_rejects_allow_all_network() {
+    let mut candidate = environment_candidate();
+    candidate["network"]["mode"] = json!("allow_all");
+
+    assert!(serde_json::from_value::<EnvironmentSpec>(candidate).is_err());
 }
 
 fn evaluation_candidate() -> Result<Value, ClaudeCodeProcessError> {
@@ -361,6 +370,21 @@ fn stream_output(
             "session_id": session_id,
             "estimated_tokens": 64,
             "estimated_tokens_delta": 64
+        }),
+        json!({
+            "type": "system",
+            "subtype": "status",
+            "session_id": session_id,
+            "status": "running"
+        }),
+        json!({
+            "type": "user",
+            "session_id": session_id,
+            "isSynthetic": true,
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "runtime retry notice"}]
+            }
         }),
     ];
     if let Some(candidate) = candidate {
@@ -651,12 +675,85 @@ async fn postgres_run_is_atomic_and_exact_replay_is_not_billed_twice() -> Result
     let store = PostgresAgentRunStore::new(pool.clone());
     assert_exact_replay(&store, &pool, now).await?;
     assert_track_recovery(&store, now).await?;
+    assert_dispatch_does_not_replay_live_tracks(&store, now).await?;
     assert_durable_cancellation(&store, now).await?;
     assert_concurrent_idempotency(&store, now).await?;
 
     drop(store);
     remove_isolated_database(admin_pool, pool, &database_name).await?;
     drop(container);
+    Ok(())
+}
+
+async fn assert_dispatch_does_not_replay_live_tracks(
+    store: &PostgresAgentRunStore,
+    now: UtcTimestamp,
+) -> Result<(), Box<dyn Error>> {
+    let policy = valid_policy()?;
+    let bytes = b"dispatch lease fencing";
+    let package = package(policy.course_id, bytes)?;
+    let request = CreateAgentRunRequest {
+        package_id: package.id,
+        package_revision: package.revision,
+        package_sha256: package.manifest_sha256,
+        policy_id: policy.id,
+        policy_revision: policy.revision,
+        requested_runtime: RuntimeKind::Container,
+    };
+    let object = package
+        .files
+        .first()
+        .ok_or("package file missing")?
+        .object
+        .clone();
+    let locators = BTreeMap::from([(object.artifact_id, "problem-packages/test".to_owned())]);
+    let key = IdempotencyKey::parse("agent-dispatch-live-track-fence-0001")?;
+    store
+        .reserve_dispatch(
+            policy.course_id,
+            &request,
+            &package,
+            &locators,
+            &policy,
+            &key,
+            now,
+            "trace-agent-dispatch-fence",
+        )
+        .await?;
+    let dispatch = store
+        .claim_dispatch(Duration::from_secs(1))
+        .await?
+        .ok_or("pending dispatch was not claimable")?;
+    let input_sha256 = Sha256Digest::of_bytes(bytes);
+    store
+        .bind_prepared_dispatch(&dispatch, input_sha256)
+        .await?;
+    let lease_duration = Duration::from_millis(80);
+    for track in [AgentTrackKind::Environment, AgentTrackKind::Evaluation] {
+        store
+            .claim_track(
+                dispatch.run.id,
+                track,
+                input_sha256,
+                "dispatch-fence-worker",
+                lease_duration,
+            )
+            .await?
+            .ok_or("prepared track was not claimable")?;
+    }
+    assert!(
+        store
+            .claim_dispatch(Duration::from_secs(1))
+            .await?
+            .is_none()
+    );
+    tokio::time::sleep(Duration::from_millis(110)).await;
+    assert!(
+        store
+            .claim_dispatch(Duration::from_secs(1))
+            .await?
+            .is_some()
+    );
     Ok(())
 }
 
@@ -1044,11 +1141,8 @@ async fn isolated_agent_database(
     sqlx::query("SET search_path = agent, pg_catalog")
         .execute(&mut *migration_connection)
         .await?;
-    sqlx::raw_sql(include_str!("../../../migrations/agent/0001_initial.sql"))
-        .execute(&mut *migration_connection)
-        .await?;
     sqlx::raw_sql(include_str!(
-        "../../../migrations/agent/0002_track_leases.sql"
+        "../../../migrations/agent/0001_sprint2_baseline.sql"
     ))
     .execute(&mut *migration_connection)
     .await?;
@@ -1166,6 +1260,91 @@ async fn successful_invocation_is_shell_free_hardened_and_hash_audited()
     let debug = format!("{command:?}");
     assert!(!debug.contains("ignore all previous instructions"));
     assert!(!debug.contains("Generate exactly one"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn evaluation_prompt_enforces_supported_schema_variants_and_semantics()
+-> Result<(), Box<dyn Error>> {
+    let (runtime, process, policy) = runtime(FakeMode::FullSuccess)?;
+    let execution = runtime
+        .generate(
+            AgentTrackKind::Evaluation,
+            input(&policy).await?,
+            RunCancellation::new(),
+        )
+        .await?;
+
+    assert!(matches!(
+        execution.document,
+        CandidateDocument::Evaluation(_)
+    ));
+    let commands = process.commands();
+    assert_eq!(commands.len(), 1);
+    let prompt = commands[0]
+        .args()
+        .last()
+        .ok_or_else(|| std::io::Error::other("candidate prompt is missing"))?;
+    for required in [
+        "never invent a runner, checker, collector",
+        "use the normalized submission-relative path result.txt",
+        "file_assertion runner is compatible only with an exit_code checker",
+        "aggregation.maxScore equals the sum of score.max values",
+        "teacherApprovalRequiredForRelease is true",
+        "\"maxScore\":0",
+        "\"requiredStatus\":\"passed\"",
+    ] {
+        assert!(
+            prompt.contains(required),
+            "missing prompt invariant: {required}"
+        );
+    }
+    let example = prompt
+        .lines()
+        .find(|line| line.starts_with("{\"apiVersion\":\"evaluation.labweaver.io/v1\""))
+        .ok_or_else(|| std::io::Error::other("evaluation prompt example is missing"))?;
+    serde_json::from_str::<EvaluationSpec>(example)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn environment_prompt_preserves_mixed_case_variant_contract() -> Result<(), Box<dyn Error>> {
+    let (runtime, process, policy) = runtime(FakeMode::Success)?;
+    runtime
+        .generate(
+            AgentTrackKind::Environment,
+            input(&policy).await?,
+            RunCancellation::new(),
+        )
+        .await?;
+
+    let commands = process.commands();
+    assert_eq!(commands.len(), 1);
+    let prompt = commands[0]
+        .args()
+        .last()
+        .ok_or_else(|| std::io::Error::other("candidate prompt is missing"))?;
+    for required in [
+        "runtime variant properties are exactly provider_binding",
+        "Container security requires rootFilesystemPolicy read_only_required",
+        "virtual_machine requires mutable_required",
+        "\"build_context\"",
+        "\"base_image_digest\"",
+        "\"service_port\":8080",
+        "\"storeBinding\":\"minio-primary-v1\"",
+        "authoritative artifactId, storeBinding, objectVersion, sha256, sizeBytes, and mediaType",
+        "copy all six identity fields from exactly one input file",
+    ] {
+        assert!(
+            prompt.contains(required),
+            "missing prompt invariant: {required}"
+        );
+    }
+    let example = prompt
+        .lines()
+        .find(|line| line.starts_with("{\"apiVersion\":\"environment.labweaver.io/v1\""))
+        .ok_or_else(|| std::io::Error::other("environment prompt example is missing"))?;
+    serde_json::from_str::<EnvironmentSpec>(example)?;
     Ok(())
 }
 

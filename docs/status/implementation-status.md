@@ -1,128 +1,76 @@
 # Implementation Status
 
-Status is proven only by the identified commit/worktree and current evidence. `docs/draft/` is not completion evidence.
+This document records current repository and connected-runtime facts. Design
+documents, fixtures, health endpoints and reports from another source identity
+are not completion evidence.
 
-| Capability | Owner | State | Evidence | Level | Limitation / blocker |
-| --- | --- | --- | --- | --- | --- |
-| Rust Workspace and foundation crates | A | implemented | `cargo xtask check` passed after PR #21 merge | E1 | no business domain implementation |
-| Six Axum service shells | A | implemented | `cargo xtask check` passed; Control live/ready smoke passed | E1 | health-only; no persistence, messaging or providers |
-| GitHub Milestones, Labels and Sprint Issues | A | configured | GitHub API read-back | E0 | remote metadata only |
-| GitHub Project fields and Ready assignments | A | configured | API read-back: 15 P0 items have `Workflow Status=Ready` | E0 | Issue #20 resolved; remote metadata does not prove product behavior |
-| Testable requirements baseline | D (A temporarily implementing Issue #8) | documented, pending review | `docs/requirements/` impact map, journeys, 3C stories and acceptance matrix | E0 | requirements are targets only; no runtime capability or P0 release evidence is added |
-| Branch protection | A | configured | GitHub API read-back for `main` and `develop` | E0 | required `rust-gate` starts with API-01a PR |
-| C4, service boundaries and data ownership | A | documented, pending review | current documentation PR | E0 | design evidence only |
-| PostgreSQL schema ownership and Migration policy | A | implemented, pending A/B review and D Verify | `persistence-sqlx`, immutable catalog, controlled `cargo xtask migrate`, Docker PostgreSQL integration test and migration report schema | E2 | no service startup/readiness wiring, JetStream publisher/consumer or audit-projection worker |
-| Identity, Tailnet, DirectAccessGrant and Guacamole trust boundary | A | documented, pending B/D review | ACCESS-01a formal architecture documentation and ADR 0001 | E0 | no OIDC, Headscale Grants, Router firewall, Guacamole extension, grant store, containment or VM-stop implementation/evidence |
-| AccessGrant and OpenSSH authorization (#49) | A; requires A+B security review and D Verify | implemented in current worktree, pending review and deployment Verify | generated v1 contracts; forward-only Access Migration; SSH key/Grant/EndpointGrant/token/session handlers; async activation/expiry/revocation/Outbox workers; real PostgreSQL constraint test; Environment eligibility unit evidence | E1 plus partial local E2 | real JetStream/mTLS combined multi-instance replay and controlled Kubernetes Access/Environment evidence are not yet recorded; #53 supplies real VM endpoints and #63 supplies Gateway/ForceCommand, so native SSH-to-VM E3 is blocked and not claimed |
-| NATS Subject v1 and delivery contract | A | Environment slice implemented locally, broader catalog pending A/B review | ADR 0003, NATS event catalog, Environment real JetStream command/Outbox integration test | Partial E2 | Environment path has client, durable consumer and acknowledged Outbox publisher; shared quarantine, other domains and deployment evidence remain unimplemented |
-| Contracts v1 semantic source of truth | A | implemented in current worktree, pending A+B review and D Verify | `contracts` tests, generated JSON Schema, dual OpenAPI, Axios SDK and byte-drift gate | E1 | no Handler, persistence, Outbox/JetStream, Provider, Gateway, UI, deployment or EvaluationRun runtime evidence |
-| Environment management Public API (#81) | A | contract and authenticated SDK transport implemented in current worktree, pending A+B review and D Verify | generated inventory/operation/AccessGrant schemas and Public OpenAPI, Rust negative contract tests, Chromium bearer/RFC 9457/cancel transport tests | E1 | no authorized Handler, persistence query, Outbox/SSE runtime, console UI, deployment or E2/E3 multi-role evidence |
-| Issue #48 Control plane | A with B-owned Agent boundary; pending A+B review and D Verify | production path implemented in current worktree; review blockers addressed | public Control and mTLS Control-to-Agent APIs; immutable ProblemPackage upload completion; append-only course LLM policy, kind-bound decisions, releases and withdrawals; Agent PostgreSQL dispatch leases and course-bound mutations; acknowledged Agent and Control Outbox publishers; transactional Control Inbox/projection/SSE consumer; release read model includes append-only withdrawal; durable SSE; additive Control/Agent Migrations; PostgreSQL 17 migration, completion fencing/recovery/orphan-cleanup, cross-course mutation rejection, candidate-kind rejection and concurrent SSE tests; real versioned MinIO; real JetStream publish/withdraw ACK failure/retry and Control consumer recovery tests; ephemeral-CA SAN/rotation/outage tests | E2 for the local same-worktree PostgreSQL, MinIO, JetStream and mTLS control-plane composition | #52 supplies the local authoritative Container artifact projection, but its connected executor/E3 evidence and #53 VM artifact producer are pending; internal Agent route coverage is local rather than deployed; no Evaluation execution or scoring claim |
-| Approved Container supply chain and runtime (#52) | B implementation; requires A+B security review and D Verify | local production wiring and deterministic tests implemented in current worktree; connected E3 blocked | v2 full-payload build/release events and generated schemas; approval-to-BuildRequest Control Outbox plus exact persisted candidate/approval/artifact projection; durable Agent Inbox/fenced heartbeat worker/live cancellation/atomic artifact-policy/project-evidence-Outbox; course/hash/state/revision/actor/authority/idempotency-bound Control-to-Agent build cancellation; exact per-course private Harbor Project/quota/robot identity and restricted BuildKit/Trivy/Private Sigstore provider protocol; executor-side PostgreSQL highest-generation, in-flight serialization, response replay and generation-scoped cleanup tombstone; Container executor permanent delete tombstone; remote build requests bind attempt/lease/stage/request/deadline and Container requests bind operation/step/generation/attempt/request/deadline; certificate/signature hashes and signed subject digest fail closed; Environment projects append-only withdrawal and independently rechecks active image-policy ID/revision plus trust identity; authoritative Control artifact readback; deterministic least-privilege namespace/finalizer/Quota/LimitRange/ServiceAccount/imagePullSecret/PVC/Deployment/ClusterIP Service/NetworkPolicy/unique protected HTTPRoute; ten pipeline and eight Provider tests; PostgreSQL 17 cancellation, executor restart/replay/stale-generation/tombstone/deadline, Environment withdrawal ordering and Agent delayed-provider retry scheduling use authority time | E1 deterministic behavior and process wiring; E2 PostgreSQL Migration, executor fencing/tombstones, cancellation, withdrawal and transaction evidence | deployment-specific BuildKit/Harbor/Trivy/Private Sigstore and Kubernetes side-effect adapters have no connected same-build E3 replay in this worktree; no human approval or D Verify |
-| EvaluationSpec and GoalReview v1 | B/A | implemented as part of Contracts v1, pending review | generated schemas and OJ/Linux positive/negative contract tests under `contracts` | E1 | no Runner execution, persistence, messaging or production approval path |
-| PVC and short-lived SSH dual Collector (#54) | B implementation; requires A+B contract/security review and D Verify | local bounded production library, Migration and event path implemented; connected E3 blocked | capability-scoped PVC and SFTP-only VM sources; include/exclude/required, traversal/symlink, raw/output/file bounds and two-read consistency; five-minute user certificate with `labweaver-collector` and `internal-sftp -R`; Governance Object Lock exact-version verification; append-only leased attempts; idempotent replay; atomic FrozenSubmission plus v2 Outbox; generated Schema and local adversarial tests | E1 deterministic Collector; PostgreSQL/MinIO tests define E2 but require Docker execution | Evaluation process source/approval resolver and deployment short-lived certificate issuer/Secret cleanup are not connected; no real PVC, VM SSH, MinIO or same-build E3 evidence; A+B review and D Verify are pending, so Issue acceptance is not claimed |
-| Environment lifecycle and owner resolver (#51) | B/A | local E2 implementation in current worktree, review feedback addressed; pending A re-review and D Verify | exhaustive lifecycle matrices; Docker PostgreSQL 17 atomic first-create, Migration, idempotency, Inbox, reconcile, timeout/cancel and Provider-step recovery tests; real JetStream 2.11 command/Outbox/Resource-Lease/provider-adapter test; real rustls mTLS SAN/rotation/ETag/database-clock/shutdown/outage test; #52 Container and #53 KubeVirt formal local Providers | E2 for lifecycle and KubeVirt observation persistence; E1 for Provider resource plans | Resource and Access responders are integration fixtures rather than their owner-service implementations; Container/KubeVirt need connected Kubernetes evidence; no E3 deployed mTLS NATS/cleanup evidence or D Verify |
-| KubeVirt RuntimeProvider and private SSH endpoint (#53) | B implementation; requires A+B security review and D Verify | deterministic production wiring and local tests implemented in current worktree; connected E3 not run | exact VM artifact/policy/trust/storage binding and unique `ssh:22` entry; deterministic Namespace/VMI+CDI+scratch-aware Quota/default-deny and Gateway-only NetworkPolicy/base64 `data.userdata` Secret/CDI DataVolume/KubeVirt VM/ClusterIP Service plan; generation/operation/step/attempt/request/deadline backend fence; guest-agent/observed-generation/SSH host-key readiness; one stable SSH endpoint; PostgreSQL VM/VMI/root-disk/IP/host-key identity, stop-start preservation and deletion tombstone; provider and PostgreSQL negative tests | E1 resource/security/lifecycle behavior plus local E2 PostgreSQL 17 Migration/fencing evidence | deployment-owned executor and real KubeVirt/CDI guest/SSH/network/cleanup replay are not connected in this worktree; no real VMI/CDI budget observation, start-stop-start disk evidence, A+B approval or D Verify, so E3 and Issue acceptance are not claimed |
-| Linux Nginx material contract | A | implemented in current worktree, pending review | public-safe example package, candidate manifests, Python material validator and reviewed contract | E1 | no approved VM image, SubmissionManifest Reader, full Probe capability, KubeVirt VM, or E3 evidence; B owns the blocking runtime contract |
-| Agent state and Tool contract | B | partially implemented, blocked | `agent-core` state, capability binding, timeout/cancel/no-retry, idempotency identity propagation, output validation, diagnostic ownership, audit and negative tests | Partial E1 | role A must freeze Tool permissions and approval evidence; the generic Tool dispatcher is not wired into a service path and AG-01b Fixture Backend remains unimplemented; the separate Claude Code path intentionally exposes no Tools |
-| Claude Code Agent process-level runtime boundary | B | implemented in current worktree, pending A+B review and D Verify | `ClaudeCodeBindingV1`, generated Schema, ProblemPackage hash/classification gate, pinned shell-free worker, exact-Schema JSON prompt, strict local typed/semantic validation, terminal `stream-json` parsing, explicit-environment per-invocation HOME/XDG/tmp/workdir, bounded worker semaphore, hash-only audit, per-track PostgreSQL lease/heartbeat/cancellation/checkpoint and Outbox implementation; PostgreSQL 17 migration/replay/10-identical-request and 20-distinct-run contention across 4 workers/lease-reclaim/cross-worker-cancel integration passed on 2026-07-15; the current isolated process path generated a real local Environment candidate with CLI `2.1.209` in 11.83 seconds at 35,321 microusd | E1 runtime/process boundary plus live local provider evidence; E2 persistence/recovery | Evaluation and dual-track real-provider calls are not yet verified; explicit local provider environment is not deployment Secret/Config evidence; no pinned worker image/config verification, HTTP handler, Control candidate projection, JetStream publisher/consumer, object-store checkpoint reference, isolated Kubernetes Job or deployed multi-container/E3 credential path |
-| Playwright role-project configuration | D (implemented in `test/9-playwright-role-projects`, pending C/A review) | implemented configuration, pending review | exactly four projects, aggregate E1 gate, static/subprocess contracts and fail-fast entrypoints | E1 | requirements baseline PR #36 @ `a9bc7a8ab013a35a846a4b428bad22ecc48eca1b` merged by `0f80e4e9c4b2334d4a833d1fb6a2263ecc3dda9a`; integration baseline `develop` @ `8ec186599f82afeab7ff5bed346c844ce7f923d1`; researcher requires a separate approved Project/auth-state Issue; CI records baseline metadata but does not receive an externally pinned baseline-change input; no auth setup, browser runtime, role isolation, E3 or E4 evidence exists |
-| Frontend, Agent runtime and Playwright work | C/B/D | planned | assigned Sprint Issues | E0 | real UI behavior, authentication, authorization and browser evidence remain unimplemented |
-| Adopted-cluster infrastructure baseline TestFlight | B/D | implemented, pending human Verify | Issue #15, scoped `InfrastructureTestFlightReport` bound to the current deployment identity | E3 baseline | proves RWO/RWX, KVM VM lifecycle, internal Gateway, Cilium control-plane, etcd backup evidence and cleanup only; OIDC/governance is deferred to #47 and extended security/recovery remains under #2 |
-| Private Sigstore trust plane (#61) | A implementation; requires A+B security review and D Verify | deployed on the adopted cluster; current merge identity requires replay | source identity `3509e14` completed deploy, backup-first lifecycle, exact OIDC subject keyless signing, Fulcio certificate issuance, CT SCT, Rekor inclusion, bundle verification, isolated restore/DR drills, plan-only rotation, cleanup and a second idempotent deploy; reports are schema-validated and identity-bound | E3 for the pre-merge source identity | evidence must be regenerated for the merge commit before D starts T0; self-signed private-lab CA and deferred Kyverno/Release Gate scope remain explicit limitations |
-| Platform image trusted supply chain (#62) | A implementation; requires A+B security review and D Verify | local E2 implementation validated; connected path blocked | seven pinned multi-stage images built twice with stable subject digests; SBOM/max-provenance present; Trivy found zero Critical and zero secrets across all seven while retaining Web's 16 High findings; fixed runtime UID/CA/no-build-tool inspection; atomic `xtask` package/validate/deploy/rollback path; digest-only GHCR Helm/Kyverno policy; PR-only non-publishing CI plus gated `develop` GHCR publication job; Rust negative tests and Linux Helm/Kyverno fixtures | E2 local Docker/static evidence; no GHCR publication or connected E3 | Actions publication has not run on `develop`; Private Sigstore signing/admission replay, #61 post-merge identity replay, production Config/Secret locators and read-only cluster baseline remain mandatory blockers |
-| Sprint 3 E4 acceptance assets (#94) | D, pending A+B review and D Verify | local static implementation in feature worktree | strict manifest and three result schemas; exact OJ/Container/KubeVirt future paths; six path/hash/limit-bound C++17 samples; 81-case negative matrix; six-item frontend inventory; recursive valid/invalid fixture gate; path confinement and cross-identity Feature Complete validation; direct Rust negative tests | E1 static/schema/fixture evidence only | no Evaluation runtime/provider/scoring service, dangerous sample execution, connected E3, real E4, production UI, #64 evidence, Feature Complete, Release Gate or release-readiness claim |
-| Keycloak identity foundation for #61 | A, requires B security review and D Verify | deployed on the adopted cluster | fixed-digest PostgreSQL/Keycloak Ready, namespace CA/TLS Ready, Gateway `10.20.0.222` Programmed, exact issuer and immutable workload `sub`/`aud`/`azp` verified; independent read-only verifier evidence is recorded in `docs/testing/evidence/identity-foundation-verifier-20260715.md` | E3 identity baseline | self-signed private-lab CA is not a public PKI; PostgreSQL recovery and D Verify remain required |
+## Current identity
 
-## Kubernetes infrastructure automation
+- Draft PR: #121, branch `release/sprint2`, target `develop`
+- Source commit: `748c2470ad0f3fba848761f0113853a6870576d6`
+- Cluster UID: `171e3e6b-1e8b-4666-9936-b5f8a514132e`
+- Package manifest:
+  `sha256:6fa824800ac83e51c826242128687b4734622bdcf348969fed8dae4c89cc63d9`
+- Configuration bundle:
+  `sha256:564cf33c34b8d851c349f8e45bf10da34665ea9ad05d21e4fe49199292fe6518`
+- Migration catalog:
+  `sha256:0c9d5dbac9c9f7855147f35f21ea492a8ec1a5f7d4a1fff49e9b413c1e0ef1c3`
+- Non-destructive application runs: `deploy-748c2470` and
+  `deploy-748c2470-repeat`
+- Release Gate Run:
+  `a2835d47-7f9b-48a3-b8a0-60d22f57d5e2`
 
-State: implemented, pending review; the router replay is complete for the
-currently scoped baseline.
+The second application reconcile completed at Helm revision 265. All ten
+declared Deployments read back one ready replica and use immutable Harbor
+digests. Kubernetes, KubeVirt, PostgreSQL, NATS, MinIO, Harbor and Keycloak
+were retained; no infrastructure reset was used.
 
-The Ansible playbooks encode the currently validated Rocky Kubernetes baseline:
-Kubernetes/CRI-O, Cilium, MetalLB, Local Path, NFS CSI, cert-manager, KubeVirt,
-CDI, Kyverno, internal Gateway, and etcd backup. The prior manual environment
-provided E3 evidence. The router worktree has now completed a guarded deploy,
-backup, TestFlight verification, and a second idempotent deploy under the same
-source identity.
+## Sprint 1 and Sprint 2 connected result
 
-Linux CI continues to provide lint, syntax, fictional encrypted-Vault,
-preflight-chain, and storage-safety fixture evidence. The router is now the
-only Linux execution authority for the real controller path; its evidence is
-recorded below. Bootstrap remains intentionally out of scope for an adopted
-cluster, and the existing baseline is read-only validated before Harbor
-reconciliation.
+| Capability | State | Current evidence and boundary |
+| --- | --- | --- |
+| Six service and six PostgreSQL domain boundaries | verified | Baseline catalog and non-destructive adoption cover all six owned schemas. Resource remains outside the Sprint 2 runtime path. |
+| Contract, OpenAPI, JSON Schema and Web SDK | verified | One Sprint 2 v1 semantic source; drift checks and CI pass. |
+| Keycloak/OIDC and authorization | verified | Real teacher and student sessions, CSRF-protected BFF calls, course scoping and connected denial matrix pass. |
+| Claude Code AgentRun | verified | Container AgentRun `019fa7ca-2be5-7540-8546-d55f721a4c27` and VM AgentRun `019fa7d7-0bec-7f11-811f-3c22deb44e75` each produced independent Environment and Evaluation candidates through the explicit ECNU Anthropic-compatible binding. |
+| Teacher approval and publication | verified | Both candidate kinds were approved for each runtime. Container release `019fa7cb-d51e-7af3-8f89-995a509e37f3` and VM release `019fa7e1-cd5f-78f2-8e5e-68c2971c47e8` were published. |
+| BuildKit, Harbor and Trivy | verified | Container artifact `sha256:e06d528deebc192569bcc337784d3bd8eed4ecd44755520137c32f98bd497547` was built, pushed, scanned by Trivy 0.72.0 and passed the digest-bound gate with zero Critical findings. |
+| Container runtime | verified | Environment `019fa7cc-1b72-76e1-a039-cd6aa74f1c1e` completed create, HTTP access, freeze, stop, start, delete and absence readback. |
+| KubeVirt runtime | verified | VM `019fa7e2-4bfd-7ee2-9eea-61314caa82d6` completed create, Gateway SSH workspace write/read, freeze, stop, start, delete and absence readback. |
+| Freeze-only Evaluation | verified | Container submission `019fa7d0-d62a-7542-9e81-0bf5471d7b31` and VM submission `019fa7fe-0d0b-7343-91d0-61f492250c12` are immutable and retain runtime-artifact identity. Runner, Checker, Aggregator and scoring remain excluded. |
+| Access and Gateway negative matrix | verified | Cross-course, revoked, expired, arbitrary shell, target injection, SCP/SFTP, forwarding and Access-service-outage cases all rejected. The temporary test VM was deleted afterward. |
+| Real browser journeys | verified | Connected Playwright used real Keycloak teacher/student sessions. The Container replay passed teacher and student paths; the VM replay passed teacher/student setup and the KubeVirt freeze path. |
+| Application adoption and idempotence | verified | Two non-destructive application reconciles retained the same package, configuration, migration and seven-image identities. |
+| Rollback drill | verified | Helm rollback from revision 260 to 259 created revision 261; all workloads recovered. The current source deployment was then restored and verified at revision 265. |
+| Cleanup readback | verified | No namespace labeled `labweaver.io/environment=true` remained after the final cleanup; all ten platform Deployments remained ready. |
+| Machine-readable Release Gate | verified | `cargo xtask release-gate` produced a schema-valid passing report for Run `a2835d47-7f9b-48a3-b8a0-60d22f57d5e2`. Evidence remains private/ignored and contains no Secret. |
+| Full `cargo xtask demo replay` | not run | The authoritative gate was run directly after connected checks. The wrapper's repeated infrastructure Verify and Playwright execution was intentionally skipped; this is not represented as a replay pass. |
 
-## Harbor infrastructure (Issue #23)
+## Accepted Sprint 2 security exceptions
 
-State: manual adopted-cluster deployment established; guarded controller
-reconciliation, router-side ansible-rs entrypoint, and sanitized manifest schemas
-are implemented in this worktree. The next router rerun is blocked until the
-new controller-identity locator and identity-bound backup evidence are present;
-the earlier replay must not be treated as evidence for those new controls.
+- Rootless BuildKit may use the documented namespace-scoped
+  `Unconfined`/`spc_t`/no-process-sandbox settings. It remains
+  non-privileged and may not use HostPath or host networking.
+- Container and KubeVirt executors retain broad namespace CRUD for Sprint 2.
+  Separate ServiceAccounts and application ownership checks are compensating
+  controls, not least-privilege proof.
+- Agent Service has unrestricted outbound access. A teacher-approved
+  Container may independently use `network.mode=allow_all`; the exception does
+  not extend to KubeVirt, BuildKit, Evaluation or other workloads.
+- `labweaver-system` uses the documented Pod Security baseline exception for
+  the OpenSSH Gateway. Other workloads retain their restricted security
+  context.
 
-The manual deployment uses chart `1.19.1` and Harbor `2.15.1`, a dedicated
-namespace, internal CA/TLS, a separate Cilium Gateway/HTTPRoute, a dedicated
-router DNS fragment, the `local-path`/`nfs-rwx` single-instance storage split,
-and the private `labweaver-system` project. The Trivy volume ownership repair
-was scoped to the newly-created Harbor PVC after the NFS CSI provisioner created
-it with anonymous ownership. It is deployment evidence only, not a replacement
-for the future reconciler's first-run and replay evidence.
+## Release decision
 
-The TestFlight report is schema-validated for the `adopted-cluster-baseline`
-scope. Keycloak OIDC is intentionally deferred to #47; registry push/pull/scan
-policy replay, immutable-tag and retention enforcement, recovery drills, a
-reviewed Cilium policy for host-network Gateway traffic, and Release Gate
-evidence remain Sprint 2/#2 work. They do not make #23 or the baseline #15
-release-ready, but are not blockers for their bounded close conditions.
+The implementation and connected technical gate for Sprint 1+2 are verified
+for the identity above. PR #121 remains **blocked from merge** because it is a
+Draft high-risk PR and still requires:
 
-Issue #47 has a complete local E2 implementation on its dedicated feature
-branch: the Access Service has configuration-validated OIDC Discovery,
-Authorization Code + PKCE state/nonce handling, AEAD-protected PostgreSQL BFF
-transaction/session/logout-hint records, synchronizer-CSRF logout with
-RP-Initiated Logout, bearer/back-channel JWKS validation, and a separate Rustls
-mTLS listener. The listener requires a client-authenticated CA chain,
-an allowlisted URI SAN, and a live registered `service_identities` row before
-it accepts `/internal/v1/auth/decision`. The decision route binds the requested
-actor to a live BFF session, reloads course/project memberships for every
-decision, checks the generated operation role/scope catalog, and returns an
-expiry-bounded decision. Environment scope additionally calls the merged #51
-owner resolver over configured mTLS and binds actor, course, environment,
-Environment revision, strong ETag and eligibility expiry. Generated OpenAPI now
-includes the allowed roles and scope kind for every catalog operation.
+1. B human review and approval for core/security changes;
+2. C human review for Web changes;
+3. D connected Verify and acceptance;
+4. resolution of any resulting review threads and a final green CI readback.
 
-Current E2 evidence includes the controlled SQLx PostgreSQL container path
-(session rotation, encrypted CSRF/logout-hint restoration, SID/direct
-revocation, authoritative membership reload and service identity), a real
-ephemeral-CA Access-to-Environment mTLS handshake with denial/tamper/outage,
-and a digest-pinned HTTPS Keycloak 26.3 run
-(`sha256:08a31919cfcd814bf1b465142b1a716c4d1a8830f772bb5c9dffcbd96de3fba6`).
-The Keycloak run completed HTML
-login, code exchange, nonce/issuer/audience/`azp`/role checks, provider logout,
-two RSA signing-key rotations, custom-CA unknown-`kid` refresh and empty-JWKS
-fail-closed behavior.
-
-The PR review TLS findings are addressed: strict Discovery rejects non-HTTPS
-authorization/token/JWKS/logout endpoints, an OIDC private CA replaces system
-roots, and the Owner Resolver always uses an exclusive configured CA. A
-double-opt-in `insecure-test-only` mode exists only for disposable loopback
-tests; configuration plus `LABWEAVER_ENABLE_INSECURE_AUTH_TEST_MODE=1` are both
-required. Unit/integration coverage proves remote HTTP rejection, loopback HTTP
-Discovery, invalid loopback test certificates, and the unchanged strict
-private-CA Keycloak path.
-
-Human A+B review, D same-build Verify, controlled client-certificate rotation,
-deployed metrics validation and real Gateway/internal-DNS/TLS verification
-remain incomplete. Back-channel token validation and SID revocation are covered
-below the HTTP boundary, but real Keycloak back-channel HTTP delivery is still
-an E3 dependency. No E3, E4, production deployment, or Issue closure claim is
-made.
-
-The Issue #47 design preference for `tower-sessions` SQLx storage is not
-currently usable with this workspace: the available `tower-sessions` 0.15
-store is compiled against Axum 0.7, while the services are on Axum 0.8. It
-cannot satisfy the required `SessionStore` trait or provide a valid Axum 0.8
-extractor. The service therefore keeps the controlled `access.bff_sessions`
-store and its catalog migration for now; replacing it requires an approved
-compatible upstream release or a reviewed framework migration, not an unsafe
-dual-Axum workaround.
+The author must not approve or merge the PR. No Tag, formal release or `main`
+merge is included.

@@ -4,54 +4,13 @@
       "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
       "type": "string"
     },
+    "AgentRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `AgentRunId`.",
+      "type": "string"
+    },
     "ApprovalId": {
       "description": "Strongly typed UUIDv7 identifier for `ApprovalId`.",
       "type": "string"
-    },
-    "ArtifactId": {
-      "description": "Strongly typed UUIDv7 identifier for `ArtifactId`.",
-      "type": "string"
-    },
-    "ArtifactRef": {
-      "additionalProperties": false,
-      "description": "Immutable object-store identity without a machine-local path or credential.",
-      "properties": {
-        "artifactId": {
-          "$ref": "#/$defs/ArtifactId",
-          "description": "Stable metadata identity resolved by the owning service."
-        },
-        "mediaType": {
-          "description": "Registered media type.",
-          "type": "string"
-        },
-        "objectVersion": {
-          "description": "Immutable backend object version.",
-          "type": "string"
-        },
-        "sha256": {
-          "$ref": "#/$defs/Sha256Digest",
-          "description": "Exact content digest."
-        },
-        "sizeBytes": {
-          "description": "Raw object length.",
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "storeBinding": {
-          "description": "Explicit object-store binding from deployment configuration.",
-          "type": "string"
-        }
-      },
-      "required": [
-        "artifactId",
-        "storeBinding",
-        "objectVersion",
-        "sha256",
-        "sizeBytes",
-        "mediaType"
-      ],
-      "type": "object"
     },
     "BuildRequestId": {
       "description": "Strongly typed UUIDv7 identifier for `BuildRequestId`.",
@@ -142,24 +101,12 @@
             "id": {
               "$ref": "#/$defs/ImageArtifactId"
             },
-            "immutable_tag": {
-              "type": "string"
-            },
             "kind": {
               "const": "container",
               "type": "string"
             },
-            "provenance": {
-              "$ref": "#/$defs/ArtifactRef"
-            },
             "repository": {
               "type": "string"
-            },
-            "sbom": {
-              "$ref": "#/$defs/ArtifactRef"
-            },
-            "signature": {
-              "$ref": "#/$defs/SigstoreEvidence"
             }
           },
           "required": [
@@ -167,11 +114,7 @@
             "id",
             "build_request_id",
             "repository",
-            "immutable_tag",
-            "digest",
-            "sbom",
-            "provenance",
-            "signature"
+            "digest"
           ],
           "type": "object"
         },
@@ -179,7 +122,7 @@
           "additionalProperties": false,
           "properties": {
             "base_disk": {
-              "$ref": "#/$defs/ArtifactRef"
+              "$ref": "#/$defs/VirtualMachineBaseDisk"
             },
             "format": {
               "$ref": "#/$defs/VirtualMachineDiskFormat"
@@ -190,25 +133,13 @@
             "kind": {
               "const": "virtual_machine",
               "type": "string"
-            },
-            "provenance": {
-              "$ref": "#/$defs/ArtifactRef"
-            },
-            "sbom": {
-              "$ref": "#/$defs/ArtifactRef"
-            },
-            "signature": {
-              "$ref": "#/$defs/SigstoreEvidence"
             }
           },
           "required": [
             "kind",
             "id",
             "base_disk",
-            "format",
-            "sbom",
-            "provenance",
-            "signature"
+            "format"
           ],
           "type": "object"
         }
@@ -220,7 +151,7 @@
     },
     "ImagePolicyEvaluation": {
       "additionalProperties": false,
-      "description": "Deterministic scan and trust-policy evaluation.",
+      "description": "Deterministic digest-bound Trivy evaluation.",
       "properties": {
         "artifactId": {
           "$ref": "#/$defs/ImageArtifactId"
@@ -230,12 +161,6 @@
         },
         "evaluatedAt": {
           "$ref": "#/$defs/UtcTimestamp"
-        },
-        "expectedCertificateSubject": {
-          "type": "string"
-        },
-        "expectedFulcioIssuer": {
-          "type": "string"
         },
         "maxEvidenceAgeMilliseconds": {
           "format": "uint64",
@@ -251,12 +176,6 @@
         "policyRevision": {
           "$ref": "#/$defs/Revision"
         },
-        "requireCtSct": {
-          "type": "boolean"
-        },
-        "requireRekorInclusion": {
-          "type": "boolean"
-        },
         "scannerDatabaseSha256": {
           "$ref": "#/$defs/Sha256Digest"
         },
@@ -265,9 +184,6 @@
         },
         "scannerVersion": {
           "type": "string"
-        },
-        "trustBundleSha256": {
-          "$ref": "#/$defs/Sha256Digest"
         },
         "validUntil": {
           "$ref": "#/$defs/UtcTimestamp"
@@ -285,11 +201,6 @@
         "scannerVersion",
         "scannerDatabaseSha256",
         "vulnerabilities",
-        "trustBundleSha256",
-        "expectedFulcioIssuer",
-        "expectedCertificateSubject",
-        "requireRekorInclusion",
-        "requireCtSct",
         "evaluatedAt",
         "maxEvidenceAgeMilliseconds",
         "validUntil",
@@ -323,69 +234,36 @@
       "description": "Canonical lowercase SHA-256 digest.",
       "type": "string"
     },
-    "SigstoreEvidence": {
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    },
+    "VirtualMachineBaseDisk": {
       "additionalProperties": false,
-      "description": "Private Sigstore identity and transparency evidence.",
+      "description": "Deployment-owned immutable KubeVirt base-disk identity.\n\nUnlike an object-store `ArtifactRef`, this identifies a CDI source image and its imported\ndisk content. `capacity_bytes` is the reviewed PVC capacity, not a fabricated object length.",
       "properties": {
-        "certificateSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
-        "certificateSubject": {
+        "binding": {
           "type": "string"
         },
-        "ctLogId": {
-          "type": "string"
-        },
-        "fulcioIssuer": {
-          "type": "string"
-        },
-        "rekorInclusionProofSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
-        "rekorLogId": {
-          "type": "string"
-        },
-        "rekorLogIndex": {
+        "capacityBytes": {
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
         },
-        "sctSha256": {
+        "diskSha256": {
           "$ref": "#/$defs/Sha256Digest"
         },
-        "signatureSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
-        "subjectDigest": {
-          "$ref": "#/$defs/Sha256Digest",
-          "description": "Immutable artifact digest covered by the verified signature."
-        },
-        "trustBundleSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
-        "verifiedAt": {
-          "$ref": "#/$defs/UtcTimestamp"
+        "sourceRegistryDigest": {
+          "type": "string"
         }
       },
       "required": [
-        "trustBundleSha256",
-        "fulcioIssuer",
-        "certificateSubject",
-        "subjectDigest",
-        "certificateSha256",
-        "signatureSha256",
-        "rekorLogId",
-        "rekorLogIndex",
-        "rekorInclusionProofSha256",
-        "ctLogId",
-        "sctSha256",
-        "verifiedAt"
+        "binding",
+        "sourceRegistryDigest",
+        "diskSha256",
+        "capacityBytes"
       ],
       "type": "object"
-    },
-    "UtcTimestamp": {
-      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
-      "type": "string"
     },
     "VirtualMachineDiskFormat": {
       "description": "Supported VM base-disk encodings.",
@@ -439,6 +317,9 @@
   "additionalProperties": false,
   "description": "Immutable environment-first release.",
   "properties": {
+    "agentRunId": {
+      "$ref": "#/$defs/AgentRunId"
+    },
     "approval": {
       "$ref": "#/$defs/CandidateApproval"
     },
@@ -461,7 +342,15 @@
       "$ref": "#/$defs/ReleaseId"
     },
     "imagePolicyEvaluation": {
-      "$ref": "#/$defs/ImagePolicyEvaluation"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ImagePolicyEvaluation"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Container-only Trivy evidence. VM releases bind a deployment-owned CDI base disk instead\nand must not fabricate vulnerability counts for an imported guest disk."
     },
     "publishedAt": {
       "$ref": "#/$defs/UtcTimestamp"
@@ -483,12 +372,12 @@
     "courseId",
     "version",
     "candidateId",
+    "agentRunId",
     "candidateRevision",
     "environmentSpecSha256",
     "runtimeKind",
     "approval",
     "artifact",
-    "imagePolicyEvaluation",
     "publishedBy",
     "publishedAt"
   ],

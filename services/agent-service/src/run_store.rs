@@ -342,7 +342,8 @@ impl PostgresAgentRunStore {
              WHERE (state IN ('pending','prepared') OR (state='preparing' AND lease_expires_at <= now())) \
                AND EXISTS (SELECT 1 FROM agent.agent_track_work_items work \
                            WHERE work.run_id=agent_run_dispatches.run_id \
-                             AND work.state IN ('requested','running')) \
+                             AND (work.state='requested' OR \
+                                  (work.state='running' AND work.lease_expires_at <= now()))) \
              ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1",
         )
         .fetch_optional(&mut *transaction)

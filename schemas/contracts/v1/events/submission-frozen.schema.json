@@ -4,6 +4,59 @@
       "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
       "type": "string"
     },
+    "AgentRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `AgentRunId`.",
+      "type": "string"
+    },
+    "ArtifactId": {
+      "description": "Strongly typed UUIDv7 identifier for `ArtifactId`.",
+      "type": "string"
+    },
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "description": "Immutable object-store identity without a machine-local path or credential.",
+      "properties": {
+        "artifactId": {
+          "$ref": "#/$defs/ArtifactId",
+          "description": "Stable metadata identity resolved by the owning service."
+        },
+        "mediaType": {
+          "description": "Registered media type.",
+          "type": "string"
+        },
+        "objectVersion": {
+          "description": "Immutable backend object version.",
+          "type": "string"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Exact content digest."
+        },
+        "sizeBytes": {
+          "description": "Raw object length.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "storeBinding": {
+          "description": "Explicit object-store binding from deployment configuration.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifactId",
+        "storeBinding",
+        "objectVersion",
+        "sha256",
+        "sizeBytes",
+        "mediaType"
+      ],
+      "type": "object"
+    },
+    "BuildRequestId": {
+      "description": "Strongly typed UUIDv7 identifier for `BuildRequestId`.",
+      "type": "string"
+    },
     "CourseId": {
       "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
       "type": "string"
@@ -16,15 +69,240 @@
       "description": "Strongly typed UUIDv7 identifier for `EventId`.",
       "type": "string"
     },
+    "FrozenEnvironmentIdentity": {
+      "additionalProperties": false,
+      "description": "Frozen build and runtime identity used to reproduce collection.",
+      "properties": {
+        "buildRequestId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BuildRequestId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "environmentId": {
+          "$ref": "#/$defs/EnvironmentId"
+        },
+        "environmentRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "releaseId": {
+          "$ref": "#/$defs/ReleaseId"
+        },
+        "releaseVersion": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runtimeArtifactSha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "runtimeKind": {
+          "$ref": "#/$defs/RuntimeKind"
+        }
+      },
+      "required": [
+        "environmentId",
+        "environmentRevision",
+        "releaseId",
+        "releaseVersion",
+        "runtimeKind",
+        "runtimeArtifactSha256"
+      ],
+      "type": "object"
+    },
+    "FrozenFile": {
+      "additionalProperties": false,
+      "description": "One immutable frozen file.",
+      "properties": {
+        "mediaType": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "sizeBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "sha256",
+        "sizeBytes",
+        "mediaType"
+      ],
+      "type": "object"
+    },
+    "FrozenSubmission": {
+      "additionalProperties": false,
+      "description": "Manifest-authoritative immutable collection result.",
+      "properties": {
+        "actorId": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "agentRunId": {
+          "$ref": "#/$defs/AgentRunId"
+        },
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "courseId": {
+          "$ref": "#/$defs/CourseId"
+        },
+        "derivedArchive": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "environment": {
+          "$ref": "#/$defs/FrozenEnvironmentIdentity"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/FrozenFile"
+          },
+          "type": "array"
+        },
+        "frozenAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "id": {
+          "$ref": "#/$defs/FrozenSubmissionId"
+        },
+        "manifestRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "manifestSha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "object": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "retention": {
+          "$ref": "#/$defs/RetentionSnapshot"
+        },
+        "submissionManifestSha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "systemFacts": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "courseId",
+        "actorId",
+        "agentRunId",
+        "attempt",
+        "manifestRevision",
+        "submissionManifestSha256",
+        "files",
+        "manifestSha256",
+        "object",
+        "environment",
+        "retention",
+        "systemFacts",
+        "frozenAt"
+      ],
+      "type": "object"
+    },
     "FrozenSubmissionId": {
       "description": "Strongly typed UUIDv7 identifier for `FrozenSubmissionId`.",
       "type": "string"
+    },
+    "PolicyId": {
+      "description": "Strongly typed UUIDv7 identifier for `PolicyId`.",
+      "type": "string"
+    },
+    "ReleaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `ReleaseId`.",
+      "type": "string"
+    },
+    "RetentionClass": {
+      "description": "Retention classes with distinct privacy and recovery requirements.",
+      "enum": [
+        "course_material",
+        "build_evidence",
+        "run_evidence",
+        "student_submission",
+        "security_audit"
+      ],
+      "type": "string"
+    },
+    "RetentionDisposition": {
+      "description": "Required action after retention expires.",
+      "enum": [
+        "delete",
+        "purge_after_export",
+        "retain_sanitized_receipt"
+      ],
+      "type": "string"
+    },
+    "RetentionSnapshot": {
+      "additionalProperties": false,
+      "description": "Frozen data-retention decision for an immutable resource.",
+      "properties": {
+        "class": {
+          "$ref": "#/$defs/RetentionClass",
+          "description": "Stable retention class."
+        },
+        "disposition": {
+          "$ref": "#/$defs/RetentionDisposition",
+          "description": "Required terminal disposition."
+        },
+        "policyId": {
+          "$ref": "#/$defs/PolicyId",
+          "description": "Policy identity."
+        },
+        "policyRevision": {
+          "$ref": "#/$defs/Revision",
+          "description": "Exact policy revision used at creation."
+        },
+        "retainUntil": {
+          "$ref": "#/$defs/UtcTimestamp",
+          "description": "Absolute retention boundary."
+        }
+      },
+      "required": [
+        "policyId",
+        "policyRevision",
+        "class",
+        "retainUntil",
+        "disposition"
+      ],
+      "type": "object"
     },
     "Revision": {
       "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
       "format": "uint64",
       "minimum": 0,
       "type": "integer"
+    },
+    "RuntimeKind": {
+      "description": "Runtime kind shared by candidates, releases, and instances.",
+      "enum": [
+        "container",
+        "virtual_machine"
+      ],
+      "type": "string"
     },
     "Sequence": {
       "description": "Aggregate-local ordering sequence. This value is not an SSE resume cursor.",
@@ -38,25 +316,20 @@
     },
     "SubmissionFrozen": {
       "additionalProperties": false,
+      "description": "Complete immutable submission identity emitted only after database and Object Lock verification.",
       "properties": {
-        "environmentId": {
-          "$ref": "#/$defs/EnvironmentId"
+        "sourceIdentitySha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Environment-owned PVC or VM source identity used for both preflight and freeze."
         },
-        "frozenBy": {
-          "$ref": "#/$defs/ActorId"
-        },
-        "frozenSubmissionId": {
-          "$ref": "#/$defs/FrozenSubmissionId"
-        },
-        "manifestSha256": {
-          "$ref": "#/$defs/Sha256Digest"
+        "submission": {
+          "$ref": "#/$defs/FrozenSubmission",
+          "description": "Authoritative frozen submission contract, including object version and digest."
         }
       },
       "required": [
-        "frozenSubmissionId",
-        "environmentId",
-        "manifestSha256",
-        "frozenBy"
+        "submission",
+        "sourceIdentitySha256"
       ],
       "type": "object"
     },

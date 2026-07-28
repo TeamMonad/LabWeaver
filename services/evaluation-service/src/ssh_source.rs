@@ -20,6 +20,15 @@ use crate::collector::{
 
 const MAX_CREDENTIAL_TTL_SECONDS: i64 = 300;
 
+fn source_unavailable(stage: &'static str, error: &impl std::fmt::Debug) -> CollectError {
+    tracing::error!(
+        event = "evaluation.collector.ssh_source_unavailable",
+        stage,
+        error = ?error
+    );
+    CollectError::SourceUnavailable
+}
+
 /// One short-lived, single-environment, certificate-authenticated SFTP binding.
 #[derive(Clone)]
 pub struct SshSnapshotConfig {
@@ -74,8 +83,8 @@ impl SshSnapshotConfig {
                 .bytes()
                 .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
             || !safe_remote_root(&self.workspace_root)
-            || !self.private_key_path.is_absolute()
-            || !self.certificate_path.is_absolute()
+            || !safe_secret_path(&self.private_key_path)
+            || !safe_secret_path(&self.certificate_path)
             || ttl <= 0
             || ttl > MAX_CREDENTIAL_TTL_SECONDS
             || self.connect_timeout.is_zero()
@@ -123,10 +132,7 @@ impl SshSnapshotSource {
         let certificate = load_openssh_certificate(&config.certificate_path)
             .map_err(|_| CollectError::SshCredentialInvalid)?;
         validate_certificate(&certificate, &config, now)?;
-        let client_config = Arc::new(client::Config {
-            inactivity_timeout: Some(config.operation_timeout),
-            ..client::Config::default()
-        });
+        let client_config = ssh_client_configuration(config.operation_timeout);
         let verifier = HostKeyVerifier {
             expected: config.expected_host_key_sha256,
         };
@@ -141,7 +147,9 @@ impl SshSnapshotSource {
             Ok(Err(russh::Error::UnknownKey)) => {
                 return Err(CollectError::SshHostKeyMismatch);
             }
-            Ok(Err(_)) => return Err(CollectError::SourceUnavailable),
+            Ok(Err(error)) => {
+                return Err(source_unavailable("connect", &error));
+            }
             Ok(Ok(session)) => session,
         };
         let authentication = tokio::time::timeout(
@@ -154,7 +162,7 @@ impl SshSnapshotSource {
         )
         .await
         .map_err(|_| CollectError::SshTimeout)?
-        .map_err(|_| CollectError::SourceUnavailable)?;
+        .map_err(|error| source_unavailable("authenticate_certificate", &error))?;
         if !authentication.success() {
             return Err(CollectError::SshCredentialInvalid);
         }
@@ -162,28 +170,28 @@ impl SshSnapshotSource {
             tokio::time::timeout(config.operation_timeout, session.channel_open_session())
                 .await
                 .map_err(|_| CollectError::SshTimeout)?
-                .map_err(|_| CollectError::SourceUnavailable)?;
+                .map_err(|error| source_unavailable("open_session_channel", &error))?;
         tokio::time::timeout(
             config.operation_timeout,
             channel.request_subsystem(true, "sftp"),
         )
         .await
         .map_err(|_| CollectError::SshTimeout)?
-        .map_err(|_| CollectError::SourceUnavailable)?;
+        .map_err(|error| source_unavailable("request_sftp_subsystem", &error))?;
         let sftp = tokio::time::timeout(
             config.operation_timeout,
             SftpSession::new(channel.into_stream()),
         )
         .await
         .map_err(|_| CollectError::SshTimeout)?
-        .map_err(|_| CollectError::SourceUnavailable)?;
+        .map_err(|error| source_unavailable("initialize_sftp", &error))?;
         let canonical = tokio::time::timeout(
             config.operation_timeout,
             sftp.canonicalize(config.workspace_root.clone()),
         )
         .await
         .map_err(|_| CollectError::SshTimeout)?
-        .map_err(|_| CollectError::SourceUnavailable)?;
+        .map_err(|error| source_unavailable("canonicalize_workspace_root", &error))?;
         if canonical.trim_end_matches('/') != config.workspace_root.trim_end_matches('/') {
             return Err(CollectError::UnsafePath);
         }
@@ -193,7 +201,7 @@ impl SshSnapshotSource {
         )
         .await
         .map_err(|_| CollectError::SshTimeout)?
-        .map_err(|_| CollectError::SourceUnavailable)?;
+        .map_err(|error| source_unavailable("stat_workspace_root", &error))?;
         if !root_metadata.is_dir() || root_metadata.is_symlink() {
             return Err(CollectError::UnsafePath);
         }
@@ -263,6 +271,18 @@ impl SshSnapshotSource {
         }
         Ok(())
     }
+}
+
+fn ssh_client_configuration(operation_timeout: Duration) -> Arc<client::Config> {
+    Arc::new(client::Config {
+        // Russh uses this shared preference set for host-key negotiation and certificate
+        // authentication. Reducing it to one host-key algorithm makes a valid Ed25519 OpenSSH
+        // user certificate fail authentication. HostKeyVerifier still fail-closes on the exact
+        // observed host-key SHA-256 identity.
+        preferred: russh::Preferred::default(),
+        inactivity_timeout: Some(operation_timeout),
+        ..client::Config::default()
+    })
 }
 
 fn validate_certificate(
@@ -389,10 +409,24 @@ impl client::Handler for HostKeyVerifier {
         &mut self,
         server_public_key: &russh::keys::ssh_key::PublicKey,
     ) -> Result<bool, Self::Error> {
-        Ok(server_public_key
-            .to_bytes()
-            .is_ok_and(|bytes| Sha256Digest::of_bytes(&bytes) == self.expected))
+        let observed = host_key_identity(server_public_key);
+        let matches = observed == self.expected;
+        if !matches {
+            tracing::warn!(
+                event = "evaluation.collector.ssh_host_key_mismatch",
+                expected_host_key_sha256 = %self.expected,
+                observed_host_key_sha256 = %observed,
+            );
+        }
+        Ok(matches)
     }
+}
+
+fn host_key_identity(server_public_key: &russh::keys::ssh_key::PublicKey) -> Sha256Digest {
+    let fingerprint = server_public_key
+        .fingerprint(russh::keys::HashAlg::Sha256)
+        .to_string();
+    Sha256Digest::of_bytes(fingerprint.as_bytes())
 }
 
 fn sftp_metadata(metadata: &FileAttributes) -> SourceMetadata {
@@ -436,6 +470,14 @@ fn safe_remote_root(value: &str) -> bool {
         && value.split('/').skip(1).all(safe_component)
 }
 
+fn safe_secret_path(path: &std::path::Path) -> bool {
+    let value = path.to_string_lossy();
+    value.starts_with('/')
+        && !value.contains("//")
+        && !value.contains('\\')
+        && value.split('/').skip(1).all(safe_component)
+}
+
 fn safe_component(value: &str) -> bool {
     !value.is_empty()
         && value != "."
@@ -447,7 +489,10 @@ fn safe_component(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{SshSnapshotConfig, private_ip, safe_remote_root, validate_certificate};
+    use super::{
+        SshSnapshotConfig, host_key_identity, private_ip, safe_remote_root,
+        ssh_client_configuration, validate_certificate,
+    };
     use contracts::{Sha256Digest, UtcTimestamp};
     use russh::keys::ssh_key::{PrivateKey, certificate, private::Ed25519Keypair};
     use std::net::{IpAddr, Ipv4Addr};
@@ -485,6 +530,27 @@ mod tests {
         assert!(private_ip("fd00::8".parse()?));
         assert!(safe_remote_root("/srv/workspace"));
         Ok(())
+    }
+
+    #[test]
+    fn host_key_identity_matches_the_runtime_executor_fingerprint_contract() {
+        let key = PrivateKey::from(Ed25519Keypair::from_seed(&[7_u8; 32]));
+        let public_key = key.public_key();
+        let fingerprint = public_key
+            .fingerprint(russh::keys::HashAlg::Sha256)
+            .to_string();
+
+        assert_eq!(
+            host_key_identity(public_key),
+            Sha256Digest::of_bytes(fingerprint.as_bytes())
+        );
+    }
+
+    #[test]
+    fn certificate_authentication_keeps_russh_safe_key_preferences() {
+        let configuration = ssh_client_configuration(Duration::from_secs(5));
+        assert_eq!(configuration.preferred.key, russh::Preferred::default().key);
+        assert!(configuration.preferred.key.len() > 1);
     }
 
     #[test]

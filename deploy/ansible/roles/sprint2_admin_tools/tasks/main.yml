@@ -1,0 +1,163 @@
+---
+- name: Load the locked Sprint 2 administration tool identities
+  ansible.builtin.set_fact:
+    sprint2_admin_tools_lock: >-
+      {{ (lookup('ansible.builtin.file', playbook_dir ~ '/../../versions.lock.yml')
+          | from_yaml).sprint2_foundation.admin_tools }}
+
+- name: Reject an unknown administration tool profile
+  ansible.builtin.assert:
+    that:
+      - sprint2_admin_tools_profile in ['authoring', 'execution']
+      - sprint2_admin_tools_lock.nats_cli.linux_amd64_sha256 is match('^[0-9a-f]{64}$')
+      - sprint2_admin_tools_lock.nsc.linux_amd64_sha256 is match('^[0-9a-f]{64}$')
+      - sprint2_admin_tools_lock.minio_client.linux_amd64_sha256 is match('^[0-9a-f]{64}$')
+      - sprint2_admin_tools_lock.buildctl.linux_amd64_sha256 is match('^[0-9a-f]{64}$')
+      - sprint2_admin_tools_lock.keycloak_admin.linux_amd64_sha256 is match('^[0-9a-f]{64}$')
+    fail_msg: SPRINT2_ADMIN_TOOL_LOCK_INVALID
+
+- name: Create root-owned administration tool directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - "{{ sprint2_admin_tools_cache_root }}"
+    - "{{ sprint2_admin_tools_install_root }}"
+
+- name: Download the locked NATS CLI archive
+  ansible.builtin.get_url:
+    url: "{{ sprint2_admin_tools_lock.nats_cli.linux_amd64_url }}"
+    dest: "{{ sprint2_admin_tools_cache_root }}/nats-{{ sprint2_admin_tools_lock.nats_cli.version }}.zip"
+    checksum: "sha256:{{ sprint2_admin_tools_lock.nats_cli.linux_amd64_sha256 }}"
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Extract the locked NATS CLI archive
+  ansible.builtin.unarchive:
+    src: "{{ sprint2_admin_tools_cache_root }}/nats-{{ sprint2_admin_tools_lock.nats_cli.version }}.zip"
+    dest: "{{ sprint2_admin_tools_install_root }}"
+    remote_src: true
+    creates: "{{ sprint2_admin_tools_install_root }}/nats-0.4.0-linux-amd64/nats"
+
+- name: Install the locked NATS CLI entrypoint
+  ansible.builtin.file:
+    src: "{{ sprint2_admin_tools_install_root }}/nats-0.4.0-linux-amd64/nats"
+    dest: "{{ sprint2_admin_tools_bin_root }}/nats"
+    state: link
+    force: true
+
+- name: Download the locked NSC archive for credential authoring
+  ansible.builtin.get_url:
+    url: "{{ sprint2_admin_tools_lock.nsc.linux_amd64_url }}"
+    dest: "{{ sprint2_admin_tools_cache_root }}/nsc-{{ sprint2_admin_tools_lock.nsc.version }}.zip"
+    checksum: "sha256:{{ sprint2_admin_tools_lock.nsc.linux_amd64_sha256 }}"
+    owner: root
+    group: root
+    mode: '0644'
+  when: sprint2_admin_tools_profile == 'authoring'
+
+- name: Extract the locked NSC credential authoring tool
+  ansible.builtin.unarchive:
+    src: "{{ sprint2_admin_tools_cache_root }}/nsc-{{ sprint2_admin_tools_lock.nsc.version }}.zip"
+    dest: "{{ sprint2_admin_tools_install_root }}"
+    remote_src: true
+    creates: "{{ sprint2_admin_tools_install_root }}/nsc"
+  when: sprint2_admin_tools_profile == 'authoring'
+
+- name: Install the locked NSC entrypoint
+  ansible.builtin.file:
+    src: "{{ sprint2_admin_tools_install_root }}/nsc"
+    dest: "{{ sprint2_admin_tools_bin_root }}/nsc"
+    state: link
+    force: true
+  when: sprint2_admin_tools_profile == 'authoring'
+
+- name: Install locked execution package dependencies
+  ansible.builtin.dnf:
+    name:
+      - "{{ sprint2_admin_tools_lock.system_packages.postgresql }}"
+      - "{{ sprint2_admin_tools_lock.system_packages.java }}"
+    state: present
+  when: sprint2_admin_tools_profile == 'execution'
+
+- name: Download locked execution tool archives
+  ansible.builtin.get_url:
+    url: "{{ item.value.linux_amd64_url }}"
+    dest: "{{ sprint2_admin_tools_cache_root }}/{{ item.key }}-{{ item.value.version }}{{ '.tar.gz' if item.key in ['buildctl', 'keycloak_admin'] else '' }}"
+    checksum: "sha256:{{ item.value.linux_amd64_sha256 }}"
+    owner: root
+    group: root
+    mode: "{{ '0755' if item.key == 'minio_client' else '0644' }}"
+  loop: >-
+    {{ sprint2_admin_tools_lock
+       | dict2items
+       | selectattr('key', 'in', ['minio_client', 'buildctl', 'keycloak_admin'])
+       | list }}
+  when: sprint2_admin_tools_profile == 'execution'
+
+- name: Install the locked MinIO client
+  ansible.builtin.copy:
+    src: "{{ sprint2_admin_tools_cache_root }}/minio_client-{{ sprint2_admin_tools_lock.minio_client.version }}"
+    dest: "{{ sprint2_admin_tools_bin_root }}/mc"
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0755'
+  when: sprint2_admin_tools_profile == 'execution'
+
+- name: Create the locked BuildKit client extraction directory
+  ansible.builtin.file:
+    path: "{{ sprint2_admin_tools_install_root }}/buildkit-{{ sprint2_admin_tools_lock.buildctl.version }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: sprint2_admin_tools_profile == 'execution'
+
+- name: Extract the locked BuildKit client
+  ansible.builtin.unarchive:
+    src: "{{ sprint2_admin_tools_cache_root }}/buildctl-{{ sprint2_admin_tools_lock.buildctl.version }}.tar.gz"
+    dest: "{{ sprint2_admin_tools_install_root }}/buildkit-{{ sprint2_admin_tools_lock.buildctl.version }}"
+    remote_src: true
+    creates: "{{ sprint2_admin_tools_install_root }}/buildkit-{{ sprint2_admin_tools_lock.buildctl.version }}/bin/buildctl"
+  when: sprint2_admin_tools_profile == 'execution'
+
+- name: Extract the locked Keycloak administration client
+  ansible.builtin.unarchive:
+    src: "{{ sprint2_admin_tools_cache_root }}/keycloak_admin-{{ sprint2_admin_tools_lock.keycloak_admin.version }}.tar.gz"
+    dest: "{{ sprint2_admin_tools_install_root }}"
+    remote_src: true
+    creates: "{{ sprint2_admin_tools_install_root }}/keycloak-{{ sprint2_admin_tools_lock.keycloak_admin.version }}/bin/kcadm.sh"
+  when: sprint2_admin_tools_profile == 'execution'
+
+- name: Install locked execution tool entrypoints
+  ansible.builtin.file:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    state: link
+    force: true
+  loop:
+    - src: "{{ sprint2_admin_tools_install_root }}/buildkit-{{ sprint2_admin_tools_lock.buildctl.version }}/bin/buildctl"
+      dest: "{{ sprint2_admin_tools_bin_root }}/buildctl"
+    - src: "{{ sprint2_admin_tools_install_root }}/keycloak-{{ sprint2_admin_tools_lock.keycloak_admin.version }}/bin/kcadm.sh"
+      dest: "{{ sprint2_admin_tools_bin_root }}/kcadm.sh"
+  when: sprint2_admin_tools_profile == 'execution'
+
+- name: Verify installed administration tool identities
+  ansible.builtin.command:
+    argv: "{{ item.argv }}"
+  changed_when: false
+  register: sprint2_admin_tool_versions
+  loop: >-
+    {{ ([{'argv': [sprint2_admin_tools_bin_root ~ '/nats', '--version']}]
+        + ([{'argv': [sprint2_admin_tools_bin_root ~ '/nsc', '--version']}]
+           if sprint2_admin_tools_profile == 'authoring' else [])
+        + ([{'argv': [sprint2_admin_tools_bin_root ~ '/mc', '--version']},
+            {'argv': [sprint2_admin_tools_bin_root ~ '/buildctl', '--version']},
+            {'argv': [sprint2_admin_tools_bin_root ~ '/kcadm.sh', 'help']},
+            {'argv': ['/usr/bin/psql', '--version']}]
+           if sprint2_admin_tools_profile == 'execution' else [])) }}

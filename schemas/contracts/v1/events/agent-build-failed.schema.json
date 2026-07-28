@@ -1,18 +1,31 @@
 {
   "$defs": {
-    "AgentBuildRequested": {
+    "AgentBuildFailed": {
       "additionalProperties": false,
+      "description": "Safe terminal failure emitted only after candidate-resource cleanup was attempted.",
       "properties": {
         "buildRequestId": {
           "$ref": "#/$defs/BuildRequestId"
         },
-        "candidateSha256": {
+        "cleanupVerified": {
+          "type": "boolean"
+        },
+        "commandSha256": {
           "$ref": "#/$defs/Sha256Digest"
+        },
+        "diagnosticCode": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
         }
       },
       "required": [
         "buildRequestId",
-        "candidateSha256"
+        "commandSha256",
+        "diagnosticCode",
+        "retryable",
+        "cleanupVerified"
       ],
       "type": "object"
     },
@@ -63,7 +76,7 @@
       "$ref": "#/$defs/CourseId"
     },
     "data": {
-      "$ref": "#/$defs/AgentBuildRequested"
+      "$ref": "#/$defs/AgentBuildFailed"
     },
     "datacontenttype": {
       "type": "string"

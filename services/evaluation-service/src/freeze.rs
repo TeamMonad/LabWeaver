@@ -14,9 +14,10 @@ use contracts::submission::{
     FrozenEnvironmentIdentity, FrozenSubmission, SubmissionManifest, SubmissionSource,
 };
 use contracts::{
-    ActorId, AgentRunId, CourseId, RetentionClass, RetentionSnapshot, Revision, Sha256Digest,
+    ActorId, AgentRunId, CourseId, FrozenSubmissionId, RetentionClass, RetentionSnapshot, Revision,
+    Sha256Digest,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::collector::{CollectError, SnapshotCollector, SnapshotSource, SnapshotTransport};
 use crate::freeze_store::{BeginFreeze, FreezeStoreError, PgFreezeStore};
@@ -24,8 +25,10 @@ use crate::freeze_store::{BeginFreeze, FreezeStoreError, PgFreezeStore};
 const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(15 * 60);
 
 /// Internal authenticated command produced from an approved `SubmissionManifest` projection.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FreezeRequest {
+    pub frozen_submission_id: FrozenSubmissionId,
     pub course_id: CourseId,
     pub actor_id: ActorId,
     pub agent_run_id: AgentRunId,
@@ -114,6 +117,7 @@ impl FreezeService {
         let lease = match self
             .store
             .begin(
+                request.frozen_submission_id,
                 request.course_id,
                 request.environment.environment_id,
                 &request.idempotency_key,
@@ -174,6 +178,12 @@ impl FreezeService {
         {
             Ok(verified) => verified,
             Err(error) => {
+                tracing::error!(
+                    event = "evaluation.freeze.object_store_failed",
+                    frozen_submission_id = %lease.frozen_submission_id,
+                    diagnostic = error.diagnostic_code(),
+                    error = ?error,
+                );
                 self.fail_attempt(&lease, error.diagnostic_code(), false)
                     .await?;
                 return Err(FreezeServiceError::ObjectStore(error));
@@ -218,6 +228,11 @@ impl FreezeService {
             .complete(&lease, &object_key, &submission, &request.trace_id)
             .await
         {
+            tracing::error!(
+                event = "evaluation.freeze.persistence_failed",
+                frozen_submission_id = %lease.frozen_submission_id,
+                error = ?error,
+            );
             self.fail_attempt(&lease, error.diagnostic_code(), false)
                 .await?;
             return Err(FreezeServiceError::Store(error));
@@ -234,7 +249,15 @@ impl FreezeService {
         self.store
             .fail(lease, diagnostic_code, cleanup_verified)
             .await
-            .map_err(|_| FreezeServiceError::FailurePersistence)
+            .map_err(|error| {
+                tracing::error!(
+                    event = "evaluation.freeze.failure_persistence_failed",
+                    frozen_submission_id = %lease.frozen_submission_id,
+                    diagnostic = diagnostic_code,
+                    error = ?error,
+                );
+                FreezeServiceError::FailurePersistence
+            })
     }
 }
 
@@ -274,6 +297,7 @@ fn request_hash(
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
     struct RequestIdentity<'a> {
+        frozen_submission_id: FrozenSubmissionId,
         course_id: CourseId,
         actor_id: ActorId,
         agent_run_id: AgentRunId,
@@ -289,6 +313,7 @@ fn request_hash(
         SnapshotTransport::Ssh => "ssh_sftp",
     };
     Sha256Digest::of_canonical(&RequestIdentity {
+        frozen_submission_id: request.frozen_submission_id,
         course_id: request.course_id,
         actor_id: request.actor_id,
         agent_run_id: request.agent_run_id,
@@ -323,4 +348,22 @@ pub enum FreezeServiceError {
     ObjectIdentityMismatch,
     #[error("LW_COLLECT_FAILURE_PERSIST_FAILED")]
     FailurePersistence,
+}
+
+impl FreezeServiceError {
+    /// Returns the stable diagnostic without exposing source paths or provider payloads.
+    #[must_use]
+    pub const fn diagnostic_code(&self) -> &'static str {
+        match self {
+            Self::ConfigurationInvalid => "LW_COLLECT_CONFIG_INVALID",
+            Self::ContractInvalid => "LW_COLLECT_CONTRACT_INVALID",
+            Self::IdempotencyConflict => "LW_COLLECT_IDEMPOTENCY_CONFLICT",
+            Self::InProgress => "LW_COLLECT_IN_PROGRESS",
+            Self::Collect(error) => error.diagnostic_code(),
+            Self::ObjectStore(error) => error.diagnostic_code(),
+            Self::Store(error) => error.diagnostic_code(),
+            Self::ObjectIdentityMismatch => "LW_OBJECT_LOCK_IDENTITY_MISMATCH",
+            Self::FailurePersistence => "LW_COLLECT_FAILURE_PERSIST_FAILED",
+        }
+    }
 }

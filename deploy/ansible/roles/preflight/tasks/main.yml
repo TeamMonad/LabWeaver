@@ -1,7 +1,10 @@
 ---
 - name: Require an approved preflight scope
   ansible.builtin.assert:
-    that: (labweaver_preflight_scope | default('cluster')) in ['cluster', 'private-sigstore', 'identity-foundation']
+    that: >-
+      (labweaver_preflight_scope | default('cluster')) in
+      ['cluster', 'identity-foundation', 'sprint2-foundation',
+       'sprint2-buildkit', 'sprint2-harbor-route', 'sprint2-application', 'sprint2-reset']
     fail_msg: PREFLIGHT_SCOPE_INVALID
   run_once: true
   delegate_to: localhost
@@ -16,9 +19,12 @@
     fail_msg: "inventory must declare exactly one router/control plane/NFS server and at least two workers"
   run_once: true
   delegate_to: localhost
-  when: (labweaver_preflight_scope | default('cluster')) == 'cluster'
+  when: >-
+    (labweaver_preflight_scope | default('cluster')) in
+    ['cluster', 'sprint2-foundation', 'sprint2-buildkit',
+     'sprint2-harbor-route', 'sprint2-application', 'sprint2-reset']
 
-- name: Assert the minimal Private Sigstore inventory boundary
+- name: Assert the minimal identity-foundation inventory boundary
   ansible.builtin.assert:
     that:
       - (groups.get('routers', []) | sort) == ['edge-router']
@@ -26,10 +32,10 @@
       - (groups.get('k8s_cluster', []) | sort) == ['k8s-cp1']
       - groups.get('workers', []) | length == 0
       - groups.get('nfs_servers', []) | length == 0
-    fail_msg: SIGSTORE_INVENTORY_SCOPE_INVALID
+    fail_msg: IDENTITY_INVENTORY_SCOPE_INVALID
   run_once: true
   delegate_to: localhost
-  when: (labweaver_preflight_scope | default('cluster')) in ['private-sigstore', 'identity-foundation']
+  when: (labweaver_preflight_scope | default('cluster')) == 'identity-foundation'
 
 - name: Reject unresolved configuration placeholders
   ansible.builtin.assert:
@@ -59,14 +65,14 @@
   delegate_to: localhost
   when: (labweaver_preflight_scope | default('cluster')) == 'cluster'
 
-- name: Reject unresolved Private Sigstore controller placeholders
+- name: Reject unresolved identity-foundation controller placeholders
   ansible.builtin.assert:
     that:
-      - sigstore_controller_inputs | select('match', '^REPLACE_') | list | length == 0
-      - sigstore_controller_inputs | select('equalto', '') | list | length == 0
+      - identity_controller_inputs | select('match', '^REPLACE_') | list | length == 0
+      - identity_controller_inputs | select('equalto', '') | list | length == 0
     fail_msg: "private inventory/controller variables contain an unresolved placeholder"
   vars:
-    sigstore_controller_inputs:
+    identity_controller_inputs:
       - "{{ kubernetes_api_endpoint | string }}"
       - "{{ kubernetes_api_advertise_address | string }}"
       - "{{ router_wan_interface | string }}"
@@ -76,7 +82,7 @@
       - "{{ nfs_server | string }}"
   run_once: true
   delegate_to: localhost
-  when: (labweaver_preflight_scope | default('cluster')) in ['private-sigstore', 'identity-foundation']
+  when: (labweaver_preflight_scope | default('cluster')) == 'identity-foundation'
 
 - name: Assert Rocky family target
   ansible.builtin.assert:
@@ -91,7 +97,7 @@
 - name: Require local-only hosts for direct Kubernetes controller mode
   ansible.builtin.assert:
     that:
-      - (labweaver_preflight_scope | default('cluster')) in ['private-sigstore', 'identity-foundation']
+      - (labweaver_preflight_scope | default('cluster')) == 'identity-foundation'
       - ansible_connection == 'local'
     fail_msg: DIRECT_KUBERNETES_CONTROLLER_SCOPE_INVALID
   when:
@@ -101,9 +107,9 @@
 - name: Verify the adopted cluster API from the direct controller
   ansible.builtin.command:
     argv:
-      - "{{ private_sigstore_kubectl_path | default('/usr/bin/kubectl') }}"
+      - "{{ identity_kubectl_path | default('/usr/bin/kubectl') }}"
       - --kubeconfig
-      - "{{ private_sigstore_kubeconfig_path | default('/etc/kubernetes/admin.conf') }}"
+      - "{{ identity_kubeconfig_path | default('/etc/kubernetes/admin.conf') }}"
       - get
       - namespace
       - kube-system

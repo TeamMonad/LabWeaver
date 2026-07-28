@@ -1,0 +1,485 @@
+---
+- name: Load immutable Sprint 2 BuildKit identity
+  ansible.builtin.set_fact:
+    sprint2_buildkit_lock: >-
+      {{ lookup('ansible.builtin.file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml }}
+
+- name: Validate Sprint 2 BuildKit inputs
+  ansible.builtin.assert:
+    that:
+      - sprint2_buildkit_enabled | bool
+      - sprint2_buildkit_namespace == 'labweaver-build'
+      - sprint2_buildkit_bundle | length > 0
+      - sprint2_buildkit_storage_class | length > 0
+      - sprint2_buildkit_registry_cidr is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}/(?:[0-9]|[12][0-9]|3[0-2])$')
+      - sprint2_buildkit_operator_client_path == '/home/rocky/.config/labweaver/buildkit'
+      - sprint2_buildkit_lock.sprint2_foundation.buildkit_rootless is match('^[^\s]+@sha256:[0-9a-f]{64}$')
+    fail_msg: SPRINT2_BUILDKIT_INPUT_INVALID
+
+- name: Inspect controlled BuildKit inputs
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ sprint2_buildkit_bundle }}"
+    - "{{ sprint2_buildkit_manifest }}"
+  register: sprint2_buildkit_inputs
+  delegate_to: localhost
+  become: false
+
+- name: Reject missing BuildKit inputs
+  ansible.builtin.assert:
+    that:
+      - sprint2_buildkit_inputs.results | map(attribute='stat.exists') | min
+      - sprint2_buildkit_inputs.results | map(attribute='stat.isreg') | min
+    fail_msg: SPRINT2_BUILDKIT_INPUT_MISSING
+
+- name: Parse reviewed BuildKit bundle and manifest
+  ansible.builtin.set_fact:
+    sprint2_buildkit_objects: >-
+      {{ lookup('ansible.builtin.file', sprint2_buildkit_bundle) | from_yaml_all | list }}
+    sprint2_buildkit_manifest_value: >-
+      {{ lookup('ansible.builtin.file', sprint2_buildkit_manifest) | from_json }}
+    sprint2_buildkit_bundle_sha256: >-
+      {{ lookup('ansible.builtin.file', sprint2_buildkit_bundle) | hash('sha256') }}
+  no_log: true
+
+- name: Validate BuildKit object boundary
+  ansible.builtin.assert:
+    that:
+      - sprint2_buildkit_manifest_value.apiVersion == 'deploy.labweaver.io/sprint2-bundle-manifest/v1'
+      - sprint2_buildkit_manifest_value.namespace == sprint2_buildkit_namespace
+      - sprint2_buildkit_objects | length == 2
+      - sprint2_buildkit_objects | map(attribute='apiVersion') | unique | list == ['v1']
+      - sprint2_buildkit_objects | map(attribute='metadata.namespace') | unique | list == [sprint2_buildkit_namespace]
+      - sprint2_buildkit_objects | selectattr('kind', 'equalto', 'ConfigMap') | map(attribute='metadata.name') | list == ['buildkit-config']
+      - sprint2_buildkit_objects | selectattr('kind', 'equalto', 'Secret') | map(attribute='metadata.name') | list == ['buildkit-server-secrets']
+    fail_msg: SPRINT2_BUILDKIT_BUNDLE_INVALID
+  no_log: true
+
+- name: Validate every BuildKit key against the manifest
+  ansible.builtin.assert:
+    that:
+      - item.data is defined
+      - item.stringData is not defined
+      - item.binaryData is not defined
+      - item.data.keys() | sort == sprint2_buildkit_expected_keys | sort
+      - item.kind != 'Secret' or item.type == 'Opaque'
+    fail_msg: SPRINT2_BUILDKIT_BUNDLE_KEYS_INVALID
+  vars:
+    sprint2_buildkit_expected_keys: >-
+      {{ (sprint2_buildkit_manifest_value.configMaps
+          if item.kind == 'ConfigMap'
+          else sprint2_buildkit_manifest_value.secrets)[item.metadata.name] }}
+  loop: "{{ sprint2_buildkit_objects }}"
+  no_log: true
+
+- name: Select reviewed BuildKit configuration
+  ansible.builtin.set_fact:
+    sprint2_buildkit_configuration: >-
+      {{ (sprint2_buildkit_objects
+          | selectattr('kind', 'equalto', 'ConfigMap')
+          | first).data['buildkitd.toml'] }}
+    sprint2_buildkit_registry_ca_b64: >-
+      {{ (sprint2_buildkit_objects
+          | selectattr('kind', 'equalto', 'Secret')
+          | first).data['registry-ca.crt'] }}
+  no_log: true
+
+- name: Require the approved rootless BuildKit boundary
+  ansible.builtin.assert:
+    that:
+      - "'rootless = true' in sprint2_buildkit_configuration"
+      - "'noProcessSandbox = true' in sprint2_buildkit_configuration"
+      - "'tcp://0.0.0.0:1234' in sprint2_buildkit_configuration"
+      - "'/etc/buildkit/tls/ca.crt' in sprint2_buildkit_configuration"
+      - "'/etc/buildkit/tls/registry-ca.crt' in sprint2_buildkit_configuration"
+      - >-
+        sprint2_buildkit_dns_nameserver is
+        match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
+      - >-
+        ('nameservers = ["' ~ sprint2_buildkit_dns_nameserver ~ '"]')
+        in sprint2_buildkit_configuration
+    fail_msg: SPRINT2_BUILDKIT_CONFIGURATION_INVALID
+  no_log: true
+
+- name: Read the retained Harbor public TLS authority
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ sprint2_buildkit_kubeconfig }}"
+    api_version: v1
+    kind: Secret
+    namespace: harbor
+    name: "{{ sprint2_buildkit_harbor_tls_secret }}"
+  register: sprint2_buildkit_harbor_tls
+  no_log: true
+
+- name: Reject a BuildKit bundle that trusts a different Harbor authority
+  ansible.builtin.assert:
+    that:
+      - sprint2_buildkit_harbor_tls.resources | length == 1
+      - sprint2_buildkit_harbor_tls.resources[0].type == 'Opaque'
+      - sprint2_buildkit_harbor_tls.resources[0].data['ca.crt'] | default('') | length > 0
+      - sprint2_buildkit_harbor_tls.resources[0].data['tls.crt'] | default('') | length > 0
+      - sprint2_buildkit_harbor_tls.resources[0].data['tls.key'] | default('') | length > 0
+      - sprint2_buildkit_harbor_tls.resources[0].data['ca.crt'] == sprint2_buildkit_registry_ca_b64
+    fail_msg: SPRINT2_BUILDKIT_HARBOR_CA_MISMATCH
+  no_log: true
+
+- name: Read the retained Harbor nginx service for cluster-local access
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ sprint2_buildkit_kubeconfig }}"
+    api_version: v1
+    kind: Service
+    namespace: harbor
+    name: harbor
+  register: sprint2_buildkit_harbor_service
+
+- name: Bind the retained Harbor service identity
+  ansible.builtin.set_fact:
+    sprint2_buildkit_harbor_service_ip: >-
+      {{ sprint2_buildkit_harbor_service.resources[0].spec.clusterIP
+         if sprint2_buildkit_harbor_service.resources | length == 1 else '' }}
+
+- name: Reject a missing or invalid retained Harbor service
+  ansible.builtin.assert:
+    that:
+      - sprint2_buildkit_harbor_service.resources | length == 1
+      - sprint2_buildkit_harbor_service.resources[0].metadata.labels['app.kubernetes.io/managed-by'] | default('') == 'Helm'
+      - sprint2_buildkit_harbor_service.resources[0].spec.ports | selectattr('port', 'equalto', 443) | list | length == 1
+      - sprint2_buildkit_harbor_service_ip is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
+    fail_msg: SPRINT2_BUILDKIT_HARBOR_SERVICE_INVALID
+
+- name: Read retained cluster DNS configuration
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ sprint2_buildkit_kubeconfig }}"
+    api_version: v1
+    kind: ConfigMap
+    namespace: "{{ sprint2_buildkit_coredns_namespace }}"
+    name: "{{ sprint2_buildkit_coredns_configmap }}"
+  register: sprint2_buildkit_coredns
+
+- name: Bind the additive Harbor DNS block
+  ansible.builtin.set_fact:
+    sprint2_buildkit_coredns_corefile: >-
+      {{ sprint2_buildkit_coredns.resources[0].data.Corefile
+         if sprint2_buildkit_coredns.resources | length == 1 else '' }}
+    sprint2_buildkit_coredns_harbor_block: |
+          hosts {
+              {{ sprint2_buildkit_harbor_service_ip }} {{ sprint2_buildkit_harbor_hostname }}
+              fallthrough
+          }
+    sprint2_buildkit_coredns_harbor_legacy_block: >-
+      {{ ['    hosts {',
+          '        ' ~ sprint2_buildkit_harbor_service_ip ~ ' ' ~ sprint2_buildkit_harbor_hostname,
+          '        fallthrough',
+          '    }',
+          ''] | join('\n') }}
+
+- name: Reject ambiguous cluster DNS ownership
+  ansible.builtin.assert:
+    that:
+      - sprint2_buildkit_coredns.resources | length == 1
+      - >-
+        sprint2_buildkit_coredns_corefile.count('    prometheus :9153') == 1
+      - >-
+        sprint2_buildkit_harbor_hostname not in sprint2_buildkit_coredns_corefile or
+        sprint2_buildkit_coredns_harbor_block in sprint2_buildkit_coredns_corefile or
+        sprint2_buildkit_coredns_harbor_legacy_block in sprint2_buildkit_coredns_corefile
+    fail_msg: SPRINT2_BUILDKIT_CLUSTER_DNS_AMBIGUOUS
+
+- name: Render additive Harbor cluster DNS resolution
+  ansible.builtin.set_fact:
+    sprint2_buildkit_coredns_desired: >-
+      {{ sprint2_buildkit_coredns_corefile
+         if sprint2_buildkit_coredns_harbor_block in sprint2_buildkit_coredns_corefile
+         else (sprint2_buildkit_coredns_corefile.replace(
+           sprint2_buildkit_coredns_harbor_legacy_block,
+           sprint2_buildkit_coredns_harbor_block)
+         if sprint2_buildkit_coredns_harbor_legacy_block in sprint2_buildkit_coredns_corefile
+         else sprint2_buildkit_coredns_corefile.replace(
+           '    prometheus :9153',
+           sprint2_buildkit_coredns_harbor_block ~ '    prometheus :9153')) }}
+
+- name: Reconcile additive Harbor cluster DNS resolution
+  kubernetes.core.k8s:
+    kubeconfig: "{{ sprint2_buildkit_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        namespace: "{{ sprint2_buildkit_coredns_namespace }}"
+        name: "{{ sprint2_buildkit_coredns_configmap }}"
+      data:
+        Corefile: "{{ sprint2_buildkit_coredns_desired }}"
+
+- name: Inspect the generated BuildKit operator client inputs
+  ansible.builtin.stat:
+    path: "{{ sprint2_buildkit_bundle | dirname }}/build-executor-client/{{ item }}"
+  loop: [ca.crt, tls.crt, tls.key]
+  register: sprint2_buildkit_operator_client_inputs
+  delegate_to: localhost
+  become: false
+
+- name: Reject missing BuildKit operator client inputs
+  ansible.builtin.assert:
+    that:
+      - sprint2_buildkit_operator_client_inputs.results | map(attribute='stat.exists') | min
+      - sprint2_buildkit_operator_client_inputs.results | map(attribute='stat.isreg') | min
+      - sprint2_buildkit_operator_client_inputs.results | map(attribute='stat.mode') | select('match', '^0?600$') | list | length == 3
+    fail_msg: SPRINT2_BUILDKIT_OPERATOR_CLIENT_INVALID
+  no_log: true
+
+- name: Create the protected BuildKit operator client directory
+  ansible.builtin.file:
+    path: "{{ sprint2_buildkit_operator_client_path }}"
+    state: directory
+    owner: rocky
+    group: rocky
+    mode: '0700'
+
+- name: Install the current BuildKit operator mTLS client
+  ansible.builtin.copy:
+    src: "{{ sprint2_buildkit_bundle | dirname }}/build-executor-client/{{ item }}"
+    dest: "{{ sprint2_buildkit_operator_client_path }}/{{ item }}"
+    owner: rocky
+    group: rocky
+    mode: '0600'
+  loop: [ca.crt, tls.crt, tls.key]
+  no_log: true
+
+- name: Reconcile the dedicated BuildKit namespace
+  kubernetes.core.k8s:
+    kubeconfig: "{{ sprint2_buildkit_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ sprint2_buildkit_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver-infrastructure
+          labweaver.io/infrastructure: "true"
+          labweaver.io/security-exception: rootless-buildkit-no-process-sandbox
+          pod-security.kubernetes.io/enforce: privileged
+          pod-security.kubernetes.io/audit: restricted
+          pod-security.kubernetes.io/warn: restricted
+
+- name: Apply reviewed BuildKit configuration
+  kubernetes.core.k8s:
+    kubeconfig: "{{ sprint2_buildkit_kubeconfig }}"
+    state: present
+    definition: "{{ item }}"
+  loop: "{{ sprint2_buildkit_objects }}"
+  no_log: true
+
+- name: Reconcile rootless BuildKit workload
+  kubernetes.core.k8s:
+    kubeconfig: "{{ sprint2_buildkit_kubeconfig }}"
+    state: present
+    definition: "{{ item }}"
+  loop: >-
+    {{ lookup('ansible.builtin.template', 'workloads.yml.j2') | from_yaml_all | list }}
+
+- name: Read rootless BuildKit deployment
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ sprint2_buildkit_kubeconfig }}"
+    api_version: apps/v1
+    kind: Deployment
+    namespace: "{{ sprint2_buildkit_namespace }}"
+    name: buildkit
+  register: sprint2_buildkit_deployment
+  until: >-
+    sprint2_buildkit_deployment.resources | length == 1 and
+    sprint2_buildkit_deployment.resources[0].status.readyReplicas | default(0, true) | int == 1 and
+    sprint2_buildkit_deployment.resources[0].status.updatedReplicas | default(0, true) | int == 1
+  retries: "{{ sprint2_buildkit_rollout_retries }}"
+  delay: "{{ sprint2_buildkit_rollout_delay }}"
+
+- name: Verify rootless BuildKit security and immutable image readback
+  ansible.builtin.assert:
+    that:
+      - sprint2_buildkit_deployment.resources[0].spec.template.spec.containers | length == 1
+      - sprint2_buildkit_deployment.resources[0].spec.template.spec.containers[0].image == sprint2_buildkit_lock.sprint2_foundation.buildkit_rootless
+      - sprint2_buildkit_deployment.resources[0].spec.template.spec.dnsPolicy == 'None'
+      - sprint2_buildkit_deployment.resources[0].spec.template.spec.dnsConfig.nameservers == [sprint2_buildkit_dns_nameserver]
+      - not (sprint2_buildkit_deployment.resources[0].spec.template.spec.containers[0].securityContext.privileged | default(false))
+      - (sprint2_buildkit_deployment.resources[0].spec.template.spec.hostNetwork | default(false)) == false
+      - sprint2_buildkit_deployment.resources[0].spec.template.spec.volumes | selectattr('hostPath', 'defined') | list | length == 0
+      - sprint2_buildkit_deployment.resources[0].spec.template.spec.securityContext.seccompProfile.type == 'Unconfined'
+      - sprint2_buildkit_deployment.resources[0].spec.template.spec.containers[0].securityContext.appArmorProfile.type == 'Unconfined'
+      - sprint2_buildkit_deployment.resources[0].spec.template.spec.containers[0].securityContext.seLinuxOptions.type == 'spc_t'
+    fail_msg: SPRINT2_BUILDKIT_READBACK_INVALID
+
+- name: Validate the router-owned BuildKit controller binding
+  ansible.builtin.assert:
+    that:
+      - sprint2_buildkit_controller_kubeconfig_source | length > 0
+      - sprint2_buildkit_controller_api_server is match('^https://(?:[0-9]{1,3}\.){3}[0-9]{1,3}:6443$')
+      - sprint2_buildkit_controller_api_address is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
+      - sprint2_buildkit_controller_port | int == 1234
+    fail_msg: SPRINT2_BUILDKIT_CONTROLLER_INPUT_INVALID
+  when: sprint2_buildkit_controller_enabled | bool
+
+- name: Inspect the router-owned Kubernetes controller input
+  ansible.builtin.stat:
+    path: "{{ sprint2_buildkit_controller_kubeconfig_source }}"
+  register: sprint2_buildkit_controller_kubeconfig_input
+  delegate_to: "{{ sprint2_buildkit_controller_host }}"
+  when: sprint2_buildkit_controller_enabled | bool
+
+- name: Require a protected router-owned Kubernetes controller input
+  ansible.builtin.assert:
+    that:
+      - sprint2_buildkit_controller_kubeconfig_input.stat.exists
+      - sprint2_buildkit_controller_kubeconfig_input.stat.isreg
+      - sprint2_buildkit_controller_kubeconfig_input.stat.mode is match('^0?600$')
+    fail_msg: SPRINT2_BUILDKIT_CONTROLLER_KUBECONFIG_INVALID
+  when: sprint2_buildkit_controller_enabled | bool
+  no_log: true
+
+- name: Create the router-owned package client directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: rocky
+    group: rocky
+    mode: "0700"
+  loop:
+    - "{{ sprint2_buildkit_controller_kubeconfig | dirname }}"
+    - "{{ sprint2_buildkit_controller_client_path }}"
+  delegate_to: "{{ sprint2_buildkit_controller_host }}"
+  become: true
+  when: sprint2_buildkit_controller_enabled | bool
+
+- name: Install the router-owned Kubernetes controller identity
+  ansible.builtin.copy:
+    src: "{{ sprint2_buildkit_controller_kubeconfig_source }}"
+    dest: "{{ sprint2_buildkit_controller_kubeconfig }}"
+    remote_src: true
+    owner: rocky
+    group: rocky
+    mode: "0600"
+  delegate_to: "{{ sprint2_buildkit_controller_host }}"
+  become: true
+  when: sprint2_buildkit_controller_enabled | bool
+  no_log: true
+
+- name: Install the router-owned BuildKit package identity
+  ansible.builtin.copy:
+    src: "{{ sprint2_buildkit_bundle | dirname }}/build-executor-client/{{ item }}"
+    dest: "{{ sprint2_buildkit_controller_client_path }}/{{ item }}"
+    owner: rocky
+    group: rocky
+    mode: "0600"
+  loop: [ca.crt, tls.crt, tls.key]
+  delegate_to: "{{ sprint2_buildkit_controller_host }}"
+  become: true
+  when: sprint2_buildkit_controller_enabled | bool
+  no_log: true
+
+- name: Reconcile the bounded Kubernetes API router resolution
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} LABWEAVER SPRINT2 KUBERNETES API"
+    block: >-
+      {{ sprint2_buildkit_controller_api_address }} k8s-api.lab.lan
+    create: false
+    owner: root
+    group: root
+    mode: "0644"
+  delegate_to: "{{ sprint2_buildkit_controller_host }}"
+  become: true
+  when: sprint2_buildkit_controller_enabled | bool
+
+- name: Install the persistent router-owned BuildKit tunnel
+  ansible.builtin.template:
+    src: buildkit-port-forward.service.j2
+    dest: /etc/systemd/system/labweaver-buildkit-port-forward.service
+    owner: root
+    group: root
+    mode: "0644"
+  delegate_to: "{{ sprint2_buildkit_controller_host }}"
+  become: true
+  notify: Restart router-owned BuildKit tunnel
+  when: sprint2_buildkit_controller_enabled | bool
+
+- name: Apply the router-owned BuildKit tunnel before package validation
+  ansible.builtin.meta: flush_handlers
+  when: sprint2_buildkit_controller_enabled | bool
+
+- name: Require the router-owned BuildKit endpoint
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ sprint2_buildkit_controller_port }}"
+    state: started
+    timeout: 30
+  delegate_to: "{{ sprint2_buildkit_controller_host }}"
+  when: sprint2_buildkit_controller_enabled | bool
+
+- name: Inspect the router-owned BuildKit package context
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/docker-buildx
+      - inspect
+      - labweaver-package
+  register: sprint2_buildkit_controller_context
+  environment:
+    HOME: /home/rocky
+  become: true
+  become_user: rocky
+  delegate_to: "{{ sprint2_buildkit_controller_host }}"
+  changed_when: false
+  failed_when: false
+  when: sprint2_buildkit_controller_enabled | bool
+
+- name: Create the missing router-owned BuildKit package context
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/docker-buildx
+      - create
+      - --name
+      - labweaver-package
+      - --driver
+      - remote
+      - --driver-opt
+      - >-
+        {{ 'cacert=' ~ sprint2_buildkit_controller_client_path ~ '/ca.crt,cert='
+           ~ sprint2_buildkit_controller_client_path ~ '/tls.crt,key='
+           ~ sprint2_buildkit_controller_client_path
+           ~ '/tls.key,servername=buildkit.labweaver-build.svc' }}
+      - --use
+      - tcp://127.0.0.1:1234
+  environment:
+    HOME: /home/rocky
+  become: true
+  become_user: rocky
+  delegate_to: "{{ sprint2_buildkit_controller_host }}"
+  changed_when: true
+  when:
+    - sprint2_buildkit_controller_enabled | bool
+    - sprint2_buildkit_controller_context.rc != 0
+
+- name: Verify the router-owned BuildKit package binding
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/docker-buildx
+      - inspect
+      - labweaver-package
+      - --bootstrap
+  register: sprint2_buildkit_controller_inspect
+  environment:
+    HOME: /home/rocky
+  become: true
+  become_user: rocky
+  delegate_to: "{{ sprint2_buildkit_controller_host }}"
+  changed_when: false
+  when: sprint2_buildkit_controller_enabled | bool
+
+- name: Require the exact router-owned BuildKit package identity
+  ansible.builtin.assert:
+    that:
+      - "'Endpoint:         tcp://127.0.0.1:1234' in sprint2_buildkit_controller_inspect.stdout"
+      - "'BuildKit version: v0.31.1' in sprint2_buildkit_controller_inspect.stdout"
+      - "'servername=\"buildkit.labweaver-build.svc\"' in sprint2_buildkit_controller_inspect.stdout"
+    fail_msg: SPRINT2_BUILDKIT_CONTROLLER_IDENTITY_INVALID
+  when: sprint2_buildkit_controller_enabled | bool

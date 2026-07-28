@@ -14,7 +14,7 @@ use contracts::environment::{
     EnvironmentOperationKind,
 };
 use contracts::events::{
-    CloudEvent, EVENT_CONTRACTS, ReleasePublishedV2, ReleaseWithdrawn, subjects,
+    CloudEvent, EVENT_CONTRACTS, ReleasePublished, ReleaseWithdrawn, subjects,
 };
 use contracts::{EnvironmentId, EventId, OperationId, Revision, Sha256Digest};
 use futures_util::StreamExt;
@@ -206,11 +206,30 @@ impl NatsAccessRevoker {
         &self,
         instance: &EnvironmentInstance,
     ) -> Result<Revision, NatsMessagingError> {
+        self.revoke(instance, "environment_expired").await
+    }
+
+    /// Revokes all grants before an actor-requested lifecycle mutation.
+    pub async fn revoke(
+        &self,
+        instance: &EnvironmentInstance,
+        reason: &'static str,
+    ) -> Result<Revision, NatsMessagingError> {
+        if !matches!(
+            reason,
+            "environment_stopped"
+                | "environment_restarted"
+                | "environment_deleted"
+                | "environment_cancelled"
+                | "environment_expired"
+        ) {
+            return Err(NatsMessagingError::Configuration);
+        }
         let request = AccessRevocationRequest {
             version: 1,
             environment_id: instance.id,
             environment_revision: instance.revision,
-            reason: "environment_expired",
+            reason,
         };
         let payload =
             serde_json::to_vec(&request).map_err(|_| NatsMessagingError::Serialization)?;
@@ -583,7 +602,7 @@ pub struct JetStreamReleaseConsumer {
 }
 
 enum ReleaseEvent {
-    Published(Box<CloudEvent<ReleasePublishedV2>>),
+    Published(Box<CloudEvent<ReleasePublished>>),
     Withdrawn(Box<CloudEvent<ReleaseWithdrawn>>),
 }
 
@@ -610,7 +629,7 @@ impl JetStreamReleaseConsumer {
             .await
             .map_err(|_| NatsMessagingError::ConsumerUnavailable)?;
         let expected_subjects = BTreeSet::from([
-            subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED_V2,
+            subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED,
             subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN,
         ]);
         let configured_subjects = consumer
@@ -667,8 +686,8 @@ impl JetStreamReleaseConsumer {
         };
         let subject = envelope.get("subject").and_then(Value::as_str);
         let parsed = match subject {
-            Some(subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED_V2) => {
-                serde_json::from_value::<CloudEvent<ReleasePublishedV2>>(envelope)
+            Some(subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED) => {
+                serde_json::from_value::<CloudEvent<ReleasePublished>>(envelope)
                     .map(|event| (event.id, ReleaseEvent::Published(Box::new(event))))
             }
             Some(subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN) => {

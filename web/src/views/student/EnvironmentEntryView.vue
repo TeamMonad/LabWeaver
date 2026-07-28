@@ -235,16 +235,16 @@
                         <div v-if="httpsGrant(g)" class="access-card">
                           <h5 class="access-card__title">
                             <SvgIcon name="code" size="sm" aria-hidden="true" />
-                            code-server
+                            容器实验入口
                           </h5>
-                          <p class="access-card__desc">通过 OIDC 与 AccessGrant 经受保护 Gateway 打开 code-server。</p>
+                          <p class="access-card__desc">通过当前登录会话与 AccessGrant 打开受保护的容器实验页面。</p>
                           <button
                             type="button"
                             class="filled-button"
                             :disabled="!connectUrl(g)"
-                            @click="openCodeServer(g)"
+                            @click="openContainerRuntime(g)"
                           >
-                            打开 code-server
+                            打开容器实验
                           </button>
                           <p v-if="!connectUrl(g)" class="access-card__hint">连接地址缺失，无法打开。</p>
                         </div>
@@ -260,7 +260,7 @@
                             <CopyButton :text="sshCommand(g) ?? ''" aria-label="复制 SSH 命令" />
                           </div>
                           <div v-if="sshCommand(g)" class="ssh-meta">
-                            <span>Gateway fingerprint：<code>{{ truncateSha256(g.gatewayFingerprintSha256 ?? '') }}</code></span>
+                            <span>Gateway fingerprint：<code>{{ sshFingerprint(g) ?? 'unavailable' }}</code></span>
                             <span>Grant：{{ formatExpiry(g.expiresAt) }}</span>
                           </div>
                           <p v-else class="access-card__hint">SSH 别名或 Gateway 缺失，无法生成命令。</p>
@@ -344,7 +344,7 @@ import { useEnvironmentInstance } from '@/composables/useEnvironmentInstance'
 import { useEnvironmentLifecycle } from '@/composables/useEnvironmentLifecycle'
 import { useEnvironmentAccess } from '@/composables/useEnvironmentAccess'
 import { useEnvironmentOperations } from '@/composables/useEnvironmentOperations'
-import { freezeSubmission } from '@/generated/contracts'
+import { freezeSubmission, getFrozenSubmission } from '@/generated/contracts'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import CopyButton from '@/components/common/CopyButton.vue'
 import DataTable from '@/components/common/DataTable.vue'
@@ -352,7 +352,7 @@ import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import EventTimeline from '@/components/common/EventTimeline.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
-import { formatTimestamp, idempotencyKey, ifMatch, truncateSha256 } from '@/utils/format'
+import { formatTimestamp, idempotencyKey, ifMatch } from '@/utils/format'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import type { DataTableColumn } from '@/components/common/DataTable.vue'
 import type {
@@ -431,9 +431,12 @@ watch(
 )
 
 watch(
-  () => env.instance.kind,
-  (kind, previousKind) => {
-    if (kind === 'success' && previousKind !== 'success') {
+  () =>
+    env.instance.kind === 'success'
+      ? `${env.instance.data.id}:${env.instance.data.revision}:${env.instance.data.observedState}`
+      : null,
+  (identity, previousIdentity) => {
+    if (identity && identity !== previousIdentity) {
       access.loadEndpoints()
     }
   },
@@ -482,14 +485,18 @@ function connectUrl(g: AccessGrantWithGateway): string | null {
   return eg ? resolveConnectUrl(eg) : null
 }
 
-function openCodeServer(g: AccessGrantWithGateway) {
+function openContainerRuntime(g: AccessGrantWithGateway) {
   const url = connectUrl(g)
   if (url) window.open(url, '_blank', 'noopener,noreferrer')
 }
 
 function sshCommand(g: AccessGrantWithGateway): string | null {
   const eg = sshGrant(g)
-  return eg ? buildSshCommand(g, eg) : null
+  return eg ? buildSshCommand(eg) : null
+}
+
+function sshFingerprint(g: AccessGrantWithGateway): string | null {
+  return sshGrant(g)?.sshGatewayHostKeyFingerprint ?? null
 }
 
 function canFreeze(data: EnvironmentInstanceSchema): boolean {
@@ -508,13 +515,14 @@ async function freeze(data: EnvironmentInstanceSchema) {
     path: { environmentId: data.id },
     headers: { 'Idempotency-Key': idempotencyKey(), 'If-Match': ifMatch(data.revision) },
     body: {
+      courseId: data.courseId,
       manifest: {
         apiVersion: 'evaluation.labweaver.io/v1',
         kind: 'SubmissionManifest',
         name: 'workspace-freeze',
-        include: [{ kind: 'directoryTree', path: 'workspace' }],
+        include: [{ kind: 'exactFile', path: 'README.md' }],
         exclude: [],
-        required: [],
+        required: [{ kind: 'exactFile', path: 'README.md' }],
         llmReadable: [],
         followSymlinks: false,
         maxFiles: 1000,
@@ -537,7 +545,59 @@ async function freeze(data: EnvironmentInstanceSchema) {
     return
   }
   freezeState.value = { kind: 'success', data: result.data }
+  const submissionId = result.data.statusUrl.match(
+    /^\/api\/v1\/frozen-submissions\/([0-9a-f-]{36})$/,
+  )?.[1]
+  if (!submissionId) {
+    freezeState.value = {
+      kind: 'error',
+      diagnostic: makeDiagnostic(
+        'FREEZE_STATUS_IDENTITY_INVALID',
+        '冻结提交返回了无法验证的状态地址',
+        false,
+      ),
+    }
+    freezeDiagnostic.value = freezeState.value.diagnostic
+    return
+  }
+  let frozenObject: EnvironmentInstanceWithFreeze['freezeEvidence']
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const frozen = await getFrozenSubmission({ path: { submissionId } })
+    if (frozen.data) {
+      frozenObject = frozen.data.object
+      break
+    }
+    const problem = extractProblemDetails(frozen.error)
+    if (
+      problem &&
+      problem.diagnosticCode !== 'LW_COLLECT_SUBMISSION_NOT_FOUND' &&
+      !problem.retryable
+    ) {
+      freezeState.value = {
+        kind: 'error',
+        diagnostic: makeDiagnostic(
+          problem.diagnosticCode ?? 'FREEZE_READBACK_FAILED',
+          problem.detail ?? '冻结提交读取失败',
+          false,
+        ),
+      }
+      freezeDiagnostic.value = freezeState.value.diagnostic
+      return
+    }
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 1000))
+  }
+  if (!frozenObject) {
+    freezeState.value = {
+      kind: 'error',
+      diagnostic: makeDiagnostic('FREEZE_READBACK_TIMEOUT', '冻结提交读取超时', true),
+    }
+    freezeDiagnostic.value = freezeState.value.diagnostic
+    return
+  }
   await env.load()
+  if (env.instance.kind === 'success' && env.instance.data.id === data.id) {
+    ;(env.instance.data as EnvironmentInstanceWithFreeze).freezeEvidence = frozenObject
+  }
   await operations.load()
 }
 

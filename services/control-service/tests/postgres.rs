@@ -8,15 +8,14 @@ use async_trait::async_trait;
 use contracts::authoring::{
     AgentTrackKind, CandidateDecision, EnvironmentCandidate, EnvironmentSpec,
 };
-use contracts::events::{AgentBuildRequestedV2, CloudEvent};
+use contracts::events::{AgentBuildRequested, CloudEvent};
 use contracts::http::{
     CandidateDecisionRequest, CreateEnvironmentTemplateReleaseRequest,
     CreateProblemPackageUploadRequest, IdempotencyKey, ProblemPackageUploadFile,
 };
 use contracts::supply_chain::BuildNetworkPolicy;
 use contracts::supply_chain::{
-    EnvironmentTemplateRelease, ImageArtifact, ImagePolicyEvaluation, SigstoreEvidence,
-    VulnerabilitySummary,
+    EnvironmentTemplateRelease, ImageArtifact, ImagePolicyEvaluation, VulnerabilitySummary,
 };
 use contracts::{
     ActorId, AgentRunId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId,
@@ -42,17 +41,13 @@ async fn issue_48_migrations_enforce_fencing_and_monotonic_course_sequences()
         .connect(&url)
         .await?;
     let control = format!(
-        "CREATE SCHEMA control; SET search_path TO control;\n{}\n{}\n{}",
-        include_str!("../../../migrations/control/0001_initial.sql"),
-        include_str!("../../../migrations/control/0002_control_plane.sql"),
-        include_str!("../../../migrations/control/0003_container_build_projections.sql")
+        "CREATE SCHEMA control; SET search_path TO control;\n{}",
+        include_str!("../../../migrations/control/0001_sprint2_baseline.sql")
     );
     sqlx::raw_sql(&control).execute(&pool).await?;
     let agent = format!(
-        "CREATE SCHEMA agent; SET search_path TO agent;\n{}\n{}\n{}",
-        include_str!("../../../migrations/agent/0001_initial.sql"),
-        include_str!("../../../migrations/agent/0002_track_leases.sql"),
-        include_str!("../../../migrations/agent/0003_control_dispatch.sql")
+        "CREATE SCHEMA agent; SET search_path TO agent;\n{}",
+        include_str!("../../../migrations/agent/0001_sprint2_baseline.sql")
     );
     sqlx::raw_sql(&agent).execute(&pool).await?;
 
@@ -273,10 +268,8 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
         .connect(&url)
         .await?;
     let migrations = format!(
-        "CREATE SCHEMA control; SET search_path TO control;\n{}\n{}\n{}",
-        include_str!("../../../migrations/control/0001_initial.sql"),
-        include_str!("../../../migrations/control/0002_control_plane.sql"),
-        include_str!("../../../migrations/control/0003_container_build_projections.sql")
+        "CREATE SCHEMA control; SET search_path TO control;\n{}",
+        include_str!("../../../migrations/control/0001_sprint2_baseline.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;
     let config = control_config()?;
@@ -351,6 +344,40 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     );
 
     let environment_candidate = environment_candidate(environment_schema)?;
+    let build_context = match &environment_candidate.spec.runtime {
+        contracts::authoring::EnvironmentRuntimeSpec::Container { build_context, .. } => {
+            build_context
+        }
+        contracts::authoring::EnvironmentRuntimeSpec::VirtualMachine { .. } => {
+            return Err("fixture must be Container".into());
+        }
+    };
+    let upload_id = Uuid::now_v7();
+    let foreign_course_id = CourseId::new();
+    sqlx::query(
+        "INSERT INTO control.problem_package_upload_sessions \
+         (upload_id,course_id,revision,state,retention_policy_revision,expires_at,completed_package_id) \
+         VALUES ($1,$2,1,'completed',1,now()+interval '1 hour',$3)",
+    )
+    .bind(upload_id)
+    .bind(foreign_course_id.as_uuid())
+    .bind(Uuid::now_v7())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO control.problem_package_upload_files \
+         (upload_id,ordinal,path,object_key,artifact_id,object_version,size_bytes,sha256,media_type,verified_at) \
+         VALUES ($1,0,'context.tar.gz',$2,$3,$4,$5,$6,$7,now())",
+    )
+    .bind(upload_id)
+    .bind(format!("courses/{course_id}/uploads/{upload_id}/context.tar.gz"))
+    .bind(build_context.artifact_id.as_uuid())
+    .bind(&build_context.object_version)
+    .bind(i64::try_from(build_context.size_bytes)?)
+    .bind(build_context.sha256.to_string())
+    .bind(&build_context.media_type)
+    .execute(&pool)
+    .await?;
     sqlx::query(
         "INSERT INTO control.candidates \
          (candidate_id,candidate_kind,course_id,revision,state,content_sha256,contract, \
@@ -365,34 +392,76 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     .bind(Uuid::now_v7())
     .execute(&pool)
     .await?;
+    let environment_decision = CandidateDecisionRequest {
+        candidate_revision: environment_candidate.revision,
+        candidate_sha256: environment_candidate.spec_sha256,
+        policy_revision: environment_candidate.policy_revision,
+        schema_sha256: environment_candidate.schema_sha256,
+        trust_revision: Revision::new(1)?,
+        decision: CandidateDecision::Approved,
+        reason: "reviewed container candidate".to_owned(),
+    };
+    let cross_course_context = service
+        .decide_candidate(
+            course_id,
+            environment_candidate.id,
+            AgentTrackKind::Environment,
+            &environment_decision,
+            ActorId::new(),
+            Revision::new(1)?,
+            &IdempotencyKey::parse("reject-cross-course-build-context")?,
+            "2026-07-16T08:00:00.000Z".parse()?,
+        )
+        .await;
+    assert!(matches!(
+        cross_course_context,
+        Err(ControlError::PersistenceIdentityMismatch)
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM control.candidate_approvals")
+            .fetch_one(&pool)
+            .await?,
+        0
+    );
+    sqlx::query(
+        "UPDATE control.problem_package_upload_sessions SET course_id=$1 WHERE upload_id=$2",
+    )
+    .bind(course_id.as_uuid())
+    .bind(upload_id)
+    .execute(&pool)
+    .await?;
     let approval = service
         .decide_candidate(
             course_id,
             environment_candidate.id,
             AgentTrackKind::Environment,
-            &CandidateDecisionRequest {
-                candidate_revision: environment_candidate.revision,
-                candidate_sha256: environment_candidate.spec_sha256,
-                policy_revision: environment_candidate.policy_revision,
-                schema_sha256: environment_candidate.schema_sha256,
-                trust_revision: Revision::new(1)?,
-                decision: CandidateDecision::Approved,
-                reason: "reviewed container candidate".to_owned(),
-            },
+            &environment_decision,
             ActorId::new(),
             Revision::new(1)?,
             &IdempotencyKey::parse("approve-container-candidate")?,
             "2026-07-16T08:00:00.000Z".parse()?,
         )
         .await?;
+    let requested_view = service
+        .environment_candidate_view(course_id, environment_candidate.id)
+        .await?;
+    assert_eq!(requested_view.candidate, environment_candidate);
+    assert_eq!(requested_view.approvals, vec![approval.clone()]);
+    let requested_build = requested_view.build.ok_or("missing requested build view")?;
+    assert_eq!(
+        requested_build.state,
+        contracts::http::CandidateBuildState::Requested
+    );
+    assert!(requested_build.artifact.is_none());
+    assert!(requested_build.image_policy_evaluation.is_none());
     let payload: serde_json::Value = sqlx::query_scalar(
         "SELECT payload FROM control.outbox_events WHERE subject=$1 AND aggregate_id<>$2",
     )
-    .bind(contracts::events::subjects::AGENT_BUILD_REQUESTED_V2)
+    .bind(contracts::events::subjects::AGENT_BUILD_REQUESTED)
     .bind(approval.id.as_uuid())
     .fetch_one(&pool)
     .await?;
-    let build_event: CloudEvent<AgentBuildRequestedV2> = serde_json::from_value(payload)?;
+    let build_event: CloudEvent<AgentBuildRequested> = serde_json::from_value(payload)?;
     build_event.data.validate()?;
     assert_eq!(
         build_event.data.request.candidate_id,
@@ -402,7 +471,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     assert_eq!(
         build_event.data.request.output_repository,
         format!(
-            "harbor.internal/course-{course_id}/{}",
+            "harbor.internal/labweaver-system/course-{course_id}-{}",
             environment_candidate.id
         )
     );
@@ -429,16 +498,23 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     {
         *build_request_id = build_event.data.request.id;
     }
-    supply_chain.image_policy_evaluation.policy_id = image_policy_id;
-    supply_chain.image_policy_evaluation.artifact_sha256 =
-        supply_chain.artifact.content_sha256()?;
+    let artifact_sha256 = supply_chain.artifact.content_sha256()?;
+    let evaluation = supply_chain
+        .image_policy_evaluation
+        .as_mut()
+        .ok_or("container fixture must carry image policy evidence")?;
+    evaluation.policy_id = image_policy_id;
+    evaluation.artifact_sha256 = artifact_sha256;
     assert!(matches!(
         service
             .project_artifact(
                 EventId::new(),
                 CourseId::new(),
                 &supply_chain.artifact,
-                &supply_chain.image_policy_evaluation,
+                supply_chain
+                    .image_policy_evaluation
+                    .as_ref()
+                    .ok_or("container fixture must carry image policy evidence")?,
             )
             .await,
         Err(ControlError::CourseMismatch)
@@ -448,9 +524,28 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
             EventId::new(),
             course_id,
             &supply_chain.artifact,
-            &supply_chain.image_policy_evaluation,
+            supply_chain
+                .image_policy_evaluation
+                .as_ref()
+                .ok_or("container fixture must carry image policy evidence")?,
         )
         .await?;
+    let succeeded_view = service
+        .environment_candidate_view(course_id, environment_candidate.id)
+        .await?;
+    let succeeded_build = succeeded_view.build.ok_or("missing succeeded build view")?;
+    assert_eq!(
+        succeeded_build.state,
+        contracts::http::CandidateBuildState::Succeeded
+    );
+    assert_eq!(
+        succeeded_build.artifact,
+        Some(supply_chain.artifact.clone())
+    );
+    assert_eq!(
+        succeeded_build.image_policy_evaluation,
+        supply_chain.image_policy_evaluation.clone()
+    );
     let release = service
         .create_release(
             course_id,
@@ -460,8 +555,6 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
                 environment_spec_sha256: environment_candidate.spec_sha256,
                 runtime_kind: contracts::authoring::RuntimeKind::Container,
                 approval_id: approval.id,
-                artifact: supply_chain.artifact,
-                image_policy_evaluation: supply_chain.image_policy_evaluation,
             },
             ActorId::new(),
             &IdempotencyKey::parse("publish-container-release")?,
@@ -488,7 +581,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].withdrawal, Some(withdrawal));
     for subject in [
-        contracts::events::subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED_V2,
+        contracts::events::subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED,
         contracts::events::subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN,
     ] {
         assert!(
@@ -567,37 +660,15 @@ fn release_fixture(
     let published_at = "2026-07-16T08:00:00.000Z".parse::<UtcTimestamp>()?;
     let valid_until = "2026-07-16T10:00:00.000Z".parse::<UtcTimestamp>()?;
     let artifact_sha256 = Sha256Digest::of_bytes(b"container-image");
-    let trust_bundle_sha256 = Sha256Digest::of_bytes(b"trust-bundle");
     let candidate_id = CandidateId::new();
     let candidate_sha256 = Sha256Digest::of_bytes(b"environment-spec");
     let artifact_id = ImageArtifactId::new();
-    let artifact_ref = |media_type: &str| ArtifactRef {
-        artifact_id: ArtifactId::new(),
-        store_binding: "artifact-store-v1".to_owned(),
-        object_version: "version-1".to_owned(),
-        sha256: Sha256Digest::of_bytes(media_type.as_bytes()),
-        size_bytes: 1,
-        media_type: media_type.to_owned(),
-    };
-    let signature = SigstoreEvidence {
-        trust_bundle_sha256,
-        fulcio_issuer: "https://issuer.invalid".to_owned(),
-        certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
-        subject_digest: artifact_sha256,
-        certificate_sha256: Sha256Digest::of_bytes(b"certificate"),
-        signature_sha256: Sha256Digest::of_bytes(b"signature"),
-        rekor_log_id: "rekor-v1".to_owned(),
-        rekor_log_index: 1,
-        rekor_inclusion_proof_sha256: Sha256Digest::of_bytes(b"rekor-proof"),
-        ct_log_id: "ct-v1".to_owned(),
-        sct_sha256: Sha256Digest::of_bytes(b"sct"),
-        verified_at: published_at,
-    };
     Ok(EnvironmentTemplateRelease {
         id: ReleaseId::new(),
         course_id,
         version: 1,
         candidate_id,
+        agent_run_id: AgentRunId::new(),
         candidate_revision: Revision::new(1)?,
         environment_spec_sha256: candidate_sha256,
         runtime_kind: contracts::authoring::RuntimeKind::Container,
@@ -618,13 +689,9 @@ fn release_fixture(
             id: artifact_id,
             build_request_id: BuildRequestId::new(),
             repository: "registry.invalid/course/environment".to_owned(),
-            immutable_tag: "release-1".to_owned(),
             digest: format!("sha256:{artifact_sha256}"),
-            sbom: artifact_ref("application/spdx+json"),
-            provenance: artifact_ref("application/vnd.in-toto+json"),
-            signature,
         },
-        image_policy_evaluation: ImagePolicyEvaluation {
+        image_policy_evaluation: Some(ImagePolicyEvaluation {
             artifact_id,
             artifact_sha256,
             policy_id: PolicyId::new(),
@@ -639,16 +706,11 @@ fn release_fixture(
                 high: 1,
                 critical: 0,
             },
-            trust_bundle_sha256,
-            expected_fulcio_issuer: "https://issuer.invalid".to_owned(),
-            expected_certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
-            require_rekor_inclusion: true,
-            require_ct_sct: true,
             evaluated_at: published_at,
             max_evidence_age_milliseconds: 7_200_000,
             valid_until,
             passed: true,
-        },
+        }),
         published_by: ActorId::new(),
         published_at,
     })
@@ -687,19 +749,32 @@ fn control_config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
         trust_revision: Revision::new(1)?,
         image_policy_id: PolicyId::new(),
         image_policy_revision: Revision::new(1)?,
-        trust_bundle_sha256: Sha256Digest::of_bytes(b"trust-bundle"),
-        fulcio_issuer: "https://issuer.invalid".to_owned(),
-        certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
         environment_schema_sha256: Sha256Digest::of_bytes(b"environment"),
         evaluation_schema_sha256: Sha256Digest::of_bytes(b"evaluation"),
         container_build: ContainerBuildPolicy {
             builder_binding: "buildkit-primary-v1".to_owned(),
-            output_repository_prefix: "harbor.internal".to_owned(),
+            output_repository_prefix: "harbor.internal/labweaver-system".to_owned(),
             dockerfile_path: "Dockerfile".to_owned(),
             network: BuildNetworkPolicy::DenyAll,
             max_duration_milliseconds: 600_000,
             max_cpu_millicores: 2_000,
             max_memory_bytes: 2_147_483_648,
+        },
+        virtual_machine_base: control_service::VirtualMachineBasePolicy {
+            provider_binding: "kubevirt-primary-v1".to_owned(),
+            storage_class_binding: "vm-rwo-primary-v1".to_owned(),
+            artifact_id: contracts::ImageArtifactId::new(),
+            base_disk: contracts::supply_chain::VirtualMachineBaseDisk {
+                binding: "ubuntu-24.04-v1".to_owned(),
+                source_registry_digest: concat!(
+                    "docker://quay.io/containerdisks/ubuntu@",
+                    "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
+                )
+                .to_owned(),
+                disk_sha256: Sha256Digest::of_bytes(b"vm-disk"),
+                capacity_bytes: 10_737_418_240,
+            },
+            format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
         },
     })
 }

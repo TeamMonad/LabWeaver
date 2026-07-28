@@ -1,0 +1,68 @@
+{{- if .Values.portalRoute.enabled }}
+{{- $routeNamespace := required "portalRoute.namespace is required" .Values.portalRoute.namespace }}
+{{- $routeName := required "portalRoute.name is required" .Values.portalRoute.name }}
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: {{ $routeName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "labweaver.labels" . | nindent 4 }}
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: {{ $routeNamespace }}
+  to:
+    - group: ""
+      kind: Service
+      name: web
+    - group: ""
+      kind: Service
+      name: access-service
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $routeName }}
+  namespace: {{ $routeNamespace }}
+  labels:
+    {{- include "labweaver.labels" . | nindent 4 }}
+spec:
+  hostnames:
+    - {{ required "portalRoute.hostname is required" .Values.portalRoute.hostname | quote }}
+  parentRefs:
+    - name: {{ required "portalRoute.gatewayName is required" .Values.portalRoute.gatewayName }}
+      sectionName: {{ required "portalRoute.gatewaySectionName is required" .Values.portalRoute.gatewaySectionName }}
+  rules:
+    {{- if .Values.objectStoreRoute.enabled }}
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ required "objectStoreRoute.pathPrefix is required" .Values.objectStoreRoute.pathPrefix | quote }}
+      backendRefs:
+        - name: web
+          namespace: {{ .Release.Namespace }}
+          port: 8080
+    {{- end }}
+    - matches:
+        - path: {type: PathPrefix, value: /api}
+        - path: {type: PathPrefix, value: /auth}
+      backendRefs:
+        - name: access-service
+          namespace: {{ .Release.Namespace }}
+          port: 8080
+    - matches:
+        - path: {type: PathPrefix, value: /connect}
+      backendRefs:
+        - name: access-service
+          namespace: {{ .Release.Namespace }}
+          port: 8080
+    - matches:
+        - path: {type: PathPrefix, value: /}
+      backendRefs:
+        - name: web
+          namespace: {{ .Release.Namespace }}
+          port: 8080
+{{- end }}

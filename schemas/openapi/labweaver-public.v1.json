@@ -606,7 +606,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OperationAccepted"
+                  "$ref": "../contracts/v1/agent-run.schema.json"
                 }
               }
             },
@@ -828,7 +828,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OperationAccepted"
+                  "$ref": "../contracts/v1/agent-run.schema.json"
                 }
               }
             },
@@ -956,7 +956,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OperationAccepted"
+                  "$ref": "../contracts/v1/agent-run.schema.json"
                 }
               }
             },
@@ -1059,7 +1059,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "../contracts/v1/environment-candidate.schema.json"
+                  "$ref": "../contracts/v1/http/environment-candidate-view.schema.json"
                 }
               }
             },
@@ -1761,7 +1761,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "../contracts/v1/evaluation-candidate.schema.json"
+                  "$ref": "../contracts/v1/http/evaluation-candidate-view.schema.json"
                 }
               }
             },

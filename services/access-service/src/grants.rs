@@ -9,8 +9,9 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
 };
 use contracts::{
-    AccessGrantId, ActorId, CourseId, EndpointGrantId, EndpointId, EventId, GatewaySessionId,
-    PlatformRole, Revision, Sequence, Sha256Digest, SshPublicKeyId, StreamSequence, UtcTimestamp,
+    AccessGrantId, ActorId, CourseId, EndpointGrantId, EndpointId, EnvironmentId, EventId,
+    GatewaySessionId, PlatformRole, Revision, Sequence, Sha256Digest, SshPublicKeyId,
+    StreamSequence, UtcTimestamp,
     access::{
         AccessGrant, AccessGrantSnapshot, AccessGrantState, AuthorizationDecision,
         AuthorizationDecisionSummary, CloseGatewaySessionRequest, CreateGatewaySessionRequest,
@@ -31,6 +32,7 @@ use contracts::{
         IdempotencyKey, RenewAccessGrantRequest, RevokeAccessGrantRequest, StrongEtag,
     },
 };
+use futures_util::StreamExt;
 use rand::RngCore;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -46,6 +48,28 @@ use super::{
 };
 
 const TERMINATION_SECONDS: i64 = 60;
+// This request/reply subject deliberately sits outside the persisted
+// `labweaver.access.>` event stream. Otherwise JetStream's PubAck races the
+// authoritative Access response and the caller can observe the wrong payload.
+const ACCESS_REVOCATION_SUBJECT: &str = "labweaver.service.access.revoke.v1";
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EnvironmentAccessRevocationRequest {
+    version: u8,
+    environment_id: EnvironmentId,
+    environment_revision: Revision,
+    reason: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EnvironmentAccessRevocationResponse {
+    version: u8,
+    environment_id: EnvironmentId,
+    environment_revision: Revision,
+    access_revocation_revision: Revision,
+}
 
 fn parse_body<T: DeserializeOwned>(body: &Bytes) -> Result<T, ApiError> {
     contracts::parse_strict_json(body)
@@ -732,7 +756,6 @@ pub async fn authorize_ssh(
 ) -> Result<Json<SshAuthorization>, ApiError> {
     let request: SshAuthorizationRequest = parse_body(&body)?;
     ensure_gateway_request(&state, &principal, &request.gateway_identity)?;
-    validate_alias(&request.alias)?;
     if !valid_fingerprint(&request.presented_key_fingerprint_sha256)
         || request.connection_id.trim().is_empty()
         || !valid_sha256_hex(&request.source_address_hash)
@@ -747,150 +770,59 @@ pub async fn authorize_ssh(
     {
         return Err(ApiError::forbidden("LW_ACCESS_AUTHORIZATION_STALE"));
     }
+    // OpenSSH resolves the local account before AuthorizedKeysCommand. Therefore this
+    // phase authenticates only the fixed `gateway` account and key. The exact endpoint
+    // alias is selected and re-authorized when the forced command is redeemed.
     let candidate = sqlx::query(
-        "SELECT g.grant_id,g.actor_id,g.course_id,g.environment_id,g.environment_revision,g.contract, \
-                g.revision AS grant_revision,eg.endpoint_grant_id,eg.endpoint_id,eg.endpoint_revision, \
-                k.key_id \
-         FROM access.endpoint_grants eg JOIN access.access_grants g ON g.grant_id=eg.grant_id \
-         JOIN access.ssh_public_keys k ON k.actor_id=g.actor_id \
-         JOIN access.course_memberships cm ON cm.course_id=g.course_id AND cm.actor_id=g.actor_id \
-         WHERE eg.alias=$1 AND eg.protocol='ssh' AND eg.health='healthy' AND g.state='active' \
-           AND g.not_before <= $2 AND g.expires_at > $2 AND eg.expires_at > $2 \
-           AND k.fingerprint_sha256=$3 AND k.revoked_at IS NULL \
-           AND cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>$2) \
-           AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END",
+        "SELECT k.key_id,k.actor_id,k.normalized_openssh FROM access.ssh_public_keys k \
+         JOIN access.actors a ON a.actor_id=k.actor_id \
+         WHERE k.fingerprint_sha256=$1 AND k.revoked_at IS NULL AND a.disabled_at IS NULL \
+           AND EXISTS (SELECT 1 FROM access.access_grants g \
+             JOIN access.endpoint_grants eg ON eg.grant_id=g.grant_id \
+             JOIN access.course_memberships cm ON cm.course_id=g.course_id AND cm.actor_id=g.actor_id \
+             WHERE g.actor_id=k.actor_id AND g.state='active' AND g.not_before<=$2 AND g.expires_at>$2 \
+               AND eg.protocol='ssh' AND eg.health='healthy' AND eg.expires_at>$2 \
+               AND cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>$2) \
+               AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END)",
     )
-    .bind(&request.alias)
-    .bind(now)
     .bind(&request.presented_key_fingerprint_sha256)
+    .bind(now)
     .fetch_optional(&state.pool)
     .await
     .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?
     .ok_or_else(|| ApiError::forbidden("LW_ACCESS_SSH_DENIED"))?;
-    let grant_id = typed_id::<AccessGrantId>(candidate.get("grant_id"))?;
     let actor_id = typed_id::<ActorId>(candidate.get("actor_id"))?;
-    let course_id = typed_id::<CourseId>(candidate.get("course_id"))?;
-    let environment_id = typed_id::<contracts::EnvironmentId>(candidate.get("environment_id"))?;
-    let environment_revision = revision(candidate.get("environment_revision"))?;
-    let endpoint_grant_id = typed_id::<EndpointGrantId>(candidate.get("endpoint_grant_id"))?;
-    let endpoint_id = typed_id::<EndpointId>(candidate.get("endpoint_id"))?;
-    let endpoint_revision = revision(candidate.get("endpoint_revision"))?;
     let key_id = typed_id::<SshPublicKeyId>(candidate.get("key_id"))?;
-    let contract: Value = candidate.get("contract");
-    let subject_kind: EnvironmentAccessSubjectKind = serde_json::from_value(
-        contract
-            .get("subjectKind")
-            .cloned()
-            .ok_or_else(|| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?,
-    )
-    .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?;
-    let eligibility_request = EnvironmentEndpointEligibilityRequest {
-        environment_id,
-        course_id,
-        actor_id,
-        subject_kind,
-        expected_revision: environment_revision,
-        endpoint_ids: vec![endpoint_id],
-    };
-    let eligibility = state
-        .owner_resolver
-        .resolve_endpoint_eligibility(&eligibility_request, utc_timestamp(now)?)
-        .await
-        .map_err(|error| match error {
-            auth::OwnerResolverClientError::ScopeDenied
-            | auth::OwnerResolverClientError::ResponseInvalid => {
-                ApiError::forbidden("LW_ACCESS_SSH_DENIED")
-            }
-            _ => ApiError::unavailable("LW_ACCESS_SSH_AUTHORITY_UNAVAILABLE"),
-        })?;
-    let resolved_endpoint = eligibility
-        .endpoints
-        .first()
-        .ok_or_else(|| ApiError::forbidden("LW_ACCESS_SSH_DENIED"))?;
-    if resolved_endpoint.protocol != EndpointProtocol::Ssh
-        || resolved_endpoint.health != EndpointHealth::Healthy
-        || resolved_endpoint.revision != endpoint_revision
-    {
-        return Err(ApiError::forbidden("LW_ACCESS_SSH_DENIED"));
-    }
     let authorized_at = OffsetDateTime::now_utc();
-    if eligibility.eligibility_expires_at.get() <= authorized_at {
-        return Err(ApiError::forbidden("LW_ACCESS_SSH_DENIED"));
-    }
     let authorization_id = Uuid::now_v7();
     let token = random_token();
     let token_hash = sha256_hex(token.as_bytes());
-    let mut tx = state
-        .pool
-        .begin()
-        .await
-        .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
-    let current = sqlx::query(
-        "SELECT k.normalized_openssh,g.expires_at,eg.expires_at AS endpoint_expires_at,cm.expires_at AS membership_expires_at FROM access.endpoint_grants eg \
-         JOIN access.access_grants g ON g.grant_id=eg.grant_id \
-         JOIN access.ssh_public_keys k ON k.actor_id=g.actor_id \
-         JOIN access.course_memberships cm ON cm.course_id=g.course_id AND cm.actor_id=g.actor_id \
-         WHERE g.grant_id=$1 AND g.revision=$2 AND eg.endpoint_grant_id=$3 AND eg.endpoint_revision=$4 \
-           AND k.key_id=$5 AND k.fingerprint_sha256=$6 AND eg.alias=$7 \
-           AND eg.protocol='ssh' AND eg.health='healthy' AND g.state='active' \
-           AND g.not_before<=$8 AND g.expires_at>$8 AND eg.expires_at>$8 AND k.revoked_at IS NULL \
-           AND cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>$8) \
-           AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END \
-         FOR SHARE OF g,eg,k,cm",
-    )
-    .bind(grant_id.as_uuid())
-    .bind(candidate.get::<i64, _>("grant_revision"))
-    .bind(endpoint_grant_id.as_uuid())
-    .bind(i64::try_from(endpoint_revision.get()).map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?)
-    .bind(key_id.as_uuid())
-    .bind(&request.presented_key_fingerprint_sha256)
-    .bind(&request.alias)
-    .bind(authorized_at)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?
-    .ok_or_else(|| ApiError::forbidden("LW_ACCESS_SSH_DENIED"))?;
     let configured_until = authorized_at
         + time::Duration::seconds(
             i64::try_from(state.deployment.grants.authorization_token_ttl_seconds)
                 .map_err(|_| ApiError::internal("LW_ACCESS_CONFIG_INVALID"))?,
         );
-    let valid_until = [
-        configured_until,
-        current.get::<OffsetDateTime, _>("expires_at"),
-        current.get::<OffsetDateTime, _>("endpoint_expires_at"),
-        current
-            .get::<Option<OffsetDateTime>, _>("membership_expires_at")
-            .unwrap_or(configured_until),
-        eligibility.eligibility_expires_at.get(),
-    ]
-    .into_iter()
-    .min()
-    .ok_or_else(|| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?;
+    let valid_until = configured_until;
     sqlx::query(
         "INSERT INTO access.ssh_authorizations \
-         (authorization_id,token_sha256,grant_id,grant_revision,endpoint_grant_id,key_id,gateway_identity,connection_id,source_address_sha256,issued_at,expires_at) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
-    ).bind(authorization_id).bind(token_hash).bind(grant_id.as_uuid())
-      .bind(candidate.get::<i64,_>("grant_revision")).bind(endpoint_grant_id.as_uuid()).bind(key_id.as_uuid())
+         (authorization_id,token_sha256,actor_id,key_id,gateway_identity,connection_id,source_address_sha256,issued_at,expires_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+    ).bind(authorization_id).bind(token_hash).bind(actor_id.as_uuid()).bind(key_id.as_uuid())
       .bind(&principal.san_uri).bind(&request.connection_id).bind(&request.source_address_hash).bind(authorized_at).bind(valid_until)
-      .execute(&mut *tx).await.map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
-    tx.commit()
-        .await
-        .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
+      .execute(&state.pool).await.map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
     Ok(Json(SshAuthorization {
         authorization_id: authorization_id.to_string(),
-        access_grant_id: grant_id,
-        access_grant_revision: revision(candidate.get("grant_revision"))?,
-        endpoint_grant_id,
-        endpoint_id,
         ssh_public_key_id: key_id,
-        normalized_authorized_key: current.get("normalized_openssh"),
+        normalized_authorized_key: candidate.get("normalized_openssh"),
         force_command_token: token,
         valid_until: utc_timestamp(valid_until)?,
     }))
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one transaction binds the one-time key authorization to the exact endpoint eligibility decision"
+)]
 pub async fn create_gateway_session(
     State(state): State<Arc<AppState>>,
     axum::extract::Extension(principal): axum::extract::Extension<MtlsPrincipal>,
@@ -899,6 +831,7 @@ pub async fn create_gateway_session(
 ) -> Result<(StatusCode, Json<GatewaySession>), ApiError> {
     let request: CreateGatewaySessionRequest = parse_body(&body)?;
     ensure_gateway_request(&state, &principal, &request.gateway_identity)?;
+    validate_alias(&request.alias)?;
     let idem = idempotency_key(&headers)?;
     let idem_scope = service_idempotency_scope(&principal);
     let hash = request_hash(&request)?;
@@ -922,25 +855,108 @@ pub async fn create_gateway_session(
         return Ok((StatusCode::OK, Json(session)));
     }
     let auth = sqlx::query(
-        "SELECT a.grant_id,a.grant_revision,a.endpoint_grant_id,a.key_id,g.actor_id,eg.endpoint_id,g.expires_at \
-         FROM access.ssh_authorizations a JOIN access.access_grants g ON g.grant_id=a.grant_id \
-         JOIN access.endpoint_grants eg ON eg.endpoint_grant_id=a.endpoint_grant_id \
+        "SELECT a.actor_id,a.key_id,a.expires_at \
+         FROM access.ssh_authorizations a \
          JOIN access.ssh_public_keys k ON k.key_id=a.key_id \
          WHERE a.authorization_id=$1 AND a.token_sha256=$2 AND a.gateway_identity=$3 AND a.connection_id=$4 \
-           AND a.consumed_at IS NULL AND a.expires_at>$5 AND g.state='active' AND g.revision=a.grant_revision \
-           AND g.expires_at>$5 AND k.revoked_at IS NULL FOR UPDATE OF a",
+           AND a.consumed_at IS NULL AND a.expires_at>$5 AND k.actor_id=a.actor_id \
+           AND k.revoked_at IS NULL FOR UPDATE OF a",
     ).bind(authorization_id).bind(sha256_hex(request.force_command_token.as_bytes()))
       .bind(&principal.san_uri).bind(&request.connection_id).bind(now)
       .fetch_optional(&mut *tx).await.map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?
       .ok_or_else(|| ApiError::forbidden("LW_ACCESS_FORCE_TOKEN_REJECTED"))?;
+    let candidate = sqlx::query(
+        "SELECT g.grant_id,g.revision AS grant_revision,g.actor_id,g.course_id,g.environment_id, \
+                g.environment_revision,g.contract,g.expires_at,eg.endpoint_grant_id,eg.endpoint_id, \
+                eg.endpoint_revision,eg.expires_at AS endpoint_expires_at,cm.expires_at AS membership_expires_at \
+         FROM access.endpoint_grants eg JOIN access.access_grants g ON g.grant_id=eg.grant_id \
+         JOIN access.course_memberships cm ON cm.course_id=g.course_id AND cm.actor_id=g.actor_id \
+         JOIN access.ssh_public_keys k ON k.key_id=$2 AND k.actor_id=g.actor_id \
+         WHERE eg.alias=$1 AND eg.protocol='ssh' AND eg.health='healthy' AND g.actor_id=$3 \
+           AND g.state='active' AND g.not_before<=$4 AND g.expires_at>$4 AND eg.expires_at>$4 \
+           AND k.revoked_at IS NULL AND cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>$4) \
+           AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END \
+         FOR SHARE OF g,eg,k,cm",
+    )
+    .bind(&request.alias)
+    .bind(auth.get::<Uuid, _>("key_id"))
+    .bind(auth.get::<Uuid, _>("actor_id"))
+    .bind(now)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?
+    .ok_or_else(|| ApiError::forbidden("LW_ACCESS_SSH_DENIED"))?;
+    let actor_id = typed_id::<ActorId>(candidate.get("actor_id"))?;
+    let endpoint_id = typed_id::<EndpointId>(candidate.get("endpoint_id"))?;
+    let endpoint_revision = revision(candidate.get("endpoint_revision"))?;
+    let subject_kind: EnvironmentAccessSubjectKind = serde_json::from_value(
+        candidate
+            .get::<Value, _>("contract")
+            .get("subjectKind")
+            .cloned()
+            .ok_or_else(|| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?,
+    )
+    .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?;
+    let eligibility = state
+        .owner_resolver
+        .resolve_endpoint_eligibility(
+            &EnvironmentEndpointEligibilityRequest {
+                environment_id: typed_id(candidate.get("environment_id"))?,
+                course_id: typed_id(candidate.get("course_id"))?,
+                actor_id,
+                subject_kind,
+                expected_revision: revision(candidate.get("environment_revision"))?,
+                endpoint_ids: vec![endpoint_id],
+            },
+            utc_timestamp(now)?,
+        )
+        .await
+        .map_err(|error| match error {
+            auth::OwnerResolverClientError::ScopeDenied
+            | auth::OwnerResolverClientError::ResponseInvalid => {
+                ApiError::forbidden("LW_ACCESS_SSH_DENIED")
+            }
+            _ => ApiError::unavailable("LW_ACCESS_SSH_AUTHORITY_UNAVAILABLE"),
+        })?;
+    let resolved = eligibility
+        .endpoints
+        .first()
+        .ok_or_else(|| ApiError::forbidden("LW_ACCESS_SSH_DENIED"))?;
+    if resolved.protocol != EndpointProtocol::Ssh
+        || resolved.health != EndpointHealth::Healthy
+        || resolved.revision != endpoint_revision
+        || eligibility.eligibility_expires_at.get() <= now
+    {
+        return Err(ApiError::forbidden("LW_ACCESS_SSH_DENIED"));
+    }
+    let target_ssh_host_key_identity_sha256 = resolved
+        .ssh_host_key_identity_sha256
+        .ok_or_else(|| ApiError::forbidden("LW_ACCESS_SSH_DENIED"))?;
+    let expires_at = [
+        auth.get::<OffsetDateTime, _>("expires_at"),
+        candidate.get::<OffsetDateTime, _>("expires_at"),
+        candidate.get::<OffsetDateTime, _>("endpoint_expires_at"),
+        candidate
+            .get::<Option<OffsetDateTime>, _>("membership_expires_at")
+            .unwrap_or(eligibility.eligibility_expires_at.get()),
+        eligibility.eligibility_expires_at.get(),
+    ]
+    .into_iter()
+    .min()
+    .ok_or_else(|| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?;
     sqlx::query(
         "INSERT INTO access.gateway_sessions \
          (session_id,grant_id,grant_revision,actor_id,endpoint_id,endpoint_grant_id,key_id,state,started_at,expires_at,contract,gateway_identity,connection_id,revision,last_heartbeat_at) \
          VALUES ($1,$2,$3,$4,$5,$6,$7,'active',$8,$9,$10,$11,$12,1,$8)",
-    ).bind(session_id.as_uuid()).bind(auth.get::<Uuid,_>("grant_id")).bind(auth.get::<i64,_>("grant_revision"))
-      .bind(auth.get::<Uuid,_>("actor_id")).bind(auth.get::<Uuid,_>("endpoint_id"))
-      .bind(auth.get::<Uuid,_>("endpoint_grant_id")).bind(auth.get::<Uuid,_>("key_id"))
-      .bind(now).bind(auth.get::<OffsetDateTime,_>("expires_at")).bind(json!({"authorizationId": authorization_id}))
+    ).bind(session_id.as_uuid()).bind(candidate.get::<Uuid,_>("grant_id")).bind(candidate.get::<i64,_>("grant_revision"))
+      .bind(auth.get::<Uuid,_>("actor_id")).bind(candidate.get::<Uuid,_>("endpoint_id"))
+      .bind(candidate.get::<Uuid,_>("endpoint_grant_id")).bind(auth.get::<Uuid,_>("key_id"))
+      .bind(now).bind(expires_at).bind(json!({
+          "authorizationId": authorization_id,
+          "alias": request.alias,
+          "targetHost": format!("ssh.lw-env-{}.svc", candidate.get::<Uuid,_>("environment_id")),
+          "sshHostKeyIdentitySha256": target_ssh_host_key_identity_sha256,
+      }))
       .bind(&principal.san_uri).bind(&request.connection_id)
       .execute(&mut *tx).await.map_err(|_| ApiError::conflict("LW_ACCESS_SESSION_CONFLICT"))?;
     sqlx::query("UPDATE access.ssh_authorizations SET consumed_at=$2,session_id=$3 WHERE authorization_id=$1 AND consumed_at IS NULL")
@@ -1167,7 +1183,27 @@ async fn activate_grant(
         let endpoint_grant_id = EndpointGrantId::new();
         let alias =
             (endpoint.protocol == EndpointProtocol::Ssh).then(|| ssh_alias(endpoint_grant_id));
-        let contract = json!({"endpointId": endpoint.id, "endpointRevision": endpoint.revision, "protocol": endpoint.protocol, "health": endpoint.health});
+        let ssh_gateway_hostname = (endpoint.protocol == EndpointProtocol::Ssh)
+            .then(|| state.deployment.grants.public_ssh_gateway_hostname.clone());
+        let ssh_gateway_port = (endpoint.protocol == EndpointProtocol::Ssh)
+            .then_some(state.deployment.grants.public_ssh_gateway_port);
+        let ssh_gateway_host_key_fingerprint =
+            (endpoint.protocol == EndpointProtocol::Ssh).then(|| {
+                state
+                    .deployment
+                    .grants
+                    .public_ssh_gateway_host_key_fingerprint
+                    .clone()
+            });
+        let contract = json!({
+            "endpointId": endpoint.id,
+            "endpointRevision": endpoint.revision,
+            "protocol": endpoint.protocol,
+            "health": endpoint.health,
+            "sshGatewayHostname": ssh_gateway_hostname,
+            "sshGatewayPort": ssh_gateway_port,
+            "sshGatewayHostKeyFingerprint": ssh_gateway_host_key_fingerprint,
+        });
         sqlx::query("INSERT INTO access.endpoint_grants (endpoint_grant_id,grant_id,endpoint_id,endpoint_revision,protocol,health,alias,expires_at,contract) VALUES ($1,$2,$3,$4,$5,'healthy',$6,$7,$8)")
             .bind(endpoint_grant_id.as_uuid()).bind(grant_id).bind(endpoint.id.as_uuid())
             .bind(i64::try_from(endpoint.revision.get()).map_err(|_| GrantRuntimeError::Contract)?)
@@ -1308,6 +1344,124 @@ fn log_activation_lease_lost(grant_id: Uuid, action: &'static str) {
         action,
         "stale activation worker was fenced"
     );
+}
+
+/// Handles the synchronous Environment owner request/reply used to revoke all
+/// live grants before stop, restart, delete, cancellation, or expiry advances.
+pub async fn environment_revocation_loop(state: Arc<AppState>) -> Result<(), GrantRuntimeError> {
+    let mut subscriber = state
+        .nats
+        .subscribe(ACCESS_REVOCATION_SUBJECT)
+        .await
+        .map_err(|_| GrantRuntimeError::NatsSubscribe)?;
+    while let Some(message) = subscriber.next().await {
+        let Some(reply) = message.reply else {
+            tracing::warn!(
+                event = "access.environment_revocation.request_rejected",
+                diagnostic = "LW_ACCESS_REVOCATION_REPLY_MISSING"
+            );
+            continue;
+        };
+        let request = match contracts::parse_strict_json::<EnvironmentAccessRevocationRequest>(
+            &message.payload,
+        ) {
+            Ok(request) if valid_environment_revocation_request(&request) => request,
+            _ => {
+                tracing::warn!(
+                    event = "access.environment_revocation.request_rejected",
+                    diagnostic = "LW_ACCESS_REVOCATION_REQUEST_INVALID"
+                );
+                continue;
+            }
+        };
+        let access_revocation_revision = revoke_environment_grants(&state.pool, &request).await?;
+        let response = EnvironmentAccessRevocationResponse {
+            version: 1,
+            environment_id: request.environment_id,
+            environment_revision: request.environment_revision,
+            access_revocation_revision,
+        };
+        let payload = serde_json::to_vec(&response).map_err(|_| GrantRuntimeError::Contract)?;
+        state
+            .nats
+            .publish(reply, payload.into())
+            .await
+            .map_err(|_| GrantRuntimeError::NatsPublish)?;
+        tracing::info!(
+            event = "access.environment_revocation.completed",
+            environment_id = %request.environment_id,
+            environment_revision = request.environment_revision.get(),
+            access_revocation_revision = access_revocation_revision.get(),
+            reason = request.reason
+        );
+    }
+    Err(GrantRuntimeError::NatsSubscribe)
+}
+
+fn valid_environment_revocation_request(request: &EnvironmentAccessRevocationRequest) -> bool {
+    request.version == 1
+        && matches!(
+            request.reason.as_str(),
+            "environment_stopped"
+                | "environment_restarted"
+                | "environment_deleted"
+                | "environment_cancelled"
+                | "environment_expired"
+        )
+}
+
+async fn revoke_environment_grants(
+    pool: &PgPool,
+    request: &EnvironmentAccessRevocationRequest,
+) -> Result<Revision, GrantRuntimeError> {
+    let now = OffsetDateTime::now_utc();
+    let terminate_by = now + time::Duration::seconds(TERMINATION_SECONDS);
+    let mut transaction = pool.begin().await?;
+    let rows = sqlx::query(
+        "UPDATE access.access_grants \
+         SET state='revoked',revision=revision+1,revoked_at=$2,reason_code=$3,updated_at=$2 \
+         WHERE environment_id=$1 AND state IN ('requested','active') RETURNING grant_id",
+    )
+    .bind(request.environment_id.as_uuid())
+    .bind(now)
+    .bind(&request.reason)
+    .fetch_all(&mut *transaction)
+    .await?;
+    for row in rows {
+        let grant_id = typed_id::<AccessGrantId>(row.get("grant_id"))
+            .map_err(|error| log_revocation_mutation_error(&error))?;
+        terminate_sessions_for_grant(&mut transaction, grant_id, now, terminate_by)
+            .await
+            .map_err(|error| log_revocation_mutation_error(&error))?;
+        let grant = load_grant_tx(&mut transaction, grant_id, None)
+            .await
+            .map_err(|error| log_revocation_mutation_error(&error))?;
+        enqueue_grant_event(
+            &mut transaction,
+            &grant,
+            subjects::ACCESS_GRANT_REVOKED,
+            now,
+        )
+        .await
+        .map_err(|error| log_revocation_mutation_error(&error))?;
+    }
+    let maximum_revision: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(revision),1) FROM access.access_grants WHERE environment_id=$1",
+    )
+    .bind(request.environment_id.as_uuid())
+    .fetch_one(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    revision(maximum_revision).map_err(|error| log_revocation_mutation_error(&error))
+}
+
+fn log_revocation_mutation_error(error: &ApiError) -> GrantRuntimeError {
+    tracing::error!(
+        event = "access.environment_revocation.failed",
+        diagnostic = error.diagnostic,
+        status = error.status.as_u16()
+    );
+    GrantRuntimeError::AccessMutation
 }
 
 pub async fn maintenance_loop(state: Arc<AppState>) -> Result<(), GrantRuntimeError> {
@@ -1521,19 +1675,31 @@ async fn endpoint_grants(
     tx: &mut Transaction<'_, Postgres>,
     grant_id: AccessGrantId,
 ) -> Result<Vec<EndpointGrant>, ApiError> {
-    let rows = sqlx::query("SELECT endpoint_grant_id,endpoint_id,endpoint_revision,protocol,health,alias,expires_at FROM access.endpoint_grants WHERE grant_id=$1 ORDER BY endpoint_grant_id")
+    let rows = sqlx::query("SELECT endpoint_grant_id,endpoint_id,endpoint_revision,protocol,health,alias,expires_at,contract FROM access.endpoint_grants WHERE grant_id=$1 ORDER BY endpoint_grant_id")
         .bind(grant_id.as_uuid()).fetch_all(&mut **tx).await.map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
     rows.into_iter()
         .map(|row| {
+            let id = typed_id(row.get("endpoint_grant_id"))?;
+            let protocol = parse_protocol(&row.get::<String, _>("protocol"))?;
+            let contract: Value = row.get("contract");
+            let ssh_gateway_hostname = optional_contract_string(&contract, "sshGatewayHostname")?;
+            let ssh_gateway_port = optional_contract_u16(&contract, "sshGatewayPort")?;
+            let ssh_gateway_host_key_fingerprint =
+                optional_contract_string(&contract, "sshGatewayHostKeyFingerprint")?;
             Ok(EndpointGrant {
-                id: typed_id(row.get("endpoint_grant_id"))?,
+                id,
                 access_grant_id: grant_id,
                 endpoint_id: typed_id(row.get("endpoint_id"))?,
                 endpoint_revision: revision(row.get("endpoint_revision"))?,
-                protocol: parse_protocol(&row.get::<String, _>("protocol"))?,
+                protocol,
                 action: EndpointAction::Connect,
                 health: parse_health(&row.get::<String, _>("health"))?,
                 alias: row.get("alias"),
+                connect_url: matches!(protocol, EndpointProtocol::Http | EndpointProtocol::Https)
+                    .then(|| format!("/connect/{id}/")),
+                ssh_gateway_hostname,
+                ssh_gateway_port,
+                ssh_gateway_host_key_fingerprint,
                 expires_at: utc_timestamp(row.get("expires_at"))?,
             })
         })
@@ -1581,15 +1747,35 @@ async fn load_session_tx(
     tx: &mut Transaction<'_, Postgres>,
     id: GatewaySessionId,
 ) -> Result<GatewaySession, ApiError> {
-    let row = sqlx::query("SELECT grant_id,grant_revision,endpoint_grant_id,key_id,gateway_identity,connection_id,revision,state,started_at,last_heartbeat_at,termination_requested_at,terminate_by,terminated_at,close_reason_code FROM access.gateway_sessions WHERE session_id=$1")
+    let row = sqlx::query("SELECT grant_id,grant_revision,endpoint_grant_id,key_id,contract,gateway_identity,connection_id,revision,state,started_at,last_heartbeat_at,termination_requested_at,terminate_by,terminated_at,close_reason_code FROM access.gateway_sessions WHERE session_id=$1")
         .bind(id.as_uuid()).fetch_optional(&mut **tx).await.map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?
         .ok_or_else(|| ApiError::not_found("LW_ACCESS_SESSION_NOT_FOUND"))?;
+    let contract = row.get::<Value, _>("contract");
+    let target_alias = contract
+        .get("alias")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?
+        .to_owned();
+    let target_host = contract
+        .get("targetHost")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?
+        .to_owned();
+    let target_ssh_host_key_identity_sha256 = contract
+        .get("sshHostKeyIdentitySha256")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?
+        .parse::<Sha256Digest>()
+        .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?;
     let session = GatewaySession {
         id,
         access_grant_id: typed_id(row.get("grant_id"))?,
         access_grant_revision: revision(row.get("grant_revision"))?,
         endpoint_grant_id: typed_id(row.get("endpoint_grant_id"))?,
         ssh_public_key_id: typed_id(row.get("key_id"))?,
+        target_alias,
+        target_host,
+        target_ssh_host_key_identity_sha256,
         gateway_identity: row.get("gateway_identity"),
         connection_id: row.get("connection_id"),
         revision: revision(row.get("revision"))?,
@@ -1984,6 +2170,26 @@ fn parse_health(v: &str) -> Result<EndpointHealth, ApiError> {
         _ => Err(ApiError::internal("LW_ACCESS_STORE_CORRUPT")),
     }
 }
+
+fn optional_contract_string(contract: &Value, field: &str) -> Result<Option<String>, ApiError> {
+    match contract.get(field) {
+        Some(Value::String(value)) if !value.is_empty() => Ok(Some(value.clone())),
+        Some(Value::Null) | None => Ok(None),
+        _ => Err(ApiError::internal("LW_ACCESS_STORE_CORRUPT")),
+    }
+}
+
+fn optional_contract_u16(contract: &Value, field: &str) -> Result<Option<u16>, ApiError> {
+    match contract.get(field) {
+        Some(Value::Number(value)) => value
+            .as_u64()
+            .and_then(|value| u16::try_from(value).ok())
+            .map(Some)
+            .ok_or_else(|| ApiError::internal("LW_ACCESS_STORE_CORRUPT")),
+        Some(Value::Null) | None => Ok(None),
+        _ => Err(ApiError::internal("LW_ACCESS_STORE_CORRUPT")),
+    }
+}
 fn grant_state_str(s: AccessGrantState) -> &'static str {
     match s {
         AccessGrantState::Requested => "requested",
@@ -2030,6 +2236,34 @@ fn typed_id<T: FromStr>(v: Uuid) -> Result<T, ApiError> {
         .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))
 }
 
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn environment_revocation_request_is_strict_and_reason_bounded() {
+        let valid: EnvironmentAccessRevocationRequest = contracts::parse_strict_json(
+            br#"{"version":1,"environmentId":"00000000-0000-7000-8000-000000000101","environmentRevision":4,"reason":"environment_deleted"}"#,
+        )
+        .expect("valid revocation request");
+        assert!(valid_environment_revocation_request(&valid));
+
+        let unsupported: EnvironmentAccessRevocationRequest = contracts::parse_strict_json(
+            br#"{"version":1,"environmentId":"00000000-0000-7000-8000-000000000101","environmentRevision":4,"reason":"arbitrary"}"#,
+        )
+        .expect("structurally valid request");
+        assert!(!valid_environment_revocation_request(&unsupported));
+
+        assert!(
+            contracts::parse_strict_json::<EnvironmentAccessRevocationRequest>(
+                br#"{"version":1,"environmentId":"00000000-0000-7000-8000-000000000101","environmentRevision":4,"reason":"environment_deleted","extra":true}"#,
+            )
+            .is_err()
+        );
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum GrantRuntimeError {
     #[error("LW_ACCESS_CONFIG_INVALID")]
@@ -2040,10 +2274,14 @@ pub enum GrantRuntimeError {
     NatsConnect,
     #[error("LW_ACCESS_NATS_PUBLISH_FAILED")]
     NatsPublish,
+    #[error("LW_ACCESS_NATS_SUBSCRIBE_FAILED")]
+    NatsSubscribe,
     #[error("LW_ACCESS_CONTRACT_INVALID")]
     Contract,
     #[error("LW_ACCESS_ACTIVATION_LEASE_LOST")]
     ActivationLeaseLost,
+    #[error("LW_ACCESS_REVOCATION_FAILED")]
+    AccessMutation,
     #[error("LW_ACCESS_STORE_UNAVAILABLE")]
     Database(#[from] sqlx::Error),
 }

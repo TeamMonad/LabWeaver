@@ -21,10 +21,10 @@ One VM operation is admitted only when all of these identities agree:
   provider;
 - approved `EnvironmentSpec.runtime` binds that provider, the immutable base
   disk, reviewed storage binding and SSH port 22;
-- `EnvironmentTemplateRelease` contains a VM artifact whose `ArtifactRef`,
-  object version, SHA-256 and disk format match the spec and policy evaluation;
-- the release is not withdrawn or expired and uses the active policy revision,
-  trust revision and trust-bundle SHA-256;
+- `EnvironmentTemplateRelease` contains a VM artifact whose deployment binding,
+  immutable OCI source digest, disk SHA-256, capacity and disk format match the
+  approved spec and reviewed deployment lock;
+- the release is not withdrawn and uses the active approval trust revision;
 - security requires a non-root guest, mutable VM root disk, denied privilege
   escalation and denied public exposure.
 
@@ -54,10 +54,7 @@ The deployment binding requires:
   "cdiImporterMemoryRequestBytes": 262144000,
   "cdiImporterMemoryLimitBytes": 1073741824,
   "cdiScratchStorageBytes": 10737418240,
-  "activeImagePolicyId": "01900000-0000-7000-8000-000000000001",
-  "activeImagePolicyRevision": 1,
-  "activeTrustRevision": 1,
-  "activeTrustBundleSha256": "<64 lowercase hex>"
+  "activeTrustRevision": 1
 }
 ```
 
@@ -96,9 +93,9 @@ issuance. A deployment-owned short-lived issuer and ephemeral Secret cleanup
 remain mandatory for VM Collector E3.
 
 The executor uses server-side apply with deterministic field ownership. Before
-creating or starting the VM it resolves the private artifact reference and
-verifies the CDI source and resulting PVC match the exact base-disk object
-version and SHA-256. A mutable `DataSource` name or annotation alone is not
+creating or starting the VM it verifies that the CDI source and resulting PVC
+match the exact deployment-locked base-disk source digest and disk SHA-256. A
+mutable `DataSource` name or annotation alone is not
 evidence. Exact reapplication does not create another VM, DataVolume or PVC.
 
 ## Backend protocol and fencing

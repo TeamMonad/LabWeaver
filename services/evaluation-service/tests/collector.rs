@@ -4,6 +4,7 @@ use std::fs;
 
 use contracts::submission::SubmissionManifest;
 use contracts::{Sha256Digest, parse_strict_json};
+#[cfg(unix)]
 use evaluation_service::SnapshotSource;
 use evaluation_service::{CollectError, CollectorLimits, PvcSnapshotSource, SnapshotCollector};
 use tempfile::tempdir;
@@ -140,7 +141,7 @@ async fn pvc_collection_rejects_symlinks_even_when_the_target_stays_under_root()
     symlink("src", directory.path().join("src-alias"))?;
     let source = PvcSnapshotSource::open(directory.path(), Sha256Digest::of_bytes(b"pvc"))?;
     assert_eq!(
-        source.validate_path("src-alias/main.rs").await,
+        SnapshotSource::validate_path(&source, "src-alias/main.rs").await,
         Err(CollectError::SymlinkRejected)
     );
     assert_eq!(

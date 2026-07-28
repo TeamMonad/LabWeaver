@@ -41,9 +41,8 @@ async fn jetstream_command_outbox_and_provider_rpc_use_durable_identities()
         .connect(&database_url)
         .await?;
     let migrations = format!(
-        "CREATE SCHEMA environment; SET search_path TO environment;\n{}\n{}",
-        include_str!("../../../migrations/environment/0001_initial.sql"),
-        include_str!("../../../migrations/environment/0002_reconcile_leases.sql")
+        "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
+        include_str!("../../../migrations/environment/0001_sprint2_baseline.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;
 
@@ -131,6 +130,7 @@ async fn jetstream_command_outbox_and_provider_rpc_use_durable_identities()
             create: Some(EnvironmentCreateSpec {
                 course_id: instance.course_id,
                 owner_actor_id: instance.owner_id,
+                display_label: instance.display_label.clone(),
                 class: instance.class,
                 runtime_kind: instance.runtime_kind,
                 release_id: instance.release_id,
@@ -271,6 +271,7 @@ async fn jetstream_command_outbox_and_provider_rpc_use_durable_identities()
     work_create.data.create = Some(EnvironmentCreateSpec {
         course_id: work_course_id,
         owner_actor_id: work_owner_id,
+        display_label: "Work environment".to_owned(),
         class: contracts::authoring::EnvironmentClass::Work,
         runtime_kind: instance.runtime_kind,
         release_id: contracts::ReleaseId::new(),

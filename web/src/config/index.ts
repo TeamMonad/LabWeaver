@@ -21,4 +21,7 @@ export const OIDC_CONFIG = {
   scope: 'openid profile email',
 }
 
-export const OIDC_ENABLED = Boolean(OIDC_CONFIG.authority && OIDC_CONFIG.client_id)
+export const DIRECT_OIDC_ENABLED = Boolean(OIDC_CONFIG.authority && OIDC_CONFIG.client_id)
+// The Sprint 2 browser uses the Access Service BFF: issuer and client identity
+// are server-owned and therefore must not be duplicated into the Web image.
+export const OIDC_ENABLED = API_AUTH_MODE === 'bff' || DIRECT_OIDC_ENABLED

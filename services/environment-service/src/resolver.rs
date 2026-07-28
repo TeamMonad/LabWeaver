@@ -36,6 +36,12 @@ impl VerifiedCallerIdentity {
         }
         Ok(Self { sans })
     }
+
+    /// Returns whether the verified peer certificate carried one exact URI SAN.
+    #[must_use]
+    pub fn contains_san(&self, san: &str) -> bool {
+        self.sans.contains(san)
+    }
 }
 
 /// Exact caller SAN policy; wildcard and empty policies are not supported.
@@ -271,12 +277,38 @@ async fn resolve_owner(
 }
 
 fn valid_san(san: &str) -> bool {
-    !san.is_empty()
-        && san.len() <= 253
-        && !san.contains('*')
-        && san
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+    if san.is_empty() || san.len() > 253 || san.contains('*') {
+        return false;
+    }
+    if san.starts_with("spiffe://") {
+        return url::Url::parse(san).is_ok_and(|uri| {
+            uri.scheme() == "spiffe"
+                && uri.host_str().is_some()
+                && uri.username().is_empty()
+                && uri.password().is_none()
+                && uri.port().is_none()
+                && uri.path() != "/"
+                && uri.query().is_none()
+                && uri.fragment().is_none()
+        });
+    }
+    san.bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+}
+
+#[cfg(test)]
+mod san_tests {
+    use super::valid_san;
+
+    #[test]
+    fn accepts_exact_dns_and_spiffe_sans_but_rejects_ambiguous_uris() {
+        assert!(valid_san("access-service.internal"));
+        assert!(valid_san("spiffe://labweaver/access-service"));
+        assert!(!valid_san("spiffe://labweaver/"));
+        assert!(!valid_san("spiffe://user@labweaver/access-service"));
+        assert!(!valid_san("spiffe://labweaver/access-*"));
+        assert!(!valid_san("https://labweaver/access-service"));
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

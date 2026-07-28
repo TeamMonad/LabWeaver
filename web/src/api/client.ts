@@ -204,10 +204,16 @@ export const apiClient = createLabWeaverApiClient({
 const sdkTransport: AxiosInstance = axios.create({
   baseURL: '',
   timeout: 30_000,
+  withCredentials: API_AUTH_MODE === 'bff',
   headers: { Accept: 'application/json, application/problem+json' },
 })
 
-attachAuthInterceptor(sdkTransport, { mode: 'bearer', accessToken: getOidcAccessToken })
+attachAuthInterceptor(
+  sdkTransport,
+  API_AUTH_MODE === 'bff'
+    ? { mode: 'bff' }
+    : { mode: 'bearer', accessToken: getOidcAccessToken },
+)
 attachResponseInterceptor(sdkTransport)
 
 /**

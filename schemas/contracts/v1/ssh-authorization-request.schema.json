@@ -7,11 +7,8 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Request from AuthorizedKeysCommand over mTLS. It deliberately has no target field.",
+  "description": "Request from `AuthorizedKeysCommand` over mTLS. Target selection happens only after\npublic-key authentication, through the fixed command grammar.",
   "properties": {
-    "alias": {
-      "type": "string"
-    },
     "connectionId": {
       "type": "string"
     },
@@ -29,7 +26,6 @@
     }
   },
   "required": [
-    "alias",
     "presentedKeyFingerprintSha256",
     "gatewayIdentity",
     "connectionId",

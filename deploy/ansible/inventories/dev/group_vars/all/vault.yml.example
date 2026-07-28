@@ -1,6 +1,6 @@
 ---
-# Private Sigstore secret material is not copied into this example. The
-# controller receives only root-owned locators through LABWEAVER_SIGSTORE_*
+# Secret material is not copied into this example. The controller receives
+# only root-owned locators from the approved private inventory.
 # environment variables. The referenced files must remain outside Git.
 # Copy to group_vars/all/vault.yml and encrypt it with ansible-vault before use.
 vault_ansible_ssh_private_key_file: REPLACE_PRIVATE_KEY_PATH

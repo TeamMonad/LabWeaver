@@ -1,6 +1,7 @@
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -12,19 +13,19 @@ use contracts::authoring::{
 use contracts::environment::{
     EndpointHealth, EnvironmentEndpoint, EnvironmentInstance, ObservedEnvironmentState,
 };
-use contracts::supply_chain::{ImageArtifact, VirtualMachineDiskFormat};
+use contracts::supply_chain::{ImageArtifact, VirtualMachineBaseDisk, VirtualMachineDiskFormat};
 use contracts::{
     ArtifactRef, EndpointId, EnvironmentId, OperationId, Revision, Sha256Digest, UtcTimestamp,
 };
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::{
-    ContainerReleasePolicy, ContainerReleaseResolver, EnvironmentProvider, ProviderFailure,
-    ProviderFailureCode, ProviderObservation, ReconcileAction, ReleaseProjectionError,
-    ResolvedContainerRelease,
+    ContainerReleaseResolver, EnvironmentProvider, ProviderFailure, ProviderFailureCode,
+    ProviderObservation, ReconcileAction, ReleaseProjectionError, ResolvedContainerRelease,
 };
 
 pub const KUBEVIRT_BACKEND_PROTOCOL_VERSION: u8 = 1;
@@ -87,7 +88,7 @@ pub struct KubeVirtResource {
     pub document: Value,
 }
 
-/// Immutable VM resource plan. The backend resolves the private `ArtifactRef` without exposing URLs.
+/// Immutable VM resource plan bound to one deployment-owned CDI source and imported disk hash.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KubeVirtResourcePlan {
@@ -95,7 +96,7 @@ pub struct KubeVirtResourcePlan {
     pub namespace: String,
     pub virtual_machine_name: String,
     pub data_volume_name: String,
-    pub base_disk: ArtifactRef,
+    pub base_disk: VirtualMachineBaseDisk,
     pub base_disk_format: VirtualMachineDiskFormat,
     pub storage_class_name: String,
     pub resources: Vec<KubeVirtResource>,
@@ -185,38 +186,64 @@ pub trait KubeVirtProviderBackend: Send + Sync {
 pub struct NatsKubeVirtProviderBackend {
     client: async_nats::Client,
     subject: String,
+    request_timeout: Duration,
 }
 
 impl NatsKubeVirtProviderBackend {
-    pub fn new(client: async_nats::Client, subject: String) -> Result<Self, ProviderFailure> {
-        if !valid_subject(&subject) {
+    pub fn new(
+        client: async_nats::Client,
+        subject: String,
+        request_timeout: Duration,
+    ) -> Result<Self, ProviderFailure> {
+        if !valid_subject(&subject)
+            || request_timeout.is_zero()
+            || request_timeout > Duration::from_secs(300)
+        {
             return Err(configuration_invalid());
         }
-        Ok(Self { client, subject })
+        Ok(Self {
+            client,
+            subject,
+            request_timeout,
+        })
     }
 
     async fn request(
         &self,
         fence: &KubeVirtBackendFence,
-        request: KubeVirtBackendRequest<'_>,
-    ) -> Result<KubeVirtBackendResponse, ProviderFailure> {
+        request: KubeVirtExecutorRequest,
+    ) -> Result<KubeVirtExecutorResponse, ProviderFailure> {
         if !request.matches_action(fence.action) {
             return Err(invalid_observation());
         }
-        let payload = serde_json::to_vec(&KubeVirtBackendRequestEnvelope {
-            fence: *fence,
-            request,
-        })
-        .map_err(|_| invalid_observation())?;
+        let fence = bind_kubevirt_executor_request(*fence, &request)?;
+        let payload = serde_json::to_vec(&KubeVirtExecutorRequestEnvelope { fence, request })
+            .map_err(|_| invalid_observation())?;
+        let request = async_nats::Request::new()
+            .timeout(Some(self.request_timeout))
+            .payload(payload.into());
         let message = self
             .client
-            .request(self.subject.clone(), payload.into())
+            .send_request(self.subject.clone(), request)
             .await
-            .map_err(|_| unavailable())?;
+            .map_err(|error| {
+                tracing::warn!(
+                    event = "environment.kubevirt_provider.executor_request_failed",
+                    diagnostic = "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
+                    environment_id = %fence.environment_id,
+                    operation_id = %fence.operation_id,
+                    provider_step = fence.provider_step,
+                    attempt = fence.attempt,
+                    action = ?fence.action,
+                    timeout_milliseconds = self.request_timeout.as_millis(),
+                    error = %error
+                );
+                unavailable()
+            })?;
         if message.payload.len() > MAX_RESPONSE_BYTES {
             return Err(invalid_observation());
         }
-        let response: KubeVirtBackendResponseEnvelope =
+        let response: KubeVirtExecutorResponseEnvelope =
             serde_json::from_slice(&message.payload).map_err(|_| invalid_observation())?;
         if response.protocol_version != fence.protocol_version
             || response.environment_id != fence.environment_id
@@ -242,7 +269,7 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
     ) -> Result<KubeVirtRunningObservation, ProviderFailure> {
         running_response(
             &self
-                .request(fence, KubeVirtBackendRequest::Apply { plan })
+                .request(fence, KubeVirtExecutorRequest::Apply { plan: plan.clone() })
                 .await?,
             plan,
         )
@@ -255,7 +282,10 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
     ) -> Result<KubeVirtRunningObservation, ProviderFailure> {
         running_response(
             &self
-                .request(fence, KubeVirtBackendRequest::Observe { plan })
+                .request(
+                    fence,
+                    KubeVirtExecutorRequest::Observe { plan: plan.clone() },
+                )
                 .await?,
             plan,
         )
@@ -268,7 +298,7 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
     ) -> Result<KubeVirtRunningObservation, ProviderFailure> {
         running_response(
             &self
-                .request(fence, KubeVirtBackendRequest::Start { plan })
+                .request(fence, KubeVirtExecutorRequest::Start { plan: plan.clone() })
                 .await?,
             plan,
         )
@@ -280,14 +310,14 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
         plan: &KubeVirtResourcePlan,
     ) -> Result<KubeVirtStoppedObservation, ProviderFailure> {
         match self
-            .request(fence, KubeVirtBackendRequest::Stop { plan })
+            .request(fence, KubeVirtExecutorRequest::Stop { plan: plan.clone() })
             .await?
         {
-            KubeVirtBackendResponse::Stopped {
+            KubeVirtExecutorResponse::Stopped {
                 plan_sha256,
                 observation,
             } if plan_sha256 == plan.plan_sha256 => Ok(observation),
-            KubeVirtBackendResponse::Failed { failure } => Err(failure),
+            KubeVirtExecutorResponse::Failed { failure } => Err(failure),
             _ => Err(invalid_observation()),
         }
     }
@@ -299,7 +329,10 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
     ) -> Result<KubeVirtRunningObservation, ProviderFailure> {
         running_response(
             &self
-                .request(fence, KubeVirtBackendRequest::Restart { plan })
+                .request(
+                    fence,
+                    KubeVirtExecutorRequest::Restart { plan: plan.clone() },
+                )
                 .await?,
             plan,
         )
@@ -311,16 +344,19 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
         plan: &KubeVirtCleanupPlan,
     ) -> Result<ArtifactRef, ProviderFailure> {
         match self
-            .request(fence, KubeVirtBackendRequest::DeleteNamespace { plan })
+            .request(
+                fence,
+                KubeVirtExecutorRequest::DeleteNamespace { plan: plan.clone() },
+            )
             .await?
         {
-            KubeVirtBackendResponse::Deleted {
+            KubeVirtExecutorResponse::Deleted {
                 plan_sha256,
                 cleanup_evidence,
             } if plan_sha256 == plan.plan_sha256 && valid_artifact_ref(&cleanup_evidence) => {
                 Ok(cleanup_evidence)
             }
-            KubeVirtBackendResponse::Failed { failure } => Err(failure),
+            KubeVirtExecutorResponse::Failed { failure } => Err(failure),
             _ => Err(ProviderFailure {
                 code: ProviderFailureCode::CleanupFailed,
                 retryable: true,
@@ -330,43 +366,44 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
 }
 
 fn running_response(
-    response: &KubeVirtBackendResponse,
+    response: &KubeVirtExecutorResponse,
     plan: &KubeVirtResourcePlan,
 ) -> Result<KubeVirtRunningObservation, ProviderFailure> {
     match response {
-        KubeVirtBackendResponse::Running {
+        KubeVirtExecutorResponse::Running {
             plan_sha256,
             observation,
         } if *plan_sha256 == plan.plan_sha256 => Ok(*observation),
-        KubeVirtBackendResponse::Failed { failure } => Err(*failure),
+        KubeVirtExecutorResponse::Failed { failure } => Err(*failure),
         _ => Err(invalid_observation()),
     }
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct KubeVirtBackendRequestEnvelope<'a> {
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KubeVirtExecutorRequestEnvelope {
     #[serde(flatten)]
-    fence: KubeVirtBackendFence,
-    request: KubeVirtBackendRequest<'a>,
+    pub fence: KubeVirtBackendFence,
+    pub request: KubeVirtExecutorRequest,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(
     tag = "backendAction",
     rename_all = "snake_case",
-    rename_all_fields = "camelCase"
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
 )]
-enum KubeVirtBackendRequest<'a> {
-    Apply { plan: &'a KubeVirtResourcePlan },
-    Observe { plan: &'a KubeVirtResourcePlan },
-    Start { plan: &'a KubeVirtResourcePlan },
-    Stop { plan: &'a KubeVirtResourcePlan },
-    Restart { plan: &'a KubeVirtResourcePlan },
-    DeleteNamespace { plan: &'a KubeVirtCleanupPlan },
+pub enum KubeVirtExecutorRequest {
+    Apply { plan: KubeVirtResourcePlan },
+    Observe { plan: KubeVirtResourcePlan },
+    Start { plan: KubeVirtResourcePlan },
+    Stop { plan: KubeVirtResourcePlan },
+    Restart { plan: KubeVirtResourcePlan },
+    DeleteNamespace { plan: KubeVirtCleanupPlan },
 }
 
-impl KubeVirtBackendRequest<'_> {
+impl KubeVirtExecutorRequest {
     const fn matches_action(&self, action: ReconcileAction) -> bool {
         matches!(
             (self, action),
@@ -382,28 +419,65 @@ impl KubeVirtBackendRequest<'_> {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct KubeVirtBackendResponseEnvelope {
-    protocol_version: u8,
-    environment_id: EnvironmentId,
-    operation_id: OperationId,
-    provider_step: u32,
-    environment_generation: u64,
-    attempt: u32,
-    action: ReconcileAction,
-    request_id: Sha256Digest,
-    response: KubeVirtBackendResponse,
+fn bind_kubevirt_executor_request(
+    mut fence: KubeVirtBackendFence,
+    request: &KubeVirtExecutorRequest,
+) -> Result<KubeVirtBackendFence, ProviderFailure> {
+    fence.request_id = kubevirt_executor_request_id(fence, request)?;
+    Ok(fence)
 }
 
-#[derive(Deserialize)]
+fn kubevirt_executor_request_id(
+    fence: KubeVirtBackendFence,
+    request: &KubeVirtExecutorRequest,
+) -> Result<Sha256Digest, ProviderFailure> {
+    Sha256Digest::of_canonical(&json!({
+        "protocolVersion": fence.protocol_version,
+        "environmentId": fence.environment_id,
+        "operationId": fence.operation_id,
+        "providerStep": fence.provider_step,
+        "environmentGeneration": fence.environment_generation,
+        "attempt": fence.attempt,
+        "action": fence.action,
+        "deadlineAt": fence.deadline_at,
+        "request": request,
+    }))
+    .map_err(|_| invalid_observation())
+}
+
+const fn kubevirt_executor_environment_id(request: &KubeVirtExecutorRequest) -> EnvironmentId {
+    match request {
+        KubeVirtExecutorRequest::Apply { plan }
+        | KubeVirtExecutorRequest::Observe { plan }
+        | KubeVirtExecutorRequest::Start { plan }
+        | KubeVirtExecutorRequest::Stop { plan }
+        | KubeVirtExecutorRequest::Restart { plan } => plan.environment_id,
+        KubeVirtExecutorRequest::DeleteNamespace { plan } => plan.environment_id,
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KubeVirtExecutorResponseEnvelope {
+    pub protocol_version: u8,
+    pub environment_id: EnvironmentId,
+    pub operation_id: OperationId,
+    pub provider_step: u32,
+    pub environment_generation: u64,
+    pub attempt: u32,
+    pub action: ReconcileAction,
+    pub request_id: Sha256Digest,
+    pub response: KubeVirtExecutorResponse,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(
     tag = "status",
     rename_all = "snake_case",
     rename_all_fields = "camelCase",
     deny_unknown_fields
 )]
-enum KubeVirtBackendResponse {
+pub enum KubeVirtExecutorResponse {
     Running {
         plan_sha256: Sha256Digest,
         observation: KubeVirtRunningObservation,
@@ -419,6 +493,396 @@ enum KubeVirtBackendResponse {
     Failed {
         failure: ProviderFailure,
     },
+}
+
+/// `KubeVirt` side-effect adapter invoked only after durable executor admission.
+#[async_trait]
+pub trait KubeVirtExecutorBackend: Send + Sync {
+    async fn execute(
+        &self,
+        fence: &KubeVirtBackendFence,
+        request: &KubeVirtExecutorRequest,
+    ) -> KubeVirtExecutorResponse;
+}
+
+/// Persistent highest-generation and permanent-cleanup ledger for VM operations.
+#[derive(Clone, Debug)]
+pub struct PgKubeVirtExecutorFenceStore {
+    pool: PgPool,
+}
+
+impl PgKubeVirtExecutorFenceStore {
+    #[must_use]
+    pub const fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the row lock, generation fence and cleanup tombstone form one admission decision"
+    )]
+    async fn admit(
+        &self,
+        envelope: &KubeVirtExecutorRequestEnvelope,
+    ) -> Result<KubeVirtExecutorAdmission, KubeVirtExecutorFenceError> {
+        validate_kubevirt_executor_request(envelope)?;
+        let fence = envelope.fence;
+        let mut transaction = self.pool.begin().await?;
+        let authority_now: time::OffsetDateTime =
+            sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
+                .fetch_one(&mut *transaction)
+                .await?;
+        if authority_now >= fence.deadline_at.get() {
+            return Err(KubeVirtExecutorFenceError::DeadlineExceeded);
+        }
+        let remaining = std::time::Duration::try_from(fence.deadline_at.get() - authority_now)
+            .map_err(|_| KubeVirtExecutorFenceError::DeadlineExceeded)?;
+        let current = sqlx::query(
+            "SELECT highest_generation,operation_id,provider_step,attempt,tombstoned, \
+                    last_request_id,last_response,deadline_at \
+             FROM environment.kubevirt_executor_fences WHERE environment_id=$1 FOR UPDATE",
+        )
+        .bind(fence.environment_id.as_uuid())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(row) = current {
+            let highest_generation = u64::try_from(row.try_get::<i64, _>("highest_generation")?)
+                .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?;
+            let operation_id =
+                OperationId::from_str(&row.try_get::<Uuid, _>("operation_id")?.to_string())
+                    .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?;
+            let provider_step = u32::try_from(row.try_get::<i32, _>("provider_step")?)
+                .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?;
+            let attempt = u32::try_from(row.try_get::<i32, _>("attempt")?)
+                .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?;
+            let tombstoned: bool = row.try_get("tombstoned")?;
+            let last_request_id: String = row.try_get("last_request_id")?;
+            let last_response = row.try_get::<Option<Value>, _>("last_response")?;
+            let previous_deadline: time::OffsetDateTime = row.try_get("deadline_at")?;
+            if last_request_id == fence.request_id.to_string() {
+                if let Some(value) = last_response {
+                    transaction.rollback().await?;
+                    return Ok(KubeVirtExecutorAdmission::Replay(value));
+                }
+                return Err(KubeVirtExecutorFenceError::InProgress);
+            }
+            if last_response.is_none() && authority_now < previous_deadline {
+                return Err(KubeVirtExecutorFenceError::InProgress);
+            }
+            let cleanup_succeeded = last_response
+                .as_ref()
+                .and_then(|value| value.get("status"))
+                .and_then(Value::as_str)
+                == Some("deleted");
+            if tombstoned && cleanup_succeeded {
+                if fence.action == ReconcileAction::Cleanup {
+                    let value = last_response
+                        .as_ref()
+                        .ok_or(KubeVirtExecutorFenceError::IdentityMismatch)?
+                        .clone();
+                    transaction.rollback().await?;
+                    return Ok(KubeVirtExecutorAdmission::Replay(value));
+                }
+                return Err(KubeVirtExecutorFenceError::Tombstoned);
+            }
+            if fence.environment_generation < highest_generation
+                || (fence.environment_generation == highest_generation
+                    && (fence.provider_step < provider_step
+                        || (fence.provider_step == provider_step && fence.attempt < attempt)))
+            {
+                return Err(KubeVirtExecutorFenceError::StaleGeneration);
+            }
+            if fence.environment_generation == highest_generation
+                && fence.operation_id != operation_id
+            {
+                return Err(KubeVirtExecutorFenceError::IdentityMismatch);
+            }
+            sqlx::query(
+                "UPDATE environment.kubevirt_executor_fences SET highest_generation=$2, \
+                 operation_id=$3,provider_step=$4,attempt=$5,tombstoned=$6,last_action=$7, \
+                 last_request_id=$8,last_response=NULL,deadline_at=$9,updated_at=clock_timestamp() \
+                 WHERE environment_id=$1",
+            )
+            .bind(fence.environment_id.as_uuid())
+            .bind(
+                i64::try_from(fence.environment_generation)
+                    .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?,
+            )
+            .bind(fence.operation_id.as_uuid())
+            .bind(
+                i32::try_from(fence.provider_step)
+                    .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?,
+            )
+            .bind(
+                i32::try_from(fence.attempt)
+                    .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?,
+            )
+            .bind(false)
+            .bind(kubevirt_action_name(fence.action))
+            .bind(fence.request_id.to_string())
+            .bind(fence.deadline_at.get())
+            .execute(&mut *transaction)
+            .await?;
+        } else {
+            sqlx::query(
+                "INSERT INTO environment.kubevirt_executor_fences \
+                 (environment_id,highest_generation,operation_id,provider_step,attempt,tombstoned, \
+                  last_action,last_request_id,deadline_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+            )
+            .bind(fence.environment_id.as_uuid())
+            .bind(
+                i64::try_from(fence.environment_generation)
+                    .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?,
+            )
+            .bind(fence.operation_id.as_uuid())
+            .bind(
+                i32::try_from(fence.provider_step)
+                    .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?,
+            )
+            .bind(
+                i32::try_from(fence.attempt)
+                    .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?,
+            )
+            .bind(false)
+            .bind(kubevirt_action_name(fence.action))
+            .bind(fence.request_id.to_string())
+            .bind(fence.deadline_at.get())
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(KubeVirtExecutorAdmission::Execute(remaining))
+    }
+
+    async fn complete(
+        &self,
+        fence: KubeVirtBackendFence,
+        response: &KubeVirtExecutorResponse,
+    ) -> Result<(), KubeVirtExecutorFenceError> {
+        let value = serde_json::to_value(response)
+            .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?;
+        let updated = sqlx::query(
+            "UPDATE environment.kubevirt_executor_fences SET last_response=$7, \
+                 tombstoned=CASE WHEN $8 THEN TRUE ELSE tombstoned END,updated_at=clock_timestamp() \
+             WHERE environment_id=$1 AND highest_generation=$2 AND operation_id=$3 \
+               AND provider_step=$4 AND attempt=$5 AND last_request_id=$6 AND last_response IS NULL",
+        )
+        .bind(fence.environment_id.as_uuid())
+        .bind(i64::try_from(fence.environment_generation).map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?)
+        .bind(fence.operation_id.as_uuid())
+        .bind(i32::try_from(fence.provider_step).map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?)
+        .bind(i32::try_from(fence.attempt).map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?)
+        .bind(fence.request_id.to_string())
+        .bind(value)
+        .bind(matches!(response, KubeVirtExecutorResponse::Deleted { .. }))
+        .execute(&self.pool)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(KubeVirtExecutorFenceError::StaleGeneration);
+        }
+        Ok(())
+    }
+}
+
+enum KubeVirtExecutorAdmission {
+    Execute(std::time::Duration),
+    Replay(Value),
+}
+
+/// Deadline-bounded executor with replay and stale-generation rejection.
+pub struct FencedKubeVirtExecutor<B> {
+    store: PgKubeVirtExecutorFenceStore,
+    backend: B,
+}
+
+impl<B: KubeVirtExecutorBackend> FencedKubeVirtExecutor<B> {
+    #[must_use]
+    pub const fn new(store: PgKubeVirtExecutorFenceStore, backend: B) -> Self {
+        Self { store, backend }
+    }
+
+    pub async fn execute(
+        &self,
+        envelope: KubeVirtExecutorRequestEnvelope,
+    ) -> Result<KubeVirtExecutorResponseEnvelope, KubeVirtExecutorFenceError> {
+        let response = match self.store.admit(&envelope).await? {
+            KubeVirtExecutorAdmission::Execute(remaining) => {
+                let response = tokio::time::timeout(
+                    remaining,
+                    self.backend.execute(&envelope.fence, &envelope.request),
+                )
+                .await
+                .map_err(|_| KubeVirtExecutorFenceError::DeadlineExceeded)?;
+                self.store.complete(envelope.fence, &response).await?;
+                response
+            }
+            KubeVirtExecutorAdmission::Replay(value) => serde_json::from_value(value)
+                .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?,
+        };
+        Ok(KubeVirtExecutorResponseEnvelope {
+            protocol_version: envelope.fence.protocol_version,
+            environment_id: envelope.fence.environment_id,
+            operation_id: envelope.fence.operation_id,
+            provider_step: envelope.fence.provider_step,
+            environment_generation: envelope.fence.environment_generation,
+            attempt: envelope.fence.attempt,
+            action: envelope.fence.action,
+            request_id: envelope.fence.request_id,
+            response,
+        })
+    }
+}
+
+/// Typed NATS request/reply server for the `KubeVirt` executor subject.
+pub struct NatsKubeVirtExecutorServer<B> {
+    client: async_nats::Client,
+    subject: String,
+    executor: Arc<FencedKubeVirtExecutor<B>>,
+}
+
+impl<B: KubeVirtExecutorBackend + 'static> NatsKubeVirtExecutorServer<B> {
+    pub fn new(
+        client: async_nats::Client,
+        subject: String,
+        executor: FencedKubeVirtExecutor<B>,
+    ) -> Result<Self, KubeVirtExecutorFenceError> {
+        if !valid_subject(&subject) {
+            return Err(KubeVirtExecutorFenceError::ConfigurationInvalid);
+        }
+        Ok(Self {
+            client,
+            subject,
+            executor: Arc::new(executor),
+        })
+    }
+
+    pub async fn serve(self) -> Result<(), KubeVirtExecutorFenceError> {
+        let mut subscriber = self
+            .client
+            .subscribe(self.subject)
+            .await
+            .map_err(|_| KubeVirtExecutorFenceError::Transport)?;
+        while let Some(message) = subscriber.next().await {
+            let Some(reply) = message.reply.clone() else {
+                tracing::warn!(
+                    event = "environment.kubevirt_executor.request_rejected",
+                    diagnostic = "LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_REPLY_REQUIRED"
+                );
+                continue;
+            };
+            if message.payload.len() > MAX_RESPONSE_BYTES {
+                tracing::warn!(
+                    event = "environment.kubevirt_executor.request_rejected",
+                    diagnostic = "LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_PAYLOAD_TOO_LARGE"
+                );
+                continue;
+            }
+            let Ok(envelope) =
+                serde_json::from_slice::<KubeVirtExecutorRequestEnvelope>(&message.payload)
+            else {
+                tracing::warn!(
+                    event = "environment.kubevirt_executor.request_rejected",
+                    diagnostic = "LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_CONTRACT_INVALID"
+                );
+                continue;
+            };
+            let client = self.client.clone();
+            let executor = Arc::clone(&self.executor);
+            tokio::spawn(async move {
+                let fence = envelope.fence;
+                let response = executor.execute(envelope).await.unwrap_or_else(|error| {
+                    KubeVirtExecutorResponseEnvelope {
+                        protocol_version: fence.protocol_version,
+                        environment_id: fence.environment_id,
+                        operation_id: fence.operation_id,
+                        provider_step: fence.provider_step,
+                        environment_generation: fence.environment_generation,
+                        attempt: fence.attempt,
+                        action: fence.action,
+                        request_id: fence.request_id,
+                        response: KubeVirtExecutorResponse::Failed {
+                            failure: kubevirt_executor_failure(&error),
+                        },
+                    }
+                });
+                let Ok(payload) = serde_json::to_vec(&response) else {
+                    tracing::error!(
+                        event = "environment.kubevirt_executor.response_failed",
+                        diagnostic = "LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_RESPONSE_INVALID"
+                    );
+                    return;
+                };
+                if client.publish(reply, payload.into()).await.is_err() {
+                    tracing::warn!(
+                        event = "environment.kubevirt_executor.response_failed",
+                        diagnostic = "LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_TRANSPORT_FAILED"
+                    );
+                }
+            });
+        }
+        Err(KubeVirtExecutorFenceError::Transport)
+    }
+}
+
+fn validate_kubevirt_executor_request(
+    envelope: &KubeVirtExecutorRequestEnvelope,
+) -> Result<(), KubeVirtExecutorFenceError> {
+    let fence = envelope.fence;
+    let expected = kubevirt_executor_request_id(fence, &envelope.request)
+        .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?;
+    if fence.protocol_version != KUBEVIRT_BACKEND_PROTOCOL_VERSION
+        || fence.environment_generation == 0
+        || fence.request_id != expected
+        || !envelope.request.matches_action(fence.action)
+        || kubevirt_executor_environment_id(&envelope.request) != fence.environment_id
+    {
+        return Err(KubeVirtExecutorFenceError::IdentityMismatch);
+    }
+    Ok(())
+}
+
+const fn kubevirt_executor_failure(error: &KubeVirtExecutorFenceError) -> ProviderFailure {
+    match error {
+        KubeVirtExecutorFenceError::InProgress
+        | KubeVirtExecutorFenceError::Database(_)
+        | KubeVirtExecutorFenceError::Transport => unavailable(),
+        _ => configuration_invalid(),
+    }
+}
+
+const fn kubevirt_action_name(action: ReconcileAction) -> &'static str {
+    match action {
+        ReconcileAction::Validate => "validate",
+        ReconcileAction::Build => "build",
+        ReconcileAction::Provision => "provision",
+        ReconcileAction::Observe => "observe",
+        ReconcileAction::Start => "start",
+        ReconcileAction::Stop => "stop",
+        ReconcileAction::Restart => "restart",
+        ReconcileAction::Reset => "reset",
+        ReconcileAction::Configure => "configure",
+        ReconcileAction::Cleanup => "cleanup",
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum KubeVirtExecutorFenceError {
+    #[error("LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_CONFIGURATION_INVALID")]
+    ConfigurationInvalid,
+    #[error("LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_IDENTITY_MISMATCH")]
+    IdentityMismatch,
+    #[error("LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_DEADLINE_EXCEEDED")]
+    DeadlineExceeded,
+    #[error("LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_STALE_GENERATION")]
+    StaleGeneration,
+    #[error("LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_TOMBSTONED")]
+    Tombstoned,
+    #[error("LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_REQUEST_IN_PROGRESS")]
+    InProgress,
+    #[error("LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_DATABASE_FAILED")]
+    Database(#[from] sqlx::Error),
+    #[error("LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_TRANSPORT_FAILED")]
+    Transport,
 }
 
 /// Deployment-owned mapping from an approved artifact to a CDI `DataSource` and `StorageClass`.
@@ -458,6 +922,8 @@ impl KubeVirtStorageBinding {
 pub struct KubeVirtSshBootstrap {
     pub gateway_namespace: String,
     pub gateway_pod_label: String,
+    pub collector_namespace: String,
+    pub collector_pod_label: String,
     pub guest_user: String,
     pub user_ca_public_key: String,
 }
@@ -466,6 +932,8 @@ impl KubeVirtSshBootstrap {
     pub fn new(
         gateway_namespace: String,
         gateway_pod_label: String,
+        collector_namespace: String,
+        collector_pod_label: String,
         guest_user: String,
         user_ca_public_key: &str,
     ) -> Result<Self, ReleaseProjectionError> {
@@ -473,6 +941,8 @@ impl KubeVirtSshBootstrap {
             .map_err(|_| ReleaseProjectionError::ConfigurationInvalid)?;
         if !valid_dns_label(&gateway_namespace)
             || !valid_dns_label(&gateway_pod_label)
+            || !valid_dns_label(&collector_namespace)
+            || !valid_dns_label(&collector_pod_label)
             || !valid_guest_user(&guest_user)
         {
             return Err(ReleaseProjectionError::ConfigurationInvalid);
@@ -480,6 +950,8 @@ impl KubeVirtSshBootstrap {
         Ok(Self {
             gateway_namespace,
             gateway_pod_label,
+            collector_namespace,
+            collector_pod_label,
             guest_user,
             user_ca_public_key: public_key.normalized_openssh,
         })
@@ -489,7 +961,7 @@ impl KubeVirtSshBootstrap {
 /// Reviewed non-secret configuration for one exact `KubeVirt` Provider binding.
 #[derive(Clone, Debug)]
 pub struct KubeVirtProviderConfiguration {
-    pub release_policy: ContainerReleasePolicy,
+    pub trust_revision: Revision,
     pub storage: KubeVirtStorageBinding,
     pub ssh: KubeVirtSshBootstrap,
     pub resource_budget: KubeVirtResourceBudget,
@@ -538,13 +1010,13 @@ impl KubeVirtResourceBudget {
 impl KubeVirtProviderConfiguration {
     #[must_use]
     pub const fn new(
-        release_policy: ContainerReleasePolicy,
+        trust_revision: Revision,
         storage: KubeVirtStorageBinding,
         ssh: KubeVirtSshBootstrap,
         resource_budget: KubeVirtResourceBudget,
     ) -> Self {
         Self {
-            release_policy,
+            trust_revision,
             storage,
             ssh,
             resource_budget,
@@ -1025,7 +1497,6 @@ where
             || storage_class_binding != &self.configuration.storage.binding
             || *ssh_port != 22
             || spec_base_disk != base_disk
-            || projection.release.image_policy_evaluation.artifact_sha256 != base_disk.sha256
             || projection.environment_spec.security.user_policy
                 != RuntimeUserPolicy::NonRootRequired
             || projection.environment_spec.security.root_filesystem_policy
@@ -1037,7 +1508,7 @@ where
                 != PrivilegeEscalationPolicy::Deny
             || projection.environment_spec.security.public_exposure_policy
                 != PublicExposurePolicy::Deny
-            || !valid_artifact_ref(base_disk)
+            || base_disk.validate().is_err()
         {
             return Err(ReleaseProjectionError::SecurityPostureInvalid);
         }
@@ -1058,13 +1529,14 @@ where
             "labweaver.io/environment-id": instance.id.to_string(),
             "labweaver.io/course-id": instance.course_id.to_string(),
             "labweaver.io/managed": "true",
+            "labweaver.io/environment": "true",
         });
         let annotations = json!({
             "labweaver.io/release-id": projection.release.id.to_string(),
             "labweaver.io/release-version": projection.release.version.to_string(),
-            "labweaver.io/base-disk-store-binding": base_disk.store_binding,
-            "labweaver.io/base-disk-object-version": base_disk.object_version,
-            "labweaver.io/base-disk-sha256": base_disk.sha256.to_string(),
+            "labweaver.io/base-disk-binding": base_disk.binding,
+            "labweaver.io/base-disk-source-registry": base_disk.source_registry_digest,
+            "labweaver.io/base-disk-sha256": base_disk.disk_sha256.to_string(),
             "labweaver.io/environment-generation": instance.generation.to_string(),
         });
         let resources = &projection.environment_spec.resources;
@@ -1113,6 +1585,9 @@ where
         });
         let cloud_init = self.cloud_init_user_data();
         let cloud_init_data = BASE64_STANDARD.encode(cloud_init.as_bytes());
+        let cloud_init_network_data = BASE64_STANDARD.encode(
+            b"version: 2\nethernets:\n  default:\n    match:\n      name: \"en*\"\n    dhcp4: true\n",
+        );
         let mut documents = vec![
             resource(
                 "Namespace",
@@ -1150,7 +1625,31 @@ where
                 json!({
                     "apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
                     "metadata":{"name":"openssh-gateway-ingress","namespace":namespace,"labels":labels},
-                    "spec":{"podSelector":{"matchLabels":{"labweaver.io/environment-id":instance.id.to_string()}},"policyTypes":["Ingress"],"ingress":[{"from":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":self.configuration.ssh.gateway_namespace}},"podSelector":{"matchLabels":{GATEWAY_LABEL_KEY:self.configuration.ssh.gateway_pod_label}}}],"ports":[{"protocol":"TCP","port":ssh_port}]}]}
+                    "spec":{"podSelector":{"matchLabels":{"labweaver.io/environment-id":instance.id.to_string()}},"policyTypes":["Ingress"],"ingress":[{"from":[
+                        {"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":self.configuration.ssh.gateway_namespace}},"podSelector":{"matchLabels":{GATEWAY_LABEL_KEY:self.configuration.ssh.gateway_pod_label}}},
+                        {"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":self.configuration.ssh.collector_namespace}},"podSelector":{"matchLabels":{GATEWAY_LABEL_KEY:self.configuration.ssh.collector_pod_label}}},
+                        {"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":self.configuration.storage.data_source_namespace}},"podSelector":{"matchLabels":{GATEWAY_LABEL_KEY:"kubevirt-executor"}}}
+                    ],"ports":[{"protocol":"TCP","port":ssh_port}]}]}
+                }),
+            ),
+            resource(
+                "NetworkPolicy",
+                Some(&namespace),
+                "cdi-clone-ingress",
+                json!({
+                    "apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
+                    "metadata":{"name":"cdi-clone-ingress","namespace":namespace,"labels":labels},
+                    "spec":{
+                        "podSelector":{"matchLabels":{"cdi.kubevirt.io":"cdi-upload-server"}},
+                        "policyTypes":["Ingress"],
+                        "ingress":[{
+                            "from":[{
+                                "namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":self.configuration.storage.data_source_namespace}},
+                                "podSelector":{"matchLabels":{"cdi.kubevirt.io":"cdi-clone-source"}}
+                            }],
+                            "ports":[{"protocol":"TCP","port":8443}]
+                        }]
+                    }
                 }),
             ),
             resource(
@@ -1160,7 +1659,7 @@ where
                 json!({
                     "apiVersion":"v1","kind":"Secret","type":"Opaque",
                     "metadata":{"name":"cloud-init","namespace":namespace,"labels":labels,"annotations":annotations},
-                    "data":{"userdata":cloud_init_data}
+                    "data":{"userdata":cloud_init_data,"networkdata":cloud_init_network_data}
                 }),
             ),
             resource(
@@ -1205,9 +1704,11 @@ where
                                 "networks":[{"name":"default","pod":{}}],
                                 "volumes":[
                                     {"name":"rootdisk","persistentVolumeClaim":{"claimName":data_volume_name}},
-                                    {"name":"cloudinit","cloudInitNoCloud":{"secretRef":{"name":"cloud-init"}}}
-                                ],
-                                "readinessProbe":{"tcpSocket":{"port":ssh_port},"periodSeconds":2,"failureThreshold":60}
+                                    {"name":"cloudinit","cloudInitNoCloud":{
+                                        "secretRef":{"name":"cloud-init"},
+                                        "networkDataSecretRef":{"name":"cloud-init"}
+                                    }}
+                                ]
                             }
                         }
                     }
@@ -1272,17 +1773,7 @@ where
         if resolved.withdrawn_at.is_some() {
             return Err(ReleaseProjectionError::Withdrawn);
         }
-        if resolved.authority_now >= release.image_policy_evaluation.valid_until {
-            return Err(ReleaseProjectionError::EvidenceExpired);
-        }
-        let policy = self.configuration.release_policy;
-        if release.image_policy_evaluation.policy_id != policy.image_policy_id
-            || release.image_policy_evaluation.policy_revision != policy.image_policy_revision
-            || release.approval.trust_revision != policy.trust_revision
-            || release.image_policy_evaluation.trust_bundle_sha256 != policy.trust_bundle_sha256
-            || release.artifact.signature_evidence().trust_bundle_sha256
-                != policy.trust_bundle_sha256
-        {
+        if release.approval.trust_revision != self.configuration.trust_revision {
             return Err(ReleaseProjectionError::TrustRevisionMismatch);
         }
         Ok(())
@@ -1290,7 +1781,7 @@ where
 
     fn cloud_init_user_data(&self) -> String {
         format!(
-            "#cloud-config\nusers:\n  - name: {user}\n    lock_passwd: true\n    shell: /bin/bash\nwrite_files:\n  - path: /etc/ssh/labweaver_user_ca.pub\n    owner: root:root\n    permissions: '0644'\n    content: |\n      {ca}\n  - path: /etc/ssh/auth_principals/{user}\n    owner: root:root\n    permissions: '0644'\n    content: |\n      labweaver-gateway\n      labweaver-collector\n  - path: /etc/ssh/sshd_config.d/99-labweaver.conf\n    owner: root:root\n    permissions: '0644'\n    content: |\n      TrustedUserCAKeys /etc/ssh/labweaver_user_ca.pub\n      AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u\n      AuthorizedKeysFile none\n      PubkeyAuthentication yes\n      AuthenticationMethods publickey\n      AllowUsers {user}\n      PasswordAuthentication no\n      KbdInteractiveAuthentication no\n      PermitRootLogin no\n      AllowTcpForwarding no\n      PermitAgentForwarding no\n      PermitTunnel no\n      X11Forwarding no\nruncmd:\n  - [systemctl, reload, ssh]\n",
+            "#cloud-config\nusers:\n  - name: {user}\n    lock_passwd: true\n    shell: /bin/bash\nwrite_files:\n  - path: /etc/ssh/labweaver_user_ca.pub\n    owner: root:root\n    permissions: '0644'\n    content: |\n      {ca}\n  - path: /etc/ssh/auth_principals/{user}\n    owner: root:root\n    permissions: '0644'\n    content: |\n      labweaver-gateway\n      labweaver-collector\n  - path: /etc/ssh/sshd_config.d/99-labweaver.conf\n    owner: root:root\n    permissions: '0644'\n    content: |\n      TrustedUserCAKeys /etc/ssh/labweaver_user_ca.pub\n      AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u\n      AuthorizedKeysFile none\n      PubkeyAuthentication yes\n      AuthenticationMethods publickey\n      AllowUsers {user}\n      PasswordAuthentication no\n      KbdInteractiveAuthentication no\n      PermitRootLogin no\n      AllowTcpForwarding no\n      AllowAgentForwarding no\n      PermitTunnel no\n      X11Forwarding no\nruncmd:\n  - [install, -d, -o, {user}, -g, {user}, -m, '0700', /home/{user}/workspace]\n  - [sshd, -t]\n  - [systemctl, enable, --now, ssh.service]\n",
             user = self.configuration.ssh.guest_user,
             ca = self.configuration.ssh.user_ca_public_key,
         )
@@ -1473,6 +1964,7 @@ fn ready_observation(
             protocol: contracts::environment::EndpointProtocol::Ssh,
             revision,
             health: EndpointHealth::Healthy,
+            ssh_host_key_identity_sha256: Some(observed.ssh_host_key_sha256),
             observed_at: observed.observed_at,
         }],
         cleanup_evidence: None,
@@ -1500,7 +1992,6 @@ fn valid_running_observation(
         && private_route_ip(observed.guest_ip)
         && private_route_ip(observed.service_cluster_ip)
         && observed.ssh_host_key_sha256 != Sha256Digest::of_bytes(&[])
-        && observed.guest_agent_connected
         && observed.ssh_ready
 }
 

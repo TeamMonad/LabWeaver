@@ -1,0 +1,170 @@
+---
+sprint2_application_run_id: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RUN_ID') }}"
+sprint2_application_source_commit: "{{ lookup('ansible.builtin.env', 'LABWEAVER_COMMIT_SHA') }}"
+sprint2_application_package_manifest: "{{ lookup('ansible.builtin.env', 'LABWEAVER_PACKAGE_MANIFEST') }}"
+sprint2_application_migration_catalog: "{{ playbook_dir }}/../../../migrations/catalog.yaml"
+sprint2_application_kubeconfig: /etc/kubernetes/admin.conf
+sprint2_application_kubectl: /usr/bin/kubectl
+sprint2_application_helm: /usr/local/bin/helm
+sprint2_application_psql: /usr/bin/psql
+sprint2_application_nats: /usr/local/bin/nats
+sprint2_application_mc: /usr/local/bin/mc
+sprint2_application_kcadm: /usr/local/bin/kcadm.sh
+sprint2_application_keytool: /usr/bin/keytool
+sprint2_application_report_root: /var/lib/labweaver/sprint2-application
+sprint2_application_domains: [control, access, environment, agent, evaluation, resource]
+# Exact migration-1 identities observed from the retained pre-reset Sprint 2
+# database. They are accepted without rewriting history; new installations
+# still record the catalog hash, and every later migration remains exact-only.
+sprint2_application_retained_baseline_sha256:
+  control: d6849ba453cace3cb7806d918b24ac3f923ca93283bbebb6b2a6fccaaf736f4b
+  access: b57bc3d29605a9986c211df809e6bcc391b987c846f647c66bb7a5d3600780c4
+  environment: 925bbcef2003f0f2764ebbb8b4304081b3287218ed5d03e5e803120386e60f69
+  evaluation: 5f1cf9d27b0bf4976d86dc23a7d65adbf8ac107ee6786ccf5db81d664adce884
+  resource: 3096083438fbb06d20c13a012663fbde4ad2f787771449adf1c52ca91696f380
+sprint2_application_runtime_passwords: {}
+sprint2_application_postgres_service_file: ""
+sprint2_application_postgres_service: sprint2-admin
+sprint2_application_postgres_database: labweaver
+sprint2_application_nats_server: ""
+sprint2_application_nats_controller_address: ""
+sprint2_application_nats_credentials_file: ""
+sprint2_application_nats_ca_file: ""
+sprint2_application_nats_client_certificate_file: ""
+sprint2_application_nats_client_private_key_file: ""
+sprint2_application_nats_streams:
+  - {name: LABWEAVER_AGENT_EVENTS, subjects: ["labweaver.agent.>"], max_age: 24h}
+  - {name: LABWEAVER_CONTROL_COMMANDS, subjects: ["labweaver.control.agent_build.requested.v1"], max_age: 24h}
+  - name: LABWEAVER_ENVIRONMENT_COMMANDS
+    subjects:
+      - labweaver.environment.instance.>
+      - labweaver.environment.command.quarantine.v1
+    adopted_subjects:
+      - labweaver.environment.instance.lifecycle_requested.v1
+    max_age: 24h
+  - name: LABWEAVER_RELEASES
+    subjects:
+      - labweaver.control.environment_template_release.>
+      - labweaver.environment.release.quarantine.v1
+    adopted_subjects:
+      - labweaver.control.environment_template_release.>
+    max_age: 168h
+  - {name: LABWEAVER_ACCESS, subjects: ["labweaver.access.>"], max_age: 24h}
+  - {name: LABWEAVER_SUBMISSION, subjects: ["labweaver.evaluation.submission.>"], max_age: 168h}
+sprint2_application_nats_consumers:
+  - name: control-agent-run-projection-v1
+    stream: LABWEAVER_AGENT_EVENTS
+    filters: ["labweaver.agent.run.>"]
+  - name: control-agent-build-projection-v1
+    stream: LABWEAVER_AGENT_EVENTS
+    filters:
+      - labweaver.agent.build.completed.v1
+      - labweaver.agent.build.failed.v1
+  - name: agent-build-command-v1
+    stream: LABWEAVER_CONTROL_COMMANDS
+    filters: [labweaver.control.agent_build.requested.v1]
+  - name: environment-service-v1
+    stream: LABWEAVER_ENVIRONMENT_COMMANDS
+    filters: [labweaver.environment.instance.lifecycle_requested.v1]
+  - name: environment-release-v1
+    stream: LABWEAVER_RELEASES
+    filters:
+      - labweaver.control.environment_template_release.published.v1
+      - labweaver.control.environment_template_release.withdrawn.v1
+sprint2_application_minio_alias: ""
+sprint2_application_minio_endpoint: ""
+sprint2_application_minio_controller_address: ""
+sprint2_application_minio_username: ""
+sprint2_application_minio_password: ""
+sprint2_application_minio_ca_file: ""
+sprint2_application_minio_bucket: labweaver-artifacts
+sprint2_application_harbor_api: ""
+sprint2_application_harbor_registry: ""
+sprint2_application_harbor_endpoint_address: ""
+sprint2_application_harbor_ca_file: ""
+sprint2_application_harbor_username: ""
+sprint2_application_harbor_password: ""
+sprint2_application_harbor_project: labweaver-system
+sprint2_application_image_pull_secret_name: harbor-labweaver-system-pull
+sprint2_application_data_namespace: labweaver-data
+sprint2_application_data_services: [postgres, nats, minio]
+sprint2_application_keycloak_realm: workloads
+sprint2_application_keycloak_config: ""
+sprint2_application_keycloak_server: ""
+sprint2_application_keycloak_admin_realm: master
+sprint2_application_keycloak_username: ""
+sprint2_application_keycloak_password: ""
+sprint2_application_keycloak_realm_file: ""
+sprint2_application_keycloak_ca_file: ""
+sprint2_application_keycloak_hostname: ""
+sprint2_application_keycloak_endpoint_address: ""
+sprint2_application_keycloak_truststore_password: ""
+sprint2_application_keycloak_client_id: labweaver-web
+sprint2_application_keycloak_required_roles: [teacher, student, platform_admin]
+sprint2_application_keycloak_required_users: [sprint2-teacher, sprint2-student]
+sprint2_application_access_seed_file: ""
+sprint2_application_chart_source: "{{ playbook_dir }}/../../helm/labweaver"
+sprint2_application_values_files: []
+sprint2_application_configuration_bundle: ""
+sprint2_application_configuration_manifest: "{{ playbook_dir }}/../../config/sprint2-bundle-manifest.json"
+sprint2_application_nats_credential_validator: "{{ playbook_dir }}/../../../tools/validate_nats_user_credentials.py"
+sprint2_application_required_configmaps:
+  - control-service-config
+  - access-service-config
+  - agent-service-config
+  - build-executor-config
+  - environment-service-config
+  - evaluation-service-config
+  - container-executor-config
+  - kubevirt-executor-config
+  - web-config
+sprint2_application_required_secrets:
+  - control-service-secrets
+  - access-service-secrets
+  - agent-service-secrets
+  - build-executor-secrets
+  - environment-service-secrets
+  - evaluation-service-secrets
+  - container-executor-secrets
+  - kubevirt-executor-secrets
+  - openssh-gateway-secrets
+sprint2_application_release_name: labweaver
+sprint2_application_namespace: labweaver-system
+sprint2_application_evaluation_namespace: labweaver-evaluation
+sprint2_application_evaluation_pull_secret_name: harbor-labweaver-system-pull
+sprint2_application_rollout_timeout: 10m
+sprint2_application_portal_route_namespace: ""
+sprint2_application_portal_route_name: ""
+sprint2_application_portal_gateway_name: ""
+sprint2_application_portal_gateway_listener_name: https
+sprint2_application_portal_hostname: ""
+sprint2_application_portal_tls_secret_name: labweaver-sprint2-tls
+sprint2_application_portal_tls_certificate_file: ""
+sprint2_application_portal_tls_key_file: ""
+sprint2_application_portal_tls_ca_file: ""
+sprint2_application_object_store_route_enabled: false
+sprint2_application_object_store_service_name: minio
+sprint2_application_object_store_service_port: 9000
+sprint2_application_object_store_backend_hostname: minio.labweaver-data.svc
+sprint2_application_object_store_external_cidr: ""
+sprint2_application_ssh_load_balancer_ip: ""
+sprint2_application_ssh_shared_ip_key: labweaver-sprint2-public
+sprint2_application_workloads:
+  - control-service
+  - access-service
+  - agent-service
+  - build-executor
+  - environment-service
+  - evaluation-service
+  - container-executor
+  - kubevirt-executor
+  - openssh-gateway
+  - web
+sprint2_application_components:
+  - access-service
+  - agent-service
+  - control-service
+  - environment-service
+  - evaluation-service
+  - openssh-gateway
+  - web

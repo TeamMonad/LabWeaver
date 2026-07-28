@@ -9,8 +9,10 @@
     "environment",
     "package_manifest_sha256",
     "source_commit",
+    "run_id",
     "cluster_uid",
     "helm_revision",
+    "migration_catalog_sha256",
     "images",
     "previous_verified_manifest_sha256"
   ],
@@ -29,6 +31,10 @@
       "type": "string",
       "pattern": "^[0-9a-f]{40}$"
     },
+    "run_id": {
+      "type": "string",
+      "format": "uuid"
+    },
     "cluster_uid": {
       "type": "string",
       "minLength": 1
@@ -36,6 +42,9 @@
     "helm_revision": {
       "type": "integer",
       "minimum": 1
+    },
+    "migration_catalog_sha256": {
+      "$ref": "#/$defs/digest"
     },
     "images": {
       "type": "array",

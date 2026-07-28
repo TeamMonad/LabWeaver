@@ -1,154 +1,81 @@
-# NATS Event Contract v1
+# Sprint 2 NATS Event Contract v1
 
-## Status and scope
+## Scope
 
-This is the human-readable, normative v1 catalog for cross-service NATS
-messages. It implements the design decision in
-[ADR 0003](../adr/0003-nats-subject-and-delivery-contract.md) and resolves
-Issue #18 at E0 and is now backed by Issue #45 Rust payloads and generated
-schemas at E1. Issue #51 adds local E2 evidence for the Environment lifecycle
-command and Outbox subjects plus controlled Resource-Lease and Provider
-request/reply using real NATS JetStream 2.11; it does not upgrade the rest of
-the catalog, implement the Resource/Provider owners or prove a deployed NATS
-identity.
+`crates/contracts/src/events.rs` and the generated
+`schemas/contracts/v1/events/` files are the semantic source of truth. Sprint 2
+has one event version only. It carries Agent, Build, Environment lifecycle,
+Access expiry/revocation/session, release publication and Submission freeze
+messages. Evaluation execution/scoring and Resource approval events are not in
+the active catalog.
 
-All public Subjects use `labweaver.<owner>.<aggregate>.<event>.v1`. The Owner
-is an existing business service, never a worker process or a Provider. A
-message crosses service boundaries only after its Owner commits the state
-change, idempotency record and local Outbox row together. A catalog entry may
-be consumed only by the stated handling purpose; a future additional purpose
-requires a catalog change and its own durable Consumer.
+Ordinary queries, authorization decisions, candidate validation and owner
+lookups use direct APIs. They do not create event projections merely to cross a
+service boundary.
 
-## CloudEvents envelope
+## Envelope and delivery
 
-Each message is a CloudEvents 1.0 structured JSON document with
-`datacontenttype: application/json`.
+Every message is a strict CloudEvents 1.0 JSON object. Its `type`, `subject`,
+`source`, `dataschema`, course, aggregate revision/sequence and trace identity
+must match the registered `EventContract`. The canonical deduplication key is
+the event ID. Missing or mismatched metadata, an unsupported version, a stale
+generation or protected payload field is rejected before a business write.
 
-| Attribute | Rule |
+Long-running commands use explicit durable consumers, finite `AckWait`, bounded
+backoff and `MaxDeliver`. A consumer acknowledges only after its transaction or
+durable fence commits. Duplicate delivery is idempotent; stale/out-of-order
+delivery, deadline, cancellation and exhausted retry budget produce a stable
+diagnostic and no speculative success. Terminal invalid messages are
+quarantined with bounded metadata, never silently skipped.
+
+Control consumes AgentRun and build results from `LABWEAVER_AGENT_EVENTS`.
+Its sanitized quarantine records therefore use distinct
+`labweaver.agent.quarantine.control_*` subjects covered by that retained
+stream. Deployment fails before rollout if the configured quarantine subjects
+fall outside the stream or the mounted Control user JWT cannot publish both
+subjects. Foundation authoring grants Control only the bounded
+`labweaver.agent.quarantine.>` family in addition to its existing subjects; a
+quarantine publish failure is never treated as a successful terminal
+acknowledgement.
+
+Payloads contain IDs, immutable references, SHA-256 values and bounded status
+summaries. They never contain credentials, raw submissions, full logs, direct
+endpoints or arbitrary executable text. Large files and logs remain artifacts;
+messages carry only their locator, hash, type, size and safe summary.
+
+## Active subject families
+
+| Family | Purpose |
 | --- | --- |
-| `id` | The immutable `event_id`; unique for the published fact or command. |
-| `source` | `urn:labweaver:<owner>` for the catalogued state Owner. |
-| `specversion` | Exactly `1.0`. |
-| `type` | Exactly the NATS Subject receiving the message. |
-| `subject` | `<aggregate_type>/<aggregate_id>`; no local or user-specific path. |
-| `time` | RFC 3339 UTC occurrence time recorded by the Owner. |
-| `dataschema` | The exact generated `schemas/contracts/v1/events/<name>.schema.json` identity; it identifies the matching catalogued v1 payload, not a machine-local file. |
-| `lwaggregatetype` / `lwaggregateid` | Must equal the aggregate represented by `subject`. |
-| `lwsequence` | Non-negative, strictly increasing sequence within the aggregate. |
-| `lwcorrelationid` / `lwcausationid` | Required correlation and immediate predecessor identity; the initial command uses its own `id` as causation ID. |
-| `traceparent` | W3C Trace Context supplied or continued by the Owner. |
-| `data` | Subject-specific payload containing only validated domain IDs, immutable references, hashes and bounded summaries. |
+| `labweaver.agent.run.*.v1` | request and terminal result of a Claude Code AgentRun |
+| `labweaver.control.agent_build.requested.v1` and `labweaver.agent.build.*.v1` | approved fixed BuildRequest and BuildKit/Harbor/Trivy terminal result |
+| `labweaver.control.lab_release.approved.v1` | approved Draft publication input |
+| `labweaver.control.environment_template_release.*.v1` | immutable release publish/withdraw facts |
+| `labweaver.environment.instance.*.v1` | provision, lifecycle, observation and deletion |
+| `labweaver.access.grant.*.v1` | grant decision, activation, expiry and revocation |
+| `labweaver.access.ssh_key.revoked.v1` | key revocation without key body |
+| `labweaver.access.session.*.v1` | termination request, close receipt and overdue failure |
+| `labweaver.evaluation.submission.*.v1` | freeze request and immutable FrozenSubmission fact; no evaluation is scheduled |
 
-Consumers reject a missing required attribute, mismatched Subject/`type`/
-`dataschema`, invalid aggregate identity, unsupported version, malformed
-payload or invalid sequence before a business write. `id` is the canonical
-deduplication key. A repeated ID is idempotently acknowledged only after the
-consumer proves that its prior business effect is durable; a stale sequence or
-sequence gap produces a stable blocking diagnostic and no speculative state
-transition.
+The exact subjects and schemas are generated from `EVENT_CONTRACTS`; this table
+is explanatory and must not be extended independently.
 
-`data` must never contain credentials, tokens, raw submissions, full private
-logs, direct environment endpoints or arbitrary executable text. It uses an
-immutable object reference plus SHA-256 where an external artifact is needed.
+## Worker boundaries
 
-## Stream and consumer policy
+Build Executor and the Container/KubeVirt executors are worker modes of their
+owning services, not new business services. A deployment binds each worker to
+fixed subjects and one owner-approved operation set. Workers do not discover a
+provider by registration order, accept arbitrary shell text, or create a second
+source of lifecycle truth.
 
-| Stream | Message class | Retention and handling |
-| --- | --- | --- |
-| `COMMANDS` | Rows marked Command in the catalog | WorkQueue. Exactly one declared handling purpose receives a command. It remains until successful acknowledgement or quarantine. |
-| `EVENTS` | Rows marked Event | Limits. Each declared handling purpose has an independent durable pull Consumer. Events are facts, not a request to choose the first available Provider. |
-| `AUDIT` | Explicitly selected sanitized audit copies | Limits with longer, environment-controlled retention. It is not a business state store and does not receive raw payloads. |
-| controlled quarantine/DLQ | Terminal failures | Private deployment-controlled stream/locator. It retains identity, metadata, diagnostic and bounded safe payload evidence for audited repair or replay. |
+The active build-completed event contains the immutable Harbor digest, Trivy
+scanner/database identity, vulnerability counts and gate result. It contains no
+Sigstore, attestation, SBOM or provenance evidence.
 
-Each durable Consumer explicitly configures `AckWait`, a finite backoff array
-and `MaxDeliver`. A handler acknowledges only after its transaction commits.
-Transport failure, a retryable dependency failure or a lease loss is retried
-under that configuration. Parse, contract, authorization and unsupported
-version failures are quarantined immediately. A retry-budget exhaustion is
-quarantined after its last permitted delivery and emits an alert. No consumer
-may log and skip, silently replace a message, or treat quarantine as success.
+## Verification
 
-## Subject catalog
-
-`sequence` is per row's aggregate, and every Event payload includes the
-aggregate's resulting state/revision where applicable. Command payloads carry
-the immutable input reference, requested operation and caller/approval context
-needed by the handling Owner; they never carry untrusted executable text.
-
-| Subject | Class / stream | State Owner → handling purpose | Aggregate and payload contract |
-| --- | --- | --- | --- |
-| `labweaver.control.lab_package.created.v1` | Event / EVENTS | Control → Agent planning | `lab_package`; immutable package/version references, hashes and approval state. |
-| `labweaver.control.lab_release.approved.v1` | Event / EVENTS | Control → Environment, Evaluation | `lab_release`; approved release ID, version, immutable spec hashes and actor audit reference. |
-| `labweaver.control.environment_template_release.published.v1` | Event / EVENTS + AUDIT | Control → Environment | `environment_template_release`; exact spec hash, approved release version and verified Container/VM artifact identity. This is the only new Subject added by Issue #45. |
-| `labweaver.control.course.closed.v1` | Event / EVENTS + AUDIT | Control → Environment, Evaluation, Resource purge planning | `course`; closure revision and approved purge policy reference; no user data. |
-| `labweaver.agent.run.requested.v1` | Command / COMMANDS | Agent → Agent run executor | `agent_run`; run type, validated immutable inputs, approval reference and idempotency key. |
-| `labweaver.agent.run.completed.v1` | Event / EVENTS + AUDIT | Agent → Control review | `agent_run`; result reference/hash, validation summary and terminal state. |
-| `labweaver.agent.run.failed.v1` | Event / EVENTS + AUDIT | Agent → Control review | `agent_run`; stable diagnostic, safe failure summary and terminal state. |
-| `labweaver.agent.build.requested.v1` | Command / COMMANDS | Agent → Agent Build Executor | `agent_build`; approved BuildRequest reference, fixed input/image digests and idempotency key. |
-| `labweaver.agent.build.completed.v1` | Event / EVENTS + AUDIT | Agent → Control approval | `agent_build`; image digest, attestation/reference hashes and validation summary. |
-| `labweaver.agent.build.failed.v1` | Event / EVENTS + AUDIT | Agent → Control review | `agent_build`; terminal diagnostic and bounded safe report reference. |
-| `labweaver.access.grant.created.v1` | Event / EVENTS + AUDIT | Access → Access Gateway policy application | `access_grant`; grant revision, scoped endpoint IDs, expiry and policy reference. |
-| `labweaver.access.grant.activated.v1` | Event / EVENTS + AUDIT | Access → Gateway observers | `access_grant`; activated revision, endpoint IDs and expiry. |
-| `labweaver.access.grant.denied.v1` | Event / EVENTS + AUDIT | Access → audit observers | `access_grant`; terminal revision and stable diagnostic. |
-| `labweaver.access.grant.expired.v1` | Event / EVENTS + AUDIT | Access → Gateway observers | `access_grant`; terminal revision, effective time and stable diagnostic. |
-| `labweaver.access.grant.revoked.v1` | Event / EVENTS + AUDIT | Access → Access Gateway revocation | `access_grant`; revoked revision, reason code and effective time. |
-| `labweaver.access.ssh_key.revoked.v1` | Event / EVENTS + AUDIT | Access → Gateway observers | `ssh_public_key`; key ID, actor ID, revision and effective time; no public-key body. |
-| `labweaver.access.session.termination_requested.v1` | Event / EVENTS + AUDIT | Access → OpenSSH Gateway | `gateway_session`; session/key/grant/endpoint revisions and termination deadline. |
-| `labweaver.access.session.closed.v1` | Event / EVENTS + AUDIT | Access → audit observers | `gateway_session`; close receipt revision, effective time and reason. |
-| `labweaver.access.session.termination_overdue.v1` | Event / EVENTS + AUDIT | Access → release/audit observers | `gateway_session`; overdue revision, deadline and blocking diagnostic. |
-| `labweaver.access.policy.publish.requested.v1` | Command / COMMANDS | Access → Access policy compiler | `policy_revision`; validated policy input reference, prior revision and approval context. |
-| `labweaver.access.device.expired.v1` | Event / EVENTS + AUDIT | Access → Access cleanup | `device`; device ID, expiry revision and cleanup scope. |
-| `labweaver.environment.instance.provision_requested.v1` | Command / COMMANDS | Environment → Environment reconciler | `environment_instance`; approved template/version, runtime binding and idempotency key. |
-| `labweaver.environment.instance.ready.v1` | Event / EVENTS + AUDIT | Environment → Access, Evaluation | `environment_instance`; observed generation, endpoint IDs and immutable runtime identity. |
-| `labweaver.environment.instance.failed.v1` | Event / EVENTS + AUDIT | Environment → Control, Access cleanup | `environment_instance`; stable diagnostic, observed generation and safe report reference. |
-| `labweaver.environment.instance.delete_requested.v1` | Command / COMMANDS | Environment → Environment reconciler | `environment_instance`; deletion revision, cleanup policy and idempotency key. |
-| `labweaver.environment.instance.operation_accepted.v1` | Event / EVENTS + AUDIT | Environment → lifecycle observers | `environment_instance`; accepted operation ID, revision, generation and state without Provider payload. |
-| `labweaver.environment.instance.state_changed.v1` | Event / EVENTS + AUDIT | Environment → Access and lifecycle observers | `environment_instance`; resulting state, revision/generation and stable diagnostic without endpoint credentials. |
-| `labweaver.environment.instance.lifecycle_requested.v1` | Command / COMMANDS | Environment command boundary → Environment lifecycle reconciler | `environment_instance`; revision-checked lifecycle command, bounded deadline/retry, revocation revision and idempotency key without Provider handles; create carries the complete versioned first-aggregate spec. |
-| `labweaver.evaluation.submission.freeze_requested.v1` | Command / COMMANDS | Evaluation → Evaluation Collector | `submission`; approved SubmissionManifest reference, source identity and idempotency key. |
-| `labweaver.evaluation.submission.frozen.v1` | Event / EVENTS + AUDIT | Evaluation → Evaluation scheduler | Legacy minimal identity; retained for compatibility and not used by the Issue #54 authoritative publisher. |
-| `labweaver.evaluation.submission.frozen.v2` | Event / EVENTS + AUDIT | Evaluation → Evaluation scheduler | `submission`; complete FrozenSubmission with immutable object version/SHA-256 plus source identity; emitted atomically with the database contract. |
-| `labweaver.evaluation.run.requested.v1` | Command / COMMANDS | Evaluation → Evaluation scheduler | `evaluation_run`; immutable submission/spec/bundle identities, approved execution binding and idempotency key. |
-| `labweaver.evaluation.step.ready.v1` | Event / EVENTS | Evaluation → Evaluation executor | `evaluation_step_run`; step revision, runner binding, immutable inputs and dependency facts. |
-| `labweaver.evaluation.step.completed.v1` | Event / EVENTS + AUDIT | Evaluation → deterministic aggregator | `evaluation_step_run`; terminal verdict, bounded metrics and evidence references; no LLM numeric score. |
-| `labweaver.evaluation.run.completed.v1` | Event / EVENTS + AUDIT | Evaluation → Control release review | `evaluation_run`; deterministic aggregate result, evidence hashes and terminal state. |
-| `labweaver.resource.request.submitted.v1` | Event / EVENTS + AUDIT | Resource → Resource approval workflow | `resource_request`; scoped request, policy revision and actor reference. |
-| `labweaver.resource.request.approved.v1` | Event / EVENTS + AUDIT | Resource → Environment capacity binding | `resource_request`; approval revision, bound capacity reference and expiry policy. |
-| `labweaver.resource.lease.expired.v1` | Event / EVENTS + AUDIT | Resource → Environment cleanup | `resource_lease`; lease revision, effective time and cleanup scope. |
-
-The catalog intentionally has no `labweaver.build.*` or
-`labweaver.artifact.*` public domain. Build Executor and Collector are
-controlled workers respectively owned by Agent and Evaluation; assigning them
-their own public namespace would imply a service and authority boundary that
-does not exist.
-
-## Controlled request/reply boundaries
-
-Provider and owner-service verification calls are not public domain events and
-do not enter `EVENTS` or `AUDIT`. Deployments bind each call to one exact,
-reviewed subject; wildcards and registry-order fallback are forbidden.
-
-The Environment Service Resource-Lease verifier sends a version-1 request with
-the exact Lease, Environment, course, owner and capacity identities. It accepts
-only a version-1 `Active` response containing the same identities, an explicit
-Lease revision, and an interval active at the Environment database time.
-Timeout or Resource unavailability is retryable. Missing, inactive, expired or
-mismatched authorization is terminal, is quarantined with bounded safe evidence
-and causes no aggregate or Provider mutation. The concrete Resource Service
-responder remains a separate owner implementation.
-
-Each Environment Provider request carries
-`(operationId, providerStep, action)`; the response must echo the operation and
-step. A Provider uses this tuple as its idempotency identity. Environment
-persists and advances the step only with the corresponding lifecycle state so
-adjacent phases cannot alias even when their action enum is equal.
-
-## Required runtime evidence
-
-An implementation may not claim this contract is live based on type existence,
-a mock or a generated document. The first E2 implementation must prove with
-real PostgreSQL and JetStream that Outbox commit/publish failure has no partial
-business result, valid messages publish and consume, duplicates/replays are
-idempotent, stale and gap sequences block state mutation, Consumers recover
-after restart, acknowledgement occurs only after durable mutation, and invalid
-or exhausted messages reach quarantine with a stable diagnostic and alert.
+Contract generation/check must have zero byte drift. Integration tests cover
+duplicate, reordered, stale generation, restart replay, cancellation, deadline,
+quarantine and dependency failure. Connected Release Gate evidence additionally
+binds the deployed stream/consumer configuration to the same commit,
+deployment manifest, migration catalog, image digests and Run ID.

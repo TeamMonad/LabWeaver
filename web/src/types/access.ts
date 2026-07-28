@@ -1,16 +1,6 @@
 import type { AccessGrantSchema, EndpointGrant, EnvironmentInstanceSchema } from '@/generated/contracts'
 
-/** Additive optional gateway fields the backend may attach to an AccessGrant
- * response. The UI only consumes these values; it never fabricates them. */
-export type AccessGrantWithGateway = AccessGrantSchema & {
-  gatewayHostname?: string
-  gatewayFingerprintSha256?: string
-  endpointGrants: Array<
-    EndpointGrant & {
-      connectUrl?: string | null
-    }
-  >
-}
+export type AccessGrantWithGateway = AccessGrantSchema
 
 export type EnvironmentInstanceWithFreeze = EnvironmentInstanceSchema & {
   freezeEvidence?: EnvironmentInstanceSchema['cleanupEvidence']
@@ -18,15 +8,15 @@ export type EnvironmentInstanceWithFreeze = EnvironmentInstanceSchema & {
 
 /** Single-line SSH command for a VM endpoint grant. Returns null when the
  * identity is incomplete (fail closed). */
-export function buildSshCommand(grant: AccessGrantWithGateway, endpointGrant: EndpointGrant): string | null {
+export function buildSshCommand(endpointGrant: EndpointGrant): string | null {
   if (!endpointGrant.alias) return null
-  if (!grant.gatewayHostname) return null
-  return `ssh ${endpointGrant.alias}@${grant.gatewayHostname}`
+  if (!endpointGrant.sshGatewayHostname || endpointGrant.sshGatewayPort !== 2222) return null
+  return `ssh -p ${endpointGrant.sshGatewayPort} ${endpointGrant.alias}@${endpointGrant.sshGatewayHostname}`
 }
 
-/** Code-server connect URL for an https endpoint grant. Returns null when the
+/** Browser connect URL for an HTTPS endpoint grant. Returns null when the
  * backend did not provide one (fail closed). */
-export function resolveConnectUrl(endpointGrant: EndpointGrant & { connectUrl?: string | null }): string | null {
+export function resolveConnectUrl(endpointGrant: EndpointGrant): string | null {
   return endpointGrant.connectUrl ?? null
 }
 

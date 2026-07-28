@@ -20,6 +20,7 @@ pub fn ready_instance() -> EnvironmentInstance {
     let accepted_at = timestamp("2026-07-14T00:00:00.000Z");
     EnvironmentInstance {
         id: EnvironmentId::new(),
+        display_label: "Ready environment".to_owned(),
         course_id: CourseId::new(),
         owner_id: ActorId::new(),
         class: EnvironmentClass::Experiment,
@@ -61,6 +62,7 @@ pub fn ready_instance() -> EnvironmentInstance {
             protocol: EndpointProtocol::Https,
             revision: revision(2),
             health: EndpointHealth::Healthy,
+            ssh_host_key_identity_sha256: None,
             observed_at: timestamp("2026-07-14T00:01:00.000Z"),
         }],
         last_diagnostic_code: None,
@@ -73,6 +75,7 @@ pub fn requested_instance() -> EnvironmentInstance {
     let accepted_at = timestamp("2026-07-14T00:00:00.000Z");
     EnvironmentInstance {
         id: EnvironmentId::new(),
+        display_label: "Requested environment".to_owned(),
         course_id: CourseId::new(),
         owner_id: ActorId::new(),
         class: EnvironmentClass::Experiment,

@@ -1,0 +1,27 @@
+{
+  "schema_version": "labweaver.sprint2-application-report.v1",
+  "run_id": {{ sprint2_application_run_id | to_json }},
+  "source_commit": {{ sprint2_application_source_commit | to_json }},
+  "cluster_uid": {{ sprint2_application_cluster_uid.stdout | trim | to_json }},
+  "package_manifest_sha256": {{ ('sha256:' + sprint2_application_identity_inputs.results[0].stat.checksum) | to_json }},
+  "migration_catalog_sha256": {{ ('sha256:' + sprint2_application_identity_inputs.results[1].stat.checksum) | to_json }},
+  "retained_baseline_sha256": {{ sprint2_application_retained_baseline_sha256 | to_json }},
+  "configuration_manifest_sha256": {{ ('sha256:' + sprint2_application_identity_inputs.results[2].stat.checksum) | to_json }},
+  "configuration_bundle_sha256": {{ ('sha256:' + sprint2_application_identity_inputs.results[3].stat.checksum) | to_json }},
+  "destructive_reset": false,
+  "retained": ["kubernetes", "kubevirt", "postgresql", "nats", "minio", "harbor", "keycloak"],
+  "adopted": {
+    "postgres_domains": {{ sprint2_application_domains | to_json }},
+    "nats_streams": {{ sprint2_application_nats_streams | map(attribute='name') | list | to_json }},
+    "minio_bucket": {{ sprint2_application_minio_bucket | to_json }},
+    "harbor_project": {{ sprint2_application_harbor_project | to_json }},
+    "keycloak_realm": {{ sprint2_application_keycloak_realm | to_json }}
+  },
+  "deployment": {
+    "release": {{ sprint2_application_release_name | to_json }},
+    "namespace": {{ sprint2_application_namespace | to_json }},
+    "helm_revision": {{ ((sprint2_application_helm_history.stdout | from_json | first).revision | int) | to_json }},
+    "workloads": {{ sprint2_application_workloads | to_json }},
+    "images": {{ sprint2_application_package.images | map(attribute='reference') | list | to_json }}
+  }
+}

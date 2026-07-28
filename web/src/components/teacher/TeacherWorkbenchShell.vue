@@ -17,8 +17,7 @@
         <RouterLink to="/teacher/labs" active-class="module-active">实验</RouterLink>
         <RouterLink to="/teacher/materials" active-class="module-active">材料</RouterLink>
         <RouterLink to="/teacher/environments" active-class="module-active">环境</RouterLink>
-        <RouterLink to="/teacher/evaluations" active-class="module-active">评测</RouterLink>
-        <RouterLink to="/teacher/resources" active-class="module-active">资源</RouterLink>
+        <RouterLink to="/teacher/approvals" active-class="module-active">候选审批</RouterLink>
       </nav>
       <section class="resource-tree" aria-label="课程与实验资源树">
         <h2>课程与实验</h2>

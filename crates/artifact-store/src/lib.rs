@@ -8,6 +8,7 @@ use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::{Builder as S3ConfigBuilder, Region};
+use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::{ByteStream, DateTime};
 use aws_sdk_s3::types::ObjectLockMode;
@@ -198,6 +199,75 @@ impl S3ImmutableObjectStore {
         &self.config.binding
     }
 
+    /// Prefixes an application-relative key with the configured immutable
+    /// object namespace and validates the resulting locator.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ObjectStoreError::ObjectIdentityInvalid`] when the scoped
+    /// locator violates the configured object namespace rules.
+    pub fn scoped_key(&self, suffix: &str) -> Result<String, ObjectStoreError> {
+        let prefix = self.config.object_prefix.trim_matches('/');
+        let suffix = suffix.trim_start_matches('/');
+        let key = format!("{prefix}/{suffix}");
+        self.validate_key(&key)?;
+        Ok(key)
+    }
+
+    /// Stores an immutable version in a versioned bucket without requiring
+    /// S3 Object Lock. The conditional write, version id, and read-back hash
+    /// still make the artifact identity explicit for clusters whose existing
+    /// bucket was provisioned without Governance Lock support.
+    ///
+    /// # Errors
+    ///
+    /// Returns an object-store error when the key or payload identity is
+    /// invalid, the bucket cannot establish a version, the upload fails, or
+    /// the read-back identity does not match.
+    pub async fn put_versioned_immutable(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        sha256: Sha256Digest,
+        media_type: &str,
+    ) -> Result<VerifiedObject, ObjectStoreError> {
+        self.validate_key(key)?;
+        let size_bytes =
+            u64::try_from(bytes.len()).map_err(|_| ObjectStoreError::ObjectTooLarge)?;
+        if bytes.is_empty()
+            || size_bytes > self.config.max_object_bytes
+            || Sha256Digest::of_bytes(bytes) != sha256
+            || media_type.trim().is_empty()
+        {
+            return Err(ObjectStoreError::ObjectIdentityInvalid);
+        }
+        let checksum = STANDARD
+            .encode(hex_bytes(&sha256.to_string()).ok_or(ObjectStoreError::ObjectIdentityInvalid)?);
+        let response = self
+            .client
+            .put_object()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .content_length(
+                i64::try_from(size_bytes).map_err(|_| ObjectStoreError::ObjectTooLarge)?,
+            )
+            .content_type(media_type)
+            .checksum_sha256(checksum)
+            .if_none_match("*")
+            .metadata("sha256", sha256.to_string())
+            .body(ByteStream::from(bytes.to_vec()))
+            .send()
+            .await
+            .map_err(|_| ObjectStoreError::UploadFailed)?;
+        let version = response
+            .version_id()
+            .filter(|value| !value.is_empty() && *value != "null")
+            .ok_or(ObjectStoreError::VersioningRequired)?
+            .to_owned();
+        self.read_verified(key, &version, size_bytes, sha256, media_type)
+            .await
+    }
+
     fn validate_key(&self, key: &str) -> Result<(), ObjectStoreError> {
         let prefix = self.config.object_prefix.trim_matches('/');
         if key.is_empty()
@@ -278,7 +348,7 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
         if version.trim().is_empty() || expected_size == 0 || media_type.trim().is_empty() {
             return Err(ObjectStoreError::ObjectIdentityInvalid);
         }
-        let response = self
+        let response = match self
             .client
             .get_object()
             .bucket(&self.config.bucket)
@@ -286,7 +356,24 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
             .version_id(version)
             .send()
             .await
-            .map_err(|_| ObjectStoreError::ObjectUnavailable)?;
+        {
+            Ok(response) => response,
+            Err(error) => {
+                let rendered_error = error.to_string();
+                let error_class = rendered_error.split(':').next().unwrap_or("unknown").trim();
+                tracing::warn!(
+                    event = "artifact_store.get_object_failed",
+                    endpoint = %self.config.endpoint,
+                    bucket = %self.config.bucket,
+                    object_key = %key,
+                    object_version = %version,
+                    error_class = %error_class,
+                    error_source = ?std::error::Error::source(&error).map(ToString::to_string),
+                    service_error_code = ?error.as_service_error().and_then(|service| service.code()),
+                );
+                return Err(ObjectStoreError::ObjectUnavailable);
+            }
+        };
         let observed_size = response
             .content_length()
             .and_then(|observed| u64::try_from(observed).ok());
@@ -300,13 +387,17 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
         {
             return Err(ObjectStoreError::ObjectIdentityMismatch);
         }
-        let body = response
-            .body
-            .collect()
-            .await
-            .map_err(|_| ObjectStoreError::ObjectUnavailable)?
-            .into_bytes()
-            .to_vec();
+        let Ok(body) = response.body.collect().await else {
+            tracing::warn!(
+                event = "artifact_store.get_object_body_failed",
+                endpoint = %self.config.endpoint,
+                bucket = %self.config.bucket,
+                object_key = %key,
+                object_version = %version,
+            );
+            return Err(ObjectStoreError::ObjectUnavailable);
+        };
+        let body = body.into_bytes().to_vec();
         if u64::try_from(body.len()).ok() != Some(expected_size)
             || Sha256Digest::of_bytes(&body) != expected_sha256
         {

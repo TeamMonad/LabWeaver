@@ -19,7 +19,7 @@ use environment_service::{
 };
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
-    KeyUsagePurpose,
+    KeyUsagePurpose, SanType, string::Ia5String,
 };
 use reqwest::{Certificate, Client, Identity, StatusCode};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -29,7 +29,7 @@ use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
-const ALLOWED_CALLER_SAN: &str = "access-service.internal";
+const ALLOWED_CALLER_SAN: &str = "spiffe://labweaver/access-service";
 
 #[tokio::test]
 async fn resolver_uses_real_postgres_and_verified_rotatable_mtls_identity()
@@ -271,9 +271,8 @@ async fn shutdown_future_failure_is_propagated_as_a_typed_server_error()
 
 async fn migrate(pool: &PgPool) -> Result<(), sqlx::Error> {
     let migration = format!(
-        "CREATE SCHEMA environment; SET search_path TO environment;\n{}\n{}",
-        include_str!("../../../migrations/environment/0001_initial.sql"),
-        include_str!("../../../migrations/environment/0002_reconcile_leases.sql")
+        "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
+        include_str!("../../../migrations/environment/0001_sprint2_baseline.sql")
     );
     sqlx::raw_sql(&migration).execute(pool).await?;
     Ok(())
@@ -286,12 +285,14 @@ async fn insert_instance(
     instance.validate()?;
     sqlx::query(
         "INSERT INTO environment.environment_instances \
-         (environment_id, release_id, generation, observed_generation, desired_state, \
+         (environment_id, course_id, owner_actor_id, release_id, generation, observed_generation, desired_state, \
           observed_state, provider_binding, lease_id, revision, terminal_diagnostic, \
           eligibility_expires_at, contract) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
     )
     .bind(instance.id.as_uuid())
+    .bind(instance.course_id.as_uuid())
+    .bind(instance.owner_id.as_uuid())
     .bind(instance.release_id.as_uuid())
     .bind(i64::try_from(instance.generation)?)
     .bind(i64::try_from(instance.observed_generation)?)
@@ -438,8 +439,16 @@ fn leaf_certificate(
     ca: &CertifiedIssuer<'static, KeyPair>,
     san: &str,
     client: bool,
-) -> Result<(String, String), rcgen::Error> {
-    let mut parameters = CertificateParams::new(vec![san.to_owned()])?;
+) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let mut parameters = if san.starts_with("spiffe://") {
+        let mut parameters = CertificateParams::new(Vec::<String>::new())?;
+        parameters
+            .subject_alt_names
+            .push(SanType::URI(Ia5String::try_from(san)?));
+        parameters
+    } else {
+        CertificateParams::new(vec![san.to_owned()])?
+    };
     parameters.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     parameters.extended_key_usages = vec![if client {
         ExtendedKeyUsagePurpose::ClientAuth

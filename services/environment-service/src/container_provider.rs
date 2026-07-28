@@ -2,6 +2,7 @@
 
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use contracts::authoring::{
@@ -11,7 +12,7 @@ use contracts::environment::{
     EndpointHealth, EnvironmentEndpoint, EnvironmentInstance, ObservedEnvironmentState,
 };
 use contracts::events::{
-    CloudEvent, EVENT_CONTRACTS, ReleasePublishedV2, ReleaseWithdrawn, subjects,
+    CloudEvent, EVENT_CONTRACTS, ReleasePublished, ReleaseWithdrawn, subjects,
 };
 use contracts::supply_chain::ImageArtifact;
 use contracts::{
@@ -30,6 +31,22 @@ use crate::{
 
 pub const CONTAINER_BACKEND_PROTOCOL_VERSION: u8 = 2;
 const MAX_CONTAINER_EXECUTOR_MESSAGE_BYTES: usize = 1024 * 1024;
+// The Evaluation freeze coordinator is the only additional workload admitted to a
+// Sprint 2 Container environment namespace. Keep its fixed budget aligned with
+// `evaluation-service::coordinator` and account for it in the namespace quota so
+// submission freezing cannot deadlock behind the running environment Pod.
+const FREEZE_REQUEST_CPU_MILLICORES: u32 = 100;
+const FREEZE_LIMIT_CPU_MILLICORES: u32 = 1_000;
+const FREEZE_REQUEST_MEMORY_BYTES: u64 = 128 * 1024 * 1024;
+const FREEZE_LIMIT_MEMORY_BYTES: u64 = 1024 * 1024 * 1024;
+const WORKSPACE_ROOT: &str = "/workspace";
+const WORKSPACE_SEED_COMMAND: &str = concat!(
+    "set -eu; ",
+    "if [ -n \"$(find /workspace -mindepth 1 -maxdepth 1 -print -quit)\" ]; then exit 0; fi; ",
+    "if [ ! -d /opt/labweaver/workspace-seed ]; then ",
+    "echo 'LW_ENVIRONMENT_WORKSPACE_SEED_MISSING' >&2; exit 64; fi; ",
+    "cp -R /opt/labweaver/workspace-seed/. /workspace/"
+);
 
 /// One server-side-apply document. The name is deterministic and never user-controlled.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -144,17 +161,26 @@ pub trait ContainerProviderBackend: Send + Sync {
 pub struct NatsContainerProviderBackend {
     client: async_nats::Client,
     subject: String,
+    request_timeout: Duration,
 }
 
 impl NatsContainerProviderBackend {
     pub fn new(
         client: async_nats::Client,
         subject: String,
+        request_timeout: Duration,
     ) -> Result<Self, ReleaseProjectionError> {
-        if !valid_subject(&subject) {
+        if !valid_subject(&subject)
+            || request_timeout.is_zero()
+            || request_timeout > Duration::from_secs(300)
+        {
             return Err(ReleaseProjectionError::ConfigurationInvalid);
         }
-        Ok(Self { client, subject })
+        Ok(Self {
+            client,
+            subject,
+            request_timeout,
+        })
     }
 
     async fn request(
@@ -168,11 +194,27 @@ impl NatsContainerProviderBackend {
         let fence = bind_container_executor_request(*fence, &request)?;
         let payload = serde_json::to_vec(&ContainerExecutorRequestEnvelope { fence, request })
             .map_err(|_| invalid_observation())?;
+        let request = async_nats::Request::new()
+            .timeout(Some(self.request_timeout))
+            .payload(payload.into());
         let message = self
             .client
-            .request(self.subject.clone(), payload.into())
+            .send_request(self.subject.clone(), request)
             .await
-            .map_err(|_| unavailable())?;
+            .map_err(|error| {
+                tracing::warn!(
+                    event = "environment.container_provider.executor_request_failed",
+                    diagnostic = "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
+                    environment_id = %fence.environment_id,
+                    operation_id = %fence.operation_id,
+                    provider_step = fence.provider_step,
+                    attempt = fence.attempt,
+                    action = ?fence.action,
+                    timeout_milliseconds = self.request_timeout.as_millis(),
+                    error = %error
+                );
+                unavailable()
+            })?;
         if message.payload.len() > MAX_CONTAINER_EXECUTOR_MESSAGE_BYTES {
             return Err(invalid_observation());
         }
@@ -313,8 +355,32 @@ impl ContainerProviderBackend for NatsContainerProviderBackend {
             } if plan_sha256 == plan.plan_sha256 && valid_artifact_ref(&cleanup_evidence) => {
                 Ok(cleanup_evidence)
             }
-            ContainerExecutorResponse::Failed { failure } => Err(failure),
-            _ => Err(ProviderFailure {
+            ContainerExecutorResponse::Deleted {
+                plan_sha256,
+                cleanup_evidence,
+            } => {
+                tracing::warn!(
+                    event = "environment.container_provider.cleanup_response_invalid",
+                    diagnostic = "LW_ENVIRONMENT_PROVIDER_CLEANUP_FAILED",
+                    environment_id = %plan.environment_id,
+                    expected_plan_sha256 = %plan.plan_sha256,
+                    actual_plan_sha256 = %plan_sha256,
+                    artifact_size_bytes = cleanup_evidence.size_bytes
+                );
+                Err(ProviderFailure {
+                    code: ProviderFailureCode::CleanupFailed,
+                    retryable: true,
+                })
+            }
+            ContainerExecutorResponse::Failed { failure } => {
+                tracing::warn!(
+                    event = "environment.container_provider.cleanup_response_failed",
+                    diagnostic = ?failure.code,
+                    environment_id = %plan.environment_id
+                );
+                Err(failure)
+            }
+            ContainerExecutorResponse::Observed { .. } => Err(ProviderFailure {
                 code: ProviderFailureCode::CleanupFailed,
                 retryable: true,
             }),
@@ -474,7 +540,20 @@ impl PgContainerExecutorFenceStore {
             if last_response.is_none() && authority_now < previous_deadline {
                 return Err(ContainerExecutorFenceError::InProgress);
             }
-            if tombstoned {
+            let cleanup_succeeded = last_response
+                .as_ref()
+                .and_then(|value| value.get("status"))
+                .and_then(Value::as_str)
+                == Some("deleted");
+            if tombstoned && cleanup_succeeded {
+                if fence.action == ReconcileAction::Cleanup {
+                    let value = last_response
+                        .as_ref()
+                        .ok_or(ContainerExecutorFenceError::IdentityMismatch)?
+                        .clone();
+                    transaction.rollback().await?;
+                    return Ok(ContainerExecutorAdmission::Replay(value));
+                }
                 return Err(ContainerExecutorFenceError::Tombstoned);
             }
             if fence.operation_generation < highest_generation
@@ -500,7 +579,7 @@ impl PgContainerExecutorFenceStore {
             .bind(fence.operation_id.as_uuid())
             .bind(i32::try_from(fence.provider_step).map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?)
             .bind(i32::try_from(fence.attempt).map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?)
-            .bind(fence.action == ReconcileAction::Cleanup)
+            .bind(false)
             .bind(reconcile_action_name(fence.action))
             .bind(fence.request_id.to_string())
             .bind(fence.deadline_at.get())
@@ -526,7 +605,7 @@ impl PgContainerExecutorFenceStore {
                 i32::try_from(fence.attempt)
                     .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?,
             )
-            .bind(fence.action == ReconcileAction::Cleanup)
+            .bind(false)
             .bind(reconcile_action_name(fence.action))
             .bind(fence.request_id.to_string())
             .bind(fence.deadline_at.get())
@@ -545,7 +624,8 @@ impl PgContainerExecutorFenceStore {
         let value = serde_json::to_value(response)
             .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
         let updated = sqlx::query(
-            "UPDATE environment.container_executor_fences SET last_response=$7,updated_at=clock_timestamp() \
+            "UPDATE environment.container_executor_fences SET last_response=$7, \
+                 tombstoned=CASE WHEN $8 THEN TRUE ELSE tombstoned END,updated_at=clock_timestamp() \
              WHERE environment_id=$1 AND highest_generation=$2 AND operation_id=$3 \
                AND provider_step=$4 AND attempt=$5 AND last_request_id=$6 AND last_response IS NULL",
         )
@@ -556,6 +636,7 @@ impl PgContainerExecutorFenceStore {
         .bind(i32::try_from(fence.attempt).map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?)
         .bind(fence.request_id.to_string())
         .bind(value)
+        .bind(matches!(response, ContainerExecutorResponse::Deleted { .. }))
         .execute(&self.pool)
         .await?;
         if updated.rows_affected() != 1 {
@@ -674,19 +755,30 @@ impl<B: ContainerExecutorBackend + 'static> NatsContainerExecutorServer<B> {
                 let fence = envelope.fence;
                 let response = match executor.execute(envelope).await {
                     Ok(response) => response,
-                    Err(error) => ContainerExecutorResponseEnvelope {
-                        protocol_version: fence.protocol_version,
-                        environment_id: fence.environment_id,
-                        operation_id: fence.operation_id,
-                        provider_step: fence.provider_step,
-                        operation_generation: fence.operation_generation,
-                        attempt: fence.attempt,
-                        request_id: fence.request_id,
-                        action: fence.action,
-                        response: ContainerExecutorResponse::Failed {
-                            failure: container_executor_failure(&error),
-                        },
-                    },
+                    Err(error) => {
+                        let failure = container_executor_failure(&error);
+                        tracing::warn!(
+                            event = "environment.container_executor.request_failed",
+                            diagnostic = failure.diagnostic_code(),
+                            operation_id = %fence.operation_id,
+                            environment_id = %fence.environment_id,
+                            action = ?fence.action,
+                            provider_step = fence.provider_step,
+                            operation_generation = fence.operation_generation,
+                            error = %error
+                        );
+                        ContainerExecutorResponseEnvelope {
+                            protocol_version: fence.protocol_version,
+                            environment_id: fence.environment_id,
+                            operation_id: fence.operation_id,
+                            provider_step: fence.provider_step,
+                            operation_generation: fence.operation_generation,
+                            attempt: fence.attempt,
+                            request_id: fence.request_id,
+                            action: fence.action,
+                            response: ContainerExecutorResponse::Failed { failure },
+                        }
+                    }
                 };
                 let Ok(payload) = serde_json::to_vec(&response) else {
                     tracing::error!(
@@ -827,18 +919,17 @@ pub trait ContainerReleaseResolver: Send + Sync {
 /// Release projection paired with Environment's authority clock and append-only withdrawal state.
 #[derive(Clone, Debug)]
 pub struct ResolvedContainerRelease {
-    pub projection: ReleasePublishedV2,
+    pub projection: ReleasePublished,
     pub authority_now: UtcTimestamp,
     pub withdrawn_at: Option<UtcTimestamp>,
 }
 
-/// Deployment authority for the currently accepted scan policy and private trust bundle.
+/// Deployment authority for the currently accepted scan policy and approval revision.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ContainerReleasePolicy {
     pub image_policy_id: PolicyId,
     pub image_policy_revision: Revision,
     pub trust_revision: Revision,
-    pub trust_bundle_sha256: Sha256Digest,
 }
 
 impl ContainerReleasePolicy {
@@ -846,16 +937,11 @@ impl ContainerReleasePolicy {
         image_policy_id: PolicyId,
         image_policy_revision: Revision,
         trust_revision: Revision,
-        trust_bundle_sha256: Sha256Digest,
     ) -> Result<Self, ReleaseProjectionError> {
-        if trust_bundle_sha256 == Sha256Digest::of_bytes(&[]) {
-            return Err(ReleaseProjectionError::ConfigurationInvalid);
-        }
         Ok(Self {
             image_policy_id,
             image_policy_revision,
             trust_revision,
-            trust_bundle_sha256,
         })
     }
 }
@@ -864,33 +950,37 @@ impl ContainerReleasePolicy {
 #[derive(Clone, Debug)]
 pub struct ContainerProviderConfiguration {
     pub release_policy: ContainerReleasePolicy,
-    pub gateway_namespace: String,
-    pub gateway_name: String,
-    pub gateway_section: String,
+    pub image_repository_prefix: String,
+    pub access_namespace: String,
+    pub access_pod_label: String,
     pub image_pull_secret_name: String,
+    pub workspace_storage_class_name: String,
 }
 
 impl ContainerProviderConfiguration {
     pub fn new(
         release_policy: ContainerReleasePolicy,
-        gateway_namespace: String,
-        gateway_name: String,
-        gateway_section: String,
+        image_repository_prefix: String,
+        access_namespace: String,
+        access_pod_label: String,
         image_pull_secret_name: String,
+        workspace_storage_class_name: String,
     ) -> Result<Self, ReleaseProjectionError> {
-        if !valid_dns_label(&gateway_namespace)
-            || !valid_dns_label(&gateway_name)
-            || !valid_dns_label(&gateway_section)
+        if !valid_image_repository_prefix(&image_repository_prefix)
+            || !valid_dns_label(&access_namespace)
+            || !valid_dns_label(&access_pod_label)
             || !valid_dns_label(&image_pull_secret_name)
+            || !valid_dns_label(&workspace_storage_class_name)
         {
             return Err(ReleaseProjectionError::ConfigurationInvalid);
         }
         Ok(Self {
             release_policy,
-            gateway_namespace,
-            gateway_name,
-            gateway_section,
+            image_repository_prefix,
+            access_namespace,
+            access_pod_label,
             image_pull_secret_name,
+            workspace_storage_class_name,
         })
     }
 }
@@ -919,14 +1009,12 @@ impl PgReleaseProjectionStore {
     pub async fn accept(
         &self,
         consumer: &str,
-        event: &CloudEvent<ReleasePublishedV2>,
+        event: &CloudEvent<ReleasePublished>,
     ) -> Result<ReleaseProjectionDecision, ReleaseProjectionError> {
         let contract = EVENT_CONTRACTS
             .iter()
             .copied()
-            .find(|contract| {
-                contract.subject == subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED_V2
-            })
+            .find(|contract| contract.subject == subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED)
             .ok_or(ReleaseProjectionError::ContractInvalid)?;
         event
             .validate(contract)
@@ -935,7 +1023,7 @@ impl PgReleaseProjectionStore {
             .data
             .validate()
             .map_err(|_| ReleaseProjectionError::ContractInvalid)?;
-        if event.subject != subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED_V2
+        if event.subject != subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED
             || event.course_id != event.data.release.course_id
             || event.aggregate_sequence.0 != 1
             || event.aggregate_revision
@@ -944,7 +1032,7 @@ impl PgReleaseProjectionStore {
         {
             return Err(ReleaseProjectionError::IdentityMismatch);
         }
-        let provider_binding = container_provider_binding(&event.data)?;
+        let provider_binding = release_provider_binding(&event.data.environment_spec.runtime);
         let payload =
             serde_json::to_value(event).map_err(|_| ReleaseProjectionError::ContractInvalid)?;
         let payload_sha256 = canonical_hash(&payload)?;
@@ -1095,7 +1183,7 @@ impl ContainerReleaseResolver for PgReleaseProjectionStore {
         if u64::try_from(stored_version).ok() != Some(release_version) {
             return Err(ReleaseProjectionError::IdentityMismatch);
         }
-        let projection: ReleasePublishedV2 = serde_json::from_value(row.try_get("contract")?)
+        let projection: ReleasePublished = serde_json::from_value(row.try_get("contract")?)
             .map_err(|_| ReleaseProjectionError::ContractInvalid)?;
         projection
             .validate()
@@ -1127,10 +1215,11 @@ pub struct ContainerProvider<B, R> {
     backend: Arc<B>,
     releases: Arc<R>,
     release_policy: ContainerReleasePolicy,
-    gateway_namespace: String,
-    gateway_name: String,
-    gateway_section: String,
+    image_repository_prefix: String,
+    access_namespace: String,
+    access_pod_label: String,
     image_pull_secret_name: String,
+    workspace_storage_class_name: String,
 }
 
 impl<B, R> ContainerProvider<B, R>
@@ -1152,10 +1241,11 @@ where
             backend,
             releases,
             release_policy: configuration.release_policy,
-            gateway_namespace: configuration.gateway_namespace,
-            gateway_name: configuration.gateway_name,
-            gateway_section: configuration.gateway_section,
+            image_repository_prefix: configuration.image_repository_prefix,
+            access_namespace: configuration.access_namespace,
+            access_pod_label: configuration.access_pod_label,
             image_pull_secret_name: configuration.image_pull_secret_name,
+            workspace_storage_class_name: configuration.workspace_storage_class_name,
         })
     }
 
@@ -1195,15 +1285,13 @@ where
         {
             return Err(ReleaseProjectionError::ContractInvalid);
         }
-        let mut repository_parts = repository.split('/');
-        let registry = repository_parts.next().unwrap_or_default();
-        let project = repository_parts.next().unwrap_or_default();
-        let image_name = repository_parts.next().unwrap_or_default();
-        if registry.is_empty()
-            || project != format!("course-{}", projection.release.course_id)
-            || image_name != projection.release.candidate_id.to_string()
-            || repository_parts.next().is_some()
-        {
+        let expected_repository = format!(
+            "{}/course-{}-{}",
+            self.image_repository_prefix,
+            projection.release.course_id,
+            projection.release.candidate_id
+        );
+        if repository != &expected_repository {
             return Err(ReleaseProjectionError::IdentityMismatch);
         }
         let image = format!("{repository}@{digest}");
@@ -1214,6 +1302,7 @@ where
             "labweaver.io/environment-id": instance.id.to_string(),
             "labweaver.io/course-id": instance.course_id.to_string(),
             "labweaver.io/managed": "true",
+            "labweaver.io/environment": "true",
         });
         let resources = &projection.environment_spec.resources;
         let service_port = match &projection.environment_spec.runtime {
@@ -1224,7 +1313,7 @@ where
         };
         if !projection.environment_spec.entries.iter().any(|entry| {
             entry.service_port == service_port
-                && entry.protocol == contracts::environment::EndpointProtocol::Https
+                && entry.protocol == contracts::environment::EndpointProtocol::Http
         }) {
             return Err(ReleaseProjectionError::SecurityPostureInvalid);
         }
@@ -1235,6 +1324,22 @@ where
         }
         let cpu = format!("{}m", resources.cpu_millicores);
         let memory = resources.memory_bytes.to_string();
+        let quota_request_cpu = resources
+            .cpu_millicores
+            .checked_add(FREEZE_REQUEST_CPU_MILLICORES)
+            .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
+        let quota_limit_cpu = resources
+            .cpu_millicores
+            .checked_add(FREEZE_LIMIT_CPU_MILLICORES)
+            .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
+        let quota_request_memory = resources
+            .memory_bytes
+            .checked_add(FREEZE_REQUEST_MEMORY_BYTES)
+            .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
+        let quota_limit_memory = resources
+            .memory_bytes
+            .checked_add(FREEZE_LIMIT_MEMORY_BYTES)
+            .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
         let storage = resources.storage_bytes.to_string();
         let mut documents = vec![
             resource(
@@ -1252,8 +1357,26 @@ where
                 "runtime-quota",
                 json!({
                     "apiVersion":"v1","kind":"ResourceQuota",
-                    "metadata":{"name":"runtime-quota","namespace":namespace,"labels":labels},
-                    "spec":{"hard":{"requests.cpu":cpu,"limits.cpu":cpu,"requests.memory":memory,"limits.memory":memory,"requests.storage":storage,"persistentvolumeclaims":"1","pods":"1"}}
+                    "metadata":{
+                        "name":"runtime-quota",
+                        "namespace":namespace,
+                        "labels":labels,
+                        "annotations":{
+                            "labweaver.io/freeze-request-cpu-millicores":FREEZE_REQUEST_CPU_MILLICORES.to_string(),
+                            "labweaver.io/freeze-limit-cpu-millicores":FREEZE_LIMIT_CPU_MILLICORES.to_string(),
+                            "labweaver.io/freeze-request-memory-bytes":FREEZE_REQUEST_MEMORY_BYTES.to_string(),
+                            "labweaver.io/freeze-limit-memory-bytes":FREEZE_LIMIT_MEMORY_BYTES.to_string()
+                        }
+                    },
+                    "spec":{"hard":{
+                        "requests.cpu":format!("{quota_request_cpu}m"),
+                        "limits.cpu":format!("{quota_limit_cpu}m"),
+                        "requests.memory":quota_request_memory.to_string(),
+                        "limits.memory":quota_limit_memory.to_string(),
+                        "requests.storage":storage,
+                        "persistentvolumeclaims":"1",
+                        "pods":"2"
+                    }}
                 }),
             ),
             resource(
@@ -1284,27 +1407,27 @@ where
                 json!({
                     "apiVersion":"v1","kind":"PersistentVolumeClaim",
                     "metadata":{"name":"workspace","namespace":namespace,"labels":labels},
-                    "spec":{"accessModes":["ReadWriteOnce"],"resources":{"requests":{"storage":storage}}}
+                    "spec":{"accessModes":["ReadWriteMany"],"storageClassName":self.workspace_storage_class_name,"resources":{"requests":{"storage":storage}}}
                 }),
             ),
             resource(
                 "NetworkPolicy",
                 Some(&namespace),
-                "default-deny",
+                "default-deny-ingress",
                 json!({
                     "apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
-                    "metadata":{"name":"default-deny","namespace":namespace,"labels":labels},
-                    "spec":{"podSelector":{},"policyTypes":["Ingress","Egress"]}
+                    "metadata":{"name":"default-deny-ingress","namespace":namespace,"labels":labels},
+                    "spec":{"podSelector":{},"policyTypes":["Ingress"]}
                 }),
             ),
             resource(
                 "NetworkPolicy",
                 Some(&namespace),
-                "protected-gateway-ingress",
+                "access-service-ingress",
                 json!({
                     "apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
-                    "metadata":{"name":"protected-gateway-ingress","namespace":namespace,"labels":labels},
-                    "spec":{"podSelector":{"matchLabels":{"app":app_name}},"policyTypes":["Ingress"],"ingress":[{"from":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":self.gateway_namespace}},"podSelector":{"matchLabels":{"gateway.networking.k8s.io/gateway-name":self.gateway_name}}}],"ports":[{"protocol":"TCP","port":service_port}]}]}
+                    "metadata":{"name":"access-service-ingress","namespace":namespace,"labels":labels},
+                    "spec":{"podSelector":{"matchLabels":{"app":app_name}},"policyTypes":["Ingress"],"ingress":[{"from":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":self.access_namespace}},"podSelector":{"matchLabels":{"app.kubernetes.io/name":self.access_pod_label}}}],"ports":[{"protocol":"TCP","port":service_port}]}]}
                 }),
             ),
             resource(
@@ -1321,16 +1444,36 @@ where
                             "metadata":{"labels":{"app":app_name,"labweaver.io/environment-id":instance.id.to_string()}},
                             "spec":{
                                 "serviceAccountName":"runtime","automountServiceAccountToken":false,
-                                "securityContext":{"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}},
+                                // The shared NFS PVC is provisioned with the `nobody` owner.
+                                // Pinning the runtime identity to that non-root UID keeps the
+                                // student workspace writable. The fixed init command copies the
+                                // approved image's seed exactly once and preserves an existing
+                                // workspace across stop/start and pod replacement.
+                                "securityContext":{"runAsNonRoot":true,"runAsUser":65534,"runAsGroup":65534,"fsGroup":65534,"seccompProfile":{"type":"RuntimeDefault"}},
+                                "initContainers":[{
+                                    "name":"workspace-seed",
+                                    "image":image,
+                                    "imagePullPolicy":"IfNotPresent",
+                                    "command":["/bin/sh","-c",WORKSPACE_SEED_COMMAND],
+                                    "resources":{"requests":{"cpu":"50m","memory":"64Mi"},"limits":{"cpu":"100m","memory":"128Mi"}},
+                                    "securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"capabilities":{"drop":["ALL"]}},
+                                    "volumeMounts":[{"name":"workspace","mountPath":WORKSPACE_ROOT}]
+                                }],
                                 "containers":[{
                                     "name":"runtime","image":image,"imagePullPolicy":"IfNotPresent",
                                     "ports":[{"name":"service","containerPort":service_port}],
                                     "resources":{"requests":{"cpu":cpu,"memory":memory},"limits":{"cpu":cpu,"memory":memory}},
                                     "securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"capabilities":{"drop":["ALL"]}},
-                                    "volumeMounts":[{"name":"workspace","mountPath":"/workspace"}],
+                                    "volumeMounts":[
+                                        {"name":"workspace","mountPath":WORKSPACE_ROOT},
+                                        {"name":"runtime-tmp","mountPath":"/tmp"}
+                                    ],
                                     "readinessProbe":{"tcpSocket":{"port":"service"},"periodSeconds":2,"failureThreshold":30}
                                 }],
-                                "volumes":[{"name":"workspace","persistentVolumeClaim":{"claimName":"workspace"}}]
+                                "volumes":[
+                                    {"name":"workspace","persistentVolumeClaim":{"claimName":"workspace"}},
+                                    {"name":"runtime-tmp","emptyDir":{"sizeLimit":"64Mi"}}
+                                ]
                             }
                         }
                     }
@@ -1343,29 +1486,26 @@ where
                 json!({
                     "apiVersion":"v1","kind":"Service",
                     "metadata":{"name":app_name,"namespace":namespace,"labels":labels},
-                    "spec":{"type":"ClusterIP","selector":{"app":app_name},"ports":[{"name":"service","port":service_port,"targetPort":"service"}]}
-                }),
-            ),
-            resource(
-                "HTTPRoute",
-                Some(&namespace),
-                "protected",
-                json!({
-                    "apiVersion":"gateway.networking.k8s.io/v1","kind":"HTTPRoute",
-                    "metadata":{"name":"protected","namespace":namespace,"labels":labels,"annotations":{"labweaver.io/access-controlled":"true"}},
-                    "spec":{"parentRefs":[{"group":"gateway.networking.k8s.io","kind":"Gateway","namespace":self.gateway_namespace,"name":self.gateway_name,"sectionName":self.gateway_section}],
-                        "rules":[{"matches":[{"path":{"type":"PathPrefix","value":format!("/environments/{}/",instance.id)}}],"filters":[{"type":"URLRewrite","urlRewrite":{"path":{"type":"ReplacePrefixMatch","replacePrefixMatch":"/"}}}],"backendRefs":[{"group":"","kind":"Service","name":app_name,"port":service_port}]}]}
+                    "spec":{"type":"ClusterIP","selector":{"app":app_name},"ports":[{"name":"http","port":8080,"targetPort":"service"}]}
                 }),
             ),
         ];
-        if let NetworkPolicySpec::Restricted { policy_binding } =
-            &projection.environment_spec.network
-        {
-            documents.push(resource("NetworkPolicy", Some(&namespace), "restricted-egress", json!({
-                "apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
-                "metadata":{"name":"restricted-egress","namespace":namespace,"labels":labels},
-                "spec":{"podSelector":{"matchLabels":{"app":app_name}},"policyTypes":["Egress"],"egress":[{"to":[{"namespaceSelector":{"matchLabels":{"labweaver.io/egress-policy":policy_binding}}}]}]}
-            })));
+        match &projection.environment_spec.network {
+            NetworkPolicySpec::AllowAll => {}
+            NetworkPolicySpec::DenyAll => {
+                documents.push(resource("NetworkPolicy", Some(&namespace), "deny-all-egress", json!({
+                    "apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
+                    "metadata":{"name":"deny-all-egress","namespace":namespace,"labels":labels},
+                    "spec":{"podSelector":{"matchLabels":{"app":app_name}},"policyTypes":["Egress"]}
+                })));
+            }
+            NetworkPolicySpec::Restricted { policy_binding } => {
+                documents.push(resource("NetworkPolicy", Some(&namespace), "restricted-egress", json!({
+                    "apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
+                    "metadata":{"name":"restricted-egress","namespace":namespace,"labels":labels},
+                    "spec":{"podSelector":{"matchLabels":{"app":app_name}},"policyTypes":["Egress"],"egress":[{"to":[{"namespaceSelector":{"matchLabels":{"labweaver.io/egress-policy":policy_binding}}}]}]}
+                })));
+            }
         }
         let plan_sha256 = canonical_hash(&json!({
             "environmentId": instance.id,
@@ -1395,17 +1535,23 @@ where
         if resolved.withdrawn_at.is_some() {
             return Err(ReleaseProjectionError::Withdrawn);
         }
-        if resolved.authority_now >= release.image_policy_evaluation.valid_until {
+        let evaluation = release
+            .image_policy_evaluation
+            .as_ref()
+            .ok_or(ReleaseProjectionError::ContractInvalid)?;
+        // Scan freshness gates new materialization and destructive reset. An
+        // existing Environment is already bound to the approved immutable
+        // digest; expiring the scan must not make observe/start/restart fail
+        // after a normal stop. Withdrawal and trust rotation still fail
+        // closed for those actions below.
+        if matches!(action, ReconcileAction::Provision | ReconcileAction::Reset)
+            && resolved.authority_now >= evaluation.valid_until
+        {
             return Err(ReleaseProjectionError::EvidenceExpired);
         }
-        if release.image_policy_evaluation.policy_id != self.release_policy.image_policy_id
-            || release.image_policy_evaluation.policy_revision
-                != self.release_policy.image_policy_revision
+        if evaluation.policy_id != self.release_policy.image_policy_id
+            || evaluation.policy_revision != self.release_policy.image_policy_revision
             || release.approval.trust_revision != self.release_policy.trust_revision
-            || release.image_policy_evaluation.trust_bundle_sha256
-                != self.release_policy.trust_bundle_sha256
-            || release.artifact.signature_evidence().trust_bundle_sha256
-                != self.release_policy.trust_bundle_sha256
         {
             return Err(ReleaseProjectionError::TrustRevisionMismatch);
         }
@@ -1477,10 +1623,14 @@ where
             .releases
             .resolve(instance.release_id, instance.release_version)
             .await
-            .map_err(|error| projection_failure(&error))?;
-        let plan = self
-            .plan(instance, &resolved, action)
-            .map_err(|error| projection_failure(&error))?;
+            .map_err(|error| {
+                log_projection_failure(&error, instance, action, "resolve");
+                projection_failure(&error)
+            })?;
+        let plan = self.plan(instance, &resolved, action).map_err(|error| {
+            log_projection_failure(&error, instance, action, "plan");
+            projection_failure(&error)
+        })?;
         let no_endpoints = |next_state, operation_complete| ProviderObservation {
             next_state,
             endpoints: Vec::new(),
@@ -1559,9 +1709,10 @@ fn ready_observation(
         next_state: ObservedEnvironmentState::Ready,
         endpoints: vec![EnvironmentEndpoint {
             id: deterministic_endpoint_id(instance.id)?,
-            protocol: contracts::environment::EndpointProtocol::Https,
+            protocol: contracts::environment::EndpointProtocol::Http,
             revision,
             health: EndpointHealth::Healthy,
+            ssh_host_key_identity_sha256: None,
             observed_at: observed.observed_at,
         }],
         cleanup_evidence: None,
@@ -1588,7 +1739,7 @@ fn resource(kind: &str, namespace: Option<&str>, name: &str, document: Value) ->
 }
 
 fn container_provider_binding(
-    projection: &ReleasePublishedV2,
+    projection: &ReleasePublished,
 ) -> Result<&str, ReleaseProjectionError> {
     match &projection.environment_spec.runtime {
         EnvironmentRuntimeSpec::Container {
@@ -1597,6 +1748,17 @@ fn container_provider_binding(
         EnvironmentRuntimeSpec::VirtualMachine { .. } => {
             Err(ReleaseProjectionError::IdentityMismatch)
         }
+    }
+}
+
+fn release_provider_binding(runtime: &EnvironmentRuntimeSpec) -> &str {
+    match runtime {
+        EnvironmentRuntimeSpec::Container {
+            provider_binding, ..
+        }
+        | EnvironmentRuntimeSpec::VirtualMachine {
+            provider_binding, ..
+        } => provider_binding,
     }
 }
 
@@ -1625,6 +1787,24 @@ fn projection_failure(error: &ReleaseProjectionError) -> ProviderFailure {
     }
 }
 
+fn log_projection_failure(
+    error: &ReleaseProjectionError,
+    instance: &EnvironmentInstance,
+    action: ReconcileAction,
+    phase: &'static str,
+) {
+    tracing::warn!(
+        event = "environment.container_provider.release_rejected",
+        environment_id = %instance.id,
+        release_id = %instance.release_id,
+        release_version = instance.release_version,
+        provider_binding = %instance.provider_binding,
+        ?action,
+        phase,
+        diagnostic_code = %error,
+    );
+}
+
 fn canonical_hash<T: Serialize>(value: &T) -> Result<Sha256Digest, ReleaseProjectionError> {
     Sha256Digest::of_canonical(value).map_err(|_| ReleaseProjectionError::ContractInvalid)
 }
@@ -1635,6 +1815,19 @@ fn valid_binding(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+}
+
+fn valid_image_repository_prefix(value: &str) -> bool {
+    let mut parts = value.split('/');
+    let registry = parts.next().unwrap_or_default();
+    let project = parts.next().unwrap_or_default();
+    !registry.is_empty()
+        && !registry.contains("//")
+        && !registry.contains(char::is_whitespace)
+        && !registry.contains('@')
+        && !registry.contains(':')
+        && valid_dns_label(project)
+        && parts.next().is_none()
 }
 
 fn valid_subject(value: &str) -> bool {
@@ -1706,4 +1899,66 @@ pub enum ReleaseProjectionError {
     PersistenceFailed,
     #[error("LW_ENVIRONMENT_RELEASE_DATABASE_FAILED")]
     Database(#[from] sqlx::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::release_provider_binding;
+    use contracts::authoring::EnvironmentRuntimeSpec;
+    use serde_json::json;
+
+    #[allow(
+        clippy::expect_used,
+        reason = "the static JSON fixtures are asserted through deserialization in this unit test"
+    )]
+    fn runtime(kind: &str) -> EnvironmentRuntimeSpec {
+        let runtime = match kind {
+            "container" => json!({
+                "kind": "container",
+                "provider_binding": "container-primary-v1",
+                "build_context": {
+                    "artifactId": "00000000-0000-7000-8000-000000000001",
+                    "storeBinding": "minio-primary-v1",
+                    "objectVersion": "1",
+                    "sha256":
+                        "d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5",
+                    "sizeBytes": 1,
+                    "mediaType": "application/vnd.labweaver.build-context.v1+tar"
+                },
+                "base_image_digest": concat!(
+                    "sha256:",
+                    "d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
+                ),
+                "service_port": 8080
+            }),
+            "virtual_machine" => json!({
+                "kind": "virtual_machine",
+                "provider_binding": "kubevirt-primary-v1",
+                "base_disk": {
+                    "binding": "ubuntu-24.04-v1",
+                    "sourceRegistryDigest": concat!(
+                        "docker://quay.io/containerdisks/ubuntu@",
+                        "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
+                    ),
+                    "diskSha256":
+                        "d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5",
+                    "capacityBytes": 10_737_418_240_u64
+                },
+                "storage_class_binding": "vm-rwo-primary-v1",
+                "ssh_port": 22
+            }),
+            _ => unreachable!("test runtime kind"),
+        };
+        serde_json::from_value(runtime).expect("valid runtime")
+    }
+
+    #[test]
+    fn release_projection_accepts_both_runtime_provider_bindings() {
+        for (kind, expected) in [
+            ("container", "container-primary-v1"),
+            ("virtual_machine", "kubevirt-primary-v1"),
+        ] {
+            assert_eq!(release_provider_binding(&runtime(kind)), expected);
+        }
+    }
 }

@@ -37,8 +37,8 @@ export function nextUuid7(prefix?: string): string {
 
   const timestamp = EPOCH.getTime()
   const timeHex = timestamp.toString(16).padStart(12, '0')
-  const rand = toHex(uuidCounter, 12)
-  return `${timeHex.slice(0, 8)}-${timeHex.slice(8, 12)}-7${rand.slice(0, 3)}-${rand.slice(3, 7)}-${rand.slice(7, 13)}`
+  const rand = toHex(uuidCounter, 18)
+  return `${timeHex.slice(0, 8)}-${timeHex.slice(8, 12)}-7${rand.slice(0, 3)}-8${rand.slice(3, 6)}-${rand.slice(6, 18)}`
 }
 
 /**

@@ -12,7 +12,7 @@ use std::time::Duration;
 use async_nats::jetstream::AckKind;
 use async_nats::jetstream::consumer::PullConsumer;
 use async_nats::jetstream::message::PublishMessage;
-use contracts::events::{AgentBuildRequestedV2, CloudEvent, EVENT_CONTRACTS, subjects};
+use contracts::events::{AgentBuildRequested, CloudEvent, EVENT_CONTRACTS, subjects};
 use contracts::{EventId, Sha256Digest};
 use futures_util::StreamExt;
 use serde::Serialize;
@@ -129,7 +129,7 @@ impl AgentOutboxDispatcher {
     }
 }
 
-/// Durable `JetStream` consumer for approved v2 build commands.
+/// Durable `JetStream` consumer for approved v1 build commands.
 pub struct AgentBuildCommandConsumer {
     consumer_name: String,
     quarantine_subject: String,
@@ -159,7 +159,7 @@ impl AgentBuildCommandConsumer {
             .get_consumer(consumer_name)
             .await
             .map_err(|_| AgentMessagingError::ConsumerUnavailable)?;
-        if consumer.cached_info().config.filter_subject != subjects::AGENT_BUILD_REQUESTED_V2
+        if consumer.cached_info().config.filter_subject != subjects::AGENT_BUILD_REQUESTED
             || !consumer.cached_info().config.filter_subjects.is_empty()
         {
             return Err(AgentMessagingError::Configuration);
@@ -195,7 +195,7 @@ impl AgentBuildCommandConsumer {
                 .map_err(|_| AgentMessagingError::Acknowledge)?;
             return Ok(BuildConsumeOutcome::Rejected);
         }
-        let Ok(event): Result<CloudEvent<AgentBuildRequestedV2>, _> =
+        let Ok(event): Result<CloudEvent<AgentBuildRequested>, _> =
             serde_json::from_slice(&message.payload)
         else {
             self.quarantine(&message, None, "LW_AGENT_BUILD_COMMAND_PAYLOAD_INVALID")

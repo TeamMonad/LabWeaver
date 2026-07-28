@@ -48,11 +48,9 @@ function parseReleaseBody(req: unknown): CreateEnvironmentTemplateReleaseRequest
   const body = req as CreateEnvironmentTemplateReleaseRequestSchema | undefined
   if (!body || typeof body !== 'object') return null
   if (typeof body.approvalId !== 'string') return null
-  if (!body.artifact || typeof body.artifact !== 'object') return null
   if (typeof body.candidateId !== 'string') return null
   if (typeof body.candidateRevision !== 'number') return null
   if (typeof body.environmentSpecSha256 !== 'string') return null
-  if (!body.imagePolicyEvaluation || typeof body.imagePolicyEvaluation !== 'object') return null
   if (typeof body.runtimeKind !== 'string') return null
   return body
 }
@@ -94,23 +92,24 @@ export const createEnvironmentTemplateRelease: FixtureHandler = (req) => {
     return conflict('审批与候选不匹配')
   }
 
-  const evaluation = body.imagePolicyEvaluation
-  const artifact = body.artifact
-  const signature = artifact.signature
-  if (!signature) {
-    return conflict('镜像缺少 Sigstore 签名证据，禁止发布')
+  if (candidate.spec.runtime.kind !== body.runtimeKind) {
+    return conflict('候选 runtime identity 已变化，请刷新后重试')
   }
-  if (
-    evaluation.expectedFulcioIssuer !== signature.fulcioIssuer ||
-    evaluation.expectedCertificateSubject !== signature.certificateSubject
-  ) {
-    return conflict('签名 issuer 或 subject 与策略不符，禁止发布')
-  }
-  if (artifact.kind === 'container' && artifact.digest !== evaluation.artifactSha256) {
-    return conflict('镜像 digest 与扫描结果不匹配，禁止发布')
-  }
-  if (evaluation.vulnerabilities.critical > 0) {
-    return conflict('镜像存在 Critical 漏洞，禁止发布')
+
+  const artifact = stored.imageArtifact
+  const evaluation = candidate.spec.runtime.kind === 'container'
+    ? stored.imagePolicyEvaluation
+    : null
+  if (artifact.kind === 'container') {
+    if (!evaluation || artifact.digest.replace(/^sha256:/, '') !== evaluation.artifactSha256) {
+      return conflict('镜像 digest 与扫描结果不匹配，禁止发布')
+    }
+    if (evaluation.vulnerabilities.critical > 0) {
+      return conflict('镜像存在 Critical 漏洞，禁止发布')
+    }
+    if (!evaluation.passed) {
+      return conflict('Trivy Gate 未通过，禁止发布')
+    }
   }
 
   const release: EnvironmentTemplateReleaseViewSchema = {

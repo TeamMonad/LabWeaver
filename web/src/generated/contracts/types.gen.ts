@@ -101,12 +101,29 @@ export type EndpointGrant = {
     accessGrantId: AccessGrantId;
     action: EndpointAction;
     alias?: string | null;
+    /**
+     * Same-origin, Access Service-authorized browser entry point. Present only
+     * for HTTP(S) grants and derived from this immutable endpoint grant ID.
+     */
+    connectUrl?: string | null;
     endpointId: EndpointId;
     endpointRevision: Revision;
     expiresAt: UtcTimestamp;
     health: EndpointHealth;
     id: EndpointGrantId;
     protocol: EndpointProtocol;
+    /**
+     * OpenSSH SHA-256 host-key fingerprint for the public Gateway.
+     */
+    sshGatewayHostKeyFingerprint?: string | null;
+    /**
+     * Public OpenSSH Gateway DNS name for SSH grants. Never a runtime target.
+     */
+    sshGatewayHostname?: string | null;
+    /**
+     * Public OpenSSH Gateway listener port for SSH grants.
+     */
+    sshGatewayPort?: number | null;
 };
 
 /**
@@ -773,218 +790,6 @@ export type CsrfTokenResponseSchema = {
 export type CsrfTokenResponseSchemaUtcTimestamp = string;
 
 /**
- * EnvironmentCandidate
- *
- * Immutable validated Environment candidate.
- */
-export type EnvironmentCandidateSchema = {
-    createdAt: EnvironmentCandidateSchemaUtcTimestamp;
-    id: EnvironmentCandidateSchemaCandidateId;
-    model: string;
-    policyRevision: EnvironmentCandidateSchemaRevision;
-    revision: EnvironmentCandidateSchemaRevision;
-    runId: EnvironmentCandidateSchemaAgentRunId;
-    schemaSha256: EnvironmentCandidateSchemaSha256Digest;
-    spec: EnvironmentSpec;
-    specSha256: EnvironmentCandidateSchemaSha256Digest;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `AgentRunId`.
- */
-export type EnvironmentCandidateSchemaAgentRunId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `ArtifactId`.
- */
-export type EnvironmentCandidateSchemaArtifactId = string;
-
-/**
- * Immutable object-store identity without a machine-local path or credential.
- */
-export type EnvironmentCandidateSchemaArtifactRef = {
-    /**
-     * Stable metadata identity resolved by the owning service.
-     */
-    artifactId: EnvironmentCandidateSchemaArtifactId;
-    /**
-     * Registered media type.
-     */
-    mediaType: string;
-    /**
-     * Immutable backend object version.
-     */
-    objectVersion: string;
-    /**
-     * Exact content digest.
-     */
-    sha256: EnvironmentCandidateSchemaSha256Digest;
-    /**
-     * Raw object length.
-     */
-    sizeBytes: number;
-    /**
-     * Explicit object-store binding from deployment configuration.
-     */
-    storeBinding: string;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `CandidateId`.
- */
-export type EnvironmentCandidateSchemaCandidateId = string;
-
-/**
- * Supported controlled protocols.
- */
-export type EnvironmentCandidateSchemaEndpointProtocol = 'http' | 'https' | 'ssh';
-
-export type EnvironmentApiVersion = 'environment.labweaver.io/v1';
-
-/**
- * Environment business class retained from the v2.1 architecture.
- */
-export type EnvironmentClass = 'experiment' | 'work';
-
-export type EnvironmentDocumentKind = 'EnvironmentSpec';
-
-/**
- * One named service entry exposed only through the controlled access plane.
- */
-export type EnvironmentEntrySpec = {
-    name: string;
-    protocol: EnvironmentCandidateSchemaEndpointProtocol;
-    servicePort: number;
-};
-
-/**
- * Strict runtime-specific environment shape.
- */
-export type EnvironmentRuntimeSpec = {
-    base_image_digest: string;
-    build_context: EnvironmentCandidateSchemaArtifactRef;
-    kind: 'container';
-    provider_binding: string;
-    service_port: number;
-} | {
-    base_disk: EnvironmentCandidateSchemaArtifactRef;
-    kind: 'virtual_machine';
-    provider_binding: string;
-    ssh_port: number;
-    storage_class_binding: string;
-};
-
-/**
- * Runtime-independent minimum security posture.
- */
-export type EnvironmentSecuritySpec = {
-    privilegeEscalationPolicy: PrivilegeEscalationPolicy;
-    publicExposurePolicy: PublicExposurePolicy;
-    rootFilesystemPolicy: RootFilesystemPolicy;
-    securityProfileBinding: string;
-    userPolicy: RuntimeUserPolicy;
-};
-
-/**
- * Stable EnvironmentSpec v1.
- */
-export type EnvironmentSpec = {
-    apiVersion: EnvironmentApiVersion;
-    class: EnvironmentClass;
-    entries: Array<EnvironmentEntrySpec>;
-    kind: EnvironmentDocumentKind;
-    name: string;
-    network: NetworkPolicySpec;
-    resources: ResourceRequirements;
-    retention: RetentionSnapshot;
-    runtime: EnvironmentRuntimeSpec;
-    security: EnvironmentSecuritySpec;
-};
-
-/**
- * Network egress posture for a published environment.
- */
-export type NetworkPolicySpec = {
-    mode: 'deny_all';
-} | {
-    mode: 'restricted';
-    policy_binding: string;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `PolicyId`.
- */
-export type EnvironmentCandidateSchemaPolicyId = string;
-
-export type PrivilegeEscalationPolicy = 'deny';
-
-export type PublicExposurePolicy = 'deny';
-
-/**
- * Bounded runtime resources expressed without Kubernetes-dependent parsing.
- */
-export type ResourceRequirements = {
-    cpuMillicores: number;
-    memoryBytes: number;
-    storageBytes: number;
-};
-
-/**
- * Retention classes with distinct privacy and recovery requirements.
- */
-export type RetentionClass = 'course_material' | 'build_evidence' | 'run_evidence' | 'student_submission' | 'security_audit';
-
-/**
- * Required action after retention expires.
- */
-export type RetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt';
-
-/**
- * Frozen data-retention decision for an immutable resource.
- */
-export type RetentionSnapshot = {
-    /**
-     * Stable retention class.
-     */
-    class: RetentionClass;
-    /**
-     * Required terminal disposition.
-     */
-    disposition: RetentionDisposition;
-    /**
-     * Policy identity.
-     */
-    policyId: EnvironmentCandidateSchemaPolicyId;
-    /**
-     * Exact policy revision used at creation.
-     */
-    policyRevision: EnvironmentCandidateSchemaRevision;
-    /**
-     * Absolute retention boundary.
-     */
-    retainUntil: EnvironmentCandidateSchemaUtcTimestamp;
-};
-
-/**
- * Monotonic aggregate revision. Zero is never a persisted revision.
- */
-export type EnvironmentCandidateSchemaRevision = number;
-
-export type RootFilesystemPolicy = 'read_only_required' | 'mutable_required';
-
-export type RuntimeUserPolicy = 'non_root_required';
-
-/**
- * Canonical lowercase SHA-256 digest.
- */
-export type EnvironmentCandidateSchemaSha256Digest = string;
-
-/**
- * UTC timestamp serialized with a literal `Z` and millisecond precision.
- */
-export type EnvironmentCandidateSchemaUtcTimestamp = string;
-
-/**
  * EnvironmentEndpoint
  *
  * Sanitized Environment-owned endpoint metadata.
@@ -995,6 +800,11 @@ export type EnvironmentEndpointSchema = {
     observedAt: EnvironmentEndpointSchemaUtcTimestamp;
     protocol: EnvironmentEndpointSchemaEndpointProtocol;
     revision: EnvironmentEndpointSchemaRevision;
+    /**
+     * SHA-256 of the OpenSSH host-key fingerprint string observed by the
+     * runtime executor. Required for SSH and absent for non-SSH endpoints.
+     */
+    sshHostKeyIdentitySha256?: EnvironmentEndpointSchemaSha256Digest | null;
 };
 
 /**
@@ -1018,6 +828,11 @@ export type EnvironmentEndpointSchemaEndpointProtocol = 'http' | 'https' | 'ssh'
 export type EnvironmentEndpointSchemaRevision = number;
 
 /**
+ * Canonical lowercase SHA-256 digest.
+ */
+export type EnvironmentEndpointSchemaSha256Digest = string;
+
+/**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
  */
 export type EnvironmentEndpointSchemaUtcTimestamp = string;
@@ -1029,10 +844,11 @@ export type EnvironmentEndpointSchemaUtcTimestamp = string;
  */
 export type EnvironmentInstanceSchema = {
     capacityBinding?: string | null;
-    class: EnvironmentInstanceSchemaEnvironmentClass;
+    class: EnvironmentClass;
     cleanupEvidence?: EnvironmentInstanceSchemaArtifactRef | null;
     courseId: EnvironmentInstanceSchemaCourseId;
     desiredState: DesiredEnvironmentState;
+    displayLabel: string;
     eligibilityExpiresAt: EnvironmentInstanceSchemaUtcTimestamp;
     endpoints: Array<EnvironmentEndpoint>;
     failedPhase?: ObservedEnvironmentState | null;
@@ -1119,7 +935,7 @@ export type EnvironmentInstanceSchemaEndpointProtocol = 'http' | 'https' | 'ssh'
 /**
  * Environment business class retained from the v2.1 architecture.
  */
-export type EnvironmentInstanceSchemaEnvironmentClass = 'experiment' | 'work';
+export type EnvironmentClass = 'experiment' | 'work';
 
 /**
  * Sanitized Environment-owned endpoint metadata.
@@ -1130,6 +946,11 @@ export type EnvironmentEndpoint = {
     observedAt: EnvironmentInstanceSchemaUtcTimestamp;
     protocol: EnvironmentInstanceSchemaEndpointProtocol;
     revision: EnvironmentInstanceSchemaRevision;
+    /**
+     * SHA-256 of the OpenSSH host-key fingerprint string observed by the
+     * runtime executor. Required for SSH and absent for non-SSH endpoints.
+     */
+    sshHostKeyIdentitySha256?: EnvironmentInstanceSchemaSha256Digest | null;
 };
 
 /**
@@ -1323,346 +1144,6 @@ export type StreamSequence = string;
 export type EnvironmentOperationSnapshotSchemaUtcTimestamp = string;
 
 /**
- * EvaluationCandidate
- *
- * Immutable validated Evaluation candidate.
- */
-export type EvaluationCandidateSchema = {
-    createdAt: EvaluationCandidateSchemaUtcTimestamp;
-    id: EvaluationCandidateSchemaCandidateId;
-    model: string;
-    policyRevision: EvaluationCandidateSchemaRevision;
-    revision: EvaluationCandidateSchemaRevision;
-    runId: EvaluationCandidateSchemaAgentRunId;
-    schemaSha256: EvaluationCandidateSchemaSha256Digest;
-    spec: EvaluationSpec;
-    specSha256: EvaluationCandidateSchemaSha256Digest;
-};
-
-/**
- * Preserve the advisory failure without changing deterministic results.
- */
-export type AdvisoryFailurePolicy = 'continue_advisory';
-
-/**
- * Emit a `goal-review/v1` assessment.
- */
-export type AdvisoryOutputMode = 'goal_assessment';
-
-/**
- * Reviews allowlisted submission paths without producing a score.
- */
-export type AdvisoryRunnerSpec = {
-    /**
-     * Submission-relative paths visible to the LLM.
-     */
-    include: Array<string>;
-    kind: 'llm_review';
-    /**
-     * Versioned advisory output shape.
-     */
-    outputMode: AdvisoryOutputMode;
-    /**
-     * Immutable advisory rubric locator.
-     */
-    rubric: string;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `AgentRunId`.
- */
-export type EvaluationCandidateSchemaAgentRunId = string;
-
-/**
- * Required Gate status used by deterministic aggregation.
- */
-export type AggregationGate = {
-    requiredStatus: RequiredStatus;
-    step: string;
-};
-
-/**
- * Checked sum of deterministic Score steps.
- */
-export type AggregationKind = 'deterministic_sum';
-
-/**
- * Pure deterministic score aggregation contract.
- */
-export type AggregationSpec = {
-    gates: Array<AggregationGate>;
-    kind: AggregationKind;
-    maxScore: number;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `CandidateId`.
- */
-export type EvaluationCandidateSchemaCandidateId = string;
-
-/**
- * Deterministic Checker configurations frozen for v1.
- */
-export type CheckerSpec = {
-    kind: 'exact';
-} | {
-    kind: 'token';
-} | {
-    /**
-     * Required exit code.
-     */
-    expected: number;
-    kind: 'exit_code';
-} | {
-    kind: 'json_schema';
-    /**
-     * Immutable schema locator.
-     */
-    schemaRef: string;
-} | {
-    /**
-     * Required service state.
-     */
-    expected: ExpectedServiceState;
-    kind: 'service_state';
-    /**
-     * Stable service name.
-     */
-    service: string;
-};
-
-/**
- * Supported P0 submission collectors.
- */
-export type CollectorSpec = {
-    /**
-     * Excluded submission-relative paths.
-     */
-    exclude?: Array<string>;
-    /**
-     * Included submission-relative paths.
-     */
-    include: Array<string>;
-    kind: 'workspace_snapshot';
-    /**
-     * Maximum collected bytes.
-     */
-    maxBytes: number;
-} | {
-    /**
-     * Named facts to collect.
-     */
-    facts: Array<string>;
-    kind: 'system_facts';
-    /**
-     * Maximum collected bytes.
-     */
-    maxBytes: number;
-};
-
-/**
- * Deterministic Runner configurations frozen for P0 OJ and Linux evaluation.
- */
-export type DeterministicRunnerSpec = {
-    kind: 'file_assertion';
-    /**
-     * Required submission-relative files.
-     */
-    requiredFiles: Array<string>;
-} | {
-    /**
-     * Submission-relative program input.
-     */
-    input: string;
-    kind: 'program';
-    /**
-     * Mandatory execution limits.
-     */
-    limits: ExecutionLimits;
-    /**
-     * Compile or test phase.
-     */
-    phase: ProgramPhase;
-    /**
-     * Deterministic test groups used by the test phase.
-     */
-    testGroups?: Array<TestGroup>;
-    /**
-     * Explicit approved toolchain binding.
-     */
-    toolchainProfile: string;
-} | {
-    /**
-     * Facts expected from the probe.
-     */
-    assertions: Array<FactAssertion>;
-    kind: 'ansible_probe';
-    /**
-     * Modules requested from the frozen P0 allowlist.
-     */
-    moduleAllowlist: Array<string>;
-    /**
-     * Explicit approved playbook binding.
-     */
-    playbookProfile: string;
-    /**
-     * Must remain true in v1.
-     */
-    readOnly: boolean;
-};
-
-export type EvaluationApiVersion = 'evaluation.labweaver.io/v1';
-
-/**
- * Submission, step, aggregation, and review decomposition of an evaluation.
- */
-export type EvaluationBody = {
-    aggregation: AggregationSpec;
-    review: ReviewPolicy;
-    steps: Array<EvaluationStep>;
-    submission: SubmissionSpec;
-};
-
-export type EvaluationKind = 'EvaluationSpec';
-
-/**
- * Stable name and version of an evaluation definition.
- */
-export type EvaluationMetadata = {
-    name: string;
-    version: string;
-};
-
-/**
- * Versioned evaluation definition shared by OJ and Linux system experiments.
- */
-export type EvaluationSpec = {
-    apiVersion: EvaluationApiVersion;
-    kind: EvaluationKind;
-    metadata: EvaluationMetadata;
-    spec: EvaluationBody;
-};
-
-/**
- * A role-specific evaluation step.
- */
-export type EvaluationStep = {
-    checker: CheckerSpec;
-    dependsOn?: Array<string>;
-    failurePolicy: GateFailurePolicy;
-    id: string;
-    role: 'gate';
-    runner: DeterministicRunnerSpec;
-} | {
-    checker: CheckerSpec;
-    dependsOn?: Array<string>;
-    failurePolicy: ScoreFailurePolicy;
-    id: string;
-    role: 'score';
-    runner: DeterministicRunnerSpec;
-    score: ScoreSpec;
-} | {
-    dependsOn?: Array<string>;
-    failurePolicy: AdvisoryFailurePolicy;
-    id: string;
-    role: 'advisory';
-    runner: AdvisoryRunnerSpec;
-};
-
-/**
- * Resource and output limits for a program Runner.
- */
-export type ExecutionLimits = {
-    memoryBytes: number;
-    outputBytes: number;
-    wallTimeSeconds: number;
-};
-
-/**
- * Expected state of a system service.
- */
-export type ExpectedServiceState = 'active' | 'inactive';
-
-/**
- * Expected fact emitted by a Linux probe.
- */
-export type FactAssertion = {
-    fact: string;
-};
-
-/**
- * Stop downstream deterministic execution.
- */
-export type GateFailurePolicy = 'stop';
-
-/**
- * Conditions that force manual teacher review.
- */
-export type ManualReviewReason = 'infrastructureError' | 'invalidEvidence';
-
-/**
- * Approved program Runner phase.
- */
-export type ProgramPhase = 'compile' | 'test';
-
-/**
- * The Gate must pass.
- */
-export type RequiredStatus = 'passed';
-
-/**
- * Mandatory approval and manual-review policy.
- */
-export type ReviewPolicy = {
-    forceManualWhen: Array<ManualReviewReason>;
-    teacherApprovalRequiredForRelease: true;
-};
-
-/**
- * Monotonic aggregate revision. Zero is never a persisted revision.
- */
-export type EvaluationCandidateSchemaRevision = number;
-
-/**
- * Failure behavior for a Score step.
- */
-export type ScoreFailurePolicy = 'stop' | 'continue';
-
-/**
- * Maximum contribution of a deterministic Score step.
- */
-export type ScoreSpec = {
-    max: number;
-};
-
-/**
- * Canonical lowercase SHA-256 digest.
- */
-export type EvaluationCandidateSchemaSha256Digest = string;
-
-/**
- * Submission collection boundary used before evaluation starts.
- */
-export type SubmissionSpec = {
-    collector: CollectorSpec;
-    llmReadable: Array<string>;
-};
-
-/**
- * One deterministic program test group.
- */
-export type TestGroup = {
-    maxPoints: number;
-    name: string;
-    source: string;
-};
-
-/**
- * UTC timestamp serialized with a literal `Z` and millisecond precision.
- */
-export type EvaluationCandidateSchemaUtcTimestamp = string;
-
-/**
  * FrozenSubmission
  *
  * Manifest-authoritative immutable collection result.
@@ -1680,7 +1161,7 @@ export type FrozenSubmissionSchema = {
     manifestRevision: FrozenSubmissionSchemaRevision;
     manifestSha256: FrozenSubmissionSchemaSha256Digest;
     object: FrozenSubmissionSchemaArtifactRef;
-    retention: FrozenSubmissionSchemaRetentionSnapshot;
+    retention: RetentionSnapshot;
     submissionManifestSha256: FrozenSubmissionSchemaSha256Digest;
     systemFacts: {
         [key: string]: string;
@@ -1788,25 +1269,25 @@ export type FrozenSubmissionSchemaReleaseId = string;
 /**
  * Retention classes with distinct privacy and recovery requirements.
  */
-export type FrozenSubmissionSchemaRetentionClass = 'course_material' | 'build_evidence' | 'run_evidence' | 'student_submission' | 'security_audit';
+export type RetentionClass = 'course_material' | 'build_evidence' | 'run_evidence' | 'student_submission' | 'security_audit';
 
 /**
  * Required action after retention expires.
  */
-export type FrozenSubmissionSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt';
+export type RetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt';
 
 /**
  * Frozen data-retention decision for an immutable resource.
  */
-export type FrozenSubmissionSchemaRetentionSnapshot = {
+export type RetentionSnapshot = {
     /**
      * Stable retention class.
      */
-    class: FrozenSubmissionSchemaRetentionClass;
+    class: RetentionClass;
     /**
      * Required terminal disposition.
      */
-    disposition: FrozenSubmissionSchemaRetentionDisposition;
+    disposition: RetentionDisposition;
     /**
      * Policy identity.
      */
@@ -1979,11 +1460,9 @@ export type CreateEnvironmentRequestSchemaReleaseId = string;
  */
 export type CreateEnvironmentTemplateReleaseRequestSchema = {
     approvalId: CreateEnvironmentTemplateReleaseRequestSchemaApprovalId;
-    artifact: ImageArtifact;
     candidateId: CreateEnvironmentTemplateReleaseRequestSchemaCandidateId;
     candidateRevision: CreateEnvironmentTemplateReleaseRequestSchemaRevision;
     environmentSpecSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
-    imagePolicyEvaluation: ImagePolicyEvaluation;
     runtimeKind: CreateEnvironmentTemplateReleaseRequestSchemaRuntimeKind;
 };
 
@@ -1993,105 +1472,9 @@ export type CreateEnvironmentTemplateReleaseRequestSchema = {
 export type CreateEnvironmentTemplateReleaseRequestSchemaApprovalId = string;
 
 /**
- * Strongly typed UUIDv7 identifier for `ArtifactId`.
- */
-export type CreateEnvironmentTemplateReleaseRequestSchemaArtifactId = string;
-
-/**
- * Immutable object-store identity without a machine-local path or credential.
- */
-export type CreateEnvironmentTemplateReleaseRequestSchemaArtifactRef = {
-    /**
-     * Stable metadata identity resolved by the owning service.
-     */
-    artifactId: CreateEnvironmentTemplateReleaseRequestSchemaArtifactId;
-    /**
-     * Registered media type.
-     */
-    mediaType: string;
-    /**
-     * Immutable backend object version.
-     */
-    objectVersion: string;
-    /**
-     * Exact content digest.
-     */
-    sha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
-    /**
-     * Raw object length.
-     */
-    sizeBytes: number;
-    /**
-     * Explicit object-store binding from deployment configuration.
-     */
-    storeBinding: string;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `BuildRequestId`.
- */
-export type CreateEnvironmentTemplateReleaseRequestSchemaBuildRequestId = string;
-
-/**
  * Strongly typed UUIDv7 identifier for `CandidateId`.
  */
 export type CreateEnvironmentTemplateReleaseRequestSchemaCandidateId = string;
-
-/**
- * Complete immutable runtime artifact identity.
- */
-export type ImageArtifact = {
-    build_request_id: CreateEnvironmentTemplateReleaseRequestSchemaBuildRequestId;
-    digest: string;
-    id: ImageArtifactId;
-    immutable_tag: string;
-    kind: 'container';
-    provenance: CreateEnvironmentTemplateReleaseRequestSchemaArtifactRef;
-    repository: string;
-    sbom: CreateEnvironmentTemplateReleaseRequestSchemaArtifactRef;
-    signature: SigstoreEvidence;
-} | {
-    base_disk: CreateEnvironmentTemplateReleaseRequestSchemaArtifactRef;
-    format: VirtualMachineDiskFormat;
-    id: ImageArtifactId;
-    kind: 'virtual_machine';
-    provenance: CreateEnvironmentTemplateReleaseRequestSchemaArtifactRef;
-    sbom: CreateEnvironmentTemplateReleaseRequestSchemaArtifactRef;
-    signature: SigstoreEvidence;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `ImageArtifactId`.
- */
-export type ImageArtifactId = string;
-
-/**
- * Deterministic scan and trust-policy evaluation.
- */
-export type ImagePolicyEvaluation = {
-    artifactId: ImageArtifactId;
-    artifactSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
-    evaluatedAt: CreateEnvironmentTemplateReleaseRequestSchemaUtcTimestamp;
-    expectedCertificateSubject: string;
-    expectedFulcioIssuer: string;
-    maxEvidenceAgeMilliseconds: number;
-    passed: boolean;
-    policyId: CreateEnvironmentTemplateReleaseRequestSchemaPolicyId;
-    policyRevision: CreateEnvironmentTemplateReleaseRequestSchemaRevision;
-    requireCtSct: boolean;
-    requireRekorInclusion: boolean;
-    scannerDatabaseSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
-    scannerName: string;
-    scannerVersion: string;
-    trustBundleSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
-    validUntil: CreateEnvironmentTemplateReleaseRequestSchemaUtcTimestamp;
-    vulnerabilities: VulnerabilitySummary;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `PolicyId`.
- */
-export type CreateEnvironmentTemplateReleaseRequestSchemaPolicyId = string;
 
 /**
  * Monotonic aggregate revision. Zero is never a persisted revision.
@@ -2107,48 +1490,6 @@ export type CreateEnvironmentTemplateReleaseRequestSchemaRuntimeKind = 'containe
  * Canonical lowercase SHA-256 digest.
  */
 export type CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest = string;
-
-/**
- * Private Sigstore identity and transparency evidence.
- */
-export type SigstoreEvidence = {
-    certificateSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
-    certificateSubject: string;
-    ctLogId: string;
-    fulcioIssuer: string;
-    rekorInclusionProofSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
-    rekorLogId: string;
-    rekorLogIndex: number;
-    sctSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
-    signatureSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
-    /**
-     * Immutable artifact digest covered by the verified signature.
-     */
-    subjectDigest: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
-    trustBundleSha256: CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest;
-    verifiedAt: CreateEnvironmentTemplateReleaseRequestSchemaUtcTimestamp;
-};
-
-/**
- * UTC timestamp serialized with a literal `Z` and millisecond precision.
- */
-export type CreateEnvironmentTemplateReleaseRequestSchemaUtcTimestamp = string;
-
-/**
- * Supported VM base-disk encodings.
- */
-export type VirtualMachineDiskFormat = 'qcow2' | 'raw';
-
-/**
- * Vulnerability counts by severity.
- */
-export type VulnerabilitySummary = {
-    critical: number;
-    high: number;
-    low: number;
-    medium: number;
-    unknown: number;
-};
 
 /**
  * CreateProblemPackageUploadRequest
@@ -2282,6 +1623,360 @@ export type EnvironmentAccessGrantPageSchemaStreamSequence = string;
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
  */
 export type EnvironmentAccessGrantPageSchemaUtcTimestamp = string;
+
+/**
+ * EnvironmentCandidateView
+ *
+ * Control-owned teacher read model for one immutable Environment candidate.
+ */
+export type EnvironmentCandidateViewSchema = {
+    approvals: Array<CandidateApproval>;
+    build?: CandidateBuildView | null;
+    candidate: EnvironmentCandidate;
+    trustRevision: EnvironmentCandidateViewSchemaRevision;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type EnvironmentCandidateViewSchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `AgentRunId`.
+ */
+export type EnvironmentCandidateViewSchemaAgentRunId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ApprovalId`.
+ */
+export type EnvironmentCandidateViewSchemaApprovalId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ArtifactId`.
+ */
+export type EnvironmentCandidateViewSchemaArtifactId = string;
+
+/**
+ * Immutable object-store identity without a machine-local path or credential.
+ */
+export type EnvironmentCandidateViewSchemaArtifactRef = {
+    /**
+     * Stable metadata identity resolved by the owning service.
+     */
+    artifactId: EnvironmentCandidateViewSchemaArtifactId;
+    /**
+     * Registered media type.
+     */
+    mediaType: string;
+    /**
+     * Immutable backend object version.
+     */
+    objectVersion: string;
+    /**
+     * Exact content digest.
+     */
+    sha256: EnvironmentCandidateViewSchemaSha256Digest;
+    /**
+     * Raw object length.
+     */
+    sizeBytes: number;
+    /**
+     * Explicit object-store binding from deployment configuration.
+     */
+    storeBinding: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `BuildRequestId`.
+ */
+export type EnvironmentCandidateViewSchemaBuildRequestId = string;
+
+/**
+ * Human decision bound to an exact candidate and dependency identity.
+ */
+export type CandidateApproval = {
+    actorId: EnvironmentCandidateViewSchemaActorId;
+    candidateId: EnvironmentCandidateViewSchemaCandidateId;
+    candidateRevision: EnvironmentCandidateViewSchemaRevision;
+    candidateSha256: EnvironmentCandidateViewSchemaSha256Digest;
+    decidedAt: EnvironmentCandidateViewSchemaUtcTimestamp;
+    decision: EnvironmentCandidateViewSchemaCandidateDecision;
+    id: EnvironmentCandidateViewSchemaApprovalId;
+    policyRevision: EnvironmentCandidateViewSchemaRevision;
+    reason: string;
+    schemaSha256: EnvironmentCandidateViewSchemaSha256Digest;
+    trustRevision: EnvironmentCandidateViewSchemaRevision;
+};
+
+/**
+ * Public state of the deterministic Container build attached to one approved candidate.
+ */
+export type CandidateBuildState = 'requested' | 'succeeded' | 'failed' | 'cancelled';
+
+/**
+ * Control-owned build projection exposed for teacher review without leaking object keys or
+ * executor internals.
+ */
+export type CandidateBuildView = {
+    artifact?: ImageArtifact | null;
+    cleanupVerified?: boolean | null;
+    diagnosticCode?: EnvironmentCandidateViewSchemaDiagnosticCode | null;
+    imagePolicyEvaluation?: ImagePolicyEvaluation | null;
+    state: CandidateBuildState;
+};
+
+/**
+ * Append-only candidate decision.
+ */
+export type EnvironmentCandidateViewSchemaCandidateDecision = 'approved' | 'rejected' | 'withdrawn';
+
+/**
+ * Strongly typed UUIDv7 identifier for `CandidateId`.
+ */
+export type EnvironmentCandidateViewSchemaCandidateId = string;
+
+/**
+ * Stable machine-readable diagnostic code.
+ *
+ * Consumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so
+ * additive diagnostics do not force a wire-version change.
+ */
+export type EnvironmentCandidateViewSchemaDiagnosticCode = string;
+
+/**
+ * Supported controlled protocols.
+ */
+export type EnvironmentCandidateViewSchemaEndpointProtocol = 'http' | 'https' | 'ssh';
+
+export type EnvironmentApiVersion = 'environment.labweaver.io/v1';
+
+/**
+ * Immutable validated Environment candidate.
+ */
+export type EnvironmentCandidate = {
+    createdAt: EnvironmentCandidateViewSchemaUtcTimestamp;
+    id: EnvironmentCandidateViewSchemaCandidateId;
+    model: string;
+    policyRevision: EnvironmentCandidateViewSchemaRevision;
+    revision: EnvironmentCandidateViewSchemaRevision;
+    runId: EnvironmentCandidateViewSchemaAgentRunId;
+    schemaSha256: EnvironmentCandidateViewSchemaSha256Digest;
+    spec: EnvironmentSpec;
+    specSha256: EnvironmentCandidateViewSchemaSha256Digest;
+};
+
+/**
+ * Environment business class retained from the v2.1 architecture.
+ */
+export type EnvironmentCandidateViewSchemaEnvironmentClass = 'experiment' | 'work';
+
+export type EnvironmentDocumentKind = 'EnvironmentSpec';
+
+/**
+ * One named service entry exposed only through the controlled access plane.
+ */
+export type EnvironmentEntrySpec = {
+    name: string;
+    protocol: EnvironmentCandidateViewSchemaEndpointProtocol;
+    servicePort: number;
+};
+
+/**
+ * Strict runtime-specific environment shape.
+ */
+export type EnvironmentRuntimeSpec = {
+    base_image_digest: string;
+    build_context: EnvironmentCandidateViewSchemaArtifactRef;
+    kind: 'container';
+    provider_binding: string;
+    service_port: number;
+} | {
+    base_disk: VirtualMachineBaseDisk;
+    kind: 'virtual_machine';
+    provider_binding: string;
+    ssh_port: number;
+    storage_class_binding: string;
+};
+
+/**
+ * Runtime-independent minimum security posture.
+ */
+export type EnvironmentSecuritySpec = {
+    privilegeEscalationPolicy: PrivilegeEscalationPolicy;
+    publicExposurePolicy: PublicExposurePolicy;
+    rootFilesystemPolicy: RootFilesystemPolicy;
+    securityProfileBinding: string;
+    userPolicy: RuntimeUserPolicy;
+};
+
+/**
+ * Stable EnvironmentSpec v1.
+ */
+export type EnvironmentSpec = {
+    apiVersion: EnvironmentApiVersion;
+    class: EnvironmentCandidateViewSchemaEnvironmentClass;
+    entries: Array<EnvironmentEntrySpec>;
+    kind: EnvironmentDocumentKind;
+    name: string;
+    network: NetworkPolicySpec;
+    resources: ResourceRequirements;
+    retention: EnvironmentCandidateViewSchemaRetentionSnapshot;
+    runtime: EnvironmentRuntimeSpec;
+    security: EnvironmentSecuritySpec;
+};
+
+/**
+ * Complete immutable runtime artifact identity.
+ */
+export type ImageArtifact = {
+    build_request_id: EnvironmentCandidateViewSchemaBuildRequestId;
+    digest: string;
+    id: ImageArtifactId;
+    kind: 'container';
+    repository: string;
+} | {
+    base_disk: VirtualMachineBaseDisk;
+    format: VirtualMachineDiskFormat;
+    id: ImageArtifactId;
+    kind: 'virtual_machine';
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ImageArtifactId`.
+ */
+export type ImageArtifactId = string;
+
+/**
+ * Deterministic digest-bound Trivy evaluation.
+ */
+export type ImagePolicyEvaluation = {
+    artifactId: ImageArtifactId;
+    artifactSha256: EnvironmentCandidateViewSchemaSha256Digest;
+    evaluatedAt: EnvironmentCandidateViewSchemaUtcTimestamp;
+    maxEvidenceAgeMilliseconds: number;
+    passed: boolean;
+    policyId: EnvironmentCandidateViewSchemaPolicyId;
+    policyRevision: EnvironmentCandidateViewSchemaRevision;
+    scannerDatabaseSha256: EnvironmentCandidateViewSchemaSha256Digest;
+    scannerName: string;
+    scannerVersion: string;
+    validUntil: EnvironmentCandidateViewSchemaUtcTimestamp;
+    vulnerabilities: VulnerabilitySummary;
+};
+
+/**
+ * Network egress posture for a published environment.
+ */
+export type NetworkPolicySpec = {
+    mode: 'allow_all';
+} | {
+    mode: 'deny_all';
+} | {
+    mode: 'restricted';
+    policy_binding: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `PolicyId`.
+ */
+export type EnvironmentCandidateViewSchemaPolicyId = string;
+
+export type PrivilegeEscalationPolicy = 'deny';
+
+export type PublicExposurePolicy = 'deny';
+
+/**
+ * Bounded runtime resources expressed without Kubernetes-dependent parsing.
+ */
+export type ResourceRequirements = {
+    cpuMillicores: number;
+    memoryBytes: number;
+    storageBytes: number;
+};
+
+/**
+ * Retention classes with distinct privacy and recovery requirements.
+ */
+export type EnvironmentCandidateViewSchemaRetentionClass = 'course_material' | 'build_evidence' | 'run_evidence' | 'student_submission' | 'security_audit';
+
+/**
+ * Required action after retention expires.
+ */
+export type EnvironmentCandidateViewSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt';
+
+/**
+ * Frozen data-retention decision for an immutable resource.
+ */
+export type EnvironmentCandidateViewSchemaRetentionSnapshot = {
+    /**
+     * Stable retention class.
+     */
+    class: EnvironmentCandidateViewSchemaRetentionClass;
+    /**
+     * Required terminal disposition.
+     */
+    disposition: EnvironmentCandidateViewSchemaRetentionDisposition;
+    /**
+     * Policy identity.
+     */
+    policyId: EnvironmentCandidateViewSchemaPolicyId;
+    /**
+     * Exact policy revision used at creation.
+     */
+    policyRevision: EnvironmentCandidateViewSchemaRevision;
+    /**
+     * Absolute retention boundary.
+     */
+    retainUntil: EnvironmentCandidateViewSchemaUtcTimestamp;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type EnvironmentCandidateViewSchemaRevision = number;
+
+export type RootFilesystemPolicy = 'read_only_required' | 'mutable_required';
+
+export type RuntimeUserPolicy = 'non_root_required';
+
+/**
+ * Canonical lowercase SHA-256 digest.
+ */
+export type EnvironmentCandidateViewSchemaSha256Digest = string;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type EnvironmentCandidateViewSchemaUtcTimestamp = string;
+
+/**
+ * Deployment-owned immutable KubeVirt base-disk identity.
+ *
+ * Unlike an object-store `ArtifactRef`, this identifies a CDI source image and its imported
+ * disk content. `capacity_bytes` is the reviewed PVC capacity, not a fabricated object length.
+ */
+export type VirtualMachineBaseDisk = {
+    binding: string;
+    capacityBytes: number;
+    diskSha256: EnvironmentCandidateViewSchemaSha256Digest;
+    sourceRegistryDigest: string;
+};
+
+/**
+ * Supported VM base-disk encodings.
+ */
+export type VirtualMachineDiskFormat = 'qcow2' | 'raw';
+
+/**
+ * Vulnerability counts by severity.
+ */
+export type VulnerabilitySummary = {
+    critical: number;
+    high: number;
+    low: number;
+    medium: number;
+    unknown: number;
+};
 
 /**
  * SseEvent
@@ -2683,14 +2378,19 @@ export type EnvironmentSummaryPageSchemaUtcTimestamp = string;
  * Read model that keeps the immutable release separate from its append-only withdrawal fact.
  */
 export type EnvironmentTemplateReleaseViewSchema = {
-    approval: CandidateApproval;
+    agentRunId: EnvironmentTemplateReleaseViewSchemaAgentRunId;
+    approval: EnvironmentTemplateReleaseViewSchemaCandidateApproval;
     artifact: EnvironmentTemplateReleaseViewSchemaImageArtifact;
     candidateId: EnvironmentTemplateReleaseViewSchemaCandidateId;
     candidateRevision: EnvironmentTemplateReleaseViewSchemaRevision;
     courseId: EnvironmentTemplateReleaseViewSchemaCourseId;
     environmentSpecSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
     id: EnvironmentTemplateReleaseViewSchemaReleaseId;
-    imagePolicyEvaluation: EnvironmentTemplateReleaseViewSchemaImagePolicyEvaluation;
+    /**
+     * Container-only Trivy evidence. VM releases bind a deployment-owned CDI base disk instead
+     * and must not fabricate vulnerability counts for an imported guest disk.
+     */
+    imagePolicyEvaluation?: EnvironmentTemplateReleaseViewSchemaImagePolicyEvaluation | null;
     publishedAt: EnvironmentTemplateReleaseViewSchemaUtcTimestamp;
     publishedBy: EnvironmentTemplateReleaseViewSchemaActorId;
     runtimeKind: EnvironmentTemplateReleaseViewSchemaRuntimeKind;
@@ -2704,44 +2404,14 @@ export type EnvironmentTemplateReleaseViewSchema = {
 export type EnvironmentTemplateReleaseViewSchemaActorId = string;
 
 /**
+ * Strongly typed UUIDv7 identifier for `AgentRunId`.
+ */
+export type EnvironmentTemplateReleaseViewSchemaAgentRunId = string;
+
+/**
  * Strongly typed UUIDv7 identifier for `ApprovalId`.
  */
 export type EnvironmentTemplateReleaseViewSchemaApprovalId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `ArtifactId`.
- */
-export type EnvironmentTemplateReleaseViewSchemaArtifactId = string;
-
-/**
- * Immutable object-store identity without a machine-local path or credential.
- */
-export type EnvironmentTemplateReleaseViewSchemaArtifactRef = {
-    /**
-     * Stable metadata identity resolved by the owning service.
-     */
-    artifactId: EnvironmentTemplateReleaseViewSchemaArtifactId;
-    /**
-     * Registered media type.
-     */
-    mediaType: string;
-    /**
-     * Immutable backend object version.
-     */
-    objectVersion: string;
-    /**
-     * Exact content digest.
-     */
-    sha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
-    /**
-     * Raw object length.
-     */
-    sizeBytes: number;
-    /**
-     * Explicit object-store binding from deployment configuration.
-     */
-    storeBinding: string;
-};
 
 /**
  * Strongly typed UUIDv7 identifier for `BuildRequestId`.
@@ -2751,7 +2421,7 @@ export type EnvironmentTemplateReleaseViewSchemaBuildRequestId = string;
 /**
  * Human decision bound to an exact candidate and dependency identity.
  */
-export type CandidateApproval = {
+export type EnvironmentTemplateReleaseViewSchemaCandidateApproval = {
     actorId: EnvironmentTemplateReleaseViewSchemaActorId;
     candidateId: EnvironmentTemplateReleaseViewSchemaCandidateId;
     candidateRevision: EnvironmentTemplateReleaseViewSchemaRevision;
@@ -2787,20 +2457,13 @@ export type EnvironmentTemplateReleaseViewSchemaImageArtifact = {
     build_request_id: EnvironmentTemplateReleaseViewSchemaBuildRequestId;
     digest: string;
     id: EnvironmentTemplateReleaseViewSchemaImageArtifactId;
-    immutable_tag: string;
     kind: 'container';
-    provenance: EnvironmentTemplateReleaseViewSchemaArtifactRef;
     repository: string;
-    sbom: EnvironmentTemplateReleaseViewSchemaArtifactRef;
-    signature: EnvironmentTemplateReleaseViewSchemaSigstoreEvidence;
 } | {
-    base_disk: EnvironmentTemplateReleaseViewSchemaArtifactRef;
+    base_disk: EnvironmentTemplateReleaseViewSchemaVirtualMachineBaseDisk;
     format: EnvironmentTemplateReleaseViewSchemaVirtualMachineDiskFormat;
     id: EnvironmentTemplateReleaseViewSchemaImageArtifactId;
     kind: 'virtual_machine';
-    provenance: EnvironmentTemplateReleaseViewSchemaArtifactRef;
-    sbom: EnvironmentTemplateReleaseViewSchemaArtifactRef;
-    signature: EnvironmentTemplateReleaseViewSchemaSigstoreEvidence;
 };
 
 /**
@@ -2809,24 +2472,19 @@ export type EnvironmentTemplateReleaseViewSchemaImageArtifact = {
 export type EnvironmentTemplateReleaseViewSchemaImageArtifactId = string;
 
 /**
- * Deterministic scan and trust-policy evaluation.
+ * Deterministic digest-bound Trivy evaluation.
  */
 export type EnvironmentTemplateReleaseViewSchemaImagePolicyEvaluation = {
     artifactId: EnvironmentTemplateReleaseViewSchemaImageArtifactId;
     artifactSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
     evaluatedAt: EnvironmentTemplateReleaseViewSchemaUtcTimestamp;
-    expectedCertificateSubject: string;
-    expectedFulcioIssuer: string;
     maxEvidenceAgeMilliseconds: number;
     passed: boolean;
     policyId: EnvironmentTemplateReleaseViewSchemaPolicyId;
     policyRevision: EnvironmentTemplateReleaseViewSchemaRevision;
-    requireCtSct: boolean;
-    requireRekorInclusion: boolean;
     scannerDatabaseSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
     scannerName: string;
     scannerVersion: string;
-    trustBundleSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
     validUntil: EnvironmentTemplateReleaseViewSchemaUtcTimestamp;
     vulnerabilities: EnvironmentTemplateReleaseViewSchemaVulnerabilitySummary;
 };
@@ -2868,30 +2526,22 @@ export type EnvironmentTemplateReleaseViewSchemaRuntimeKind = 'container' | 'vir
 export type EnvironmentTemplateReleaseViewSchemaSha256Digest = string;
 
 /**
- * Private Sigstore identity and transparency evidence.
- */
-export type EnvironmentTemplateReleaseViewSchemaSigstoreEvidence = {
-    certificateSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
-    certificateSubject: string;
-    ctLogId: string;
-    fulcioIssuer: string;
-    rekorInclusionProofSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
-    rekorLogId: string;
-    rekorLogIndex: number;
-    sctSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
-    signatureSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
-    /**
-     * Immutable artifact digest covered by the verified signature.
-     */
-    subjectDigest: EnvironmentTemplateReleaseViewSchemaSha256Digest;
-    trustBundleSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
-    verifiedAt: EnvironmentTemplateReleaseViewSchemaUtcTimestamp;
-};
-
-/**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
  */
 export type EnvironmentTemplateReleaseViewSchemaUtcTimestamp = string;
+
+/**
+ * Deployment-owned immutable KubeVirt base-disk identity.
+ *
+ * Unlike an object-store `ArtifactRef`, this identifies a CDI source image and its imported
+ * disk content. `capacity_bytes` is the reviewed PVC capacity, not a fabricated object length.
+ */
+export type EnvironmentTemplateReleaseViewSchemaVirtualMachineBaseDisk = {
+    binding: string;
+    capacityBytes: number;
+    diskSha256: EnvironmentTemplateReleaseViewSchemaSha256Digest;
+    sourceRegistryDigest: string;
+};
 
 /**
  * Supported VM base-disk encodings.
@@ -2910,11 +2560,398 @@ export type EnvironmentTemplateReleaseViewSchemaVulnerabilitySummary = {
 };
 
 /**
+ * EvaluationCandidateView
+ *
+ * Control-owned teacher read model for one immutable Evaluation candidate.
+ */
+export type EvaluationCandidateViewSchema = {
+    approvals: Array<EvaluationCandidateViewSchemaCandidateApproval>;
+    candidate: EvaluationCandidate;
+    trustRevision: EvaluationCandidateViewSchemaRevision;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type EvaluationCandidateViewSchemaActorId = string;
+
+/**
+ * Preserve the advisory failure without changing deterministic results.
+ */
+export type AdvisoryFailurePolicy = 'continue_advisory';
+
+/**
+ * Emit a `goal-review/v1` assessment.
+ */
+export type AdvisoryOutputMode = 'goal_assessment';
+
+/**
+ * Reviews allowlisted submission paths without producing a score.
+ */
+export type AdvisoryRunnerSpec = {
+    /**
+     * Submission-relative paths visible to the LLM.
+     */
+    include: Array<string>;
+    kind: 'llm_review';
+    /**
+     * Versioned advisory output shape.
+     */
+    outputMode: AdvisoryOutputMode;
+    /**
+     * Immutable advisory rubric locator.
+     */
+    rubric: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `AgentRunId`.
+ */
+export type EvaluationCandidateViewSchemaAgentRunId = string;
+
+/**
+ * Required Gate status used by deterministic aggregation.
+ */
+export type AggregationGate = {
+    requiredStatus: RequiredStatus;
+    step: string;
+};
+
+/**
+ * Checked sum of deterministic Score steps.
+ */
+export type AggregationKind = 'deterministic_sum';
+
+/**
+ * Pure deterministic score aggregation contract.
+ */
+export type AggregationSpec = {
+    gates: Array<AggregationGate>;
+    kind: AggregationKind;
+    maxScore: number;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ApprovalId`.
+ */
+export type EvaluationCandidateViewSchemaApprovalId = string;
+
+/**
+ * Human decision bound to an exact candidate and dependency identity.
+ */
+export type EvaluationCandidateViewSchemaCandidateApproval = {
+    actorId: EvaluationCandidateViewSchemaActorId;
+    candidateId: EvaluationCandidateViewSchemaCandidateId;
+    candidateRevision: EvaluationCandidateViewSchemaRevision;
+    candidateSha256: EvaluationCandidateViewSchemaSha256Digest;
+    decidedAt: EvaluationCandidateViewSchemaUtcTimestamp;
+    decision: EvaluationCandidateViewSchemaCandidateDecision;
+    id: EvaluationCandidateViewSchemaApprovalId;
+    policyRevision: EvaluationCandidateViewSchemaRevision;
+    reason: string;
+    schemaSha256: EvaluationCandidateViewSchemaSha256Digest;
+    trustRevision: EvaluationCandidateViewSchemaRevision;
+};
+
+/**
+ * Append-only candidate decision.
+ */
+export type EvaluationCandidateViewSchemaCandidateDecision = 'approved' | 'rejected' | 'withdrawn';
+
+/**
+ * Strongly typed UUIDv7 identifier for `CandidateId`.
+ */
+export type EvaluationCandidateViewSchemaCandidateId = string;
+
+/**
+ * Deterministic Checker configurations frozen for v1.
+ */
+export type CheckerSpec = {
+    kind: 'exact';
+} | {
+    kind: 'token';
+} | {
+    /**
+     * Required exit code.
+     */
+    expected: number;
+    kind: 'exit_code';
+} | {
+    kind: 'json_schema';
+    /**
+     * Immutable schema locator.
+     */
+    schemaRef: string;
+} | {
+    /**
+     * Required service state.
+     */
+    expected: ExpectedServiceState;
+    kind: 'service_state';
+    /**
+     * Stable service name.
+     */
+    service: string;
+};
+
+/**
+ * Supported P0 submission collectors.
+ */
+export type CollectorSpec = {
+    /**
+     * Excluded submission-relative paths.
+     */
+    exclude?: Array<string>;
+    /**
+     * Included submission-relative paths.
+     */
+    include: Array<string>;
+    kind: 'workspace_snapshot';
+    /**
+     * Maximum collected bytes.
+     */
+    maxBytes: number;
+} | {
+    /**
+     * Named facts to collect.
+     */
+    facts: Array<string>;
+    kind: 'system_facts';
+    /**
+     * Maximum collected bytes.
+     */
+    maxBytes: number;
+};
+
+/**
+ * Deterministic Runner configurations frozen for P0 OJ and Linux evaluation.
+ */
+export type DeterministicRunnerSpec = {
+    kind: 'file_assertion';
+    /**
+     * Required submission-relative files.
+     */
+    requiredFiles: Array<string>;
+} | {
+    /**
+     * Submission-relative program input.
+     */
+    input: string;
+    kind: 'program';
+    /**
+     * Mandatory execution limits.
+     */
+    limits: ExecutionLimits;
+    /**
+     * Compile or test phase.
+     */
+    phase: ProgramPhase;
+    /**
+     * Deterministic test groups used by the test phase.
+     */
+    testGroups?: Array<TestGroup>;
+    /**
+     * Explicit approved toolchain binding.
+     */
+    toolchainProfile: string;
+} | {
+    /**
+     * Facts expected from the probe.
+     */
+    assertions: Array<FactAssertion>;
+    kind: 'ansible_probe';
+    /**
+     * Modules requested from the frozen P0 allowlist.
+     */
+    moduleAllowlist: Array<string>;
+    /**
+     * Explicit approved playbook binding.
+     */
+    playbookProfile: string;
+    /**
+     * Must remain true in v1.
+     */
+    readOnly: boolean;
+};
+
+export type EvaluationApiVersion = 'evaluation.labweaver.io/v1';
+
+/**
+ * Submission, step, aggregation, and review decomposition of an evaluation.
+ */
+export type EvaluationBody = {
+    aggregation: AggregationSpec;
+    review: ReviewPolicy;
+    steps: Array<EvaluationStep>;
+    submission: SubmissionSpec;
+};
+
+/**
+ * Immutable validated Evaluation candidate.
+ */
+export type EvaluationCandidate = {
+    createdAt: EvaluationCandidateViewSchemaUtcTimestamp;
+    id: EvaluationCandidateViewSchemaCandidateId;
+    model: string;
+    policyRevision: EvaluationCandidateViewSchemaRevision;
+    revision: EvaluationCandidateViewSchemaRevision;
+    runId: EvaluationCandidateViewSchemaAgentRunId;
+    schemaSha256: EvaluationCandidateViewSchemaSha256Digest;
+    spec: EvaluationSpec;
+    specSha256: EvaluationCandidateViewSchemaSha256Digest;
+};
+
+export type EvaluationKind = 'EvaluationSpec';
+
+/**
+ * Stable name and version of an evaluation definition.
+ */
+export type EvaluationMetadata = {
+    name: string;
+    version: string;
+};
+
+/**
+ * Versioned evaluation definition shared by OJ and Linux system experiments.
+ */
+export type EvaluationSpec = {
+    apiVersion: EvaluationApiVersion;
+    kind: EvaluationKind;
+    metadata: EvaluationMetadata;
+    spec: EvaluationBody;
+};
+
+/**
+ * A role-specific evaluation step.
+ */
+export type EvaluationStep = {
+    checker: CheckerSpec;
+    dependsOn?: Array<string>;
+    failurePolicy: GateFailurePolicy;
+    id: string;
+    role: 'gate';
+    runner: DeterministicRunnerSpec;
+} | {
+    checker: CheckerSpec;
+    dependsOn?: Array<string>;
+    failurePolicy: ScoreFailurePolicy;
+    id: string;
+    role: 'score';
+    runner: DeterministicRunnerSpec;
+    score: ScoreSpec;
+} | {
+    dependsOn?: Array<string>;
+    failurePolicy: AdvisoryFailurePolicy;
+    id: string;
+    role: 'advisory';
+    runner: AdvisoryRunnerSpec;
+};
+
+/**
+ * Resource and output limits for a program Runner.
+ */
+export type ExecutionLimits = {
+    memoryBytes: number;
+    outputBytes: number;
+    wallTimeSeconds: number;
+};
+
+/**
+ * Expected state of a system service.
+ */
+export type ExpectedServiceState = 'active' | 'inactive';
+
+/**
+ * Expected fact emitted by a Linux probe.
+ */
+export type FactAssertion = {
+    fact: string;
+};
+
+/**
+ * Stop downstream deterministic execution.
+ */
+export type GateFailurePolicy = 'stop';
+
+/**
+ * Conditions that force manual teacher review.
+ */
+export type ManualReviewReason = 'infrastructureError' | 'invalidEvidence';
+
+/**
+ * Approved program Runner phase.
+ */
+export type ProgramPhase = 'compile' | 'test';
+
+/**
+ * The Gate must pass.
+ */
+export type RequiredStatus = 'passed';
+
+/**
+ * Mandatory approval and manual-review policy.
+ */
+export type ReviewPolicy = {
+    forceManualWhen: Array<ManualReviewReason>;
+    teacherApprovalRequiredForRelease: true;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type EvaluationCandidateViewSchemaRevision = number;
+
+/**
+ * Failure behavior for a Score step.
+ */
+export type ScoreFailurePolicy = 'stop' | 'continue';
+
+/**
+ * Maximum contribution of a deterministic Score step.
+ */
+export type ScoreSpec = {
+    max: number;
+};
+
+/**
+ * Canonical lowercase SHA-256 digest.
+ */
+export type EvaluationCandidateViewSchemaSha256Digest = string;
+
+/**
+ * Submission collection boundary used before evaluation starts.
+ */
+export type SubmissionSpec = {
+    collector: CollectorSpec;
+    llmReadable: Array<string>;
+};
+
+/**
+ * One deterministic program test group.
+ */
+export type TestGroup = {
+    maxPoints: number;
+    name: string;
+    source: string;
+};
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type EvaluationCandidateViewSchemaUtcTimestamp = string;
+
+/**
  * FreezeSubmissionRequest
  */
 export type FreezeSubmissionRequestSchema = {
+    courseId: FreezeSubmissionRequestSchemaCourseId;
     manifest: SubmissionManifest;
 };
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type FreezeSubmissionRequestSchemaCourseId = string;
 
 /**
  * Strict safe path selector shared by packages, collectors, and LLM allowlists.
@@ -3101,11 +3138,11 @@ export type InternalAgentRunOutcomeSchema = {
     /**
      * Validated Environment candidate, if that track succeeded.
      */
-    environmentCandidate?: EnvironmentCandidate | null;
+    environmentCandidate?: InternalAgentRunOutcomeSchemaEnvironmentCandidate | null;
     /**
      * Validated Evaluation candidate, if that track succeeded.
      */
-    evaluationCandidate?: EvaluationCandidate | null;
+    evaluationCandidate?: InternalAgentRunOutcomeSchemaEvaluationCandidate | null;
     /**
      * Canonical hash over this response, excluding this field.
      */
@@ -3394,7 +3431,7 @@ export type InternalAgentRunOutcomeSchemaEnvironmentApiVersion = 'environment.la
 /**
  * Immutable validated Environment candidate.
  */
-export type EnvironmentCandidate = {
+export type InternalAgentRunOutcomeSchemaEnvironmentCandidate = {
     createdAt: InternalAgentRunOutcomeSchemaUtcTimestamp;
     id: InternalAgentRunOutcomeSchemaCandidateId;
     model: string;
@@ -3432,7 +3469,7 @@ export type InternalAgentRunOutcomeSchemaEnvironmentRuntimeSpec = {
     provider_binding: string;
     service_port: number;
 } | {
-    base_disk: InternalAgentRunOutcomeSchemaArtifactRef;
+    base_disk: InternalAgentRunOutcomeSchemaVirtualMachineBaseDisk;
     kind: 'virtual_machine';
     provider_binding: string;
     ssh_port: number;
@@ -3481,7 +3518,7 @@ export type InternalAgentRunOutcomeSchemaEvaluationBody = {
 /**
  * Immutable validated Evaluation candidate.
  */
-export type EvaluationCandidate = {
+export type InternalAgentRunOutcomeSchemaEvaluationCandidate = {
     createdAt: InternalAgentRunOutcomeSchemaUtcTimestamp;
     id: InternalAgentRunOutcomeSchemaCandidateId;
     model: string;
@@ -3584,6 +3621,8 @@ export type InternalAgentRunOutcomeSchemaManualReviewReason = 'infrastructureErr
  * Network egress posture for a published environment.
  */
 export type InternalAgentRunOutcomeSchemaNetworkPolicySpec = {
+    mode: 'allow_all';
+} | {
     mode: 'deny_all';
 } | {
     mode: 'restricted';
@@ -3719,6 +3758,19 @@ export type InternalAgentRunOutcomeSchemaTestGroup = {
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
  */
 export type InternalAgentRunOutcomeSchemaUtcTimestamp = string;
+
+/**
+ * Deployment-owned immutable KubeVirt base-disk identity.
+ *
+ * Unlike an object-store `ArtifactRef`, this identifies a CDI source image and its imported
+ * disk content. `capacity_bytes` is the reviewed PVC capacity, not a fabricated object length.
+ */
+export type InternalAgentRunOutcomeSchemaVirtualMachineBaseDisk = {
+    binding: string;
+    capacityBytes: number;
+    diskSha256: InternalAgentRunOutcomeSchemaSha256Digest;
+    sourceRegistryDigest: string;
+};
 
 /**
  * InternalCreateAgentRunRequest
@@ -3976,41 +4028,6 @@ export type InternalImageArtifactResolutionSchema = {
 };
 
 /**
- * Strongly typed UUIDv7 identifier for `ArtifactId`.
- */
-export type InternalImageArtifactResolutionSchemaArtifactId = string;
-
-/**
- * Immutable object-store identity without a machine-local path or credential.
- */
-export type InternalImageArtifactResolutionSchemaArtifactRef = {
-    /**
-     * Stable metadata identity resolved by the owning service.
-     */
-    artifactId: InternalImageArtifactResolutionSchemaArtifactId;
-    /**
-     * Registered media type.
-     */
-    mediaType: string;
-    /**
-     * Immutable backend object version.
-     */
-    objectVersion: string;
-    /**
-     * Exact content digest.
-     */
-    sha256: InternalImageArtifactResolutionSchemaSha256Digest;
-    /**
-     * Raw object length.
-     */
-    sizeBytes: number;
-    /**
-     * Explicit object-store binding from deployment configuration.
-     */
-    storeBinding: string;
-};
-
-/**
  * Strongly typed UUIDv7 identifier for `BuildRequestId`.
  */
 export type InternalImageArtifactResolutionSchemaBuildRequestId = string;
@@ -4022,20 +4039,13 @@ export type InternalImageArtifactResolutionSchemaImageArtifact = {
     build_request_id: InternalImageArtifactResolutionSchemaBuildRequestId;
     digest: string;
     id: InternalImageArtifactResolutionSchemaImageArtifactId;
-    immutable_tag: string;
     kind: 'container';
-    provenance: InternalImageArtifactResolutionSchemaArtifactRef;
     repository: string;
-    sbom: InternalImageArtifactResolutionSchemaArtifactRef;
-    signature: InternalImageArtifactResolutionSchemaSigstoreEvidence;
 } | {
-    base_disk: InternalImageArtifactResolutionSchemaArtifactRef;
+    base_disk: InternalImageArtifactResolutionSchemaVirtualMachineBaseDisk;
     format: InternalImageArtifactResolutionSchemaVirtualMachineDiskFormat;
     id: InternalImageArtifactResolutionSchemaImageArtifactId;
     kind: 'virtual_machine';
-    provenance: InternalImageArtifactResolutionSchemaArtifactRef;
-    sbom: InternalImageArtifactResolutionSchemaArtifactRef;
-    signature: InternalImageArtifactResolutionSchemaSigstoreEvidence;
 };
 
 /**
@@ -4044,24 +4054,19 @@ export type InternalImageArtifactResolutionSchemaImageArtifact = {
 export type InternalImageArtifactResolutionSchemaImageArtifactId = string;
 
 /**
- * Deterministic scan and trust-policy evaluation.
+ * Deterministic digest-bound Trivy evaluation.
  */
 export type InternalImageArtifactResolutionSchemaImagePolicyEvaluation = {
     artifactId: InternalImageArtifactResolutionSchemaImageArtifactId;
     artifactSha256: InternalImageArtifactResolutionSchemaSha256Digest;
     evaluatedAt: InternalImageArtifactResolutionSchemaUtcTimestamp;
-    expectedCertificateSubject: string;
-    expectedFulcioIssuer: string;
     maxEvidenceAgeMilliseconds: number;
     passed: boolean;
     policyId: InternalImageArtifactResolutionSchemaPolicyId;
     policyRevision: InternalImageArtifactResolutionSchemaRevision;
-    requireCtSct: boolean;
-    requireRekorInclusion: boolean;
     scannerDatabaseSha256: InternalImageArtifactResolutionSchemaSha256Digest;
     scannerName: string;
     scannerVersion: string;
-    trustBundleSha256: InternalImageArtifactResolutionSchemaSha256Digest;
     validUntil: InternalImageArtifactResolutionSchemaUtcTimestamp;
     vulnerabilities: InternalImageArtifactResolutionSchemaVulnerabilitySummary;
 };
@@ -4082,30 +4087,22 @@ export type InternalImageArtifactResolutionSchemaRevision = number;
 export type InternalImageArtifactResolutionSchemaSha256Digest = string;
 
 /**
- * Private Sigstore identity and transparency evidence.
- */
-export type InternalImageArtifactResolutionSchemaSigstoreEvidence = {
-    certificateSha256: InternalImageArtifactResolutionSchemaSha256Digest;
-    certificateSubject: string;
-    ctLogId: string;
-    fulcioIssuer: string;
-    rekorInclusionProofSha256: InternalImageArtifactResolutionSchemaSha256Digest;
-    rekorLogId: string;
-    rekorLogIndex: number;
-    sctSha256: InternalImageArtifactResolutionSchemaSha256Digest;
-    signatureSha256: InternalImageArtifactResolutionSchemaSha256Digest;
-    /**
-     * Immutable artifact digest covered by the verified signature.
-     */
-    subjectDigest: InternalImageArtifactResolutionSchemaSha256Digest;
-    trustBundleSha256: InternalImageArtifactResolutionSchemaSha256Digest;
-    verifiedAt: InternalImageArtifactResolutionSchemaUtcTimestamp;
-};
-
-/**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
  */
 export type InternalImageArtifactResolutionSchemaUtcTimestamp = string;
+
+/**
+ * Deployment-owned immutable KubeVirt base-disk identity.
+ *
+ * Unlike an object-store `ArtifactRef`, this identifies a CDI source image and its imported
+ * disk content. `capacity_bytes` is the reviewed PVC capacity, not a fabricated object length.
+ */
+export type InternalImageArtifactResolutionSchemaVirtualMachineBaseDisk = {
+    binding: string;
+    capacityBytes: number;
+    diskSha256: InternalImageArtifactResolutionSchemaSha256Digest;
+    sourceRegistryDigest: string;
+};
 
 /**
  * Supported VM base-disk encodings.
@@ -4724,7 +4721,7 @@ export type CreateAgentRunResponses = {
     /**
      * Successful response
      */
-    202: OperationAccepted;
+    202: AgentRunSchema;
 };
 
 export type CreateAgentRunResponse = CreateAgentRunResponses[keyof CreateAgentRunResponses];
@@ -4864,7 +4861,7 @@ export type CancelAgentRunResponses = {
     /**
      * Successful response
      */
-    202: OperationAccepted;
+    202: AgentRunSchema;
 };
 
 export type CancelAgentRunResponse = CancelAgentRunResponses[keyof CancelAgentRunResponses];
@@ -4937,7 +4934,7 @@ export type RetryAgentRunTrackResponses = {
     /**
      * Successful response
      */
-    202: OperationAccepted;
+    202: AgentRunSchema;
 };
 
 export type RetryAgentRunTrackResponse = RetryAgentRunTrackResponses[keyof RetryAgentRunTrackResponses];
@@ -5005,7 +5002,7 @@ export type GetEnvironmentCandidateResponses = {
     /**
      * Successful response
      */
-    200: EnvironmentCandidateSchema;
+    200: EnvironmentCandidateViewSchema;
 };
 
 export type GetEnvironmentCandidateResponse = GetEnvironmentCandidateResponses[keyof GetEnvironmentCandidateResponses];
@@ -5426,7 +5423,7 @@ export type GetEvaluationCandidateResponses = {
     /**
      * Successful response
      */
-    200: EvaluationCandidateSchema;
+    200: EvaluationCandidateViewSchema;
 };
 
 export type GetEvaluationCandidateResponse = GetEvaluationCandidateResponses[keyof GetEvaluationCandidateResponses];

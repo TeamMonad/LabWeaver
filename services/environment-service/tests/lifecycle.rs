@@ -108,6 +108,26 @@ fn start_and_recover_converge_through_validated_provider_states()
         started_plan.observed_state,
         ObservedEnvironmentState::Stopped
     );
+    let direct_start_plan = plan_command(
+        &stopped,
+        &command(&stopped, EnvironmentOperationKind::Start),
+        OperationId::new(),
+    )?;
+    let mut direct_endpoints = current.endpoints.clone();
+    for endpoint in &mut direct_endpoints {
+        endpoint.revision = revision(direct_start_plan.revision.get() + 1);
+    }
+    let direct_started = apply_provider_observation(
+        &direct_start_plan,
+        direct_start_plan.operation.id,
+        ProviderObservation {
+            next_state: ObservedEnvironmentState::Ready,
+            endpoints: direct_endpoints,
+            cleanup_evidence: None,
+            operation_complete: true,
+        },
+    )?;
+    assert_eq!(direct_started.operation.state, OperationState::Succeeded);
     let start_provisioning = apply_provider_observation(
         &started_plan,
         started_plan.operation.id,
@@ -118,13 +138,28 @@ fn start_and_recover_converge_through_validated_provider_states()
             operation_complete: false,
         },
     )?;
-    let mut started_endpoints = current.endpoints.clone();
-    for endpoint in &mut started_endpoints {
-        endpoint.revision = revision(start_provisioning.revision.get() + 1);
-    }
-    let started = apply_provider_observation(
+    let pending_start = apply_provider_observation(
         &start_provisioning,
         start_provisioning.operation.id,
+        ProviderObservation {
+            next_state: ObservedEnvironmentState::Provisioning,
+            endpoints: Vec::new(),
+            cleanup_evidence: None,
+            operation_complete: false,
+        },
+    )?;
+    assert_eq!(
+        pending_start.operation.provider_step,
+        start_provisioning.operation.provider_step + 1
+    );
+    assert_eq!(pending_start.operation.state, OperationState::Running);
+    let mut started_endpoints = current.endpoints.clone();
+    for endpoint in &mut started_endpoints {
+        endpoint.revision = revision(pending_start.revision.get() + 1);
+    }
+    let started = apply_provider_observation(
+        &pending_start,
+        pending_start.operation.id,
         ProviderObservation {
             next_state: ObservedEnvironmentState::Ready,
             endpoints: started_endpoints,

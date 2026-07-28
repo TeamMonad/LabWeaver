@@ -1,4 +1,8 @@
-import type { CandidateDecisionRequestSchema, EnvironmentCandidateSchema, EvaluationCandidateSchema } from '@/generated/contracts'
+import type {
+  CandidateDecisionRequestSchema,
+  EnvironmentCandidateViewSchema,
+  EvaluationCandidateViewSchema,
+} from '@/generated/contracts'
 import { conflict, problem } from '../diagnostics'
 import { getEnvironmentCandidate, getEvaluationCandidate } from '../stores/candidateStore'
 import { appendDecision, getApprovals, getLatestApproval } from '../stores/approvalStore'
@@ -65,14 +69,6 @@ export const getEnvironmentCandidateHandler: FixtureHandler = (req) => {
       case 'high':
         imagePolicyEvaluation.vulnerabilities.high = 1
         break
-      case 'unsigned':
-        delete (imageArtifact as { signature?: unknown }).signature
-        imagePolicyEvaluation.passed = false
-        break
-      case 'wrong-issuer':
-        imageArtifact.signature.fulcioIssuer = 'https://wrong-issuer.example.com'
-        imagePolicyEvaluation.passed = false
-        break
       case 'wrong-digest':
         if (imageArtifact.kind === 'container') {
           imageArtifact.digest = 'sha256:' + 'f'.repeat(64)
@@ -85,12 +81,17 @@ export const getEnvironmentCandidateHandler: FixtureHandler = (req) => {
   return {
     status: 200,
     data: {
-      ...stored.candidate,
       approvals: getApprovals(params.candidateId),
-      imageArtifact,
-      imagePolicyEvaluation,
+      build: {
+        artifact: imageArtifact,
+        cleanupVerified: null,
+        diagnosticCode: null,
+        imagePolicyEvaluation,
+        state: 'succeeded',
+      },
+      candidate: stored.candidate,
       trustRevision: stored.trustRevision,
-    } as EnvironmentCandidateSchema,
+    } satisfies EnvironmentCandidateViewSchema,
   }
 }
 
@@ -143,10 +144,10 @@ export const getEvaluationCandidateHandler: FixtureHandler = (req) => {
   return {
     status: 200,
     data: {
-      ...stored.candidate,
       approvals: getApprovals(params.candidateId),
+      candidate: stored.candidate,
       trustRevision: stored.trustRevision,
-    } as EvaluationCandidateSchema,
+    } satisfies EvaluationCandidateViewSchema,
   }
 }
 

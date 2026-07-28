@@ -1,0 +1,13 @@
+---
+sprint2_foundation_enabled: false
+sprint2_foundation_kubeconfig: /etc/kubernetes/admin.conf
+sprint2_foundation_namespace: labweaver-data
+sprint2_foundation_bundle: ""
+sprint2_foundation_manifest: "{{ playbook_dir }}/../../config/sprint2-foundation-bundle-manifest.json"
+sprint2_foundation_storage_class: local-path
+sprint2_foundation_minio_storage_class: nfs-rwx
+sprint2_foundation_postgres_storage: 20Gi
+sprint2_foundation_nats_storage: 10Gi
+sprint2_foundation_minio_storage: 100Gi
+sprint2_foundation_rollout_retries: 60
+sprint2_foundation_rollout_delay: 5

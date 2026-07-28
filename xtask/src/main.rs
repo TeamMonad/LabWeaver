@@ -10,7 +10,9 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use sha2::{Digest, Sha256};
 
 mod acceptance_assets;
+mod migration_catalog;
 mod platform_images;
+mod release_gate;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -35,10 +37,16 @@ enum Command {
     Deploy(EnvironmentArgs),
     Verify(EnvironmentArgs),
     Backup(EnvironmentArgs),
-    /// Run an allowlisted Private Sigstore lifecycle action.
-    PrivateSigstore(PrivateSigstoreArgs),
     /// Reconcile or verify the private Keycloak identity foundation.
     IdentityFoundation(IdentityFoundationArgs),
+    /// Reconcile the persistent `PostgreSQL`, NATS, and `MinIO` Sprint 2 foundation.
+    Sprint2Foundation(EnvironmentArgs),
+    /// Reconcile the dedicated rootless `BuildKit` Sprint 2 foundation.
+    Sprint2Buildkit(EnvironmentArgs),
+    /// Adopt the existing Harbor Gateway route without reconciling Harbor state.
+    Sprint2HarborRoute(EnvironmentArgs),
+    /// Adopt existing data services and atomically deploy the Sprint 2 application profile.
+    Sprint2Application(EnvironmentArgs),
     Upgrade(UpgradeArgs),
     Rollback(RollbackArgs),
     Restore(RestoreArgs),
@@ -138,14 +146,6 @@ struct PackageValidateArgs {
 }
 
 #[derive(Debug, Args)]
-struct PrivateSigstoreArgs {
-    #[command(flatten)]
-    environment: EnvironmentArgs,
-    #[arg(long, value_enum)]
-    action: PrivateSigstoreAction,
-}
-
-#[derive(Debug, Args)]
 struct IdentityFoundationArgs {
     #[command(flatten)]
     environment: EnvironmentArgs,
@@ -164,31 +164,6 @@ impl IdentityFoundationAction {
         match self {
             Self::Deploy => "91-identity-foundation.yml",
             Self::Verify => "92-identity-foundation-verify.yml",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-enum PrivateSigstoreAction {
-    Deploy,
-    Backup,
-    Restore,
-    Rotate,
-    Verify,
-    Cleanup,
-    DisasterRecovery,
-}
-
-impl PrivateSigstoreAction {
-    const fn playbook(self) -> &'static str {
-        match self {
-            Self::Deploy => "96-private-sigstore.yml",
-            Self::Backup => "97-private-sigstore-backup.yml",
-            Self::Restore => "98-private-sigstore-restore.yml",
-            Self::Rotate => "99-private-sigstore-rotate.yml",
-            Self::Verify => "100-private-sigstore-verify.yml",
-            Self::Cleanup => "101-private-sigstore-cleanup.yml",
-            Self::DisasterRecovery => "102-private-sigstore-disaster-recovery.yml",
         }
     }
 }
@@ -233,7 +208,7 @@ struct RestoreArgs {
 enum DemoCommand {
     Seed(EnvironmentArgs),
     Replay,
-    Reset(ConfirmArgs),
+    Reset(EnvironmentArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -280,6 +255,10 @@ enum AppError {
         code: &'static str,
         detail: String,
     },
+    ReleaseGate {
+        code: &'static str,
+        detail: String,
+    },
     InvalidArgument {
         role: &'static str,
     },
@@ -299,6 +278,7 @@ impl AppError {
             Self::ContractDrift { .. } => "LW_CONTRACT_DRIFT",
             Self::PlatformImage { code, .. } => code,
             Self::AcceptanceAsset { code, .. } => code,
+            Self::ReleaseGate { code, .. } => code,
             Self::InvalidArgument { .. } => "XTASK_INVALID_ARGUMENT",
             #[cfg(not(target_os = "linux"))]
             Self::UnsupportedPlatform { .. } => "XTASK_INFRA_UNSUPPORTED_PLATFORM",
@@ -334,6 +314,7 @@ impl Display for AppError {
             }
             Self::PlatformImage { code, detail } => write!(formatter, "{code}: {detail}"),
             Self::AcceptanceAsset { detail, .. } => write!(formatter, "{detail}"),
+            Self::ReleaseGate { detail, .. } => write!(formatter, "{detail}"),
             Self::InvalidArgument { role } => {
                 write!(
                     formatter,
@@ -348,6 +329,8 @@ impl Display for AppError {
         }
     }
 }
+
+impl std::error::Error for AppError {}
 
 fn main() -> ExitCode {
     match run(Cli::parse()) {
@@ -404,8 +387,11 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::Deploy(args) => deploy(&args),
         Command::Verify(args) => verify(&args),
         Command::Backup(args) => backup(&args),
-        Command::PrivateSigstore(args) => private_sigstore(&args),
         Command::IdentityFoundation(args) => identity_foundation(&args),
+        Command::Sprint2Foundation(args) => sprint2_foundation(&args),
+        Command::Sprint2Buildkit(args) => sprint2_buildkit(&args),
+        Command::Sprint2HarborRoute(args) => sprint2_harbor_route(&args),
+        Command::Sprint2Application(args) => sprint2_application(&args),
         Command::AcceptanceAssets(args) => match args.action {
             AcceptanceAssetsAction::Validate => acceptance_assets::validate(&repository_root()),
             AcceptanceAssetsAction::List => {
@@ -433,8 +419,8 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::Destroy(args) => destructive_not_implemented("destroy", args.yes),
         Command::Demo(command) => match command {
             DemoCommand::Seed(args) => not_implemented(format!("demo seed --env {}", args.env)),
-            DemoCommand::Replay => not_implemented("demo replay"),
-            DemoCommand::Reset(args) => destructive_not_implemented("demo reset", args.yes),
+            DemoCommand::Replay => demo_replay(),
+            DemoCommand::Reset(args) => sprint2_reset(&args),
         },
         Command::Playwright(PlaywrightCommand::Install) => not_implemented("playwright install"),
         Command::Docs(DocsCommand::Serve) => not_implemented("docs serve"),
@@ -451,7 +437,7 @@ fn run(cli: Cli) -> Result<(), AppError> {
             args.env.as_deref(),
             &repository_root(),
         ),
-        Command::ReleaseGate => not_implemented("release-gate"),
+        Command::ReleaseGate => release_gate::run(&repository_root()),
         Command::Contracts(ContractsCommand::Generate) => contracts_generate(),
         Command::Contracts(ContractsCommand::Check) => contracts_check(),
     }
@@ -576,20 +562,6 @@ fn backup(args: &EnvironmentArgs) -> Result<(), AppError> {
     run_infrastructure(&args.env, "85-backup.yml", "backup --infra")
 }
 
-fn private_sigstore(args: &PrivateSigstoreArgs) -> Result<(), AppError> {
-    if !args.environment.yes {
-        return Err(AppError::ConfirmationRequired {
-            command: "private-sigstore",
-        });
-    }
-    require_infrastructure(&args.environment, "private-sigstore --infra")?;
-    run_infrastructure(
-        &args.environment.env,
-        args.action.playbook(),
-        "private-sigstore --infra",
-    )
-}
-
 fn identity_foundation(args: &IdentityFoundationArgs) -> Result<(), AppError> {
     if !args.environment.yes {
         return Err(AppError::ConfirmationRequired {
@@ -601,6 +573,91 @@ fn identity_foundation(args: &IdentityFoundationArgs) -> Result<(), AppError> {
         &args.environment.env,
         args.action.playbook(),
         "identity-foundation --infra",
+    )
+}
+
+fn sprint2_foundation(args: &EnvironmentArgs) -> Result<(), AppError> {
+    if !args.yes {
+        return Err(AppError::ConfirmationRequired {
+            command: "sprint2-foundation",
+        });
+    }
+    require_infrastructure(args, "sprint2-foundation --infra")?;
+    if args.package_manifest.is_some() {
+        return Err(AppError::InvalidArgument {
+            role: "Sprint 2 foundation does not accept --package-manifest",
+        });
+    }
+    run_infrastructure(
+        &args.env,
+        "92-sprint2-foundation.yml",
+        "sprint2-foundation --infra",
+    )
+}
+
+fn sprint2_buildkit(args: &EnvironmentArgs) -> Result<(), AppError> {
+    if !args.yes {
+        return Err(AppError::ConfirmationRequired {
+            command: "sprint2-buildkit",
+        });
+    }
+    require_infrastructure(args, "sprint2-buildkit --infra")?;
+    if args.package_manifest.is_some() {
+        return Err(AppError::InvalidArgument {
+            role: "Sprint 2 BuildKit does not accept --package-manifest",
+        });
+    }
+    run_infrastructure(
+        &args.env,
+        "92-sprint2-buildkit.yml",
+        "sprint2-buildkit --infra",
+    )
+}
+
+fn sprint2_harbor_route(args: &EnvironmentArgs) -> Result<(), AppError> {
+    if !args.yes {
+        return Err(AppError::ConfirmationRequired {
+            command: "sprint2-harbor-route",
+        });
+    }
+    require_infrastructure(args, "sprint2-harbor-route --infra")?;
+    if args.package_manifest.is_some() {
+        return Err(AppError::InvalidArgument {
+            role: "Sprint 2 Harbor route adoption does not accept --package-manifest",
+        });
+    }
+    run_infrastructure(
+        &args.env,
+        "92-sprint2-harbor-route.yml",
+        "sprint2-harbor-route --infra",
+    )
+}
+
+fn sprint2_application(args: &EnvironmentArgs) -> Result<(), AppError> {
+    if !args.yes {
+        return Err(AppError::ConfirmationRequired {
+            command: "sprint2-application",
+        });
+    }
+    require_infrastructure(args, "sprint2-application --infra")?;
+    let package_manifest = args
+        .package_manifest
+        .as_deref()
+        .ok_or(AppError::InvalidArgument {
+            role: "Sprint 2 application package manifest",
+        })?;
+    let package_manifest = package_manifest
+        .canonicalize()
+        .map_err(|error| AppError::Io {
+            role: "resolve Sprint 2 application package manifest",
+            detail: error.to_string(),
+        })?;
+    platform_images::validate(&package_manifest, false, None, &repository_root())?;
+    run_infrastructure_with_package(
+        &args.env,
+        "93-sprint2-application.yml",
+        "sprint2-application --infra",
+        Some(&package_manifest),
     )
 }
 
@@ -632,11 +689,87 @@ fn validate_environment_name(environment: &str) -> Result<(), AppError> {
     }
 }
 
+fn demo_replay() -> Result<(), AppError> {
+    let environment = std::env::var("LABWEAVER_DEMO_ENV").map_err(|_| AppError::ReleaseGate {
+        code: "LW_DEMO_ENVIRONMENT_MISSING",
+        detail: "LABWEAVER_DEMO_ENV is required".to_owned(),
+    })?;
+    validate_environment_name(&environment)?;
+    let package_manifest =
+        std::env::var("LABWEAVER_DEMO_PACKAGE_MANIFEST").map_err(|_| AppError::ReleaseGate {
+            code: "LW_DEMO_PACKAGE_MANIFEST_MISSING",
+            detail: "LABWEAVER_DEMO_PACKAGE_MANIFEST is required".to_owned(),
+        })?;
+    // Sprint 2 adopts retained infrastructure. Re-running the broad Harbor
+    // installation verifier would bind the application replay to a historical
+    // infrastructure-install commit and would require an unrelated Harbor data
+    // backup/reconciliation. Reconcile and verify the current application
+    // package through the allowlisted non-destructive adoption path instead.
+    sprint2_application(&EnvironmentArgs {
+        env: environment,
+        infra: true,
+        yes: true,
+        package_manifest: Some(PathBuf::from(package_manifest)),
+    })?;
+    let status = ProcessCommand::new("pnpm")
+        .args(["--dir=web", "test:e2e:live"])
+        .current_dir(repository_root())
+        .status()
+        .map_err(|error| AppError::ExternalCommand {
+            role: "live Playwright demo replay",
+            code: None,
+            detail: Some(error.to_string()),
+        })?;
+    if !status.success() {
+        return Err(AppError::ExternalCommand {
+            role: "live Playwright demo replay",
+            code: status.code(),
+            detail: None,
+        });
+    }
+    release_gate::run(&repository_root())
+}
+
+fn sprint2_reset(args: &EnvironmentArgs) -> Result<(), AppError> {
+    if !args.yes {
+        return Err(AppError::ConfirmationRequired {
+            command: "demo reset",
+        });
+    }
+    require_infrastructure(args, "demo reset --infra")?;
+    if args.package_manifest.is_some() {
+        return Err(AppError::InvalidArgument {
+            role: "Sprint 2 reset does not accept --package-manifest",
+        });
+    }
+    run_infrastructure(&args.env, "93-sprint2-reset.yml", "demo reset --infra")
+}
+
 #[cfg(target_os = "linux")]
 fn run_infrastructure(
     environment: &str,
     playbook_name: &str,
+    command: &'static str,
+) -> Result<(), AppError> {
+    run_infrastructure_with_package(environment, playbook_name, command, None)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_infrastructure_with_package(
+    _environment: &str,
+    _playbook_name: &str,
+    command: &'static str,
+    _package_manifest: Option<&Path>,
+) -> Result<(), AppError> {
+    Err(AppError::UnsupportedPlatform { command })
+}
+
+#[cfg(target_os = "linux")]
+fn run_infrastructure_with_package(
+    environment: &str,
+    playbook_name: &str,
     _command: &'static str,
+    package_manifest: Option<&Path>,
 ) -> Result<(), AppError> {
     use ansible::{Play, Playbook};
 
@@ -652,10 +785,6 @@ fn run_infrastructure(
         inventory_hash,
         component_lock_hash,
         harbor_data_backup_locator,
-        sigstore_backup_locator,
-        sigstore_secret_locator,
-        sigstore_tuf_root_locator,
-        deployment_manifest_hash,
         identity_secret_locator,
     } = InfrastructureInputs::load(environment, playbook_name)?;
     let run_id = required_run_id("LABWEAVER_RUN_ID", "infrastructure run identity")?;
@@ -684,15 +813,13 @@ fn run_infrastructure(
             harbor_data_backup_locator,
         )
         .add_env("LABWEAVER_TESTFLIGHT_RUN_ID", testflight_run_id)
-        .add_env("LABWEAVER_SIGSTORE_BACKUP_LOCATOR", sigstore_backup_locator)
-        .add_env("LABWEAVER_SIGSTORE_SECRET_LOCATOR", sigstore_secret_locator)
         .add_env(
-            "LABWEAVER_SIGSTORE_TUF_ROOT_LOCATOR",
-            sigstore_tuf_root_locator,
+            "LABWEAVER_PACKAGE_MANIFEST",
+            package_manifest.map_or_else(String::new, infrastructure_path),
         )
         .add_env(
-            "LABWEAVER_DEPLOYMENT_MANIFEST_HASH",
-            deployment_manifest_hash,
+            "LABWEAVER_SPRINT2_RESET_CONFIRMATION",
+            std::env::var("LABWEAVER_SPRINT2_RESET_CONFIRMATION").unwrap_or_default(),
         )
         .add_env("LABWEAVER_IDENTITY_SECRET_LOCATOR", identity_secret_locator)
         .set_inventory(&inventory);
@@ -702,12 +829,10 @@ fn run_infrastructure(
     runner
         .run(Play::from_file(playbook))
         .map(|_| ())
-        .map_err(|_| AppError::ExternalCommand {
+        .map_err(|error| AppError::ExternalCommand {
             role: "allowlisted infrastructure playbook",
             code: None,
-            detail: Some(
-                "ansible-rs returned a non-zero result; inspect the controller event log".into(),
-            ),
+            detail: Some(format!("ansible-rs returned a non-zero result: {error:?}")),
         })
 }
 
@@ -724,10 +849,6 @@ struct InfrastructureInputs {
     inventory_hash: String,
     component_lock_hash: String,
     harbor_data_backup_locator: String,
-    sigstore_backup_locator: String,
-    sigstore_secret_locator: String,
-    sigstore_tuf_root_locator: String,
-    deployment_manifest_hash: String,
     identity_secret_locator: String,
 }
 
@@ -770,10 +891,6 @@ impl InfrastructureInputs {
         )?;
 
         let PlaybookLocators {
-            sigstore_backup_locator,
-            sigstore_secret_locator,
-            sigstore_tuf_root_locator,
-            deployment_manifest_hash,
             identity_secret_locator,
         } = PlaybookLocators::load(playbook_name)?;
 
@@ -790,10 +907,6 @@ impl InfrastructureInputs {
             component_lock_hash: file_sha256(&root.join("deploy/versions.lock.yml"))?,
             harbor_data_backup_locator: std::env::var("LABWEAVER_HARBOR_DATA_BACKUP_LOCATOR")
                 .unwrap_or_default(),
-            sigstore_backup_locator,
-            sigstore_secret_locator,
-            sigstore_tuf_root_locator,
-            deployment_manifest_hash,
             identity_secret_locator,
         })
     }
@@ -801,48 +914,17 @@ impl InfrastructureInputs {
 
 #[cfg(target_os = "linux")]
 struct PlaybookLocators {
-    sigstore_backup_locator: String,
-    sigstore_secret_locator: String,
-    sigstore_tuf_root_locator: String,
-    deployment_manifest_hash: String,
     identity_secret_locator: String,
 }
 
 #[cfg(target_os = "linux")]
 impl PlaybookLocators {
     fn load(playbook_name: &str) -> Result<Self, AppError> {
-        let private_sigstore = matches!(
-            playbook_name,
-            "96-private-sigstore.yml"
-                | "97-private-sigstore-backup.yml"
-                | "98-private-sigstore-restore.yml"
-                | "99-private-sigstore-rotate.yml"
-                | "100-private-sigstore-verify.yml"
-                | "101-private-sigstore-cleanup.yml"
-                | "102-private-sigstore-disaster-recovery.yml"
-        );
         let identity_foundation = matches!(
             playbook_name,
             "91-identity-foundation.yml" | "92-identity-foundation-verify.yml"
         );
-        let deployment_manifest_hash = deployment_manifest_hash(private_sigstore)?;
         Ok(Self {
-            sigstore_backup_locator: locator(
-                "LABWEAVER_SIGSTORE_BACKUP_LOCATOR",
-                "Private Sigstore backup locator",
-                private_sigstore,
-            )?,
-            sigstore_secret_locator: locator(
-                "LABWEAVER_SIGSTORE_SECRET_LOCATOR",
-                "Private Sigstore secret locator",
-                private_sigstore,
-            )?,
-            sigstore_tuf_root_locator: locator(
-                "LABWEAVER_SIGSTORE_TUF_ROOT_LOCATOR",
-                "Private Sigstore TUF root locator",
-                private_sigstore,
-            )?,
-            deployment_manifest_hash,
             identity_secret_locator: locator(
                 "LABWEAVER_IDENTITY_SECRET_LOCATOR",
                 "identity-foundation secret locator",
@@ -862,23 +944,6 @@ fn locator(variable: &str, role: &'static str, required: bool) -> Result<String,
 }
 
 #[cfg(target_os = "linux")]
-fn deployment_manifest_hash(required: bool) -> Result<String, AppError> {
-    let value = locator(
-        "LABWEAVER_DEPLOYMENT_MANIFEST_HASH",
-        "deployment manifest identity",
-        required,
-    )?;
-    if !required || is_sha256_identity(&value) {
-        return Ok(value);
-    }
-    Err(AppError::ExternalCommand {
-        role: "deployment manifest identity",
-        code: None,
-        detail: Some("LABWEAVER_DEPLOYMENT_MANIFEST_HASH must be sha256:<64 lowercase hex>".into()),
-    })
-}
-
-#[cfg(target_os = "linux")]
 fn required_environment_value(variable: &str, role: &'static str) -> Result<String, AppError> {
     std::env::var(variable)
         .ok()
@@ -888,16 +953,6 @@ fn required_environment_value(variable: &str, role: &'static str) -> Result<Stri
             code: None,
             detail: Some(format!("{variable} is required")),
         })
-}
-
-#[cfg(target_os = "linux")]
-fn is_sha256_identity(value: &str) -> bool {
-    value.strip_prefix("sha256:").is_some_and(|digest| {
-        digest.len() == 64
-            && digest
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    })
 }
 
 #[cfg(target_os = "linux")]
@@ -1268,21 +1323,10 @@ fn not_implemented(command: impl Into<String>) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        EnvironmentArgs, IdentityFoundationAction, IdentityFoundationArgs, PrivateSigstoreAction,
-        PrivateSigstoreArgs, deploy, identity_foundation, private_sigstore,
+        EnvironmentArgs, IdentityFoundationAction, IdentityFoundationArgs, deploy,
+        identity_foundation, sprint2_application, sprint2_buildkit, sprint2_foundation,
+        sprint2_harbor_route,
     };
-
-    fn sigstore_args(env: &str, infra: bool, yes: bool) -> PrivateSigstoreArgs {
-        PrivateSigstoreArgs {
-            environment: EnvironmentArgs {
-                env: env.into(),
-                infra,
-                yes,
-                package_manifest: None,
-            },
-            action: PrivateSigstoreAction::Deploy,
-        }
-    }
 
     fn identity_args(env: &str, infra: bool, yes: bool) -> IdentityFoundationArgs {
         IdentityFoundationArgs {
@@ -1360,35 +1404,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn private_sigstore_requires_confirmation_and_infra_boundary() -> Result<(), String> {
-        let Err(unconfirmed) = private_sigstore(&sigstore_args("dev", true, false)) else {
-            return Err("Private Sigstore deployment without --yes must fail".into());
-        };
-        if unconfirmed.diagnostic_code() != "XTASK_CONFIRMATION_REQUIRED" {
-            return Err("unexpected Private Sigstore confirmation diagnostic".into());
-        }
-
-        let Err(product_path) = private_sigstore(&sigstore_args("dev", false, true)) else {
-            return Err("Private Sigstore must not run through the product path".into());
-        };
-        if product_path.diagnostic_code() != "XTASK_NOT_IMPLEMENTED" {
-            return Err("unexpected Private Sigstore product-path diagnostic".into());
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn private_sigstore_rejects_path_traversal_before_platform_dispatch() -> Result<(), String> {
-        let Err(error) = private_sigstore(&sigstore_args("../../private", true, true)) else {
-            return Err("an environment path traversal must fail".into());
-        };
-        if error.diagnostic_code() != "XTASK_INVALID_ARGUMENT" {
-            return Err("unexpected environment traversal diagnostic".into());
-        }
-        Ok(())
-    }
-
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn infra_deploy_has_a_stable_non_linux_diagnostic() -> Result<(), String> {
@@ -1407,52 +1422,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(not(target_os = "linux"))]
-    #[test]
-    fn private_sigstore_has_a_stable_non_linux_diagnostic() -> Result<(), String> {
-        let Err(error) = private_sigstore(&sigstore_args("dev", true, true)) else {
-            return Err("non-Linux Private Sigstore deployment must fail".into());
-        };
-        if error.diagnostic_code() != "XTASK_INFRA_UNSUPPORTED_PLATFORM" {
-            return Err("unexpected Private Sigstore non-Linux diagnostic".into());
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn private_sigstore_actions_are_fixed_playbooks() {
-        let mappings = [
-            (PrivateSigstoreAction::Deploy, "96-private-sigstore.yml"),
-            (
-                PrivateSigstoreAction::Backup,
-                "97-private-sigstore-backup.yml",
-            ),
-            (
-                PrivateSigstoreAction::Restore,
-                "98-private-sigstore-restore.yml",
-            ),
-            (
-                PrivateSigstoreAction::Rotate,
-                "99-private-sigstore-rotate.yml",
-            ),
-            (
-                PrivateSigstoreAction::Verify,
-                "100-private-sigstore-verify.yml",
-            ),
-            (
-                PrivateSigstoreAction::Cleanup,
-                "101-private-sigstore-cleanup.yml",
-            ),
-            (
-                PrivateSigstoreAction::DisasterRecovery,
-                "102-private-sigstore-disaster-recovery.yml",
-            ),
-        ];
-        for (action, expected) in mappings {
-            assert_eq!(action.playbook(), expected);
-        }
-    }
-
     #[test]
     fn identity_foundation_requires_confirmation_and_fixed_playbooks() -> Result<(), String> {
         let Err(error) = identity_foundation(&identity_args("dev", true, false)) else {
@@ -1467,6 +1436,62 @@ mod tests {
             IdentityFoundationAction::Verify.playbook(),
             "92-identity-foundation-verify.yml"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn sprint2_foundation_requires_confirmation() -> Result<(), String> {
+        let Err(error) = sprint2_foundation(&EnvironmentArgs {
+            env: "demo".into(),
+            infra: true,
+            yes: false,
+            package_manifest: None,
+        }) else {
+            return Err("Sprint 2 foundation without --yes must fail".into());
+        };
+        assert_eq!(error.diagnostic_code(), "XTASK_CONFIRMATION_REQUIRED");
+        Ok(())
+    }
+
+    #[test]
+    fn sprint2_buildkit_requires_confirmation() -> Result<(), String> {
+        let Err(error) = sprint2_buildkit(&EnvironmentArgs {
+            env: "demo".into(),
+            infra: true,
+            yes: false,
+            package_manifest: None,
+        }) else {
+            return Err("Sprint 2 BuildKit without --yes must fail".into());
+        };
+        assert_eq!(error.diagnostic_code(), "XTASK_CONFIRMATION_REQUIRED");
+        Ok(())
+    }
+
+    #[test]
+    fn sprint2_harbor_route_requires_confirmation() -> Result<(), String> {
+        let Err(error) = sprint2_harbor_route(&EnvironmentArgs {
+            env: "demo".into(),
+            infra: true,
+            yes: false,
+            package_manifest: None,
+        }) else {
+            return Err("Sprint 2 Harbor route adoption without --yes must fail".into());
+        };
+        assert_eq!(error.diagnostic_code(), "XTASK_CONFIRMATION_REQUIRED");
+        Ok(())
+    }
+
+    #[test]
+    fn sprint2_application_requires_confirmation() -> Result<(), String> {
+        let Err(error) = sprint2_application(&EnvironmentArgs {
+            env: "demo".into(),
+            infra: true,
+            yes: false,
+            package_manifest: None,
+        }) else {
+            return Err("Sprint 2 application adoption without --yes must fail".into());
+        };
+        assert_eq!(error.diagnostic_code(), "XTASK_CONFIRMATION_REQUIRED");
         Ok(())
     }
 }

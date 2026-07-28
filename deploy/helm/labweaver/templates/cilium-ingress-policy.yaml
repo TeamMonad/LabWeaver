@@ -1,0 +1,38 @@
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: gateway-backends
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "labweaver.labels" . | nindent 4 }}
+specs:
+  - endpointSelector:
+      matchExpressions:
+        - key: app.kubernetes.io/name
+          operator: In
+          values: [web, access-service]
+    ingress:
+      - fromEntities: [ingress]
+        toPorts:
+          - ports:
+              - {port: "8080", protocol: TCP}
+  - endpointSelector:
+      matchLabels:
+        app.kubernetes.io/name: openssh-gateway
+    ingress:
+      - fromEntities: [world]
+        toPorts:
+          - ports:
+              - {port: "2222", protocol: TCP}
+  - endpointSelector:
+      matchExpressions:
+        - key: app.kubernetes.io/name
+          operator: In
+          values: [container-executor, evaluation-service, kubevirt-executor]
+    egress:
+      - toEntities: [kube-apiserver]
+        toPorts:
+          - ports:
+              {{- range $port := .Values.network.kubernetesApiPorts }}
+              - {port: {{ $port | quote }}, protocol: TCP}
+              {{- end }}

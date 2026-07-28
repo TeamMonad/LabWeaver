@@ -7,15 +7,21 @@
 
 - name: Validate router prerequisites
   hosts: routers
-  gather_facts: true
-  roles: [preflight]
+  gather_facts: "{{ labweaver_preflight_validate_remote_hosts | default(true) | bool }}"
+  roles:
+    - role: preflight
+      when: labweaver_preflight_validate_remote_hosts | default(true) | bool
 
 - name: Validate Kubernetes node prerequisites
   hosts: k8s_cluster
-  gather_facts: true
-  roles: [preflight]
+  gather_facts: "{{ labweaver_preflight_validate_remote_hosts | default(true) | bool }}"
+  roles:
+    - role: preflight
+      when: labweaver_preflight_validate_remote_hosts | default(true) | bool
 
 - name: Validate NFS server prerequisites
   hosts: nfs_servers
-  gather_facts: true
-  roles: [preflight]
+  gather_facts: "{{ labweaver_preflight_validate_remote_hosts | default(true) | bool }}"
+  roles:
+    - role: preflight
+      when: labweaver_preflight_validate_remote_hosts | default(true) | bool

@@ -20,7 +20,7 @@ use contracts::environment::{
     ObservedEnvironmentState, OperationState,
 };
 use contracts::events::{CloudEvent, EVENT_CONTRACTS, ReleaseWithdrawn, SPEC_VERSION, subjects};
-use contracts::supply_chain::VirtualMachineDiskFormat;
+use contracts::supply_chain::{VirtualMachineBaseDisk, VirtualMachineDiskFormat};
 use contracts::{
     ActorId, ArtifactId, ArtifactRef, CourseId, EndpointId, EnvironmentId, EventId, OperationId,
     ReleaseId, Revision, Sequence, Sha256Digest, UtcTimestamp,
@@ -30,14 +30,17 @@ use environment_service::{
     ContainerExecutorBackend, ContainerExecutorFenceError, ContainerExecutorRequest,
     ContainerExecutorRequestEnvelope, ContainerExecutorResponse, ContainerResourcePlan,
     EnvironmentEventPublisher, EnvironmentProvider, EnvironmentStoreError, FencedContainerExecutor,
-    InboundCommandDecision, InboundLifecycleCommand, KubeVirtBackendFence, KubeVirtCleanupPlan,
-    KubeVirtObservationStore, KubeVirtObservationStoreError, KubeVirtResourcePlan,
-    KubeVirtRunningObservation, KubeVirtStoppedObservation, LifecycleCommand, LifecycleError,
-    OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher, PgContainerExecutorFenceStore,
-    PgEnvironmentStore, PgKubeVirtObservationStore, PgReleaseProjectionStore, ProviderFailure,
-    ProviderFailureCode, ProviderObservation, ProviderRegistry, PublishFailure, ReconcileAction,
-    ReconcileWorker, ReconcileWorkerOutcome, Reconciler, ReleaseProjectionDecision,
-    apply_provider_observation,
+    FencedKubeVirtExecutor, InboundCommandDecision, InboundLifecycleCommand,
+    KUBEVIRT_BACKEND_PROTOCOL_VERSION, KubeVirtBackendFence, KubeVirtCleanupPlan,
+    KubeVirtExecutorBackend, KubeVirtExecutorFenceError, KubeVirtExecutorRequest,
+    KubeVirtExecutorRequestEnvelope, KubeVirtExecutorResponse, KubeVirtObservationStore,
+    KubeVirtObservationStoreError, KubeVirtResourcePlan, KubeVirtRunningObservation,
+    KubeVirtStoppedObservation, LifecycleCommand, LifecycleError, OutboxDispatchError,
+    OutboxDispatchOutcome, OutboxDispatcher, PgContainerExecutorFenceStore, PgEnvironmentStore,
+    PgKubeVirtExecutorFenceStore, PgKubeVirtObservationStore, PgReleaseProjectionStore,
+    ProviderFailure, ProviderFailureCode, ProviderObservation, ProviderRegistry, PublishFailure,
+    ReconcileAction, ReconcileWorker, ReconcileWorkerOutcome, Reconciler,
+    ReleaseProjectionDecision, apply_provider_observation,
 };
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::{ImageExt, runners::AsyncRunner};
@@ -57,171 +60,13 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
         .max_connections(4)
         .connect(&url)
         .await?;
-    let initial = format!(
+    let baseline = format!(
         "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
-        include_str!("../../../migrations/environment/0001_initial.sql")
+        include_str!("../../../migrations/environment/0001_sprint2_baseline.sql")
     );
-    sqlx::raw_sql(&initial).execute(&pool).await?;
-
-    let mut legacy = support::ready_instance();
-    legacy.operation.attempt = 6;
-    let mut legacy_contract = serde_json::to_value(&legacy)?;
-    legacy_contract
-        .as_object_mut()
-        .ok_or("legacy instance must be an object")?
-        .remove("eligibilityExpiresAt");
-    legacy_contract
-        .as_object_mut()
-        .ok_or("legacy instance must be an object")?
-        .remove("capacityBinding");
-    legacy_contract
-        .as_object_mut()
-        .ok_or("legacy instance must be an object")?
-        .remove("failedPhase");
-    let legacy_operation = legacy_contract
-        .get_mut("operation")
-        .and_then(serde_json::Value::as_object_mut)
-        .ok_or("legacy operation must be an object")?;
-    legacy_operation.remove("maxAttempts");
-    legacy_operation.remove("nextAttemptAt");
-    legacy_operation.remove("traceId");
-    legacy_operation.remove("cleanupStartedAt");
-    legacy_operation.remove("providerStep");
-    legacy_operation.remove("retryFromPhase");
-    legacy_operation.remove("resetTarget");
-    legacy_operation.remove("leaseAuthorization");
-    let legacy_operation_contract = serde_json::Value::Object(legacy_operation.clone());
-    sqlx::query(
-        "INSERT INTO environment.environment_instances \
-         (environment_id, release_id, generation, observed_generation, desired_state, \
-          observed_state, provider_binding, lease_id, revision, terminal_diagnostic, contract) \
-         VALUES ($1,$2,1,1,'running','ready',$3,NULL,2,NULL,$4)",
-    )
-    .bind(legacy.id.as_uuid())
-    .bind(legacy.release_id.as_uuid())
-    .bind(&legacy.provider_binding)
-    .bind(&legacy_contract)
-    .execute(&pool)
-    .await?;
-    sqlx::query(
-        "INSERT INTO environment.environment_operations \
-         (operation_id, environment_id, operation_kind, expected_revision, target_generation, \
-          state, retry_count, diagnostic, contract) \
-         VALUES ($1,$2,'create',1,1,'succeeded',5,NULL,$3)",
-    )
-    .bind(legacy.operation.id.as_uuid())
-    .bind(legacy.id.as_uuid())
-    .bind(&legacy_operation_contract)
-    .execute(&pool)
-    .await?;
-
-    let legacy_failed_id = EnvironmentId::new();
-    let legacy_failed_operation_id = OperationId::new();
-    let mut legacy_failed_contract = legacy_contract.clone();
-    let failed_object = legacy_failed_contract
-        .as_object_mut()
-        .ok_or("legacy failed instance must be an object")?;
-    failed_object.insert("id".to_owned(), serde_json::to_value(legacy_failed_id)?);
-    failed_object.insert(
-        "observedState".to_owned(),
-        serde_json::Value::String("failed".to_owned()),
-    );
-    failed_object.insert("endpoints".to_owned(), serde_json::json!([]));
-    failed_object.insert(
-        "lastDiagnosticCode".to_owned(),
-        serde_json::Value::String("LW_ENVIRONMENT_PROVIDER_UNAVAILABLE".to_owned()),
-    );
-    let failed_operation = failed_object
-        .get_mut("operation")
-        .and_then(serde_json::Value::as_object_mut)
-        .ok_or("legacy failed operation must be an object")?;
-    failed_operation.insert(
-        "id".to_owned(),
-        serde_json::to_value(legacy_failed_operation_id)?,
-    );
-    failed_operation.insert(
-        "state".to_owned(),
-        serde_json::Value::String("failed".to_owned()),
-    );
-    failed_operation.insert(
-        "diagnosticCode".to_owned(),
-        serde_json::Value::String("LW_ENVIRONMENT_PROVIDER_UNAVAILABLE".to_owned()),
-    );
-    let legacy_failed_operation_contract = serde_json::Value::Object(failed_operation.clone());
-    sqlx::query(
-        "INSERT INTO environment.environment_instances \
-         (environment_id, release_id, generation, observed_generation, desired_state, \
-          observed_state, provider_binding, lease_id, revision, terminal_diagnostic, contract) \
-         VALUES ($1,$2,1,1,'running','failed',$3,NULL,2,$4,$5)",
-    )
-    .bind(legacy_failed_id.as_uuid())
-    .bind(legacy.release_id.as_uuid())
-    .bind(&legacy.provider_binding)
-    .bind("LW_ENVIRONMENT_PROVIDER_UNAVAILABLE")
-    .bind(&legacy_failed_contract)
-    .execute(&pool)
-    .await?;
-    sqlx::query(
-        "INSERT INTO environment.environment_operations \
-         (operation_id, environment_id, operation_kind, expected_revision, target_generation, \
-          state, retry_count, diagnostic, contract) \
-         VALUES ($1,$2,'create',1,1,'failed',5,$3,$4)",
-    )
-    .bind(legacy_failed_operation_id.as_uuid())
-    .bind(legacy_failed_id.as_uuid())
-    .bind("LW_ENVIRONMENT_PROVIDER_UNAVAILABLE")
-    .bind(&legacy_failed_operation_contract)
-    .execute(&pool)
-    .await?;
-
-    let reconcile_migration = format!(
-        "SET search_path TO environment;\n{}",
-        include_str!("../../../migrations/environment/0002_reconcile_leases.sql")
-    );
-    sqlx::raw_sql(&reconcile_migration).execute(&pool).await?;
+    sqlx::raw_sql(&baseline).execute(&pool).await?;
 
     let store = PgEnvironmentStore::new(pool.clone());
-    let upgraded = store.load(legacy.id).await?;
-    assert_eq!(upgraded.operation.attempt, 6);
-    assert_eq!(upgraded.operation.max_attempts, 6);
-    assert!(upgraded.operation.trace_id.starts_with("migration-v1-"));
-    assert_eq!(upgraded.operation.provider_step, 1);
-    let migrated_max_attempts: i64 = sqlx::query_scalar(
-        "SELECT max_attempts FROM environment.environment_operations WHERE operation_id=$1",
-    )
-    .bind(legacy.operation.id.as_uuid())
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(migrated_max_attempts, 6);
-    assert!(matches!(
-        store.load(legacy_failed_id).await,
-        Err(EnvironmentStoreError::Contract(
-            contracts::environment::EnvironmentError::FailedPhaseRequired
-        ))
-    ));
-    let migrated_failed_phase: Option<String> = sqlx::query_scalar(
-        "SELECT failed_phase FROM environment.environment_instances WHERE environment_id=$1",
-    )
-    .bind(legacy_failed_id.as_uuid())
-    .fetch_one(&pool)
-    .await?;
-    assert!(migrated_failed_phase.is_none());
-    sqlx::query("DELETE FROM environment.environment_operations WHERE operation_id=$1")
-        .bind(legacy_failed_operation_id.as_uuid())
-        .execute(&pool)
-        .await?;
-    sqlx::query("DELETE FROM environment.environment_instances WHERE environment_id=$1")
-        .bind(legacy_failed_id.as_uuid())
-        .execute(&pool)
-        .await?;
-    sqlx::query("DELETE FROM environment.environment_operations WHERE operation_id=$1")
-        .bind(legacy.operation.id.as_uuid())
-        .execute(&pool)
-        .await?;
-    sqlx::query("DELETE FROM environment.environment_instances WHERE environment_id=$1")
-        .bind(legacy.id.as_uuid())
-        .execute(&pool)
-        .await?;
 
     let mut invalid_ready_create = support::ready_instance();
     invalid_ready_create.operation.state = OperationState::Accepted;
@@ -242,8 +87,32 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
 
     let instance = requested_instance();
     let accepted = store.create("create-key-0001", &instance).await?;
+    assert_eq!(accepted.environment_id, instance.id);
+    assert_eq!(
+        serde_json::to_value(&accepted)?["environmentId"],
+        instance.id.to_string()
+    );
     let replay = store.create("create-key-0001", &instance).await?;
     assert_eq!(accepted, replay);
+
+    sqlx::query(
+        "UPDATE environment.environment_instances \
+         SET created_at='2026-07-24T00:00:00.123456Z'::timestamptz, \
+             updated_at='2026-07-24T00:00:01.654321Z'::timestamptz \
+         WHERE environment_id=$1",
+    )
+    .bind(instance.id.as_uuid())
+    .execute(&pool)
+    .await?;
+    let (inventory, _) = store
+        .list_owned(instance.course_id, instance.owner_id, 100)
+        .await?;
+    let listed = inventory
+        .iter()
+        .find(|record| record.instance.id == instance.id)
+        .ok_or("expected the created environment in owned inventory")?;
+    assert_eq!(listed.created_at.to_string(), "2026-07-24T00:00:00.123Z");
+    assert_eq!(listed.updated_at.to_string(), "2026-07-24T00:00:01.654Z");
 
     let mut conflicting = instance.clone();
     conflicting.release_version += 1;
@@ -743,9 +612,8 @@ async fn persistent_timeout_and_ready_cancel_cleanup_are_bounded()
         .connect(&url)
         .await?;
     let migrations = format!(
-        "CREATE SCHEMA environment; SET search_path TO environment;\n{}\n{}",
-        include_str!("../../../migrations/environment/0001_initial.sql"),
-        include_str!("../../../migrations/environment/0002_reconcile_leases.sql")
+        "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
+        include_str!("../../../migrations/environment/0001_sprint2_baseline.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;
     let store = PgEnvironmentStore::new(pool);
@@ -863,14 +731,12 @@ async fn release_withdrawal_is_projected_in_aggregate_order()
         .connect(&url)
         .await?;
     let migrations = format!(
-        "CREATE SCHEMA environment; SET search_path TO environment;\n{}\n{}\n{}",
-        include_str!("../../../migrations/environment/0001_initial.sql"),
-        include_str!("../../../migrations/environment/0002_reconcile_leases.sql"),
-        include_str!("../../../migrations/environment/0003_release_projections.sql")
+        "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
+        include_str!("../../../migrations/environment/0001_sprint2_baseline.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;
 
-    let consumer = "environment-release-v2";
+    let consumer = "environment-release-v1";
     let release_id = ReleaseId::new();
     let course_id = CourseId::new();
     let publication_event_id = EventId::new();
@@ -1018,7 +884,7 @@ async fn container_executor_persists_generation_and_permanent_delete_tombstone()
         .await?;
     let migrations = format!(
         "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
-        include_str!("../../../migrations/environment/0004_container_executor_fence.sql")
+        include_str!("../../../migrations/environment/0001_sprint2_baseline.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;
     let authority_now = container_database_now(&pool).await?;
@@ -1229,6 +1095,217 @@ fn container_add_time(
     Ok(UtcTimestamp::from_utc(timestamp.get() + duration)?)
 }
 
+struct CountingKubeVirtExecutor {
+    calls: Arc<AtomicUsize>,
+    observed_at: UtcTimestamp,
+}
+
+#[async_trait]
+impl KubeVirtExecutorBackend for CountingKubeVirtExecutor {
+    async fn execute(
+        &self,
+        fence: &KubeVirtBackendFence,
+        request: &KubeVirtExecutorRequest,
+    ) -> KubeVirtExecutorResponse {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        match request {
+            KubeVirtExecutorRequest::DeleteNamespace { plan } => {
+                KubeVirtExecutorResponse::Deleted {
+                    plan_sha256: plan.plan_sha256,
+                    cleanup_evidence: ArtifactRef {
+                        artifact_id: ArtifactId::new(),
+                        store_binding: "environment-cleanup-evidence-v1".to_owned(),
+                        object_version: plan.plan_sha256.to_string(),
+                        sha256: Sha256Digest::of_bytes(plan.namespace.as_bytes()),
+                        size_bytes: 1,
+                        media_type: "application/json".to_owned(),
+                    },
+                }
+            }
+            KubeVirtExecutorRequest::Apply { plan }
+            | KubeVirtExecutorRequest::Observe { plan }
+            | KubeVirtExecutorRequest::Start { plan }
+            | KubeVirtExecutorRequest::Stop { plan }
+            | KubeVirtExecutorRequest::Restart { plan } => KubeVirtExecutorResponse::Running {
+                plan_sha256: plan.plan_sha256,
+                observation: KubeVirtRunningObservation {
+                    observed_environment_generation: fence.environment_generation,
+                    vm_resource_generation: 1,
+                    observed_vm_resource_generation: 1,
+                    vm_uid: uuid::Uuid::new_v4(),
+                    vmi_uid: uuid::Uuid::new_v4(),
+                    root_disk_uid: uuid::Uuid::new_v4(),
+                    guest_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2)),
+                    service_cluster_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 96, 0, 2)),
+                    ssh_host_key_sha256: Sha256Digest::of_bytes(b"host-key"),
+                    guest_agent_connected: true,
+                    ssh_ready: true,
+                    observed_at: self.observed_at,
+                },
+            },
+        }
+    }
+}
+
+#[tokio::test]
+async fn kubevirt_executor_replays_and_permanently_tombstones_cleanup()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        container.get_host_port_ipv4(5432).await?
+    );
+    let pool = PgPoolOptions::new()
+        .max_connections(3)
+        .connect(&url)
+        .await?;
+    sqlx::raw_sql(&format!(
+        "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
+        include_str!("../../../migrations/environment/0001_sprint2_baseline.sql")
+    ))
+    .execute(&pool)
+    .await?;
+    let observed_at = container_database_now(&pool).await?;
+    let deadline = container_add_time(observed_at, time::Duration::minutes(1))?;
+    let environment_id = EnvironmentId::new();
+    let plan = kubevirt_executor_plan(environment_id);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let operation_id = OperationId::new();
+    let first = kubevirt_executor_envelope(
+        plan.clone(),
+        operation_id,
+        1,
+        1,
+        ReconcileAction::Provision,
+        deadline,
+    )?;
+    for _ in 0..2 {
+        FencedKubeVirtExecutor::new(
+            PgKubeVirtExecutorFenceStore::new(pool.clone()),
+            CountingKubeVirtExecutor {
+                calls: Arc::clone(&calls),
+                observed_at,
+            },
+        )
+        .execute(first.clone())
+        .await?;
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let executor = FencedKubeVirtExecutor::new(
+        PgKubeVirtExecutorFenceStore::new(pool),
+        CountingKubeVirtExecutor {
+            calls: Arc::clone(&calls),
+            observed_at,
+        },
+    );
+    executor
+        .execute(kubevirt_executor_envelope(
+            plan.clone(),
+            operation_id,
+            1,
+            2,
+            ReconcileAction::Cleanup,
+            deadline,
+        )?)
+        .await?;
+    assert!(matches!(
+        executor
+            .execute(kubevirt_executor_envelope(
+                plan,
+                OperationId::new(),
+                2,
+                1,
+                ReconcileAction::Provision,
+                deadline,
+            )?)
+            .await,
+        Err(KubeVirtExecutorFenceError::Tombstoned)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    Ok(())
+}
+
+fn kubevirt_executor_plan(environment_id: EnvironmentId) -> KubeVirtResourcePlan {
+    KubeVirtResourcePlan {
+        environment_id,
+        namespace: format!("lw-env-{environment_id}"),
+        virtual_machine_name: "runtime".to_owned(),
+        data_volume_name: "rootdisk".to_owned(),
+        base_disk: VirtualMachineBaseDisk {
+            binding: "ubuntu-24.04-v1".to_owned(),
+            source_registry_digest: concat!(
+                "docker://quay.io/containerdisks/ubuntu@",
+                "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
+            )
+            .to_owned(),
+            disk_sha256: Sha256Digest::of_bytes(b"vm-base-disk"),
+            capacity_bytes: 10_737_418_240,
+        },
+        base_disk_format: VirtualMachineDiskFormat::Qcow2,
+        storage_class_name: "local-path".to_owned(),
+        resources: Vec::new(),
+        plan_sha256: Sha256Digest::of_bytes(b"vm-plan"),
+    }
+}
+
+fn kubevirt_executor_envelope(
+    plan: KubeVirtResourcePlan,
+    operation_id: OperationId,
+    generation: u64,
+    provider_step: u32,
+    action: ReconcileAction,
+    deadline_at: UtcTimestamp,
+) -> Result<KubeVirtExecutorRequestEnvelope, Box<dyn std::error::Error>> {
+    let request = match action {
+        ReconcileAction::Provision => KubeVirtExecutorRequest::Apply { plan },
+        ReconcileAction::Cleanup => KubeVirtExecutorRequest::DeleteNamespace {
+            plan: KubeVirtCleanupPlan {
+                environment_id: plan.environment_id,
+                namespace: plan.namespace,
+                virtual_machine_name: plan.virtual_machine_name,
+                plan_sha256: plan.plan_sha256,
+            },
+        },
+        _ => return Err("unsupported executor fixture action".into()),
+    };
+    let request_id = Sha256Digest::of_canonical(&serde_json::json!({
+        "protocolVersion": KUBEVIRT_BACKEND_PROTOCOL_VERSION,
+        "environmentId": environment_id_for_kubevirt_request(&request),
+        "operationId": operation_id,
+        "providerStep": provider_step,
+        "environmentGeneration": generation,
+        "attempt": 1,
+        "action": action,
+        "deadlineAt": deadline_at,
+        "request": &request,
+    }))?;
+    Ok(KubeVirtExecutorRequestEnvelope {
+        fence: KubeVirtBackendFence {
+            protocol_version: KUBEVIRT_BACKEND_PROTOCOL_VERSION,
+            environment_id: environment_id_for_kubevirt_request(&request),
+            operation_id,
+            provider_step,
+            environment_generation: generation,
+            attempt: 1,
+            action,
+            request_id,
+            deadline_at,
+        },
+        request,
+    })
+}
+
+const fn environment_id_for_kubevirt_request(request: &KubeVirtExecutorRequest) -> EnvironmentId {
+    match request {
+        KubeVirtExecutorRequest::Apply { plan }
+        | KubeVirtExecutorRequest::Observe { plan }
+        | KubeVirtExecutorRequest::Start { plan }
+        | KubeVirtExecutorRequest::Stop { plan }
+        | KubeVirtExecutorRequest::Restart { plan } => plan.environment_id,
+        KubeVirtExecutorRequest::DeleteNamespace { plan } => plan.environment_id,
+    }
+}
+
 #[tokio::test]
 async fn kubevirt_observation_identity_is_durable_fenced_and_tombstoned()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -1243,7 +1320,7 @@ async fn kubevirt_observation_identity_is_durable_fenced_and_tombstoned()
         .await?;
     let migration = format!(
         "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
-        include_str!("../../../migrations/environment/0005_kubevirt_runtime_observations.sql")
+        include_str!("../../../migrations/environment/0001_sprint2_baseline.sql")
     );
     sqlx::raw_sql(&migration).execute(&pool).await?;
     let store = PgKubeVirtObservationStore::new(pool.clone());
@@ -1253,13 +1330,15 @@ async fn kubevirt_observation_identity_is_durable_fenced_and_tombstoned()
         namespace: format!("lw-env-{environment_id}"),
         virtual_machine_name: "runtime".to_owned(),
         data_volume_name: "rootdisk".to_owned(),
-        base_disk: ArtifactRef {
-            artifact_id: ArtifactId::new(),
-            store_binding: "artifact-store-v1".to_owned(),
-            object_version: "version-1".to_owned(),
-            sha256: Sha256Digest::of_bytes(b"vm-base-disk"),
-            size_bytes: 1024,
-            media_type: "application/x-qemu-disk".to_owned(),
+        base_disk: VirtualMachineBaseDisk {
+            binding: "ubuntu-24.04-v1".to_owned(),
+            source_registry_digest: concat!(
+                "docker://quay.io/containerdisks/ubuntu@",
+                "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
+            )
+            .to_owned(),
+            disk_sha256: Sha256Digest::of_bytes(b"vm-base-disk"),
+            capacity_bytes: 10_737_418_240,
         },
         base_disk_format: VirtualMachineDiskFormat::Qcow2,
         storage_class_name: "local-path".to_owned(),
@@ -1545,6 +1624,7 @@ impl EnvironmentProvider for LifecycleSuccessProvider {
                         protocol: EndpointProtocol::Https,
                         revision: next_revision,
                         health: EndpointHealth::Healthy,
+                        ssh_host_key_identity_sha256: None,
                         observed_at: timestamp("2026-07-14T00:01:00.000Z"),
                     }],
                     cleanup_evidence: None,

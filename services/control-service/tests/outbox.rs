@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use contracts::events::{
-    CloudEvent, DATA_SCHEMA_BASE, ReleasePublished, ReleaseWithdrawn, SPEC_VERSION, subjects,
+    CloudEvent, DATA_SCHEMA_BASE, LabReleaseApproved, ReleaseWithdrawn, SPEC_VERSION, subjects,
 };
 use contracts::{
     ActorId, CourseId, EventId, ReleaseId, Revision, Sequence, Sha256Digest, UtcTimestamp,
@@ -27,10 +27,8 @@ async fn release_and_withdrawal_are_marked_published_only_after_jetstream_ack()
         .connect(&database_url)
         .await?;
     let migrations = format!(
-        "CREATE SCHEMA control; SET search_path TO control;\n{}\n{}\n{}",
-        include_str!("../../../migrations/control/0001_initial.sql"),
-        include_str!("../../../migrations/control/0002_control_plane.sql"),
-        include_str!("../../../migrations/control/0003_container_build_projections.sql")
+        "CREATE SCHEMA control; SET search_path TO control;\n{}",
+        include_str!("../../../migrations/control/0001_sprint2_baseline.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;
 
@@ -68,7 +66,7 @@ async fn release_and_withdrawal_are_marked_published_only_after_jetstream_ack()
         aggregate_revision: Revision::new(1)?,
         aggregate_sequence: Sequence(1),
         trace_id: "issue-48-control-outbox".to_owned(),
-        data: ReleasePublished {
+        data: LabReleaseApproved {
             release_id,
             version: 1,
             environment_spec_sha256: digest,

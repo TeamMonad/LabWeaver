@@ -14,7 +14,7 @@ use async_nats::jetstream::consumer::PullConsumer;
 use async_nats::jetstream::message::PublishMessage;
 use async_trait::async_trait;
 use contracts::events::{
-    AgentBuildCompletedV2, AgentBuildFailedV2, AgentRunEvent, CloudEvent, EVENT_CONTRACTS, subjects,
+    AgentBuildCompleted, AgentBuildFailed, AgentRunEvent, CloudEvent, EVENT_CONTRACTS, subjects,
 };
 use contracts::{EventId, ImageArtifactId, Sha256Digest};
 use futures_util::StreamExt;
@@ -28,6 +28,7 @@ use crate::{ControlError, ControlService};
 
 const MAX_EVENT_BYTES: usize = 1024 * 1024;
 const REDELIVERY_DELAY: Duration = Duration::from_secs(1);
+const AGENT_STREAM_SUBJECT_PREFIX: &str = "labweaver.agent.";
 
 /// Agent-owned read boundary used by the durable projection consumer.
 #[async_trait]
@@ -214,6 +215,7 @@ impl AgentRunConsumer {
         if [stream_name, consumer_name, quarantine_subject]
             .iter()
             .any(|value| value.trim().is_empty() || value.chars().any(char::is_whitespace))
+            || !quarantine_subject.starts_with(AGENT_STREAM_SUBJECT_PREFIX)
         {
             return Err(MessagingError::Configuration);
         }
@@ -405,6 +407,7 @@ impl AgentBuildConsumer {
         if [stream_name, consumer_name, quarantine_subject]
             .iter()
             .any(|value| value.trim().is_empty() || value.chars().any(char::is_whitespace))
+            || !quarantine_subject.starts_with(AGENT_STREAM_SUBJECT_PREFIX)
         {
             return Err(MessagingError::Configuration);
         }
@@ -420,8 +423,8 @@ impl AgentBuildConsumer {
         let mut filters = consumer.cached_info().config.filter_subjects.clone();
         filters.sort_unstable();
         let mut expected_filters = vec![
-            subjects::AGENT_BUILD_COMPLETED_V2.to_owned(),
-            subjects::AGENT_BUILD_FAILED_V2.to_owned(),
+            subjects::AGENT_BUILD_COMPLETED.to_owned(),
+            subjects::AGENT_BUILD_FAILED.to_owned(),
         ];
         expected_filters.sort_unstable();
         if !consumer.cached_info().config.filter_subject.is_empty() || filters != expected_filters {
@@ -491,8 +494,8 @@ impl AgentBuildConsumer {
             return Ok(());
         }
         match event.subject.as_str() {
-            subjects::AGENT_BUILD_COMPLETED_V2 => {
-                let Ok(data): Result<AgentBuildCompletedV2, _> =
+            subjects::AGENT_BUILD_COMPLETED => {
+                let Ok(data): Result<AgentBuildCompleted, _> =
                     serde_json::from_value(event.data.clone())
                 else {
                     self.quarantine(
@@ -589,8 +592,8 @@ impl AgentBuildConsumer {
                     }
                 }
             }
-            subjects::AGENT_BUILD_FAILED_V2 => {
-                let Ok(data): Result<AgentBuildFailedV2, _> =
+            subjects::AGENT_BUILD_FAILED => {
+                let Ok(data): Result<AgentBuildFailed, _> =
                     serde_json::from_value(event.data.clone())
                 else {
                     self.quarantine(

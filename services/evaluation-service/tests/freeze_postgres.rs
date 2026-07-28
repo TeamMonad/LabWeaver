@@ -18,13 +18,84 @@ use contracts::{
     parse_strict_json,
 };
 use evaluation_service::{
-    FreezeRequest, FreezeService, FreezeServiceError, PgFreezeStore, PvcSnapshotSource,
-    SnapshotCollector,
+    FreezeRequest, FreezeService, FreezeServiceError, PgFreezeCommandStore, PgFreezeStore,
+    PvcSnapshotSource, SnapshotCollector, SubmissionFreezeCommand,
 };
 use sqlx::postgres::PgPoolOptions;
 use tempfile::tempdir;
 use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
+
+#[tokio::test]
+async fn public_acceptance_is_atomic_idempotent_and_enqueues_one_command()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = TestContext::start(0).await?;
+    let store = PgFreezeCommandStore::new(fixture.pool.clone());
+    let command = SubmissionFreezeCommand {
+        frozen_submission_id: contracts::FrozenSubmissionId::new(),
+        operation_id: contracts::OperationId::new(),
+        course_id: fixture.request.course_id,
+        environment_id: fixture.request.environment.environment_id,
+        actor_id: fixture.request.actor_id,
+        environment_revision: fixture.request.environment.environment_revision,
+        manifest_revision: fixture.request.manifest_revision,
+        manifest: fixture.request.manifest.clone(),
+        idempotency_key: "browser-freeze-1".to_owned(),
+        trace_id: "browser-freeze-trace-1".to_owned(),
+        requested_at: PgFreezeStore::new(fixture.pool.clone())
+            .authority_now()
+            .await?,
+    };
+    let first = store.accept(&command).await?;
+    let mut retry = command.clone();
+    retry.frozen_submission_id = contracts::FrozenSubmissionId::new();
+    retry.operation_id = contracts::OperationId::new();
+    retry.trace_id = "browser-freeze-trace-2".to_owned();
+    let replay = store.accept(&retry).await?;
+    assert!(!first.replay);
+    assert!(replay.replay);
+    assert_eq!(first.frozen_submission_id, replay.frozen_submission_id);
+    assert_eq!(first.accepted.operation_id, replay.accepted.operation_id);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM evaluation.submission_freeze_commands")
+            .fetch_one(&fixture.pool)
+            .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM evaluation.outbox_events")
+            .fetch_one(&fixture.pool)
+            .await?,
+        1
+    );
+    let claimed = store.claim_next().await?.expect("queued command");
+    assert_eq!(claimed.frozen_submission_id, command.frozen_submission_id);
+    assert!(store.claim_next().await?.is_none());
+    assert_eq!(store.running(32).await?, vec![command.clone()]);
+    store
+        .mark_failed_pending_cleanup(
+            first.frozen_submission_id,
+            "LW_COLLECT_SSH_CREDENTIAL_INVALID",
+        )
+        .await?;
+    assert!(store.running(32).await?.is_empty());
+    assert_eq!(store.cleanup_pending(32).await?, vec![command.clone()]);
+    assert_eq!(
+        sqlx::query_as::<_, (String, bool)>(
+            "SELECT diagnostic_code,cleanup_verified \
+             FROM evaluation.submission_freeze_commands WHERE frozen_submission_id=$1",
+        )
+        .bind(first.frozen_submission_id.as_uuid())
+        .fetch_one(&fixture.pool)
+        .await?,
+        ("LW_COLLECT_SSH_CREDENTIAL_INVALID".to_owned(), false)
+    );
+    store
+        .mark_cleanup_verified(first.frozen_submission_id)
+        .await?;
+    assert!(store.cleanup_pending(32).await?.is_empty());
+    Ok(())
+}
 
 #[derive(Debug)]
 struct LockedStore {
@@ -218,9 +289,8 @@ impl TestContext {
             .connect(&database_url)
             .await?;
         let migrations = format!(
-            "CREATE SCHEMA evaluation; SET search_path TO evaluation;\n{}\n{}",
-            include_str!("../../../migrations/evaluation/0001_initial.sql"),
-            include_str!("../../../migrations/evaluation/0002_submission_freezes.sql")
+            "CREATE SCHEMA evaluation; SET search_path TO evaluation;\n{}",
+            include_str!("../../../migrations/evaluation/0001_sprint2_baseline.sql")
         );
         sqlx::raw_sql(&migrations).execute(&pool).await?;
         let store = PgFreezeStore::new(pool.clone());
@@ -241,6 +311,7 @@ impl TestContext {
         let course_id = CourseId::new();
         let environment_id = contracts::EnvironmentId::new();
         let request = FreezeRequest {
+            frozen_submission_id: contracts::FrozenSubmissionId::new(),
             course_id,
             actor_id: ActorId::new(),
             agent_run_id: AgentRunId::new(),

@@ -85,28 +85,19 @@ test('high vulnerability shows warning but allows publish', async ({ page }) => 
   await expect(page.locator('button:has-text("发布 EnvironmentTemplateRelease")')).toBeEnabled()
 })
 
-test('unsigned image blocks publish', async ({ page }) => {
+test('release evidence excludes the retired signing trust plane', async ({ page }) => {
   await uploadAndStartRun(page)
-  await setImageGate(page, 'unsigned')
   await openApprovalPage(page)
 
   await page.fill('textarea[aria-label="Environment 审批理由"]', 'Environment candidate approved')
   await page.locator('button:has-text("批准")').first().click()
   await expect(page.locator('.approval-status--approved')).toBeVisible()
 
-  await expect(page.locator('button:has-text("发布 EnvironmentTemplateRelease")')).toBeDisabled()
-})
-
-test('wrong issuer blocks publish', async ({ page }) => {
-  await uploadAndStartRun(page)
-  await setImageGate(page, 'wrong-issuer')
-  await openApprovalPage(page)
-
-  await page.fill('textarea[aria-label="Environment 审批理由"]', 'Environment candidate approved')
-  await page.locator('button:has-text("批准")').first().click()
-  await expect(page.locator('.approval-status--approved')).toBeVisible()
-
-  await expect(page.locator('button:has-text("发布 EnvironmentTemplateRelease")')).toBeDisabled()
+  await expect(page.getByText('Digest', { exact: true })).toBeVisible()
+  await expect(page.getByText('Trivy', { exact: true })).toBeVisible()
+  await expect(page.getByText('Immutable Tag', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('SBOM', { exact: true })).toHaveCount(0)
+  await expect(page.locator('button:has-text("发布 EnvironmentTemplateRelease")')).toBeEnabled()
 })
 
 test('wrong digest blocks publish', async ({ page }) => {

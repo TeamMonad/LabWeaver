@@ -1,0 +1,28 @@
+{{- if .Values.objectStoreRoute.enabled }}
+{{- $service := required "objectStoreRoute.serviceName is required" .Values.objectStoreRoute.serviceName }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-object-store-ca
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "labweaver.labels" . | nindent 4 }}
+data:
+  ca.crt: |
+{{ required "objectStoreRoute.caCertificate is required" .Values.objectStoreRoute.caCertificate | nindent 4 }}
+  object-store.conf: |
+    location {{ required "objectStoreRoute.pathPrefix is required" .Values.objectStoreRoute.pathPrefix }} {
+      client_max_body_size 256m;
+      proxy_http_version 1.1;
+      proxy_request_buffering off;
+      proxy_buffering off;
+      proxy_set_header Host $http_host;
+      proxy_ssl_server_name on;
+      proxy_ssl_name {{ required "objectStoreRoute.backendHostname is required" .Values.objectStoreRoute.backendHostname }};
+      proxy_ssl_verify on;
+      proxy_ssl_verify_depth 2;
+      proxy_ssl_trusted_certificate /etc/labweaver/object-store/ca.crt;
+      proxy_pass https://{{ $service }}.{{ required "objectStoreRoute.namespace is required" .Values.objectStoreRoute.namespace }}.svc:{{ required "objectStoreRoute.servicePort is required" .Values.objectStoreRoute.servicePort }};
+    }
+{{- end }}

@@ -19,22 +19,23 @@ use contracts::authoring::{
     EnvironmentCandidate, EvaluationCandidate, PackageFile, ProblemPackage, RuntimeKind,
 };
 use contracts::events::{
-    AgentBuildFailedV2, AgentBuildRequestedV2, AgentRunEvent, CloudEvent, EVENT_CONTRACTS,
-    ReleasePublishedV2, ReleaseWithdrawn, SPEC_VERSION, subjects,
+    AgentBuildFailed, AgentBuildRequested, AgentRunEvent, CloudEvent, EVENT_CONTRACTS,
+    ReleasePublished, ReleaseWithdrawn, SPEC_VERSION, subjects,
 };
 use contracts::http::{
-    CandidateDecisionRequest, CreateEnvironmentTemplateReleaseRequest,
-    CreateProblemPackageUploadRequest, IdempotencyKey, ProblemPackageUploadFile,
+    CandidateBuildState, CandidateBuildView, CandidateDecisionRequest,
+    CreateEnvironmentTemplateReleaseRequest, CreateProblemPackageUploadRequest,
+    EnvironmentCandidateView, EvaluationCandidateView, IdempotencyKey, ProblemPackageUploadFile,
     ProblemPackageUploadSession, ProblemPackageUploadTarget,
 };
 use contracts::supply_chain::{
     BuildNetworkPolicy, BuildRequest, EnvironmentTemplateRelease, EnvironmentTemplateReleaseView,
-    ImageArtifact, ReleaseWithdrawal,
+    ImageArtifact, ReleaseWithdrawal, VirtualMachineBaseDisk, VirtualMachineDiskFormat,
 };
 use contracts::{
-    ActorId, ApprovalId, BuildRequestId, CandidateId, CourseId, EventId, ImageArtifactId, PolicyId,
-    ProblemPackageId, ReleaseId, RetentionClass, RetentionDisposition, RetentionSnapshot, Revision,
-    Sequence, Sha256Digest, UploadSessionId, UtcTimestamp,
+    ActorId, ApprovalId, BuildRequestId, CandidateId, CourseId, DiagnosticCode, EventId,
+    ImageArtifactId, PolicyId, ProblemPackageId, ReleaseId, RetentionClass, RetentionDisposition,
+    RetentionSnapshot, Revision, Sequence, Sha256Digest, UploadSessionId, UtcTimestamp,
 };
 use persistence_sqlx::{
     Domain, IdempotencyDecision, IdempotencyStore, InboxDecision, InboxStore, OutboxStore,
@@ -52,8 +53,8 @@ const CREATE_POLICY: &str = "control_create_llm_policy_v1";
 const DECIDE_CANDIDATE: &str = "control_decide_candidate_v1";
 const CREATE_RELEASE: &str = "control_create_environment_template_release_v1";
 const WITHDRAW_RELEASE: &str = "control_withdraw_environment_template_release_v1";
-const BUILD_REQUEST_SUBJECT: &str = subjects::AGENT_BUILD_REQUESTED_V2;
-const RELEASE_SUBJECT: &str = subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED_V2;
+const BUILD_REQUEST_SUBJECT: &str = subjects::AGENT_BUILD_REQUESTED;
+const RELEASE_SUBJECT: &str = subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED;
 const WITHDRAWAL_SUBJECT: &str = subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN;
 
 /// Non-secret Control behavior configuration.
@@ -82,18 +83,14 @@ pub struct ControlConfig {
     pub image_policy_id: PolicyId,
     /// Exact active image-policy revision accepted for publication.
     pub image_policy_revision: Revision,
-    /// Exact active private trust-bundle identity accepted for publication.
-    pub trust_bundle_sha256: Sha256Digest,
-    /// Exact Fulcio issuer accepted for publication.
-    pub fulcio_issuer: String,
-    /// Exact workload certificate subject accepted for publication.
-    pub certificate_subject: String,
     /// Frozen Environment candidate schema identity.
     pub environment_schema_sha256: Sha256Digest,
     /// Frozen Evaluation candidate schema identity.
     pub evaluation_schema_sha256: Sha256Digest,
     /// Exact build execution policy used to turn an approved Container candidate into a command.
     pub container_build: ContainerBuildPolicy,
+    /// Exact deployment-owned `KubeVirt` base disk accepted for VM publication.
+    pub virtual_machine_base: VirtualMachineBasePolicy,
 }
 
 /// Deployment-owned, non-secret limits and bindings for approved Container builds.
@@ -102,7 +99,7 @@ pub struct ControlConfig {
 pub struct ContainerBuildPolicy {
     /// Exact registered `BuildKit` provider binding.
     pub builder_binding: String,
-    /// Harbor registry authority; Control appends one `course-<uuid>` Project and repository.
+    /// Harbor registry/project prefix; Control appends one course-bound repository name.
     pub output_repository_prefix: String,
     /// Candidate-context-relative Dockerfile path.
     pub dockerfile_path: String,
@@ -114,6 +111,22 @@ pub struct ContainerBuildPolicy {
     pub max_cpu_millicores: u32,
     /// `BuildKit` memory ceiling in bytes.
     pub max_memory_bytes: u64,
+}
+
+/// Deployment-owned fixed `KubeVirt` artifact and provider bindings.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VirtualMachineBasePolicy {
+    /// Exact Environment provider binding accepted in the candidate.
+    pub provider_binding: String,
+    /// Exact reviewed storage binding accepted in the candidate.
+    pub storage_class_binding: String,
+    /// Stable release artifact identity assigned to this deployment-owned disk.
+    pub artifact_id: ImageArtifactId,
+    /// Immutable CDI source and imported disk identity.
+    pub base_disk: VirtualMachineBaseDisk,
+    /// Exact disk encoding exposed to the runtime provider.
+    pub format: VirtualMachineDiskFormat,
 }
 
 impl ControlConfig {
@@ -129,9 +142,8 @@ impl ControlConfig {
             || self.max_package_bytes == 0
             || self.retention_seconds == 0
             || self.sse_retention_seconds == 0
-            || self.fulcio_issuer.trim().is_empty()
-            || self.certificate_subject.trim().is_empty()
             || !self.container_build.validate()
+            || !self.virtual_machine_base.validate()
         {
             return Err(ControlError::ConfigurationInvalid);
         }
@@ -142,6 +154,14 @@ impl ControlConfig {
 impl ContainerBuildPolicy {
     fn validate(&self) -> bool {
         let prefix = self.output_repository_prefix.trim_end_matches('/');
+        let repository_scope = prefix.split_once('/').filter(|(registry, project)| {
+            !registry.is_empty()
+                && !project.is_empty()
+                && !project.contains('/')
+                && project
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        });
         !self.builder_binding.trim().is_empty()
             && !self
                 .builder_binding
@@ -151,7 +171,7 @@ impl ContainerBuildPolicy {
             && !prefix.contains("://")
             && !prefix.contains('@')
             && !prefix.contains("..")
-            && !prefix.contains('/')
+            && repository_scope.is_some()
             && !self.dockerfile_path.trim().is_empty()
             && self.max_duration_milliseconds > 0
             && self.max_cpu_millicores > 0
@@ -167,6 +187,14 @@ impl ContainerBuildPolicy {
                         })
                 }
             }
+    }
+}
+
+impl VirtualMachineBasePolicy {
+    fn validate(&self) -> bool {
+        !self.provider_binding.trim().is_empty()
+            && !self.storage_class_binding.trim().is_empty()
+            && self.base_disk.validate().is_ok()
     }
 }
 
@@ -430,16 +458,26 @@ impl ControlService {
                     .map_err(ControlError::from),
                 _ => Err(ControlError::PersistenceIdentityMismatch),
             };
-            let Ok(object) = verified else {
-                return self
-                    .fail_upload(
-                        upload_id,
-                        completion_lease,
-                        idempotency_key,
-                        "LW_PACKAGE_OBJECT_VERIFICATION_FAILED",
-                        &frozen_versions,
-                    )
-                    .await;
+            let object = match verified {
+                Ok(object) => object,
+                Err(error) => {
+                    tracing::warn!(
+                        event = "control.problem_package.object_verification_failed",
+                        diagnostic = "LW_PACKAGE_OBJECT_VERIFICATION_FAILED",
+                        upload_id = %upload_id,
+                        object_key = %key,
+                        cause = %error,
+                    );
+                    return self
+                        .fail_upload(
+                            upload_id,
+                            completion_lease,
+                            idempotency_key,
+                            "LW_PACKAGE_OBJECT_VERIFICATION_FAILED",
+                            &frozen_versions,
+                        )
+                        .await;
+                }
             };
             self.record_frozen_version(upload_id, completion_lease, &key, &object.reference, now)
                 .await?;
@@ -684,6 +722,23 @@ impl ControlService {
         load_candidate_contract(&self.pool, course_id, candidate_id, "environment").await
     }
 
+    /// Reads the Control-owned teacher view for one Environment candidate.
+    pub async fn environment_candidate_view(
+        &self,
+        course_id: CourseId,
+        candidate_id: CandidateId,
+    ) -> Result<EnvironmentCandidateView, ControlError> {
+        let candidate = self.environment_candidate(course_id, candidate_id).await?;
+        let approvals = load_candidate_approvals(&self.pool, candidate_id).await?;
+        let build = load_candidate_build(&self.pool, course_id, candidate_id).await?;
+        Ok(EnvironmentCandidateView {
+            candidate,
+            approvals,
+            build,
+            trust_revision: self.config.trust_revision,
+        })
+    }
+
     /// Reads a validated Evaluation candidate projection.
     pub async fn evaluation_candidate(
         &self,
@@ -691,6 +746,21 @@ impl ControlService {
         candidate_id: CandidateId,
     ) -> Result<EvaluationCandidate, ControlError> {
         load_candidate_contract(&self.pool, course_id, candidate_id, "evaluation").await
+    }
+
+    /// Reads the Control-owned teacher view for one Evaluation candidate.
+    pub async fn evaluation_candidate_view(
+        &self,
+        course_id: CourseId,
+        candidate_id: CandidateId,
+    ) -> Result<EvaluationCandidateView, ControlError> {
+        let candidate = self.evaluation_candidate(course_id, candidate_id).await?;
+        let approvals = load_candidate_approvals(&self.pool, candidate_id).await?;
+        Ok(EvaluationCandidateView {
+            candidate,
+            approvals,
+            trust_revision: self.config.trust_revision,
+        })
     }
 
     /// Reads one immutable Release together with its optional append-only withdrawal fact.
@@ -1106,7 +1176,7 @@ impl ControlService {
         &self,
         event_id: EventId,
         course_id: CourseId,
-        failure: &AgentBuildFailedV2,
+        failure: &AgentBuildFailed,
     ) -> Result<(), ControlError> {
         failure
             .validate()
@@ -1313,6 +1383,20 @@ impl ControlService {
                 ..
             } = &candidate.spec.runtime
             {
+                let context_object_key = sqlx::query_scalar::<_, String>(
+                    "SELECT f.object_key \
+                     FROM control.problem_package_upload_files f \
+                     JOIN control.problem_package_upload_sessions s ON s.upload_id=f.upload_id \
+                     WHERE f.artifact_id=$1 AND f.object_version=$2 AND s.course_id=$3 \
+                       AND s.state='completed' AND f.verified_at IS NOT NULL",
+                )
+                .bind(build_context.artifact_id.as_uuid())
+                .bind(&build_context.object_version)
+                .bind(course_id.as_uuid())
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(db)?
+                .ok_or(ControlError::PersistenceIdentityMismatch)?;
                 let build_request = BuildRequest {
                     id: BuildRequestId::new(),
                     course_id,
@@ -1322,10 +1406,11 @@ impl ControlService {
                     approval_id: approval.id,
                     builder_binding: self.config.container_build.builder_binding.clone(),
                     context: build_context.clone(),
+                    context_object_key,
                     dockerfile_path: self.config.container_build.dockerfile_path.clone(),
                     base_image_digest: base_image_digest.clone(),
                     output_repository: format!(
-                        "{}/course-{course_id}/{candidate_id}",
+                        "{}/course-{course_id}-{candidate_id}",
                         self.config
                             .container_build
                             .output_repository_prefix
@@ -1349,7 +1434,7 @@ impl ControlService {
                     "approval": approval,
                     "idempotencyKey": build_idempotency_key,
                 }))?;
-                let command = AgentBuildRequestedV2 {
+                let command = AgentBuildRequested {
                     request: build_request,
                     approval: approval.clone(),
                     idempotency_key: build_idempotency_key,
@@ -1453,30 +1538,6 @@ impl ControlService {
         trace_id: &str,
     ) -> Result<EnvironmentTemplateRelease, ControlError> {
         validate_trace_id(trace_id)?;
-        request
-            .artifact
-            .validate()
-            .map_err(|_| ControlError::ReleaseEvidenceInvalid)?;
-        request
-            .image_policy_evaluation
-            .validate()
-            .map_err(|_| ControlError::ReleaseEvidenceInvalid)?;
-        if now >= request.image_policy_evaluation.valid_until {
-            return Err(ControlError::ReleaseEvidenceStale);
-        }
-        let evaluation = &request.image_policy_evaluation;
-        let signature = request.artifact.signature_evidence();
-        if evaluation.policy_id != self.config.image_policy_id
-            || evaluation.policy_revision != self.config.image_policy_revision
-            || evaluation.trust_bundle_sha256 != self.config.trust_bundle_sha256
-            || signature.trust_bundle_sha256 != self.config.trust_bundle_sha256
-            || evaluation.expected_fulcio_issuer != self.config.fulcio_issuer
-            || signature.fulcio_issuer != self.config.fulcio_issuer
-            || evaluation.expected_certificate_subject != self.config.certificate_subject
-            || signature.certificate_subject != self.config.certificate_subject
-        {
-            return Err(ControlError::ReleaseEvidenceInvalid);
-        }
         let request_hash = canonical_hash(&json!({
             "courseId":course_id,"request":request,"actorId":actor_id
         }))?;
@@ -1530,6 +1591,9 @@ impl ControlService {
         environment_candidate
             .validate()
             .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+        if environment_candidate.spec.runtime.kind() != request.runtime_kind {
+            return Err(ControlError::ReleaseCandidateMismatch);
+        }
         let approval: CandidateApproval = load_contract_tx(
             &mut transaction,
             "SELECT contract FROM control.candidate_approvals WHERE approval_id=$1 AND candidate_id=$2",
@@ -1557,54 +1621,78 @@ impl ControlService {
         {
             return Err(ControlError::ReleaseCandidateMismatch);
         }
-        let artifact_id = image_artifact_id(&request.artifact);
-        if artifact_id != request.image_policy_evaluation.artifact_id {
-            return Err(ControlError::ArtifactMismatch);
-        }
-        let projection = sqlx::query(
-            "SELECT artifact,policy_evaluation FROM control.image_artifact_projections \
-             WHERE image_artifact_id=$1 FOR SHARE",
-        )
-        .bind(artifact_id.as_uuid())
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(db)?
-        .ok_or(ControlError::ArtifactNotAuthoritative)?;
-        let projected_artifact: ImageArtifact =
-            serde_json::from_value(projection.try_get("artifact").map_err(db)?)
-                .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
-        let projected_evaluation: contracts::supply_chain::ImagePolicyEvaluation =
-            serde_json::from_value(projection.try_get("policy_evaluation").map_err(db)?)
-                .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
-        if projected_artifact != request.artifact
-            || projected_evaluation != request.image_policy_evaluation
-        {
-            return Err(ControlError::ArtifactMismatch);
-        }
-        if let Some(build_request_id) = image_build_request_id(&request.artifact) {
-            let build_is_authoritative = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS(SELECT 1 FROM control.container_build_projections \
-                 WHERE build_request_id=$1 AND course_id=$2 AND candidate_id=$3 \
-                   AND candidate_revision=$4 AND candidate_sha256=$5 AND approval_id=$6 \
-                   AND state='succeeded' AND image_artifact_id=$7)",
-            )
-            .bind(build_request_id.as_uuid())
-            .bind(course_id.as_uuid())
-            .bind(request.candidate_id.as_uuid())
-            .bind(
-                i64::try_from(request.candidate_revision.get())
-                    .map_err(|_| ControlError::ReleaseCandidateMismatch)?,
-            )
-            .bind(request.environment_spec_sha256.to_string())
-            .bind(approval.id.as_uuid())
-            .bind(artifact_id.as_uuid())
-            .fetch_one(&mut *transaction)
-            .await
-            .map_err(db)?;
-            if !build_is_authoritative {
-                return Err(ControlError::ArtifactMismatch);
+        let (artifact, image_policy_evaluation) = match &environment_candidate.spec.runtime {
+            contracts::authoring::EnvironmentRuntimeSpec::Container { .. } => {
+                let projection = sqlx::query(
+                    "SELECT artifacts.artifact,artifacts.policy_evaluation \
+                     FROM control.container_build_projections builds \
+                     JOIN control.image_artifact_projections artifacts \
+                       ON artifacts.image_artifact_id=builds.image_artifact_id \
+                     WHERE builds.course_id=$1 AND builds.candidate_id=$2 \
+                       AND builds.candidate_revision=$3 AND builds.candidate_sha256=$4 \
+                       AND builds.approval_id=$5 AND builds.state='succeeded' FOR SHARE",
+                )
+                .bind(course_id.as_uuid())
+                .bind(request.candidate_id.as_uuid())
+                .bind(
+                    i64::try_from(request.candidate_revision.get())
+                        .map_err(|_| ControlError::ReleaseCandidateMismatch)?,
+                )
+                .bind(request.environment_spec_sha256.to_string())
+                .bind(approval.id.as_uuid())
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(db)?
+                .ok_or(ControlError::ArtifactNotAuthoritative)?;
+                let artifact: ImageArtifact =
+                    serde_json::from_value(projection.try_get("artifact").map_err(db)?)
+                        .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+                let evaluation: contracts::supply_chain::ImagePolicyEvaluation =
+                    serde_json::from_value(projection.try_get("policy_evaluation").map_err(db)?)
+                        .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+                if !matches!(artifact, ImageArtifact::Container { .. })
+                    || evaluation.artifact_id != artifact.id()
+                    || evaluation.artifact_sha256
+                        != artifact
+                            .content_sha256()
+                            .map_err(|_| ControlError::ReleaseEvidenceInvalid)?
+                    || evaluation.policy_id != self.config.image_policy_id
+                    || evaluation.policy_revision != self.config.image_policy_revision
+                {
+                    return Err(ControlError::ArtifactMismatch);
+                }
+                evaluation
+                    .validate()
+                    .map_err(|_| ControlError::ReleaseEvidenceInvalid)?;
+                if now >= evaluation.valid_until {
+                    return Err(ControlError::ReleaseEvidenceStale);
+                }
+                (artifact, Some(evaluation))
             }
-        }
+            contracts::authoring::EnvironmentRuntimeSpec::VirtualMachine {
+                provider_binding,
+                base_disk,
+                storage_class_binding,
+                ..
+            } => {
+                let policy = &self.config.virtual_machine_base;
+                if provider_binding != &policy.provider_binding
+                    || storage_class_binding != &policy.storage_class_binding
+                    || base_disk != &policy.base_disk
+                {
+                    return Err(ControlError::ArtifactMismatch);
+                }
+                (
+                    ImageArtifact::VirtualMachine {
+                        id: policy.artifact_id,
+                        base_disk: policy.base_disk.clone(),
+                        format: policy.format,
+                    },
+                    None,
+                )
+            }
+        };
+        let artifact_id = artifact.id();
         let next_version = sqlx::query_scalar::<_, i64>(
             "SELECT COALESCE(MAX(version),0)+1 FROM control.environment_template_releases WHERE course_id=$1",
         )
@@ -1618,12 +1706,13 @@ impl ControlService {
             version: u64::try_from(next_version)
                 .map_err(|_| ControlError::PersistenceIdentityMismatch)?,
             candidate_id: request.candidate_id,
+            agent_run_id: environment_candidate.run_id,
             candidate_revision: request.candidate_revision,
             environment_spec_sha256: request.environment_spec_sha256,
             runtime_kind: request.runtime_kind,
             approval,
-            artifact: request.artifact.clone(),
-            image_policy_evaluation: request.image_policy_evaluation.clone(),
+            artifact,
+            image_policy_evaluation,
             published_by: actor_id,
             published_at: now,
         };
@@ -1668,7 +1757,7 @@ impl ControlService {
                 .map_err(|_| ControlError::ContractInvalid)?,
             aggregate_sequence: Sequence(1),
             trace_id: trace_id.to_owned(),
-            data: ReleasePublishedV2 {
+            data: ReleasePublished {
                 release: release.clone(),
                 environment_spec: environment_candidate.spec,
                 projection_sha256,
@@ -1701,7 +1790,8 @@ impl ControlService {
             json!({
                 "releaseId":release.id,"version":release.version,
                 "environmentSpecSha256":release.environment_spec_sha256,
-                "highSeverityWarnings":release.image_policy_evaluation.high_severity_warning_count()
+                "highSeverityWarnings":release.image_policy_evaluation.as_ref()
+                    .map_or(0, contracts::supply_chain::ImagePolicyEvaluation::high_severity_warning_count)
             }),
         )
         .await?;
@@ -2565,6 +2655,93 @@ where
         .map_err(|_| ControlError::PersistenceIdentityMismatch)
 }
 
+async fn load_candidate_approvals(
+    pool: &PgPool,
+    candidate_id: CandidateId,
+) -> Result<Vec<CandidateApproval>, ControlError> {
+    let rows = sqlx::query(
+        "SELECT contract FROM control.candidate_approvals \
+         WHERE candidate_id=$1 ORDER BY decided_at,approval_id",
+    )
+    .bind(candidate_id.as_uuid())
+    .fetch_all(pool)
+    .await
+    .map_err(db)?;
+    rows.into_iter()
+        .map(|row| {
+            serde_json::from_value(row.try_get("contract").map_err(db)?)
+                .map_err(|_| ControlError::PersistenceIdentityMismatch)
+        })
+        .collect()
+}
+
+async fn load_candidate_build(
+    pool: &PgPool,
+    course_id: CourseId,
+    candidate_id: CandidateId,
+) -> Result<Option<CandidateBuildView>, ControlError> {
+    let row = sqlx::query(
+        "SELECT builds.state,builds.terminal_diagnostic,builds.cleanup_verified, \
+                artifacts.artifact,artifacts.policy_evaluation \
+         FROM control.container_build_projections builds \
+         LEFT JOIN control.image_artifact_projections artifacts \
+           ON artifacts.image_artifact_id=builds.image_artifact_id \
+         WHERE builds.course_id=$1 AND builds.candidate_id=$2",
+    )
+    .bind(course_id.as_uuid())
+    .bind(candidate_id.as_uuid())
+    .fetch_optional(pool)
+    .await
+    .map_err(db)?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let state = match row.try_get::<String, _>("state").map_err(db)?.as_str() {
+        "requested" => CandidateBuildState::Requested,
+        "succeeded" => CandidateBuildState::Succeeded,
+        "failed" => CandidateBuildState::Failed,
+        "cancelled" => CandidateBuildState::Cancelled,
+        _ => return Err(ControlError::PersistenceIdentityMismatch),
+    };
+    let artifact = row
+        .try_get::<Option<Value>, _>("artifact")
+        .map_err(db)?
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+    let image_policy_evaluation = row
+        .try_get::<Option<Value>, _>("policy_evaluation")
+        .map_err(db)?
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+    let diagnostic_code = row
+        .try_get::<Option<String>, _>("terminal_diagnostic")
+        .map_err(db)?
+        .map(DiagnosticCode::parse)
+        .transpose()
+        .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+    let cleanup_verified: Option<bool> = row.try_get("cleanup_verified").map_err(db)?;
+    let evidence_is_complete = artifact.is_some() && image_policy_evaluation.is_some();
+    if (state == CandidateBuildState::Succeeded) != evidence_is_complete
+        || (state == CandidateBuildState::Requested
+            && (diagnostic_code.is_some() || cleanup_verified.is_some()))
+        || (matches!(
+            state,
+            CandidateBuildState::Failed | CandidateBuildState::Cancelled
+        ) && diagnostic_code.is_none())
+    {
+        return Err(ControlError::PersistenceIdentityMismatch);
+    }
+    Ok(Some(CandidateBuildView {
+        state,
+        artifact,
+        image_policy_evaluation,
+        diagnostic_code,
+        cleanup_verified,
+    }))
+}
+
 async fn load_contract_tx<T>(
     transaction: &mut Transaction<'_, Postgres>,
     query: &str,
@@ -2849,8 +3026,8 @@ mod tests {
     use contracts::supply_chain::BuildNetworkPolicy;
 
     use super::{
-        ContainerBuildPolicy, ControlConfig, ControlError, reject_sensitive_payload,
-        validate_upload_request,
+        ContainerBuildPolicy, ControlConfig, ControlError, VirtualMachineBasePolicy,
+        reject_sensitive_payload, validate_upload_request,
     };
 
     fn config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
@@ -2866,19 +3043,32 @@ mod tests {
             trust_revision: Revision::new(1)?,
             image_policy_id: PolicyId::new(),
             image_policy_revision: Revision::new(1)?,
-            trust_bundle_sha256: Sha256Digest::of_bytes(b"trust-bundle"),
-            fulcio_issuer: "https://issuer.invalid".to_owned(),
-            certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
             environment_schema_sha256: Sha256Digest::of_bytes(b"environment-schema"),
             evaluation_schema_sha256: Sha256Digest::of_bytes(b"evaluation-schema"),
             container_build: ContainerBuildPolicy {
                 builder_binding: "buildkit-primary-v1".to_owned(),
-                output_repository_prefix: "harbor.internal".to_owned(),
+                output_repository_prefix: "harbor.internal/labweaver-system".to_owned(),
                 dockerfile_path: "Dockerfile".to_owned(),
                 network: BuildNetworkPolicy::DenyAll,
                 max_duration_milliseconds: 600_000,
                 max_cpu_millicores: 2_000,
                 max_memory_bytes: 2_147_483_648,
+            },
+            virtual_machine_base: VirtualMachineBasePolicy {
+                provider_binding: "kubevirt-primary-v1".to_owned(),
+                storage_class_binding: "vm-rwo-primary-v1".to_owned(),
+                artifact_id: contracts::ImageArtifactId::new(),
+                base_disk: contracts::supply_chain::VirtualMachineBaseDisk {
+                    binding: "ubuntu-24.04-v1".to_owned(),
+                    source_registry_digest: concat!(
+                        "docker://quay.io/containerdisks/ubuntu@",
+                        "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
+                    )
+                    .to_owned(),
+                    disk_sha256: Sha256Digest::of_bytes(b"vm-disk"),
+                    capacity_bytes: 10_737_418_240,
+                },
+                format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
             },
         })
     }

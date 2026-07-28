@@ -420,9 +420,12 @@ fn validate_provider_observation(
                 | Operation::Restart
                 | Operation::Reset,
             State::Provisioning,
-            State::Ready | State::Stopped,
-        ) | (Operation::Start, State::Stopped, State::Provisioning)
-            | (Operation::Stop, State::Stopping, State::Stopped)
+            State::Provisioning | State::Ready | State::Stopped,
+        ) | (
+            Operation::Start,
+            State::Stopped,
+            State::Provisioning | State::Ready
+        ) | (Operation::Stop, State::Stopping, State::Stopped)
             | (
                 Operation::Freeze | Operation::Retry | Operation::Recover,
                 State::Updating,

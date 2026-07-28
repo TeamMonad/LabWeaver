@@ -27,7 +27,7 @@
     "test:e2e:gate": "node scripts/e2e-gate.mjs",
     "test:e2e": "node scripts/run-e2e.mjs",
     "test:e2e:fixture": "cross-env VITE_DATA_MODE=fixture LABWEAVER_DATA_MODE=fixture pnpm build:fixture && cross-env VITE_DATA_MODE=fixture LABWEAVER_DATA_MODE=fixture LABWEAVER_BASE_URL=http://localhost:4173 playwright test --config=playwright.config.mjs",
-    "test:e2e:live": "pnpm build && cross-env LABWEAVER_DATA_MODE=live LABWEAVER_BASE_URL=http://localhost:4173 playwright test --config=playwright.config.mjs"
+    "test:e2e:live": "cross-env LABWEAVER_DATA_MODE=live node scripts/run-e2e.mjs"
   },
   "dependencies": {
     "@fontsource-variable/noto-sans-sc": "^5.2.10",

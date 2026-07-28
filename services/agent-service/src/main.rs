@@ -7,8 +7,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_service::api::{AgentApiState, router, serve_mtls};
+use agent_service::build_executor::{ProductionBuildExecutor, ProductionBuildExecutorConfig};
 use agent_service::build_pipeline::{BuildPipeline, BuildPipelinePolicy};
 use agent_service::build_provider::NatsBuildSupplyChainProvider;
+use agent_service::build_provider::{
+    FencedBuildExecutor, NatsBuildExecutorServer, PgBuildExecutorFenceStore,
+};
 use agent_service::build_store::{BuildWorker, PgBuildStore};
 use agent_service::classifier::DeterministicEgressClassifier;
 use agent_service::claude_code::{
@@ -26,6 +30,9 @@ use contracts::{ArtifactId, ArtifactRef, PolicyId, Revision, Sha256Digest, UtcTi
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 use time::OffsetDateTime;
+
+#[path = "../../service_runtime.rs"]
+mod service_runtime;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -54,16 +61,12 @@ struct BuildFileConfig {
     provider_subject: String,
     builder_binding: String,
     scanner_binding: String,
-    signer_binding: String,
     registry_binding: String,
     policy_id: PolicyId,
     policy_revision: Revision,
     scanner_name: String,
     scanner_version: String,
     scanner_database_sha256: Sha256Digest,
-    trust_bundle_sha256: Sha256Digest,
-    expected_fulcio_issuer: String,
-    expected_certificate_subject: String,
     registry_robot_name: String,
     evidence_ttl_milliseconds: u64,
     stage_timeout_milliseconds: u64,
@@ -87,12 +90,48 @@ struct NatsFileConfig {
     outbox_poll_milliseconds: u64,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuildExecutorDeploymentFile {
+    database_url_file: String,
+    database_max_connections: u32,
+    object_store: S3StoreConfig,
+    object_store_access_key_file: String,
+    object_store_secret_key_file: String,
+    object_store_session_token_file: Option<String>,
+    nats: BuildExecutorNatsFileConfig,
+    executor: ProductionBuildExecutorConfig,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuildExecutorNatsFileConfig {
+    server: String,
+    ca_file: String,
+    client_certificate_file: String,
+    client_private_key_file: String,
+    credentials_file: String,
+    request_subject: String,
+}
+
 #[tokio::main]
+async fn main() -> Result<(), StartupError> {
+    let mut arguments = std::env::args().skip(1);
+    if arguments.next().as_deref() != Some("--mode") || arguments.size_hint().0 != 1 {
+        return Err(StartupError::Configuration);
+    }
+    match arguments.next().as_deref() {
+        Some("agent-service") => Box::pin(run_agent_service()).await,
+        Some("build-executor") => Box::pin(run_build_executor()).await,
+        _ => Err(StartupError::Configuration),
+    }
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "startup keeps every fail-closed Agent dependency binding in one auditable boundary"
 )]
-async fn main() -> Result<(), StartupError> {
+async fn run_agent_service() -> Result<(), StartupError> {
     telemetry::init(env!("CARGO_PKG_NAME"))?;
     let deployment = load_deployment()?;
     validate_deployment(&deployment)?;
@@ -128,8 +167,8 @@ async fn main() -> Result<(), StartupError> {
         deployment.build.provider_subject.clone(),
         deployment.build.builder_binding.clone(),
         deployment.build.scanner_binding.clone(),
-        deployment.build.signer_binding.clone(),
         deployment.build.registry_binding.clone(),
+        Duration::from_millis(deployment.build.stage_timeout_milliseconds),
     )
     .map_err(|_| StartupError::Configuration)?;
     let build_pipeline = BuildPipeline::new(
@@ -137,16 +176,12 @@ async fn main() -> Result<(), StartupError> {
         BuildPipelinePolicy {
             builder_binding: deployment.build.builder_binding.clone(),
             scanner_binding: deployment.build.scanner_binding.clone(),
-            signer_binding: deployment.build.signer_binding.clone(),
             registry_binding: deployment.build.registry_binding.clone(),
             policy_id: deployment.build.policy_id,
             policy_revision: deployment.build.policy_revision,
             scanner_name: deployment.build.scanner_name.clone(),
             scanner_version: deployment.build.scanner_version.clone(),
             scanner_database_sha256: deployment.build.scanner_database_sha256,
-            trust_bundle_sha256: deployment.build.trust_bundle_sha256,
-            expected_fulcio_issuer: deployment.build.expected_fulcio_issuer.clone(),
-            expected_certificate_subject: deployment.build.expected_certificate_subject.clone(),
             registry_robot_name: deployment.build.registry_robot_name.clone(),
             evidence_ttl_milliseconds: deployment.build.evidence_ttl_milliseconds,
             stage_timeout: Duration::from_millis(deployment.build.stage_timeout_milliseconds),
@@ -216,6 +251,62 @@ async fn main() -> Result<(), StartupError> {
         ) => result?,
         result = outbox_loop(outbox, outbox_poll) => result?,
     }
+    Ok(())
+}
+
+async fn run_build_executor() -> Result<(), StartupError> {
+    let deployment = load_build_executor_deployment()?;
+    if deployment.database_max_connections == 0 || deployment.database_max_connections > 32 {
+        return Err(StartupError::Configuration);
+    }
+    let pool = PgPoolOptions::new()
+        .max_connections(deployment.database_max_connections)
+        .connect(&read_trimmed(&deployment.database_url_file)?)
+        .await?;
+    let schema_ready: bool = sqlx::query_scalar(
+        "SELECT to_regclass('agent.build_executor_fences') IS NOT NULL \
+         AND to_regclass('agent.build_executor_artifacts') IS NOT NULL",
+    )
+    .fetch_one(&pool)
+    .await?;
+    if !schema_ready {
+        return Err(StartupError::SchemaUnavailable);
+    }
+    let objects = Arc::new(
+        S3ImmutableObjectStore::new(
+            deployment.object_store,
+            S3Credential {
+                access_key_id: read_trimmed(&deployment.object_store_access_key_file)?,
+                secret_access_key: read_trimmed(&deployment.object_store_secret_key_file)?,
+                session_token: deployment
+                    .object_store_session_token_file
+                    .as_deref()
+                    .map(read_trimmed)
+                    .transpose()?,
+            },
+        )
+        .await?,
+    );
+    let nats = connect_nats_mtls(
+        &deployment.nats.server,
+        deployment.nats.ca_file.into(),
+        deployment.nats.client_certificate_file.into(),
+        deployment.nats.client_private_key_file.into(),
+        deployment.nats.credentials_file.into(),
+    )
+    .await?;
+    let backend = ProductionBuildExecutor::new(deployment.executor, pool.clone(), objects)
+        .map_err(|_| StartupError::Configuration)?;
+    let executor = FencedBuildExecutor::new(PgBuildExecutorFenceStore::new(pool), backend);
+    let server = NatsBuildExecutorServer::new(nats, deployment.nats.request_subject, executor)?;
+    tokio::try_join!(
+        async { server.serve().await.map_err(StartupError::BuildExecutor) },
+        async {
+            service_runtime::run("build-executor")
+                .await
+                .map_err(StartupError::Service)
+        }
+    )?;
     Ok(())
 }
 
@@ -371,6 +462,12 @@ fn load_deployment() -> Result<DeploymentFile, StartupError> {
     serde_yaml::from_str(&std::fs::read_to_string(path)?).map_err(|_| StartupError::Configuration)
 }
 
+fn load_build_executor_deployment() -> Result<BuildExecutorDeploymentFile, StartupError> {
+    let path = std::env::var("LABWEAVER_BUILD_EXECUTOR_CONFIG_FILE")
+        .map_err(|_| StartupError::Configuration)?;
+    serde_yaml::from_str(&std::fs::read_to_string(path)?).map_err(|_| StartupError::Configuration)
+}
+
 fn validate_deployment(deployment: &DeploymentFile) -> Result<(), StartupError> {
     if deployment.database_max_connections == 0
         || deployment.database_max_connections > 100
@@ -466,4 +563,58 @@ enum StartupError {
     Runtime(#[from] agent_service::claude_code::ClaudeCodeRuntimeError),
     #[error(transparent)]
     Messaging(#[from] agent_service::messaging::AgentMessagingError),
+    #[error(transparent)]
+    BuildExecutor(#[from] agent_service::build_provider::BuildExecutorFenceError),
+    #[error(transparent)]
+    Service(#[from] service_runtime::StartupError),
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::case_sensitive_file_extension_comparisons)]
+mod deployment_contract_tests {
+    use std::collections::BTreeMap;
+
+    use super::{BuildExecutorDeploymentFile, DeploymentFile};
+
+    #[test]
+    fn checked_in_sprint2_example_matches_the_runtime_contract() {
+        let example = include_str!("../../../deploy/config/agent-control-plane.yaml.example");
+        let deployment: DeploymentFile =
+            serde_yaml::from_str(example).expect("agent deployment example must deserialize");
+
+        assert!(deployment.database_url_file.starts_with('/'));
+        assert!(deployment.nats.server.starts_with("tls://"));
+        assert!(deployment.build.provider_subject.ends_with(".v1"));
+        assert_eq!(
+            deployment.worker_environment_files,
+            BTreeMap::from([
+                (
+                    "ANTHROPIC_AUTH_TOKEN".to_owned(),
+                    "/etc/labweaver/secrets/anthropic-auth-token".to_owned(),
+                ),
+                (
+                    "ANTHROPIC_BASE_URL".to_owned(),
+                    "/etc/labweaver/config/anthropic-base-url".to_owned(),
+                ),
+            ])
+        );
+        assert!(!example.contains(".v2"));
+    }
+
+    #[test]
+    fn checked_in_build_executor_example_requires_mtls_buildkit() {
+        let example = include_str!("../../../deploy/config/build-executor.yaml.example");
+        let deployment: BuildExecutorDeploymentFile = serde_yaml::from_str(example)
+            .expect("build executor deployment example must deserialize");
+
+        assert!(deployment.executor.buildkit_address.starts_with("tcp://"));
+        for path in [
+            &deployment.executor.buildkit_ca_file,
+            &deployment.executor.buildkit_client_certificate_file,
+            &deployment.executor.buildkit_client_private_key_file,
+        ] {
+            assert!(path.to_string_lossy().starts_with('/'));
+        }
+        assert!(deployment.nats.request_subject.ends_with(".v1"));
+    }
 }

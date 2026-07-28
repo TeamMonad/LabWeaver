@@ -25,6 +25,7 @@ export function createPlaywrightConfig({ ci = Boolean(process.env.CI) } = {}) {
       return {
         ...base,
         dependencies: ['setup'],
+        testIgnore: isFixture ? /\.live\.spec\.mjs$/ : /\.fixture\.spec\.mjs$/,
         use: { storageState: project.storageState },
       }
     }
@@ -41,6 +42,7 @@ export function createPlaywrightConfig({ ci = Boolean(process.env.CI) } = {}) {
   return {
     testDir: './e2e',
     outputDir: `./test-results/${evidenceLabel}`,
+    timeout: isFixture ? 30_000 : 120_000,
     snapshotPathTemplate: `{testDir}/{testFileDir}/{testFileName}-snapshots/${evidenceLabel}/{arg}-{projectName}{ext}`,
     forbidOnly: ci,
     retries: ci ? 2 : 0,
@@ -52,20 +54,32 @@ export function createPlaywrightConfig({ ci = Boolean(process.env.CI) } = {}) {
     ],
     use: {
       baseURL: process.env.LABWEAVER_BASE_URL || 'http://localhost:4173',
+      ignoreHTTPSErrors: process.env.LABWEAVER_E2E_IGNORE_HTTPS_ERRORS === 'true',
       trace: 'retain-on-failure',
       screenshot: 'only-on-failure',
       video: 'retain-on-failure',
-      actionTimeout: 10_000,
-      navigationTimeout: 15_000,
+      actionTimeout: isFixture ? 10_000 : 30_000,
+      navigationTimeout: isFixture ? 15_000 : 60_000,
     },
-    expect: { timeout: 10_000 },
+    expect: {
+      timeout: isFixture ? 10_000 : 30_000,
+      // The pinned Chromium image is identical in CI and local generation, but
+      // Linux kernel/font rasterization still changes anti-aliased edge pixels.
+      // Keep the allowance below a layout-sized change while avoiding false
+      // failures on otherwise byte-for-byte identical content and geometry.
+      ...(isFixture ? { toHaveScreenshot: { maxDiffPixelRatio: 0.025 } } : {}),
+    },
     projects,
     metadata: evidenceMetadata,
-    webServer: {
-      command: isFixture ? 'pnpm preview:fixture' : 'pnpm preview --port 4173',
-      url: 'http://localhost:4173',
-      reuseExistingServer: !ci,
-    },
+    ...(isFixture || !process.env.LABWEAVER_BASE_URL
+      ? {
+          webServer: {
+            command: isFixture ? 'pnpm preview:fixture' : 'pnpm preview --port 4173',
+            url: 'http://localhost:4173',
+            reuseExistingServer: !ci,
+          },
+        }
+      : {}),
   }
 }
 

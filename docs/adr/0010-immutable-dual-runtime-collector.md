@@ -45,8 +45,53 @@ stable ID and attempt. Evaluation uploads the exact archive with `If-None-Match:
 version and exact HEAD/read-back match for size, media type, SHA-256, retention
 mode and deadline. Only after that verification does one PostgreSQL transaction
 write `frozen_submissions`, complete the attempt and enqueue
-`labweaver.evaluation.submission.frozen.v2` containing the same object version,
+`labweaver.evaluation.submission.frozen.v1` containing the same object version,
 hash and full immutable contract.
+
+### Sprint 2 deployment topology
+
+The Evaluation Service runs a freeze-only coordinator in
+`labweaver-system`. It consumes the durable v1 freeze command, reserves the
+fenced attempt, and creates an allowlisted Kubernetes Job from the same
+Evaluation Service image in `--mode freeze-worker`. The worker has no
+Kubernetes API token, no shell command input and no Evaluation Runner, Checker,
+Aggregator or scoring code path. Its command is a strict immutable ConfigMap;
+its database, object-store and NATS credentials are mounted from the existing
+Evaluation Secret in the same namespace. The coordinator owns bounded Job,
+ConfigMap and one-time Secret cleanup and treats residue as a blocking failure.
+
+For Container environments, Sprint 2 workspaces use the reviewed `nfs-rwx`
+storage binding. The coordinator resolves the exact bound PVC and PV by
+environment identity, accepts only the expected NFS CSI driver and server/path
+shape, and mounts that same NFS export read-only into the worker. It never
+mounts a HostPath and never copies Evaluation credentials into a student
+namespace. The worker opens the mount as a `cap-std` capability before
+collection.
+
+An approved Container runtime image must provide POSIX `/bin/sh`, `find`, and
+`cp`, and place the initial student workspace below the fixed
+`/opt/labweaver/workspace-seed` directory. Environment mounts the persistent
+PVC at `/workspace` and runs the same digest-pinned image as a non-root init
+container with a fixed command. It copies the seed only when the PVC is empty,
+fails closed if the seed directory is absent, and never overwrites retained
+student data during restart or pod replacement. No candidate field controls
+the command or either path.
+
+For KubeVirt environments, the coordinator generates an ephemeral user key and
+asks the Environment owner over mTLS to sign its public key for one exact
+running environment. Environment verifies course, owner, revision, runtime
+generation, current private guest address and pinned host key, then issues a
+certificate valid for at most five minutes with principal
+`labweaver-collector` and critical `force-command=internal-sftp -R`. The key and
+certificate live only in a run-scoped Secret in `labweaver-system`; the worker
+removes no credential itself and coordinator cleanup is mandatory.
+
+The coordinator has cluster read-only access to the exact PVC/PV discovery
+resources and namespace-local mutation access only to its Job, ConfigMap and
+Secret resources. This is distinct from the accepted broad runtime-executor
+ClusterRoles. No student-controlled field becomes a Kubernetes resource name,
+NFS server/path, network destination or credential locator without an
+Environment-owned identity resolution.
 
 An upload error, ambiguous retained orphan, database failure or lost fence does
 not create a publishable row or event. Failed attempts retain a payload-free
@@ -86,21 +131,26 @@ single-Environment issuer are mandatory before VM acceptance.
 
 ## Compatibility, rollback and evidence
 
-Migration `evaluation/0002_submission_freezes.sql` is additive except for
-removing the legacy content-only uniqueness rule, which incorrectly conflated
-independent approved freezes with identical bytes. The v1 frozen event remains
-registered; new authoritative publication uses the additive v2 event and
-generated Schema. Empty regular files are valid and remain hash-addressed.
+The destructive reset applies `evaluation/0001_sprint2_baseline.sql`, including
+the corrected freeze uniqueness rule that distinguishes independent approved
+freezes with identical bytes. No pre-reset Evaluation data upgrade is
+supported. Empty regular files are valid and remain hash-addressed.
 
-Before publication, rollback is whole-PR reversion. After Object Lock upload,
+Before publication, rollback disables the Evaluation workload or applies a
+forward corrective PR; it does not restore pre-baseline data. After Object Lock upload,
 rollback disables new collection, retains request/attempt rows and locked
 objects through their policy deadline, and never rewrites a completed
 `FrozenSubmission`.
 
 Local evidence covers PVC adversarial paths and deterministic archives, SSH
 configuration/credential guards, PostgreSQL idempotency and Outbox consistency,
-and a MinIO Object Lock integration test. This is E1 plus test-defined E2; it is
-not E3. E3 requires the same build against a real read-only PVC, real
+MinIO Object Lock, and the coordinator's fixed-operation Kubernetes resource
+construction. The owner process atomically claims queued commands, resumes
+`running` commands after restart, obtains the current Environment binding over
+mTLS, creates an immutable ConfigMap/Secret plus bounded Job and NetworkPolicy,
+and marks a command terminal only after Job residue is absent. This is local
+and test-defined evidence, not connected verification. Connected verification
+requires the same build against a real read-only PVC, real
 KubeVirt VM, private network, real short-lived certificate issuer and MinIO
 bucket, including credential expiry, SSH denial/timeout, retained-orphan and
 cleanup evidence.

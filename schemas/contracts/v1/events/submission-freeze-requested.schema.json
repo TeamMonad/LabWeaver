@@ -36,7 +36,7 @@
       "description": "Canonical lowercase SHA-256 digest.",
       "type": "string"
     },
-    "SubmissionFrozen": {
+    "SubmissionFreezeRequested": {
       "additionalProperties": false,
       "properties": {
         "environmentId": {
@@ -79,7 +79,7 @@
       "$ref": "#/$defs/CourseId"
     },
     "data": {
-      "$ref": "#/$defs/SubmissionFrozen"
+      "$ref": "#/$defs/SubmissionFreezeRequested"
     },
     "datacontenttype": {
       "type": "string"

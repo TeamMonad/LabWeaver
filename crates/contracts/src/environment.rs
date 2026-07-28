@@ -62,6 +62,7 @@ pub enum EnvironmentOperationKind {
 pub struct EnvironmentCreateSpec {
     pub course_id: CourseId,
     pub owner_actor_id: ActorId,
+    pub display_label: String,
     pub class: EnvironmentClass,
     pub runtime_kind: RuntimeKind,
     pub release_id: ReleaseId,
@@ -409,6 +410,9 @@ pub struct EnvironmentEndpoint {
     pub protocol: EndpointProtocol,
     pub revision: Revision,
     pub health: EndpointHealth,
+    /// SHA-256 of the OpenSSH host-key fingerprint string observed by the
+    /// runtime executor. Required for SSH and absent for non-SSH endpoints.
+    pub ssh_host_key_identity_sha256: Option<crate::Sha256Digest>,
     pub observed_at: UtcTimestamp,
 }
 
@@ -436,6 +440,7 @@ pub enum EndpointHealth {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EnvironmentInstance {
     pub id: EnvironmentId,
+    pub display_label: String,
     pub course_id: crate::CourseId,
     pub owner_id: ActorId,
     pub class: EnvironmentClass,
@@ -461,7 +466,10 @@ pub struct EnvironmentInstance {
 impl EnvironmentInstance {
     /// Validates aggregate invariants without consulting provider state.
     pub fn validate(&self) -> Result<(), EnvironmentError> {
-        if self.release_version == 0
+        if self.display_label.trim().is_empty()
+            || self.display_label.chars().count() > 120
+            || self.display_label.chars().any(char::is_control)
+            || self.release_version == 0
             || self.provider_binding.trim().is_empty()
             || self.generation == 0
             || self.observed_generation > self.generation
@@ -569,7 +577,10 @@ impl EnvironmentInstance {
             && (self.observed_generation != self.generation
                 || self.endpoints.is_empty()
                 || self.endpoints.iter().any(|endpoint| {
-                    endpoint.health != EndpointHealth::Healthy || endpoint.revision != self.revision
+                    endpoint.health != EndpointHealth::Healthy
+                        || endpoint.revision != self.revision
+                        || (endpoint.protocol == EndpointProtocol::Ssh)
+                            != endpoint.ssh_host_key_identity_sha256.is_some()
                 }))
         {
             return Err(EnvironmentError::ReadyWithoutHealthyEndpoint);
@@ -615,7 +626,11 @@ impl EnvironmentInstance {
                 State::Stopped | State::Failed | State::Deleting
             ) | (
                 State::Stopped,
-                State::Provisioning | State::Expiring | State::Deleting | State::Failed
+                State::Provisioning
+                    | State::Ready
+                    | State::Expiring
+                    | State::Deleting
+                    | State::Failed
             ) | (
                 State::Updating,
                 State::Ready | State::Failed | State::Deleting
@@ -829,10 +844,11 @@ impl EnvironmentEndpointEligibility {
             || self.environment_revision != request.expected_revision
             || self.eligibility_expires_at <= now
             || requested != returned
-            || self
-                .endpoints
-                .iter()
-                .any(|endpoint| endpoint.health != EndpointHealth::Healthy)
+            || self.endpoints.iter().any(|endpoint| {
+                endpoint.health != EndpointHealth::Healthy
+                    || (endpoint.protocol == EndpointProtocol::Ssh)
+                        != endpoint.ssh_host_key_identity_sha256.is_some()
+            })
         {
             return Err(EnvironmentError::EndpointEligibilityInvalid);
         }
@@ -959,7 +975,11 @@ mod tests {
                         State::Stopped | State::Failed | State::Deleting
                     ) | (
                         State::Stopped,
-                        State::Provisioning | State::Expiring | State::Deleting | State::Failed
+                        State::Provisioning
+                            | State::Ready
+                            | State::Expiring
+                            | State::Deleting
+                            | State::Failed
                     ) | (
                         State::Updating,
                         State::Ready | State::Failed | State::Deleting

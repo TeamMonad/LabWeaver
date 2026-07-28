@@ -14,7 +14,8 @@ the root disk and SSH host identity, while reset is the only operation allowed
 to replace them.
 
 The Environment service owns lifecycle state and the sanitized VM observation.
-The deployment-owned KubeVirt executor owns Kubernetes/CDI API calls. Access
+The deployment-owned `kubevirt-executor` process owns Kubernetes/CDI API calls
+under a KubeVirt-specific ServiceAccount. Access
 owns grants and the Gateway connection boundary. No component may infer another
 owner's authoritative state from object existence or message order.
 
@@ -24,15 +25,16 @@ owner's authoritative state from object existence or message order.
 binding, `StorageClass`, CDI `DataSource`, OpenSSH Gateway identity, locked guest
 user, public user CA and active release policy/trust identity. Startup rejects
 missing, mixed or wildcard bindings. A release is usable only when its VM
-`ArtifactRef`, SHA-256, format, provider and storage binding match the approved
-`EnvironmentSpec`; signature, policy, freshness and withdrawal checks are
-reapplied before every operation that can create or expose a running VM.
+base-disk binding, immutable OCI source digest, disk SHA-256, capacity, format,
+provider and storage binding match the approved `EnvironmentSpec` and reviewed
+deployment lock. Approval trust revision and withdrawal checks are reapplied
+before every operation that can create or expose a running VM.
 
 The provider deterministically emits one namespace with a cleanup finalizer,
 quota, default-deny policy, Gateway-only SSH ingress policy, fixed cloud-init
 Secret, CDI `DataVolume`, KubeVirt `VirtualMachine` and ClusterIP SSH Service.
-The plan carries the immutable base-disk `ArtifactRef`, expected SHA-256 and
-plan SHA-256. It never emits NodePort, LoadBalancer, Ingress, VNC, a private key,
+The plan carries the immutable base-disk identity, expected SHA-256 and plan
+SHA-256. It never emits NodePort, LoadBalancer, Ingress, VNC, a private key,
 `authorized_keys`, user-supplied shell or arbitrary cloud-init content.
 
 VM v1 admits exactly one approved `ssh:22` entry. Cloud-init is stored under
@@ -49,9 +51,10 @@ provider step, environment generation, attempt, action, deterministic request
 ID and deadline. The executor must persist the highest accepted fence per
 environment, return the exact prior result for an exact request replay, reject
 older or payload-conflicting requests, and persist a namespace deletion
-tombstone before reporting cleanup. Server-side apply uses deterministic field
+tombstone before reporting cleanup. The implementation uses a typed, allowlisted
+HTTPS client and never invokes `kubectl` or accepts a command string. Server-side apply uses deterministic field
 ownership and names; it must verify the CDI source/PVC corresponds to the exact
-base-disk object version and SHA-256 rather than trusting a mutable name or
+base-disk source digest and SHA-256 rather than trusting a mutable name or
 annotation.
 
 `Ready` requires the current environment generation, a current observed VM
@@ -108,8 +111,10 @@ a Ready endpoint.
 
 ## Compatibility and migration
 
-Migration `environment/0005_kubevirt_runtime_observations.sql` is additive and
-forward-only. It must be applied before enabling a KubeVirt provider binding.
+The destructive reset applies `environment/0001_sprint2_baseline.sql` before
+enabling a KubeVirt provider binding. Observation identity and executor fences
+are part of that single baseline; no upgrade compatibility is promised for
+pre-reset development data.
 Existing remote and Container bindings retain their behavior, and provider-
 specific fields are rejected on the wrong kind.
 

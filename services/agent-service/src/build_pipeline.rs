@@ -10,13 +10,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use contracts::events::AgentBuildRequestedV2;
-use contracts::supply_chain::{
-    ImageArtifact, ImagePolicyEvaluation, SigstoreEvidence, VulnerabilitySummary,
-};
-use contracts::{
-    ArtifactRef, BuildRequestId, ImageArtifactId, PolicyId, Revision, Sha256Digest, UtcTimestamp,
-};
+use contracts::events::AgentBuildRequested;
+use contracts::supply_chain::{ImageArtifact, ImagePolicyEvaluation, VulnerabilitySummary};
+use contracts::{BuildRequestId, ImageArtifactId, PolicyId, Revision, Sha256Digest, UtcTimestamp};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use uuid::Uuid;
@@ -88,7 +84,6 @@ pub enum BuildProviderStage {
     EnsurePrivateProject,
     Build,
     Scan,
-    Sign,
     Publish,
     Cleanup,
 }
@@ -99,7 +94,6 @@ impl BuildProviderStage {
             Self::EnsurePrivateProject => "ensure_private_project",
             Self::Build => "build",
             Self::Scan => "scan",
-            Self::Sign => "sign",
             Self::Publish => "publish",
             Self::Cleanup => "cleanup",
         }
@@ -124,16 +118,12 @@ pub struct BuildProviderRequestContext {
 pub struct BuildPipelinePolicy {
     pub builder_binding: String,
     pub scanner_binding: String,
-    pub signer_binding: String,
     pub registry_binding: String,
     pub policy_id: PolicyId,
     pub policy_revision: Revision,
     pub scanner_name: String,
     pub scanner_version: String,
     pub scanner_database_sha256: Sha256Digest,
-    pub trust_bundle_sha256: Sha256Digest,
-    pub expected_fulcio_issuer: String,
-    pub expected_certificate_subject: String,
     pub registry_robot_name: String,
     pub evidence_ttl_milliseconds: u64,
     pub stage_timeout: Duration,
@@ -144,7 +134,6 @@ impl BuildPipelinePolicy {
         let bindings = [
             self.builder_binding.as_str(),
             self.scanner_binding.as_str(),
-            self.signer_binding.as_str(),
             self.registry_binding.as_str(),
         ];
         if bindings.iter().any(|binding| {
@@ -154,9 +143,6 @@ impl BuildPipelinePolicy {
         }) || self.scanner_name.trim().is_empty()
             || self.scanner_version.trim().is_empty()
             || self.scanner_database_sha256 == Sha256Digest::of_bytes(&[])
-            || self.trust_bundle_sha256 == Sha256Digest::of_bytes(&[])
-            || self.expected_fulcio_issuer.trim().is_empty()
-            || self.expected_certificate_subject.trim().is_empty()
             || self.registry_robot_name.trim().is_empty()
             || !self
                 .registry_robot_name
@@ -185,8 +171,6 @@ pub struct BuiltCandidate {
     pub build_identity: BuildIdentity,
     pub repository: String,
     pub digest: String,
-    pub sbom: ArtifactRef,
-    pub provenance: ArtifactRef,
 }
 
 /// Non-secret proof that the exact per-course Harbor project is private and usable.
@@ -219,7 +203,6 @@ pub struct ScanEvidence {
 pub struct PublishedImage {
     pub build_identity: BuildIdentity,
     pub digest: String,
-    pub immutable_tag: String,
 }
 
 /// Complete result persisted by the Agent authority only after every gate passes.
@@ -237,20 +220,19 @@ pub struct BuildPipelineOutput {
 pub trait BuildSupplyChainProvider: Send + Sync {
     fn builder_binding(&self) -> &str;
     fn scanner_binding(&self) -> &str;
-    fn signer_binding(&self) -> &str;
     fn registry_binding(&self) -> &str;
 
     async fn ensure_private_project(
         &self,
         context: &BuildProviderRequestContext,
-        command: &AgentBuildRequestedV2,
+        command: &AgentBuildRequested,
         identity: BuildIdentity,
     ) -> Result<PrivateRegistryProject, BuildProviderFailure>;
 
     async fn build_candidate(
         &self,
         context: &BuildProviderRequestContext,
-        command: &AgentBuildRequestedV2,
+        command: &AgentBuildRequested,
         identity: BuildIdentity,
     ) -> Result<BuiltCandidate, BuildProviderFailure>;
 
@@ -259,12 +241,6 @@ pub trait BuildSupplyChainProvider: Send + Sync {
         context: &BuildProviderRequestContext,
         candidate: &BuiltCandidate,
     ) -> Result<ScanEvidence, BuildProviderFailure>;
-
-    async fn sign_and_verify(
-        &self,
-        context: &BuildProviderRequestContext,
-        candidate: &BuiltCandidate,
-    ) -> Result<SigstoreEvidence, BuildProviderFailure>;
 
     async fn publish_immutable(
         &self,
@@ -328,7 +304,6 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
         policy.validate()?;
         if provider.builder_binding() != policy.builder_binding
             || provider.scanner_binding() != policy.scanner_binding
-            || provider.signer_binding() != policy.signer_binding
             || provider.registry_binding() != policy.registry_binding
         {
             return Err(BuildPipelineError::new(
@@ -343,7 +318,7 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
     /// Executes a complete candidate build. Any failure after admission invokes cleanup.
     pub async fn execute(
         &self,
-        command: &AgentBuildRequestedV2,
+        command: &AgentBuildRequested,
         started_at: UtcTimestamp,
         fence: BuildExecutionFence,
         cancellation: &BuildCancellation,
@@ -393,7 +368,7 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
     )]
     async fn execute_inner(
         &self,
-        command: &AgentBuildRequestedV2,
+        command: &AgentBuildRequested,
         started_at: UtcTimestamp,
         fence: BuildExecutionFence,
         cancellation: &BuildCancellation,
@@ -429,11 +404,7 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
             || project.repository_prefix != expected_repository_prefix
             || !project.private
             || project.storage_quota_bytes == 0
-            || project.robot_subject
-                != format!(
-                    "robot$course-{}+{}",
-                    command.request.course_id, self.policy.registry_robot_name
-                )
+            || project.robot_subject.trim().is_empty()
         {
             return Err(self
                 .cleanup(
@@ -464,8 +435,6 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
             || candidate.build_identity != identity
             || candidate.repository != command.request.output_repository
             || validate_digest(&candidate.digest).is_err()
-            || !valid_artifact_ref(&candidate.sbom)
-            || !valid_artifact_ref(&candidate.provenance)
         {
             return Err(self
                 .cleanup(
@@ -516,49 +485,6 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
                 )
                 .await);
         }
-        let sign_context = fence.request_context(command.request.id, BuildProviderStage::Sign);
-        let signature = match self
-            .stage(
-                cancellation,
-                self.provider.sign_and_verify(&sign_context, &candidate),
-            )
-            .await
-        {
-            Ok(signature) => signature,
-            Err(error) => {
-                return Err(self
-                    .cleanup(command.request.id, identity, fence, error)
-                    .await);
-            }
-        };
-        if signature.trust_bundle_sha256 != self.policy.trust_bundle_sha256
-            || signature.fulcio_issuer != self.policy.expected_fulcio_issuer
-            || signature.certificate_subject != self.policy.expected_certificate_subject
-            || signature.subject_digest
-                != validate_digest(&candidate.digest).map_err(|_| {
-                    BuildPipelineError::new(BuildFailureCode::BuildIdentityMismatch, false, true)
-                })?
-            || signature.certificate_sha256 == Sha256Digest::of_bytes(&[])
-            || signature.signature_sha256 == Sha256Digest::of_bytes(&[])
-            || signature.rekor_log_id.trim().is_empty()
-            || signature.ct_log_id.trim().is_empty()
-            || signature.rekor_inclusion_proof_sha256 == Sha256Digest::of_bytes(&[])
-            || signature.sct_sha256 == Sha256Digest::of_bytes(&[])
-            || !evidence_is_within_build(
-                signature.verified_at,
-                started_at,
-                command.request.max_duration_milliseconds,
-            )
-        {
-            return Err(self
-                .cleanup(
-                    command.request.id,
-                    identity,
-                    fence,
-                    BuildPipelineError::new(BuildFailureCode::SignatureInvalid, false, true),
-                )
-                .await);
-        }
         let publish_context =
             fence.request_context(command.request.id, BuildProviderStage::Publish);
         let published = match self
@@ -576,11 +502,7 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
                     .await);
             }
         };
-        if published.build_identity != identity
-            || published.digest != candidate.digest
-            || published.immutable_tag.trim().is_empty()
-            || published.immutable_tag.eq_ignore_ascii_case("latest")
-        {
+        if published.build_identity != identity || published.digest != candidate.digest {
             return Err(self
                 .cleanup(
                     command.request.id,
@@ -594,24 +516,18 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
                 )
                 .await);
         }
-        let evidence_verified_at = signature.verified_at;
         let output = (|| {
             let artifact_id = ImageArtifactId::new();
             let artifact = ImageArtifact::Container {
                 id: artifact_id,
                 build_request_id: command.request.id,
                 repository: candidate.repository,
-                immutable_tag: published.immutable_tag,
                 digest: candidate.digest,
-                sbom: candidate.sbom,
-                provenance: candidate.provenance,
-                signature,
             };
             artifact.validate().map_err(|_| {
                 BuildPipelineError::new(BuildFailureCode::ArtifactInvalid, false, true)
             })?;
-            let valid_until =
-                add_milliseconds(evidence_verified_at, self.policy.evidence_ttl_milliseconds)?;
+            let valid_until = add_milliseconds(started_at, self.policy.evidence_ttl_milliseconds)?;
             let policy_evaluation = ImagePolicyEvaluation {
                 artifact_id,
                 artifact_sha256: artifact.content_sha256().map_err(|_| {
@@ -623,12 +539,7 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
                 scanner_version: scan.scanner_version,
                 scanner_database_sha256: scan.scanner_database_sha256,
                 vulnerabilities: scan.vulnerabilities,
-                trust_bundle_sha256: self.policy.trust_bundle_sha256,
-                expected_fulcio_issuer: self.policy.expected_fulcio_issuer.clone(),
-                expected_certificate_subject: self.policy.expected_certificate_subject.clone(),
-                require_rekor_inclusion: true,
-                require_ct_sct: true,
-                evaluated_at: evidence_verified_at,
+                evaluated_at: started_at,
                 max_evidence_age_milliseconds: self.policy.evidence_ttl_milliseconds,
                 valid_until,
                 passed: true,
@@ -645,7 +556,11 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
             })
         })();
         match output {
-            Ok(output) => Ok(output),
+            Ok(output) => {
+                self.cleanup_success(command.request.id, identity, fence)
+                    .await?;
+                Ok(output)
+            }
             Err(error) => Err(self
                 .cleanup(command.request.id, identity, fence, error)
                 .await),
@@ -708,6 +623,29 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
             }
         }
     }
+
+    async fn cleanup_success(
+        &self,
+        build_request_id: BuildRequestId,
+        identity: BuildIdentity,
+        fence: BuildExecutionFence,
+    ) -> Result<(), BuildPipelineError> {
+        let context = fence.request_context(build_request_id, BuildProviderStage::Cleanup);
+        match tokio::time::timeout(
+            self.policy.stage_timeout,
+            self.provider
+                .cleanup_candidate(&context, build_request_id, identity),
+        )
+        .await
+        {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) | Err(_) => Err(BuildPipelineError::new(
+                BuildFailureCode::CleanupFailed,
+                false,
+                false,
+            )),
+        }
+    }
 }
 
 fn validate_digest(value: &str) -> Result<Sha256Digest, BuildPipelineError> {
@@ -721,15 +659,19 @@ fn validate_digest(value: &str) -> Result<Sha256Digest, BuildPipelineError> {
 }
 
 fn expected_course_repository_prefix(
-    command: &AgentBuildRequestedV2,
+    command: &AgentBuildRequested,
 ) -> Result<String, BuildPipelineError> {
     let mut parts = command.request.output_repository.split('/');
     let registry = parts.next().unwrap_or_default();
     let project = parts.next().unwrap_or_default();
     let repository = parts.next().unwrap_or_default();
     if registry.is_empty()
-        || project != format!("course-{}", command.request.course_id)
-        || repository != command.request.candidate_id.to_string()
+        || project.is_empty()
+        || repository
+            != format!(
+                "course-{}-{}",
+                command.request.course_id, command.request.candidate_id
+            )
         || parts.next().is_some()
     {
         return Err(BuildPipelineError::new(
@@ -739,18 +681,6 @@ fn expected_course_repository_prefix(
         ));
     }
     Ok(format!("{registry}/{project}"))
-}
-
-fn valid_artifact_ref(artifact: &ArtifactRef) -> bool {
-    artifact.size_bytes > 0
-        && artifact.sha256 != Sha256Digest::of_bytes(&[])
-        && !artifact.store_binding.trim().is_empty()
-        && !artifact.object_version.trim().is_empty()
-        && !artifact.media_type.trim().is_empty()
-        && !artifact
-            .store_binding
-            .bytes()
-            .any(|byte| byte.is_ascii_whitespace())
 }
 
 fn add_milliseconds(
@@ -765,17 +695,6 @@ fn add_milliseconds(
         .ok_or_else(|| BuildPipelineError::new(BuildFailureCode::ClockInvalid, false, false))?;
     UtcTimestamp::from_utc(value)
         .map_err(|_| BuildPipelineError::new(BuildFailureCode::ClockInvalid, false, false))
-}
-
-fn evidence_is_within_build(
-    verified_at: UtcTimestamp,
-    started_at: UtcTimestamp,
-    maximum_duration_milliseconds: u64,
-) -> bool {
-    let elapsed = (verified_at.get() - started_at.get()).whole_milliseconds();
-    elapsed >= 0
-        && u128::try_from(elapsed)
-            .is_ok_and(|elapsed| elapsed <= u128::from(maximum_duration_milliseconds))
 }
 
 /// Provider transport failure without raw backend text.
@@ -840,7 +759,6 @@ pub enum BuildFailureCode {
     BuildIdentityMismatch,
     ScanIdentityMismatch,
     CriticalVulnerability,
-    SignatureInvalid,
     PublicationIdentityMismatch,
     ArtifactInvalid,
     PolicyEvaluationInvalid,
@@ -871,7 +789,6 @@ impl BuildFailureCode {
             Self::BuildIdentityMismatch => "LW_AGENT_BUILD_IDENTITY_MISMATCH",
             Self::ScanIdentityMismatch => "LW_AGENT_BUILD_SCAN_IDENTITY_MISMATCH",
             Self::CriticalVulnerability => "LW_AGENT_BUILD_CRITICAL_VULNERABILITY",
-            Self::SignatureInvalid => "LW_AGENT_BUILD_SIGNATURE_INVALID",
             Self::PublicationIdentityMismatch => "LW_AGENT_BUILD_PUBLICATION_IDENTITY_MISMATCH",
             Self::ArtifactInvalid => "LW_AGENT_BUILD_ARTIFACT_INVALID",
             Self::PolicyEvaluationInvalid => "LW_AGENT_BUILD_POLICY_EVALUATION_INVALID",

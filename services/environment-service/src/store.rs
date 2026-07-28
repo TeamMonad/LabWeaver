@@ -9,7 +9,7 @@ use contracts::environment::{
 use contracts::events::{
     CloudEvent, EVENT_CONTRACTS, EnvironmentEvent, EventContract, SPEC_VERSION, subjects,
 };
-use contracts::http::{IdempotencyKey, OperationAccepted};
+use contracts::http::{EnvironmentOperationAccepted, IdempotencyKey};
 use contracts::{
     CourseId, EnvironmentId, EventId, OperationId, Revision, Sequence, Sha256Digest, UtcTimestamp,
 };
@@ -32,6 +32,15 @@ pub struct LeasedEnvironment {
     lease_token: Uuid,
 }
 
+/// One actor-scoped inventory record with database and public-stream identity.
+#[derive(Clone, Debug)]
+pub struct StoredEnvironmentInventory {
+    pub instance: EnvironmentInstance,
+    pub created_at: UtcTimestamp,
+    pub updated_at: UtcTimestamp,
+    pub stream_sequence: contracts::StreamSequence,
+}
+
 /// Immutable delivery metadata for one lifecycle command received from a durable consumer.
 #[derive(Clone, Debug)]
 pub struct InboundLifecycleCommand {
@@ -49,7 +58,7 @@ pub struct InboundLifecycleCommand {
 /// Durable Inbox decision and, only for the next event, its atomic lifecycle result.
 #[derive(Clone, Debug, PartialEq)]
 pub enum InboundCommandDecision {
-    Applied(OperationAccepted),
+    Applied(EnvironmentOperationAccepted),
     Duplicate,
     Stale,
     Gap,
@@ -81,7 +90,7 @@ impl PgEnvironmentStore {
         &self,
         idempotency_key: &str,
         instance: &EnvironmentInstance,
-    ) -> Result<OperationAccepted, EnvironmentStoreError> {
+    ) -> Result<EnvironmentOperationAccepted, EnvironmentStoreError> {
         let mut transaction = self.pool.begin().await?;
         let accepted = create_in_transaction(&mut transaction, idempotency_key, instance).await?;
         transaction.commit().await?;
@@ -93,7 +102,7 @@ impl PgEnvironmentStore {
         &self,
         idempotency_key: &str,
         command: &LifecycleCommand,
-    ) -> Result<OperationAccepted, EnvironmentStoreError> {
+    ) -> Result<EnvironmentOperationAccepted, EnvironmentStoreError> {
         let mut transaction = self.pool.begin().await?;
         let accepted = accept_command_in_transaction(
             &mut transaction,
@@ -102,6 +111,28 @@ impl PgEnvironmentStore {
             None,
             None,
             None,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(accepted)
+    }
+
+    /// Accepts an authenticated public API command through the same transaction used by NATS.
+    pub async fn accept_api_command(
+        &self,
+        idempotency_key: &str,
+        command: &LifecycleCommand,
+        create: Option<&EnvironmentCreateSpec>,
+        course_id: CourseId,
+    ) -> Result<EnvironmentOperationAccepted, EnvironmentStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let accepted = accept_command_in_transaction(
+            &mut transaction,
+            idempotency_key,
+            command,
+            create,
+            None,
+            Some(course_id),
         )
         .await?;
         transaction.commit().await?;
@@ -363,13 +394,59 @@ impl PgEnvironmentStore {
             .map(|row| decode_contract(row.try_get("contract")?))
             .collect()
     }
+
+    /// Lists one actor's environments in one course at a stable database snapshot.
+    pub async fn list_owned(
+        &self,
+        course_id: CourseId,
+        owner_actor_id: contracts::ActorId,
+        limit: u16,
+    ) -> Result<(Vec<StoredEnvironmentInventory>, UtcTimestamp), EnvironmentStoreError> {
+        if !(1..=100).contains(&limit) {
+            return Err(EnvironmentStoreError::InvalidLimit);
+        }
+        let mut transaction = self.pool.begin().await?;
+        let snapshot_at = database_now(&mut transaction).await?;
+        let rows = sqlx::query(
+            "SELECT i.contract, \
+                    date_trunc('milliseconds',i.created_at) AS created_at, \
+                    date_trunc('milliseconds',i.updated_at) AS updated_at, \
+                    COALESCE(max(o.public_sequence),1) AS stream_sequence \
+             FROM environment.environment_instances i LEFT JOIN environment.outbox_events o ON o.aggregate_id=i.environment_id \
+             WHERE i.course_id=$1 AND i.owner_actor_id=$2 \
+             GROUP BY i.environment_id,i.contract,i.created_at,i.updated_at \
+             ORDER BY i.created_at DESC,i.environment_id DESC LIMIT $3",
+        )
+        .bind(course_id.as_uuid())
+        .bind(owner_actor_id.as_uuid())
+        .bind(i64::from(limit))
+        .fetch_all(&mut *transaction)
+        .await?;
+        let records = rows
+            .into_iter()
+            .map(|row| {
+                let sequence: i64 = row.try_get("stream_sequence")?;
+                Ok(StoredEnvironmentInventory {
+                    instance: decode_contract(row.try_get("contract")?)?,
+                    created_at: UtcTimestamp::from_utc(row.try_get("created_at")?)?,
+                    updated_at: UtcTimestamp::from_utc(row.try_get("updated_at")?)?,
+                    stream_sequence: contracts::StreamSequence(
+                        u64::try_from(sequence)
+                            .map_err(|_| EnvironmentStoreError::InvalidDatabaseIdentity)?,
+                    ),
+                })
+            })
+            .collect::<Result<Vec<_>, EnvironmentStoreError>>()?;
+        transaction.commit().await?;
+        Ok((records, snapshot_at))
+    }
 }
 
 async fn create_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     idempotency_key: &str,
     instance: &EnvironmentInstance,
-) -> Result<OperationAccepted, EnvironmentStoreError> {
+) -> Result<EnvironmentOperationAccepted, EnvironmentStoreError> {
     IdempotencyKey::parse(idempotency_key)
         .map_err(|_| EnvironmentStoreError::InvalidIdempotencyKey)?;
     instance.validate()?;
@@ -420,12 +497,14 @@ async fn create_in_transaction(
     }
     let result = sqlx::query(
         "INSERT INTO environment.environment_instances \
-         (environment_id, release_id, generation, observed_generation, desired_state, \
+         (environment_id, course_id, owner_actor_id, release_id, generation, observed_generation, desired_state, \
           observed_state, provider_binding, lease_id, capacity_binding, revision, \
           terminal_diagnostic, failed_phase, eligibility_expires_at, contract) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
     )
     .bind(instance.id.as_uuid())
+    .bind(instance.course_id.as_uuid())
+    .bind(instance.owner_id.as_uuid())
     .bind(instance.release_id.as_uuid())
     .bind(as_i64(instance.generation, "generation")?)
     .bind(as_i64(instance.observed_generation, "observed generation")?)
@@ -518,6 +597,7 @@ fn build_create_instance(
     };
     let instance = EnvironmentInstance {
         id: command.environment_id,
+        display_label: spec.display_label.clone(),
         course_id: spec.course_id,
         owner_id: spec.owner_actor_id,
         class: spec.class,
@@ -574,7 +654,7 @@ async fn accept_command_in_transaction(
     create: Option<&EnvironmentCreateSpec>,
     lease_authorization: Option<EnvironmentLeaseAuthorization>,
     course_id: Option<CourseId>,
-) -> Result<OperationAccepted, EnvironmentStoreError> {
+) -> Result<EnvironmentOperationAccepted, EnvironmentStoreError> {
     if command.kind == EnvironmentOperationKind::Create {
         let authority_now = database_now(transaction).await?;
         let instance = build_create_instance(
@@ -862,14 +942,15 @@ async fn database_now(
     UtcTimestamp::from_utc(value).map_err(Into::into)
 }
 
-fn accepted_response(instance: &EnvironmentInstance) -> OperationAccepted {
-    OperationAccepted {
+fn accepted_response(instance: &EnvironmentInstance) -> EnvironmentOperationAccepted {
+    EnvironmentOperationAccepted {
         operation_id: instance.operation.id,
         revision: instance.revision,
         status_url: format!(
             "/api/v1/environments/{}/operations/{}",
             instance.id, instance.operation.id
         ),
+        environment_id: instance.id,
     }
 }
 

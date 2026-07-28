@@ -35,24 +35,9 @@ jobs:
           ansible-playbook --syntax-check -i /tmp/labweaver-hosts.yml deploy/ansible/playbooks/site.yml
           ansible-playbook --syntax-check -i /tmp/labweaver-hosts.yml deploy/ansible/playbooks/95-harbor.yml
           ansible-playbook --syntax-check -i /tmp/labweaver-hosts.yml deploy/ansible/playbooks/90-verify.yml
-          ansible-playbook --syntax-check -i /tmp/labweaver-hosts.yml deploy/ansible/playbooks/96-private-sigstore.yml
-          for playbook in deploy/ansible/playbooks/{97-private-sigstore-backup,98-private-sigstore-restore,99-private-sigstore-rotate,100-private-sigstore-verify,101-private-sigstore-cleanup,102-private-sigstore-disaster-recovery}.yml; do
-            ansible-playbook --syntax-check -i /tmp/labweaver-hosts.yml "$playbook"
-          done
-      - name: Install checksum-pinned Helm
-        run: |
-          curl --fail --location --silent --show-error --output /tmp/helm.tgz https://get.helm.sh/helm-v3.18.4-linux-amd64.tar.gz
-          echo "f8180838c23d7c7d797b208861fecb591d9ce1690d8704ed1e4cb8e2add966c1  /tmp/helm.tgz" | sha256sum --check --strict
-          tar --extract --gzip --file /tmp/helm.tgz --directory /tmp linux-amd64/helm
-          install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
-          helm version --short | grep --fixed-strings 'v3.18.4'
-      - name: Verify pinned scaffold archive and render
-        run: |
-          curl --fail --location --silent --show-error --output /tmp/scaffold.tgz https://github.com/sigstore/helm-charts/releases/download/scaffold-0.6.111/scaffold-0.6.111.tgz
-          echo "317e725c98d34cb600aa5a80aed7e455672e5dab7f9d70aad874949314551b08  /tmp/scaffold.tgz" | sha256sum --check --strict
-          ansible localhost --connection local --module-name ansible.builtin.template --args 'src=deploy/ansible/roles/private_sigstore/templates/values.yml.j2 dest=/tmp/private-sigstore-values.yml' --extra-vars @tests/ansible/fixtures/private-sigstore-render-vars.yml
-          helm lint /tmp/scaffold.tgz --values /tmp/private-sigstore-values.yml
-          helm template private-sigstore /tmp/scaffold.tgz --namespace sigstore-system --values /tmp/private-sigstore-values.yml > /tmp/private-sigstore-render.yml
-          python tests/ansible/validate_sigstore_render.py /tmp/private-sigstore-render.yml
+          ansible-playbook --syntax-check -i /tmp/labweaver-hosts.yml deploy/ansible/playbooks/91-sprint2-admin-tools.yml
+          ansible-playbook --syntax-check -i /tmp/labweaver-hosts.yml deploy/ansible/playbooks/92-sprint2-foundation.yml
+          ansible-playbook --syntax-check -i /tmp/labweaver-hosts.yml deploy/ansible/playbooks/92-sprint2-buildkit.yml
+          ansible-playbook --syntax-check -i /tmp/labweaver-hosts.yml deploy/ansible/playbooks/93-sprint2-reset.yml
       - name: Run fictional Vault and storage-safety fixtures
         run: python -m unittest discover -s tests/ansible

@@ -139,6 +139,10 @@
     "context": {
       "$ref": "#/$defs/ArtifactRef"
     },
+    "contextObjectKey": {
+      "description": "Object-store key resolved by Control and bound to the immutable context reference.",
+      "type": "string"
+    },
     "courseId": {
       "$ref": "#/$defs/CourseId"
     },
@@ -182,6 +186,7 @@
     "approvalId",
     "builderBinding",
     "context",
+    "contextObjectKey",
     "dockerfilePath",
     "baseImageDigest",
     "outputRepository",

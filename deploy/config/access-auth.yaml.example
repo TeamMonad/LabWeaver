@@ -11,7 +11,7 @@ oidc:
   audience: "labweaver-api"
   redirect_uri: "https://portal.example.invalid/auth/callback"
   post_logout_redirect_uri: "https://portal.example.invalid/"
-  trusted_ca_file: ""
+  trusted_ca_file: "/etc/labweaver/secrets/oidc-ca.pem"
   role_claim_path: ["realm_access", "roles"]
   role_mappings:
     teacher: teacher
@@ -21,7 +21,7 @@ oidc:
   jwks_refresh_seconds: 600
   jwks_retry_seconds: 10
 browser:
-  bind_addr: "127.0.0.1:8080"
+  bind_addr: "0.0.0.0:8080"
   allowed_origins: ["https://portal.example.invalid"]
   session_ttl_seconds: 900
   session_idle_ttl_seconds: 300
@@ -32,27 +32,35 @@ browser:
   session_cookie_name: "__Host-labweaver_session"
   csrf_header_name: "X-CSRF-Token"
 secrets:
-  oidc_client_secret_file: ""
-  session_keyring_file: ""
-  active_session_key_id: ""
-  access_runtime_url_file: ""
+  oidc_client_secret_file: "/etc/labweaver/secrets/oidc-client-secret"
+  session_keyring_file: "/etc/labweaver/secrets/session-keyring.json"
+  active_session_key_id: "sprint2-primary"
+  access_runtime_url_file: "/etc/labweaver/secrets/database-url"
   file_bindings:
-    "secret://environment-owner-resolver/ca": "secrets/environment-owner-resolver-ca.pem"
-    "secret://access-service/owner-resolver-client-cert": "secrets/access-owner-resolver-client-cert.pem"
-    "secret://access-service/owner-resolver-client-key": "secrets/access-owner-resolver-client-key.pem"
+    "secret://environment-owner-resolver/ca": "/etc/labweaver/secrets/mtls-ca.pem"
+    "secret://access-service/owner-resolver-client-cert": "/etc/labweaver/secrets/tls.crt"
+    "secret://access-service/owner-resolver-client-key": "/etc/labweaver/secrets/tls.key"
+    "secret://control-gateway/ca": "/etc/labweaver/secrets/mtls-ca.pem"
+    "secret://access-service/control-client-cert": "/etc/labweaver/secrets/tls.crt"
+    "secret://access-service/control-client-key": "/etc/labweaver/secrets/tls.key"
+    "secret://evaluation-gateway/ca": "/etc/labweaver/secrets/mtls-ca.pem"
+    "secret://access-service/evaluation-client-cert": "/etc/labweaver/secrets/tls.crt"
+    "secret://access-service/evaluation-client-key": "/etc/labweaver/secrets/tls.key"
 internal_mtls:
-  bind_addr: "127.0.0.1:9443"
-  server_certificate_file: ""
-  server_key_file: ""
-  client_ca_file: ""
-  allowed_san_uris: ["spiffe://labweaver/gateway"]
+  bind_addr: "0.0.0.0:9443"
+  server_certificate_file: "/etc/labweaver/secrets/tls.crt"
+  server_key_file: "/etc/labweaver/secrets/tls.key"
+  client_ca_file: "/etc/labweaver/secrets/mtls-ca.pem"
+  allowed_san_uris:
+    - "spiffe://labweaver/control-service"
+    - "spiffe://labweaver/openssh-gateway"
   required_eku: "clientAuth"
 environment_owner_resolver:
   # Recommended production starting point: a 2 s call timeout, one bounded
   # retry after 100 ms, and a 5 s maximum Gateway decision cache horizon.
   # Deployments may tune these explicit values only within startup-validated
   # limits; no compiled fallback is used.
-  resolver_uri: "https://environment-owner-resolver.example.invalid:9444"
+  resolver_uri: "https://environment-service:9446"
   ca_certificate_locator: "secret://environment-owner-resolver/ca"
   client_certificate_locator: "secret://access-service/owner-resolver-client-cert"
   client_private_key_locator: "secret://access-service/owner-resolver-client-key"
@@ -61,9 +69,39 @@ environment_owner_resolver:
   max_retries: 1
   retry_backoff_milliseconds: 100
   decision_ttl_seconds: 5
+control_gateway:
+  base_uri: "https://control-service:9444/"
+  ca_certificate_locator: "secret://control-gateway/ca"
+  client_certificate_locator: "secret://access-service/control-client-cert"
+  client_private_key_locator: "secret://access-service/control-client-key"
+  allowed_server_sans: ["control-service"]
+  timeout_milliseconds: 5000
+  max_request_bytes: 1048576
+  max_response_bytes: 8388608
+environment_gateway:
+  base_uri: "https://environment-service:9446/"
+  ca_certificate_locator: "secret://control-gateway/ca"
+  client_certificate_locator: "secret://access-service/control-client-cert"
+  client_private_key_locator: "secret://access-service/control-client-key"
+  allowed_server_sans: ["environment-service"]
+  timeout_milliseconds: 5000
+  max_request_bytes: 1048576
+  max_response_bytes: 8388608
+evaluation_gateway:
+  base_uri: "https://evaluation-service:9447/"
+  ca_certificate_locator: "secret://evaluation-gateway/ca"
+  client_certificate_locator: "secret://access-service/evaluation-client-cert"
+  client_private_key_locator: "secret://access-service/evaluation-client-key"
+  allowed_server_sans: ["evaluation-service"]
+  timeout_milliseconds: 5000
+  max_request_bytes: 1048576
+  max_response_bytes: 8388608
 grants:
   gateway_san_uris:
-    - spiffe://labweaver/gateway
+    - spiffe://labweaver/openssh-gateway
+  public_ssh_gateway_hostname: demo.lab.lan
+  public_ssh_gateway_port: 2222
+  public_ssh_gateway_host_key_fingerprint: SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
   default_ttl_seconds: 1800
   max_ttl_seconds: 3600
   authorization_token_ttl_seconds: 30
@@ -75,8 +113,8 @@ grants:
   max_keys_per_actor: 10
   max_endpoints_per_grant: 16
 nats:
-  server: "tls://nats.example.invalid:4222"
-  ca_certificate_file: "secrets/nats-ca.pem"
-  client_certificate_file: "secrets/access-nats-client-cert.pem"
-  client_private_key_file: "secrets/access-nats-client-key.pem"
-  credentials_file: "secrets/access-nats.creds"
+  server: "tls://nats.labweaver-data.svc:4222"
+  ca_certificate_file: "/etc/labweaver/secrets/nats-ca.pem"
+  client_certificate_file: "/etc/labweaver/secrets/nats-client.crt"
+  client_private_key_file: "/etc/labweaver/secrets/nats-client.key"
+  credentials_file: "/etc/labweaver/secrets/nats.creds"

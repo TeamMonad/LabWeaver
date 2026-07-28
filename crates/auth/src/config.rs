@@ -55,6 +55,12 @@ pub struct AccessAuthFile {
     pub internal_mtls: MtlsFileConfig,
     /// Environment-authoritative owner resolver client configuration.
     pub environment_owner_resolver: OwnerResolverFileConfig,
+    /// Authenticated browser gateway for the Control public API.
+    pub control_gateway: ControlGatewayFileConfig,
+    /// Authenticated browser gateway for the Environment public API.
+    pub environment_gateway: ControlGatewayFileConfig,
+    /// Authenticated browser gateway for the freeze-only Evaluation API.
+    pub evaluation_gateway: ControlGatewayFileConfig,
     /// `AccessGrant`, worker, and one-time authorization limits.
     pub grants: GrantRuntimeFileConfig,
     /// Mandatory mTLS `JetStream` connection.
@@ -71,6 +77,9 @@ pub struct AccessAuthFile {
 #[serde(deny_unknown_fields)]
 pub struct GrantRuntimeFileConfig {
     pub gateway_san_uris: Vec<String>,
+    pub public_ssh_gateway_hostname: String,
+    pub public_ssh_gateway_port: u16,
+    pub public_ssh_gateway_host_key_fingerprint: String,
     pub default_ttl_seconds: u64,
     pub max_ttl_seconds: u64,
     pub authorization_token_ttl_seconds: u64,
@@ -189,6 +198,24 @@ pub struct OwnerResolverFileConfig {
     pub decision_ttl_seconds: u64,
 }
 
+/// Fail-closed mTLS forwarding boundary from the browser BFF to Control.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[allow(
+    missing_docs,
+    reason = "YAML keys are documented by deploy/config/access-auth.yaml.example"
+)]
+#[serde(deny_unknown_fields)]
+pub struct ControlGatewayFileConfig {
+    pub base_uri: String,
+    pub ca_certificate_locator: String,
+    pub client_certificate_locator: String,
+    pub client_private_key_locator: String,
+    pub allowed_server_sans: Vec<String>,
+    pub timeout_milliseconds: u64,
+    pub max_request_bytes: usize,
+    pub max_response_bytes: usize,
+}
+
 impl OwnerResolverFileConfig {
     /// Converts deployment YAML into the contract-owned resolver settings.
     #[must_use]
@@ -286,6 +313,9 @@ impl AccessAuthFile {
             || parsed.internal_mtls.required_eku != "clientAuth"
             || !(1..=5_000).contains(&parsed.environment_owner_resolver.retry_backoff_milliseconds)
             || !(1..=60).contains(&parsed.environment_owner_resolver.decision_ttl_seconds)
+            || !parsed.service_gateway_is_valid(&parsed.control_gateway)
+            || !parsed.service_gateway_is_valid(&parsed.environment_gateway)
+            || !parsed.service_gateway_is_valid(&parsed.evaluation_gateway)
             || !parsed.access_runtime_is_valid()
             || required_resolver_locators.iter().any(|locator| {
                 parsed
@@ -312,6 +342,24 @@ impl AccessAuthFile {
                 .collect::<BTreeSet<_>>()
                 .len()
                 == self.grants.gateway_san_uris.len()
+            && matches!(
+                url::Host::parse(&self.grants.public_ssh_gateway_hostname),
+                Ok(url::Host::Domain(hostname))
+                    if hostname == self.grants.public_ssh_gateway_hostname
+                        && hostname.contains('.')
+            )
+            && self.grants.public_ssh_gateway_port == 2222
+            && self.grants.public_ssh_gateway_host_key_fingerprint.len() == 50
+            && self
+                .grants
+                .public_ssh_gateway_host_key_fingerprint
+                .starts_with("SHA256:")
+            && self
+                .grants
+                .public_ssh_gateway_host_key_fingerprint
+                .bytes()
+                .skip(7)
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/'))
             && self.grants.default_ttl_seconds > 0
             && self.grants.default_ttl_seconds <= self.grants.max_ttl_seconds
             && self.grants.max_ttl_seconds == 3_600
@@ -334,13 +382,48 @@ impl AccessAuthFile {
             .all(|path| !invalid_secret_file_path(path))
     }
 
+    fn service_gateway_is_valid(&self, gateway: &ControlGatewayFileConfig) -> bool {
+        let Ok(uri) = Url::parse(&gateway.base_uri) else {
+            return false;
+        };
+        let locators = [
+            gateway.ca_certificate_locator.as_str(),
+            gateway.client_certificate_locator.as_str(),
+            gateway.client_private_key_locator.as_str(),
+        ];
+        uri.scheme() == "https"
+            && uri.host_str().is_some()
+            && uri.path() == "/"
+            && uri.query().is_none()
+            && uri.fragment().is_none()
+            && gateway
+                .allowed_server_sans
+                .iter()
+                .any(|san| Some(san.as_str()) == uri.host_str())
+            && (100..=30_000).contains(&gateway.timeout_milliseconds)
+            && (1..=16 * 1024 * 1024).contains(&gateway.max_request_bytes)
+            && (1..=32 * 1024 * 1024).contains(&gateway.max_response_bytes)
+            && locators.iter().all(|locator| {
+                self.secrets
+                    .file_bindings
+                    .get(*locator)
+                    .is_some_and(|path| !invalid_secret_file_path(path))
+            })
+    }
+
     fn insecure_mode_is_loopback_only(&self) -> bool {
         let browser_bind = self.browser.bind_addr.parse::<std::net::SocketAddr>();
         let internal_bind = self.internal_mtls.bind_addr.parse::<std::net::SocketAddr>();
         let resolver = Url::parse(&self.environment_owner_resolver.resolver_uri);
+        let control = Url::parse(&self.control_gateway.base_uri);
+        let environment = Url::parse(&self.environment_gateway.base_uri);
+        let evaluation = Url::parse(&self.evaluation_gateway.base_uri);
         browser_bind.is_ok_and(|address| address.ip().is_loopback())
             && internal_bind.is_ok_and(|address| address.ip().is_loopback())
             && resolver.is_ok_and(|url| url_host_is_loopback(&url))
+            && control.is_ok_and(|url| url_host_is_loopback(&url))
+            && environment.is_ok_and(|url| url_host_is_loopback(&url))
+            && evaluation.is_ok_and(|url| url_host_is_loopback(&url))
     }
 }
 
@@ -592,6 +675,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one complete deployment fixture exercises deny-unknown-fields parsing"
+    )]
     fn deployment_file_rejects_unpinned_browser_security_values() {
         let valid = r#"
 oidc:
@@ -626,6 +713,9 @@ secrets:
     "secret://environment-owner-resolver/ca": resolver-ca
     "secret://access-service/resolver-cert": resolver-cert
     "secret://access-service/resolver-key": resolver-key
+    "secret://control-gateway/ca": control-ca
+    "secret://access-service/control-client-cert": control-cert
+    "secret://access-service/control-client-key": control-key
 internal_mtls:
   bind_addr: 127.0.0.1:9443
   server_certificate_file: server-cert
@@ -643,8 +733,38 @@ environment_owner_resolver:
   max_retries: 1
   retry_backoff_milliseconds: 100
   decision_ttl_seconds: 5
+control_gateway:
+  base_uri: https://control-service.example.test:9444/
+  ca_certificate_locator: secret://control-gateway/ca
+  client_certificate_locator: secret://access-service/control-client-cert
+  client_private_key_locator: secret://access-service/control-client-key
+  allowed_server_sans: [control-service.example.test]
+  timeout_milliseconds: 5000
+  max_request_bytes: 1048576
+  max_response_bytes: 8388608
+environment_gateway:
+  base_uri: https://environment-service.example.test:9446/
+  ca_certificate_locator: secret://control-gateway/ca
+  client_certificate_locator: secret://access-service/control-client-cert
+  client_private_key_locator: secret://access-service/control-client-key
+  allowed_server_sans: [environment-service.example.test]
+  timeout_milliseconds: 5000
+  max_request_bytes: 1048576
+  max_response_bytes: 8388608
+evaluation_gateway:
+  base_uri: https://evaluation-service.example.test:9447/
+  ca_certificate_locator: secret://control-gateway/ca
+  client_certificate_locator: secret://access-service/control-client-cert
+  client_private_key_locator: secret://access-service/control-client-key
+  allowed_server_sans: [evaluation-service.example.test]
+  timeout_milliseconds: 5000
+  max_request_bytes: 1048576
+  max_response_bytes: 8388608
 grants:
   gateway_san_uris: [spiffe://labweaver/gateway]
+  public_ssh_gateway_hostname: demo.lab.lan
+  public_ssh_gateway_port: 2222
+  public_ssh_gateway_host_key_fingerprint: SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
   default_ttl_seconds: 1800
   max_ttl_seconds: 3600
   authorization_token_ttl_seconds: 30

@@ -9,6 +9,13 @@ Control and Agent read one reviewed YAML document from
 NATS credentials and private keys are file locators; secret values do not belong in YAML, logs,
 reports or Git.
 
+The Sprint 2 Claude Code worker has one deployment-owned provider binding: the reviewed ECNU
+Anthropic-compatible base URL from `agent-service-config/anthropic-base-url`, and the
+operator-provided `ECNU_API_KEY` mounted as
+`agent-service-secrets/anthropic-auth-token`. The env-cleared child receives these as
+`ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`. Missing or empty input blocks startup; the worker
+does not inherit an ambient provider credential and has no fallback endpoint.
+
 The deployment must provision these identities before either service starts:
 
 - Gateway client CA and exact URI SAN accepted by Control;
@@ -18,11 +25,10 @@ The deployment must provision these identities before either service starts:
 - JetStream stream and durable consumers named by configuration;
 - Control and Agent runtime database roles with only their own schema privileges.
 
-The reviewed Control configuration also pins the active image-policy ID/revision, private
-trust-bundle SHA-256, Fulcio issuer and workload certificate subject. Publication rejects evidence
-that differs from any of these values even when the artifact payload is otherwise well formed.
-Rotation therefore requires a reviewed configuration rollout and new authoritative evidence; no
-historical trust policy is selected implicitly.
+The reviewed Control configuration pins the active image-policy ID and revision.
+Publication accepts only an approved private Harbor repository, immutable digest
+and matching Trivy scanner/database identity and vulnerability gate. There is no
+signing trust-plane configuration in the Sprint 2 contract.
 
 Control publishes both Release publication and withdrawal facts from its PostgreSQL Outbox. The
 publisher uses the configured bounded ACK timeout and poll interval and marks `published_at` only
@@ -35,7 +41,9 @@ original upload declaration. Control separately computes the immutable completed
 hash after freezing every exact MinIO object version. This keeps the client-verifiable upload
 contract distinct from the server-owned object-version identity.
 
-Apply the additive Migration catalog through the controlled entry point before starting the new
+After the non-destructive retained-infrastructure inventory confirms that each
+domain has no business relations and an empty migration ledger, apply the Sprint
+2 baseline catalog through the controlled entry point before starting the new
 processes:
 
 ```sh
@@ -51,12 +59,10 @@ Startup never repairs an unknown schema.
 
 1. Stop admission of new Control mutations at the trusted Gateway.
 2. Stop new Agent dispatch claims, then allow bounded work to finish or request cancellation.
-3. Confirm committed Outbox rows and immutable packages, decisions, releases and withdrawals
-   remain present; do not delete or rewrite them.
-4. Roll back the application images while retaining all applied forward Migrations, including
-   Control `0003`, Agent `0004` and Environment `0003` from Issue #52.
-5. If a schema correction is required, ship a reviewed forward Migration. Do not edit a released
-   Migration or its catalog hash.
+3. Confirm immutable packages and the current baseline identity remain present.
+4. Roll back only to an image set verified against the same Sprint 2 baseline.
+5. After Sprint 2 publication, schema corrections use reviewed forward Migrations;
+   rollback never drops or rewrites retained infrastructure state.
 
 Rollback does not withdraw an EnvironmentTemplateRelease. A withdrawal is a separate append-only
 fact. A functional rollback to older material creates a higher release version referencing a
@@ -64,9 +70,7 @@ still-valid verified candidate and authoritative artifact evidence.
 
 ## Current production blocker
 
-Issue #48 deliberately does not build or verify images. Issue #52 now supplies the local v2
-command, Agent-owned authoritative `ImageArtifact`/`ImagePolicyEvaluation` projection and
-Container release path. Release creation still fails closed until that artifact is durably
-projected, and the deployment-owned BuildKit/Harbor/Trivy/Private Sigstore executor requires a
-connected same-build replay before the Container path can claim E3. Issue #53 remains required for
-the VM artifact path. Fixtures and static reports are not production publication evidence.
+The local v1 build and release path is implemented. Connected BuildKit, Harbor,
+Trivy, Container and KubeVirt replay under one deployment identity is still
+required before Sprint 2 can claim verified deployment. Fixtures and static
+reports are not production publication evidence.

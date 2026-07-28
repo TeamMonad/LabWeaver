@@ -11,6 +11,7 @@ async-nats = { version = "=0.45.0", default-features = false, features = ["ring"
 axum.workspace = true
 auth = { path = "../../crates/auth" }
 contracts = { path = "../../crates/contracts" }
+futures-util = "0.3.31"
 hyper-util.workspace = true
 hyper.workspace = true
 jsonwebtoken.workspace = true
@@ -38,5 +39,5 @@ uuid.workspace = true
 workspace = true
 
 [dev-dependencies]
-testcontainers = { version = "0.25.0", features = ["blocking", "properties-config"] }
+testcontainers = { version = "=0.25.0", features = ["blocking", "properties-config"] }
 testcontainers-modules = { version = "0.13.0", features = ["postgres"] }

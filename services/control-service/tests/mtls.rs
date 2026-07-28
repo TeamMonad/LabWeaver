@@ -87,10 +87,8 @@ async fn mtls_sans_rotation_and_outage_fail_closed_on_control_routes()
         ))
         .await?;
     sqlx::raw_sql(&format!(
-        "CREATE SCHEMA control; SET search_path TO control;\n{}\n{}\n{}",
-        include_str!("../../../migrations/control/0001_initial.sql"),
-        include_str!("../../../migrations/control/0002_control_plane.sql"),
-        include_str!("../../../migrations/control/0003_container_build_projections.sql")
+        "CREATE SCHEMA control; SET search_path TO control;\n{}",
+        include_str!("../../../migrations/control/0001_sprint2_baseline.sql")
     ))
     .execute(&pool)
     .await?;
@@ -469,19 +467,32 @@ fn config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
         trust_revision: Revision::new(1)?,
         image_policy_id: PolicyId::new(),
         image_policy_revision: Revision::new(1)?,
-        trust_bundle_sha256: Sha256Digest::of_bytes(b"trust-bundle"),
-        fulcio_issuer: "https://issuer.invalid".to_owned(),
-        certificate_subject: "spiffe://labweaver/image-builder".to_owned(),
         environment_schema_sha256: Sha256Digest::of_bytes(b"environment"),
         evaluation_schema_sha256: Sha256Digest::of_bytes(b"evaluation"),
         container_build: ContainerBuildPolicy {
             builder_binding: "buildkit-primary-v1".to_owned(),
-            output_repository_prefix: "harbor.internal".to_owned(),
+            output_repository_prefix: "harbor.internal/labweaver-system".to_owned(),
             dockerfile_path: "Dockerfile".to_owned(),
             network: BuildNetworkPolicy::DenyAll,
             max_duration_milliseconds: 600_000,
             max_cpu_millicores: 2_000,
             max_memory_bytes: 2_147_483_648,
+        },
+        virtual_machine_base: control_service::VirtualMachineBasePolicy {
+            provider_binding: "kubevirt-primary-v1".to_owned(),
+            storage_class_binding: "vm-rwo-primary-v1".to_owned(),
+            artifact_id: contracts::ImageArtifactId::new(),
+            base_disk: contracts::supply_chain::VirtualMachineBaseDisk {
+                binding: "ubuntu-24.04-v1".to_owned(),
+                source_registry_digest: concat!(
+                    "docker://quay.io/containerdisks/ubuntu@",
+                    "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
+                )
+                .to_owned(),
+                disk_sha256: Sha256Digest::of_bytes(b"vm-disk"),
+                capacity_bytes: 10_737_418_240,
+            },
+            format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
         },
     })
 }

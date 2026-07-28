@@ -7,6 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::diagnostic;
 use crate::evaluation::EvaluationSpec;
+use crate::supply_chain::VirtualMachineBaseDisk;
 use crate::{
     ActorId, AgentRunId, ApprovalId, ArtifactRef, CandidateId, CourseId, PolicyId,
     ProblemPackageId, RetentionSnapshot, Revision, Sha256Digest, UtcTimestamp,
@@ -245,6 +246,7 @@ pub struct ResourceRequirements {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NetworkPolicySpec {
+    AllowAll,
     DenyAll,
     Restricted { policy_binding: String },
 }
@@ -303,7 +305,7 @@ pub enum EnvironmentRuntimeSpec {
     },
     VirtualMachine {
         provider_binding: String,
-        base_disk: ArtifactRef,
+        base_disk: VirtualMachineBaseDisk,
         storage_class_binding: String,
         ssh_port: u16,
     },
@@ -444,6 +446,12 @@ impl EnvironmentSpec {
                 storage_class_binding,
                 ssh_port,
             } => {
+                if matches!(self.network, NetworkPolicySpec::AllowAll) {
+                    return Err(AuthoringError::InvalidEnvironmentSpec(
+                        "allow_all network policy is supported only by container runtimes"
+                            .to_owned(),
+                    ));
+                }
                 if provider_binding.trim().is_empty()
                     || storage_class_binding.trim().is_empty()
                     || *ssh_port != 22
@@ -456,7 +464,11 @@ impl EnvironmentSpec {
                         "VM requires provider/storage binding and SSH port 22".to_owned(),
                     ));
                 }
-                validate_artifact_ref(base_disk)?;
+                base_disk.validate().map_err(|_| {
+                    AuthoringError::InvalidEnvironmentSpec(
+                        "VM base disk binding must be immutable and complete".to_owned(),
+                    )
+                })?;
             }
         }
         Ok(())

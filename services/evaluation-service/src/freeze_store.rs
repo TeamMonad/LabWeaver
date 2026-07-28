@@ -7,7 +7,7 @@
 use std::str::FromStr;
 use std::time::Duration;
 
-use contracts::events::{CloudEvent, EVENT_CONTRACTS, SPEC_VERSION, SubmissionFrozenV2, subjects};
+use contracts::events::{CloudEvent, EVENT_CONTRACTS, SPEC_VERSION, SubmissionFrozen, subjects};
 use contracts::submission::FrozenSubmission;
 use contracts::{
     CourseId, EnvironmentId, EventId, FrozenSubmissionId, Revision, Sequence, Sha256Digest,
@@ -72,6 +72,35 @@ impl PgFreezeStore {
         UtcTimestamp::from_utc(value).map_err(|_| FreezeStoreError::ClockInvalid)
     }
 
+    /// Loads one completed immutable submission without exposing incomplete attempts.
+    /// Loads a completed immutable submission only for its owning actor.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NotFound` for absent, incomplete, or differently owned submissions and a stable
+    /// persistence error when the authority cannot be queried.
+    pub async fn load_completed(
+        &self,
+        frozen_submission_id: FrozenSubmissionId,
+        actor_id: contracts::ActorId,
+    ) -> Result<FrozenSubmission, FreezeStoreError> {
+        let value: Value = sqlx::query_scalar(
+            "SELECT contract FROM evaluation.frozen_submissions \
+             WHERE frozen_submission_id=$1 AND contract->>'actorId'=$2",
+        )
+        .bind(frozen_submission_id.as_uuid())
+        .bind(actor_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(FreezeStoreError::NotFound)?;
+        let submission: FrozenSubmission =
+            serde_json::from_value(value).map_err(|_| FreezeStoreError::ContractInvalid)?;
+        submission
+            .validate()
+            .map_err(|_| FreezeStoreError::ContractInvalid)?;
+        Ok(submission)
+    }
+
     /// Acquires a new attempt, reclaims an expired attempt, or returns the durable replay.
     ///
     /// # Errors
@@ -84,6 +113,7 @@ impl PgFreezeStore {
     )]
     pub async fn begin(
         &self,
+        frozen_submission_id: FrozenSubmissionId,
         course_id: CourseId,
         environment_id: EnvironmentId,
         idempotency_key: &str,
@@ -104,7 +134,6 @@ impl PgFreezeStore {
                 .fetch_one(&mut *transaction)
                 .await?;
         let lease_expires_at = authority_now + time::Duration::seconds(lease_seconds);
-        let frozen_submission_id = FrozenSubmissionId::new();
         let inserted = sqlx::query(
             "INSERT INTO evaluation.submission_freeze_requests \
              (frozen_submission_id,course_id,environment_id,idempotency_key,request_sha256,source_identity_sha256,state,current_attempt) \
@@ -157,11 +186,25 @@ impl PgFreezeStore {
             || request.try_get::<String, _>("source_identity_sha256")?
                 != source_identity_sha256.to_string()
         {
+            tracing::error!(
+                event = "evaluation.freeze.idempotency_conflict",
+                frozen_submission_id = %frozen_submission_id,
+                environment_id = %environment_id,
+                persisted_environment_id = %request.try_get::<Uuid, _>("environment_id")?,
+                persisted_request_sha256 = %request.try_get::<String, _>("request_sha256")?,
+                request_sha256 = %request_sha256,
+                persisted_source_identity_sha256 = %request.try_get::<String, _>("source_identity_sha256")?,
+                source_identity_sha256 = %source_identity_sha256,
+            );
             transaction.rollback().await?;
             return Ok(BeginFreeze::Conflict);
         }
         let persisted_id =
             parse_id::<FrozenSubmissionId>(request.try_get::<Uuid, _>("frozen_submission_id")?)?;
+        if persisted_id != frozen_submission_id {
+            transaction.rollback().await?;
+            return Ok(BeginFreeze::Conflict);
+        }
         let state: String = request.try_get("state")?;
         if state == "completed" {
             let contract: Value = request.try_get("contract")?;
@@ -271,7 +314,7 @@ impl PgFreezeStore {
             .await
     }
 
-    /// Atomically writes the authoritative result and matching v2 Outbox event.
+    /// Atomically writes the authoritative result and matching v1 Outbox event.
     ///
     /// # Errors
     ///
@@ -465,9 +508,9 @@ async fn enqueue_frozen_event(
     let contract = EVENT_CONTRACTS
         .iter()
         .copied()
-        .find(|contract| contract.subject == subjects::SUBMISSION_FROZEN_V2)
+        .find(|contract| contract.subject == subjects::SUBMISSION_FROZEN)
         .ok_or(FreezeStoreError::ContractInvalid)?;
-    let data = SubmissionFrozenV2 {
+    let data = SubmissionFrozen {
         submission: submission.clone(),
         source_identity_sha256: lease.source_identity_sha256,
     };
@@ -478,14 +521,17 @@ async fn enqueue_frozen_event(
         specversion: SPEC_VERSION.to_owned(),
         id: event_id,
         source: contract.source().to_owned(),
-        event_type: subjects::SUBMISSION_FROZEN_V2.to_owned(),
-        subject: subjects::SUBMISSION_FROZEN_V2.to_owned(),
+        event_type: subjects::SUBMISSION_FROZEN.to_owned(),
+        subject: subjects::SUBMISSION_FROZEN.to_owned(),
         time: submission.frozen_at,
         datacontenttype: "application/json".to_owned(),
         dataschema: contract.data_schema(),
         course_id: submission.course_id,
-        aggregate_revision: Revision::new(1).map_err(|_| FreezeStoreError::ContractInvalid)?,
-        aggregate_sequence: Sequence(1),
+        // The request event is the first event for this aggregate.  The frozen
+        // result must advance the same stream instead of colliding with the
+        // outbox `(aggregate_id, aggregate_sequence)` uniqueness fence.
+        aggregate_revision: Revision::new(2).map_err(|_| FreezeStoreError::ContractInvalid)?,
+        aggregate_sequence: Sequence(2),
         trace_id: trace_id.to_owned(),
         data,
     };
@@ -499,10 +545,10 @@ async fn enqueue_frozen_event(
         transaction,
         Domain::Evaluation,
         event_id.as_uuid(),
-        subjects::SUBMISSION_FROZEN_V2,
-        subjects::SUBMISSION_FROZEN_V2,
+        subjects::SUBMISSION_FROZEN,
+        subjects::SUBMISSION_FROZEN,
         submission.id.as_uuid(),
-        1,
+        2,
         &payload,
         payload_sha256,
     )
@@ -583,6 +629,8 @@ pub enum FreezeStoreError {
     DatabaseBoundary,
     #[error("LW_COLLECT_CONTRACT_INVALID")]
     ContractInvalid,
+    #[error("LW_COLLECT_SUBMISSION_NOT_FOUND")]
+    NotFound,
     #[error("LW_COLLECT_IDENTITY_MISMATCH")]
     IdentityMismatch,
     #[error("LW_COLLECT_FENCE_LOST")]
@@ -613,6 +661,7 @@ impl FreezeStoreError {
         match self {
             Self::Database(_) | Self::DatabaseBoundary => "LW_COLLECT_DATABASE_FAILED",
             Self::ContractInvalid => "LW_COLLECT_CONTRACT_INVALID",
+            Self::NotFound => "LW_COLLECT_SUBMISSION_NOT_FOUND",
             Self::IdentityMismatch => "LW_COLLECT_IDENTITY_MISMATCH",
             Self::FenceLost => "LW_COLLECT_FENCE_LOST",
             Self::LeaseInvalid => "LW_COLLECT_LEASE_INVALID",

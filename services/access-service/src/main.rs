@@ -1,6 +1,7 @@
 //! Access Service browser BFF entry points.
 
 mod grants;
+mod proxy;
 
 use std::{collections::BTreeSet, net::SocketAddr, str::FromStr, sync::Arc};
 
@@ -47,6 +48,10 @@ struct AppState {
     pool: PgPool,
     key_ring: KeyRing,
     owner_resolver: EnvironmentOwnerResolverClient,
+    control_proxy: proxy::ControlGatewayProxy,
+    environment_proxy: proxy::ControlGatewayProxy,
+    evaluation_proxy: proxy::ControlGatewayProxy,
+    runtime_proxy: proxy::RuntimeGatewayProxy,
     metrics: telemetry::PrometheusHandle,
     nats: async_nats::Client,
 }
@@ -66,7 +71,25 @@ async fn main() -> Result<(), StartupError> {
     let internal_bind = SocketAddr::from_str(&deployment.internal_mtls.bind_addr)
         .map_err(|_| StartupError::Config)?;
     let state = build_app_state(deployment, metrics).await?;
-    let router = Router::new()
+    let router = browser_router(Arc::clone(&state));
+    let internal_router = internal_router(Arc::clone(&state));
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    let internal_listener = tokio::net::TcpListener::bind(internal_bind).await?;
+    let mtls = load_mtls_server_config(&state.deployment.internal_mtls)?;
+    tokio::select! {
+        result = axum::serve(listener, router) => result.map_err(StartupError::from)?,
+        result = serve_internal_mtls(internal_listener, internal_router, mtls) => result?,
+        result = auth_cleanup_loop(Arc::clone(&state)) => result?,
+        result = grants::activation_loop(Arc::clone(&state)) => result?,
+        result = grants::maintenance_loop(Arc::clone(&state)) => result?,
+        result = grants::outbox_loop(Arc::clone(&state)) => result?,
+        result = grants::environment_revocation_loop(Arc::clone(&state)) => result?,
+    }
+    Ok(())
+}
+
+fn browser_router(state: Arc<AppState>) -> Router {
+    Router::new()
         .route("/auth/login", get(login))
         .route("/auth/callback", get(callback))
         .route("/auth/backchannel-logout", post(backchannel_logout))
@@ -97,8 +120,79 @@ async fn main() -> Result<(), StartupError> {
             "/api/v1/access-grants/{grant_id}/revoke",
             post(grants::revoke_access_grant),
         )
-        .with_state(Arc::clone(&state));
-    let internal_router = Router::new()
+        .route(
+            "/api/v1/courses/{*control_path}",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/environments",
+            axum::routing::any(proxy::forward_environment),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/freeze",
+            post(proxy::forward_evaluation),
+        )
+        .route(
+            "/api/v1/frozen-submissions/{submission_id}",
+            get(proxy::forward_evaluation),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}",
+            axum::routing::any(proxy::forward_environment),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/start",
+            post(proxy::forward_environment),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/stop",
+            post(proxy::forward_environment),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/restart",
+            post(proxy::forward_environment),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/cancel",
+            post(proxy::forward_environment),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/recover",
+            post(proxy::forward_environment),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/reset",
+            post(proxy::forward_environment),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/retry",
+            post(proxy::forward_environment),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/endpoints",
+            get(proxy::forward_environment),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/operations",
+            get(proxy::forward_environment),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/operations/{operation_id}",
+            get(proxy::forward_environment),
+        )
+        .route(
+            "/connect/{endpoint_grant_id}/",
+            axum::routing::any(proxy::forward_runtime),
+        )
+        .route(
+            "/connect/{endpoint_grant_id}/{*runtime_path}",
+            axum::routing::any(proxy::forward_runtime),
+        )
+        .with_state(state)
+}
+
+fn internal_router(state: Arc<AppState>) -> Router {
+    Router::new()
         .route("/internal/v1/auth/decision", post(authorization_decision))
         .route("/internal/v1/metrics", get(metrics_endpoint))
         .route("/internal/v1/ssh/authorize", post(grants::authorize_ssh))
@@ -114,19 +208,7 @@ async fn main() -> Result<(), StartupError> {
             "/internal/v1/sessions/{session_id}/close",
             post(grants::close_gateway_session),
         )
-        .with_state(Arc::clone(&state));
-    let listener = tokio::net::TcpListener::bind(bind).await?;
-    let internal_listener = tokio::net::TcpListener::bind(internal_bind).await?;
-    let mtls = load_mtls_server_config(&state.deployment.internal_mtls)?;
-    tokio::select! {
-        result = axum::serve(listener, router) => result.map_err(StartupError::from)?,
-        result = serve_internal_mtls(internal_listener, internal_router, mtls) => result?,
-        result = auth_cleanup_loop(Arc::clone(&state)) => result?,
-        result = grants::activation_loop(Arc::clone(&state)) => result?,
-        result = grants::maintenance_loop(Arc::clone(&state)) => result?,
-        result = grants::outbox_loop(Arc::clone(&state)) => result?,
-    }
-    Ok(())
+        .with_state(state)
 }
 
 async fn build_app_state(
@@ -205,6 +287,10 @@ async fn build_app_state(
         ),
         deployment.transport_security,
     )?;
+    let control_proxy = build_control_proxy(&deployment)?;
+    let environment_proxy = build_service_proxy(&deployment, &deployment.environment_gateway)?;
+    let evaluation_proxy = build_service_proxy(&deployment, &deployment.evaluation_gateway)?;
+    let runtime_proxy = proxy::RuntimeGatewayProxy::new(&deployment.environment_gateway)?;
     let nats = grants::connect_nats(&deployment.nats).await?;
     Ok(Arc::new(AppState {
         config,
@@ -217,9 +303,35 @@ async fn build_app_state(
         pool,
         key_ring,
         owner_resolver,
+        control_proxy,
+        environment_proxy,
+        evaluation_proxy,
+        runtime_proxy,
         metrics,
         nats,
     }))
+}
+
+fn build_control_proxy(
+    deployment: &AccessAuthFile,
+) -> Result<proxy::ControlGatewayProxy, StartupError> {
+    build_service_proxy(deployment, &deployment.control_gateway)
+}
+
+fn build_service_proxy(
+    deployment: &AccessAuthFile,
+    config: &auth::ControlGatewayFileConfig,
+) -> Result<proxy::ControlGatewayProxy, StartupError> {
+    let ca = resolver_secret(deployment, &config.ca_certificate_locator)?;
+    let certificate = resolver_secret(deployment, &config.client_certificate_locator)?;
+    let key = resolver_secret(deployment, &config.client_private_key_locator)?;
+    Ok(proxy::ControlGatewayProxy::new(
+        config,
+        &ca,
+        &certificate,
+        &key,
+        deployment.transport_security,
+    )?)
 }
 
 async fn auth_cleanup_loop(state: Arc<AppState>) -> Result<(), StartupError> {
@@ -698,10 +810,10 @@ fn effective_session_scopes(
         {
             revision = Revision::new(revision.get().max(membership.revision.get()))
                 .map_err(|_| ApiError::internal("LW_AUTH_MEMBERSHIP_UNAVAILABLE"))?;
-            if let Some(member_expiry) = membership.expires_at
-                && member_expiry.get() < expiry.get()
-            {
-                expiry = member_expiry;
+            if let Some(member_expiry) = membership.expires_at {
+                if member_expiry.get() < expiry.get() {
+                    expiry = member_expiry;
+                }
             }
             scopes.push(AuthorizationScope::Course {
                 course_id: membership.course_id,
@@ -716,10 +828,10 @@ fn effective_session_scopes(
         {
             revision = Revision::new(revision.get().max(membership.revision.get()))
                 .map_err(|_| ApiError::internal("LW_AUTH_MEMBERSHIP_UNAVAILABLE"))?;
-            if let Some(member_expiry) = membership.expires_at
-                && member_expiry.get() < expiry.get()
-            {
-                expiry = member_expiry;
+            if let Some(member_expiry) = membership.expires_at {
+                if member_expiry.get() < expiry.get() {
+                    expiry = member_expiry;
+                }
             }
             scopes.push(AuthorizationScope::Project {
                 course_id: membership.course_id,
@@ -1099,6 +1211,8 @@ enum StartupError {
     Mtls(#[from] auth::MtlsError),
     #[error("LW_AUTH_STARTUP_FAILED")]
     OwnerResolver(#[from] auth::OwnerResolverClientError),
+    #[error("LW_AUTH_STARTUP_FAILED")]
+    ControlGateway(#[from] proxy::ControlGatewayError),
     #[error("LW_AUTH_STARTUP_FAILED")]
     GrantRuntime(#[from] grants::GrantRuntimeError),
     #[error("LW_AUTH_STARTUP_FAILED")]

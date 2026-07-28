@@ -1,5 +1,9 @@
 {
   "$defs": {
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
     "PathRule": {
       "description": "Strict safe path selector shared by packages, collectors, and LLM allowlists.",
       "oneOf": [
@@ -132,11 +136,15 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    },
     "manifest": {
       "$ref": "#/$defs/SubmissionManifest"
     }
   },
   "required": [
+    "courseId",
     "manifest"
   ],
   "title": "FreezeSubmissionRequest",
