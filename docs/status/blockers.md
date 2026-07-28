@@ -1,69 +1,31 @@
 # Active Blockers
 
-This file contains only blockers for Draft PR #121 on `release/sprint2`.
-Historical evidence cannot satisfy a current same-identity gate.
+This file contains only active blockers for Draft PR #121 on
+`release/sprint2`.
 
-## Current evidence identity
+## Human review and acceptance
 
-- Current PR head is read from Git/PR metadata; the connected application
-  source is `24928e8f06e1bc9709c4c493b7d95b2b007f522c`.
-- Connected package: `pkg-demo-sprint2-24928e8f-24928e8f06e1`.
-- Non-destructive application runs: `deploy-24928e8f` and
-  `deploy-24928e8f-replay`.
-- Both reconciles completed and all ten workloads read back ready on immutable
-  Harbor digests. Retained infrastructure was not reset.
-- Current-identity Container Agent, approval, build, publication, access,
-  freeze, stop/start/delete and cluster absence readback pass.
-- Current-source KubeVirt create, Gateway access, freeze, stop/start/delete and
-  cluster absence readback pass.
-- Real Keycloak teacher and student setup, the teacher policy/candidate view,
-  and both student runtime freeze journeys pass. Earlier browser timeouts are
-  retained only as diagnostic history.
+The connected technical gate passed at source
+`748c2470ad0f3fba848761f0113853a6870576d6`, Release Gate Run
+`a2835d47-7f9b-48a3-b8a0-60d22f57d5e2`. Access/Gateway negatives,
+dual-runtime lifecycle, real Keycloak Playwright, non-destructive application
+idempotence, rollback and cleanup readback are closed for that identity.
 
-## Access and Gateway negative matrix
+PR #121 remains `risk:high` and Draft. It must not use auto-merge. The
+remaining blockers are human governance gates:
 
-The current Container reached `ready`, exposed a healthy HTTP endpoint and was
-used by a real student session. The final identity still lacks the complete
-illegal-key, cross-course, expired, revoked, target-injection, SCP/SFTP,
-forwarding and Access-outage replay.
+- B `@zeyi2`: core implementation and security approval;
+- C `@yingxvemiao`: Web review;
+- D `@Nova-Lciop-J`: connected deployment/Release Gate Verify;
+- all review threads resolved and final required CI checks green.
 
-Exit: every denial remains fail closed and carries the current AccessGrant,
-session, endpoint and trace identity. Revocation/expiry must reject new
-connections and terminate affected sessions within the declared bound.
+Owner A `@2018wzh` remains author and acceptance owner and cannot replace
+those reviews or self-approve the merge.
 
-Owner: A authorization semantics; B security review; D Verify.
+## Explicit non-blocking limitation
 
-## Infrastructure identity and rollback
-
-Application-specific non-destructive adoption and testflight pass. Generic
-`cargo xtask verify --infra` correctly rejects the retained historical
-deployment manifest because its commit, inventory hash and component-lock hash
-do not match the current private inventory. This fail-closed result must not be
-bypassed by rewriting evidence.
-
-Exit:
-
-- produce a reviewed infrastructure deployment identity for the retained
-  target, or explicitly revise the release contract through an ADR;
-- run the bounded rollback drill and read back the recovered application;
-- retain the non-destructive adoption rule for PostgreSQL, NATS, MinIO, Harbor,
-  Keycloak, BuildKit, Kubernetes and KubeVirt.
-
-Owner: D connected Verify; A release judgment.
-
-## Release Gate and human review
-
-`cargo xtask release-gate` has not produced a passing Sprint 2 report for the
-current identity. Dual-runtime lifecycle, cleanup and browser evidence now
-pass; the gate remains blocked by the Access/Gateway negative matrix,
-infrastructure identity, rollback and human-review items above.
-
-PR #121 is `risk:high`, remains Draft and must not use auto-merge. A and B must
-approve the high-risk Contract/Schema/Migration/security paths, C must review
-the Web changes, and D must complete connected Verify. The author cannot
-replace those human approvals or merge the PR.
-
-Exit: all required CI checks pass, review threads are resolved, B/C/D reviews
-are recorded, and the one schema-valid report binds the exact commit,
-deployment manifest, migration catalog, platform/runtime image digests, Run ID
-and test results.
+The full `cargo xtask demo replay` wrapper was not run after the direct
+connected checks because it repeats infrastructure Verify and live Playwright.
+The fail-closed `cargo xtask release-gate` command itself passed and produced
+the unique schema-valid report. This limitation must remain visible in the PR
+and acceptance record; D may require the wrapper replay during Verify.
