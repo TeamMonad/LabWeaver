@@ -5,6 +5,7 @@
  * proxy and never pretends to reach a real runtime.
  */
 import type { ConsoleSocket, ConsoleSocketFactory } from '@/console/socket'
+import { consumeLocator } from './stores/consoleCapabilityStore'
 
 const BANNER = 'LabWeaver fixture console\r\n\x1b[90m(deterministic in-memory terminal; no real runtime attached)\x1b[0m\r\n$ '
 
@@ -30,6 +31,12 @@ export function createFixtureConsoleSocket(): ConsoleSocketFactory {
     }
 
     queueMicrotask(() => {
+      // ADR 0012: the locator is a one-time handoff. A second consumer of the
+      // same locator is denied, matching the real Access proxy.
+      if (!consumeLocator(locator)) {
+        handlers.onStateChange('error', 'CONSOLE_LOCATOR_CONSUMED')
+        return
+      }
       handlers.onStateChange('open')
       handlers.onData(`${BANNER}`)
     })

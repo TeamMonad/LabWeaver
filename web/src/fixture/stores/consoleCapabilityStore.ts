@@ -13,6 +13,21 @@ import { nextRevision } from '../utils/sequence'
  * HttpOnly cookie concept and never stored or returned here.
  */
 const issuedByGrant = new Map<string, ConsoleCapabilitySchema[]>()
+const consumedLocators = new Set<string>()
+
+/**
+ * Consume a connection locator exactly once, mirroring ADR 0012's one-time
+ * handoff: the first consumer succeeds, every subsequent consumer is denied.
+ */
+export function consumeLocator(locator: string): boolean {
+  if (consumedLocators.has(locator)) return false
+  consumedLocators.add(locator)
+  return true
+}
+
+export function isLocatorConsumed(locator: string): boolean {
+  return consumedLocators.has(locator)
+}
 
 export function availabilityFor(
   grantId: string,
@@ -61,6 +76,7 @@ export function issueCapability(
 
 export function resetConsoleCapabilityStore(): void {
   issuedByGrant.clear()
+  consumedLocators.clear()
 }
 
 export function bumpSequence(): number {

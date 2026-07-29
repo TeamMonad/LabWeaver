@@ -1,96 +1,107 @@
 <template>
   <div class="console-panel">
-    <div class="console-header">
-      <h5 class="console-title">
-        <SvgIcon :name="kind === 'xterm' ? 'terminal' : 'desktop_windows'" size="sm" aria-hidden="true" />
-        {{ kind === 'xterm' ? '浏览器终端' : '图形控制台' }}
-      </h5>
-      <div class="console-actions">
-        <button
-          v-if="!sessionActive"
-          type="button"
-          class="filled-button"
-          :disabled="!canOpen || capability.issuing"
-          @click="openConsole"
-        >
-          {{ capability.issuing ? '签发中…' : kind === 'xterm' ? '打开终端' : '打开图形控制台' }}
-        </button>
-        <button v-else type="button" class="text-button" @click="closeConsole">
-          断开
-        </button>
-        <button type="button" class="icon-button" aria-label="全屏" @click="toggleFullscreen">
-          <SvgIcon name="fullscreen" size="sm" aria-hidden="true" />
-        </button>
-      </div>
-    </div>
+    <AsyncStateView :state="capability.availability" @retry="capability.load">
+      <template #success="{ data }">
+        <DiagnosticBanner
+          v-if="!data.kinds.includes(kind)"
+          code="CONSOLE_KIND_NOT_ELIGIBLE"
+          message="当前环境不支持此控制台能力。"
+          :retryable="false"
+          severity="warning"
+        />
+        <template v-else>
+          <div class="console-header">
+            <h5 class="console-title">
+              <SvgIcon :name="kind === 'xterm' ? 'terminal' : 'desktop_windows'" size="sm" aria-hidden="true" />
+              {{ kind === 'xterm' ? '浏览器终端' : '图形控制台' }}
+            </h5>
+            <div class="console-actions">
+              <button
+                v-if="!sessionActive"
+                type="button"
+                class="filled-button"
+                :disabled="!isReady || capability.issuing"
+                @click="openConsole"
+              >
+                {{ capability.issuing ? '签发中…' : kind === 'xterm' ? '打开终端' : '打开图形控制台' }}
+              </button>
+              <button v-else type="button" class="text-button" @click="closeConsole">
+                断开
+              </button>
+              <button type="button" class="icon-button" aria-label="全屏" @click="toggleFullscreen">
+                <SvgIcon name="fullscreen" size="sm" aria-hidden="true" />
+              </button>
+            </div>
+          </div>
 
-    <DiagnosticBanner
-      v-if="capability.availability.kind === 'error'"
-      :code="capability.availability.diagnostic.code"
-      :message="capability.availability.diagnostic.message"
-      :retryable="capability.availability.diagnostic.retryable"
-      severity="error"
-      @retry="capability.load"
-    />
-    <DiagnosticBanner
-      v-else-if="issueError"
-      :code="issueError.code"
-      :message="issueError.message"
-      :retryable="issueError.retryable"
-      severity="error"
-      @retry="openConsole"
-    />
-    <DiagnosticBanner
-      v-else-if="session.diagnostic"
-      :code="session.diagnostic.code"
-      :message="session.diagnostic.message"
-      :retryable="session.diagnostic.retryable"
-      severity="error"
-      @retry="openConsole"
-    />
-    <DiagnosticBanner
-      v-else-if="session.status === 'expired'"
-      code="CONSOLE_EXPIRED"
-      message="控制台会话已过期，请重新签发。"
-      :retryable="true"
-      severity="warning"
-      @retry="openConsole"
-    />
-    <DiagnosticBanner
-      v-else-if="session.status === 'denied'"
-      code="CONSOLE_DENIED"
-      message="控制台访问被拒绝：授权已撤销或越权。"
-      :retryable="false"
-      severity="error"
-    />
+          <DiagnosticBanner
+            v-if="issueError"
+            :code="issueError.code"
+            :message="issueError.message"
+            :retryable="issueError.retryable"
+            severity="error"
+            @retry="openConsole"
+          />
+          <DiagnosticBanner
+            v-else-if="session.diagnostic"
+            :code="session.diagnostic.code"
+            :message="session.diagnostic.message"
+            :retryable="session.diagnostic.retryable"
+            severity="error"
+            @retry="openConsole"
+          />
+          <DiagnosticBanner
+            v-else-if="session.status === 'expired'"
+            code="CONSOLE_EXPIRED"
+            message="控制台会话已过期，请重新签发。"
+            :retryable="true"
+            severity="warning"
+            @retry="openConsole"
+          />
+          <DiagnosticBanner
+            v-else-if="session.status === 'denied'"
+            code="CONSOLE_DENIED"
+            message="控制台访问被拒绝：授权已撤销或越权。"
+            :retryable="false"
+            severity="error"
+          />
 
-    <div ref="panelEl" class="console-body" :class="{ 'console-body--active': sessionActive }">
-      <div v-if="session.status === 'connecting'" class="console-status">正在连接…</div>
-      <div v-else-if="session.status === 'closed'" class="console-status">会话已断开。</div>
-      <div v-else-if="!sessionActive" class="console-status">
-        {{ canOpen ? '点击按钮打开控制台。' : '当前环境状态不支持控制台。' }}
-      </div>
+          <div ref="panelEl" class="console-body" :class="{ 'console-body--active': sessionActive }">
+            <div v-if="session.status === 'connecting'" class="console-status">正在连接…</div>
+            <div v-else-if="session.status === 'closed'" class="console-status">会话已断开。</div>
+            <div v-else-if="!sessionActive" class="console-status">
+              {{ isReady ? '点击按钮打开控制台。' : '当前环境状态不支持控制台。' }}
+            </div>
 
-      <XtermConsole
-        v-if="kind === 'xterm' && sessionActive"
-        ref="xtermRef"
-        :send="session.send"
-        :send-resize="session.sendResize"
-      />
-      <NoVncConsole
-        v-else-if="kind === 'novnc' && sessionActive && session.capability"
-        :capability="session.capability"
-        @state-change="onVncStateChange"
-      />
-    </div>
+            <XtermConsole
+              v-if="kind === 'xterm' && sessionActive"
+              ref="xtermRef"
+              :send="session.send"
+              :send-resize="session.sendResize"
+            />
+            <NoVncConsole
+              v-else-if="kind === 'novnc' && vncCapability"
+              :capability="vncCapability"
+              @state-change="onVncStateChange"
+            />
+          </div>
+        </template>
+      </template>
+    </AsyncStateView>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import type { AccessGrantSchema, ConsoleKind, EnvironmentInstanceSchema } from '@/generated/contracts'
+import type {
+  AccessGrantSchema,
+  ConsoleCapabilitySchema,
+  ConsoleKind,
+  EnvironmentInstanceSchema,
+} from '@/generated/contracts'
 import { useConsoleCapability } from '@/composables/useConsoleCapability'
 import { useConsoleSession } from '@/composables/useConsoleSession'
+import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import XtermConsole from './XtermConsole.vue'
@@ -113,13 +124,18 @@ const xtermRef = ref<InstanceType<typeof XtermConsole> | null>(null)
 const panelEl = ref<HTMLDivElement | null>(null)
 const issueError = ref<DiagnosticViewModel | null>(null)
 
+// noVNC owns its handoff exclusively (ADR 0012 one-time locator): it is NOT
+// routed through the shared useConsoleSession socket. Its lifecycle is
+// mirrored into `vncStatus` so the banner/buttons stay consistent.
+const vncCapability = ref<ConsoleCapabilitySchema | null>(null)
+const vncStatus = ref<'idle' | 'connecting' | 'open' | 'closed' | 'error'>('idle')
+
 const isReady = computed(() => props.environment.observedState === 'ready')
-const canOpen = computed(() => {
-  if (!isReady.value) return false
-  if (capability.availability.kind !== 'success') return false
-  return capability.availability.data.kinds.includes(props.kind)
+
+const sessionActive = computed(() => {
+  if (props.kind === 'xterm') return session.status === 'connecting' || session.status === 'open'
+  return vncStatus.value === 'connecting' || vncStatus.value === 'open'
 })
-const sessionActive = computed(() => session.status === 'connecting' || session.status === 'open')
 
 session.onData((data) => {
   if (props.kind === 'xterm') xtermRef.value?.handleData(data)
@@ -139,21 +155,33 @@ async function openConsole() {
     issueError.value = result.diagnostic ?? null
     return
   }
-  await session.connect(result.capability)
+  if (props.kind === 'xterm') {
+    // xterm consumes the one-time locator through the shared session socket.
+    await session.connect(result.capability)
+  } else {
+    // noVNC owns the handoff itself; do NOT also open it via the shared
+    // session socket, or the second consumption is rejected by the proxy.
+    vncStatus.value = 'connecting'
+    vncCapability.value = result.capability
+  }
 }
 
 function closeConsole() {
-  session.disconnect()
+  if (props.kind === 'xterm') {
+    session.disconnect()
+  } else {
+    vncCapability.value = null
+    vncStatus.value = 'idle'
+  }
 }
 
 function onVncStateChange(state: 'connecting' | 'open' | 'closed' | 'error', code?: string) {
-  // noVNC manages its own socket; mirror its lifecycle into the shared session
-  // status so the banner and buttons stay consistent.
-  if (state === 'open') session.status = 'open'
-  else if (state === 'connecting') session.status = 'connecting'
-  else if (state === 'closed') session.status = 'closed'
+  if (state === 'open') vncStatus.value = 'open'
+  else if (state === 'connecting') vncStatus.value = 'connecting'
+  else if (state === 'closed') vncStatus.value = 'closed'
   else if (state === 'error') {
-    session.status = 'error'
+    vncStatus.value = 'error'
+    vncCapability.value = null
     session.diagnostic = { code: code ?? 'CONSOLE_UPSTREAM_UNAVAILABLE', message: '图形控制台上游不可用。', retryable: true }
   }
 }
@@ -170,7 +198,7 @@ watch(
     // Fail closed: if the environment leaves ready while a session is active,
     // drop the session instead of letting it linger.
     if (previous === 'ready' && state !== 'ready') {
-      session.disconnect()
+      closeConsole()
     }
   },
 )
@@ -178,7 +206,7 @@ watch(
 watch(
   () => props.grant.state,
   (state) => {
-    if (state !== 'active') session.disconnect()
+    if (state !== 'active') closeConsole()
   },
 )
 
