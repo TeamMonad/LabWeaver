@@ -35,6 +35,19 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/HomeView.vue'),
     meta: { title: 'LabWeaver' },
   },
+  // Fixture-only deterministic console layout preview: renders the xterm/noVNC
+  // layouts without creating an environment, issuing a grant, or calling any
+  // backend. It is registered only in fixture builds.
+  ...(IS_FIXTURE
+    ? [
+        {
+          path: '/fixture/console-preview',
+          name: 'fixture-console-preview',
+          component: () => import('@/views/fixture/ConsolePreviewView.vue'),
+          meta: { title: '控制台布局预览' },
+        } satisfies RouteRecordRaw,
+      ]
+    : []),
   {
     path: '/auth/callback',
     name: 'auth-callback',
