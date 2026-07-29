@@ -9,6 +9,7 @@ are not completion evidence.
 | Capability | State | Current evidence and boundary |
 | --- | --- | --- |
 | Unified xterm/noVNC ConsoleCapability | contract implemented; runtime blocked | ADR 0012 and the AccessGrant-level discovery/issuance contract bind BFF, Origin, CSRF, idempotency, revisions, conditional Work Lease fences, 30-second one-time locator and safe observability. Generated Schema/OpenAPI/Web SDK and cross-consumer validation are required E2 evidence. #131 owns the Container xterm port, #124 owns KubeVirt/noVNC, and #126 owns shared-cluster E4/Release Gate. No Migration, proxy, UI, runtime or connected evidence is claimed here. |
+| Web console Fixture preview | implemented; Fixture-verified | `pnpm --dir web preview:console:fixture` builds and serves the EX3-derived deterministic browser preview without a backend. It is visibly marked Fixture, renders only Fixture state, and is documented in `docs/testing/fixture-console-preview.md`. It is layout/state-machine evidence only, not Access proxy, Container, KubeVirt, connected-runtime, or Release Gate evidence. |
 
 ## Current identity
 

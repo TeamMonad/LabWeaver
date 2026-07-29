@@ -157,3 +157,9 @@ pnpm --dir web test:e2e:live
 Fixture specifications are excluded from this live invocation. Conversely,
 the fixture gate excludes the live specifications, so neither evidence class
 can silently satisfy the other.
+
+## Fixture console preview
+
+Issue #143 supplies `pnpm --dir web preview:console:fixture` for local layout
+review without a backend. Its scope, startup path, and hard evidence boundary
+are documented in [`fixture-console-preview.md`](fixture-console-preview.md).
