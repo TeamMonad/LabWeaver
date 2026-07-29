@@ -26,15 +26,26 @@ deployment configuration, or browser UI.
 - `POST /api/v1/access-grants/{grantId}/console-capabilities` requires BFF,
   Origin, CSRF, `Idempotency-Key`, expected AccessGrant/Environment revisions,
   and an exact Work Lease fence.
+- The `If-Match` strong ETag is the same AccessGrant revision as
+  `expectedAccessGrantRevision`; the server rejects a mismatch. The body copy
+  is retained only as part of the idempotency fingerprint.
 - A successful issuance returns an opaque same-origin relative locator and
   versioned WebSocket subprotocol. It expires exactly 30 seconds after issue.
   The handoff secret is sent only through a path-scoped `Secure`, `HttpOnly`,
-  `SameSite=Strict` cookie and is never part of the response body or URL.
+  `SameSite=Strict` cookie with `Max-Age=30` and a Path equal to the returned
+  locator; it is never part of the response body, URL, SDK, log or Debug
+  output. The locator is exactly one non-empty opaque segment after
+  `/connect/console/`.
 
 Work environments require a matching Lease ID/revision/expiry fence. Experiment
 environments explicitly have no Lease fence. The locator is consumed once;
 manual reconnect issues a fresh capability and automatic security retries are
 forbidden.
+
+Availability and an issued capability must not outlive the Work Lease. If fewer
+than 30 seconds remain in the authoritative AccessGrant, environment or Lease
+boundary, issuance is rejected with `LW_CONSOLE_CAPABILITY_EXPIRED`; the server
+does not shorten a capability or mint a partial-lifetime handoff.
 
 The intended stream is:
 

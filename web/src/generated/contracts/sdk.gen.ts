@@ -58,9 +58,9 @@ export const listConsoleCapabilities = <ThrowOnError extends boolean = false>(op
 export const issueConsoleCapability = <ThrowOnError extends boolean = false>(options: Options<IssueConsoleCapabilityData, ThrowOnError>): RequestResult<IssueConsoleCapabilityResponses, IssueConsoleCapabilityErrors, ThrowOnError> => (options.client ?? client).post<IssueConsoleCapabilityResponses, IssueConsoleCapabilityErrors, ThrowOnError>({
     responseType: 'json',
     security: [{
-            key: 'oidc',
-            scheme: 'bearer',
-            type: 'http'
+            in: 'cookie',
+            name: '__Host-labweaver_session',
+            type: 'apiKey'
         }],
     url: '/api/v1/access-grants/{grantId}/console-capabilities',
     ...options,

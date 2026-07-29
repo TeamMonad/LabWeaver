@@ -4639,10 +4639,6 @@ export type ListConsoleCapabilitiesErrors = {
     /**
      * RFC 9457 problem detail
      */
-    400: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
     401: ProblemDetails;
     /**
      * RFC 9457 problem detail
@@ -4655,14 +4651,6 @@ export type ListConsoleCapabilitiesErrors = {
     /**
      * RFC 9457 problem detail
      */
-    409: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    410: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
     412: ProblemDetails;
     /**
      * RFC 9457 problem detail
@@ -4672,10 +4660,6 @@ export type ListConsoleCapabilitiesErrors = {
      * RFC 9457 problem detail
      */
     429: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    500: ProblemDetails;
     /**
      * RFC 9457 problem detail
      */
@@ -4698,6 +4682,8 @@ export type IssueConsoleCapabilityData = {
     headers: {
         'Idempotency-Key': string;
         'If-Match': string;
+        Origin: string;
+        'X-CSRF-Token': string;
     };
     path: {
         grantId: string;
@@ -4707,10 +4693,6 @@ export type IssueConsoleCapabilityData = {
 };
 
 export type IssueConsoleCapabilityErrors = {
-    /**
-     * RFC 9457 problem detail
-     */
-    400: ProblemDetails;
     /**
      * RFC 9457 problem detail
      */
@@ -4730,10 +4712,6 @@ export type IssueConsoleCapabilityErrors = {
     /**
      * RFC 9457 problem detail
      */
-    410: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
     412: ProblemDetails;
     /**
      * RFC 9457 problem detail
@@ -4743,10 +4721,6 @@ export type IssueConsoleCapabilityErrors = {
      * RFC 9457 problem detail
      */
     429: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    500: ProblemDetails;
     /**
      * RFC 9457 problem detail
      */

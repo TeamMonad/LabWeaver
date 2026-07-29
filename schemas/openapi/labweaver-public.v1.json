@@ -299,9 +299,6 @@
               }
             }
           },
-          "400": {
-            "$ref": "#/components/responses/Problem"
-          },
           "401": {
             "$ref": "#/components/responses/Problem"
           },
@@ -311,12 +308,6 @@
           "404": {
             "$ref": "#/components/responses/Problem"
           },
-          "409": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "410": {
-            "$ref": "#/components/responses/Problem"
-          },
           "412": {
             "$ref": "#/components/responses/Problem"
           },
@@ -324,9 +315,6 @@
             "$ref": "#/components/responses/Problem"
           },
           "429": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "500": {
             "$ref": "#/components/responses/Problem"
           },
           "503": {
@@ -347,10 +335,13 @@
         ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
-          "LW_CONTRACT_DOCUMENT_INVALID",
-          "LW_ACCESS_DENIED",
-          "LW_IDEMPOTENCY_CONFLICT",
-          "LW_REVISION_CONFLICT"
+          "LW_HTTP_UNAUTHENTICATED",
+          "LW_CONSOLE_CAPABILITY_DENIED",
+          "LW_CONSOLE_CAPABILITY_EXPIRED",
+          "LW_CONSOLE_REVISION_CONFLICT",
+          "LW_CONSOLE_LEASE_INVALID",
+          "LW_CONSOLE_ENVIRONMENT_NOT_READY",
+          "LW_CONSOLE_UPSTREAM_UNAVAILABLE"
         ],
         "x-labweaver-idempotency": "None",
         "x-labweaver-permission": "console_capability:read",
@@ -387,6 +378,25 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "format": "uri",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-CSRF-Token",
+            "required": true,
+            "schema": {
+              "maxLength": 43,
+              "minLength": 43,
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -415,11 +425,14 @@
                   "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
                   "type": "string"
                 }
+              },
+              "Set-Cookie": {
+                "description": "Exactly one __Secure-labweaver_console_handoff cookie. It MUST be Secure, HttpOnly, SameSite=Strict, have Max-Age=30, and use the returned connectionLocator as its exact Path. Its value is the one-time secret and is never present in a response body, URL, SDK, or log.",
+                "schema": {
+                  "type": "string"
+                }
               }
             }
-          },
-          "400": {
-            "$ref": "#/components/responses/Problem"
           },
           "401": {
             "$ref": "#/components/responses/Problem"
@@ -433,9 +446,6 @@
           "409": {
             "$ref": "#/components/responses/Problem"
           },
-          "410": {
-            "$ref": "#/components/responses/Problem"
-          },
           "412": {
             "$ref": "#/components/responses/Problem"
           },
@@ -445,18 +455,13 @@
           "429": {
             "$ref": "#/components/responses/Problem"
           },
-          "500": {
-            "$ref": "#/components/responses/Problem"
-          },
           "503": {
             "$ref": "#/components/responses/Problem"
           }
         },
         "security": [
           {
-            "oidc": [
-              "console_capability:issue"
-            ]
+            "bffSession": []
           }
         ],
         "summary": "issueConsoleCapability",
@@ -465,11 +470,24 @@
           "student"
         ],
         "x-labweaver-cancellable": false,
+        "x-labweaver-console-handoff-cookie": {
+          "httpOnly": true,
+          "maxAgeSeconds": 30,
+          "name": "__Secure-labweaver_console_handoff",
+          "oneTime": true,
+          "path": "connectionLocator",
+          "sameSite": "Strict",
+          "secure": true
+        },
         "x-labweaver-errors": [
-          "LW_CONTRACT_DOCUMENT_INVALID",
-          "LW_ACCESS_DENIED",
-          "LW_IDEMPOTENCY_CONFLICT",
-          "LW_REVISION_CONFLICT"
+          "LW_HTTP_UNAUTHENTICATED",
+          "LW_CONSOLE_CAPABILITY_DENIED",
+          "LW_CONSOLE_CAPABILITY_EXPIRED",
+          "LW_CONSOLE_REVISION_CONFLICT",
+          "LW_CONSOLE_LEASE_INVALID",
+          "LW_CONSOLE_ENVIRONMENT_NOT_READY",
+          "LW_CONSOLE_SUBPROTOCOL_MISMATCH",
+          "LW_CONSOLE_UPSTREAM_UNAVAILABLE"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
         "x-labweaver-permission": "console_capability:issue",

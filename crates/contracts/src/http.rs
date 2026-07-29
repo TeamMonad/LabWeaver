@@ -394,6 +394,16 @@ impl IssueConsoleCapabilityRequest {
         }
         Ok(())
     }
+
+    /// `If-Match` is the AccessGrant revision fence, duplicated in the body only
+    /// because the body is persisted as the idempotency fingerprint.
+    pub fn validate_if_match(&self, if_match: &StrongEtag) -> Result<(), HttpContractError> {
+        if if_match.revision() == self.expected_access_grant_revision {
+            Ok(())
+        } else {
+            Err(HttpContractError::InvalidConsoleCapability)
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -621,6 +631,7 @@ pub enum MutationContract {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Security {
     Oidc,
+    BffSession,
     ServiceMtls,
 }
 
@@ -984,7 +995,7 @@ pub const OPERATIONS: &[OperationContract] = &[
         "/api/v1/access-grants/{grantId}/console-capabilities",
         "issueConsoleCapability",
         "console_capability:issue",
-        Oidc,
+        BffSession,
         IdempotentRevisioned,
         201,
         false,
@@ -1686,6 +1697,15 @@ mod tests {
             expected_lease_fence: None,
         };
         assert!(request.validate_against(&availability).is_ok());
+        assert!(
+            request
+                .validate_if_match(&StrongEtag::from_revision(revision(2)))
+                .is_ok()
+        );
+        assert!(matches!(
+            request.validate_if_match(&StrongEtag::from_revision(revision(3))),
+            Err(HttpContractError::InvalidConsoleCapability)
+        ));
 
         let stale = IssueConsoleCapabilityRequest {
             expected_environment_revision: revision(4),
@@ -1704,7 +1724,7 @@ mod tests {
         let work = crate::access::ConsoleCapabilityAvailability {
             environment_class: crate::authoring::EnvironmentClass::Work,
             lease_fence: Some(lease.clone()),
-            ..availability
+            ..availability.clone()
         };
         let work_request = IssueConsoleCapabilityRequest {
             expected_lease_fence: Some(lease),
@@ -1713,6 +1733,19 @@ mod tests {
         assert!(work_request.validate_against(&work).is_ok());
         assert!(matches!(
             request.validate_against(&work),
+            Err(HttpContractError::InvalidConsoleCapability)
+        ));
+
+        let invalid_experiment = IssueConsoleCapabilityRequest {
+            expected_lease_fence: Some(crate::access::ConsoleLeaseFence {
+                lease_id: crate::LeaseId::new(),
+                lease_revision: revision(6),
+                expires_at: timestamp("2026-07-29T00:01:00.000Z"),
+            }),
+            ..work_request
+        };
+        assert!(matches!(
+            invalid_experiment.validate_against(&availability),
             Err(HttpContractError::InvalidConsoleCapability)
         ));
     }

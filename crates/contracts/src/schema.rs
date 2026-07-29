@@ -529,6 +529,10 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         if operation.mutation == MutationContract::IdempotentRevisioned {
             parameters.push(header_parameter("If-Match", true));
         }
+        if operation.security == crate::http::Security::BffSession {
+            parameters.push(json!({"name":"Origin","in":"header","required":true,"schema":{"type":"string","format":"uri"}}));
+            parameters.push(json!({"name":"X-CSRF-Token","in":"header","required":true,"schema":{"type":"string","minLength":43,"maxLength":43}}));
+        }
         let responses = operation_responses(
             operation.operation_id,
             operation.success_status,
@@ -538,7 +542,12 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             "operationId": operation.operation_id,
             "summary": operation.operation_id,
             "description": format!("Permission: {}. Timeout: {} ms. Cancellable: {}. Retryable: {}. v1 permits additive endpoints and optional response fields only.", operation.permission, operation.timeout_milliseconds, operation.cancellable, operation.retryable),
-            "security": [if surface == ApiSurface::Public { json!({"oidc": [operation.permission]}) } else { json!({"serviceMtls": []}) }],
+            "security": [match (surface, operation.security) {
+                (ApiSurface::Public, crate::http::Security::Oidc) => json!({"oidc": [operation.permission]}),
+                (ApiSurface::Public, crate::http::Security::BffSession) => json!({"bffSession": []}),
+                (ApiSurface::GatewayInternal, crate::http::Security::ServiceMtls) => json!({"serviceMtls": []}),
+                _ => return Err(GenerationError::Contract("operation surface and security metadata disagree".to_owned())),
+            }],
             "parameters": parameters,
             "responses": responses,
             "x-labweaver-permission": operation.permission,
@@ -570,6 +579,20 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 "LW_REVISION_CONFLICT",
                 "LW_CANDIDATE_KIND_MISMATCH"
             ]);
+        }
+        if let Some(errors) = console_operation_errors(operation.operation_id) {
+            operation_json["x-labweaver-errors"] = errors;
+        }
+        if operation.operation_id == "issueConsoleCapability" {
+            operation_json["x-labweaver-console-handoff-cookie"] = json!({
+                "name": "__Secure-labweaver_console_handoff",
+                "secure": true,
+                "httpOnly": true,
+                "sameSite": "Strict",
+                "path": "connectionLocator",
+                "maxAgeSeconds": 30,
+                "oneTime": true
+            });
         }
         let authorization = operation_authorization(operation.operation_id).ok_or_else(|| {
             GenerationError::Contract("operation authorization metadata is missing".to_owned())
@@ -809,6 +832,32 @@ fn environment_management_errors(operation_id: &str) -> Option<Value> {
     Some(json!(errors))
 }
 
+fn console_operation_errors(operation_id: &str) -> Option<Value> {
+    let errors = match operation_id {
+        "listConsoleCapabilities" => vec![
+            "LW_HTTP_UNAUTHENTICATED",
+            "LW_CONSOLE_CAPABILITY_DENIED",
+            "LW_CONSOLE_CAPABILITY_EXPIRED",
+            "LW_CONSOLE_REVISION_CONFLICT",
+            "LW_CONSOLE_LEASE_INVALID",
+            "LW_CONSOLE_ENVIRONMENT_NOT_READY",
+            "LW_CONSOLE_UPSTREAM_UNAVAILABLE",
+        ],
+        "issueConsoleCapability" => vec![
+            "LW_HTTP_UNAUTHENTICATED",
+            "LW_CONSOLE_CAPABILITY_DENIED",
+            "LW_CONSOLE_CAPABILITY_EXPIRED",
+            "LW_CONSOLE_REVISION_CONFLICT",
+            "LW_CONSOLE_LEASE_INVALID",
+            "LW_CONSOLE_ENVIRONMENT_NOT_READY",
+            "LW_CONSOLE_SUBPROTOCOL_MISMATCH",
+            "LW_CONSOLE_UPSTREAM_UNAVAILABLE",
+        ],
+        _ => return None,
+    };
+    Some(json!(errors))
+}
+
 fn contract_ref(name: &str) -> Value {
     json!({"$ref": format!("../contracts/v1/{name}.schema.json")})
 }
@@ -933,6 +982,12 @@ fn operation_responses(
 ) -> Value {
     let mut responses = serde_json::Map::new();
     let mut success = json!({"description":"Successful response","headers":{"ETag":{"schema":{"type":"string","pattern":"^\\\"rev-[1-9][0-9]*\\\"$"}}}});
+    if operation_id == "issueConsoleCapability" {
+        success["headers"]["Set-Cookie"] = json!({
+            "description": "Exactly one __Secure-labweaver_console_handoff cookie. It MUST be Secure, HttpOnly, SameSite=Strict, have Max-Age=30, and use the returned connectionLocator as its exact Path. Its value is the one-time secret and is never present in a response body, URL, SDK, or log.",
+            "schema": {"type":"string"}
+        });
+    }
     if let Some(schema) = response_schema {
         let media_type = if operation_id == "streamCourseEvents" {
             "text/event-stream"
@@ -943,6 +998,8 @@ fn operation_responses(
     }
     responses.insert(success_status.to_string(), success);
     let error_statuses: &[u16] = match operation_id {
+        "listConsoleCapabilities" => &[401, 403, 404, 412, 422, 429, 503],
+        "issueConsoleCapability" => &[401, 403, 404, 409, 412, 422, 429, 503],
         "listEnvironments" | "listEnvironmentOperations" | "listEnvironmentAccessGrants" => {
             &[400, 401, 403, 409, 410, 422, 429, 500, 503]
         }
@@ -992,6 +1049,51 @@ mod tests {
         assert!(public.contains("#/components/schemas/AuthSession"));
         assert!(public.contains("__Host-labweaver_session"));
         let public_document: Value = serde_json::from_str(&public)?;
+        let console_path = "/api/v1/access-grants/{grantId}/console-capabilities"
+            .replace('~', "~0")
+            .replace('/', "~1");
+        let issue_console = format!("/paths/{console_path}/post");
+        assert_eq!(
+            public_document.pointer(&format!("{issue_console}/security")),
+            Some(&json!([{"bffSession": []}])),
+            "console issuance must not accept an OIDC bearer projection"
+        );
+        let parameters = public_document
+            .pointer(&format!("{issue_console}/parameters"))
+            .and_then(Value::as_array)
+            .ok_or("console issuance parameters are missing")?;
+        assert!(parameters.iter().any(|parameter| parameter == &json!({"name":"Origin","in":"header","required":true,"schema":{"type":"string","format":"uri"}})));
+        assert!(parameters.iter().any(|parameter| parameter == &json!({"name":"X-CSRF-Token","in":"header","required":true,"schema":{"type":"string","minLength":43,"maxLength":43}})));
+        assert_eq!(
+            public_document.pointer(&format!(
+                "{issue_console}/x-labweaver-console-handoff-cookie/path"
+            )),
+            Some(&json!("connectionLocator"))
+        );
+        assert_eq!(
+            public_document.pointer(&format!(
+                "{issue_console}/responses/201/headers/Set-Cookie/schema/type"
+            )),
+            Some(&json!("string"))
+        );
+        let issue_errors = public_document
+            .pointer(&format!("{issue_console}/x-labweaver-errors"))
+            .and_then(Value::as_array)
+            .ok_or("console issuance diagnostics are missing")?;
+        for diagnostic in [
+            "LW_CONSOLE_CAPABILITY_DENIED",
+            "LW_CONSOLE_CAPABILITY_EXPIRED",
+            "LW_CONSOLE_REVISION_CONFLICT",
+            "LW_CONSOLE_LEASE_INVALID",
+            "LW_CONSOLE_ENVIRONMENT_NOT_READY",
+            "LW_CONSOLE_SUBPROTOCOL_MISMATCH",
+            "LW_CONSOLE_UPSTREAM_UNAVAILABLE",
+        ] {
+            assert!(
+                issue_errors.contains(&json!(diagnostic)),
+                "missing {diagnostic}"
+            );
+        }
         for path in [
             "/api/v1/courses/{courseId}/agent-runs",
             "/api/v1/courses/{courseId}/agent-runs/{runId}/cancel",

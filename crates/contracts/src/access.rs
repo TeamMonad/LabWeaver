@@ -180,14 +180,15 @@ pub struct ConsoleCapabilityAvailability {
 impl ConsoleCapabilityAvailability {
     pub fn validate(&self) -> Result<(), AccessError> {
         let mut kinds = BTreeSet::new();
-        if self.kinds.is_empty()
-            || !self.kinds.iter().all(|kind| kinds.insert(*kind))
-            || matches!(self.environment_class, EnvironmentClass::Work)
-                != self.lease_fence.is_some()
-        {
+        let work = matches!(self.environment_class, EnvironmentClass::Work);
+        if self.kinds.is_empty() || !self.kinds.iter().all(|kind| kinds.insert(*kind)) {
             return Err(AccessError::InvalidConsoleCapability);
         }
-        Ok(())
+        match (&self.lease_fence, work) {
+            (Some(fence), true) if self.expires_at <= fence.expires_at => Ok(()),
+            (None, false) => Ok(()),
+            _ => Err(AccessError::InvalidConsoleCapability),
+        }
     }
 }
 
@@ -211,23 +212,53 @@ pub struct ConsoleCapability {
 
 impl ConsoleCapability {
     pub fn validate(&self) -> Result<(), AccessError> {
-        let lifetime = (self.expires_at.get() - self.issued_at.get()).whole_seconds();
-        let locator_valid = self.connection_locator.starts_with("/connect/console/")
-            && self.connection_locator.len() <= 256
-            && self
-                .connection_locator
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_'));
-        if lifetime != 30
-            || !locator_valid
+        let work = matches!(self.environment_class, EnvironmentClass::Work);
+        let lifetime_is_exact =
+            self.expires_at.get() - self.issued_at.get() == time::Duration::seconds(30);
+        if !lifetime_is_exact
+            || !is_console_connection_locator(&self.connection_locator)
             || self.websocket_subprotocol != self.kind.websocket_subprotocol()
-            || matches!(self.environment_class, EnvironmentClass::Work)
-                != self.lease_fence.is_some()
+        {
+            return Err(AccessError::InvalidConsoleCapability);
+        }
+        match (&self.lease_fence, work) {
+            (Some(fence), true) if self.expires_at <= fence.expires_at => Ok(()),
+            (None, false) => Ok(()),
+            _ => Err(AccessError::InvalidConsoleCapability),
+        }
+    }
+
+    /// Ensures an issued handoff remains within discovery and Lease authority.
+    pub fn validate_against(
+        &self,
+        availability: &ConsoleCapabilityAvailability,
+    ) -> Result<(), AccessError> {
+        self.validate()?;
+        availability.validate()?;
+        if !availability.kinds.contains(&self.kind)
+            || self.access_grant_id != availability.access_grant_id
+            || self.access_grant_revision != availability.access_grant_revision
+            || self.environment_id != availability.environment_id
+            || self.environment_class != availability.environment_class
+            || self.environment_revision != availability.environment_revision
+            || self.lease_fence != availability.lease_fence
+            || self.expires_at > availability.expires_at
         {
             return Err(AccessError::InvalidConsoleCapability);
         }
         Ok(())
     }
+}
+
+fn is_console_connection_locator(value: &str) -> bool {
+    const PREFIX: &str = "/connect/console/";
+    let Some(segment) = value.strip_prefix(PREFIX) else {
+        return false;
+    };
+    (1..=128).contains(&segment.len())
+        && segment
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -871,7 +902,7 @@ mod tests {
     }
 
     #[test]
-    fn console_capability_requires_a_short_relative_handoff_and_matching_fence() {
+    fn console_capability_fences_exact_lifetime_lease_and_opaque_locator() {
         let issued_at = timestamp("2026-07-29T00:00:00.000Z");
         let expires_at = timestamp("2026-07-29T00:00:30.000Z");
         let capability = ConsoleCapability {
@@ -890,14 +921,38 @@ mod tests {
         };
         assert!(capability.validate().is_ok());
 
-        let mut invalid = capability.clone();
-        invalid.connection_locator = "https://runtime.invalid/connect".to_owned();
+        for locator in [
+            "https://runtime.invalid/connect",
+            "/connect/console/",
+            "/connect/console/one/two",
+            "/connect/console/opaque?query",
+            "/connect/console/opaque.handoff",
+        ] {
+            let mut invalid = capability.clone();
+            invalid.connection_locator = locator.to_owned();
+            assert_eq!(
+                invalid.validate(),
+                Err(AccessError::InvalidConsoleCapability),
+                "{locator} must not be accepted as an opaque locator"
+            );
+        }
+
+        let mut millisecond_drift = capability.clone();
+        millisecond_drift.expires_at = timestamp("2026-07-29T00:00:30.001Z");
         assert_eq!(
-            invalid.validate(),
+            millisecond_drift.validate(),
             Err(AccessError::InvalidConsoleCapability)
         );
 
-        let availability = ConsoleCapabilityAvailability {
+        let mut wrong_subprotocol = capability.clone();
+        wrong_subprotocol.websocket_subprotocol =
+            ConsoleKind::Xterm.websocket_subprotocol().to_owned();
+        assert_eq!(
+            wrong_subprotocol.validate(),
+            Err(AccessError::InvalidConsoleCapability)
+        );
+
+        let mut availability = ConsoleCapabilityAvailability {
             access_grant_id: capability.access_grant_id,
             access_grant_revision: capability.access_grant_revision,
             environment_id: capability.environment_id,
@@ -905,10 +960,65 @@ mod tests {
             environment_revision: capability.environment_revision,
             expires_at,
             lease_fence: None,
-            kinds: vec![ConsoleKind::Novnc, ConsoleKind::Novnc],
+            kinds: vec![ConsoleKind::Novnc],
         };
+        assert!(capability.validate_against(&availability).is_ok());
+
+        let mut less_than_thirty_seconds = availability.clone();
+        less_than_thirty_seconds.expires_at = timestamp("2026-07-29T00:00:29.999Z");
+        assert_eq!(
+            capability.validate_against(&less_than_thirty_seconds),
+            Err(AccessError::InvalidConsoleCapability),
+            "issuers must reject rather than shorten a handoff when less than 30 seconds remain"
+        );
+
+        availability.kinds.push(ConsoleKind::Novnc);
         assert_eq!(
             availability.validate(),
+            Err(AccessError::InvalidConsoleCapability)
+        );
+
+        let mut work_capability = capability.clone();
+        work_capability.environment_class = EnvironmentClass::Work;
+        let fence = ConsoleLeaseFence {
+            lease_id: LeaseId::new(),
+            lease_revision: revision(4),
+            expires_at,
+        };
+        work_capability.lease_fence = Some(fence.clone());
+        assert!(work_capability.validate().is_ok());
+
+        let mut expired_by_lease = work_capability.clone();
+        expired_by_lease.expires_at = timestamp("2026-07-29T00:00:30.001Z");
+        assert_eq!(
+            expired_by_lease.validate(),
+            Err(AccessError::InvalidConsoleCapability)
+        );
+
+        let mut invalid_experiment = capability.clone();
+        invalid_experiment.lease_fence = Some(fence.clone());
+        assert_eq!(
+            invalid_experiment.validate(),
+            Err(AccessError::InvalidConsoleCapability)
+        );
+
+        let lease_limited_availability = ConsoleCapabilityAvailability {
+            environment_class: EnvironmentClass::Work,
+            expires_at: fence.expires_at,
+            lease_fence: Some(fence),
+            kinds: vec![ConsoleKind::Novnc],
+            ..availability
+        };
+        assert!(
+            work_capability
+                .validate_against(&lease_limited_availability)
+                .is_ok()
+        );
+
+        let mut availability_past_lease = lease_limited_availability;
+        availability_past_lease.expires_at = timestamp("2026-07-29T00:00:30.001Z");
+        assert_eq!(
+            availability_past_lease.validate(),
             Err(AccessError::InvalidConsoleCapability)
         );
     }
