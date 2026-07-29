@@ -61,6 +61,46 @@ baseline migration to a disposable PostgreSQL instance.
   timeout, cancellation and dependency failure return stable diagnostics;
 - LLM output cannot approve, execute, publish or score a candidate.
 
+## Issue #140 C++17 OJ gate
+
+The local gate proves only strict semantics and resource construction:
+
+```sh
+cargo test -p evaluation-service --lib --test oj --test oj_job
+cargo clippy -p evaluation-service --all-targets --all-features -- -D warnings
+LABWEAVER_OJ_RUNNER_NAMESPACE=labweaver-evaluation \
+  cargo test -p evaluation-service --test oj_job \
+  generated_resources_pass_kubernetes_server_side_dry_run -- --ignored
+docker buildx build --file containers/Containerfile.oj-cpp17 \
+  --platform linux/amd64 \
+  --build-arg SOURCE_COMMIT="$(git rev-parse HEAD)" \
+  --build-arg SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)" \
+  --provenance=false .
+```
+
+The image command requires a working BuildKit daemon. A skipped or unavailable
+build remains a blocker rather than a pass. CI must build the image twice,
+compare OCI archive identities, reject High/Critical vulnerabilities and
+secrets for the OJ image, and retain the Trivy JSON artifact.
+
+After #123 supplies the authoritative attempt path, connected D Verify must use
+one immutable submission, evaluator and image identity to exercise accepted,
+compile error, wrong answer, time limit, memory limit and output limit. It must
+also prove zero egress, no service-account token, readonly private inputs,
+cancel/retry fencing, exact terminal cleanup and absence of private input,
+expected output, command text and raw logs from the student projection and
+machine-readable report. The private-payload case must also run an adversarial
+binary that tries to read `/etc/labweaver`, `/input/evaluator`,
+`/input/submission`, `/evidence` and unlisted `/work` files; every read must
+fail under fully enforced Landlock. Equivalent adversarial preprocessor
+includes and assembler `.incbin` attempts must fail during compilation. A
+daemon/double-fork fixture must attempt `setsid`, `setpgid`, namespace `clone`,
+`clone3`, `unshare` and `setns`; each escape must fail, the process count must
+remain bounded by an observed cgroup v2 `pids.max` no greater than 128, and no
+descendant may survive into the next case. D must also replace an attempt
+resource between GET and DELETE and verify the
+UID/resourceVersion precondition produces an identity conflict.
+
 ## Integration behavior
 
 - PostgreSQL transaction, idempotency, lease recovery and clean-baseline tests;

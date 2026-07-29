@@ -6,6 +6,10 @@ pub mod command_store;
 pub mod coordinator;
 pub mod freeze;
 pub mod freeze_store;
+pub mod oj;
+pub mod oj_executor;
+pub mod oj_job;
+pub mod oj_worker;
 pub mod outbox;
 pub mod process;
 pub mod ssh_source;
@@ -22,6 +26,7 @@ pub use command_store::{
 pub use coordinator::{FreezeCoordinator, FreezeCoordinatorConfiguration, FreezeCoordinatorError};
 pub use freeze::{FreezeRequest, FreezeService, FreezeServiceError};
 pub use freeze_store::{BeginFreeze, FreezeLease, PgFreezeStore};
+pub use oj_worker::{OjWorkerError, run_oj_case_exec, run_oj_compile_exec, run_oj_worker};
 pub use outbox::{EvaluationOutboxDispatcher, EvaluationOutboxError};
 pub use process::{EvaluationProcessError, run_evaluation_service};
 pub use ssh_source::{SshSnapshotConfig, SshSnapshotSource};
