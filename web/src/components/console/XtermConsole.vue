@@ -7,6 +7,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { Terminal } from '@xterm/xterm'
+import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 
 interface Props {
@@ -16,12 +17,9 @@ interface Props {
 
 const props = defineProps<Props>()
 
-const emit = defineEmits<{
-  data: [data: string | ArrayBuffer]
-}>()
-
 const terminalEl = ref<HTMLDivElement | null>(null)
 let terminal: Terminal | null = null
+let fitAddon: FitAddon | null = null
 let resizeObserver: ResizeObserver | null = null
 
 function handleData(data: string | ArrayBuffer) {
@@ -30,6 +28,18 @@ function handleData(data: string | ArrayBuffer) {
 }
 
 defineExpose({ handleData })
+
+function fitAndNotify() {
+  if (!terminal || !fitAddon) return
+  try {
+    fitAddon.fit()
+    if (terminal.cols > 0 && terminal.rows > 0) {
+      props.sendResize(terminal.cols, terminal.rows)
+    }
+  } catch {
+    // fit() can throw before layout settles; the ResizeObserver will retry.
+  }
+}
 
 onMounted(() => {
   if (!terminalEl.value) return
@@ -61,15 +71,16 @@ onMounted(() => {
       cursor: '#d4d4d4',
     },
   })
+  fitAddon = new FitAddon()
+  terminal.loadAddon(fitAddon)
   terminal.open(terminalEl.value)
   terminal.onData((data) => props.send(data))
 
-  resizeObserver = new ResizeObserver(() => {
-    if (!terminal || !terminalEl.value) return
-    const cols = terminal.cols
-    const rows = terminal.rows
-    if (cols > 0 && rows > 0) props.sendResize(cols, rows)
-  })
+  // Bind terminal rows/cols to the container's measured geometry so the
+  // viewport is deterministic instead of relying on xterm's internal sizing.
+  fitAndNotify()
+
+  resizeObserver = new ResizeObserver(() => fitAndNotify())
   resizeObserver.observe(terminalEl.value)
 })
 
@@ -77,13 +88,16 @@ onBeforeUnmount(() => {
   resizeObserver?.disconnect()
   terminal?.dispose()
   terminal = null
+  fitAddon = null
 })
 </script>
 
 <style scoped>
 .xterm-console {
   width: 100%;
-  min-height: 320px;
+  /* Deterministic responsive geometry: a fixed viewport height so the panel
+     and terminal never collapse or grow an internal scrollbar across runs. */
+  height: 400px;
   border-radius: var(--md-sys-shape-medium);
   overflow: hidden;
   background: #1e1e1e;
@@ -92,7 +106,14 @@ onBeforeUnmount(() => {
 .xterm-host {
   width: 100%;
   height: 100%;
-  min-height: 320px;
   padding: 8px;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+@media (max-width: 599px) {
+  .xterm-console {
+    height: 360px;
+  }
 }
 </style>
