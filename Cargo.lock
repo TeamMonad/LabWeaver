@@ -2128,6 +2128,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "enumflags2"
+version = "0.7.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1027f7680c853e056ebcec683615fb6fbbc07dbaa13b4d5d9442b146ded4ecef"
+dependencies = [
+ "enumflags2_derive",
+]
+
+[[package]]
+name = "enumflags2_derive"
+version = "0.7.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67c78a4d8fdf9953a5c9d458f9efe940fd97a0cab0941c075a813ac594733827"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "environment-service"
 version = "0.1.0"
 dependencies = [
@@ -2217,6 +2237,8 @@ dependencies = [
  "cap-std",
  "contracts",
  "hyper-util",
+ "landlock",
+ "nix",
  "persistence-sqlx",
  "rand 0.9.5",
  "reqwest",
@@ -3406,6 +3428,17 @@ checksum = "01737161ba802849cfd486b5bd209d38ba4943494c249a8126005170c7621edd"
 dependencies = [
  "crypto-common 0.2.2",
  "rand_core 0.10.1",
+]
+
+[[package]]
+name = "landlock"
+version = "0.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cca98e95f35b29d469dade6724c6f96cec9236640f745a0e99b0334ec320ab1"
+dependencies = [
+ "enumflags2",
+ "libc",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

@@ -1,7 +1,21 @@
 # Active Blockers
 
-This file contains only active blockers for Draft PR #121 on
-`release/sprint2`.
+This file records active release and acceptance blockers. A local or CI-only
+result does not close a connected blocker.
+
+## Issue #140 C++17 OJ execution
+
+- Issue #123 must provide the authoritative EvaluationRun, StepRun, attempt,
+  Outbox, persistence and immutable artifact integration.
+- The dedicated runner image must build reproducibly and pass the digest-bound
+  Critical/secret scan in CI.
+- D must run the same source/image identity on real Kubernetes and verify
+  compile error, accepted, wrong answer, time, memory and output limits,
+  default-deny egress, cancel/retry, exact cleanup and private-payload absence.
+- A+B human review is required for Runner, Checker, Aggregator and scoring;
+  auto-merge is forbidden.
+
+These blockers keep Issue #140 below E3 and outside the Release Gate.
 
 ## ConsoleCapability downstream delivery
 

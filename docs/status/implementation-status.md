@@ -52,6 +52,21 @@ were retained; no infrastructure reset was used.
 | Machine-readable Release Gate | verified | `cargo xtask release-gate` produced a schema-valid passing report for Run `a2835d47-7f9b-48a3-b8a0-60d22f57d5e2`. Evidence remains private/ignored and contains no Secret. |
 | Full `cargo xtask demo replay` | not run | The authoritative gate was run directly after connected checks. The wrapper's repeated infrastructure Verify and Playwright execution was intentionally skipped; this is not represented as a replay pass. |
 
+## Issue #140 local implementation
+
+The `feature/140-oj-cpp17-runner` worktree adds the internal C++17 OJ request,
+checker, deterministic aggregator, evidence/receipt validation, isolated
+Kubernetes resource plan and executor, shell-free worker modes, dedicated
+digest-pinned image and focused tests.
+
+Its current evidence is **E1 only**. The implementation is not connected to a
+public EvaluationRun or StepRun because Issue #123's authoritative lifecycle,
+Outbox and persistence contract is not present on the current `develop`
+baseline. No local container daemon or real Kubernetes run has verified the
+compiler image, cgroup outcomes, NetworkPolicy, cancellation or cleanup.
+Accordingly Issue #140 is not `done`, is not a release-gate pass and does not
+change the connected Sprint 2 identity above.
+
 ## Accepted Sprint 2 security exceptions
 
 - Rootless BuildKit may use the documented namespace-scoped

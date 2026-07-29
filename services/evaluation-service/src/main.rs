@@ -16,6 +16,36 @@ async fn run() -> Result<(), MainError> {
             evaluation_service::run_freeze_worker().await?;
             return Ok(());
         }
+        [mode, value] if mode == "--mode" && value == "oj-worker" => {
+            let receipt = evaluation_service::run_oj_worker().await?;
+            write_termination_receipt(&receipt)?;
+            return Ok(());
+        }
+        [mode, value] if mode == "--mode" && value == "oj-compile-exec" => {
+            evaluation_service::run_oj_compile_exec()?;
+            return Ok(());
+        }
+        [
+            mode,
+            value,
+            memory_flag,
+            memory,
+            cpu_flag,
+            cpu,
+            file_flag,
+            file,
+        ] if mode == "--mode"
+            && value == "oj-case-exec"
+            && memory_flag == "--memory-bytes"
+            && cpu_flag == "--cpu-seconds"
+            && file_flag == "--file-bytes" =>
+        {
+            let memory = parse_limit(memory)?;
+            let cpu = parse_limit(cpu)?;
+            let file = parse_limit(file)?;
+            evaluation_service::run_oj_case_exec(memory, cpu, file)?;
+            return Ok(());
+        }
         [] => {
             evaluation_service::run_evaluation_service().await?;
             return Ok(());
@@ -29,11 +59,27 @@ async fn run() -> Result<(), MainError> {
     Err(MainError::Arguments)
 }
 
+fn parse_limit(value: &str) -> Result<u64, MainError> {
+    value.parse().map_err(|_| MainError::Arguments)
+}
+
 fn write_termination_diagnostic(diagnostic: &'static str) {
     const TERMINATION_LOG: &str = "/dev/termination-log";
     if let Err(error) = std::fs::write(TERMINATION_LOG, diagnostic) {
         eprintln!("LW_EVALUATION_TERMINATION_LOG_FAILED: {error}");
     }
+}
+
+fn write_termination_receipt(
+    receipt: &evaluation_service::oj::OjEvidenceReceipt,
+) -> Result<(), MainError> {
+    const TERMINATION_LOG: &str = "/dev/termination-log";
+    const MAX_TERMINATION_MESSAGE_BYTES: usize = 4096;
+    let bytes = serde_json::to_vec(receipt).map_err(|_| MainError::Receipt)?;
+    if bytes.is_empty() || bytes.len() > MAX_TERMINATION_MESSAGE_BYTES {
+        return Err(MainError::Receipt);
+    }
+    std::fs::write(TERMINATION_LOG, bytes).map_err(|_| MainError::Receipt)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -43,7 +89,11 @@ enum MainError {
     #[error(transparent)]
     Worker(#[from] evaluation_service::FreezeWorkerError),
     #[error(transparent)]
+    OjWorker(#[from] evaluation_service::OjWorkerError),
+    #[error(transparent)]
     Process(#[from] evaluation_service::EvaluationProcessError),
+    #[error("LW_OJ_RECEIPT_WRITE_FAILED")]
+    Receipt,
 }
 
 impl MainError {
@@ -51,7 +101,9 @@ impl MainError {
         match self {
             Self::Arguments => "LW_EVALUATION_MODE_INVALID",
             Self::Worker(error) => error.diagnostic_code(),
+            Self::OjWorker(error) => error.diagnostic_code(),
             Self::Process(_) => "LW_EVALUATION_PROCESS_FAILED",
+            Self::Receipt => "LW_OJ_RECEIPT_WRITE_FAILED",
         }
     }
 }

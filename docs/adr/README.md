@@ -38,3 +38,6 @@ No ADR is accepted in ARC-01a; this directory establishes the review process wit
 - [ADR 0012: Unified Console Capability and noVNC Boundary](0012-unified-console-capability-and-novnc.md)
   replaces the historical Guacamole browser-console proposal with one AccessGrant-scoped,
   one-time xterm/noVNC capability contract.
+- [ADR 0013: Isolated C++17 OJ Runner](0013-isolated-cpp17-oj-runner.md)
+  defines the digest-bound, network-denied C++17 Job, deterministic checker and
+  aggregator, payload-free evidence boundary and exact cleanup for Issue #140.

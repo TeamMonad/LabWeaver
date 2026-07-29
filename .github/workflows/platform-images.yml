@@ -82,6 +82,7 @@ jobs:
           - control-service
           - environment-service
           - evaluation-service
+          - oj-cpp17-runner
           - openssh-gateway
           - web
     steps:
@@ -102,6 +103,9 @@ jobs:
           service_args=(--build-arg "SERVICE=$COMPONENT" --target runtime)
           if [[ "$COMPONENT" == web ]]; then
             file=containers/Containerfile.web
+            service_args=()
+          elif [[ "$COMPONENT" == oj-cpp17-runner ]]; then
+            file=containers/Containerfile.oj-cpp17
             service_args=()
           elif [[ "$COMPONENT" == openssh-gateway ]]; then
             file=access-gateway/Dockerfile

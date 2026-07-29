@@ -40,8 +40,10 @@ hyper-util = { version = "0.1.20", features = ["server-auto", "tokio", "service"
 jsonwebtoken = "9.3.1"
 jwt-authorizer = { version = "0.15.0", default-features = false, features = ["rustls-tls", "time"] }
 jsonschema = { version = "0.33.0", default-features = false }
+landlock = "0.4.7"
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
+nix = { version = "0.31.3", default-features = false, features = ["process", "resource", "signal"] }
 openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest"] }
 rand = "0.9.1"
 reqwest = { version = "0.12.28", default-features = false, features = ["cookies", "json", "rustls-tls", "stream"] }
