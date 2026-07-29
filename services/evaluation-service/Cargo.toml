@@ -38,6 +38,7 @@ uuid.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock.workspace = true
+seccompiler.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

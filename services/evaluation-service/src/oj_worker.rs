@@ -553,100 +553,71 @@ fn parse_cgroup_pids_max(value: &str) -> Result<Option<u64>, OjWorkerError> {
     }
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-const AUDIT_ARCH_NATIVE: u32 = 0xc000_003e;
-#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-const AUDIT_ARCH_NATIVE: u32 = 0xc000_00b7;
-
 #[cfg(target_os = "linux")]
 fn apply_submission_syscall_sandbox() -> Result<(), OjWorkerError> {
-    const BPF_LD_W_ABS: u16 = 0x20;
-    const BPF_JMP_JEQ_K: u16 = 0x15;
-    const BPF_JMP_JSET_K: u16 = 0x45;
-    const BPF_RET_K: u16 = 0x06;
-    const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
-    const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
-    const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
-    const SECCOMP_DATA_NR_OFFSET: u32 = 0;
-    const SECCOMP_DATA_ARCH_OFFSET: u32 = 4;
-    const SECCOMP_DATA_ARG0_LOW_OFFSET: u32 = 16;
-    const CLONE_NAMESPACE_FLAGS: u32 = 0x0200_0000
-        | 0x0400_0000
-        | 0x0800_0000
-        | 0x1000_0000
-        | 0x2000_0000
-        | 0x4000_0000
-        | 0x0002_0000;
+    use seccompiler::{
+        BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
+        SeccompRule, TargetArch,
+    };
+    use std::collections::BTreeMap;
 
-    let errno = SECCOMP_RET_ERRNO
-        | u32::try_from(libc::EPERM).map_err(|_| OjWorkerError::SandboxUnavailable)?;
-    let unavailable = SECCOMP_RET_ERRNO
-        | u32::try_from(libc::ENOSYS).map_err(|_| OjWorkerError::SandboxUnavailable)?;
-    let syscall =
-        |number: libc::c_long| u32::try_from(number).map_err(|_| OjWorkerError::SandboxUnavailable);
-    let mut filter = vec![
-        seccomp_statement(BPF_LD_W_ABS, SECCOMP_DATA_ARCH_OFFSET),
-        seccomp_jump(BPF_JMP_JEQ_K, AUDIT_ARCH_NATIVE, 1, 0),
-        seccomp_statement(BPF_RET_K, SECCOMP_RET_KILL_PROCESS),
-        seccomp_statement(BPF_LD_W_ABS, SECCOMP_DATA_NR_OFFSET),
+    const CLONE_NAMESPACE_FLAGS: [u64; 7] = [
+        0x0002_0000,
+        0x0200_0000,
+        0x0400_0000,
+        0x0800_0000,
+        0x1000_0000,
+        0x2000_0000,
+        0x4000_0000,
     ];
-    for number in [
-        libc::SYS_setsid,
-        libc::SYS_setpgid,
-        libc::SYS_unshare,
-        libc::SYS_setns,
-    ] {
-        filter.push(seccomp_jump(BPF_JMP_JEQ_K, syscall(number)?, 0, 1));
-        filter.push(seccomp_statement(BPF_RET_K, errno));
-    }
-    filter.extend([
-        seccomp_jump(BPF_JMP_JEQ_K, syscall(libc::SYS_clone3)?, 0, 1),
-        seccomp_statement(BPF_RET_K, unavailable),
-        seccomp_jump(BPF_JMP_JEQ_K, syscall(libc::SYS_clone)?, 0, 3),
-        seccomp_statement(BPF_LD_W_ABS, SECCOMP_DATA_ARG0_LOW_OFFSET),
-        seccomp_jump(BPF_JMP_JSET_K, CLONE_NAMESPACE_FLAGS, 0, 1),
-        seccomp_statement(BPF_RET_K, errno),
-        seccomp_statement(BPF_RET_K, SECCOMP_RET_ALLOW),
-    ]);
-    let mut program = libc::sock_fprog {
-        len: u16::try_from(filter.len()).map_err(|_| OjWorkerError::SandboxUnavailable)?,
-        filter: filter.as_mut_ptr(),
-    };
-    // SAFETY: `program` references `filter` for the duration of the call, and
-    // `PR_SET_NO_NEW_PRIVS` plus a verified seccomp filter only restrict this process.
-    let installed = unsafe {
-        libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0
-            && libc::prctl(
-                libc::PR_SET_SECCOMP,
-                libc::SECCOMP_MODE_FILTER,
-                std::ptr::addr_of_mut!(program),
-            ) == 0
-    };
-    if installed {
-        Ok(())
-    } else {
-        Err(OjWorkerError::SandboxUnavailable)
-    }
-}
 
-#[cfg(target_os = "linux")]
-const fn seccomp_statement(code: u16, value: u32) -> libc::sock_filter {
-    libc::sock_filter {
-        code,
-        jt: 0,
-        jf: 0,
-        k: value,
-    }
-}
+    let target_arch = TargetArch::try_from(std::env::consts::ARCH)
+        .map_err(|_| OjWorkerError::SandboxUnavailable)?;
+    let clone_rules = CLONE_NAMESPACE_FLAGS
+        .into_iter()
+        .map(|flag| {
+            SeccompCondition::new(
+                0,
+                SeccompCmpArgLen::Qword,
+                SeccompCmpOp::MaskedEq(flag),
+                flag,
+            )
+            .and_then(|condition| SeccompRule::new(vec![condition]))
+            .map_err(|_| OjWorkerError::SandboxUnavailable)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let denied_syscalls = [
+        (libc::SYS_setsid, Vec::new()),
+        (libc::SYS_setpgid, Vec::new()),
+        (libc::SYS_unshare, Vec::new()),
+        (libc::SYS_setns, Vec::new()),
+        (libc::SYS_clone, clone_rules),
+    ]
+    .into_iter()
+    .collect::<BTreeMap<_, _>>();
+    let denied_program: BpfProgram = SeccompFilter::new(
+        denied_syscalls,
+        SeccompAction::Allow,
+        SeccompAction::Errno(
+            u32::try_from(libc::EPERM).map_err(|_| OjWorkerError::SandboxUnavailable)?,
+        ),
+        target_arch,
+    )
+    .and_then(TryInto::try_into)
+    .map_err(|_| OjWorkerError::SandboxUnavailable)?;
+    seccompiler::apply_filter(&denied_program).map_err(|_| OjWorkerError::SandboxUnavailable)?;
 
-#[cfg(target_os = "linux")]
-const fn seccomp_jump(code: u16, value: u32, jump_true: u8, jump_false: u8) -> libc::sock_filter {
-    libc::sock_filter {
-        code,
-        jt: jump_true,
-        jf: jump_false,
-        k: value,
-    }
+    let clone3_program: BpfProgram = SeccompFilter::new(
+        [(libc::SYS_clone3, Vec::new())].into_iter().collect(),
+        SeccompAction::Allow,
+        SeccompAction::Errno(
+            u32::try_from(libc::ENOSYS).map_err(|_| OjWorkerError::SandboxUnavailable)?,
+        ),
+        target_arch,
+    )
+    .and_then(TryInto::try_into)
+    .map_err(|_| OjWorkerError::SandboxUnavailable)?;
+    seccompiler::apply_filter(&clone3_program).map_err(|_| OjWorkerError::SandboxUnavailable)
 }
 
 #[cfg(target_os = "linux")]
@@ -1206,30 +1177,18 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         const CHILD_ENV: &str = "LABWEAVER_OJ_SECCOMP_TEST_CHILD";
         if std::env::var_os(CHILD_ENV).is_some() {
-            let limits_applied = apply_submission_process_limit().is_ok()
-                && nix::sys::resource::getrlimit(nix::sys::resource::Resource::RLIMIT_NPROC)
-                    .is_ok_and(|limits| limits == (64, 64));
-            let sandbox_applied = apply_submission_syscall_sandbox().is_ok();
-            // SAFETY: these raw calls intentionally probe the child-only seccomp
-            // policy, and `_exit` avoids running test-harness cleanup under it.
-            let escaped = unsafe {
-                let setsid = nix::libc::setsid();
-                let setsid_errno = std::io::Error::last_os_error().raw_os_error();
-                let setpgid = nix::libc::setpgid(0, 0);
-                let setpgid_errno = std::io::Error::last_os_error().raw_os_error();
-                let unshare = nix::libc::unshare(0);
-                let unshare_errno = std::io::Error::last_os_error().raw_os_error();
-                setsid != -1
-                    || setsid_errno != Some(nix::libc::EPERM)
-                    || setpgid != -1
-                    || setpgid_errno != Some(nix::libc::EPERM)
-                    || unshare != -1
-                    || unshare_errno != Some(nix::libc::EPERM)
-            };
-            // SAFETY: this is the dedicated subprocess created below.
-            unsafe {
-                nix::libc::_exit(i32::from(!limits_applied || !sandbox_applied || escaped));
-            }
+            apply_submission_process_limit()?;
+            assert_eq!(
+                nix::sys::resource::getrlimit(nix::sys::resource::Resource::RLIMIT_NPROC)?,
+                (64, 64)
+            );
+            apply_submission_syscall_sandbox()?;
+            assert_eq!(nix::unistd::setsid(), Err(nix::errno::Errno::EPERM));
+            assert_eq!(
+                nix::unistd::setpgid(nix::unistd::Pid::from_raw(0), nix::unistd::Pid::from_raw(0)),
+                Err(nix::errno::Errno::EPERM)
+            );
+            return Ok(());
         }
 
         let executable = std::env::current_exe()?;
