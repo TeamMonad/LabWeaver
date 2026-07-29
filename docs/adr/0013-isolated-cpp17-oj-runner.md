@@ -31,17 +31,22 @@ score; a test phase requires all three. Unknown fields, duplicate case IDs,
 unsafe relative paths, phase/checker mismatch, unapproved profiles, mutable
 images and out-of-range limits are rejected before resource construction.
 
-The Kubernetes executor creates exactly one attempt-scoped immutable ConfigMap,
-default-deny ingress-and-egress NetworkPolicy and Job. The Job uses a fixed
-ServiceAccount and image pull secret, disables service-account token mounting,
-sets `backoffLimit: 0` and a calculated active deadline, runs as UID/GID 65532
-with `RuntimeDefault` seccomp, drops all capabilities, denies privilege
-escalation, uses a read-only root filesystem and mounts the submission and
-private evaluator PVCs read-only. Compile-phase Jobs omit the evaluator binding
-entirely; only test-phase Jobs may mount it. Only attempt evidence and bounded
-`/work` storage are writable. CPU, memory, ephemeral storage, output and
-wall-time limits are explicit. The pod receives no shell command or network
-exception.
+Ansible installs and reads back a permanent namespace-wide ingress-and-egress
+default-deny NetworkPolicy before any runner Job can exist. The executor refuses
+to start when that exact policy is missing or permits any traffic; the dynamic
+attempt policy is defense in depth and is never the first-line isolation
+boundary. The executor then creates exactly one attempt-scoped immutable
+ConfigMap, additional default-deny NetworkPolicy and Job. Full request SHA-256
+identity is stored in annotations, while every label value remains within the
+Kubernetes 63-character limit. The Job uses a fixed ServiceAccount and image
+pull secret, disables service-account token mounting, sets `backoffLimit: 0` and
+a calculated active deadline, runs as UID/GID 65532 with `RuntimeDefault`
+seccomp, drops all capabilities, denies privilege escalation, uses a read-only
+root filesystem and mounts the submission and private evaluator PVCs read-only.
+Compile-phase Jobs omit the evaluator binding entirely; only test-phase Jobs may
+mount it. Only attempt evidence and bounded `/work` storage are writable. CPU,
+memory, ephemeral storage, output and wall-time limits are explicit. The pod
+receives no shell command or network exception.
 
 The worker reads files through the existing no-follow PVC capability, verifies
 each declared size and SHA-256, and invokes only fixed absolute binaries. It
@@ -57,19 +62,25 @@ so preprocessor includes, assembler `.incbin` directives and linker inputs
 cannot exfiltrate private tests into the executable.
 
 Each test process is entered through a fixed internal helper that applies
-`RLIMIT_AS`, `RLIMIT_CPU`, `RLIMIT_FSIZE` and a zero core-dump limit before
-applying a fail-closed Landlock v3 filesystem policy and replacing itself with
-`/work/submission`. The child may read only its binary, required runtime
-libraries and a small fixed set of system data/device files. In particular it
-cannot read the command ConfigMap, submission source, evaluator mount, evidence
-mount or arbitrary `/work` files. A kernel without full Landlock enforcement
-for ABI v3 (including truncate control) rejects execution. The coordinator
-applies an independent Job deadline and
-container resource ceiling, and timeout kills the whole process group. Stdout
-and stderr are drained concurrently under one combined byte ceiling. Runtime
-result classification is deterministic: output limit, time limit, memory
-limit, runtime error, wrong answer or accepted. Compile failure is a separate
-terminal state. No LLM participates in checking, aggregation or scoring.
+`RLIMIT_AS`, `RLIMIT_CPU`, `RLIMIT_FSIZE`, `RLIMIT_NPROC=64` and a zero core-dump
+limit after verifying that the current cgroup v2 `pids.max` is finite and no
+greater than 128. An absent, unlimited or broader Pod PID ceiling fails closed.
+The helper then applies a fail-closed Landlock v3 filesystem policy and a
+submission-only seccomp filter. The filter rejects `setsid`, `setpgid`,
+`unshare`, `setns`, namespace-bearing `clone` calls and direct `clone3`, so
+student descendants cannot leave the process group that the worker kills after
+every case. The child may read only its binary, required runtime libraries and a
+small fixed set of system data/device files. In particular it cannot read the
+command ConfigMap, submission source, evaluator mount, evidence mount or
+arbitrary `/work` files. A kernel without full Landlock, seccomp and bounded
+cgroup PID enforcement rejects execution. The coordinator applies an
+independent Job deadline and container resource ceiling. A measured wall
+timeout or `SIGXCPU` is TLE; unattributed `SIGKILL` is RuntimeError, while Pod
+`OOMKilled` is reported as the stable memory-limit diagnostic. Stdout and stderr
+are drained concurrently under one combined byte ceiling. Runtime result
+classification is deterministic: output limit, time limit, memory limit,
+runtime error, wrong answer or accepted. Compile failure is a separate terminal
+state. No LLM participates in checking, aggregation or scoring.
 
 Aggregation requires exactly one evidence item for every requested case.
 Duplicate, missing, unknown or point-forged evidence is rejected. A passing
@@ -91,12 +102,16 @@ diagnostic, score and case counts; it cannot expose private input, expected
 output, the compile command or raw stdout/stderr.
 
 Start is idempotent only when all three existing resources have the exact
-attempt and request-hash labels. A partial bundle is removed before recreation.
-Apply failure triggers exact cleanup. Cancel and terminal cleanup delete only
-the attempt Job, NetworkPolicy and ConfigMap using foreground propagation, then
-verify absence. Namespace and PVC deletion are never part of this executor.
-Ambiguous ownership, multiple Pods, invalid receipts, cleanup residue, API
-failure, worker OOM or Job deadline failure remains a blocking diagnostic.
+attempt labels and full request-hash annotation. A partial bundle is removed
+before recreation. Apply failure triggers exact cleanup. Cancel and terminal
+cleanup delete only the attempt Job, NetworkPolicy and ConfigMap using
+foreground propagation plus the observed UID and resourceVersion preconditions,
+then verify absence. A replacement race returns an identity conflict instead of
+deleting the new object. Cancellation returns `CleanupPending` until that
+absence readback completes and only then returns `Cancelled` for #123 to persist.
+Namespace and PVC deletion are never part of this executor. Ambiguous ownership,
+multiple Pods, invalid receipts, cleanup residue, API failure, worker OOM or Job
+deadline failure remains a blocking diagnostic.
 
 ## Alternatives considered
 
@@ -123,9 +138,10 @@ authorization and retention policy when #123 publishes the attempt.
 
 The dedicated base runtime is digest-pinned in `deploy/versions.lock.yml`; the
 complete worker is built twice and scanned in the platform-image workflow. The
-workflow result, not the base lock entry, is the vulnerability gate. The
-executor requires the approved request toolchain digest and actual promoted
-worker-image digest to match.
+OJ image fails on any High or Critical vulnerability or secret, and its Trivy
+JSON is retained as a CI artifact. The workflow result, not the base lock entry,
+is the vulnerability gate. The executor requires the approved request
+toolchain digest and actual promoted worker-image digest to match.
 
 This boundary does not grant RBAC, create the runner namespace or provision
 PVCs. Deployment must provide a least-privilege ServiceAccount that can read no

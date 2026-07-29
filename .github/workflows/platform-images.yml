@@ -151,9 +151,19 @@ jobs:
             image --input "/evidence/$COMPONENT-oci" --scanners vuln,secret \
             --severity HIGH,CRITICAL --exit-code 0 --format json \
             --output "/evidence/$COMPONENT-trivy.json"
+          high="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' "$RUNNER_TEMP/$COMPONENT-trivy.json")"
           critical="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' "$RUNNER_TEMP/$COMPONENT-trivy.json")"
           secrets="$(jq '[.Results[]?.Secrets[]?] | length' "$RUNNER_TEMP/$COMPONENT-trivy.json")"
-          test "$critical" -eq 0 && test "$secrets" -eq 0 || {
-            echo "LW_PACKAGE_SCAN_BLOCKED:$COMPONENT critical=$critical secrets=$secrets" >&2
+          if [[ "$COMPONENT" == oj-cpp17-runner && "$high" -ne 0 ]] \
+            || [[ "$critical" -ne 0 ]] || [[ "$secrets" -ne 0 ]]; then
+            echo "LW_PACKAGE_SCAN_BLOCKED:$COMPONENT high=$high critical=$critical secrets=$secrets" >&2
             exit 1
-          }
+          fi
+      - name: Upload OJ runner vulnerability evidence
+        if: ${{ always() && matrix.component == 'oj-cpp17-runner' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: oj-cpp17-runner-trivy
+          path: ${{ runner.temp }}/oj-cpp17-runner-trivy.json
+          if-no-files-found: error
+          retention-days: 14

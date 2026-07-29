@@ -89,7 +89,9 @@ fn error_diagnostic<T>(
 #[test]
 fn job_plan_is_non_root_bounded_read_only_and_has_no_network_egress()
 -> Result<(), Box<dyn std::error::Error>> {
-    let resources = OjJobResources::build(&binding())?;
+    let binding = binding();
+    let request_sha256 = binding.request.request_sha256()?.to_string();
+    let resources = OjJobResources::build(&binding)?;
     let job = &resources.job;
     let policy = &resources.network_policy;
 
@@ -102,6 +104,26 @@ fn job_plan_is_non_root_bounded_read_only_and_has_no_network_egress()
         pointer(job, "/metadata/annotations/labweaver.io~1trace-id"),
         "trace-oj-job-test"
     );
+    assert_eq!(
+        pointer(job, "/metadata/annotations/labweaver.io~1request-sha256").as_str(),
+        Some(request_sha256.as_str())
+    );
+    assert_eq!(
+        pointer(job, "/metadata/labels/labweaver.io~1request-sha256"),
+        &Value::Null
+    );
+    for labels in [
+        pointer(&resources.config_map, "/metadata/labels"),
+        pointer(&resources.network_policy, "/metadata/labels"),
+        pointer(job, "/metadata/labels"),
+        pointer(job, "/spec/template/metadata/labels"),
+    ] {
+        assert!(labels.as_object().is_some_and(|labels| {
+            labels
+                .values()
+                .all(|value| value.as_str().is_some_and(|value| value.len() <= 63))
+        }));
+    }
     assert_eq!(
         pointer(job, "/spec/template/spec/securityContext/runAsNonRoot"),
         true
@@ -257,6 +279,56 @@ fn job_plan_rejects_mutable_images_invalid_pvc_names_and_oversized_commands()
 }
 
 #[test]
+#[ignore = "requires LABWEAVER_OJ_RUNNER_NAMESPACE and an authenticated Kubernetes API"]
+fn generated_resources_pass_kubernetes_server_side_dry_run()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::{
+        io::Write as _,
+        process::{Command, Stdio},
+    };
+
+    let namespace = std::env::var("LABWEAVER_OJ_RUNNER_NAMESPACE")?;
+    let mut binding = binding();
+    binding.namespace = namespace;
+    let resources = OjJobResources::build(&binding)?;
+    for document in [
+        &resources.config_map,
+        &resources.network_policy,
+        &resources.job,
+    ] {
+        let mut child = Command::new("kubectl")
+            .args([
+                "apply",
+                "--server-side",
+                "--dry-run=server",
+                "--validate=strict",
+                "--field-manager=labweaver-oj-dry-run",
+                "-f",
+                "-",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        child
+            .stdin
+            .take()
+            .ok_or("kubectl stdin unavailable")?
+            .write_all(&serde_json::to_vec(document)?)?;
+        let output = child.wait_with_output()?;
+        if !output.status.success() {
+            return Err(format!(
+                "Kubernetes server-side dry-run rejected {}: {}",
+                pointer(document, "/kind").as_str().unwrap_or("unknown"),
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn pinned_toolchain_container_is_in_ci_and_version_lock() -> Result<(), Box<dyn std::error::Error>>
 {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -268,5 +340,8 @@ fn pinned_toolchain_container_is_in_ci_and_version_lock() -> Result<(), Box<dyn 
     assert!(containerfile.contains("io.labweaver.toolchain-profile=\"cpp17-approved-v1\""));
     assert!(versions.contains(runtime));
     assert!(workflow.contains("- oj-cpp17-runner"));
+    assert!(workflow.contains(r#"COMPONENT" == oj-cpp17-runner && "$high" -ne 0"#));
+    assert!(workflow.contains("name: oj-cpp17-runner-trivy"));
+    assert!(workflow.contains("actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"));
     Ok(())
 }

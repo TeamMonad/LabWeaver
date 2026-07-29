@@ -28,6 +28,7 @@ use landlock::{
 };
 use nix::{
     errno::Errno,
+    libc,
     sys::resource::{Resource, setrlimit},
     sys::signal::{Signal, killpg},
     unistd::{Pid, execv},
@@ -90,6 +91,10 @@ const COMPILER_READ_PATHS: [&str; 11] = [
 ];
 const MAX_COMMAND_BYTES: u64 = 1024 * 1024;
 const MAX_EVIDENCE_BYTES: u64 = 1024 * 1024;
+#[cfg(target_os = "linux")]
+const MAX_SUBMISSION_PROCESSES: u64 = 64;
+#[cfg(target_os = "linux")]
+const MAX_SUBMISSION_CGROUP_PROCESSES: u64 = 128;
 
 /// Executes one validated OJ request inside the isolated Kubernetes Job.
 ///
@@ -317,7 +322,7 @@ fn classify_case(
         return OjCaseStatus::OutputLimitExceeded;
     }
     let signal = process.status.signal();
-    if process.capture.timed_out || matches!(signal, Some(9 | 24)) {
+    if process.capture.timed_out || signal == Some(libc::SIGXCPU) {
         return OjCaseStatus::TimeLimitExceeded;
     }
     let near_memory_limit = process
@@ -370,7 +375,10 @@ pub fn run_oj_case_exec(
     setrlimit(Resource::RLIMIT_FSIZE, file_bytes, file_bytes)
         .map_err(|_| OjWorkerError::LimitApply)?;
     setrlimit(Resource::RLIMIT_CORE, 0, 0).map_err(|_| OjWorkerError::LimitApply)?;
+    require_submission_cgroup_process_limit()?;
+    apply_submission_process_limit()?;
     apply_submission_filesystem_sandbox()?;
+    apply_submission_syscall_sandbox()?;
     mark_helper_ready(&mut ready)?;
     let binary =
         CString::new(SUBMISSION_BINARY_PATH).map_err(|_| OjWorkerError::WorkspaceInvalid)?;
@@ -471,6 +479,177 @@ fn apply_submission_filesystem_sandbox() -> Result<(), OjWorkerError> {
 }
 
 #[cfg(target_os = "linux")]
+fn apply_submission_process_limit() -> Result<(), OjWorkerError> {
+    setrlimit(
+        Resource::RLIMIT_NPROC,
+        MAX_SUBMISSION_PROCESSES,
+        MAX_SUBMISSION_PROCESSES,
+    )
+    .map_err(|_| OjWorkerError::LimitApply)
+}
+
+#[cfg(target_os = "linux")]
+fn require_submission_cgroup_process_limit() -> Result<(), OjWorkerError> {
+    let membership =
+        fs::read_to_string("/proc/self/cgroup").map_err(|_| OjWorkerError::LimitApply)?;
+    let path = membership
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.splitn(3, ':');
+            let hierarchy = fields.next()?;
+            let controllers = fields.next()?;
+            let path = fields.next()?;
+            (hierarchy == "0" && controllers.is_empty()).then_some(path)
+        })
+        .and_then(cgroup_v2_pids_max_path)
+        .ok_or(OjWorkerError::LimitApply)?;
+    let root = Path::new("/sys/fs/cgroup");
+    let mut directory = path.parent().ok_or(OjWorkerError::LimitApply)?;
+    let mut effective_limit = None;
+    loop {
+        let value = fs::read_to_string(directory.join("pids.max"))
+            .map_err(|_| OjWorkerError::LimitApply)?;
+        if let Some(limit) = parse_cgroup_pids_max(&value)? {
+            effective_limit =
+                Some(effective_limit.map_or(limit, |current: u64| current.min(limit)));
+        }
+        if directory == root {
+            break;
+        }
+        directory = directory
+            .parent()
+            .filter(|parent| parent.starts_with(root))
+            .ok_or(OjWorkerError::LimitApply)?;
+    }
+    effective_limit
+        .filter(|limit| (2..=MAX_SUBMISSION_CGROUP_PROCESSES).contains(limit))
+        .map(|_| ())
+        .ok_or(OjWorkerError::LimitApply)
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_v2_pids_max_path(membership: &str) -> Option<PathBuf> {
+    let relative = membership.strip_prefix('/')?;
+    if Path::new(relative)
+        .components()
+        .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        && !relative.is_empty()
+    {
+        return None;
+    }
+    Some(Path::new("/sys/fs/cgroup").join(relative).join("pids.max"))
+}
+
+#[cfg(target_os = "linux")]
+fn parse_cgroup_pids_max(value: &str) -> Result<Option<u64>, OjWorkerError> {
+    let value = value.trim();
+    if value == "max" {
+        Ok(None)
+    } else {
+        value
+            .parse::<u64>()
+            .map(Some)
+            .map_err(|_| OjWorkerError::LimitApply)
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const AUDIT_ARCH_NATIVE: u32 = 0xc000_003e;
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+const AUDIT_ARCH_NATIVE: u32 = 0xc000_00b7;
+
+#[cfg(target_os = "linux")]
+fn apply_submission_syscall_sandbox() -> Result<(), OjWorkerError> {
+    const BPF_LD_W_ABS: u16 = 0x20;
+    const BPF_JMP_JEQ_K: u16 = 0x15;
+    const BPF_JMP_JSET_K: u16 = 0x45;
+    const BPF_RET_K: u16 = 0x06;
+    const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
+    const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
+    const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
+    const SECCOMP_DATA_NR_OFFSET: u32 = 0;
+    const SECCOMP_DATA_ARCH_OFFSET: u32 = 4;
+    const SECCOMP_DATA_ARG0_LOW_OFFSET: u32 = 16;
+    const CLONE_NAMESPACE_FLAGS: u32 = 0x0200_0000
+        | 0x0400_0000
+        | 0x0800_0000
+        | 0x1000_0000
+        | 0x2000_0000
+        | 0x4000_0000
+        | 0x0002_0000;
+
+    let errno = SECCOMP_RET_ERRNO
+        | u32::try_from(libc::EPERM).map_err(|_| OjWorkerError::SandboxUnavailable)?;
+    let unavailable = SECCOMP_RET_ERRNO
+        | u32::try_from(libc::ENOSYS).map_err(|_| OjWorkerError::SandboxUnavailable)?;
+    let syscall =
+        |number: libc::c_long| u32::try_from(number).map_err(|_| OjWorkerError::SandboxUnavailable);
+    let mut filter = vec![
+        seccomp_statement(BPF_LD_W_ABS, SECCOMP_DATA_ARCH_OFFSET),
+        seccomp_jump(BPF_JMP_JEQ_K, AUDIT_ARCH_NATIVE, 1, 0),
+        seccomp_statement(BPF_RET_K, SECCOMP_RET_KILL_PROCESS),
+        seccomp_statement(BPF_LD_W_ABS, SECCOMP_DATA_NR_OFFSET),
+    ];
+    for number in [
+        libc::SYS_setsid,
+        libc::SYS_setpgid,
+        libc::SYS_unshare,
+        libc::SYS_setns,
+    ] {
+        filter.push(seccomp_jump(BPF_JMP_JEQ_K, syscall(number)?, 0, 1));
+        filter.push(seccomp_statement(BPF_RET_K, errno));
+    }
+    filter.extend([
+        seccomp_jump(BPF_JMP_JEQ_K, syscall(libc::SYS_clone3)?, 0, 1),
+        seccomp_statement(BPF_RET_K, unavailable),
+        seccomp_jump(BPF_JMP_JEQ_K, syscall(libc::SYS_clone)?, 0, 3),
+        seccomp_statement(BPF_LD_W_ABS, SECCOMP_DATA_ARG0_LOW_OFFSET),
+        seccomp_jump(BPF_JMP_JSET_K, CLONE_NAMESPACE_FLAGS, 0, 1),
+        seccomp_statement(BPF_RET_K, errno),
+        seccomp_statement(BPF_RET_K, SECCOMP_RET_ALLOW),
+    ]);
+    let mut program = libc::sock_fprog {
+        len: u16::try_from(filter.len()).map_err(|_| OjWorkerError::SandboxUnavailable)?,
+        filter: filter.as_mut_ptr(),
+    };
+    // SAFETY: `program` references `filter` for the duration of the call, and
+    // `PR_SET_NO_NEW_PRIVS` plus a verified seccomp filter only restrict this process.
+    let installed = unsafe {
+        libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0
+            && libc::prctl(
+                libc::PR_SET_SECCOMP,
+                libc::SECCOMP_MODE_FILTER,
+                std::ptr::addr_of_mut!(program),
+            ) == 0
+    };
+    if installed {
+        Ok(())
+    } else {
+        Err(OjWorkerError::SandboxUnavailable)
+    }
+}
+
+#[cfg(target_os = "linux")]
+const fn seccomp_statement(code: u16, value: u32) -> libc::sock_filter {
+    libc::sock_filter {
+        code,
+        jt: 0,
+        jf: 0,
+        k: value,
+    }
+}
+
+#[cfg(target_os = "linux")]
+const fn seccomp_jump(code: u16, value: u32, jump_true: u8, jump_false: u8) -> libc::sock_filter {
+    libc::sock_filter {
+        code,
+        jt: jump_true,
+        jf: jump_false,
+        k: value,
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn apply_compiler_filesystem_sandbox() -> Result<(), OjWorkerError> {
     let abi = ABI::V3;
     let readable = COMPILER_READ_PATHS
@@ -499,6 +678,21 @@ fn apply_compiler_filesystem_sandbox() -> Result<(), OjWorkerError> {
 
 #[cfg(not(target_os = "linux"))]
 fn apply_submission_filesystem_sandbox() -> Result<(), OjWorkerError> {
+    Err(OjWorkerError::SandboxUnavailable)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn apply_submission_process_limit() -> Result<(), OjWorkerError> {
+    Err(OjWorkerError::SandboxUnavailable)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn require_submission_cgroup_process_limit() -> Result<(), OjWorkerError> {
+    Err(OjWorkerError::SandboxUnavailable)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn apply_submission_syscall_sandbox() -> Result<(), OjWorkerError> {
     Err(OjWorkerError::SandboxUnavailable)
 }
 
@@ -861,11 +1055,18 @@ impl OjWorkerError {
 #[cfg(test)]
 mod tests {
     use std::os::unix::process::ExitStatusExt as _;
+    #[cfg(target_os = "linux")]
+    use std::process::Command as StdCommand;
 
     use super::{
         COMMAND_PATH_ENV, COMPILER_READ_PATHS, CompletedProcess, EVALUATOR_ROOT, ProcessCapture,
         SUBMISSION_READ_PATHS, classify_case, consume_helper_ready, create_helper_ready,
         mark_helper_ready,
+    };
+    #[cfg(target_os = "linux")]
+    use super::{
+        apply_submission_process_limit, apply_submission_syscall_sandbox, cgroup_v2_pids_max_path,
+        parse_cgroup_pids_max,
     };
     use crate::oj::{OjCaseStatus, OjCheckerKind};
 
@@ -907,6 +1108,19 @@ mod tests {
         let cpu = process(24, b"");
         assert_eq!(
             classify_case(&cpu, 32 * 1024 * 1024, OjCheckerKind::Exact, b""),
+            OjCaseStatus::TimeLimitExceeded
+        );
+
+        let self_sigkill = process(9, b"");
+        assert_eq!(
+            classify_case(&self_sigkill, 32 * 1024 * 1024, OjCheckerKind::Exact, b""),
+            OjCaseStatus::RuntimeError
+        );
+
+        let mut wall_timeout = process(9, b"");
+        wall_timeout.capture.timed_out = true;
+        assert_eq!(
+            classify_case(&wall_timeout, 32 * 1024 * 1024, OjCheckerKind::Exact, b""),
             OjCaseStatus::TimeLimitExceeded
         );
 
@@ -968,6 +1182,63 @@ mod tests {
 
         std::fs::write(&path, b"forged")?;
         assert!(consume_helper_ready(&path).is_err());
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cgroup_pid_values_and_membership_are_strict() {
+        assert_eq!(parse_cgroup_pids_max("128\n").ok(), Some(Some(128)));
+        assert_eq!(parse_cgroup_pids_max("max\n").ok(), Some(None));
+        assert!(parse_cgroup_pids_max("invalid\n").is_err());
+        assert_eq!(
+            cgroup_v2_pids_max_path("/kubepods/pod/worker"),
+            Some(std::path::PathBuf::from(
+                "/sys/fs/cgroup/kubepods/pod/worker/pids.max"
+            ))
+        );
+        assert!(cgroup_v2_pids_max_path("/../host").is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn submission_sandbox_denies_process_group_and_namespace_escape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const CHILD_ENV: &str = "LABWEAVER_OJ_SECCOMP_TEST_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let limits_applied = apply_submission_process_limit().is_ok()
+                && nix::sys::resource::getrlimit(nix::sys::resource::Resource::RLIMIT_NPROC)
+                    .is_ok_and(|limits| limits == (64, 64));
+            let sandbox_applied = apply_submission_syscall_sandbox().is_ok();
+            // SAFETY: these raw calls intentionally probe the child-only seccomp
+            // policy, and `_exit` avoids running test-harness cleanup under it.
+            let escaped = unsafe {
+                let setsid = nix::libc::setsid();
+                let setsid_errno = std::io::Error::last_os_error().raw_os_error();
+                let setpgid = nix::libc::setpgid(0, 0);
+                let setpgid_errno = std::io::Error::last_os_error().raw_os_error();
+                let unshare = nix::libc::unshare(0);
+                let unshare_errno = std::io::Error::last_os_error().raw_os_error();
+                setsid != -1
+                    || setsid_errno != Some(nix::libc::EPERM)
+                    || setpgid != -1
+                    || setpgid_errno != Some(nix::libc::EPERM)
+                    || unshare != -1
+                    || unshare_errno != Some(nix::libc::EPERM)
+            };
+            // SAFETY: this is the dedicated subprocess created below.
+            unsafe {
+                nix::libc::_exit(i32::from(!limits_applied || !sandbox_applied || escaped));
+            }
+        }
+
+        let executable = std::env::current_exe()?;
+        let status = StdCommand::new(executable)
+            .arg("--exact")
+            .arg("oj_worker::tests::submission_sandbox_denies_process_group_and_namespace_escape")
+            .env(CHILD_ENV, "1")
+            .status()?;
+        assert!(status.success());
         Ok(())
     }
 }

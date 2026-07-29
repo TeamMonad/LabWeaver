@@ -57,7 +57,10 @@ were retained; no infrastructure reset was used.
 The `feature/140-oj-cpp17-runner` worktree adds the internal C++17 OJ request,
 checker, deterministic aggregator, evidence/receipt validation, isolated
 Kubernetes resource plan and executor, shell-free worker modes, dedicated
-digest-pinned image and focused tests.
+digest-pinned image and focused tests. Review hardening keeps full request
+digests in annotations, requires an Ansible-provisioned namespace default-deny
+before Job creation, rejects process-group/namespace escape syscalls, limits
+student processes, and binds deletion to UID/resourceVersion preconditions.
 
 Its current evidence is **E1 only**. The implementation is not connected to a
 public EvaluationRun or StepRun because Issue #123's authoritative lifecycle,

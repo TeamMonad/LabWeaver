@@ -82,10 +82,10 @@ impl OjJobResources {
             "labweaver.io/run-id":binding.request.run_id.to_string(),
             "labweaver.io/step-run-id":binding.request.step_run_id.to_string(),
             "labweaver.io/attempt-id":binding.request.attempt_id.to_string(),
-            "labweaver.io/request-sha256":request_sha256.to_string(),
         });
         let annotations = json!({
             "labweaver.io/trace-id":binding.request.trace_id,
+            "labweaver.io/request-sha256":request_sha256.to_string(),
         });
         let mut volume_mounts = vec![
             json!({"name":"command","mountPath":"/etc/labweaver/oj","readOnly":true}),

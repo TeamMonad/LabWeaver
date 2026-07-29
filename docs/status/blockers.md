@@ -8,10 +8,13 @@ result does not close a connected blocker.
 - Issue #123 must provide the authoritative EvaluationRun, StepRun, attempt,
   Outbox, persistence and immutable artifact integration.
 - The dedicated runner image must build reproducibly and pass the digest-bound
-  Critical/secret scan in CI.
+  High/Critical/secret scan in CI; its Trivy JSON must remain attached to the
+  same workflow identity.
 - D must run the same source/image identity on real Kubernetes and verify
   compile error, accepted, wrong answer, time, memory and output limits,
-  default-deny egress, cancel/retry, exact cleanup and private-payload absence.
+  preinstalled default-deny egress from Pod start, daemon/double-fork rejection,
+  PID exhaustion, cancel/retry, preconditioned exact cleanup and private-payload
+  absence.
 - A+B human review is required for Runner, Checker, Aggregator and scoring;
   auto-merge is forbidden.
 

@@ -344,6 +344,34 @@ class AnsibleFixtureTests(unittest.TestCase):
             tasks,
         )
 
+    def test_sprint2_application_preinstalls_evaluation_runner_default_deny(
+        self,
+    ) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        policy = tasks.split(
+            "- name: Reconcile the permanent evaluation runner namespace default deny",
+            maxsplit=1,
+        )[1].split(
+            "- name: Require the evaluation worker to use the platform image pull identity",
+            maxsplit=1,
+        )[0]
+
+        self.assertIn("name: oj-runner-default-deny", policy)
+        self.assertIn(
+            'namespace: "{{ sprint2_application_evaluation_namespace }}"',
+            policy,
+        )
+        self.assertIn("podSelector: {}", policy)
+        self.assertIn("policyTypes: [Ingress, Egress]", policy)
+        self.assertIn("ingress: []", policy)
+        self.assertIn("egress: []", policy)
+        self.assertIn(
+            "SPRINT2_APPLICATION_EVALUATION_DEFAULT_DENY_INVALID",
+            policy,
+        )
+
     def test_environment_owner_rollout_does_not_require_surge_capacity(self) -> None:
         values = (ROOT / "deploy/helm/labweaver/values.yaml").read_text(encoding="utf-8")
         workloads = (
