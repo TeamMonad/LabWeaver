@@ -266,6 +266,21 @@
                           <p v-else class="access-card__hint">SSH 别名或 Gateway 缺失，无法生成命令。</p>
                         </div>
                       </div>
+
+                      <div v-if="g.state === 'active' && data.observedState === 'ready'" class="console-section">
+                        <ConsolePanel
+                          v-if="data.runtimeKind === 'container'"
+                          kind="xterm"
+                          :grant="g"
+                          :environment="data"
+                        />
+                        <ConsolePanel
+                          v-else-if="data.runtimeKind === 'virtual_machine'"
+                          kind="novnc"
+                          :grant="g"
+                          :environment="data"
+                        />
+                      </div>
                     </template>
                   </AsyncStateView>
                 </template>
@@ -346,6 +361,7 @@ import { useEnvironmentAccess } from '@/composables/useEnvironmentAccess'
 import { useEnvironmentOperations } from '@/composables/useEnvironmentOperations'
 import { freezeSubmission, getFrozenSubmission } from '@/generated/contracts'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
+import ConsolePanel from '@/components/console/ConsolePanel.vue'
 import CopyButton from '@/components/common/CopyButton.vue'
 import DataTable from '@/components/common/DataTable.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
@@ -940,6 +956,13 @@ async function revokeAccessGrant() {
 
 .access-section {
   margin-top: 24px;
+}
+
+.console-section {
+  margin-top: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
 }
 
 .grant-actions {

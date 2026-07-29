@@ -10,6 +10,7 @@ import { resetLlmPolicyStore, seedLlmPolicies } from './llmPolicyStore'
 import { resetOperationStore, seedTimedOutOperation } from './operationStore'
 import { resetProblemPackageStore } from './problemPackageStore'
 import { resetTemplateReleaseStore, seedTemplateReleases } from './templateReleaseStore'
+import { resetConsoleCapabilityStore } from './consoleCapabilityStore'
 
 /**
  * Resets every fixture store, sequence, and clock offset to a deterministic
@@ -28,6 +29,7 @@ export function resetFixtureState(): void {
   resetProblemPackageStore()
   resetSshKeyStore()
   resetTemplateReleaseStore()
+  resetConsoleCapabilityStore()
   const envIds = seedEnvironments()
   seedAccessGrants(envIds)
   seedTimedOutOperation(envIds[0])
