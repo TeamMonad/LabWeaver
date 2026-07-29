@@ -671,6 +671,135 @@ export type CandidateApprovalSchemaSha256Digest = string;
 export type CandidateApprovalSchemaUtcTimestamp = string;
 
 /**
+ * ConsoleCapabilityAvailability
+ *
+ * Public capability discovery result. It deliberately contains no locator or handoff secret.
+ */
+export type ConsoleCapabilityAvailabilitySchema = {
+    accessGrantId: ConsoleCapabilityAvailabilitySchemaAccessGrantId;
+    accessGrantRevision: ConsoleCapabilityAvailabilitySchemaRevision;
+    environmentClass: EnvironmentClass;
+    environmentId: ConsoleCapabilityAvailabilitySchemaEnvironmentId;
+    environmentRevision: ConsoleCapabilityAvailabilitySchemaRevision;
+    expiresAt: ConsoleCapabilityAvailabilitySchemaUtcTimestamp;
+    kinds: Array<ConsoleKind>;
+    leaseFence?: ConsoleLeaseFence | null;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `AccessGrantId`.
+ */
+export type ConsoleCapabilityAvailabilitySchemaAccessGrantId = string;
+
+/**
+ * Browser interaction transport selected by an approved environment release.
+ */
+export type ConsoleKind = 'xterm' | 'novnc';
+
+/**
+ * Resource-owned Lease identity that fences a Work console capability.
+ */
+export type ConsoleLeaseFence = {
+    expiresAt: ConsoleCapabilityAvailabilitySchemaUtcTimestamp;
+    leaseId: LeaseId;
+    leaseRevision: ConsoleCapabilityAvailabilitySchemaRevision;
+};
+
+/**
+ * Environment business class retained from the v2.1 architecture.
+ */
+export type EnvironmentClass = 'experiment' | 'work';
+
+/**
+ * Strongly typed UUIDv7 identifier for `EnvironmentId`.
+ */
+export type ConsoleCapabilityAvailabilitySchemaEnvironmentId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `LeaseId`.
+ */
+export type LeaseId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type ConsoleCapabilityAvailabilitySchemaRevision = number;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type ConsoleCapabilityAvailabilitySchemaUtcTimestamp = string;
+
+/**
+ * ConsoleCapability
+ *
+ * One-time browser console handoff. The secret is an HttpOnly cookie, never a field here.
+ */
+export type ConsoleCapabilitySchema = {
+    accessGrantId: ConsoleCapabilitySchemaAccessGrantId;
+    accessGrantRevision: ConsoleCapabilitySchemaRevision;
+    connectionLocator: string;
+    environmentClass: ConsoleCapabilitySchemaEnvironmentClass;
+    environmentId: ConsoleCapabilitySchemaEnvironmentId;
+    environmentRevision: ConsoleCapabilitySchemaRevision;
+    expiresAt: ConsoleCapabilitySchemaUtcTimestamp;
+    id: ConsoleCapabilityId;
+    issuedAt: ConsoleCapabilitySchemaUtcTimestamp;
+    kind: ConsoleCapabilitySchemaConsoleKind;
+    leaseFence?: ConsoleCapabilitySchemaConsoleLeaseFence | null;
+    websocketSubprotocol: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `AccessGrantId`.
+ */
+export type ConsoleCapabilitySchemaAccessGrantId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ConsoleCapabilityId`.
+ */
+export type ConsoleCapabilityId = string;
+
+/**
+ * Browser interaction transport selected by an approved environment release.
+ */
+export type ConsoleCapabilitySchemaConsoleKind = 'xterm' | 'novnc';
+
+/**
+ * Resource-owned Lease identity that fences a Work console capability.
+ */
+export type ConsoleCapabilitySchemaConsoleLeaseFence = {
+    expiresAt: ConsoleCapabilitySchemaUtcTimestamp;
+    leaseId: ConsoleCapabilitySchemaLeaseId;
+    leaseRevision: ConsoleCapabilitySchemaRevision;
+};
+
+/**
+ * Environment business class retained from the v2.1 architecture.
+ */
+export type ConsoleCapabilitySchemaEnvironmentClass = 'experiment' | 'work';
+
+/**
+ * Strongly typed UUIDv7 identifier for `EnvironmentId`.
+ */
+export type ConsoleCapabilitySchemaEnvironmentId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `LeaseId`.
+ */
+export type ConsoleCapabilitySchemaLeaseId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type ConsoleCapabilitySchemaRevision = number;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type ConsoleCapabilitySchemaUtcTimestamp = string;
+
+/**
  * CourseLlmEgressPolicy
  *
  * Versioned course policy governing all LLM egress.
@@ -844,7 +973,7 @@ export type EnvironmentEndpointSchemaUtcTimestamp = string;
  */
 export type EnvironmentInstanceSchema = {
     capacityBinding?: string | null;
-    class: EnvironmentClass;
+    class: EnvironmentInstanceSchemaEnvironmentClass;
     cleanupEvidence?: EnvironmentInstanceSchemaArtifactRef | null;
     courseId: EnvironmentInstanceSchemaCourseId;
     desiredState: DesiredEnvironmentState;
@@ -855,7 +984,7 @@ export type EnvironmentInstanceSchema = {
     generation: number;
     id: EnvironmentInstanceSchemaEnvironmentId;
     lastDiagnosticCode?: string | null;
-    leaseId?: LeaseId | null;
+    leaseId?: EnvironmentInstanceSchemaLeaseId | null;
     observedGeneration: number;
     observedState: ObservedEnvironmentState;
     operation: EnvironmentOperation;
@@ -935,7 +1064,7 @@ export type EnvironmentInstanceSchemaEndpointProtocol = 'http' | 'https' | 'ssh'
 /**
  * Environment business class retained from the v2.1 architecture.
  */
-export type EnvironmentClass = 'experiment' | 'work';
+export type EnvironmentInstanceSchemaEnvironmentClass = 'experiment' | 'work';
 
 /**
  * Sanitized Environment-owned endpoint metadata.
@@ -967,7 +1096,7 @@ export type EnvironmentLeaseAuthorization = {
     courseId: EnvironmentInstanceSchemaCourseId;
     environmentId: EnvironmentInstanceSchemaEnvironmentId;
     expiresAt: EnvironmentInstanceSchemaUtcTimestamp;
-    leaseId: LeaseId;
+    leaseId: EnvironmentInstanceSchemaLeaseId;
     leaseRevision: EnvironmentInstanceSchemaRevision;
     ownerActorId: EnvironmentInstanceSchemaActorId;
 };
@@ -1022,7 +1151,7 @@ export type EnvironmentResetTarget = {
 /**
  * Strongly typed UUIDv7 identifier for `LeaseId`.
  */
-export type LeaseId = string;
+export type EnvironmentInstanceSchemaLeaseId = string;
 
 /**
  * Authoritative observed lifecycle state.
@@ -4121,6 +4250,47 @@ export type InternalImageArtifactResolutionSchemaVulnerabilitySummary = {
 };
 
 /**
+ * IssueConsoleCapabilityRequest
+ *
+ * Revision-fenced request to issue a single browser console capability.
+ */
+export type IssueConsoleCapabilityRequestSchema = {
+    expectedAccessGrantRevision: IssueConsoleCapabilityRequestSchemaRevision;
+    expectedEnvironmentRevision: IssueConsoleCapabilityRequestSchemaRevision;
+    expectedLeaseFence?: IssueConsoleCapabilityRequestSchemaConsoleLeaseFence | null;
+    kind: IssueConsoleCapabilityRequestSchemaConsoleKind;
+};
+
+/**
+ * Browser interaction transport selected by an approved environment release.
+ */
+export type IssueConsoleCapabilityRequestSchemaConsoleKind = 'xterm' | 'novnc';
+
+/**
+ * Resource-owned Lease identity that fences a Work console capability.
+ */
+export type IssueConsoleCapabilityRequestSchemaConsoleLeaseFence = {
+    expiresAt: IssueConsoleCapabilityRequestSchemaUtcTimestamp;
+    leaseId: IssueConsoleCapabilityRequestSchemaLeaseId;
+    leaseRevision: IssueConsoleCapabilityRequestSchemaRevision;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `LeaseId`.
+ */
+export type IssueConsoleCapabilityRequestSchemaLeaseId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type IssueConsoleCapabilityRequestSchemaRevision = number;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type IssueConsoleCapabilityRequestSchemaUtcTimestamp = string;
+
+/**
  * ProblemPackageUploadSession
  */
 export type ProblemPackageUploadSessionSchema = {
@@ -4455,6 +4625,118 @@ export type GetAccessGrantResponses = {
 };
 
 export type GetAccessGrantResponse = GetAccessGrantResponses[keyof GetAccessGrantResponses];
+
+export type ListConsoleCapabilitiesData = {
+    body?: never;
+    path: {
+        grantId: string;
+    };
+    query?: never;
+    url: '/api/v1/access-grants/{grantId}/console-capabilities';
+};
+
+export type ListConsoleCapabilitiesErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ListConsoleCapabilitiesError = ListConsoleCapabilitiesErrors[keyof ListConsoleCapabilitiesErrors];
+
+export type ListConsoleCapabilitiesResponses = {
+    /**
+     * Successful response
+     */
+    200: ConsoleCapabilityAvailabilitySchema;
+};
+
+export type ListConsoleCapabilitiesResponse = ListConsoleCapabilitiesResponses[keyof ListConsoleCapabilitiesResponses];
+
+export type IssueConsoleCapabilityData = {
+    body: IssueConsoleCapabilityRequestSchema;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        grantId: string;
+    };
+    query?: never;
+    url: '/api/v1/access-grants/{grantId}/console-capabilities';
+};
+
+export type IssueConsoleCapabilityErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type IssueConsoleCapabilityError = IssueConsoleCapabilityErrors[keyof IssueConsoleCapabilityErrors];
+
+export type IssueConsoleCapabilityResponses = {
+    /**
+     * Successful response
+     */
+    201: ConsoleCapabilitySchema;
+};
+
+export type IssueConsoleCapabilityResponse = IssueConsoleCapabilityResponses[keyof IssueConsoleCapabilityResponses];
 
 export type RenewAccessGrantData = {
     body: RenewAccessGrantRequestSchema;

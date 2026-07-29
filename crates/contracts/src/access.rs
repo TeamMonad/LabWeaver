@@ -6,10 +6,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ssh_key::{Algorithm, HashAlg, PublicKey, public::KeyData};
 
+use crate::authoring::EnvironmentClass;
 use crate::environment::{EndpointHealth, EndpointProtocol};
 use crate::{
-    AccessGrantId, ActorId, CourseId, EndpointGrantId, EndpointId, EnvironmentId, GatewaySessionId,
-    Revision, SshPublicKeyId, UtcTimestamp,
+    AccessGrantId, ActorId, ConsoleCapabilityId, CourseId, EndpointGrantId, EndpointId,
+    EnvironmentId, GatewaySessionId, LeaseId, Revision, SshPublicKeyId, UtcTimestamp,
 };
 
 /// Public-key algorithm frozen by the v1 Access contract.
@@ -130,6 +131,134 @@ pub enum AuthorizationDecision {
     Allow,
     Deny,
     Terminal,
+}
+
+/// Browser interaction transport selected by an approved environment release.
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsoleKind {
+    Xterm,
+    Novnc,
+}
+
+impl ConsoleKind {
+    /// Versioned WebSocket subprotocol required for this console transport.
+    #[must_use]
+    pub const fn websocket_subprotocol(self) -> &'static str {
+        match self {
+            Self::Xterm => "labweaver.console.xterm.v1",
+            Self::Novnc => "labweaver.console.novnc.v1",
+        }
+    }
+}
+
+/// Resource-owned Lease identity that fences a Work console capability.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConsoleLeaseFence {
+    pub lease_id: LeaseId,
+    pub lease_revision: Revision,
+    pub expires_at: UtcTimestamp,
+}
+
+/// Public capability discovery result. It deliberately contains no locator or handoff secret.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConsoleCapabilityAvailability {
+    pub access_grant_id: AccessGrantId,
+    pub access_grant_revision: Revision,
+    pub environment_id: EnvironmentId,
+    pub environment_class: EnvironmentClass,
+    pub environment_revision: Revision,
+    pub expires_at: UtcTimestamp,
+    pub lease_fence: Option<ConsoleLeaseFence>,
+    pub kinds: Vec<ConsoleKind>,
+}
+
+impl ConsoleCapabilityAvailability {
+    pub fn validate(&self) -> Result<(), AccessError> {
+        let mut kinds = BTreeSet::new();
+        let work = matches!(self.environment_class, EnvironmentClass::Work);
+        if self.kinds.is_empty() || !self.kinds.iter().all(|kind| kinds.insert(*kind)) {
+            return Err(AccessError::InvalidConsoleCapability);
+        }
+        match (&self.lease_fence, work) {
+            (Some(fence), true) if self.expires_at <= fence.expires_at => Ok(()),
+            (None, false) => Ok(()),
+            _ => Err(AccessError::InvalidConsoleCapability),
+        }
+    }
+}
+
+/// One-time browser console handoff. The secret is an HttpOnly cookie, never a field here.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConsoleCapability {
+    pub id: ConsoleCapabilityId,
+    pub kind: ConsoleKind,
+    pub access_grant_id: AccessGrantId,
+    pub access_grant_revision: Revision,
+    pub environment_id: EnvironmentId,
+    pub environment_class: EnvironmentClass,
+    pub environment_revision: Revision,
+    pub lease_fence: Option<ConsoleLeaseFence>,
+    pub issued_at: UtcTimestamp,
+    pub expires_at: UtcTimestamp,
+    pub connection_locator: String,
+    pub websocket_subprotocol: String,
+}
+
+impl ConsoleCapability {
+    pub fn validate(&self) -> Result<(), AccessError> {
+        let work = matches!(self.environment_class, EnvironmentClass::Work);
+        let lifetime_is_exact =
+            self.expires_at.get() - self.issued_at.get() == time::Duration::seconds(30);
+        if !lifetime_is_exact
+            || !is_console_connection_locator(&self.connection_locator)
+            || self.websocket_subprotocol != self.kind.websocket_subprotocol()
+        {
+            return Err(AccessError::InvalidConsoleCapability);
+        }
+        match (&self.lease_fence, work) {
+            (Some(fence), true) if self.expires_at <= fence.expires_at => Ok(()),
+            (None, false) => Ok(()),
+            _ => Err(AccessError::InvalidConsoleCapability),
+        }
+    }
+
+    /// Ensures an issued handoff remains within discovery and Lease authority.
+    pub fn validate_against(
+        &self,
+        availability: &ConsoleCapabilityAvailability,
+    ) -> Result<(), AccessError> {
+        self.validate()?;
+        availability.validate()?;
+        if !availability.kinds.contains(&self.kind)
+            || self.access_grant_id != availability.access_grant_id
+            || self.access_grant_revision != availability.access_grant_revision
+            || self.environment_id != availability.environment_id
+            || self.environment_class != availability.environment_class
+            || self.environment_revision != availability.environment_revision
+            || self.lease_fence != availability.lease_fence
+            || self.expires_at > availability.expires_at
+        {
+            return Err(AccessError::InvalidConsoleCapability);
+        }
+        Ok(())
+    }
+}
+
+fn is_console_connection_locator(value: &str) -> bool {
+    const PREFIX: &str = "/connect/console/";
+    let Some(segment) = value.strip_prefix(PREFIX) else {
+        return false;
+    };
+    (1..=128).contains(&segment.len())
+        && segment
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -617,6 +746,8 @@ pub enum AccessError {
     TerminationDeadlineExceeded,
     #[error("public AccessGrant snapshot is internally inconsistent")]
     InvalidGrantSnapshot,
+    #[error("ConsoleCapability is internally inconsistent")]
+    InvalidConsoleCapability,
 }
 
 #[cfg(test)]
@@ -768,5 +899,127 @@ mod tests {
         assert!(!rendered.contains("SECRET_KEY_BODY"));
         assert!(!rendered.contains("secret-token"));
         assert_eq!(rendered.matches("[REDACTED]").count(), 2);
+    }
+
+    #[test]
+    fn console_capability_fences_exact_lifetime_lease_and_opaque_locator() {
+        let issued_at = timestamp("2026-07-29T00:00:00.000Z");
+        let expires_at = timestamp("2026-07-29T00:00:30.000Z");
+        let capability = ConsoleCapability {
+            id: ConsoleCapabilityId::new(),
+            kind: ConsoleKind::Novnc,
+            access_grant_id: AccessGrantId::new(),
+            access_grant_revision: revision(2),
+            environment_id: EnvironmentId::new(),
+            environment_class: EnvironmentClass::Experiment,
+            environment_revision: revision(3),
+            lease_fence: None,
+            issued_at,
+            expires_at,
+            connection_locator: "/connect/console/opaque-handoff".to_owned(),
+            websocket_subprotocol: "labweaver.console.novnc.v1".to_owned(),
+        };
+        assert!(capability.validate().is_ok());
+
+        for locator in [
+            "https://runtime.invalid/connect",
+            "/connect/console/",
+            "/connect/console/one/two",
+            "/connect/console/opaque?query",
+            "/connect/console/opaque.handoff",
+        ] {
+            let mut invalid = capability.clone();
+            invalid.connection_locator = locator.to_owned();
+            assert_eq!(
+                invalid.validate(),
+                Err(AccessError::InvalidConsoleCapability),
+                "{locator} must not be accepted as an opaque locator"
+            );
+        }
+
+        let mut millisecond_drift = capability.clone();
+        millisecond_drift.expires_at = timestamp("2026-07-29T00:00:30.001Z");
+        assert_eq!(
+            millisecond_drift.validate(),
+            Err(AccessError::InvalidConsoleCapability)
+        );
+
+        let mut wrong_subprotocol = capability.clone();
+        wrong_subprotocol.websocket_subprotocol =
+            ConsoleKind::Xterm.websocket_subprotocol().to_owned();
+        assert_eq!(
+            wrong_subprotocol.validate(),
+            Err(AccessError::InvalidConsoleCapability)
+        );
+
+        let mut availability = ConsoleCapabilityAvailability {
+            access_grant_id: capability.access_grant_id,
+            access_grant_revision: capability.access_grant_revision,
+            environment_id: capability.environment_id,
+            environment_class: EnvironmentClass::Experiment,
+            environment_revision: capability.environment_revision,
+            expires_at,
+            lease_fence: None,
+            kinds: vec![ConsoleKind::Novnc],
+        };
+        assert!(capability.validate_against(&availability).is_ok());
+
+        let mut less_than_thirty_seconds = availability.clone();
+        less_than_thirty_seconds.expires_at = timestamp("2026-07-29T00:00:29.999Z");
+        assert_eq!(
+            capability.validate_against(&less_than_thirty_seconds),
+            Err(AccessError::InvalidConsoleCapability),
+            "issuers must reject rather than shorten a handoff when less than 30 seconds remain"
+        );
+
+        availability.kinds.push(ConsoleKind::Novnc);
+        assert_eq!(
+            availability.validate(),
+            Err(AccessError::InvalidConsoleCapability)
+        );
+
+        let mut work_capability = capability.clone();
+        work_capability.environment_class = EnvironmentClass::Work;
+        let fence = ConsoleLeaseFence {
+            lease_id: LeaseId::new(),
+            lease_revision: revision(4),
+            expires_at,
+        };
+        work_capability.lease_fence = Some(fence.clone());
+        assert!(work_capability.validate().is_ok());
+
+        let mut expired_by_lease = work_capability.clone();
+        expired_by_lease.expires_at = timestamp("2026-07-29T00:00:30.001Z");
+        assert_eq!(
+            expired_by_lease.validate(),
+            Err(AccessError::InvalidConsoleCapability)
+        );
+
+        let mut invalid_experiment = capability.clone();
+        invalid_experiment.lease_fence = Some(fence.clone());
+        assert_eq!(
+            invalid_experiment.validate(),
+            Err(AccessError::InvalidConsoleCapability)
+        );
+
+        let lease_limited_availability = ConsoleCapabilityAvailability {
+            environment_class: EnvironmentClass::Work,
+            expires_at: fence.expires_at,
+            lease_fence: Some(fence),
+            kinds: vec![ConsoleKind::Novnc],
+            ..availability
+        };
+        assert!(
+            work_capability
+                .validate_against(&lease_limited_availability)
+                .is_ok()
+        );
+
+        let mut availability_past_lease = lease_limited_availability;
+        availability_past_lease.expires_at = timestamp("2026-07-29T00:00:30.001Z");
+        assert_eq!(
+            availability_past_lease.validate(),
+            Err(AccessError::InvalidConsoleCapability)
+        );
     }
 }

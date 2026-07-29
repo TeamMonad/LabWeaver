@@ -174,9 +174,10 @@ Service checks the BFF session, current membership, grant expiry and exact
 Environment endpoint revision on every request before deriving the internal
 Service DNS name. Cookies and arbitrary upstream redirects are never forwarded.
 Sprint 2 permits bounded HTTP request/response applications only; an Upgrade
-request fails with `LW_ACCESS_RUNTIME_UPGRADE_UNSUPPORTED`. Interactive
-code-server and WorkConfig remain outside this slice instead of weakening the
-Access boundary with an unauthenticated direct route.
+request on this generic HTTP path fails with
+`LW_ACCESS_RUNTIME_UPGRADE_UNSUPPORTED`. ADR 0012 separately freezes a future
+AccessGrant-scoped ConsoleCapability route for xterm/noVNC. It does not change
+this endpoint contract or claim an interactive runtime implementation.
 
 SSH clients likewise use only the public Gateway binding copied by Access
 Service into the active `EndpointGrant`: the reviewed DNS name, fixed port

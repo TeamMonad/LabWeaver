@@ -28,6 +28,19 @@ baseline migration to a disposable PostgreSQL instance.
 
 ## Contract and unit behavior
 
+- `ConsoleCapability` discovery never returns a locator or handoff secret;
+  issuance requires BFF/Origin/CSRF/idempotency and exact AccessGrant,
+  Environment and conditional Work Lease revisions. The response has a
+  30-second relative locator and a kind-matching versioned WebSocket
+  subprotocol. Its secret is a path-scoped Secure HttpOnly cookie, not a body
+  field or URL component.
+- Work capabilities require a Lease fence; Experiment capabilities reject one.
+  Expired/consumed capability, revision drift, unsupported kind, capacity,
+  control-channel loss and upstream failure remain distinct diagnostics.
+- Runtime implementations must use local expiry deadlines plus transactional
+  Outbox/durable JetStream lifecycle delivery, never authorization polling.
+  Loss of control delivery closes sessions; #131/#124/#126 provide the
+  persistence, real stream and E4 evidence.
 - one current v1 REST/event/schema representation;
 - no Sigstore, Kyverno, SBOM, provenance or attestation field in the active
   product contract;

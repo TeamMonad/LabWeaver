@@ -1,12 +1,12 @@
 # Access Trust Boundary
 
-Status: the current P0 is `ssh gateway@gateway connect <server-alias>`. Issue #49 owns Access authorization and session facts, #53 owns real VM endpoints, and #63 owns the OpenSSH Gateway/ForceCommand process. `DirectAccessGrant`, Headscale/Router direct access and Guacamole are deferred proposals. Current local evidence does not prove native SSH-to-VM or a deployed production path.
+Status: the current P0 is `ssh gateway@gateway connect <server-alias>`. ADR 0012 supersedes Guacamole for browser consoles and freezes only the ConsoleCapability contract; #131 and #124 own its xterm/noVNC implementations. Current evidence does not prove a deployed browser-console path.
 
 ## Purpose and non-goals
 
 This document defines the P0 trust boundary for external access to LabWeaver environments. It separates authentication, device reachability, business authorization, direct VM transport, browser mediation, and environment-local credentials so that Tailnet reachability never becomes a substitute for Access Service authorization.
 
-The versioned contracts and forward-only Access Migration define the #49 data/API boundary. This document does not define the #63 Gateway image/`sshd`/ForceCommand helper, #53 endpoint route resolution, Headscale, Router, Guacamole, frontend or deployment credentials.
+The versioned contracts define the Access data/API boundary. This document does not define the Gateway image, runtime executor, ConsoleCapability persistence, noVNC UI, KubeVirt bridge or deployment credentials.
 
 ## Public discovery projection
 
@@ -25,10 +25,10 @@ without becoming an authorization authority. Missing or unavailable ownership fa
 | Access Service | AccessGrant, DirectAccessGrant, EndpointGrant, device eligibility, revisions, lifecycle and revocation | identity-provider login or workload scheduling |
 | OpenSSH Gateway (#63) | present a key fingerprint, redeem a one-time token, report session heartbeat/close and execute termination commands | authorization truth, VM endpoint ownership or independent `authorized_keys` policy |
 | Router enforcement | exact device-to-endpoint packet filtering, connection-state removal and enforcement receipt | whether a subject deserves access |
-| Guacamole extension | browser-session mediation after a one-time Access handoff | independent OIDC login, business authorization truth or connection inventory |
+| Access WebSocket proxy | browser-session mediation after a one-time ConsoleCapability handoff | runtime target selection, Kubernetes credentials or independent authorization truth |
 | Environment Service | endpoint metadata and short-lived SSH/VNC credentials | caller identity, course membership or external network policy |
 
-PostgreSQL is the planned durable source of truth for Access Service state. Headscale Grants, Router firewall state, Guacamole session state and caches are derived enforcement state; none may independently grant access.
+PostgreSQL is the planned durable source of truth for Access Service state. JetStream, proxy session state and caches are derived enforcement state; none may independently grant access.
 
 ## Issue #47 identity and internal service defaults
 
@@ -60,10 +60,10 @@ flowchart LR
     T --> H["Headscale Grants"]
     H --> R["Subnet Router firewall"]
     R --> V["VM private SSH or VNC endpoint"]
-    B["Browser portal"] --> P["Keycloak PKCE"]
-    P --> A["Access Service"]
-    A --> G["Custom Guacamole extension"]
-    G --> V
+    B["Browser xterm or noVNC"] --> P["Access ConsoleCapability"]
+    P --> A["Access WebSocket proxy"]
+    A --> E["Environment mTLS bridge"]
+    E --> V
     A --> H
     A --> R
 ```
@@ -77,9 +77,9 @@ before OpenSSH can start the terminal. This closes the dynamic VM host-key
 boundary without copying target addresses into Access or maintaining a stale
 cluster-wide `known_hosts` file.
 
-The following `DirectAccessGrant` and Guacamole sections are retained only as a deferred future proposal and are not requirements or completion evidence for #49/#53/#63.
+The following `DirectAccessGrant` sections are retained only as a deferred future proposal and are not requirements or completion evidence for browser consoles.
 
-Browser SSH and VNC use Guacamole. The portal completes Authorization Code plus PKCE with Keycloak, then receives a one-time, short-lived handoff token from Access Service. The custom Guacamole extension validates that token over an internal mutually authenticated channel, loads only the current authorized connection, and does not expose the token or endpoint credential to the browser. Code-server, Jupyter and other HTTP endpoints remain Access Gateway paths.
+Browser xterm and noVNC use the ADR 0012 ConsoleCapability handoff: discovery and issuance occur on an active AccessGrant; issuance requires BFF, Origin, CSRF, idempotency and exact revision fences. The locator expires after 30 seconds and its single-use secret is a path-scoped Secure HttpOnly cookie, never a URL or response field. The intended Access proxy and Environment mTLS bridge are downstream work, not current runtime evidence.
 
 ## DirectAccessGrant lifecycle
 
@@ -94,7 +94,7 @@ Activation is ordered but atomic from the caller's perspective:
 3. Policy Compiler applies the matching default-deny Headscale Grants revision and returns its receipt.
 4. Only matching successful receipts change the grant to `active`; any missing, stale or failed receipt leaves it `pending` or `blocked` and unusable.
 
-Each active native VNC grant additionally requires Environment Service to issue a short-lived, subject-and-endpoint-bound VNC credential. SSH uses an equivalently scoped short-lived certificate or one-time credential. No credential may be stored in the grant record, policy, ordinary logs or Guacamole connection inventory.
+KubeVirt noVNC uses a service-side least-privilege identity for the VMI `/vnc` WebSocket subresource; it does not issue a guest VNC password or browser-visible Kubernetes credential. No credential may be stored in grant records, policies, logs or session inventory.
 
 ## Revocation and containment
 
@@ -106,8 +106,8 @@ Kubernetes NetworkPolicy alone is not acceptable evidence for the 60-second cond
 
 ## Failure, audit and evidence requirements
 
-Future contracts must expose stable diagnostics for invalid identity, inactive device, invalid handoff token, missing/expired/revoked grant, DirectAccessGrant pending or blocked state, unsupported protocol, mismatched enforcement revision, Router isolation failure, policy application failure and endpoint containment escalation. The final decision boundary logs each result once with structured `event`, diagnostic code, trace/request ID, subject ID, device ID, endpoint ID, protocol, authorization/policy/firewall revisions and safe reason category.
+Console contracts expose stable diagnostics for denied, expired or consumed capability, revision or Lease conflict, environment-not-ready, subprotocol mismatch, upstream unavailable, control-channel loss and authorization end. The final decision boundary logs each result once with structured identity, revision, trace/request ID and safe reason category.
 
 Audit records and machine-readable reports may contain identifiers, timestamps, revisions, decision outcomes, hashes and safe diagnostics. They must not contain bearer tokens, handoff tokens, enrollment keys, SSH/VNC credentials, cookies, full request payloads, terminal streams or session content.
 
-The OIDC/BFF slice has E1/E2 contract, PostgreSQL, real HTTPS Keycloak, JWKS rotation/outage and real mTLS owner-resolver evidence. Still unavailable are deployed Gateway/Keycloak/internal-DNS evidence plus the Router/Headscale/Guacamole path with receipts (E3), and multi-device, multi-role replay proving native and browser-path containment (E4).
+The ConsoleCapability contract is E2 only after generated schema/API/SDK checks and cross-consumer compilation. #131, #124 and #126 respectively own implementation, real shared-cluster E3 and multi-role E4; Fixture, historical PR #138 and mixed-source evidence do not upgrade those conclusions.
