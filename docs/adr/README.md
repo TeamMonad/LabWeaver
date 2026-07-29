@@ -1,6 +1,7 @@
 # Architecture Decision Records
 
-The active Sprint 2 simplification baseline is ADR 0011. Superseded ADRs remain
+The active Sprint 2 simplification baseline is ADR 0011. ADR 0012 freezes the
+browser-console contract that follows it. Superseded ADRs remain
 as decision history and must not be treated as deployment instructions.
 
 ADRs record accepted cross-domain or high-risk decisions. A draft design statement is not an accepted ADR.
@@ -34,3 +35,6 @@ No ADR is accepted in ARC-01a; this directory establishes the review process wit
 - [ADR 0010: Immutable PVC and Certificate-bound SSH Collector](0010-immutable-dual-runtime-collector.md)
   defines bounded dual-runtime snapshots, read-only short-lived SFTP,
   Object Lock publication and durable freeze-attempt fencing for Issue #54.
+- [ADR 0012: Unified Console Capability and noVNC Boundary](0012-unified-console-capability-and-novnc.md)
+  replaces the historical Guacamole browser-console proposal with one AccessGrant-scoped,
+  one-time xterm/noVNC capability contract.

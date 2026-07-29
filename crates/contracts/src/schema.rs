@@ -166,6 +166,14 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::access::AccessGrantSnapshot
     );
     document!(
+        "schemas/contracts/v1/console-capability-availability.schema.json",
+        crate::access::ConsoleCapabilityAvailability
+    );
+    document!(
+        "schemas/contracts/v1/console-capability.schema.json",
+        crate::access::ConsoleCapability
+    );
+    document!(
         "schemas/contracts/v1/http/environment-access-grant-page.schema.json",
         crate::http::SnapshotPage<crate::access::AccessGrantSnapshot>
     );
@@ -340,6 +348,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/http/renew-access-grant-request.schema.json",
         crate::http::RenewAccessGrantRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/issue-console-capability-request.schema.json",
+        crate::http::IssueConsoleCapabilityRequest
     );
 
     document!(
@@ -820,6 +832,7 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "createAccessGrant" => "http/create-access-grant-request",
         "revokeAccessGrant" => "http/revoke-access-grant-request",
         "renewAccessGrant" => "http/renew-access-grant-request",
+        "issueConsoleCapability" => "http/issue-console-capability-request",
         "authorizeSsh" => "ssh-authorization-request",
         "resolveEnvironmentOwner" => "http/environment-owner-resolution-request",
         "resolveEndpointEligibility" => "http/environment-endpoint-eligibility-request",
@@ -865,6 +878,8 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         }
         "createSshPublicKey" => contract_ref("ssh-public-key"),
         "createAccessGrant" | "getAccessGrant" | "renewAccessGrant" => contract_ref("access-grant"),
+        "listConsoleCapabilities" => contract_ref("console-capability-availability"),
+        "issueConsoleCapability" => contract_ref("console-capability"),
         "authorizeSsh" => contract_ref("ssh-authorization"),
         "resolveEnvironmentOwner" => contract_ref("environment-owner-resolution"),
         "resolveEndpointEligibility" => contract_ref("environment-endpoint-eligibility"),

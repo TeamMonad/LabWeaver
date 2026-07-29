@@ -367,6 +367,35 @@ pub struct RenewAccessGrantRequest {
     pub expires_at: UtcTimestamp,
 }
 
+/// Revision-fenced request to issue a single browser console capability.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IssueConsoleCapabilityRequest {
+    pub kind: crate::access::ConsoleKind,
+    pub expected_access_grant_revision: Revision,
+    pub expected_environment_revision: Revision,
+    pub expected_lease_fence: Option<crate::access::ConsoleLeaseFence>,
+}
+
+impl IssueConsoleCapabilityRequest {
+    pub fn validate_against(
+        &self,
+        availability: &crate::access::ConsoleCapabilityAvailability,
+    ) -> Result<(), HttpContractError> {
+        availability
+            .validate()
+            .map_err(|_| HttpContractError::InvalidConsoleCapability)?;
+        if self.expected_access_grant_revision != availability.access_grant_revision
+            || self.expected_environment_revision != availability.environment_revision
+            || self.expected_lease_fence != availability.lease_fence
+            || !availability.kinds.contains(&self.kind)
+        {
+            return Err(HttpContractError::InvalidConsoleCapability);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CursorPage<T> {
@@ -837,6 +866,16 @@ pub const OPERATION_AUTHORIZATIONS: &[OperationAuthorization] = &[
         scope: OperationScopeKind::Environment,
     },
     OperationAuthorization {
+        operation_id: "listConsoleCapabilities",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Environment,
+    },
+    OperationAuthorization {
+        operation_id: "issueConsoleCapability",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Environment,
+    },
+    OperationAuthorization {
         operation_id: "streamCourseEvents",
         allowed_roles: TEACHER_OR_STUDENT,
         scope: OperationScopeKind::Course,
@@ -926,6 +965,30 @@ pub const OPERATIONS: &[OperationContract] = &[
         201,
         false,
         true
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/access-grants/{grantId}/console-capabilities",
+        "listConsoleCapabilities",
+        "console_capability:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/access-grants/{grantId}/console-capabilities",
+        "issueConsoleCapability",
+        "console_capability:issue",
+        Oidc,
+        IdempotentRevisioned,
+        201,
+        false,
+        false
     ),
     op!(
         Public,
@@ -1552,6 +1615,8 @@ pub enum HttpContractError {
     InvalidEnvironmentQuery,
     #[error("internal service identity or canonical response is invalid")]
     InvalidInternalIdentity,
+    #[error("console capability request or availability is invalid")]
+    InvalidConsoleCapability,
 }
 
 #[must_use]
@@ -1591,6 +1656,64 @@ mod tests {
         assert!(matches!(
             resolve_sse_resume(Some(above_javascript_safe_integer), Some(adjacent_cursor)),
             Err(HttpContractError::ConflictingSseCursor)
+        ));
+    }
+
+    #[test]
+    fn console_capability_request_requires_the_exact_discovered_fences() {
+        let timestamp = |value| {
+            serde_json::from_str(&format!("\"{value}\""))
+                .unwrap_or_else(|error| unreachable!("static timestamp must parse: {error}"))
+        };
+        let revision = |value| {
+            Revision::new(value)
+                .unwrap_or_else(|error| unreachable!("static revision must be non-zero: {error}"))
+        };
+        let availability = crate::access::ConsoleCapabilityAvailability {
+            access_grant_id: AccessGrantId::new(),
+            access_grant_revision: revision(2),
+            environment_id: EnvironmentId::new(),
+            environment_class: crate::authoring::EnvironmentClass::Experiment,
+            environment_revision: revision(3),
+            expires_at: timestamp("2026-07-29T00:01:00.000Z"),
+            lease_fence: None,
+            kinds: vec![crate::access::ConsoleKind::Xterm],
+        };
+        let request = IssueConsoleCapabilityRequest {
+            kind: crate::access::ConsoleKind::Xterm,
+            expected_access_grant_revision: revision(2),
+            expected_environment_revision: revision(3),
+            expected_lease_fence: None,
+        };
+        assert!(request.validate_against(&availability).is_ok());
+
+        let stale = IssueConsoleCapabilityRequest {
+            expected_environment_revision: revision(4),
+            ..request.clone()
+        };
+        assert!(matches!(
+            stale.validate_against(&availability),
+            Err(HttpContractError::InvalidConsoleCapability)
+        ));
+
+        let lease = crate::access::ConsoleLeaseFence {
+            lease_id: crate::LeaseId::new(),
+            lease_revision: revision(5),
+            expires_at: timestamp("2026-07-29T00:01:00.000Z"),
+        };
+        let work = crate::access::ConsoleCapabilityAvailability {
+            environment_class: crate::authoring::EnvironmentClass::Work,
+            lease_fence: Some(lease.clone()),
+            ..availability
+        };
+        let work_request = IssueConsoleCapabilityRequest {
+            expected_lease_fence: Some(lease),
+            ..request
+        };
+        assert!(work_request.validate_against(&work).is_ok());
+        assert!(matches!(
+            request.validate_against(&work),
+            Err(HttpContractError::InvalidConsoleCapability)
         ));
     }
 }

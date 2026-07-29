@@ -13,7 +13,7 @@ Kubernetes/KubeVirt credentials. The executor processes communicate through
 the explicitly bound NATS subjects and keep domain-specific credentials and
 fencing state separate.
 
-Private Sigstore, Kyverno, Packer, Headscale/Tailnet and Guacamole are not
+Private Sigstore, Kyverno, Packer and Headscale/Tailnet are not
 Sprint 2 deployment units. See ADR 0011.
 
 | Owner | Authoritative responsibility | Explicit non-responsibility |
@@ -40,4 +40,4 @@ instances with healthy registered endpoints, and revokes relevant grants before
 the Environment Service stops or cleans up an expired, failed or deleting
 instance. The proposed detailed contract is
 [`EnvironmentLifecycle v1`](../contracts/environment-lifecycle-v1.md).
-For the P0 external-access path, Keycloak authenticates users and Access Service is the authorization truth. HTTP endpoints use Access Gateway. Native SSH/VNC uses only an active DirectAccessGrant through exact Headscale Grants and Router enforcement; browser SSH/VNC uses the Guacamole handoff path. Network reachability is not authorization, and no derived policy, Router or Guacamole state may independently allow an endpoint. See [Access Trust Boundary](access-trust-boundary.md).
+For the P0 external-access path, Keycloak authenticates users and Access Service is the authorization truth. HTTP endpoints use Access Gateway. Browser xterm/noVNC uses the AccessGrant-scoped ConsoleCapability handoff, then the Access proxy and Environment bridge defined by ADR 0012; native SSH/VNC remains a deferred DirectAccessGrant proposal. Network reachability is not authorization, and no derived policy or proxy state may independently allow an endpoint. See [Access Trust Boundary](access-trust-boundary.md).

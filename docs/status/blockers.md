@@ -3,6 +3,20 @@
 This file contains only active blockers for Draft PR #121 on
 `release/sprint2`.
 
+## ConsoleCapability downstream delivery
+
+ADR 0012 and Issue #122 freeze the xterm/noVNC Contract at E2 only. The
+following remain release blockers and cannot be represented by generated
+schemas, Fixture, historical PR #138 or mixed-source demonstrations:
+
+- #131 must be reopened and reimplemented from the merged ConsoleCapability
+  contract; the closed PR #138 is design reference only.
+- #124 must implement the Access proxy, Environment mTLS bridge and
+  least-privilege KubeVirt VMI `/vnc` stream without guest VNC passwords or
+  public websockify.
+- #126 must demonstrate same-identity shared-cluster multi-role E4, negative
+  revocation/expiry/control-channel-loss behavior and Release Gate evidence.
+
 ## Human review and acceptance
 
 The connected technical gate passed at source

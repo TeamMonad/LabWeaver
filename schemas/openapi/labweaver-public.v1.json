@@ -265,6 +265,220 @@
         "x-labweaver-timeout-ms": 30000
       }
     },
+    "/api/v1/access-grants/{grantId}/console-capabilities": {
+      "get": {
+        "description": "Permission: console_capability:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "listConsoleCapabilities",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "grantId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/console-capability-availability.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "console_capability:read"
+            ]
+          }
+        ],
+        "summary": "listConsoleCapabilities",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "console_capability:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "environment",
+        "x-labweaver-timeout-ms": 30000
+      },
+      "post": {
+        "description": "Permission: console_capability:issue. Timeout: 30000 ms. Cancellable: false. Retryable: false. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "issueConsoleCapability",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "grantId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/issue-console-capability-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/console-capability.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "console_capability:issue"
+            ]
+          }
+        ],
+        "summary": "issueConsoleCapability",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "IdempotentRevisioned",
+        "x-labweaver-permission": "console_capability:issue",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": false,
+        "x-labweaver-scope": "environment",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
     "/api/v1/access-grants/{grantId}/renew": {
       "post": {
         "description": "Permission: access_grant:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",

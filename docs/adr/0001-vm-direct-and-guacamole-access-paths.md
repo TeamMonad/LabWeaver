@@ -1,6 +1,6 @@
-# ADR 0001: VM Direct and Guacamole Access Paths
+# ADR 0001: VM Direct and Guacamole Access Paths (Superseded for Browser Consoles)
 
-Status: deferred future proposal. It is not the selected P0 path for Issues #49/#53/#63.
+Status: deferred future direct-access proposal. Browser-console guidance is superseded by ADR 0012.
 
 ## Context
 
@@ -8,10 +8,10 @@ LabWeaver may later need lower-latency native VM access without making reachabil
 
 ## Decision
 
-- `DirectAccessGrant`, Headscale/Router direct access and Guacamole are deferred and must not be implemented or reported as part of #49/#53/#63.
+- `DirectAccessGrant` and Headscale/Router direct access are deferred and must not be implemented or reported as part of #49/#53/#63.
 - Any future adoption requires a new scope decision, reviewed contracts and evidence independent of the OpenSSH Gateway path.
 - Router enforcement is applied before Headscale Grants, but the grant is not usable until both services acknowledge the same revision.
-- Browser SSH/VNC uses a custom Guacamole extension. The portal completes Keycloak Authorization Code plus PKCE; Access Service issues a one-time handoff token, and the extension validates it through an internal mutually authenticated Access Service call. Guacamole has no independent OIDC login, business authorization store or connection database.
+- The historical Guacamole extension proposal is superseded. Browser xterm/noVNC follows ADR 0012's AccessGrant-scoped ConsoleCapability contract.
 - An ordinary revoke isolates the affected device-to-endpoint flow within 60 seconds by Router filtering and connection-state clearing. Endpoint isolation and VM stop are controlled escalation actions; VM stop requires no remaining active grants.
 
 ## Alternatives rejected
@@ -28,4 +28,4 @@ This ADR adds no current API, schema, Migration or runtime requirement. The curr
 
 ## Security, evidence and replacement
 
-Default-deny policy, exact endpoint scope, device-aware revisions, one-time handoff tokens, scoped credentials, Router receipts and safe audit fields are mandatory. The decision is supported only by E0 documentation until E1/E2 contract tests, E3 deployed enforcement evidence and E4 multi-role replay exist. Replace this decision if the required Router isolation receipt or Guacamole extension boundary cannot be verified; revert to browser-only Gateway access rather than silently weakening containment.
+Default-deny policy, exact endpoint scope, device-aware revisions, scoped credentials, Router receipts and safe audit fields remain mandatory for any future direct-access proposal. This ADR is not browser-console implementation guidance.
