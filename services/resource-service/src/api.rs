@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -15,6 +15,7 @@ use contracts::http::{
 };
 use contracts::resource::{ResourceRequest, ResourceRequestState, ResourceTarget};
 use contracts::{ActorId, LeaseId, ResourceRequestId, Revision, UtcTimestamp};
+use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::ApprovalPolicy;
@@ -38,6 +39,7 @@ impl ResourceApiState {
 pub fn resource_api_router(state: ResourceApiState) -> Router {
     Router::new()
         .route("/api/v1/resource-requests", post(create_request))
+        .route("/api/v1/resource-requests", get(list_requests))
         .route("/api/v1/resource-requests/{request_id}", get(get_request))
         .route(
             "/api/v1/resource-requests/{request_id}/approve",
@@ -49,6 +51,21 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
             post(renew_lease),
         )
         .with_state(state)
+}
+
+#[derive(Debug, Deserialize)]
+struct ResourceListQuery {
+    course_id: contracts::CourseId,
+}
+
+async fn list_requests(
+    State(state): State<ResourceApiState>,
+    headers: HeaderMap,
+    Query(query): Query<ResourceListQuery>,
+) -> Result<Json<Vec<ResourceRequest>>, ResourceApiError> {
+    authorize(&headers)?;
+    let actor = actor(&headers)?;
+    Ok(Json(state.store.list_owned(actor, query.course_id).await?))
 }
 
 async fn create_request(

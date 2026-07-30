@@ -182,6 +182,26 @@ impl PgResourceStore {
         decode_request(row.try_get("contract")?)
     }
 
+    /// Lists only requests owned by the authenticated actor. The database predicate is part of
+    /// the authority boundary; callers cannot fetch another actor's projections by filtering the
+    /// returned JSON in memory.
+    pub async fn list_owned(
+        &self,
+        actor_id: contracts::ActorId,
+        course_id: contracts::CourseId,
+    ) -> Result<Vec<ResourceRequest>, ResourceStoreError> {
+        let rows = sqlx::query(
+            "SELECT contract FROM resource.resource_requests WHERE requester_id=$1 AND course_id=$2 ORDER BY created_at, request_id",
+        )
+        .bind(actor_id.as_uuid())
+        .bind(course_id.as_uuid())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| decode_request(row.try_get("contract")?))
+            .collect()
+    }
+
     /// Resolves the exact authorization fence required by Environment before Work creation.
     /// Mismatched scope deliberately receives the same non-active response as an expired Lease.
     pub async fn verify_environment_lease(
