@@ -8,8 +8,13 @@
     reason = "public Resource wire semantics are documented in contracts and generated schemas"
 )]
 
-use contracts::resource::{ResourceApproval, ResourceError, ResourceRequest, ResourceRequestState};
+use contracts::resource::{
+    ResourceApproval, ResourceError, ResourceLease, ResourceLeaseState, ResourceRequest,
+    ResourceRequestState,
+};
 use contracts::{Revision, UtcTimestamp};
+
+pub mod store;
 
 /// Stable Resource-domain diagnostics. These values are safe to return in RFC 9457 responses.
 pub mod diagnostic {
@@ -150,6 +155,122 @@ impl ResourceLifecycle {
             now,
         )
     }
+
+    pub fn activate_lease(
+        lease: &ResourceLease,
+        expected_revision: Revision,
+        active_from: UtcTimestamp,
+        expires_at: UtcTimestamp,
+    ) -> Result<ResourceLease, LifecycleError> {
+        lease.validate().map_err(LifecycleError::Contract)?;
+        if lease.state != ResourceLeaseState::Allocating
+            || lease.revision != expected_revision
+            || expires_at <= active_from
+        {
+            return Err(LifecycleError::StateConflict);
+        }
+        let mut next = lease.clone();
+        next.state = ResourceLeaseState::Active;
+        next.revision = increment(lease.revision)?;
+        next.active_from = Some(active_from);
+        next.expires_at = Some(expires_at);
+        next.updated_at = active_from;
+        next.validate().map_err(LifecycleError::Contract)?;
+        Ok(next)
+    }
+
+    pub fn renew_lease(
+        lease: &ResourceLease,
+        expected_revision: Revision,
+        expires_at: UtcTimestamp,
+        now: UtcTimestamp,
+    ) -> Result<ResourceLease, LifecycleError> {
+        lease.validate().map_err(LifecycleError::Contract)?;
+        if lease.state != ResourceLeaseState::Active
+            || lease.revision != expected_revision
+            || lease.expires_at.is_none_or(|current| expires_at <= current)
+            || expires_at <= now
+        {
+            return Err(LifecycleError::StateConflict);
+        }
+        transition_lease(
+            lease,
+            ResourceLeaseState::Active,
+            now,
+            Some(expires_at),
+            None,
+        )
+    }
+
+    pub fn begin_lease_expiry(
+        lease: &ResourceLease,
+        expected_revision: Revision,
+        now: UtcTimestamp,
+        reason: Option<String>,
+    ) -> Result<ResourceLease, LifecycleError> {
+        lease.validate().map_err(LifecycleError::Contract)?;
+        if !matches!(
+            lease.state,
+            ResourceLeaseState::Allocating | ResourceLeaseState::Active
+        ) || lease.revision != expected_revision
+        {
+            return Err(LifecycleError::StateConflict);
+        }
+        transition_lease(
+            lease,
+            ResourceLeaseState::Expiring,
+            now,
+            lease.expires_at,
+            reason,
+        )
+    }
+
+    pub fn complete_lease_expiry(
+        lease: &ResourceLease,
+        expected_revision: Revision,
+        now: UtcTimestamp,
+    ) -> Result<ResourceLease, LifecycleError> {
+        lease.validate().map_err(LifecycleError::Contract)?;
+        if lease.state != ResourceLeaseState::Expiring || lease.revision != expected_revision {
+            return Err(LifecycleError::StateConflict);
+        }
+        transition_lease(
+            lease,
+            ResourceLeaseState::Expired,
+            now,
+            lease.expires_at,
+            lease.revoke_reason_code.clone(),
+        )
+    }
+
+    pub fn revoke_lease(
+        lease: &ResourceLease,
+        expected_revision: Revision,
+        now: UtcTimestamp,
+        reason: String,
+    ) -> Result<ResourceLease, LifecycleError> {
+        lease.validate().map_err(LifecycleError::Contract)?;
+        if is_terminal_lease_state(lease.state)
+            || lease.revision != expected_revision
+            || reason.trim().is_empty()
+        {
+            return Err(LifecycleError::StateConflict);
+        }
+        transition_lease(
+            lease,
+            ResourceLeaseState::Revoked,
+            now,
+            lease.expires_at,
+            Some(reason),
+        )
+    }
+}
+
+const fn is_terminal_lease_state(state: ResourceLeaseState) -> bool {
+    matches!(
+        state,
+        ResourceLeaseState::Expired | ResourceLeaseState::Revoked
+    )
 }
 
 fn transition(
@@ -181,6 +302,27 @@ fn increment(revision: Revision) -> Result<Revision, LifecycleError> {
     .map_err(|_| LifecycleError::RevisionOverflow)
 }
 
+fn transition_lease(
+    lease: &ResourceLease,
+    state: ResourceLeaseState,
+    now: UtcTimestamp,
+    expires_at: Option<UtcTimestamp>,
+    reason: Option<String>,
+) -> Result<ResourceLease, LifecycleError> {
+    if now < lease.updated_at {
+        return Err(LifecycleError::StateConflict);
+    }
+    let mut next = lease.clone();
+    next.state = state;
+    next.revision = increment(lease.revision)?;
+    next.active_from = lease.active_from;
+    next.expires_at = expires_at;
+    next.revoke_reason_code = reason;
+    next.updated_at = now;
+    next.validate().map_err(LifecycleError::Contract)?;
+    Ok(next)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum LifecycleError {
     #[error("{0}")]
@@ -202,11 +344,12 @@ mod tests {
     use std::str::FromStr;
 
     use contracts::resource::{
-        ResourceApproval, ResourceRequest, ResourceRequestState, ResourceTarget, WorkloadResources,
+        ResourceApproval, ResourceLease, ResourceLeaseState, ResourceRequest, ResourceRequestState,
+        ResourceTarget, WorkloadResources,
     };
     use contracts::{
-        ActorId, CourseId, EnvironmentId, ReleaseId, ResourceApprovalId, ResourceRequestId,
-        Revision, Sha256Digest, UtcTimestamp,
+        ActorId, CapacityClaimId, CourseId, EnvironmentId, LeaseId, ReleaseId, ResourceApprovalId,
+        ResourceRequestId, Revision, Sha256Digest, UtcTimestamp,
     };
 
     use super::{ApprovalPolicy, LifecycleError, ResourceLifecycle};
@@ -287,6 +430,52 @@ mod tests {
             timestamp("2026-07-30T00:00:03.000Z"),
         )?;
         assert_eq!(expired.state, ResourceRequestState::Expired);
+        Ok(())
+    }
+
+    #[test]
+    fn lease_activation_renewal_and_revoke_are_exactly_fenced()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let allocating = ResourceLease {
+            id: LeaseId::new(),
+            request_id: ResourceRequestId::new(),
+            claim_id: CapacityClaimId::new(),
+            state: ResourceLeaseState::Allocating,
+            revision: Revision::new(1)?,
+            active_from: None,
+            expires_at: None,
+            revoke_reason_code: None,
+            created_at: timestamp("2026-07-30T00:00:00.000Z"),
+            updated_at: timestamp("2026-07-30T00:00:00.000Z"),
+        };
+        let active = ResourceLifecycle::activate_lease(
+            &allocating,
+            allocating.revision,
+            timestamp("2026-07-30T00:00:01.000Z"),
+            timestamp("2026-07-30T00:10:01.000Z"),
+        )?;
+        let renewed = ResourceLifecycle::renew_lease(
+            &active,
+            active.revision,
+            timestamp("2026-07-30T00:15:01.000Z"),
+            timestamp("2026-07-30T00:00:02.000Z"),
+        )?;
+        assert!(
+            ResourceLifecycle::revoke_lease(
+                &renewed,
+                Revision::new(1)?,
+                timestamp("2026-07-30T00:00:03.000Z"),
+                "administrative revoke".into(),
+            )
+            .is_err()
+        );
+        let revoked = ResourceLifecycle::revoke_lease(
+            &renewed,
+            renewed.revision,
+            timestamp("2026-07-30T00:00:03.000Z"),
+            "administrative revoke".into(),
+        )?;
+        assert_eq!(revoked.state, ResourceLeaseState::Revoked);
         Ok(())
     }
 

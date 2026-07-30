@@ -146,6 +146,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::resource::CapacityClaim
     );
     document!(
+        "schemas/contracts/v1/resource-lease.schema.json",
+        crate::resource::ResourceLease
+    );
+    document!(
         "schemas/contracts/v1/resource-lease-authorization.schema.json",
         crate::resource::ResourceLeaseAuthorization
     );

@@ -9,7 +9,9 @@ rust-version.workspace = true
 [dependencies]
 axum.workspace = true
 contracts = { path = "../../crates/contracts" }
+persistence-sqlx = { path = "../../crates/persistence-sqlx" }
 serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 telemetry = { path = "../../crates/telemetry" }

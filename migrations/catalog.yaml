@@ -41,3 +41,12 @@ domains:
       - id: 2
         file: resource/0002_resource_request_capacity_lease.sql
         sha256: 80ddbe36cf0bbf19758294388458c9763007042c967bc7b423f6f99bf9d3fda3
+      - id: 3
+        file: resource/0003_resource_contract_snapshots.sql
+        sha256: e09698481c921602f5cdd184ba8b1601468813e8b6b934bb60dcc65f41eac680
+      - id: 4
+        file: resource/0004_resource_claim_quota_resources.sql
+        sha256: ba5a536c2c77b152b70bc62456ae83ebde49707f81b4c9b7cd4048537d9b8701
+      - id: 5
+        file: resource/0005_resource_lease_pending_terminal_states.sql
+        sha256: 867a1d60608ab7d1ae8e4bfac918e6b93d4ccf0959aed6b5d91c1c0faf3778df

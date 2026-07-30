@@ -750,6 +750,11 @@ pub const OPERATION_AUTHORIZATIONS: &[OperationAuthorization] = &[
         scope: OperationScopeKind::Course,
     },
     OperationAuthorization {
+        operation_id: "resizeAndApproveResourceRequest",
+        allowed_roles: PLATFORM_ADMIN,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
         operation_id: "rejectResourceRequest",
         allowed_roles: PLATFORM_ADMIN,
         scope: OperationScopeKind::Course,
@@ -761,6 +766,11 @@ pub const OPERATION_AUTHORIZATIONS: &[OperationAuthorization] = &[
     },
     OperationAuthorization {
         operation_id: "getResourceLease",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "listResourceLeases",
         allowed_roles: TEACHER_OR_STUDENT,
         scope: OperationScopeKind::Course,
     },
@@ -1082,6 +1092,18 @@ pub const OPERATIONS: &[OperationContract] = &[
     ),
     op!(
         Public,
+        Post,
+        "/api/v1/resource-requests/{requestId}/resize-and-approve",
+        "resizeAndApproveResourceRequest",
+        "resource_request:approve",
+        BffSession,
+        IdempotentRevisioned,
+        202,
+        false,
+        true
+    ),
+    op!(
+        Public,
         Get,
         "/api/v1/resource-requests",
         "listResourceRequests",
@@ -1149,6 +1171,18 @@ pub const OPERATIONS: &[OperationContract] = &[
         BffSession,
         IdempotentRevisioned,
         202,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/resource-leases",
+        "listResourceLeases",
+        "resource_lease:read",
+        BffSession,
+        None,
+        200,
         false,
         true
     ),
