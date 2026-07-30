@@ -115,7 +115,15 @@ impl PgResourceStore {
             }
             IdempotencyDecision::Reserved => {
                 insert_request(&mut transaction, request).await?;
-                insert_transition(&mut transaction, request, 1, None, None, trace_id).await?;
+                insert_transition(
+                    &mut transaction,
+                    request,
+                    1,
+                    None,
+                    Some(request.requester_id),
+                    trace_id,
+                )
+                .await?;
                 enqueue_request_event(
                     &mut transaction,
                     request,
@@ -250,7 +258,7 @@ impl PgResourceStore {
                     &next,
                     next.revision.get(),
                     Some(ResourceRequestState::Reviewing),
-                    None,
+                    Some(approval.approver_id),
                     trace_id,
                 )
                 .await?;
@@ -270,6 +278,111 @@ impl PgResourceStore {
         };
         transaction.commit().await?;
         Ok(result)
+    }
+
+    /// Loads a Lease projection; malformed snapshots never authorize use.
+    pub async fn load_lease(&self, lease_id: LeaseId) -> Result<ResourceLease, ResourceStoreError> {
+        let row = sqlx::query("SELECT contract FROM resource.resource_leases WHERE lease_id=$1")
+            .bind(lease_id.as_uuid())
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(ResourceStoreError::LeaseNotFound)?;
+        decode_lease(row.try_get("contract")?)
+    }
+
+    /// Applies an administrator renewal with an exact revision and idempotency fence.
+    pub async fn renew_lease(
+        &self,
+        idempotency_key: &str,
+        lease_id: LeaseId,
+        expected_revision: contracts::Revision,
+        expires_at: UtcTimestamp,
+    ) -> Result<ResourceLease, ResourceStoreError> {
+        IdempotencyKey::parse(idempotency_key).map_err(|_| ResourceStoreError::IdempotencyKey)?;
+        let mut transaction = self.pool.begin().await?;
+        let lease = load_locked_lease(&mut transaction, lease_id).await?;
+        let hash = Sha256Digest::of_canonical(&(lease_id, expected_revision, expires_at))?;
+        let result = match IdempotencyStore::reserve(
+            &mut transaction,
+            Domain::Resource,
+            "renew_resource_lease",
+            idempotency_key,
+            hash,
+        )
+        .await?
+        {
+            IdempotencyDecision::Replay(value) => decode_lease(value)?,
+            IdempotencyDecision::Conflict => return Err(ResourceStoreError::IdempotencyConflict),
+            IdempotencyDecision::InProgress => {
+                return Err(ResourceStoreError::IdempotencyInProgress);
+            }
+            IdempotencyDecision::Reserved => {
+                let now = database_now(&mut transaction).await?;
+                let next =
+                    ResourceLifecycle::renew_lease(&lease, expected_revision, expires_at, now)?;
+                update_lease(&mut transaction, &lease, &next).await?;
+                let value = serde_json::to_value(&next)?;
+                IdempotencyStore::complete(
+                    &mut transaction,
+                    Domain::Resource,
+                    "renew_resource_lease",
+                    idempotency_key,
+                    &value,
+                )
+                .await?;
+                next
+            }
+        };
+        transaction.commit().await?;
+        Ok(result)
+    }
+
+    /// Activates a Lease only after the selected capacity provider has read back its exact fence.
+    pub async fn activate_lease(
+        &self,
+        lease_id: LeaseId,
+        expected_revision: contracts::Revision,
+        active_from: UtcTimestamp,
+        expires_at: UtcTimestamp,
+    ) -> Result<ResourceLease, ResourceStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let lease = load_locked_lease(&mut transaction, lease_id).await?;
+        let next =
+            ResourceLifecycle::activate_lease(&lease, expected_revision, active_from, expires_at)?;
+        update_lease(&mut transaction, &lease, &next).await?;
+        transaction.commit().await?;
+        Ok(next)
+    }
+
+    /// Starts the fail-closed expiry saga. Capacity remains reserved until cleanup readback.
+    pub async fn begin_lease_expiry(
+        &self,
+        lease_id: LeaseId,
+        expected_revision: contracts::Revision,
+        reason: Option<String>,
+    ) -> Result<ResourceLease, ResourceStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let lease = load_locked_lease(&mut transaction, lease_id).await?;
+        let now = database_now(&mut transaction).await?;
+        let next = ResourceLifecycle::begin_lease_expiry(&lease, expected_revision, now, reason)?;
+        update_lease(&mut transaction, &lease, &next).await?;
+        transaction.commit().await?;
+        Ok(next)
+    }
+
+    /// Marks a Lease expired after Environment cleanup and exact capacity release readback.
+    pub async fn complete_lease_expiry(
+        &self,
+        lease_id: LeaseId,
+        expected_revision: contracts::Revision,
+    ) -> Result<ResourceLease, ResourceStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let lease = load_locked_lease(&mut transaction, lease_id).await?;
+        let now = database_now(&mut transaction).await?;
+        let next = ResourceLifecycle::complete_lease_expiry(&lease, expected_revision, now)?;
+        update_lease(&mut transaction, &lease, &next).await?;
+        transaction.commit().await?;
+        Ok(next)
     }
 }
 
@@ -360,6 +473,34 @@ async fn load_locked(
     .await?
     .ok_or(ResourceStoreError::NotFound)?;
     decode_request(row.try_get("contract")?)
+}
+
+async fn load_locked_lease(
+    transaction: &mut Transaction<'_, Postgres>,
+    lease_id: LeaseId,
+) -> Result<ResourceLease, ResourceStoreError> {
+    let row =
+        sqlx::query("SELECT contract FROM resource.resource_leases WHERE lease_id=$1 FOR UPDATE")
+            .bind(lease_id.as_uuid())
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(ResourceStoreError::LeaseNotFound)?;
+    decode_lease(row.try_get("contract")?)
+}
+
+async fn update_lease(
+    transaction: &mut Transaction<'_, Postgres>,
+    current: &ResourceLease,
+    next: &ResourceLease,
+) -> Result<(), ResourceStoreError> {
+    let changed = sqlx::query("UPDATE resource.resource_leases SET state=$3,revision=$4,active_from=$5,expires_at=$6,revoke_reason_code=$7,updated_at=$8,contract=$9 WHERE lease_id=$1 AND revision=$2")
+        .bind(current.id.as_uuid()).bind(i64::try_from(current.revision.get())?).bind(wire(next.state)?).bind(i64::try_from(next.revision.get())?)
+        .bind(next.active_from.map(UtcTimestamp::get)).bind(next.expires_at.map(UtcTimestamp::get)).bind(&next.revoke_reason_code).bind(next.updated_at.get()).bind(serde_json::to_value(next)?)
+        .execute(&mut **transaction).await?;
+    if changed.rows_affected() != 1 {
+        return Err(ResourceStoreError::RevisionConflict);
+    }
+    Ok(())
 }
 
 async fn insert_transition(
@@ -472,6 +613,8 @@ pub enum ResourceStoreError {
     AllocationMismatch,
     #[error("LW_RESOURCE_LEASE_WINDOW_MISSING")]
     LeaseWindowMissing,
+    #[error("LW_RESOURCE_LEASE_NOT_FOUND")]
+    LeaseNotFound,
     #[error("LW_RESOURCE_TRACE_INVALID")]
     Trace,
     #[error("LW_RESOURCE_WIRE_INVALID")]
