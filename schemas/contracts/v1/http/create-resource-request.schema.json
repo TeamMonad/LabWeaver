@@ -4,6 +4,10 @@
       "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
       "type": "string"
     },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
     "GpuRequest": {
       "additionalProperties": false,
       "description": "A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.",
@@ -29,6 +33,10 @@
     },
     "ReleaseId": {
       "description": "Strongly typed UUIDv7 identifier for `ReleaseId`.",
+      "type": "string"
+    },
+    "Sha256Digest": {
+      "description": "Canonical lowercase SHA-256 digest.",
       "type": "string"
     },
     "WorkloadResources": {
@@ -81,6 +89,10 @@
       "minimum": 0,
       "type": "integer"
     },
+    "environmentId": {
+      "$ref": "#/$defs/EnvironmentId",
+      "description": "Preallocated Work aggregate identity. Resource never allocates this implicitly."
+    },
     "projectId": {
       "anyOf": [
         {
@@ -93,6 +105,10 @@
     },
     "releaseId": {
       "$ref": "#/$defs/ReleaseId"
+    },
+    "releaseSha256": {
+      "$ref": "#/$defs/Sha256Digest",
+      "description": "Immutable release document identity expected by Environment at handoff."
     },
     "releaseVersion": {
       "format": "uint64",
@@ -109,8 +125,10 @@
   "required": [
     "courseId",
     "requestKey",
+    "environmentId",
     "releaseId",
     "releaseVersion",
+    "releaseSha256",
     "resources",
     "durationSeconds"
   ],

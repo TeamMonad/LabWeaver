@@ -44,8 +44,12 @@ pub struct CreateResourceRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<ProjectId>,
     pub request_key: String,
+    /// Preallocated Work aggregate identity. Resource never allocates this implicitly.
+    pub environment_id: EnvironmentId,
     pub release_id: ReleaseId,
     pub release_version: u64,
+    /// Immutable release document identity expected by Environment at handoff.
+    pub release_sha256: Sha256Digest,
     pub resources: crate::resource::WorkloadResources,
     pub duration_seconds: u64,
 }
