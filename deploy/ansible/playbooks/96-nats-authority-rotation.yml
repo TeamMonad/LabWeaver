@@ -66,6 +66,7 @@
     - name: Inspect rotation inputs without reading contents
       ansible.builtin.stat:
         path: "{{ item }}"
+        follow: true
       loop:
         - "{{ nats_rotation_foundation_generator }}"
         - "{{ nats_rotation_bundle_preparer }}"
