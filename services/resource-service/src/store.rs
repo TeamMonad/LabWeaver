@@ -1,5 +1,9 @@
 //! PostgreSQL authority for Resource requests and administrator decisions.
 
+use contracts::environment::{
+    EnvironmentLeaseAuthorization, EnvironmentLeaseState, EnvironmentLeaseVerificationRequest,
+    EnvironmentLeaseVerificationResponse,
+};
 use contracts::http::IdempotencyKey;
 use contracts::resource::{
     CapacityClaim, ResourceApproval, ResourceLease, ResourceLeaseState, ResourceRequest,
@@ -147,6 +151,61 @@ impl PgResourceStore {
                 .await?
                 .ok_or(ResourceStoreError::NotFound)?;
         decode_request(row.try_get("contract")?)
+    }
+
+    /// Resolves the exact authorization fence required by Environment before Work creation.
+    /// Mismatched scope deliberately receives the same non-active response as an expired Lease.
+    pub async fn verify_environment_lease(
+        &self,
+        verification: &EnvironmentLeaseVerificationRequest,
+        authority_now: UtcTimestamp,
+    ) -> Result<EnvironmentLeaseVerificationResponse, ResourceStoreError> {
+        if verification.version != 1 || verification.capacity_binding.trim().is_empty() {
+            return Ok(inactive_lease_response(EnvironmentLeaseState::Revoked));
+        }
+        let row = sqlx::query(
+            "SELECT l.contract AS lease_contract, c.contract AS claim_contract, r.contract AS request_contract FROM resource.resource_leases l JOIN resource.capacity_claims c ON c.claim_id=l.claim_id JOIN resource.resource_requests r ON r.request_id=l.request_id WHERE l.lease_id=$1",
+        )
+        .bind(verification.lease_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(inactive_lease_response(EnvironmentLeaseState::Revoked));
+        };
+        let lease = decode_lease(row.try_get("lease_contract")?)?;
+        let claim = decode_claim(row.try_get("claim_contract")?)?;
+        let request = decode_request(row.try_get("request_contract")?)?;
+        let state = environment_lease_state(lease.state);
+        if lease.state != ResourceLeaseState::Active
+            || lease
+                .expires_at
+                .is_none_or(|expires_at| expires_at <= authority_now)
+            || verification.environment_id != request.target.environment_id
+            || verification.course_id != request.course_id
+            || verification.owner_actor_id != request.requester_id
+            || verification.capacity_binding != claim.id.to_string()
+        {
+            return Ok(inactive_lease_response(state));
+        }
+        let authorization = EnvironmentLeaseAuthorization {
+            lease_id: lease.id,
+            lease_revision: lease.revision,
+            environment_id: request.target.environment_id,
+            course_id: request.course_id,
+            owner_actor_id: request.requester_id,
+            capacity_binding: claim.id.to_string(),
+            active_from: lease
+                .active_from
+                .ok_or(ResourceStoreError::LeaseWindowMissing)?,
+            expires_at: lease
+                .expires_at
+                .ok_or(ResourceStoreError::LeaseWindowMissing)?,
+        };
+        Ok(EnvironmentLeaseVerificationResponse {
+            version: 1,
+            state: EnvironmentLeaseState::Active,
+            authorization: Some(authorization),
+        })
     }
 
     /// Appends an approval and transitions a request to allocation in one transaction.
@@ -354,6 +413,33 @@ fn decode_request(value: Value) -> Result<ResourceRequest, ResourceStoreError> {
     request.validate()?;
     Ok(request)
 }
+fn decode_claim(value: Value) -> Result<CapacityClaim, ResourceStoreError> {
+    let claim: CapacityClaim = serde_json::from_value(value)?;
+    claim.validate()?;
+    Ok(claim)
+}
+fn decode_lease(value: Value) -> Result<ResourceLease, ResourceStoreError> {
+    let lease: ResourceLease = serde_json::from_value(value)?;
+    lease.validate()?;
+    Ok(lease)
+}
+const fn environment_lease_state(state: ResourceLeaseState) -> EnvironmentLeaseState {
+    match state {
+        ResourceLeaseState::Active => EnvironmentLeaseState::Active,
+        ResourceLeaseState::Allocating | ResourceLeaseState::Expiring => {
+            EnvironmentLeaseState::Expiring
+        }
+        ResourceLeaseState::Expired => EnvironmentLeaseState::Expired,
+        ResourceLeaseState::Revoked => EnvironmentLeaseState::Revoked,
+    }
+}
+fn inactive_lease_response(state: EnvironmentLeaseState) -> EnvironmentLeaseVerificationResponse {
+    EnvironmentLeaseVerificationResponse {
+        version: 1,
+        state,
+        authorization: None,
+    }
+}
 fn wire<T: serde::Serialize>(value: T) -> Result<String, ResourceStoreError> {
     serde_json::to_value(value)?
         .as_str()
@@ -384,6 +470,8 @@ pub enum ResourceStoreError {
     RevisionConflict,
     #[error("LW_RESOURCE_ALLOCATION_MISMATCH")]
     AllocationMismatch,
+    #[error("LW_RESOURCE_LEASE_WINDOW_MISSING")]
+    LeaseWindowMissing,
     #[error("LW_RESOURCE_TRACE_INVALID")]
     Trace,
     #[error("LW_RESOURCE_WIRE_INVALID")]

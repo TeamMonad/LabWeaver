@@ -8,7 +8,9 @@ rust-version.workspace = true
 
 [dependencies]
 axum.workspace = true
+async-nats = { version = "=0.45.0", default-features = false, features = ["ring", "server_2_10", "server_2_11"] }
 contracts = { path = "../../crates/contracts" }
+futures-util = "0.3.31"
 persistence-sqlx = { path = "../../crates/persistence-sqlx" }
 serde.workspace = true
 serde_json.workspace = true

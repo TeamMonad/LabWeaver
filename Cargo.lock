@@ -4915,8 +4915,10 @@ dependencies = [
 name = "resource-service"
 version = "0.1.0"
 dependencies = [
+ "async-nats",
  "axum 0.8.9",
  "contracts",
+ "futures-util",
  "persistence-sqlx",
  "serde",
  "serde_json",

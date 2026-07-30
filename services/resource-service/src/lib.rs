@@ -14,6 +14,7 @@ use contracts::resource::{
 };
 use contracts::{Revision, UtcTimestamp};
 
+pub mod messaging;
 pub mod store;
 
 /// Stable Resource-domain diagnostics. These values are safe to return in RFC 9457 responses.
