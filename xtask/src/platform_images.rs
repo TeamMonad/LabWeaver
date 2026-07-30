@@ -491,7 +491,9 @@ fn package_linux(
     fs::create_dir_all(&run_dir)
         .map_err(|error| io_error("create package run directory", error))?;
     scan_build_context(root, &run_dir)?;
-    let components = components_for_profile(profile).expect("validated package profile");
+    let Some(components) = components_for_profile(profile) else {
+        return manifest_invalid("package profile is not supported");
+    };
     let mut images = Vec::with_capacity(components.len());
     for component in components {
         images.push(build_scan(
