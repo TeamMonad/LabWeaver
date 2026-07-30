@@ -887,8 +887,7 @@ fn run_infrastructure_with_package(
         .add_env("LABWEAVER_COMMIT_SHA", commit_sha)
         .add_env(
             "LABWEAVER_PACKAGE_SOURCE_COMMIT",
-            std::env::var("LABWEAVER_PACKAGE_SOURCE_COMMIT")
-                .unwrap_or_else(|_| String::new()),
+            std::env::var("LABWEAVER_PACKAGE_SOURCE_COMMIT").unwrap_or_else(|_| String::new()),
         )
         .add_env("LABWEAVER_CONTROLLER_ID", controller_id)
         .add_env("LABWEAVER_INVENTORY_HASH", inventory_hash)
