@@ -963,7 +963,11 @@ impl EnvironmentOwnerResolverClientConfig {
 mod tests {
     use super::{
         EnvironmentInstance, EnvironmentOperationKind, EnvironmentOwnerResolverClientConfig,
-        ObservedEnvironmentState,
+        ObservedEnvironmentState, ResourceWorkHandoff,
+    };
+    use crate::{
+        ActorId, CapacityClaimId, CourseId, EnvironmentId, LeaseId, ReleaseId, ResourceRequestId,
+        Revision, Sha256Digest,
     };
 
     const STATES: [ObservedEnvironmentState; 12] = [
@@ -1144,5 +1148,32 @@ mod tests {
         config.resolver_uri = "https://environment-service.internal".to_owned();
         config.allowed_server_sans = vec!["*.internal".to_owned()];
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn resource_work_handoff_requires_all_fences_and_a_safe_display_label() {
+        let mut handoff = ResourceWorkHandoff {
+            version: 1,
+            request_id: ResourceRequestId::new(),
+            request_revision: Revision::new(2).expect("revision"),
+            lease_id: LeaseId::new(),
+            lease_revision: Revision::new(2).expect("revision"),
+            claim_id: CapacityClaimId::new(),
+            claim_revision: Revision::new(3).expect("revision"),
+            environment_id: EnvironmentId::new(),
+            course_id: CourseId::new(),
+            owner_actor_id: ActorId::new(),
+            display_label: "workbench".to_owned(),
+            project_id: None,
+            release_id: ReleaseId::new(),
+            release_version: 1,
+            release_sha256: Sha256Digest::of_bytes(b"release"),
+            provider_binding: "kubernetes-standard".to_owned(),
+            capacity_binding: "claim-123".to_owned(),
+            trace_id: "resource-handoff-123".to_owned(),
+        };
+        assert!(handoff.validate().is_ok());
+        handoff.trace_id = "\n".to_owned();
+        assert!(handoff.validate().is_err());
     }
 }
