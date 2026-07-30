@@ -706,8 +706,8 @@ mod tests {
         let configuration = KubernetesCapacityProviderConfiguration {
             binding: "kubernetes-standard".into(),
             api_server: "https://kubernetes.example.test/".into(),
-            bearer_token_file: PathBuf::from("C:/token"),
-            cluster_ca_file: PathBuf::from("C:/ca.pem"),
+            bearer_token_file: std::env::temp_dir().join("token"),
+            cluster_ca_file: std::env::temp_dir().join("ca.pem"),
             request_timeout_milliseconds: 5_000,
             namespace_labels: BTreeMap::new(),
         };
