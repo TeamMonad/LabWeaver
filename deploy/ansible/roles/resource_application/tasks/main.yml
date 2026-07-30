@@ -1,0 +1,105 @@
+---
+- name: Validate Resource deployment inputs
+  ansible.builtin.assert:
+    that:
+      - resource_application_run_id is match('^[a-z0-9][a-z0-9-]{2,62}$')
+      - resource_application_source_commit is match('^[0-9a-f]{40,64}$')
+      - resource_application_package_manifest | length > 0
+      - resource_application_configuration_bundle | length > 0
+      - resource_application_values_file | length > 0
+    fail_msg: RESOURCE_APPLICATION_INPUT_INVALID
+
+- name: Verify controller-owned Resource deployment inputs
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    checksum_algorithm: sha256
+  loop:
+    - "{{ resource_application_package_manifest }}"
+    - "{{ resource_application_configuration_bundle }}"
+    - "{{ resource_application_configuration_manifest }}"
+    - "{{ resource_application_values_file }}"
+    - "{{ resource_application_chart_source }}"
+  register: resource_application_inputs
+  delegate_to: localhost
+  become: false
+
+- name: Reject missing Resource deployment inputs
+  ansible.builtin.assert:
+    that: resource_application_inputs.results | map(attribute='stat.exists') | min
+    fail_msg: RESOURCE_APPLICATION_REQUIRED_PATH_MISSING
+
+- name: Parse immutable Resource package and private configuration
+  ansible.builtin.set_fact:
+    resource_application_package: "{{ lookup('ansible.builtin.file', resource_application_package_manifest) | from_json }}"
+    resource_application_bundle_manifest: "{{ lookup('ansible.builtin.file', resource_application_configuration_manifest) | from_json }}"
+    resource_application_bundle_objects: "{{ lookup('ansible.builtin.file', resource_application_configuration_bundle) | from_yaml_all | list }}"
+    resource_application_bundle_sha256: "sha256:{{ resource_application_inputs.results[1].stat.checksum }}"
+  no_log: true
+
+- name: Enforce exact Resource package and configuration boundaries
+  ansible.builtin.assert:
+    that:
+      - resource_application_package.schema_version == 'platform-image-package-manifest.v1'
+      - resource_application_package.profile | default('sprint2') == 'resource'
+      - resource_application_package.source_commit == resource_application_source_commit
+      - resource_application_package.overall == 'passed'
+      - resource_application_package.images | length == 1
+      - resource_application_package.images[0].component == 'resource-service'
+      - resource_application_package.images[0].reference is match('^[^@]+@sha256:[0-9a-f]{64}$')
+      - resource_application_bundle_manifest.apiVersion == 'deploy.labweaver.io/resource-bundle-manifest/v1'
+      - resource_application_bundle_manifest.namespace == resource_application_namespace
+      - resource_application_bundle_objects | length == 2
+      - resource_application_bundle_objects | map(attribute='metadata.name') | sort == ['resource-service-config', 'resource-service-secrets']
+      - resource_application_bundle_objects | map(attribute='metadata.namespace') | unique | list == [resource_application_namespace]
+    fail_msg: RESOURCE_APPLICATION_IDENTITY_INVALID
+  no_log: true
+
+- name: Apply only the independently reviewed Resource configuration
+  ansible.builtin.command:
+    argv:
+      - "{{ resource_application_kubectl }}"
+      - --kubeconfig
+      - "{{ resource_application_kubeconfig }}"
+      - apply
+      - --server-side
+      - --field-manager=labweaver-resource-application
+      - --filename
+      - "{{ resource_application_configuration_bundle }}"
+  changed_when: true
+  no_log: true
+
+- name: Build isolated Resource Helm arguments
+  ansible.builtin.set_fact:
+    resource_application_helm_args: >-
+      {{ ['--values=' + resource_application_values_file,
+          '--set-string', 'imagePullSecrets[0].name=' + resource_application_image_pull_secret_name,
+          '--set-string', 'deploymentIdentity.configurationBundleSha256=' + resource_application_bundle_sha256,
+          '--set-string', 'images.resource_service=' + resource_application_package.images[0].reference,
+          '--set', 'workloads.resource-service.enabled=true',
+          '--set', 'network.defaultDenyEnabled=false',
+          '--set', 'network.cdiCloneSourcePolicyEnabled=false',
+          '--set', 'network.ciliumIngressPolicyEnabled=false']
+         + (resource_application_workloads | map('regex_replace', '^(.*)$', 'workloads.\\1.enabled=false') | list) }}
+
+- name: Atomically deploy the Resource authority without taking ownership of the Sprint 2 release
+  ansible.builtin.command:
+    argv: >-
+      {{ [resource_application_helm, '--kubeconfig', resource_application_kubeconfig,
+          'upgrade', '--install', resource_application_release_name, resource_application_chart_source,
+          '--namespace', resource_application_namespace, '--atomic', '--wait',
+          '--timeout', resource_application_rollout_timeout] + resource_application_helm_args }}
+  changed_when: true
+
+- name: Verify Resource authority rollout and digest readback
+  ansible.builtin.command:
+    argv:
+      - "{{ resource_application_kubectl }}"
+      - --kubeconfig
+      - "{{ resource_application_kubeconfig }}"
+      - --namespace
+      - "{{ resource_application_namespace }}"
+      - rollout
+      - status
+      - deployment/resource-service
+      - "--timeout={{ resource_application_rollout_timeout }}"
+  changed_when: false

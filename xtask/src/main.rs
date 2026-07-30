@@ -48,6 +48,8 @@ enum Command {
     Sprint2HarborRoute(EnvironmentArgs),
     /// Adopt existing data services and atomically deploy the Sprint 2 application profile.
     Sprint2Application(EnvironmentArgs),
+    /// Deploy the independently reviewed Resource authority profile.
+    ResourceApplication(EnvironmentArgs),
     Upgrade(UpgradeArgs),
     Rollback(RollbackArgs),
     Restore(RestoreArgs),
@@ -435,6 +437,7 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::Sprint2Buildkit(args) => sprint2_buildkit(&args),
         Command::Sprint2HarborRoute(args) => sprint2_harbor_route(&args),
         Command::Sprint2Application(args) => sprint2_application(&args),
+        Command::ResourceApplication(args) => resource_application(&args),
         Command::AcceptanceAssets(args) => match args.action {
             AcceptanceAssetsAction::Validate => acceptance_assets::validate(&repository_root()),
             AcceptanceAssetsAction::List => {
@@ -707,6 +710,33 @@ fn sprint2_application(args: &EnvironmentArgs) -> Result<(), AppError> {
         &args.env,
         "93-sprint2-application.yml",
         "sprint2-application --infra",
+        Some(&package_manifest),
+    )
+}
+
+fn resource_application(args: &EnvironmentArgs) -> Result<(), AppError> {
+    if !args.yes {
+        return Err(AppError::ConfirmationRequired {
+            command: "resource-application",
+        });
+    }
+    require_infrastructure(args, "resource-application --infra")?;
+    let package_manifest = args
+        .package_manifest
+        .as_deref()
+        .ok_or(AppError::InvalidArgument {
+            role: "Resource application package manifest",
+        })?
+        .canonicalize()
+        .map_err(|error| AppError::Io {
+            role: "resolve Resource application package manifest",
+            detail: error.to_string(),
+        })?;
+    platform_images::validate_profile(&package_manifest, "resource", &repository_root())?;
+    run_infrastructure_with_package(
+        &args.env,
+        "94-resource-application.yml",
+        "resource-application --infra",
         Some(&package_manifest),
     )
 }

@@ -170,6 +170,24 @@ pub(crate) fn validate(
     Ok(())
 }
 
+/// Validates a package and requires the exact independently reviewed component profile.
+pub(crate) fn validate_profile(
+    manifest_path: &Path,
+    expected_profile: &str,
+    root: &Path,
+) -> Result<(), AppError> {
+    let manifest = read_manifest(manifest_path)?;
+    validate_manifest(&manifest)?;
+    validate_schema_file(root, "platform-image-package-manifest.v1.schema.json")?;
+    if manifest.profile != expected_profile {
+        return Err(AppError::PlatformImage {
+            code: "LW_PACKAGE_PROFILE_MISMATCH",
+            detail: expected_profile.to_owned(),
+        });
+    }
+    Ok(())
+}
+
 pub(crate) fn package(
     environment: &str,
     release: &str,

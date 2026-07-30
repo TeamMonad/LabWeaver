@@ -1,0 +1,27 @@
+---
+resource_application_run_id: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RUN_ID') }}"
+resource_application_source_commit: "{{ lookup('ansible.builtin.env', 'LABWEAVER_COMMIT_SHA') }}"
+resource_application_package_manifest: "{{ lookup('ansible.builtin.env', 'LABWEAVER_PACKAGE_MANIFEST') }}"
+resource_application_configuration_bundle: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_CONFIGURATION_BUNDLE') }}"
+resource_application_configuration_manifest: "{{ playbook_dir }}/../../config/resource-bundle-manifest.json"
+resource_application_values_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_VALUES_FILE') }}"
+resource_application_chart_source: "{{ playbook_dir }}/../../helm/labweaver"
+resource_application_kubeconfig: /etc/kubernetes/admin.conf
+resource_application_kubectl: /usr/bin/kubectl
+resource_application_helm: /usr/local/bin/helm
+resource_application_namespace: labweaver-system
+resource_application_release_name: labweaver-resource
+resource_application_image_pull_secret_name: harbor-labweaver-system-pull
+resource_application_rollout_timeout: 10m
+resource_application_report_root: /var/lib/labweaver/resource-application
+resource_application_workloads:
+  - control-service
+  - access-service
+  - agent-service
+  - build-executor
+  - environment-service
+  - evaluation-service
+  - container-executor
+  - kubevirt-executor
+  - openssh-gateway
+  - web
