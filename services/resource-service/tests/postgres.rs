@@ -75,7 +75,7 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
 async fn resource_store_commits_request_approval_claim_lease_and_renewal_as_fenced_authority()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool);
+    let store = PgResourceStore::new(pool.clone());
     let now = store.current_time().await?;
     let resources = WorkloadResources {
         cpu_millicores: 500,
@@ -158,10 +158,32 @@ async fn resource_store_commits_request_approval_claim_lease_and_renewal_as_fenc
         provisioning.claim.state,
         contracts::resource::CapacityClaimState::Provisioning
     );
+    assert!(
+        store.claim_next_capacity_shell().await?.is_none(),
+        "a fresh provisioning fence must not be reclaimed concurrently"
+    );
+    sqlx::query(
+        "UPDATE resource.capacity_claims SET updated_at=clock_timestamp()-interval '2 minutes' WHERE claim_id=$1",
+    )
+    .bind(provisioning.claim.id.as_uuid())
+    .execute(&pool)
+    .await?;
+    let recovered = store
+        .claim_next_capacity_shell()
+        .await?
+        .expect("a stale provisioning fence must be reclaimed after restart");
+    assert_eq!(
+        recovered.claim.state,
+        contracts::resource::CapacityClaimState::Provisioning
+    );
+    assert_eq!(
+        recovered.claim.revision.get(),
+        provisioning.claim.revision.get() + 2
+    );
     let ready = store
         .mark_capacity_shell_ready(
-            provisioning.claim.id,
-            provisioning.claim.revision,
+            recovered.claim.id,
+            recovered.claim.revision,
             "lw-work-test",
             "namespace-uid",
             "quota-uid",

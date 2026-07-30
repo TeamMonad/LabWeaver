@@ -657,7 +657,7 @@ impl PgResourceStore {
     ) -> Result<Option<ProvisioningCapacityClaim>, ResourceStoreError> {
         let mut transaction = self.pool.begin().await?;
         let row = sqlx::query(
-            "SELECT c.contract AS claim_contract,r.contract AS request_contract,l.contract AS lease_contract FROM resource.capacity_claims c JOIN resource.resource_requests r ON r.request_id=c.request_id JOIN resource.resource_leases l ON l.claim_id=c.claim_id WHERE c.state='reserved' ORDER BY c.created_at FOR UPDATE OF c SKIP LOCKED LIMIT 1",
+            "SELECT c.contract AS claim_contract,r.contract AS request_contract,l.contract AS lease_contract FROM resource.capacity_claims c JOIN resource.resource_requests r ON r.request_id=c.request_id JOIN resource.resource_leases l ON l.claim_id=c.claim_id WHERE c.state='reserved' OR (c.state='provisioning' AND c.updated_at <= clock_timestamp() - interval '1 minute') ORDER BY c.updated_at,c.created_at FOR UPDATE OF c SKIP LOCKED LIMIT 1",
         )
         .fetch_optional(&mut *transaction)
         .await?;
@@ -668,13 +668,31 @@ impl PgResourceStore {
         let claim = decode_claim(row.try_get("claim_contract")?)?;
         let request = decode_request(row.try_get("request_contract")?)?;
         let lease = decode_lease(row.try_get("lease_contract")?)?;
-        if claim.state != CapacityClaimState::Reserved
-            || lease.state != ResourceLeaseState::Allocating
+        if !matches!(
+            claim.state,
+            CapacityClaimState::Reserved | CapacityClaimState::Provisioning
+        ) || lease.state != ResourceLeaseState::Allocating
         {
             return Err(ResourceStoreError::CapacityClaimStateConflict);
         }
-        let next = transition_claim(&claim, CapacityClaimState::Provisioning)?;
-        update_claim(&mut transaction, &claim, &next, None, None, None).await?;
+        let next = if claim.state == CapacityClaimState::Provisioning {
+            let recovered = transition_claim(&claim, CapacityClaimState::Reserved)?;
+            update_claim(&mut transaction, &claim, &recovered, None, None, None).await?;
+            let next = transition_claim(&recovered, CapacityClaimState::Provisioning)?;
+            update_claim(&mut transaction, &recovered, &next, None, None, None).await?;
+            tracing::warn!(
+                event = "resource.capacity.provisioning_recovered",
+                diagnostic_code = "LW_RESOURCE_CAPACITY_PROVISIONING_RECOVERED",
+                claim_id = %claim.id,
+                previous_revision = claim.revision.get(),
+                recovered_revision = next.revision.get()
+            );
+            next
+        } else {
+            let next = transition_claim(&claim, CapacityClaimState::Provisioning)?;
+            update_claim(&mut transaction, &claim, &next, None, None, None).await?;
+            next
+        };
         transaction.commit().await?;
         Ok(Some(ProvisioningCapacityClaim {
             claim: next,
