@@ -20,6 +20,17 @@
     nats_rotation_expected_workloads_account: "{{ lookup('ansible.builtin.env', 'LABWEAVER_NATS_EXPECTED_WORKLOADS_ACCOUNT') }}"
     nats_rotation_valid_days: "{{ lookup('ansible.builtin.env', 'LABWEAVER_NATS_ROTATION_VALID_DAYS') | default('365', true) }}"
     nats_rotation_kubeconfig: "{{ lookup('ansible.builtin.env', 'LABWEAVER_KUBECONFIG') }}"
+    nats_rotation_expected_identities:
+      - access-service
+      - agent-service
+      - build-executor
+      - container-executor
+      - control-service
+      - environment-service
+      - evaluation-service
+      - kubevirt-executor
+      - resource-service
+      - sprint2-admin
     nats_rotation_secret_names:
       - nats-server-secrets
       - control-service-secrets
@@ -143,7 +154,7 @@
           - nats_rotation_record.system_account_public is match('^A[A-Z2-7]{55}$')
           - nats_rotation_record.workloads_account_public == nats_rotation_expected_workloads_account
           - nats_rotation_record.identities | length == 10
-          - nats_rotation_record.identities | map(attribute='identity') | sort == ['access-service', 'agent-service', 'build-executor', 'container-executor', 'control-service', 'environment-service', 'evaluation-service', 'kubevirt-executor', 'resource-service', 'sprint2-admin']
+          - nats_rotation_record.identities | map(attribute='identity') | sort == nats_rotation_expected_identities
           - nats_rotation_record.identities | map(attribute='issuer') | unique | list == [nats_rotation_expected_workloads_account]
         fail_msg: NATS_AUTHORITY_ROTATION_IDENTITY_INVALID
 
