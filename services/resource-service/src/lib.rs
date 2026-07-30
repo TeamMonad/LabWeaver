@@ -15,7 +15,10 @@ use contracts::resource::{
 use contracts::{Revision, UtcTimestamp};
 
 pub mod messaging;
+pub mod process;
 pub mod store;
+
+pub use process::{ResourceProcessRuntime, ResourceProcessRuntimeError};
 
 /// Stable Resource-domain diagnostics. These values are safe to return in RFC 9457 responses.
 pub mod diagnostic {
