@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::authoring::{EnvironmentClass, RuntimeKind};
 use crate::{
-    ActorId, CourseId, DiagnosticCode, EndpointId, EnvironmentId, LeaseId, OperationId, ProjectId,
-    ReleaseId, Revision, StreamSequence, UtcTimestamp,
+    ActorId, CapacityClaimId, CourseId, DiagnosticCode, EndpointId, EnvironmentId, LeaseId,
+    OperationId, ProjectId, ReleaseId, ResourceRequestId, Revision, Sha256Digest, StreamSequence,
+    UtcTimestamp,
 };
 
 /// Requested steady state.
@@ -139,6 +140,55 @@ pub struct EnvironmentLeaseVerificationResponse {
     pub version: u8,
     pub state: EnvironmentLeaseState,
     pub authorization: Option<EnvironmentLeaseAuthorization>,
+}
+
+/// Resource-to-Environment command to create one Work aggregate from an already-approved
+/// Lease and capacity shell. Environment resolves the release projection locally.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResourceWorkHandoff {
+    pub version: u8,
+    pub request_id: ResourceRequestId,
+    pub request_revision: Revision,
+    pub lease_id: LeaseId,
+    pub lease_revision: Revision,
+    pub claim_id: CapacityClaimId,
+    pub claim_revision: Revision,
+    pub environment_id: EnvironmentId,
+    pub course_id: CourseId,
+    pub owner_actor_id: ActorId,
+    pub display_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<ProjectId>,
+    pub release_id: ReleaseId,
+    pub release_version: u64,
+    pub release_sha256: Sha256Digest,
+    pub provider_binding: String,
+    pub capacity_binding: String,
+    pub trace_id: String,
+}
+
+impl ResourceWorkHandoff {
+    pub fn validate(&self) -> Result<(), EnvironmentError> {
+        if self.version != 1
+            || self.request_revision.get() == 0
+            || self.lease_revision.get() == 0
+            || self.claim_revision.get() == 0
+            || self.release_version == 0
+            || self.display_label.trim().is_empty()
+            || self.display_label.chars().count() > 120
+            || self.provider_binding.is_empty()
+            || self.provider_binding.len() > 120
+            || self.capacity_binding.is_empty()
+            || self.capacity_binding.len() > 120
+            || self.trace_id.is_empty()
+            || self.trace_id.len() > 128
+            || self.trace_id.chars().any(char::is_control)
+        {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        Ok(())
+    }
 }
 
 /// Revision-checked lifecycle intent consumed by the Environment state owner.
@@ -707,6 +757,8 @@ pub enum EnvironmentError {
     LeaseAuthorizationRequired,
     #[error("Resource Lease authorization does not match the Environment scope")]
     LeaseAuthorizationInvalid,
+    #[error("Resource Work handoff is incomplete or unsafe")]
+    InvalidResourceHandoff,
     #[error("illegal environment transition: {from:?} -> {to:?}")]
     InvalidTransition {
         from: ObservedEnvironmentState,
