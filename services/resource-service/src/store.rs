@@ -392,6 +392,64 @@ impl PgResourceStore {
         Ok(result)
     }
 
+    pub async fn retry(
+        &self,
+        idempotency_key: &str,
+        request_id: ResourceRequestId,
+        expected_revision: contracts::Revision,
+        actor: contracts::ActorId,
+        trace_id: &str,
+    ) -> Result<ResourceRequest, ResourceStoreError> {
+        IdempotencyKey::parse(idempotency_key).map_err(|_| ResourceStoreError::IdempotencyKey)?;
+        validate_trace(trace_id)?;
+        let mut transaction = self.pool.begin().await?;
+        let request = load_locked(&mut transaction, request_id).await?;
+        let hash = Sha256Digest::of_canonical(&(request_id, expected_revision, "retry"))?;
+        let result = match IdempotencyStore::reserve(
+            &mut transaction,
+            Domain::Resource,
+            "retry_resource_request",
+            idempotency_key,
+            hash,
+        )
+        .await?
+        {
+            IdempotencyDecision::Replay(value) => decode_request(value)?,
+            IdempotencyDecision::Conflict => return Err(ResourceStoreError::IdempotencyConflict),
+            IdempotencyDecision::InProgress => {
+                return Err(ResourceStoreError::IdempotencyInProgress);
+            }
+            IdempotencyDecision::Reserved => {
+                let now = database_now(&mut transaction).await?;
+                let next = ResourceLifecycle::retry(&request, expected_revision, now)?;
+                update_request(&mut transaction, &request, &next).await?;
+                insert_transition(
+                    &mut transaction,
+                    &next,
+                    next.revision.get(),
+                    Some(request.state),
+                    Some(actor),
+                    trace_id,
+                )
+                .await?;
+                enqueue_request_event(&mut transaction, &next, REQUEST_SUBMITTED_SUBJECT, trace_id)
+                    .await?;
+                let value = serde_json::to_value(&next)?;
+                IdempotencyStore::complete(
+                    &mut transaction,
+                    Domain::Resource,
+                    "retry_resource_request",
+                    idempotency_key,
+                    &value,
+                )
+                .await?;
+                next
+            }
+        };
+        transaction.commit().await?;
+        Ok(result)
+    }
+
     /// Loads a Lease projection; malformed snapshots never authorize use.
     pub async fn load_lease(&self, lease_id: LeaseId) -> Result<ResourceLease, ResourceStoreError> {
         let row = sqlx::query("SELECT contract FROM resource.resource_leases WHERE lease_id=$1")

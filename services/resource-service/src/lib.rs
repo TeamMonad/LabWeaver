@@ -163,6 +163,23 @@ impl ResourceLifecycle {
         )
     }
 
+    pub fn retry(
+        request: &ResourceRequest,
+        expected_revision: Revision,
+        now: UtcTimestamp,
+    ) -> Result<ResourceRequest, LifecycleError> {
+        if request.state != ResourceRequestState::Rejected {
+            return Err(LifecycleError::StateConflict);
+        }
+        transition(
+            request,
+            expected_revision,
+            ResourceRequestState::Rejected,
+            ResourceRequestState::Reviewing,
+            now,
+        )
+    }
+
     pub fn activate_lease(
         lease: &ResourceLease,
         expected_revision: Revision,

@@ -53,6 +53,10 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
             "/api/v1/resource-requests/{request_id}/reject",
             post(reject_request),
         )
+        .route(
+            "/api/v1/resource-requests/{request_id}/retry",
+            post(retry_request),
+        )
         .route("/api/v1/resource-leases/{lease_id}", get(get_lease))
         .route(
             "/api/v1/resource-leases/{lease_id}/renew",
@@ -241,6 +245,38 @@ async fn reject_request(
         ResourceRequestState::Rejected,
     )
     .await
+}
+
+async fn retry_request(
+    State(state): State<ResourceApiState>,
+    headers: HeaderMap,
+    Path(request_id): Path<ResourceRequestId>,
+    Json(input): Json<contracts::http::ResourceRequestMutation>,
+) -> Result<Response, ResourceApiError> {
+    authorize(&headers)?;
+    let actor = actor(&headers)?;
+    let key = required_header(&headers, "idempotency-key")?;
+    let request = state.store.load(request_id).await?;
+    if request.requester_id != actor {
+        return Err(ResourceApiError::ScopeDenied);
+    }
+    let result = state
+        .store
+        .retry(
+            &key,
+            request_id,
+            input.expected_revision,
+            actor,
+            &trace_id(),
+        )
+        .await?;
+    let accepted = ResourceOperationAccepted {
+        request_id: result.id,
+        lease_id: None,
+        revision: result.revision,
+        status_url: format!("/api/v1/resource-requests/{}", result.id),
+    };
+    Ok((StatusCode::ACCEPTED, Json(accepted)).into_response())
 }
 
 async fn terminal_request(
