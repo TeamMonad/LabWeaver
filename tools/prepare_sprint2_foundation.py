@@ -198,7 +198,13 @@ def _run(binary: Path, arguments: list[str], private_home: Path) -> None:
             timeout=60,
         )
     except (OSError, subprocess.SubprocessError) as error:
-        raise FoundationError("LW_SPRINT2_FOUNDATION_TOOL_FAILED") from error
+        operation = "-".join(
+            token.lstrip("-").replace("_", "-")
+            for token in arguments[:2]
+            if token and len(token) <= 32 and token.replace("-", "").isalnum()
+        )
+        suffix = f":{binary.name}:{operation}" if operation else f":{binary.name}"
+        raise FoundationError(f"LW_SPRINT2_FOUNDATION_TOOL_FAILED{suffix}") from error
 
 
 def _write(path: Path, payload: bytes, mode: int = 0o600) -> None:
