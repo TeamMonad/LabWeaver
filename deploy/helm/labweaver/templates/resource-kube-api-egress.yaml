@@ -1,4 +1,4 @@
-{{- if and .Values.workloads.resource-service.enabled .Values.network.resourceKubernetesApiCiliumPolicyEnabled }}
+{{- if and (index .Values.workloads "resource-service").enabled .Values.network.resourceKubernetesApiCiliumPolicyEnabled }}
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:

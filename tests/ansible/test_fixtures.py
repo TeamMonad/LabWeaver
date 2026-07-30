@@ -456,6 +456,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn("name: resource-kube-api-egress", policy)
+        self.assertIn('(index .Values.workloads "resource-service").enabled', policy)
         self.assertIn("app.kubernetes.io/name: resource-service", policy)
         self.assertIn("toEntities: [kube-apiserver]", policy)
         self.assertIn(
