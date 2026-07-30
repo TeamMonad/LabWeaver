@@ -121,13 +121,18 @@ not complete. The Helm workload remains disabled, and no Release Gate or Sprint
 The foundation authoring source now registers a dedicated `resource-service`
 NATS identity with no domain publish permissions, a bounded request/reply inbox
 subscription, and the Resource lease-verification subject. It also registers
-the matching mTLS platform identity. This is automation-ready but not a
-connected issuance: the retained controller bundle contains service `.creds`
-and a system/admin user, while no operator/account signing key is present.
-The remote non-secret issuance record is kept in the root-owned private
-controller locator recorded by `AGENTS.md` and is explicitly `blocked` with
-`LW_RESOURCE_NATS_SIGNING_SOURCE_UNAVAILABLE`; no other service credential was
-reused.
+the matching mTLS platform identity. The retained signing source was recovered
+from the reviewed logical bundle `sprint2-foundation-547d8fea`, copied into an
+isolated root-owned store, and matched against the issuer of the deployed
+Control Service credential before use. The Ansible issuance entrypoint created
+a dedicated `resource-service` credential as `root:root 0600`; its issuer is
+the verified `WORKLOADS` account, its subscriptions are limited to `_INBOX.>`
+and `labweaver.resource.lease.verify.v1`, and response permission is limited to
+one reply. The remote non-secret recovery and issuance records are retained at
+the private controller locator described by `AGENTS.md`; no other service
+credential was reused. This closes NATS issuance only: Resource mTLS issuance,
+application bundle integration, workload deployment, and connected service
+verification remain incomplete.
 
 Local evidence: `cargo test -p resource-service` passes 12 tests, including
 API identity guards, lifecycle fences, PostgreSQL migration/store invariants and

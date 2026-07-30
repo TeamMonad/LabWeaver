@@ -853,3 +853,15 @@ Historical audit sources for the current signing decision are
 `019f61a6-88ac-78a1-8bf5-efd67b8d3a48`. They document Harbor/Private Sigstore
 signing material, not a NATS operator/account signing key; do not treat them
 as a usable NATS signing source.
+
+The recovered Sprint 2 NATS signing source is the private logical bundle
+`sprint2-foundation-547d8fea`. Its verified public identities are operator
+`ODA447PGM46MICJWNP3HKSOY7N2DZ2S7UWG5CYM3SJXS4LJKAT33X633`, operator signing
+key `OCVEK7YQ5CMONFE63ASWDS4TZCVRF36Z7G5QVRN2Q3RHF6MOJOUWBG5F`, and
+`WORKLOADS` account `AD2SZZBFMR2A5Z2DQJFVKW74OVHZHHLVGD6VACLAJ76YO4SVZF6LUH47`.
+Resolve its server-private locator through `LABWEAVER_RESOURCE_NSC_STORE`; do
+not hard-code or commit the server path. Before issuing an identity, require
+the deployed service credential issuer to match the `WORKLOADS` public key,
+copy the source store rather than mutating it, run
+`deploy/ansible/playbooks/94-resource-identity.yml`, and retain the non-secret
+recovery/issuance record at `LABWEAVER_RESOURCE_NATS_ISSUANCE_RECORD`.
