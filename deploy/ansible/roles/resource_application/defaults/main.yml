@@ -1,6 +1,7 @@
 ---
 resource_application_run_id: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RUN_ID') }}"
 resource_application_source_commit: "{{ lookup('ansible.builtin.env', 'LABWEAVER_COMMIT_SHA') }}"
+resource_application_expected_source_commit: "{{ lookup('ansible.builtin.env', 'LABWEAVER_PACKAGE_SOURCE_COMMIT') | default(resource_application_source_commit, true) }}"
 resource_application_package_manifest: "{{ lookup('ansible.builtin.env', 'LABWEAVER_PACKAGE_MANIFEST') }}"
 resource_application_configuration_bundle: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_CONFIGURATION_BUNDLE') }}"
 resource_application_configuration_manifest: "{{ playbook_dir }}/../../config/resource-bundle-manifest.json"

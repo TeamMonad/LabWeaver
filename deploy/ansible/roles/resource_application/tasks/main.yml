@@ -41,7 +41,7 @@
     that:
       - resource_application_package.schema_version == 'platform-image-package-manifest.v1'
       - resource_application_package.profile | default('sprint2') == 'resource'
-      - resource_application_package.source_commit == resource_application_source_commit
+      - resource_application_package.source_commit == resource_application_expected_source_commit
       - resource_application_package.overall == 'passed'
       - resource_application_package.images | length == 1
       - resource_application_package.images[0].component == 'resource-service'
