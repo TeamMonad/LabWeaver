@@ -118,6 +118,17 @@ NATS identity, and connected PostgreSQL/NATS/Kubernetes/Environment evidence are
 not complete. The Helm workload remains disabled, and no Release Gate or Sprint
 2 runtime capability is claimed for #142.
 
+The foundation authoring source now registers a dedicated `resource-service`
+NATS identity with no domain publish permissions, a bounded request/reply inbox
+subscription, and the Resource lease-verification subject. It also registers
+the matching mTLS platform identity. This is automation-ready but not a
+connected issuance: the retained controller bundle contains service `.creds`
+and a system/admin user, while no operator/account signing key is present.
+The remote non-secret issuance record is kept in the root-owned private
+controller locator recorded by `AGENTS.md` and is explicitly `blocked` with
+`LW_RESOURCE_NATS_SIGNING_SOURCE_UNAVAILABLE`; no other service credential was
+reused.
+
 Local evidence: `cargo test -p resource-service` passes 12 tests, including
 API identity guards, lifecycle fences, PostgreSQL migration/store invariants and
 Outbox acknowledgement. This does not upgrade the connected-runtime status.
