@@ -138,6 +138,25 @@ async fn resource_store_commits_request_approval_claim_lease_and_renewal_as_fenc
         )
         .await?;
     assert_eq!(allocating.state, ResourceRequestState::Allocating);
+    let provisioning = store
+        .claim_next_capacity_shell()
+        .await?
+        .expect("one reserved capacity claim");
+    assert_eq!(
+        provisioning.claim.state,
+        contracts::resource::CapacityClaimState::Provisioning
+    );
+    let ready = store
+        .mark_capacity_shell_ready(
+            provisioning.claim.id,
+            provisioning.claim.revision,
+            "lw-work-test",
+            "namespace-uid",
+            "quota-uid",
+        )
+        .await?;
+    assert_eq!(ready.state, contracts::resource::CapacityClaimState::Ready);
+    assert!(store.claim_next_capacity_shell().await?.is_none());
     let active_from = store.current_time().await?;
     let active_expires = UtcTimestamp::from_utc(active_from.get() + time::Duration::minutes(10))?;
     let active = store

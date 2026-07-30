@@ -28,6 +28,14 @@ pub struct PendingAllocation {
     pub lease_id: LeaseId,
 }
 
+/// A capacity shell exclusively leased to one reconciler attempt.
+#[derive(Clone, Debug)]
+pub struct ProvisioningCapacityClaim {
+    pub claim: CapacityClaim,
+    pub request: ResourceRequest,
+    pub lease: ResourceLease,
+}
+
 impl PendingAllocation {
     fn validate(
         &self,
@@ -430,6 +438,97 @@ impl PgResourceStore {
         transaction.commit().await?;
         Ok(next)
     }
+
+    /// Claims at most one reserved shell with `SKIP LOCKED`, preventing duplicate provider calls.
+    pub async fn claim_next_capacity_shell(
+        &self,
+    ) -> Result<Option<ProvisioningCapacityClaim>, ResourceStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT c.contract AS claim_contract,r.contract AS request_contract,l.contract AS lease_contract FROM resource.capacity_claims c JOIN resource.resource_requests r ON r.request_id=c.request_id JOIN resource.resource_leases l ON l.claim_id=c.claim_id WHERE c.state='reserved' ORDER BY c.created_at FOR UPDATE OF c SKIP LOCKED LIMIT 1",
+        )
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+        let claim = decode_claim(row.try_get("claim_contract")?)?;
+        let request = decode_request(row.try_get("request_contract")?)?;
+        let lease = decode_lease(row.try_get("lease_contract")?)?;
+        if claim.state != CapacityClaimState::Reserved
+            || lease.state != ResourceLeaseState::Allocating
+        {
+            return Err(ResourceStoreError::CapacityClaimStateConflict);
+        }
+        let next = transition_claim(&claim, CapacityClaimState::Provisioning)?;
+        update_claim(&mut transaction, &claim, &next, None, None, None).await?;
+        transaction.commit().await?;
+        Ok(Some(ProvisioningCapacityClaim {
+            claim: next,
+            request,
+            lease,
+        }))
+    }
+
+    /// Records exact Kubernetes UIDs only after the Provider has read back its claim fence.
+    pub async fn mark_capacity_shell_ready(
+        &self,
+        claim_id: contracts::CapacityClaimId,
+        expected_revision: contracts::Revision,
+        namespace: &str,
+        namespace_uid: &str,
+        quota_uid: &str,
+    ) -> Result<CapacityClaim, ResourceStoreError> {
+        if !valid_namespace_name(namespace) || namespace_uid.is_empty() || quota_uid.is_empty() {
+            return Err(ResourceStoreError::CapacityReadbackInvalid);
+        }
+        let mut transaction = self.pool.begin().await?;
+        let claim = load_locked_claim(&mut transaction, claim_id).await?;
+        if claim.revision != expected_revision || claim.state != CapacityClaimState::Provisioning {
+            return Err(ResourceStoreError::CapacityClaimStateConflict);
+        }
+        let next = transition_claim(&claim, CapacityClaimState::Ready)?;
+        update_claim(
+            &mut transaction,
+            &claim,
+            &next,
+            Some(namespace),
+            Some(namespace_uid),
+            Some(quota_uid),
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(next)
+    }
+
+    /// Retains a failed claim for explicit administrator retry; it never silently re-enters admission.
+    pub async fn mark_capacity_shell_blocked(
+        &self,
+        claim_id: contracts::CapacityClaimId,
+        expected_revision: contracts::Revision,
+        diagnostic_code: &str,
+    ) -> Result<CapacityClaim, ResourceStoreError> {
+        if !valid_diagnostic(diagnostic_code) {
+            return Err(ResourceStoreError::DiagnosticInvalid);
+        }
+        let mut transaction = self.pool.begin().await?;
+        let claim = load_locked_claim(&mut transaction, claim_id).await?;
+        if claim.revision != expected_revision || claim.state != CapacityClaimState::Provisioning {
+            return Err(ResourceStoreError::CapacityClaimStateConflict);
+        }
+        let next = transition_claim(&claim, CapacityClaimState::Blocked)?;
+        update_claim(&mut transaction, &claim, &next, None, None, None).await?;
+        sqlx::query(
+            "UPDATE resource.capacity_claims SET last_diagnostic_code=$2 WHERE claim_id=$1",
+        )
+        .bind(claim_id.as_uuid())
+        .bind(diagnostic_code)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(next)
+    }
 }
 
 async fn insert_request(
@@ -549,6 +648,66 @@ async fn update_lease(
     Ok(())
 }
 
+async fn load_locked_claim(
+    transaction: &mut Transaction<'_, Postgres>,
+    claim_id: contracts::CapacityClaimId,
+) -> Result<CapacityClaim, ResourceStoreError> {
+    let row =
+        sqlx::query("SELECT contract FROM resource.capacity_claims WHERE claim_id=$1 FOR UPDATE")
+            .bind(claim_id.as_uuid())
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(ResourceStoreError::CapacityClaimNotFound)?;
+    decode_claim(row.try_get("contract")?)
+}
+
+async fn update_claim(
+    transaction: &mut Transaction<'_, Postgres>,
+    current: &CapacityClaim,
+    next: &CapacityClaim,
+    namespace: Option<&str>,
+    namespace_uid: Option<&str>,
+    quota_uid: Option<&str>,
+) -> Result<(), ResourceStoreError> {
+    let changed = sqlx::query("UPDATE resource.capacity_claims SET state=$3,revision=$4,namespace_name=COALESCE($5,namespace_name),namespace_uid=COALESCE($6,namespace_uid),quota_uid=COALESCE($7,quota_uid),updated_at=clock_timestamp(),contract=$8 WHERE claim_id=$1 AND revision=$2")
+        .bind(current.id.as_uuid()).bind(i64::try_from(current.revision.get())?).bind(wire(next.state)?).bind(i64::try_from(next.revision.get())?)
+        .bind(namespace).bind(namespace_uid).bind(quota_uid).bind(serde_json::to_value(next)?)
+        .execute(&mut **transaction).await?;
+    if changed.rows_affected() != 1 {
+        return Err(ResourceStoreError::RevisionConflict);
+    }
+    Ok(())
+}
+
+fn transition_claim(
+    claim: &CapacityClaim,
+    state: CapacityClaimState,
+) -> Result<CapacityClaim, ResourceStoreError> {
+    let valid = matches!(
+        (claim.state, state),
+        (
+            CapacityClaimState::Reserved,
+            CapacityClaimState::Provisioning
+        ) | (
+            CapacityClaimState::Provisioning,
+            CapacityClaimState::Ready | CapacityClaimState::Blocked
+        )
+    );
+    if !valid {
+        return Err(ResourceStoreError::CapacityClaimStateConflict);
+    }
+    let mut next = claim.clone();
+    next.state = state;
+    next.revision = contracts::Revision::new(
+        claim
+            .revision
+            .get()
+            .checked_add(1)
+            .ok_or(ResourceStoreError::RevisionOverflow)?,
+    )?;
+    Ok(next)
+}
+
 async fn insert_transition(
     transaction: &mut Transaction<'_, Postgres>,
     request: &ResourceRequest,
@@ -640,6 +799,22 @@ fn validate_trace(value: &str) -> Result<(), ResourceStoreError> {
         Ok(())
     }
 }
+fn valid_namespace_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 63
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && !value.starts_with('-')
+        && !value.ends_with('-')
+}
+fn valid_diagnostic(value: &str) -> bool {
+    value.len() <= 128
+        && value.starts_with("LW_")
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ResourceStoreError {
@@ -661,6 +836,16 @@ pub enum ResourceStoreError {
     LeaseWindowMissing,
     #[error("LW_RESOURCE_LEASE_NOT_FOUND")]
     LeaseNotFound,
+    #[error("LW_RESOURCE_CAPACITY_CLAIM_NOT_FOUND")]
+    CapacityClaimNotFound,
+    #[error("LW_RESOURCE_CAPACITY_CLAIM_STATE_CONFLICT")]
+    CapacityClaimStateConflict,
+    #[error("LW_RESOURCE_CAPACITY_READBACK_INVALID")]
+    CapacityReadbackInvalid,
+    #[error("LW_RESOURCE_DIAGNOSTIC_INVALID")]
+    DiagnosticInvalid,
+    #[error("LW_RESOURCE_REVISION_OVERFLOW")]
+    RevisionOverflow,
     #[error("LW_RESOURCE_TRACE_INVALID")]
     Trace,
     #[error("LW_RESOURCE_WIRE_INVALID")]
