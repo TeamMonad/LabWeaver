@@ -41,7 +41,7 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
         .connect(&url)
         .await?;
     sqlx::raw_sql(&format!(
-        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}",
+        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}",
         include_str!("../../../migrations/resource/0001_sprint2_baseline.sql"),
         include_str!("../../../migrations/resource/0002_resource_request_capacity_lease.sql"),
         include_str!("../../../migrations/resource/0003_resource_contract_snapshots.sql"),
@@ -49,6 +49,7 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
         include_str!(
             "../../../migrations/resource/0005_resource_lease_pending_terminal_states.sql"
         ),
+        include_str!("../../../migrations/resource/0006_resource_lease_reconciliation.sql"),
     ))
     .execute(&pool)
     .await?;
@@ -65,6 +66,13 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
         .bind(claim_id).bind(request_id).bind(approval_id).bind("b".repeat(64)).bind("c".repeat(64)).bind(serde_json::json!({"claim": "snapshot"})).execute(&pool).await?;
     sqlx::query("INSERT INTO resource.resource_leases (lease_id,request_id,claim_id,state,revision,contract) VALUES ($1,$2,$3,'revoked',1,$4)")
         .bind(lease_id).bind(request_id).bind(claim_id).bind(serde_json::json!({"lease": "pending-terminal"})).execute(&pool).await?;
+    let synced_revision: i64 = sqlx::query_scalar(
+        "SELECT lease_synced_revision FROM resource.capacity_claims WHERE claim_id=$1",
+    )
+    .bind(claim_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(synced_revision, 0);
 
     assert!(sqlx::query("INSERT INTO resource.capacity_claims (claim_id,request_id,approval_id,provider_binding,policy_sha256,quota_plan_sha256,state,revision,workload_cpu_millicores,workload_memory_bytes,workload_storage_bytes,workload_gpu_class,quota_cpu_millicores,quota_memory_bytes,quota_storage_bytes,contract) VALUES ($1,$2,$3,'kubernetes-standard',$4,$5,'reserved',1,1,1,1,'gpu-a100',2,2,2,$6)")
         .bind(Uuid::now_v7()).bind(Uuid::now_v7()).bind(Uuid::now_v7()).bind("b".repeat(64)).bind("c".repeat(64)).bind(serde_json::json!({})).execute(&pool).await.is_err());
@@ -266,14 +274,15 @@ async fn migrated_pool()
         .connect(&url)
         .await?;
     sqlx::raw_sql(&format!(
-        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}",
+        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}",
         include_str!("../../../migrations/resource/0001_sprint2_baseline.sql"),
         include_str!("../../../migrations/resource/0002_resource_request_capacity_lease.sql"),
         include_str!("../../../migrations/resource/0003_resource_contract_snapshots.sql"),
         include_str!("../../../migrations/resource/0004_resource_claim_quota_resources.sql"),
         include_str!(
             "../../../migrations/resource/0005_resource_lease_pending_terminal_states.sql"
-        )
+        ),
+        include_str!("../../../migrations/resource/0006_resource_lease_reconciliation.sql")
     ))
     .execute(&pool)
     .await?;

@@ -328,6 +328,16 @@ may use an implicit provider, template, Lease, endpoint or fallback target.
 | Endpoint unhealthy or absent | No new/renewed grant; Environment records diagnosis and reconciles or fails according to the lifecycle rules. |
 | `Deleted` | Endpoint metadata and grants are no longer usable; tombstone retains only sanitized cleanup/audit evidence. |
 
+Resource creates the quota shell in the same deterministic `lw-env-{environmentId}`
+namespace adopted by Environment; a parallel capacity-only namespace is
+invalid. The Resource mTLS identity may call only the versioned Work handoff,
+Lease-update and cleanup boundaries. Lease update independently verifies an
+exact active Lease and only extends eligibility. Cleanup binds Lease,
+environment, course, owner and capacity identity, records Access revocation
+before accepting `Expire`, and exposes a sanitized tombstone readback. Resource
+must retain capacity in `releasing` until both that tombstone and Kubernetes
+namespace absence are observed.
+
 The event family is versioned and idempotent: lifecycle command
 acceptance and observed transitions belong to Environment; Lease state changes
 belong to Resource; grant issuance/revocation belongs to Access. Event payloads

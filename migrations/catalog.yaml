@@ -50,3 +50,6 @@ domains:
       - id: 5
         file: resource/0005_resource_lease_pending_terminal_states.sql
         sha256: 867a1d60608ab7d1ae8e4bfac918e6b93d4ccf0959aed6b5d91c1c0faf3778df
+      - id: 6
+        file: resource/0006_resource_lease_reconciliation.sql
+        sha256: 950a925790a01e80600454e7aee30a8f63889f0a53669738eb38c0d079acf03f

@@ -17,7 +17,8 @@ use contracts::{
         EndpointHealth, EnvironmentAccessEligibilityState, EnvironmentAccessEligibilitySummary,
         EnvironmentCreateSpec, EnvironmentInstance, EnvironmentLeaseVerificationRequest,
         EnvironmentLifecycleCommand, EnvironmentOperationKind, EnvironmentOwnerRelation,
-        EnvironmentOwnerSummary, EnvironmentSummary, ResourceWorkHandoff,
+        EnvironmentOwnerSummary, EnvironmentSummary, ResourceWorkCleanup,
+        ResourceWorkCleanupStatus, ResourceWorkHandoff, ResourceWorkLeaseUpdate,
     },
     http::{
         CreateEnvironmentRequest, DEFAULT_PAGE_LIMIT, EnvironmentInventoryQuery,
@@ -112,7 +113,161 @@ pub fn environment_api_router(state: EnvironmentApiState) -> Router {
             "/internal/v1/resource/work-handoffs",
             post(accept_resource_work_handoff),
         )
+        .route(
+            "/internal/v1/resource/work-lease-updates",
+            post(accept_resource_work_lease_update),
+        )
+        .route(
+            "/internal/v1/resource/work-cleanups",
+            post(accept_resource_work_cleanup),
+        )
+        .route(
+            "/internal/v1/resource/work-cleanups/{environment_id}",
+            get(read_resource_work_cleanup),
+        )
         .with_state(state)
+}
+
+async fn accept_resource_work_lease_update(
+    State(state): State<EnvironmentApiState>,
+    caller: Option<Extension<VerifiedCallerIdentity>>,
+    body: Bytes,
+) -> Result<Json<EnvironmentInstance>, EnvironmentApiError> {
+    require_resource_service(caller)?;
+    let update = contracts::parse_strict_json::<ResourceWorkLeaseUpdate>(&body)
+        .map_err(|_| EnvironmentApiError::RequestInvalid)?;
+    update
+        .validate()
+        .map_err(|_| EnvironmentApiError::RequestInvalid)?;
+    let now = state.store.current_time().await?;
+    let authorization = state
+        .lease_verifier
+        .verify(
+            EnvironmentLeaseVerificationRequest {
+                version: 1,
+                lease_id: update.lease_id,
+                environment_id: update.environment_id,
+                course_id: update.course_id,
+                owner_actor_id: update.owner_actor_id,
+                capacity_binding: update.capacity_binding,
+            },
+            now,
+        )
+        .await?;
+    if authorization.lease_revision != update.lease_revision
+        || authorization.expires_at != update.expires_at
+    {
+        return Err(EnvironmentApiError::LeaseFenceInvalid);
+    }
+    Ok(Json(
+        state
+            .store
+            .refresh_work_lease(update.environment_id, authorization)
+            .await?,
+    ))
+}
+
+async fn accept_resource_work_cleanup(
+    State(state): State<EnvironmentApiState>,
+    caller: Option<Extension<VerifiedCallerIdentity>>,
+    body: Bytes,
+) -> Result<(StatusCode, Json<EnvironmentOperationAccepted>), EnvironmentApiError> {
+    require_resource_service(caller)?;
+    let cleanup = contracts::parse_strict_json::<ResourceWorkCleanup>(&body)
+        .map_err(|_| EnvironmentApiError::RequestInvalid)?;
+    cleanup
+        .validate()
+        .map_err(|_| EnvironmentApiError::RequestInvalid)?;
+    let instance = state.store.load(cleanup.environment_id).await?;
+    if instance.class != EnvironmentClass::Work
+        || instance.lease_id != Some(cleanup.lease_id)
+        || instance.course_id != cleanup.course_id
+        || instance.owner_id != cleanup.owner_actor_id
+        || instance.capacity_binding.as_deref() != Some(cleanup.capacity_binding.as_str())
+    {
+        return Err(EnvironmentApiError::LeaseFenceInvalid);
+    }
+    if instance.observed_state == contracts::environment::ObservedEnvironmentState::Deleted
+        || matches!(
+            instance.operation.kind,
+            EnvironmentOperationKind::Expire
+                | EnvironmentOperationKind::Delete
+                | EnvironmentOperationKind::Cleanup
+        )
+    {
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(EnvironmentOperationAccepted {
+                environment_id: instance.id,
+                operation_id: instance.operation.id,
+                revision: instance.operation.accepted_revision,
+                status_url: format!(
+                    "/api/v1/environments/{}/operations/{}",
+                    instance.id, instance.operation.id
+                ),
+            }),
+        ));
+    }
+    let access_revocation_revision = state
+        .access_revoker
+        .revoke(&instance, "environment_expired")
+        .await?;
+    let accepted_at = state.store.current_time().await?;
+    let command = EnvironmentLifecycleCommand {
+        environment_id: instance.id,
+        kind: EnvironmentOperationKind::Expire,
+        expected_revision: instance.revision,
+        actor_id: instance.owner_id,
+        trace_id: cleanup.trace_id,
+        accepted_at,
+        deadline_at: add_duration(accepted_at, OPERATION_DEADLINE)?,
+        access_revocation_revision: Some(access_revocation_revision),
+        preserve_mutable_disk: false,
+        max_attempts: 3,
+        reset_target: None,
+    };
+    let accepted = state
+        .store
+        .accept_api_command(
+            &format!(
+                "resource-work-cleanup-{}-{}",
+                cleanup.lease_id,
+                cleanup.lease_revision.get()
+            ),
+            &command,
+            None,
+            instance.course_id,
+        )
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(accepted)))
+}
+
+async fn read_resource_work_cleanup(
+    State(state): State<EnvironmentApiState>,
+    caller: Option<Extension<VerifiedCallerIdentity>>,
+    Path(environment_id): Path<EnvironmentId>,
+) -> Result<Json<ResourceWorkCleanupStatus>, EnvironmentApiError> {
+    require_resource_service(caller)?;
+    let instance = state.store.load(environment_id).await?;
+    Ok(Json(ResourceWorkCleanupStatus {
+        version: 1,
+        environment_id,
+        revision: instance.revision,
+        observed_state: instance.observed_state,
+        cleanup_complete: instance.observed_state
+            == contracts::environment::ObservedEnvironmentState::Deleted,
+        diagnostic_code: instance.last_diagnostic_code,
+    }))
+}
+
+fn require_resource_service(
+    caller: Option<Extension<VerifiedCallerIdentity>>,
+) -> Result<(), EnvironmentApiError> {
+    if caller.is_some_and(|Extension(identity)| identity.contains_san(RESOURCE_SERVICE_SAN)) {
+        Ok(())
+    } else {
+        Err(EnvironmentApiError::CallerDenied)
+    }
 }
 
 async fn accept_resource_work_handoff(

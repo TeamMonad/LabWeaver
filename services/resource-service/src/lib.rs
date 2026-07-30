@@ -264,7 +264,11 @@ impl ResourceLifecycle {
         }
         transition_lease(
             lease,
-            ResourceLeaseState::Expired,
+            if lease.revoke_reason_code.is_some() {
+                ResourceLeaseState::Revoked
+            } else {
+                ResourceLeaseState::Expired
+            },
             now,
             lease.expires_at,
             lease.revoke_reason_code.clone(),
@@ -286,7 +290,7 @@ impl ResourceLifecycle {
         }
         transition_lease(
             lease,
-            ResourceLeaseState::Revoked,
+            ResourceLeaseState::Expiring,
             now,
             lease.expires_at,
             Some(reason),
@@ -495,11 +499,17 @@ mod tests {
             )
             .is_err()
         );
-        let revoked = ResourceLifecycle::revoke_lease(
+        let expiring = ResourceLifecycle::revoke_lease(
             &renewed,
             renewed.revision,
             timestamp("2026-07-30T00:00:03.000Z"),
             "administrative revoke".into(),
+        )?;
+        assert_eq!(expiring.state, ResourceLeaseState::Expiring);
+        let revoked = ResourceLifecycle::complete_lease_expiry(
+            &expiring,
+            expiring.revision,
+            timestamp("2026-07-30T00:00:04.000Z"),
         )?;
         assert_eq!(revoked.state, ResourceLeaseState::Revoked);
         Ok(())

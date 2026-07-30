@@ -112,10 +112,23 @@ acceptance; three failed handoffs become an auditable `blocked` claim.
 The Resource public HTTP surface is now implemented locally: owner-scoped list
 and get, create, approve/resize-approve, cancel, reject, retry, Lease renew and
 Lease revoke all use explicit actor/caller checks, idempotency keys and revision
-fences backed by the PostgreSQL store. The retained application deployment is
-connected on the demo cluster: Resource is digest-pinned and Ready, migrations
-0001-0005 have an audited ledger, and a real create/approve flow produced a
-read-back ResourceQuota shell and active Lease.
+fences backed by the PostgreSQL store. Migration 0006 adds a durable
+Lease-revision acknowledgement fence. Renewal is synchronized over the
+Resource mTLS boundary and may only extend the exact Work aggregate. Revocation
+and database-clock expiry now share one persistent saga: Environment revokes
+Access before deletion, Resource waits for the Environment tombstone and exact
+namespace-absence readback, then and only then marks the capacity claim and
+Lease terminal. Cleanup failures remain `expiring`/`releasing`, retain a stable
+diagnostic and append a bounded attempt record instead of releasing capacity.
+The Resource quota shell uses the same deterministic `lw-env-*` namespace that
+Environment adopts, so the approved quota governs the actual workload.
+
+The retained application deployment at source `46d22482` remains connected on
+the demo cluster: Resource is digest-pinned and Ready, migrations 0001-0005
+have an audited ledger, and a real create/approve flow produced a read-back
+ResourceQuota shell and active Lease. Migration 0006 and the renewal/cleanup
+saga are implemented and locally verified but require a new same-identity
+package, deployment and connected replay before they are marked verified.
 
 The former NATS operator seed was not recovered and is retired. A controlled
 forward rotation preserved only the reviewed `WORKLOADS` account key, created a
@@ -133,15 +146,18 @@ Stale provisioning recovery preserves its authoritative failed phase, and the
 Resource process exits when its background runtime fails so Kubernetes can
 restart it. A deliberately invalid fixture handoff produced three auditable
 `retry`, `retry`, `failed` attempt rows without taking Resource down.
-Environment handoff is still blocked: the retained catalog contains only
-`experiment` releases and no approved `work` release suitable for a valid
-handoff replay. The invalid fixture is not positive handoff evidence.
+The prior Environment handoff blocker remains historical evidence only: the
+retained catalog at that identity contained no approved `work` release. The
+current implementation must create an approved Work release through the
+teacher/Agent/approval path; no database shortcut or invalid fixture counts as
+positive handoff evidence.
 
-Local evidence includes six Resource unit tests, strict all-target/all-feature
-Clippy, migration/store test compilation, nine NATS rotation/foundation tests,
-format and diff checks. Docker-backed PostgreSQL execution is unavailable on
-the local Windows host; the connected PostgreSQL/NATS/Kubernetes evidence above
-is reported separately.
+Local evidence includes six Resource unit tests, sixteen Environment unit
+tests, strict all-target/all-feature Clippy for affected crates, contract and
+generated Web SDK drift checks, migration catalog validation, migration/store
+test compilation, 53 Ansible fixture tests, Web lint/typecheck, format and diff
+checks. Docker-backed PostgreSQL execution is unavailable on the local Windows
+host; the new PostgreSQL migration and saga still require connected execution.
 
 ## Accepted Sprint 2 security exceptions
 

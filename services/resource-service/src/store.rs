@@ -519,6 +519,7 @@ impl PgResourceStore {
         lease_id: LeaseId,
         expected_revision: contracts::Revision,
         reason: String,
+        actor: contracts::ActorId,
     ) -> Result<ResourceLease, ResourceStoreError> {
         IdempotencyKey::parse(idempotency_key).map_err(|_| ResourceStoreError::IdempotencyKey)?;
         let mut transaction = self.pool.begin().await?;
@@ -541,7 +542,20 @@ impl PgResourceStore {
             IdempotencyDecision::Reserved => {
                 let now = database_now(&mut transaction).await?;
                 let next = ResourceLifecycle::revoke_lease(&lease, expected_revision, now, reason)?;
+                let request = load_locked(&mut transaction, lease.request_id).await?;
+                let next_request =
+                    ResourceLifecycle::begin_expiry(&request, request.revision, now)?;
                 update_lease(&mut transaction, &lease, &next).await?;
+                update_request(&mut transaction, &request, &next_request).await?;
+                insert_transition(
+                    &mut transaction,
+                    &next_request,
+                    next_request.revision.get(),
+                    Some(request.state),
+                    Some(actor),
+                    &format!("resource-lease-revoke-{lease_id}"),
+                )
+                .await?;
                 let value = serde_json::to_value(&next)?;
                 IdempotencyStore::complete(
                     &mut transaction,
@@ -769,6 +783,225 @@ impl PgResourceStore {
         update_claim(&mut transaction, &claim, &next, None, None, None).await?;
         transaction.commit().await?;
         Ok(next)
+    }
+
+    /// Returns one active handed-off Lease whose current revision has not yet
+    /// been acknowledged by Environment.
+    pub async fn next_unsynced_active_lease(
+        &self,
+    ) -> Result<Option<ProvisioningCapacityClaim>, ResourceStoreError> {
+        let row = sqlx::query(
+            "SELECT c.contract AS claim_contract,r.contract AS request_contract,l.contract AS lease_contract \
+             FROM resource.capacity_claims c \
+             JOIN resource.resource_requests r ON r.request_id=c.request_id \
+             JOIN resource.resource_leases l ON l.claim_id=c.claim_id \
+             WHERE c.state='handed_off' AND l.state='active' \
+               AND c.lease_synced_revision < l.revision \
+             ORDER BY l.updated_at,l.lease_id LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        Ok(Some(ProvisioningCapacityClaim {
+            claim: decode_claim(row.try_get("claim_contract")?)?,
+            request: decode_request(row.try_get("request_contract")?)?,
+            lease: decode_lease(row.try_get("lease_contract")?)?,
+        }))
+    }
+
+    /// Records the exact Lease revision acknowledged by Environment.
+    pub async fn mark_lease_synced(
+        &self,
+        claim_id: contracts::CapacityClaimId,
+        lease_revision: contracts::Revision,
+    ) -> Result<(), ResourceStoreError> {
+        let changed = sqlx::query(
+            "UPDATE resource.capacity_claims c SET lease_synced_revision=$2,updated_at=clock_timestamp() \
+             FROM resource.resource_leases l \
+             WHERE c.claim_id=$1 AND c.state='handed_off' AND l.claim_id=c.claim_id \
+               AND l.state='active' AND l.revision=$2 AND c.lease_synced_revision < $2",
+        )
+        .bind(claim_id.as_uuid())
+        .bind(i64::try_from(lease_revision.get())?)
+        .execute(&self.pool)
+        .await?;
+        if changed.rows_affected() != 1 {
+            return Err(ResourceStoreError::RevisionConflict);
+        }
+        Ok(())
+    }
+
+    /// Claims one due or explicitly revoked handed-off Lease. Natural expiry
+    /// first enters the same durable `expiring` state used by revocation.
+    pub async fn next_lease_cleanup(
+        &self,
+        actor: contracts::ActorId,
+    ) -> Result<Option<ProvisioningCapacityClaim>, ResourceStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT c.contract AS claim_contract,r.contract AS request_contract,l.contract AS lease_contract \
+             FROM resource.capacity_claims c \
+             JOIN resource.resource_requests r ON r.request_id=c.request_id \
+             JOIN resource.resource_leases l ON l.claim_id=c.claim_id \
+             WHERE c.state IN ('handed_off','releasing') \
+               AND (l.state='expiring' OR (l.state='active' AND l.expires_at<=clock_timestamp())) \
+             ORDER BY l.expires_at,l.updated_at FOR UPDATE OF c,l SKIP LOCKED LIMIT 1",
+        )
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+        let claim = decode_claim(row.try_get("claim_contract")?)?;
+        let request = decode_request(row.try_get("request_contract")?)?;
+        let lease = decode_lease(row.try_get("lease_contract")?)?;
+        let lease = if lease.state == ResourceLeaseState::Active {
+            let now = database_now(&mut transaction).await?;
+            let next = ResourceLifecycle::begin_lease_expiry(&lease, lease.revision, now, None)?;
+            let next_request = ResourceLifecycle::begin_expiry(&request, request.revision, now)?;
+            update_lease(&mut transaction, &lease, &next).await?;
+            update_request(&mut transaction, &request, &next_request).await?;
+            insert_transition(
+                &mut transaction,
+                &next_request,
+                next_request.revision.get(),
+                Some(request.state),
+                Some(actor),
+                &format!("resource-lease-expire-{}", lease.id),
+            )
+            .await?;
+            next
+        } else {
+            lease
+        };
+        transaction.commit().await?;
+        Ok(Some(ProvisioningCapacityClaim {
+            claim,
+            request,
+            lease,
+        }))
+    }
+
+    pub async fn mark_capacity_releasing(
+        &self,
+        claim_id: contracts::CapacityClaimId,
+        expected_revision: contracts::Revision,
+    ) -> Result<CapacityClaim, ResourceStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let claim = load_locked_claim(&mut transaction, claim_id).await?;
+        if claim.revision != expected_revision || claim.state != CapacityClaimState::HandedOff {
+            return Err(ResourceStoreError::CapacityClaimStateConflict);
+        }
+        let next = transition_claim(&claim, CapacityClaimState::Releasing)?;
+        update_claim(&mut transaction, &claim, &next, None, None, None).await?;
+        transaction.commit().await?;
+        Ok(next)
+    }
+
+    /// Completes the exact claim and Lease only after Environment and Provider
+    /// absence readback have both succeeded.
+    pub async fn complete_capacity_release(
+        &self,
+        claim_id: contracts::CapacityClaimId,
+        expected_claim_revision: contracts::Revision,
+        lease_id: LeaseId,
+        expected_lease_revision: contracts::Revision,
+        actor: contracts::ActorId,
+    ) -> Result<ResourceLease, ResourceStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let claim = load_locked_claim(&mut transaction, claim_id).await?;
+        let lease = load_locked_lease(&mut transaction, lease_id).await?;
+        let request = load_locked(&mut transaction, lease.request_id).await?;
+        if claim.revision != expected_claim_revision
+            || claim.state != CapacityClaimState::Releasing
+            || lease.revision != expected_lease_revision
+            || lease.state != ResourceLeaseState::Expiring
+            || lease.claim_id != claim.id
+        {
+            return Err(ResourceStoreError::CapacityClaimStateConflict);
+        }
+        let next_claim = transition_claim(&claim, CapacityClaimState::Released)?;
+        let now = database_now(&mut transaction).await?;
+        let next_lease = ResourceLifecycle::complete_lease_expiry(&lease, lease.revision, now)?;
+        let next_request = ResourceLifecycle::complete_expiry(&request, request.revision, now)?;
+        update_claim(&mut transaction, &claim, &next_claim, None, None, None).await?;
+        sqlx::query(
+            "UPDATE resource.capacity_claims SET last_diagnostic_code=NULL WHERE claim_id=$1",
+        )
+        .bind(claim.id.as_uuid())
+        .execute(&mut *transaction)
+        .await?;
+        update_lease(&mut transaction, &lease, &next_lease).await?;
+        update_request(&mut transaction, &request, &next_request).await?;
+        insert_transition(
+            &mut transaction,
+            &next_request,
+            next_request.revision.get(),
+            Some(request.state),
+            Some(actor),
+            &format!("resource-capacity-release-{claim_id}"),
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(next_lease)
+    }
+
+    /// Persists a sanitized reconciliation failure without releasing capacity
+    /// or moving the Lease to a false terminal state.
+    pub async fn record_reconciliation_failure(
+        &self,
+        claim_id: contracts::CapacityClaimId,
+        step: &'static str,
+        diagnostic_code: &str,
+    ) -> Result<(), ResourceStoreError> {
+        if !matches!(step, "expire_environment" | "release_capacity")
+            || !valid_diagnostic(diagnostic_code)
+        {
+            return Err(ResourceStoreError::DiagnosticInvalid);
+        }
+        let mut transaction = self.pool.begin().await?;
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM resource.capacity_claims WHERE claim_id=$1 FOR UPDATE",
+        )
+        .bind(claim_id.as_uuid())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(ResourceStoreError::CapacityClaimNotFound)?;
+        if !matches!(state.as_str(), "handed_off" | "releasing") {
+            return Err(ResourceStoreError::CapacityClaimStateConflict);
+        }
+        let attempt: i64 = sqlx::query_scalar(
+            "SELECT count(*)::bigint + 1 FROM resource.capacity_attempts \
+             WHERE claim_id=$1 AND step=$2",
+        )
+        .bind(claim_id.as_uuid())
+        .bind(step)
+        .fetch_one(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO resource.capacity_attempts \
+             (claim_id,attempt,step,state,diagnostic_code) VALUES ($1,$2,$3,$4,$5)",
+        )
+        .bind(claim_id.as_uuid())
+        .bind(attempt)
+        .bind(step)
+        .bind(if attempt >= 3 { "failed" } else { "retry" })
+        .bind(diagnostic_code)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE resource.capacity_claims SET last_diagnostic_code=$2,updated_at=clock_timestamp() \
+             WHERE claim_id=$1",
+        )
+        .bind(claim_id.as_uuid())
+        .bind(diagnostic_code)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(())
     }
 
     /// Bounds transient handoff failures. After three attempts the claim is retained as
@@ -1039,7 +1272,11 @@ fn transition_claim(
         ) | (
             CapacityClaimState::Ready,
             CapacityClaimState::HandedOff | CapacityClaimState::Blocked
-        )
+        ) | (CapacityClaimState::HandedOff, CapacityClaimState::Releasing)
+            | (
+                CapacityClaimState::Releasing,
+                CapacityClaimState::Released | CapacityClaimState::Blocked
+            )
     );
     if !valid {
         return Err(ResourceStoreError::CapacityClaimStateConflict);

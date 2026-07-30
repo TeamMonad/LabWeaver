@@ -138,6 +138,18 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::environment::ResourceWorkHandoff
     );
     document!(
+        "schemas/contracts/v1/resource-work-lease-update.schema.json",
+        crate::environment::ResourceWorkLeaseUpdate
+    );
+    document!(
+        "schemas/contracts/v1/resource-work-cleanup.schema.json",
+        crate::environment::ResourceWorkCleanup
+    );
+    document!(
+        "schemas/contracts/v1/resource-work-cleanup-status.schema.json",
+        crate::environment::ResourceWorkCleanupStatus
+    );
+    document!(
         "schemas/contracts/v1/resource-request.schema.json",
         crate::resource::ResourceRequest
     );

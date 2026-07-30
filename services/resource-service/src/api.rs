@@ -363,14 +363,14 @@ async fn revoke_lease(
     Json(input): Json<contracts::http::ResourceRequestMutation>,
 ) -> Result<Response, ResourceApiError> {
     authorize(&headers)?;
-    let _actor = actor(&headers)?;
+    let actor = actor(&headers)?;
     if input.reason.trim().is_empty() || input.reason.chars().count() > 500 {
         return Err(ResourceApiError::Invalid);
     }
     let key = required_header(&headers, "idempotency-key")?;
     let lease = state
         .store
-        .revoke_lease(&key, lease_id, input.expected_revision, input.reason)
+        .revoke_lease(&key, lease_id, input.expected_revision, input.reason, actor)
         .await?;
     let revision = lease.revision;
     with_etag(Json(lease), revision)

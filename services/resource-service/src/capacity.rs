@@ -5,7 +5,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use contracts::UtcTimestamp;
-use contracts::environment::ResourceWorkHandoff;
+use contracts::environment::{
+    ObservedEnvironmentState, ResourceWorkCleanup, ResourceWorkCleanupStatus, ResourceWorkHandoff,
+    ResourceWorkLeaseUpdate,
+};
 use contracts::resource::{CapacityClaim, ResourceLeaseState, ResourceRequest};
 use reqwest::{Certificate, Client, Identity, StatusCode};
 use serde::Deserialize;
@@ -160,6 +163,112 @@ impl EnvironmentHandoffClient {
             Err(CapacityProviderError::HandoffRejected)
         }
     }
+
+    async fn sync_lease(
+        &self,
+        item: &crate::store::ProvisioningCapacityClaim,
+    ) -> Result<(), CapacityProviderError> {
+        let lease = &item.lease;
+        let expires_at = lease
+            .expires_at
+            .ok_or(CapacityProviderError::HandoffFence)?;
+        let update = ResourceWorkLeaseUpdate {
+            version: 1,
+            lease_id: lease.id,
+            lease_revision: lease.revision,
+            environment_id: item.request.target.environment_id,
+            course_id: item.request.course_id,
+            owner_actor_id: item.request.requester_id,
+            capacity_binding: item.claim.id.to_string(),
+            expires_at,
+            trace_id: format!("resource-lease-sync-{}", lease.id),
+        };
+        update
+            .validate()
+            .map_err(|_| CapacityProviderError::HandoffFence)?;
+        let response = self
+            .client
+            .post(
+                self.base_uri
+                    .join("internal/v1/resource/work-lease-updates")
+                    .map_err(|_| CapacityProviderError::Configuration)?,
+            )
+            .json(&update)
+            .send()
+            .await
+            .map_err(|_| CapacityProviderError::Unavailable)?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(CapacityProviderError::LeaseSyncRejected)
+        }
+    }
+
+    async fn request_cleanup(
+        &self,
+        item: &crate::store::ProvisioningCapacityClaim,
+    ) -> Result<(), CapacityProviderError> {
+        let cleanup = ResourceWorkCleanup {
+            version: 1,
+            lease_id: item.lease.id,
+            lease_revision: item.lease.revision,
+            environment_id: item.request.target.environment_id,
+            course_id: item.request.course_id,
+            owner_actor_id: item.request.requester_id,
+            capacity_binding: item.claim.id.to_string(),
+            reason_code: if item.lease.revoke_reason_code.is_some() {
+                "LW_RESOURCE_LEASE_REVOKED"
+            } else {
+                "LW_RESOURCE_LEASE_EXPIRED"
+            }
+            .into(),
+            trace_id: format!("resource-work-cleanup-{}", item.lease.id),
+        };
+        cleanup
+            .validate()
+            .map_err(|_| CapacityProviderError::HandoffFence)?;
+        let response = self
+            .client
+            .post(
+                self.base_uri
+                    .join("internal/v1/resource/work-cleanups")
+                    .map_err(|_| CapacityProviderError::Configuration)?,
+            )
+            .json(&cleanup)
+            .send()
+            .await
+            .map_err(|_| CapacityProviderError::Unavailable)?;
+        if response.status() == StatusCode::ACCEPTED || response.status() == StatusCode::CONFLICT {
+            Ok(())
+        } else {
+            Err(CapacityProviderError::CleanupRejected)
+        }
+    }
+
+    async fn cleanup_status(
+        &self,
+        environment_id: contracts::EnvironmentId,
+    ) -> Result<ResourceWorkCleanupStatus, CapacityProviderError> {
+        let response = self
+            .client
+            .get(
+                self.base_uri
+                    .join(&format!(
+                        "internal/v1/resource/work-cleanups/{environment_id}"
+                    ))
+                    .map_err(|_| CapacityProviderError::Configuration)?,
+            )
+            .send()
+            .await
+            .map_err(|_| CapacityProviderError::Unavailable)?;
+        if !response.status().is_success() {
+            return Err(CapacityProviderError::CleanupRejected);
+        }
+        response
+            .json()
+            .await
+            .map_err(|_| CapacityProviderError::Readback)
+    }
 }
 
 /// Reviewed non-secret binding for one capacity Provider. Selection is exact by `binding`.
@@ -224,6 +333,8 @@ impl KubernetesQuotaShellPlan {
             claim.state,
             contracts::resource::CapacityClaimState::Reserved
                 | contracts::resource::CapacityClaimState::Provisioning
+                | contracts::resource::CapacityClaimState::HandedOff
+                | contracts::resource::CapacityClaimState::Releasing
         ) {
             return Err(CapacityProviderError::Plan);
         }
@@ -232,7 +343,10 @@ impl KubernetesQuotaShellPlan {
         if claim.quota_resources.gpu.is_some() || claim.workload_resources.gpu.is_some() {
             return Err(CapacityProviderError::GpuUnsupported);
         }
-        let namespace = format!("lw-work-{}", request.target.environment_id);
+        // Environment adopts this exact shell. A parallel `lw-work-*`
+        // namespace would leave the runtime outside the approved quota and
+        // make capacity release unverifiable.
+        let namespace = format!("lw-env-{}", request.target.environment_id);
         if !valid_dns_label(&namespace) {
             return Err(CapacityProviderError::Plan);
         }
@@ -310,6 +424,8 @@ impl CapacityReconcileWorker {
     pub async fn reconcile_once(&self) -> Result<bool, crate::store::ResourceStoreError> {
         let Some(item) = self.store.claim_next_capacity_shell().await? else {
             self.reconcile_ready_handoff().await?;
+            self.reconcile_lease_sync().await?;
+            self.reconcile_lease_cleanup().await?;
             return Ok(false);
         };
         let Some(provider) = self.providers.get(&item.claim.provider_binding) else {
@@ -374,6 +490,8 @@ impl CapacityReconcileWorker {
             }
         }
         self.reconcile_ready_handoff().await?;
+        self.reconcile_lease_sync().await?;
+        self.reconcile_lease_cleanup().await?;
         Ok(true)
     }
 
@@ -420,6 +538,153 @@ impl CapacityReconcileWorker {
                     .retry_or_block_capacity_handoff(
                         refreshed.claim.id,
                         refreshed.claim.revision,
+                        error.diagnostic(),
+                    )
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn reconcile_lease_sync(&self) -> Result<(), crate::store::ResourceStoreError> {
+        let Some(item) = self.store.next_unsynced_active_lease().await? else {
+            return Ok(());
+        };
+        match self.environment_handoff.sync_lease(&item).await {
+            Ok(()) => {
+                self.store
+                    .mark_lease_synced(item.claim.id, item.lease.revision)
+                    .await?;
+            }
+            Err(error) => {
+                tracing::error!(
+                    event = "resource.lease.sync_failed",
+                    lease_id = %item.lease.id,
+                    diagnostic_code = %error.diagnostic()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    async fn reconcile_lease_cleanup(&self) -> Result<(), crate::store::ResourceStoreError> {
+        let Some(item) = self
+            .store
+            .next_lease_cleanup(self.environment_handoff.system_actor_id)
+            .await?
+        else {
+            return Ok(());
+        };
+        if item.claim.state == contracts::resource::CapacityClaimState::HandedOff {
+            if let Err(error) = self.environment_handoff.request_cleanup(&item).await {
+                tracing::error!(
+                    event = "resource.lease.cleanup_request_failed",
+                    lease_id = %item.lease.id,
+                    diagnostic_code = %error.diagnostic()
+                );
+                self.store
+                    .record_reconciliation_failure(
+                        item.claim.id,
+                        "expire_environment",
+                        error.diagnostic(),
+                    )
+                    .await?;
+                return Ok(());
+            }
+            self.store
+                .mark_capacity_releasing(item.claim.id, item.claim.revision)
+                .await?;
+            return Ok(());
+        }
+        self.reconcile_releasing_capacity(&item).await
+    }
+
+    async fn reconcile_releasing_capacity(
+        &self,
+        item: &crate::store::ProvisioningCapacityClaim,
+    ) -> Result<(), crate::store::ResourceStoreError> {
+        let status = match self
+            .environment_handoff
+            .cleanup_status(item.request.target.environment_id)
+            .await
+        {
+            Ok(status) => status,
+            Err(error) => {
+                tracing::error!(
+                    event = "resource.lease.cleanup_readback_failed",
+                    lease_id = %item.lease.id,
+                    diagnostic_code = %error.diagnostic()
+                );
+                self.store
+                    .record_reconciliation_failure(
+                        item.claim.id,
+                        "expire_environment",
+                        error.diagnostic(),
+                    )
+                    .await?;
+                return Ok(());
+            }
+        };
+        if !status.cleanup_complete {
+            if status.observed_state == ObservedEnvironmentState::Failed {
+                let diagnostic = status
+                    .diagnostic_code
+                    .as_deref()
+                    .unwrap_or("LW_RESOURCE_ENVIRONMENT_CLEANUP_FAILED");
+                tracing::error!(
+                    event = "resource.lease.cleanup_blocked",
+                    lease_id = %item.lease.id,
+                    diagnostic_code = diagnostic
+                );
+                self.store
+                    .record_reconciliation_failure(item.claim.id, "expire_environment", diagnostic)
+                    .await?;
+            }
+            return Ok(());
+        }
+        let Some(provider) = self.providers.get(&item.claim.provider_binding) else {
+            tracing::error!(
+                event = "resource.capacity.release_provider_missing",
+                claim_id = %item.claim.id,
+                diagnostic_code = "LW_RESOURCE_CAPACITY_PROVIDER_UNAVAILABLE"
+            );
+            self.store
+                .record_reconciliation_failure(
+                    item.claim.id,
+                    "release_capacity",
+                    "LW_RESOURCE_CAPACITY_PROVIDER_UNAVAILABLE",
+                )
+                .await?;
+            return Ok(());
+        };
+        let plan = KubernetesQuotaShellPlan::from_claim(
+            &provider.configuration,
+            &item.request,
+            &item.claim,
+        )
+        .map_err(|_| crate::store::ResourceStoreError::CapacityReadbackInvalid)?;
+        match provider.verify_released(&plan).await {
+            Ok(()) => {
+                self.store
+                    .complete_capacity_release(
+                        item.claim.id,
+                        item.claim.revision,
+                        item.lease.id,
+                        item.lease.revision,
+                        self.environment_handoff.system_actor_id,
+                    )
+                    .await?;
+            }
+            Err(error) => {
+                tracing::error!(
+                    event = "resource.capacity.release_readback_failed",
+                    claim_id = %item.claim.id,
+                    diagnostic_code = %error.diagnostic()
+                );
+                self.store
+                    .record_reconciliation_failure(
+                        item.claim.id,
+                        "release_capacity",
                         error.diagnostic(),
                     )
                     .await?;
@@ -527,6 +792,36 @@ impl KubernetesCapacityProvider {
         } else {
             Err(classify(response.status()))
         }
+    }
+
+    /// Proves that the exact capacity namespace is absent. A namespace with a
+    /// mismatched fence is never treated as released.
+    pub async fn verify_released(
+        &self,
+        plan: &KubernetesQuotaShellPlan,
+    ) -> Result<(), CapacityProviderError> {
+        if plan.binding != self.configuration.binding {
+            return Err(CapacityProviderError::BindingMismatch);
+        }
+        let response = self
+            .client
+            .get(self.url(&format!("api/v1/namespaces/{}", plan.namespace))?)
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(|_| CapacityProviderError::Unavailable)?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        if !response.status().is_success() {
+            return Err(classify(response.status()));
+        }
+        let actual: Value = response
+            .json()
+            .await
+            .map_err(|_| CapacityProviderError::Readback)?;
+        verify_document(&actual, &plan.namespace_document)?;
+        Err(CapacityProviderError::ReleasePending)
     }
 
     async fn create_or_verify(
@@ -667,6 +962,12 @@ pub enum CapacityProviderError {
     HandoffFence,
     #[error("LW_RESOURCE_ENVIRONMENT_HANDOFF_REJECTED")]
     HandoffRejected,
+    #[error("LW_RESOURCE_ENVIRONMENT_LEASE_SYNC_REJECTED")]
+    LeaseSyncRejected,
+    #[error("LW_RESOURCE_ENVIRONMENT_CLEANUP_REJECTED")]
+    CleanupRejected,
+    #[error("LW_RESOURCE_CAPACITY_RELEASE_PENDING")]
+    ReleasePending,
 }
 
 impl CapacityProviderError {
@@ -682,6 +983,9 @@ impl CapacityProviderError {
             Self::Unavailable => "LW_RESOURCE_CAPACITY_UNAVAILABLE",
             Self::HandoffFence => "LW_RESOURCE_ENVIRONMENT_HANDOFF_FENCE_INVALID",
             Self::HandoffRejected => "LW_RESOURCE_ENVIRONMENT_HANDOFF_REJECTED",
+            Self::LeaseSyncRejected => "LW_RESOURCE_ENVIRONMENT_LEASE_SYNC_REJECTED",
+            Self::CleanupRejected => "LW_RESOURCE_ENVIRONMENT_CLEANUP_REJECTED",
+            Self::ReleasePending => "LW_RESOURCE_CAPACITY_RELEASE_PENDING",
         }
     }
 }
@@ -746,6 +1050,10 @@ mod tests {
         };
         let plan = KubernetesQuotaShellPlan::from_claim(&configuration, &request, &claim)
             .expect("valid plan");
+        assert_eq!(
+            plan.namespace,
+            format!("lw-env-{}", request.target.environment_id)
+        );
         assert_eq!(
             plan.quota_document
                 .pointer("/spec/hard/requests.cpu")

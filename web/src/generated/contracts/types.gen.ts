@@ -7630,6 +7630,843 @@ export type DeleteSshPublicKeyResponses = {
 
 export type DeleteSshPublicKeyResponse = DeleteSshPublicKeyResponses[keyof DeleteSshPublicKeyResponses];
 
+export type ListResourceLeasesData = {
+    body?: never;
+    headers: {
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path?: never;
+    query?: never;
+    url: '/api/v1/resource-leases';
+};
+
+export type ListResourceLeasesErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ListResourceLeasesError = ListResourceLeasesErrors[keyof ListResourceLeasesErrors];
+
+export type ListResourceLeasesResponses = {
+    /**
+     * Successful response
+     */
+    200: unknown;
+};
+
+export type GetResourceLeaseData = {
+    body?: never;
+    headers: {
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        leaseId: string;
+    };
+    query?: never;
+    url: '/api/v1/resource-leases/{leaseId}';
+};
+
+export type GetResourceLeaseErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetResourceLeaseError = GetResourceLeaseErrors[keyof GetResourceLeaseErrors];
+
+export type GetResourceLeaseResponses = {
+    /**
+     * Successful response
+     */
+    200: unknown;
+};
+
+export type RenewResourceLeaseData = {
+    body?: never;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        leaseId: string;
+    };
+    query?: never;
+    url: '/api/v1/resource-leases/{leaseId}/renew';
+};
+
+export type RenewResourceLeaseErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type RenewResourceLeaseError = RenewResourceLeaseErrors[keyof RenewResourceLeaseErrors];
+
+export type RenewResourceLeaseResponses = {
+    /**
+     * Successful response
+     */
+    202: unknown;
+};
+
+export type RevokeResourceLeaseData = {
+    body?: never;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        leaseId: string;
+    };
+    query?: never;
+    url: '/api/v1/resource-leases/{leaseId}/revoke';
+};
+
+export type RevokeResourceLeaseErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type RevokeResourceLeaseError = RevokeResourceLeaseErrors[keyof RevokeResourceLeaseErrors];
+
+export type RevokeResourceLeaseResponses = {
+    /**
+     * Successful response
+     */
+    202: unknown;
+};
+
+export type ListResourceRequestsData = {
+    body?: never;
+    headers: {
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path?: never;
+    query?: never;
+    url: '/api/v1/resource-requests';
+};
+
+export type ListResourceRequestsErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ListResourceRequestsError = ListResourceRequestsErrors[keyof ListResourceRequestsErrors];
+
+export type ListResourceRequestsResponses = {
+    /**
+     * Successful response
+     */
+    200: unknown;
+};
+
+export type CreateResourceRequestData = {
+    body?: never;
+    headers: {
+        'Idempotency-Key': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path?: never;
+    query?: never;
+    url: '/api/v1/resource-requests';
+};
+
+export type CreateResourceRequestErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type CreateResourceRequestError = CreateResourceRequestErrors[keyof CreateResourceRequestErrors];
+
+export type CreateResourceRequestResponses = {
+    /**
+     * Successful response
+     */
+    202: unknown;
+};
+
+export type GetResourceRequestData = {
+    body?: never;
+    headers: {
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        requestId: string;
+    };
+    query?: never;
+    url: '/api/v1/resource-requests/{requestId}';
+};
+
+export type GetResourceRequestErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetResourceRequestError = GetResourceRequestErrors[keyof GetResourceRequestErrors];
+
+export type GetResourceRequestResponses = {
+    /**
+     * Successful response
+     */
+    200: unknown;
+};
+
+export type ApproveResourceRequestData = {
+    body?: never;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        requestId: string;
+    };
+    query?: never;
+    url: '/api/v1/resource-requests/{requestId}/approve';
+};
+
+export type ApproveResourceRequestErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ApproveResourceRequestError = ApproveResourceRequestErrors[keyof ApproveResourceRequestErrors];
+
+export type ApproveResourceRequestResponses = {
+    /**
+     * Successful response
+     */
+    202: unknown;
+};
+
+export type CancelResourceRequestData = {
+    body?: never;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        requestId: string;
+    };
+    query?: never;
+    url: '/api/v1/resource-requests/{requestId}/cancel';
+};
+
+export type CancelResourceRequestErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type CancelResourceRequestError = CancelResourceRequestErrors[keyof CancelResourceRequestErrors];
+
+export type CancelResourceRequestResponses = {
+    /**
+     * Successful response
+     */
+    202: unknown;
+};
+
+export type RejectResourceRequestData = {
+    body?: never;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        requestId: string;
+    };
+    query?: never;
+    url: '/api/v1/resource-requests/{requestId}/reject';
+};
+
+export type RejectResourceRequestErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type RejectResourceRequestError = RejectResourceRequestErrors[keyof RejectResourceRequestErrors];
+
+export type RejectResourceRequestResponses = {
+    /**
+     * Successful response
+     */
+    202: unknown;
+};
+
+export type ResizeAndApproveResourceRequestData = {
+    body?: never;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        requestId: string;
+    };
+    query?: never;
+    url: '/api/v1/resource-requests/{requestId}/resize-and-approve';
+};
+
+export type ResizeAndApproveResourceRequestErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ResizeAndApproveResourceRequestError = ResizeAndApproveResourceRequestErrors[keyof ResizeAndApproveResourceRequestErrors];
+
+export type ResizeAndApproveResourceRequestResponses = {
+    /**
+     * Successful response
+     */
+    202: unknown;
+};
+
+export type RetryResourceRequestData = {
+    body?: never;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        requestId: string;
+    };
+    query?: never;
+    url: '/api/v1/resource-requests/{requestId}/retry';
+};
+
+export type RetryResourceRequestErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type RetryResourceRequestError = RetryResourceRequestErrors[keyof RetryResourceRequestErrors];
+
+export type RetryResourceRequestResponses = {
+    /**
+     * Successful response
+     */
+    202: unknown;
+};
+
 export type ConsumeOidcBackchannelLogoutData = {
     body: {
         logout_token: string;
