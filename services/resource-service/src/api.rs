@@ -45,6 +45,14 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
             "/api/v1/resource-requests/{request_id}/approve",
             post(approve_request),
         )
+        .route(
+            "/api/v1/resource-requests/{request_id}/cancel",
+            post(cancel_request),
+        )
+        .route(
+            "/api/v1/resource-requests/{request_id}/reject",
+            post(reject_request),
+        )
         .route("/api/v1/resource-leases/{lease_id}", get(get_lease))
         .route(
             "/api/v1/resource-leases/{lease_id}/renew",
@@ -195,6 +203,75 @@ async fn approve_request(
         lease_id: Some(allocation.lease_id),
         revision: next.revision,
         status_url: format!("/api/v1/resource-requests/{}", next.id),
+    };
+    Ok((StatusCode::ACCEPTED, Json(accepted)).into_response())
+}
+
+async fn cancel_request(
+    State(state): State<ResourceApiState>,
+    headers: HeaderMap,
+    Path(request_id): Path<ResourceRequestId>,
+    Json(input): Json<contracts::http::ResourceRequestMutation>,
+) -> Result<Response, ResourceApiError> {
+    terminal_request(
+        state,
+        headers,
+        request_id,
+        input,
+        ResourceRequestState::Cancelled,
+    )
+    .await
+}
+
+async fn reject_request(
+    State(state): State<ResourceApiState>,
+    headers: HeaderMap,
+    Path(request_id): Path<ResourceRequestId>,
+    Json(input): Json<contracts::http::ResourceRequestMutation>,
+) -> Result<Response, ResourceApiError> {
+    terminal_request(
+        state,
+        headers,
+        request_id,
+        input,
+        ResourceRequestState::Rejected,
+    )
+    .await
+}
+
+async fn terminal_request(
+    state: ResourceApiState,
+    headers: HeaderMap,
+    request_id: ResourceRequestId,
+    input: contracts::http::ResourceRequestMutation,
+    terminal: ResourceRequestState,
+) -> Result<Response, ResourceApiError> {
+    authorize(&headers)?;
+    if input.reason.trim().is_empty() || input.reason.chars().count() > 500 {
+        return Err(ResourceApiError::Invalid);
+    }
+    let actor = actor(&headers)?;
+    let key = required_header(&headers, "idempotency-key")?;
+    let request = state.store.load(request_id).await?;
+    if request.requester_id != actor && terminal == ResourceRequestState::Cancelled {
+        return Err(ResourceApiError::ScopeDenied);
+    }
+    let result = state
+        .store
+        .reject_or_cancel(
+            &key,
+            request_id,
+            input.expected_revision,
+            terminal,
+            actor,
+            &trace_id(),
+        )
+        .await?;
+    let accepted = ResourceOperationAccepted {
+        request_id: result.id,
+        lease_id: None,
+        revision: result.revision,
+        status_url: format!("/api/v1/resource-requests/{}", result.id),
     };
     Ok((StatusCode::ACCEPTED, Json(accepted)).into_response())
 }

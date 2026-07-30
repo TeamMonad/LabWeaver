@@ -321,6 +321,77 @@ impl PgResourceStore {
         Ok(result)
     }
 
+    /// Performs a revision-fenced terminal request mutation with an idempotent transaction.
+    pub async fn reject_or_cancel(
+        &self,
+        idempotency_key: &str,
+        request_id: ResourceRequestId,
+        expected_revision: contracts::Revision,
+        terminal: ResourceRequestState,
+        actor: contracts::ActorId,
+        trace_id: &str,
+    ) -> Result<ResourceRequest, ResourceStoreError> {
+        IdempotencyKey::parse(idempotency_key).map_err(|_| ResourceStoreError::IdempotencyKey)?;
+        validate_trace(trace_id)?;
+        if !matches!(
+            terminal,
+            ResourceRequestState::Rejected | ResourceRequestState::Cancelled
+        ) {
+            return Err(ResourceStoreError::InvalidCreateState);
+        }
+        let mut transaction = self.pool.begin().await?;
+        let request = load_locked(&mut transaction, request_id).await?;
+        let hash = Sha256Digest::of_canonical(&(request_id, expected_revision, terminal))?;
+        let result = match IdempotencyStore::reserve(
+            &mut transaction,
+            Domain::Resource,
+            "terminal_resource_request",
+            idempotency_key,
+            hash,
+        )
+        .await?
+        {
+            IdempotencyDecision::Replay(value) => decode_request(value)?,
+            IdempotencyDecision::Conflict => return Err(ResourceStoreError::IdempotencyConflict),
+            IdempotencyDecision::InProgress => {
+                return Err(ResourceStoreError::IdempotencyInProgress);
+            }
+            IdempotencyDecision::Reserved => {
+                let now = database_now(&mut transaction).await?;
+                let next = ResourceLifecycle::reject_or_cancel(
+                    &request,
+                    expected_revision,
+                    terminal,
+                    now,
+                )?;
+                update_request(&mut transaction, &request, &next).await?;
+                insert_transition(
+                    &mut transaction,
+                    &next,
+                    next.revision.get(),
+                    Some(request.state),
+                    Some(actor),
+                    trace_id,
+                )
+                .await?;
+                enqueue_request_event(&mut transaction, &next, REQUEST_SUBMITTED_SUBJECT, trace_id)
+                    .await?;
+                let value = serde_json::to_value(&next)?;
+                IdempotencyStore::complete(
+                    &mut transaction,
+                    Domain::Resource,
+                    "terminal_resource_request",
+                    idempotency_key,
+                    &value,
+                )
+                .await?;
+                next
+            }
+        };
+        transaction.commit().await?;
+        Ok(result)
+    }
+
     /// Loads a Lease projection; malformed snapshots never authorize use.
     pub async fn load_lease(&self, lease_id: LeaseId) -> Result<ResourceLease, ResourceStoreError> {
         let row = sqlx::query("SELECT contract FROM resource.resource_leases WHERE lease_id=$1")
