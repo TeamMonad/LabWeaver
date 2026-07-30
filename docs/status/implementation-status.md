@@ -118,6 +118,10 @@ NATS identity, and connected PostgreSQL/NATS/Kubernetes/Environment evidence are
 not complete. The Helm workload remains disabled, and no Release Gate or Sprint
 2 runtime capability is claimed for #142.
 
+Local evidence: `cargo test -p resource-service` passes 12 tests, including
+API identity guards, lifecycle fences, PostgreSQL migration/store invariants and
+Outbox acknowledgement. This does not upgrade the connected-runtime status.
+
 ## Accepted Sprint 2 security exceptions
 
 - Rootless BuildKit may use the documented namespace-scoped
