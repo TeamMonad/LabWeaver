@@ -53,6 +53,7 @@ class FoundationAuthoringTests(unittest.TestCase):
                 "evaluation-service",
                 "container-executor",
                 "kubevirt-executor",
+                "resource-service",
             },
         )
         for publish, subscribe, _ in FOUNDATION.NATS_USERS.values():
@@ -92,6 +93,13 @@ class FoundationAuthoringTests(unittest.TestCase):
             publish, _, _ = FOUNDATION.NATS_USERS[non_consumer]
             self.assertNotIn("$JS.ACK.>", publish)
 
+        resource_publish, resource_subscribe, resource_response = FOUNDATION.NATS_USERS[
+            "resource-service"
+        ]
+        self.assertEqual(resource_publish, ())
+        self.assertEqual(resource_subscribe, ("_INBOX.>", "labweaver.resource.lease.verify.v1"))
+        self.assertTrue(resource_response)
+
     def test_workloads_account_has_bounded_jetstream_limits(self) -> None:
         limits = FOUNDATION.NATS_ACCOUNT_JETSTREAM_LIMITS
         self.assertEqual(
@@ -120,6 +128,7 @@ class FoundationAuthoringTests(unittest.TestCase):
                 "agent-service",
                 "environment-service",
                 "evaluation-service",
+                "resource-service",
                 "openssh-gateway",
             },
         )

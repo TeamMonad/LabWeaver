@@ -832,3 +832,18 @@ deploy/ansible/AGENTS.md
 - 安全与数据边界；
 - API、事件或 Schema 兼容要求；
 - 必须请求人工确认的条件。
+
+## Resource NATS identity issuance and debugging
+
+Resource Service uses a dedicated NATS user identity. Its permissions are bounded to
+`labweaver.resource.lease.verify.v1` plus request/reply inbox subjects; do not reuse
+another service's `.creds` file. The private issuance record is kept on the deployment
+controller under the operator-owned private locator
+`LABWEAVER_RESOURCE_NATS_ISSUANCE_RECORD` and is never committed to this repository.
+
+The record contains only non-secret metadata: source bundle locator, issuance run ID,
+public identity names, subject/permission summary, file owner/mode, and validation
+results. JWTs, NATS seeds, private keys, `.creds` contents, and secret hashes must not
+be printed, copied into Git, or included in logs. Debugging must use the existing
+root-owned bundle and the allowlisted Ansible foundation/application entrypoints;
+inspect permissions and stable diagnostics, not credential contents.
