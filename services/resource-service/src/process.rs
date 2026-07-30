@@ -131,7 +131,7 @@ impl ResourceProcessRuntime {
         if result.is_err() {
             readiness.store(false, Ordering::Release);
         }
-        result.map_err(Into::into)
+        result
     }
 }
 

@@ -274,7 +274,7 @@ impl KubernetesQuotaShellPlan {
             namespace,
             claim_id: claim.id,
             claim_revision: claim.revision,
-            quota_plan_sha256: claim.quota_plan_sha256.clone(),
+            quota_plan_sha256: claim.quota_plan_sha256,
             namespace_document,
             quota_document,
         })
@@ -687,6 +687,10 @@ impl CapacityProviderError {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "test fixtures use expect to make invalid fixed vectors fail loudly"
+)]
 mod tests {
     use std::str::FromStr;
 

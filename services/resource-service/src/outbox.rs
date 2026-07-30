@@ -1,5 +1,10 @@
 //! Transactional Resource Outbox dispatcher backed by JetStream acknowledgements.
 
+#![allow(
+    clippy::doc_markdown,
+    reason = "wire terms such as JetStream and published_at are protocol identifiers"
+)]
+
 use std::str::FromStr;
 use std::time::Duration;
 

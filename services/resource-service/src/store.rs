@@ -1,5 +1,10 @@
 //! PostgreSQL authority for Resource requests and administrator decisions.
 
+#![allow(
+    clippy::doc_markdown,
+    reason = "SQL identifiers and protocol terms are intentionally preserved in persistence docs"
+)]
+
 use contracts::environment::{
     EnvironmentLeaseAuthorization, EnvironmentLeaseState, EnvironmentLeaseVerificationRequest,
     EnvironmentLeaseVerificationResponse,

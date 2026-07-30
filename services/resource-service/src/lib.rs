@@ -7,6 +7,10 @@
     missing_docs,
     reason = "public Resource wire semantics are documented in contracts and generated schemas"
 )]
+#![allow(
+    clippy::missing_errors_doc,
+    reason = "Resource transitions and persistence errors are documented by typed diagnostics and contracts"
+)]
 
 use contracts::resource::{
     ResourceApproval, ResourceError, ResourceLease, ResourceLeaseState, ResourceRequest,
@@ -379,8 +383,7 @@ mod tests {
     use super::{ApprovalPolicy, LifecycleError, ResourceLifecycle};
 
     #[test]
-    fn zero_gpu_capacity_blocks_a_valid_gpu_request_without_transitioning_state()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn zero_gpu_capacity_blocks_a_valid_gpu_request_without_transitioning_state() {
         let request = request();
         let approval = approval(
             request.id,
@@ -406,7 +409,6 @@ mod tests {
         );
         assert!(matches!(result, Err(LifecycleError::CapacityExhausted)));
         assert_eq!(request.state, ResourceRequestState::Reviewing);
-        Ok(())
     }
 
     #[test]

@@ -387,10 +387,10 @@ fn authorize(headers: &HeaderMap) -> Result<(), ResourceApiError> {
     Ok(())
 }
 fn scoped(headers: &HeaderMap, expected: ActorId) -> Result<(), ResourceApiError> {
-    if actor(headers)? != expected {
-        Err(ResourceApiError::ScopeDenied)
-    } else {
+    if actor(headers)? == expected {
         Ok(())
+    } else {
+        Err(ResourceApiError::ScopeDenied)
     }
 }
 fn actor(headers: &HeaderMap) -> Result<ActorId, ResourceApiError> {
@@ -447,7 +447,7 @@ impl IntoResponse for ResourceApiError {
             Self::Store(ResourceStoreError::NotFound | ResourceStoreError::LeaseNotFound) => {
                 StatusCode::NOT_FOUND
             }
-            _ => StatusCode::CONFLICT,
+            Self::Store(_) => StatusCode::CONFLICT,
         };
         (status, self.to_string()).into_response()
     }

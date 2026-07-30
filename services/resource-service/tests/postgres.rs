@@ -1,5 +1,12 @@
 //! PostgreSQL evidence for Resource authority schema and pending Lease semantics.
 
+#![allow(
+    clippy::doc_markdown,
+    clippy::expect_used,
+    clippy::too_many_lines,
+    reason = "integration fixtures intentionally keep the full transactional scenario visible"
+)]
+
 use std::time::Duration;
 
 use sqlx::postgres::PgPoolOptions;
@@ -119,7 +126,7 @@ async fn resource_store_commits_request_approval_claim_lease_and_renewal_as_fenc
             request_id: request.id,
             approval_id: approval.id,
             provider_binding: approval.provider_binding.clone(),
-            policy_sha256: approval.policy_sha256.clone(),
+            policy_sha256: approval.policy_sha256,
             workload_resources: resources.clone(),
             quota_resources: resources,
             quota_plan_sha256: digest(),

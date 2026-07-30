@@ -248,7 +248,7 @@ impl ResourceLease {
                 return Err(ResourceError::InvalidLease);
             }
         } else if self.state == ResourceLeaseState::Active
-            && !active_window.is_some_and(|(from, until)| until > from)
+            && active_window.is_none_or(|(from, until)| until <= from)
         {
             return Err(ResourceError::InvalidLease);
         }
