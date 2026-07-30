@@ -98,6 +98,23 @@ compiler image, cgroup outcomes, NetworkPolicy, cancellation or cleanup.
 Accordingly Issue #140 is not `done`, is not a release-gate pass and does not
 change the connected Sprint 2 identity above.
 
+## Issue #142 Resource request and Lease authority
+
+The `feature/142-resource-lease` worktree contains the Resource-owned request,
+approval, capacity-claim and Lease contracts; versioned schemas; PostgreSQL
+migrations; request fact Outbox dispatch; exact NATS Lease verification; and a
+fenced Kubernetes ResourceQuota-shell provider. A ready shell activates only
+after provider readback, then performs an mTLS Resource-to-Environment Work
+handoff bound to request, claim, Lease, Release hash and Provider binding.
+Handoff is idempotent at Environment and becomes `handed_off` only after its
+acceptance; three failed handoffs become an auditable `blocked` claim.
+
+This work is **local implementation only**. Resource's public API, authorized
+query/mutation path, deployment ConfigMap/Secret/NATS identity and connected
+PostgreSQL/NATS/Kubernetes/Environment evidence are not complete. The Helm
+workload remains disabled, and no Release Gate or Sprint 2 runtime capability
+is claimed for #142.
+
 ## Accepted Sprint 2 security exceptions
 
 - Rootless BuildKit may use the documented namespace-scoped
