@@ -269,6 +269,69 @@
                }
              } | to_json }}
 
+    - name: Bind the replacement administrator transport
+      ansible.builtin.set_fact:
+        nats_rotation_admin_argv:
+          - "{{ nats_rotation_cli }}"
+          - --server
+          - "{{ nats_rotation_server }}"
+          - --creds
+          - "{{ nats_rotation_output }}/nats-admin/nats.creds"
+          - --tlsca
+          - "{{ nats_rotation_output }}/nats-admin/nats-ca.pem"
+          - --tlscert
+          - "{{ nats_rotation_output }}/nats-admin/nats-client.crt"
+          - --tlskey
+          - "{{ nats_rotation_output }}/nats-admin/nats-client.key"
+
+    - name: Inspect the retained Resource stream
+      ansible.builtin.command:
+        argv: >-
+          {{ nats_rotation_admin_argv
+             + ['stream', 'info', 'LABWEAVER_RESOURCE', '--json'] }}
+      register: nats_rotation_resource_stream_before
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: Create only the missing Resource stream
+      ansible.builtin.command:
+        argv: >-
+          {{ nats_rotation_admin_argv
+             + ['stream', 'add', 'LABWEAVER_RESOURCE',
+                '--subjects',
+                'labweaver.resource.request.submitted.v1,'
+                ~ 'labweaver.resource.request.approved.v1',
+                '--storage', 'file', '--retention', 'limits',
+                '--max-age', '168h', '--discard', 'old', '--defaults'] }}
+      when: nats_rotation_resource_stream_before.rc != 0
+      changed_when: true
+      no_log: true
+
+    - name: Read back the exact Resource stream
+      ansible.builtin.command:
+        argv: >-
+          {{ nats_rotation_admin_argv
+             + ['stream', 'info', 'LABWEAVER_RESOURCE', '--json'] }}
+      register: nats_rotation_resource_stream_after
+      changed_when: false
+      no_log: true
+
+    - name: Validate the Resource stream identity
+      ansible.builtin.set_fact:
+        nats_rotation_resource_stream: "{{ nats_rotation_resource_stream_after.stdout | from_json }}"
+
+    - name: Require the bounded Resource stream contract
+      ansible.builtin.assert:
+        that:
+          - nats_rotation_resource_stream.config.name == 'LABWEAVER_RESOURCE'
+          - nats_rotation_resource_stream.config.storage == 'file'
+          - >-
+            nats_rotation_resource_stream.config.subjects | sort
+            == ['labweaver.resource.request.approved.v1',
+                'labweaver.resource.request.submitted.v1']
+        fail_msg: NATS_AUTHORITY_ROTATION_RESOURCE_STREAM_INVALID
+
     - name: Apply only reviewed NATS-bearing application objects
       ansible.builtin.command:
         argv:
@@ -321,20 +384,7 @@
 
     - name: Verify replacement administrator JWT and mutual TLS
       ansible.builtin.command:
-        argv:
-          - "{{ nats_rotation_cli }}"
-          - --server
-          - "{{ nats_rotation_server }}"
-          - --creds
-          - "{{ nats_rotation_output }}/nats-admin/nats.creds"
-          - --tlsca
-          - "{{ nats_rotation_output }}/nats-admin/nats-ca.pem"
-          - --tlscert
-          - "{{ nats_rotation_output }}/nats-admin/nats-client.crt"
-          - --tlskey
-          - "{{ nats_rotation_output }}/nats-admin/nats-client.key"
-          - account
-          - info
+        argv: "{{ nats_rotation_admin_argv + ['account', 'info'] }}"
       changed_when: false
       no_log: true
 

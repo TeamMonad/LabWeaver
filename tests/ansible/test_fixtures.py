@@ -154,6 +154,8 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("resource-service", playbook)
         self.assertIn("nats_rotation_record.identities | length == 10", playbook)
         self.assertIn("Verify replacement administrator JWT and mutual TLS", playbook)
+        self.assertIn("LABWEAVER_RESOURCE", playbook)
+        self.assertIn("NATS_AUTHORITY_ROTATION_RESOURCE_STREAM_INVALID", playbook)
         self.assertNotIn("ansible.builtin.shell", playbook)
         self.assertNotRegex(playbook, r"\bkubectl\s+delete\b")
         self.assertNotRegex(playbook, r"\bDROP\s+(?:DATABASE|SCHEMA)\b")
