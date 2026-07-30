@@ -10,13 +10,16 @@ use axum::{
     routing::{get, post},
 };
 use contracts::http::{
-    CreateResourceRequest, RenewResourceLease, ResourceOperationAccepted, StrongEtag,
+    ApproveResourceRequest, CreateResourceRequest, RenewResourceLease, ResourceOperationAccepted,
+    StrongEtag,
 };
 use contracts::resource::{ResourceRequest, ResourceRequestState, ResourceTarget};
 use contracts::{ActorId, LeaseId, ResourceRequestId, Revision, UtcTimestamp};
 use uuid::Uuid;
 
-use crate::store::{PgResourceStore, ResourceStoreError};
+use crate::ApprovalPolicy;
+use crate::store::{PendingAllocation, PgResourceStore, ResourceStoreError};
+use contracts::Sha256Digest;
 
 const ACCESS_CALLER_SAN: &str = "spiffe://labweaver/access-service";
 
@@ -36,6 +39,10 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
     Router::new()
         .route("/api/v1/resource-requests", post(create_request))
         .route("/api/v1/resource-requests/{request_id}", get(get_request))
+        .route(
+            "/api/v1/resource-requests/{request_id}/approve",
+            post(approve_request),
+        )
         .route("/api/v1/resource-leases/{lease_id}", get(get_lease))
         .route(
             "/api/v1/resource-leases/{lease_id}/renew",
@@ -97,6 +104,82 @@ async fn get_request(
     scoped(&headers, request.requester_id)?;
     let revision = request.revision;
     with_etag(Json(request), revision)
+}
+
+async fn approve_request(
+    State(state): State<ResourceApiState>,
+    headers: HeaderMap,
+    Path(request_id): Path<ResourceRequestId>,
+    Json(input): Json<ApproveResourceRequest>,
+) -> Result<Response, ResourceApiError> {
+    authorize(&headers)?;
+    let approver = actor(&headers)?;
+    let idempotency = required_header(&headers, "idempotency-key")?;
+    let request = state.store.load(request_id).await?;
+    if request.revision != input.expected_revision {
+        return Err(ResourceApiError::RevisionConflict);
+    }
+    let now = state.store.current_time().await?;
+    let valid_until = UtcTimestamp::from_utc(
+        now.get()
+            + time::Duration::seconds(
+                i64::try_from(input.duration_seconds).map_err(|_| ResourceApiError::Invalid)?,
+            ),
+    )
+    .map_err(|_| ResourceApiError::Invalid)?;
+    let approval = contracts::resource::ResourceApproval {
+        id: contracts::ResourceApprovalId::new(),
+        request_id,
+        request_revision: input.expected_revision,
+        approver_id: approver,
+        provider_binding: input.provider_binding.clone(),
+        policy_sha256: Sha256Digest::of_canonical(&input.provider_binding)
+            .map_err(|_| ResourceApiError::Invalid)?,
+        approved_resources: input.resources.clone(),
+        approved_duration_seconds: input.duration_seconds,
+        reason: input.reason,
+        valid_until,
+        created_at: now,
+    };
+    let claim = contracts::resource::CapacityClaim {
+        id: contracts::CapacityClaimId::new(),
+        request_id,
+        approval_id: approval.id,
+        provider_binding: approval.provider_binding.clone(),
+        policy_sha256: approval.policy_sha256,
+        workload_resources: input.resources.clone(),
+        quota_resources: input.resources,
+        quota_plan_sha256: Sha256Digest::of_canonical(&request.target)
+            .map_err(|_| ResourceApiError::Invalid)?,
+        state: contracts::resource::CapacityClaimState::Reserved,
+        revision: Revision::new(1).map_err(|_| ResourceApiError::Invalid)?,
+    };
+    let allocation = PendingAllocation {
+        claim,
+        lease_id: LeaseId::new(),
+    };
+    let next = state
+        .store
+        .approve(
+            &idempotency,
+            request_id,
+            &approval,
+            &allocation,
+            ApprovalPolicy {
+                min_duration_seconds: 60,
+                max_duration_seconds: 86_400,
+                gpu_capacity: 0,
+            },
+            &trace_id(),
+        )
+        .await?;
+    let accepted = ResourceOperationAccepted {
+        request_id: next.id,
+        lease_id: Some(allocation.lease_id),
+        revision: next.revision,
+        status_url: format!("/api/v1/resource-requests/{}", next.id),
+    };
+    Ok((StatusCode::ACCEPTED, Json(accepted)).into_response())
 }
 
 async fn get_lease(
@@ -189,6 +272,8 @@ pub enum ResourceApiError {
     IdentityInvalid,
     #[error("LW_AUTH_SCOPE_DENIED")]
     ScopeDenied,
+    #[error("LW_RESOURCE_REVISION_CONFLICT")]
+    RevisionConflict,
     #[error("LW_RESOURCE_REQUEST_INVALID")]
     Invalid,
     #[error(transparent)]
@@ -200,6 +285,7 @@ impl IntoResponse for ResourceApiError {
         let status = match self {
             Self::CallerDenied | Self::IdentityInvalid | Self::ScopeDenied => StatusCode::FORBIDDEN,
             Self::Invalid => StatusCode::BAD_REQUEST,
+            Self::RevisionConflict => StatusCode::PRECONDITION_FAILED,
             Self::Store(ResourceStoreError::NotFound | ResourceStoreError::LeaseNotFound) => {
                 StatusCode::NOT_FOUND
             }
