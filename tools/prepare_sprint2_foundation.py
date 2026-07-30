@@ -56,6 +56,7 @@ NATS_USERS: dict[str, tuple[tuple[str, ...], tuple[str, ...], bool]] = {
             "labweaver.service.access.revoke.v1",
             "labweaver.provider.kubernetes.container.v1",
             "labweaver.provider.kubevirt.vm.v1",
+            "labweaver.resource.lease.verify.v1",
         ),
         (
             "_INBOX.>",

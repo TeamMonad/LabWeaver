@@ -79,6 +79,7 @@ class FoundationAuthoringTests(unittest.TestCase):
 
         environment_publish, _, _ = FOUNDATION.NATS_USERS["environment-service"]
         self.assertIn("labweaver.service.access.revoke.v1", environment_publish)
+        self.assertIn("labweaver.resource.lease.verify.v1", environment_publish)
 
         for consumer in (
             "control-service",
