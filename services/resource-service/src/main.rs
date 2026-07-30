@@ -15,11 +15,12 @@ enum MainError {
 async fn main() -> Result<(), MainError> {
     let runtime = resource_service::ResourceProcessRuntime::from_env().await?;
     let readiness = runtime.readiness();
+    let api = resource_service::api::resource_api_router(runtime.api_state());
     tokio::spawn(async move {
         if let Err(error) = runtime.run().await {
             tracing::error!(event = "resource.runtime.stopped", error = %error);
         }
     });
-    service_runtime::run_with_readiness(env!("CARGO_PKG_NAME"), readiness).await?;
+    service_runtime::run_with_router(env!("CARGO_PKG_NAME"), readiness, api).await?;
     Ok(())
 }

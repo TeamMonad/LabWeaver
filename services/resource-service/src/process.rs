@@ -90,6 +90,11 @@ impl ResourceProcessRuntime {
         Arc::clone(&self.readiness)
     }
 
+    #[must_use]
+    pub fn api_state(&self) -> crate::api::ResourceApiState {
+        crate::api::ResourceApiState::new(self.store.for_http())
+    }
+
     /// Keeps the responder live. A failed authoritative dependency flips readiness false.
     pub async fn run(self) -> Result<(), ResourceProcessRuntimeError> {
         let Self {

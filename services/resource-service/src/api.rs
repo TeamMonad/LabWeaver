@@ -1,0 +1,210 @@
+//! Access-BFF authenticated Resource request and Lease HTTP boundary.
+
+use std::str::FromStr;
+
+use axum::{
+    Json, Router,
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode, header},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+};
+use contracts::http::{
+    CreateResourceRequest, RenewResourceLease, ResourceOperationAccepted, StrongEtag,
+};
+use contracts::resource::{ResourceRequest, ResourceRequestState, ResourceTarget};
+use contracts::{ActorId, LeaseId, ResourceRequestId, Revision, UtcTimestamp};
+use uuid::Uuid;
+
+use crate::store::{PgResourceStore, ResourceStoreError};
+
+const ACCESS_CALLER_SAN: &str = "spiffe://labweaver/access-service";
+
+#[derive(Clone)]
+pub struct ResourceApiState {
+    store: PgResourceStore,
+}
+
+impl ResourceApiState {
+    #[must_use]
+    pub fn new(store: PgResourceStore) -> Self {
+        Self { store }
+    }
+}
+
+pub fn resource_api_router(state: ResourceApiState) -> Router {
+    Router::new()
+        .route("/api/v1/resource-requests", post(create_request))
+        .route("/api/v1/resource-requests/{request_id}", get(get_request))
+        .route("/api/v1/resource-leases/{lease_id}", get(get_lease))
+        .route(
+            "/api/v1/resource-leases/{lease_id}/renew",
+            post(renew_lease),
+        )
+        .with_state(state)
+}
+
+async fn create_request(
+    State(state): State<ResourceApiState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateResourceRequest>,
+) -> Result<Response, ResourceApiError> {
+    authorize(&headers)?;
+    let actor = actor(&headers)?;
+    let idempotency = required_header(&headers, "idempotency-key")?;
+    let now = state.store.current_time().await?;
+    let request = ResourceRequest {
+        id: ResourceRequestId::new(),
+        generation: 1,
+        request_key: input.request_key,
+        requester_id: actor,
+        course_id: input.course_id,
+        project_id: input.project_id,
+        target: ResourceTarget {
+            environment_id: input.environment_id,
+            release_id: input.release_id,
+            release_version: input.release_version,
+            release_sha256: input.release_sha256,
+        },
+        requested_resources: input.resources,
+        requested_duration_seconds: input.duration_seconds,
+        state: ResourceRequestState::Reviewing,
+        revision: Revision::new(1).map_err(|_| ResourceApiError::Invalid)?,
+        created_at: now,
+        updated_at: now,
+        diagnostic_code: None,
+    };
+    let stored = state
+        .store
+        .create(&idempotency, &request, &trace_id())
+        .await?;
+    let accepted = ResourceOperationAccepted {
+        request_id: stored.id,
+        lease_id: None,
+        revision: stored.revision,
+        status_url: format!("/api/v1/resource-requests/{}", stored.id),
+    };
+    Ok((StatusCode::ACCEPTED, Json(accepted)).into_response())
+}
+
+async fn get_request(
+    State(state): State<ResourceApiState>,
+    headers: HeaderMap,
+    Path(request_id): Path<ResourceRequestId>,
+) -> Result<Response, ResourceApiError> {
+    authorize(&headers)?;
+    let request = state.store.load(request_id).await?;
+    scoped(&headers, request.requester_id)?;
+    let revision = request.revision;
+    with_etag(Json(request), revision)
+}
+
+async fn get_lease(
+    State(state): State<ResourceApiState>,
+    headers: HeaderMap,
+    Path(lease_id): Path<LeaseId>,
+) -> Result<Response, ResourceApiError> {
+    authorize(&headers)?;
+    let lease = state.store.load_lease(lease_id).await?;
+    let revision = lease.revision;
+    with_etag(Json(lease), revision)
+}
+
+async fn renew_lease(
+    State(state): State<ResourceApiState>,
+    headers: HeaderMap,
+    Path(lease_id): Path<LeaseId>,
+    Json(input): Json<RenewResourceLease>,
+) -> Result<Response, ResourceApiError> {
+    authorize(&headers)?;
+    let _actor = actor(&headers)?;
+    let key = required_header(&headers, "idempotency-key")?;
+    let now = state.store.current_time().await?;
+    let expires = UtcTimestamp::from_utc(
+        now.get()
+            + time::Duration::seconds(
+                i64::try_from(input.duration_seconds).map_err(|_| ResourceApiError::Invalid)?,
+            ),
+    )
+    .map_err(|_| ResourceApiError::Invalid)?;
+    let lease = state
+        .store
+        .renew_lease(&key, lease_id, input.expected_revision, expires)
+        .await?;
+    let revision = lease.revision;
+    with_etag(Json(lease), revision)
+}
+
+fn authorize(headers: &HeaderMap) -> Result<(), ResourceApiError> {
+    if headers
+        .get("x-labweaver-caller-san")
+        .and_then(|v| v.to_str().ok())
+        != Some(ACCESS_CALLER_SAN)
+    {
+        return Err(ResourceApiError::CallerDenied);
+    }
+    Ok(())
+}
+fn scoped(headers: &HeaderMap, expected: ActorId) -> Result<(), ResourceApiError> {
+    if actor(headers)? != expected {
+        Err(ResourceApiError::ScopeDenied)
+    } else {
+        Ok(())
+    }
+}
+fn actor(headers: &HeaderMap) -> Result<ActorId, ResourceApiError> {
+    required_header(headers, "x-labweaver-actor-id")
+        .and_then(|v| ActorId::from_str(&v).map_err(|_| ResourceApiError::IdentityInvalid))
+}
+fn required_header(headers: &HeaderMap, name: &'static str) -> Result<String, ResourceApiError> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+        .ok_or(ResourceApiError::IdentityInvalid)
+}
+fn trace_id() -> String {
+    format!("resource-api-{}", Uuid::now_v7())
+}
+fn with_etag<T: serde::Serialize>(
+    Json(value): Json<T>,
+    revision: Revision,
+) -> Result<Response, ResourceApiError> {
+    let mut response = Json(value).into_response();
+    response.headers_mut().insert(
+        header::ETAG,
+        StrongEtag::from_revision(revision)
+            .header_value()
+            .parse()
+            .map_err(|_| ResourceApiError::Invalid)?,
+    );
+    Ok(response)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ResourceApiError {
+    #[error("LW_RESOURCE_GATEWAY_DENIED")]
+    CallerDenied,
+    #[error("LW_AUTH_IDENTITY_INVALID")]
+    IdentityInvalid,
+    #[error("LW_AUTH_SCOPE_DENIED")]
+    ScopeDenied,
+    #[error("LW_RESOURCE_REQUEST_INVALID")]
+    Invalid,
+    #[error(transparent)]
+    Store(#[from] ResourceStoreError),
+}
+
+impl IntoResponse for ResourceApiError {
+    fn into_response(self) -> Response {
+        let status = match self {
+            Self::CallerDenied | Self::IdentityInvalid | Self::ScopeDenied => StatusCode::FORBIDDEN,
+            Self::Invalid => StatusCode::BAD_REQUEST,
+            Self::Store(ResourceStoreError::NotFound | ResourceStoreError::LeaseNotFound) => {
+                StatusCode::NOT_FOUND
+            }
+            _ => StatusCode::CONFLICT,
+        };
+        (status, self.to_string()).into_response()
+    }
+}

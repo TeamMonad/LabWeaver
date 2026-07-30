@@ -89,6 +89,13 @@ impl PgResourceStore {
         self.pool.clone()
     }
 
+    /// Exposes the same pool-backed authority to the HTTP boundary; no second repository is
+    /// created, so HTTP and background workers share the transaction and migration checks.
+    #[must_use]
+    pub fn for_http(&self) -> Self {
+        self.clone()
+    }
+
     /// Uses the database clock for every expiry and approval decision.
     pub async fn current_time(&self) -> Result<UtcTimestamp, ResourceStoreError> {
         let now: time::OffsetDateTime =
