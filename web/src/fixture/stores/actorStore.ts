@@ -48,6 +48,8 @@ export type FixtureAction =
   | 'candidate:approve'
   | 'release:read'
   | 'release:publish'
+  | 'console_capability:read'
+  | 'console_capability:issue'
   | 'ssh_key:read'
   | 'ssh_key:write'
   | 'events:read'
@@ -79,6 +81,8 @@ export function can(role: FixtureRole, action: FixtureAction, resource?: Fixture
         case 'candidate:approve':
         case 'release:read':
         case 'release:publish':
+        case 'console_capability:read':
+        case 'console_capability:issue':
           return resource?.courseId === undefined || ROLE_COURSES.teacher.includes(resource.courseId)
         case 'ssh_key:read':
         case 'ssh_key:write':
@@ -98,6 +102,8 @@ export function can(role: FixtureRole, action: FixtureAction, resource?: Fixture
         case 'access_grant:revoke':
         case 'events:read':
         case 'submission:freeze':
+        case 'console_capability:read':
+        case 'console_capability:issue':
           return resource?.courseId === undefined || ROLE_COURSES.student.includes(resource.courseId)
         case 'ssh_key:read':
         case 'ssh_key:write':

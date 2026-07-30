@@ -4,6 +4,7 @@ import type { FixtureHandler, FixtureHandlerResult, FixtureRequest, FixtureRespo
 import * as accessGrants from './accessGrants'
 import * as agentRuns from './agentRuns'
 import * as candidates from './candidates'
+import * as consoleCapabilities from './consoleCapabilities'
 import * as environmentAccessGrants from './environmentAccessGrants'
 import * as environmentEndpoints from './environmentEndpoints'
 import * as environmentOperations from './environmentOperations'
@@ -74,6 +75,10 @@ const routes: RouteEntry[] = [
   // Access grants
   { method: 'GET', match: (url) => /^\/api\/v1\/access-grants\/[^/]+$/.test(url), handler: accessGrants.getAccessGrant },
   { method: 'POST', match: (url) => /^\/api\/v1\/access-grants\/[^/]+\/revoke$/.test(url), handler: accessGrants.revokeAccessGrant },
+
+  // Console capabilities
+  { method: 'GET', match: (url) => /^\/api\/v1\/access-grants\/[^/]+\/console-capabilities$/.test(url), handler: consoleCapabilities.listConsoleCapabilities },
+  { method: 'POST', match: (url) => /^\/api\/v1\/access-grants\/[^/]+\/console-capabilities$/.test(url), handler: consoleCapabilities.issueConsoleCapability },
 
   // Events
   { method: 'GET', match: (url) => url === '/api/v1/events', handler: events.streamEvents },

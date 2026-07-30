@@ -17,6 +17,21 @@ async function expectNoA11yViolations(page, message) {
   expect(axeResult.violations, message).toEqual([])
 }
 
+const expectedDrawerLabels = ['教师工作台', '学生工作台', '科研工作台', '管理工作台']
+
+// Desktop layouts pin the navigation drawer into the app-shell grid. Assert the
+// role entries actually render so a stale golden baseline can never mask a
+// broken sidebar again (the pixel tolerance alone is too coarse to catch it).
+async function expectDesktopDrawerNav(page, viewportName) {
+  if (viewportName !== 'desktop') return
+  const items = page.locator('.drawer-item')
+  await expect(items).toHaveCount(expectedDrawerLabels.length)
+  for (const [index, label] of expectedDrawerLabels.entries()) {
+    await expect(items.nth(index)).toContainText(label)
+    await expect(items.nth(index)).toBeVisible()
+  }
+}
+
 for (const theme of themes) {
   for (const viewport of viewports) {
     test(`environment console empty ${theme} ${viewport.name}`, async ({ page }) => {
@@ -28,6 +43,7 @@ for (const theme of themes) {
       await expect(page.locator('.data-table__row')).toHaveCount(2)
 
       await expectNoA11yViolations(page, 'empty console should have no a11y violations')
+      await expectDesktopDrawerNav(page, viewport.name)
 
       await expect(page).toHaveScreenshot(`environment-console-empty-${theme}-${viewport.name}.png`, {
         fullPage: true,
@@ -52,6 +68,7 @@ test.describe('environment console blocked', () => {
         await expect(page.locator('text=课程上下文未绑定')).toBeVisible()
 
         await expectNoA11yViolations(page, 'blocked console should have no a11y violations')
+        await expectDesktopDrawerNav(page, viewport.name)
 
         await expect(page).toHaveScreenshot(`environment-console-blocked-${theme}-${viewport.name}.png`, {
           fullPage: true,
@@ -72,6 +89,7 @@ for (const theme of themes) {
       await expect(page.locator('text=ENVIRONMENT_NOT_FOUND')).toBeVisible()
 
       await expectNoA11yViolations(page, 'error console should have no a11y violations')
+      await expectDesktopDrawerNav(page, viewport.name)
 
       await expect(page).toHaveScreenshot(`environment-console-error-${theme}-${viewport.name}.png`, {
         fullPage: true,
@@ -155,6 +173,7 @@ for (const theme of themes) {
       await expect(page.locator('.env-state')).toHaveText('ready')
 
       await expectNoA11yViolations(page, 'success console should have no a11y violations')
+      await expectDesktopDrawerNav(page, viewport.name)
 
       await expect(page).toHaveScreenshot(`environment-console-success-${theme}-${viewport.name}.png`, {
         fullPage: true,
@@ -181,6 +200,7 @@ for (const theme of themes) {
       await expect(page.locator('.grant-card')).toBeVisible()
 
       await expectNoA11yViolations(page, 'grant view should have no a11y violations')
+      await expectDesktopDrawerNav(page, viewport.name)
 
       await expect(page).toHaveScreenshot(`environment-console-grant-${theme}-${viewport.name}.png`, {
         fullPage: true,
@@ -210,6 +230,7 @@ for (const theme of themes) {
       await expect(page.locator('text=访问授权已撤销')).toBeVisible()
 
       await expectNoA11yViolations(page, 'revoked view should have no a11y violations')
+      await expectDesktopDrawerNav(page, viewport.name)
 
       await expect(page).toHaveScreenshot(`environment-console-revoked-${theme}-${viewport.name}.png`, {
         fullPage: true,

@@ -15,6 +15,12 @@ for (const theme of themes) {
       await page.setViewportSize({ width: bp.width, height: bp.height })
       await page.goto('/')
       await page.waitForSelector('.home-view')
+      if (bp.name !== 'mobile') {
+        // Desktop/tablet pin the drawer into the app-shell grid; assert the role
+        // entries render so a stale golden cannot mask a broken sidebar.
+        await expect(page.locator('.drawer-item')).toHaveCount(4)
+        await expect(page.locator('.drawer-item').first()).toBeVisible()
+      }
       await expect(page).toHaveScreenshot(`home-${theme}-${bp.name}.png`, {
         fullPage: true,
         animations: 'disabled',
