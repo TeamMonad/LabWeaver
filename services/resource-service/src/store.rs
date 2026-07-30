@@ -344,12 +344,27 @@ impl PgResourceStore {
         expected_revision: contracts::Revision,
         active_from: UtcTimestamp,
         expires_at: UtcTimestamp,
+        actor: contracts::ActorId,
+        trace_id: &str,
     ) -> Result<ResourceLease, ResourceStoreError> {
+        validate_trace(trace_id)?;
         let mut transaction = self.pool.begin().await?;
         let lease = load_locked_lease(&mut transaction, lease_id).await?;
+        let request = load_locked(&mut transaction, lease.request_id).await?;
         let next =
             ResourceLifecycle::activate_lease(&lease, expected_revision, active_from, expires_at)?;
+        let next_request = ResourceLifecycle::activate(&request, request.revision, active_from)?;
         update_lease(&mut transaction, &lease, &next).await?;
+        update_request(&mut transaction, &request, &next_request).await?;
+        insert_transition(
+            &mut transaction,
+            &next_request,
+            next_request.revision.get(),
+            Some(ResourceRequestState::Allocating),
+            Some(actor),
+            trace_id,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(next)
     }
@@ -360,12 +375,27 @@ impl PgResourceStore {
         lease_id: LeaseId,
         expected_revision: contracts::Revision,
         reason: Option<String>,
+        actor: contracts::ActorId,
+        trace_id: &str,
     ) -> Result<ResourceLease, ResourceStoreError> {
+        validate_trace(trace_id)?;
         let mut transaction = self.pool.begin().await?;
         let lease = load_locked_lease(&mut transaction, lease_id).await?;
+        let request = load_locked(&mut transaction, lease.request_id).await?;
         let now = database_now(&mut transaction).await?;
         let next = ResourceLifecycle::begin_lease_expiry(&lease, expected_revision, now, reason)?;
+        let next_request = ResourceLifecycle::begin_expiry(&request, request.revision, now)?;
         update_lease(&mut transaction, &lease, &next).await?;
+        update_request(&mut transaction, &request, &next_request).await?;
+        insert_transition(
+            &mut transaction,
+            &next_request,
+            next_request.revision.get(),
+            Some(request.state),
+            Some(actor),
+            trace_id,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(next)
     }
@@ -375,12 +405,27 @@ impl PgResourceStore {
         &self,
         lease_id: LeaseId,
         expected_revision: contracts::Revision,
+        actor: contracts::ActorId,
+        trace_id: &str,
     ) -> Result<ResourceLease, ResourceStoreError> {
+        validate_trace(trace_id)?;
         let mut transaction = self.pool.begin().await?;
         let lease = load_locked_lease(&mut transaction, lease_id).await?;
+        let request = load_locked(&mut transaction, lease.request_id).await?;
         let now = database_now(&mut transaction).await?;
         let next = ResourceLifecycle::complete_lease_expiry(&lease, expected_revision, now)?;
+        let next_request = ResourceLifecycle::complete_expiry(&request, request.revision, now)?;
         update_lease(&mut transaction, &lease, &next).await?;
+        update_request(&mut transaction, &request, &next_request).await?;
+        insert_transition(
+            &mut transaction,
+            &next_request,
+            next_request.revision.get(),
+            Some(ResourceRequestState::Expiring),
+            Some(actor),
+            trace_id,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(next)
     }

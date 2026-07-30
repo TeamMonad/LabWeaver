@@ -145,8 +145,14 @@ async fn resource_store_commits_request_approval_claim_lease_and_renewal_as_fenc
             Revision::new(1)?,
             active_from,
             active_expires,
+            approval.approver_id,
+            "trace-resource-activate",
         )
         .await?;
+    assert_eq!(
+        store.load(request.id).await?.state,
+        ResourceRequestState::Active
+    );
     let renewed_expires = UtcTimestamp::from_utc(active_from.get() + time::Duration::minutes(15))?;
     let renewed = store
         .renew_lease(
