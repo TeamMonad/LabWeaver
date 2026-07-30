@@ -1770,8 +1770,8 @@
       - sprint2_application_evaluation_default_deny.resources | length == 1
       - sprint2_application_evaluation_default_deny.resources[0].spec.podSelector == {}
       - sprint2_application_evaluation_default_deny.resources[0].spec.policyTypes | sort == ['Egress', 'Ingress']
-      - sprint2_application_evaluation_default_deny.resources[0].spec.ingress == []
-      - sprint2_application_evaluation_default_deny.resources[0].spec.egress == []
+      - sprint2_application_evaluation_default_deny.resources[0].spec.ingress | default([]) == []
+      - sprint2_application_evaluation_default_deny.resources[0].spec.egress | default([]) == []
     fail_msg: SPRINT2_APPLICATION_EVALUATION_DEFAULT_DENY_INVALID
 
 - name: Require the evaluation worker to use the platform image pull identity

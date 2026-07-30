@@ -412,6 +412,14 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("ingress: []", policy)
         self.assertIn("egress: []", policy)
         self.assertIn(
+            "spec.ingress | default([]) == []",
+            policy,
+        )
+        self.assertIn(
+            "spec.egress | default([]) == []",
+            policy,
+        )
+        self.assertIn(
             "SPRINT2_APPLICATION_EVALUATION_DEFAULT_DENY_INVALID",
             policy,
         )
