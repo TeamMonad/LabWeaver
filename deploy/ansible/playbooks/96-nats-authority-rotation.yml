@@ -253,6 +253,22 @@
           - nats_rotation_record.operator_public is match('^O[A-Z2-7]{55}$')
         fail_msg: NATS_AUTHORITY_ROTATION_APPLICATION_INPUT_INVALID
 
+    - name: Build the deterministic workload rollout patch
+      ansible.builtin.set_fact:
+        nats_rotation_rollout_patch: >-
+          {{ {
+               'spec': {
+                 'template': {
+                   'metadata': {
+                     'annotations': {
+                       'labweaver.io/nats-authority-public':
+                         nats_rotation_record.operator_public
+                     }
+                   }
+                 }
+               }
+             } | to_json }}
+
     - name: Apply only reviewed NATS-bearing application objects
       ansible.builtin.command:
         argv:
@@ -284,10 +300,7 @@
           - "{{ item }}"
           - --type=merge
           - --patch
-          - >-
-            {"spec":{"template":{"metadata":{"annotations":{
-            "labweaver.io/nats-authority-public":
-            "{{ nats_rotation_record.operator_public }}"}}}}}
+          - "{{ nats_rotation_rollout_patch }}"
       loop: "{{ nats_rotation_deployments }}"
       changed_when: true
 
