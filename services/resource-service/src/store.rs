@@ -4,22 +4,23 @@ use contracts::environment::{
     EnvironmentLeaseAuthorization, EnvironmentLeaseState, EnvironmentLeaseVerificationRequest,
     EnvironmentLeaseVerificationResponse,
 };
+use contracts::events::{CloudEvent, ResourceRequestChanged, subjects};
 use contracts::http::IdempotencyKey;
 use contracts::resource::{
     CapacityClaim, CapacityClaimState, ResourceApproval, ResourceLease, ResourceLeaseState,
     ResourceRequest, ResourceRequestState,
 };
-use contracts::{EventId, LeaseId, ResourceRequestId, Sha256Digest, UtcTimestamp};
+use contracts::{EventId, LeaseId, ResourceRequestId, Sequence, Sha256Digest, UtcTimestamp};
 use persistence_sqlx::{
     Domain, IdempotencyDecision, IdempotencyStore, OutboxStore, PersistenceError,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
 use crate::{ApprovalPolicy, LifecycleError, ResourceLifecycle};
 
-const REQUEST_SUBMITTED_SUBJECT: &str = "labweaver.resource.request.submitted.v1";
-const REQUEST_APPROVED_SUBJECT: &str = "labweaver.resource.request.approved.v1";
+const REQUEST_SUBMITTED_SUBJECT: &str = subjects::RESOURCE_REQUEST_SUBMITTED;
+const REQUEST_APPROVED_SUBJECT: &str = subjects::RESOURCE_REQUEST_APPROVED;
 
 /// Deterministic capacity plan created before provider side effects are scheduled.
 #[derive(Clone, Debug)]
@@ -82,6 +83,10 @@ impl PgResourceStore {
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    pub(crate) fn pool(&self) -> PgPool {
+        self.pool.clone()
     }
 
     /// Uses the database clock for every expiry and approval decision.
@@ -765,12 +770,37 @@ async fn enqueue_request_event(
     subject: &str,
     trace_id: &str,
 ) -> Result<(), ResourceStoreError> {
-    let payload = json!({"request": request, "traceId": trace_id});
+    let event_id = EventId::new();
+    let payload = serde_json::to_value(CloudEvent {
+        specversion: contracts::events::SPEC_VERSION.into(),
+        id: event_id,
+        source: "urn:labweaver:resource-service".into(),
+        event_type: subject.into(),
+        subject: subject.into(),
+        time: request.updated_at,
+        datacontenttype: "application/json".into(),
+        dataschema: format!(
+            "{}/{}.schema.json",
+            contracts::events::DATA_SCHEMA_BASE,
+            if subject == REQUEST_SUBMITTED_SUBJECT {
+                "resource-request-submitted"
+            } else {
+                "resource-request-approved"
+            }
+        ),
+        course_id: request.course_id,
+        aggregate_revision: request.revision,
+        aggregate_sequence: Sequence(request.revision.get()),
+        trace_id: trace_id.into(),
+        data: ResourceRequestChanged {
+            request: request.clone(),
+        },
+    })?;
     let hash = Sha256Digest::of_canonical(&payload)?;
     OutboxStore::enqueue(
         transaction,
         Domain::Resource,
-        EventId::new().as_uuid(),
+        event_id.as_uuid(),
         subject,
         subject,
         request.id.as_uuid(),

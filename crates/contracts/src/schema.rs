@@ -399,6 +399,14 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         CloudEvent<events::AgentRunEvent>
     );
     document!(
+        "schemas/contracts/v1/events/resource-request-submitted.schema.json",
+        CloudEvent<events::ResourceRequestChanged>
+    );
+    document!(
+        "schemas/contracts/v1/events/resource-request-approved.schema.json",
+        CloudEvent<events::ResourceRequestChanged>
+    );
+    document!(
         "schemas/contracts/v1/events/agent-run-completed.schema.json",
         CloudEvent<events::AgentRunEvent>
     );

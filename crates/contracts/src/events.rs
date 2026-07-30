@@ -6,6 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::authoring::{CandidateApproval, CandidateDecision, EnvironmentSpec};
+use crate::resource::ResourceRequest;
 use crate::submission::FrozenSubmission;
 use crate::supply_chain::{BuildRequest, EnvironmentTemplateRelease};
 use crate::{
@@ -54,6 +55,8 @@ pub mod subjects {
         "labweaver.control.environment_template_release.published.v1";
     pub const ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN: &str =
         "labweaver.control.environment_template_release.withdrawn.v1";
+    pub const RESOURCE_REQUEST_SUBMITTED: &str = "labweaver.resource.request.submitted.v1";
+    pub const RESOURCE_REQUEST_APPROVED: &str = "labweaver.resource.request.approved.v1";
 }
 
 /// Strict CloudEvents 1.0 envelope carried as structured JSON.
@@ -74,6 +77,13 @@ pub struct CloudEvent<T> {
     pub aggregate_sequence: Sequence,
     pub trace_id: String,
     pub data: T,
+}
+
+/// Resource-owned request lifecycle fact. The full request is safe domain metadata only.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResourceRequestChanged {
+    pub request: ResourceRequest,
 }
 
 impl<T: Serialize> CloudEvent<T> {
@@ -120,6 +130,8 @@ impl EventContract {
             "urn:labweaver:access-service"
         } else if self.subject.starts_with("labweaver.evaluation.") {
             "urn:labweaver:evaluation-service"
+        } else if self.subject.starts_with("labweaver.resource.") {
+            "urn:labweaver:resource-service"
         } else {
             "urn:labweaver:control-service"
         }
@@ -127,6 +139,16 @@ impl EventContract {
 }
 
 pub const EVENT_CONTRACTS: &[EventContract] = &[
+    EventContract {
+        subject: subjects::RESOURCE_REQUEST_SUBMITTED,
+        event_type: subjects::RESOURCE_REQUEST_SUBMITTED,
+        schema_name: "resource-request-submitted",
+    },
+    EventContract {
+        subject: subjects::RESOURCE_REQUEST_APPROVED,
+        event_type: subjects::RESOURCE_REQUEST_APPROVED,
+        schema_name: "resource-request-approved",
+    },
     EventContract {
         subject: subjects::AGENT_RUN_REQUESTED,
         event_type: subjects::AGENT_RUN_REQUESTED,

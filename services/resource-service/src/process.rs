@@ -11,6 +11,7 @@ use crate::capacity::{
     CapacityProviderError, CapacityReconcileWorker, ResourceCapacityConfiguration,
 };
 use crate::messaging::{NatsLeaseResponderError, NatsLeaseVerificationResponder};
+use crate::outbox::{ResourceOutboxDispatcher, ResourceOutboxError};
 use crate::store::PgResourceStore;
 
 const DATABASE_URL: &str = "LABWEAVER_DATABASE_URL";
@@ -21,12 +22,15 @@ const NATS_CLIENT_PRIVATE_KEY_PATH: &str = "LABWEAVER_NATS_CLIENT_KEY_PATH";
 const NATS_CREDENTIALS_PATH: &str = "LABWEAVER_NATS_CREDENTIALS_PATH";
 const LEASE_VERIFICATION_SUBJECT: &str = "LABWEAVER_RESOURCE_LEASE_VERIFICATION_SUBJECT";
 const CAPACITY_CONFIG_FILE: &str = "LABWEAVER_RESOURCE_CAPACITY_CONFIG_FILE";
+const OUTBOX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const OUTBOX_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Production dependency graph for Resource-owned Lease authorization.
 pub struct ResourceProcessRuntime {
     responder: NatsLeaseVerificationResponder,
     store: PgResourceStore,
     capacity_worker: CapacityReconcileWorker,
+    outbox: ResourceOutboxDispatcher,
     readiness: Arc<AtomicBool>,
     _shutdown_sender: watch::Sender<bool>,
     shutdown: watch::Receiver<bool>,
@@ -54,14 +58,18 @@ impl ResourceProcessRuntime {
             required_path(NATS_CREDENTIALS_PATH)?,
         )
         .await?;
-        let responder =
-            NatsLeaseVerificationResponder::new(required(LEASE_VERIFICATION_SUBJECT)?, client)?;
+        let responder = NatsLeaseVerificationResponder::new(
+            required(LEASE_VERIFICATION_SUBJECT)?,
+            client.clone(),
+        )?;
         let capacity_configuration: ResourceCapacityConfiguration = serde_json::from_slice(
             &std::fs::read(required_path(CAPACITY_CONFIG_FILE)?)
                 .map_err(|_| ResourceProcessRuntimeError::CapacityConfiguration)?,
         )
         .map_err(|_| ResourceProcessRuntimeError::CapacityConfiguration)?;
         let store = PgResourceStore::new(pool);
+        let outbox = ResourceOutboxDispatcher::new(store.pool(), client, OUTBOX_TIMEOUT)
+            .map_err(ResourceProcessRuntimeError::Outbox)?;
         let capacity_worker = capacity_configuration
             .build_worker(store.clone())
             .map_err(ResourceProcessRuntimeError::CapacityProvider)?;
@@ -70,6 +78,7 @@ impl ResourceProcessRuntime {
             responder,
             store,
             capacity_worker,
+            outbox,
             readiness: Arc::new(AtomicBool::new(true)),
             _shutdown_sender: shutdown_sender,
             shutdown,
@@ -87,11 +96,13 @@ impl ResourceProcessRuntime {
             responder,
             store,
             capacity_worker,
+            outbox,
             readiness,
             _shutdown_sender,
             shutdown,
         } = self;
         let responder_shutdown = shutdown.clone();
+        let outbox_shutdown = shutdown.clone();
         let result = tokio::try_join!(
             async {
                 responder
@@ -105,12 +116,30 @@ impl ResourceProcessRuntime {
                     .await
                     .map_err(ResourceProcessRuntimeError::Store)
             },
+            async {
+                run_outbox(outbox, outbox_shutdown)
+                    .await
+                    .map_err(ResourceProcessRuntimeError::Outbox)
+            },
         )
         .map(|_| ());
         if result.is_err() {
             readiness.store(false, Ordering::Release);
         }
         result.map_err(Into::into)
+    }
+}
+
+async fn run_outbox(
+    outbox: ResourceOutboxDispatcher,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<(), ResourceOutboxError> {
+    let mut interval = tokio::time::interval(OUTBOX_INTERVAL);
+    loop {
+        tokio::select! {
+            changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { return Ok(()); } }
+            _ = interval.tick() => { let _ = outbox.dispatch_once().await?; }
+        }
     }
 }
 
@@ -169,6 +198,8 @@ pub enum ResourceProcessRuntimeError {
     CapacityConfiguration,
     #[error("LW_RESOURCE_CAPACITY_PROVIDER_INITIALIZATION_FAILED: {0}")]
     CapacityProvider(#[source] CapacityProviderError),
+    #[error("LW_RESOURCE_OUTBOX_FAILED: {0}")]
+    Outbox(#[source] ResourceOutboxError),
     #[error("LW_RESOURCE_STORE_FAILED: {0}")]
     Store(#[source] crate::store::ResourceStoreError),
     #[error("LW_RESOURCE_NATS_RESPONDER_FAILED: {0}")]
