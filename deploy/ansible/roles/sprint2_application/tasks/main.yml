@@ -1869,6 +1869,17 @@
                     protocol: TCP
                   - port: "9000"
                     protocol: TCP
+          # Browser uploads terminate at the Web nginx object-store proxy. Give
+          # that exact workload access only to MinIO rather than adding it to
+          # the broader owner-service transport rule above.
+          - fromEndpoints:
+              - matchLabels:
+                  k8s:io.kubernetes.pod.namespace: "{{ sprint2_application_namespace }}"
+                  app.kubernetes.io/name: web
+            toPorts:
+              - ports:
+                  - port: "9000"
+                    protocol: TCP
 
 - name: Inspect the retained CDI clone source network policy
   kubernetes.core.k8s_info:

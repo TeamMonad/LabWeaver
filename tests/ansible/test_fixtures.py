@@ -161,6 +161,21 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertNotRegex(playbook, r"\bkubectl\s+delete\b")
         self.assertNotRegex(playbook, r"\bDROP\s+(?:DATABASE|SCHEMA)\b")
 
+    def test_object_store_proxy_has_a_minio_only_transport_rule(self) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        marker = "Browser uploads terminate at the Web nginx object-store proxy."
+        self.assertIn(marker, tasks)
+        scoped_rule = tasks.split(marker, maxsplit=1)[1].split(
+            "- name: Inspect the retained CDI clone source network policy",
+            maxsplit=1,
+        )[0]
+        self.assertIn("app.kubernetes.io/name: web", scoped_rule)
+        self.assertIn('port: "9000"', scoped_rule)
+        self.assertNotIn('port: "5432"', scoped_rule)
+        self.assertNotIn('port: "4222"', scoped_rule)
+
     def test_sprint2_buildkit_is_rootless_isolated_and_explicitly_exception_bound(self) -> None:
         playbook = (ROOT / "deploy/ansible/playbooks/92-sprint2-buildkit.yml").read_text(
             encoding="utf-8"
