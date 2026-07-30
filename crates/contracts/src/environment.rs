@@ -960,6 +960,7 @@ impl EnvironmentOwnerResolverClientConfig {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::{
         EnvironmentInstance, EnvironmentOperationKind, EnvironmentOwnerResolverClientConfig,

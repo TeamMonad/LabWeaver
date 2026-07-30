@@ -1,9 +1,10 @@
 import base64
 import json
 import os
+import tempfile
+import unittest
 from pathlib import Path
-
-import pytest
+from unittest import mock
 
 from tools import issue_resource_tls_identity as tls
 from tools import render_resource_bundle as bundle
@@ -19,38 +20,58 @@ def _manifest_root(tmp_path: Path) -> Path:
     return root
 
 
-def test_resource_manifest_rejects_extra_input(tmp_path):
-    root = _manifest_root(tmp_path)
-    (root / "secrets" / "extra").mkdir()
-    with pytest.raises(bundle.BundleError, match="INPUT_INCOMPLETE"):
-        bundle.render(Path("deploy/config/resource-bundle-manifest.json"), root, None)
+class ResourceBundleAndTlsTests(unittest.TestCase):
+    def test_resource_manifest_rejects_extra_input(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _manifest_root(Path(temporary))
+            (root / "secrets" / "extra").mkdir()
+            with self.assertRaisesRegex(bundle.BundleError, "INPUT_INCOMPLETE"):
+                bundle.render(
+                    Path("deploy/config/resource-bundle-manifest.json"), root, None
+                )
+
+    def test_resource_manifest_requires_private_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _manifest_root(Path(temporary))
+            with self.assertRaisesRegex(
+                bundle.BundleError, "NATS_CREDENTIALS_INVALID"
+            ):
+                bundle.render(
+                    Path("deploy/config/resource-bundle-manifest.json"), root, None
+                )
+
+    def test_tls_private_path_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(
+                tls.TlsIssuanceError, "PRIVATE_PATH_REQUIRED"
+            ):
+                tls.private_path(Path(temporary) / "output")
+
+    def test_tls_issuer_rejects_existing_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            private = Path(temporary) / ".private"
+            authority = private / "authority"
+            platform = private / "platform"
+            authority.mkdir(parents=True)
+            platform.mkdir()
+            for directory in (authority, platform):
+                (directory / "ca.key").write_text("key")
+                (directory / "ca.crt").write_text("cert")
+                os.chmod(directory, 0o700)
+                os.chmod(directory / "ca.key", 0o600)
+                os.chmod(directory / "ca.crt", 0o600)
+            output = private / "out"
+            output.mkdir()
+            with mock.patch.object(
+                tls,
+                "secure_ca",
+                return_value=(authority / "ca.key", authority / "ca.crt"),
+            ):
+                with self.assertRaisesRegex(tls.TlsIssuanceError, "OUTPUT_EXISTS"):
+                    tls.issue(
+                        authority, platform, Path("/usr/bin/openssl"), output, 365
+                    )
 
 
-def test_resource_manifest_requires_private_output(tmp_path):
-    root = _manifest_root(tmp_path)
-    with pytest.raises(bundle.BundleError, match="NATS_CREDENTIALS_INVALID"):
-        bundle.render(Path("deploy/config/resource-bundle-manifest.json"), root, None)
-
-
-def test_tls_private_path_guard(tmp_path):
-    with pytest.raises(tls.TlsIssuanceError, match="PRIVATE_PATH_REQUIRED"):
-        tls.private_path(tmp_path / "output")
-
-
-def test_tls_issuer_rejects_existing_output(tmp_path, monkeypatch):
-    private = tmp_path / ".private"
-    authority = private / "authority"
-    platform = private / "platform"
-    authority.mkdir(parents=True)
-    platform.mkdir()
-    for directory in (authority, platform):
-        (directory / "ca.key").write_text("key")
-        (directory / "ca.crt").write_text("cert")
-        os.chmod(directory, 0o700)
-        os.chmod(directory / "ca.key", 0o600)
-        os.chmod(directory / "ca.crt", 0o600)
-    output = private / "out"
-    output.mkdir()
-    monkeypatch.setattr(tls, "secure_ca", lambda _: (authority / "ca.key", authority / "ca.crt"))
-    with pytest.raises(tls.TlsIssuanceError, match="OUTPUT_EXISTS"):
-        tls.issue(authority, platform, Path("/usr/bin/openssl"), output, 365)
+if __name__ == "__main__":
+    unittest.main()

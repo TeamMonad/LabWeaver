@@ -438,22 +438,7 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::Sprint2HarborRoute(args) => sprint2_harbor_route(&args),
         Command::Sprint2Application(args) => sprint2_application(&args),
         Command::ResourceApplication(args) => resource_application(&args),
-        Command::AcceptanceAssets(args) => match args.action {
-            AcceptanceAssetsAction::Validate => acceptance_assets::validate(&repository_root()),
-            AcceptanceAssetsAction::List => {
-                acceptance_assets::list();
-                Ok(())
-            }
-            AcceptanceAssetsAction::ValidateReport { report } => {
-                acceptance_assets::validate_report(&repository_root(), &report)
-            }
-            AcceptanceAssetsAction::ValidateFeatureComplete { report } => {
-                acceptance_assets::validate_feature_complete(&repository_root(), &report)
-            }
-            AcceptanceAssetsAction::ValidateFixtures => {
-                acceptance_assets::validate_fixtures(&repository_root())
-            }
-        },
+        Command::AcceptanceAssets(args) => run_acceptance_assets(args),
         Command::Upgrade(args) => destructive_not_implemented("upgrade", args.yes),
         Command::Rollback(args) => platform_images::rollback(
             &args.env,
@@ -493,6 +478,25 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::ReleaseGate => release_gate::run(&repository_root()),
         Command::Contracts(ContractsCommand::Generate) => contracts_generate(),
         Command::Contracts(ContractsCommand::Check) => contracts_check(),
+    }
+}
+
+fn run_acceptance_assets(args: AcceptanceAssetsArgs) -> Result<(), AppError> {
+    match args.action {
+        AcceptanceAssetsAction::Validate => acceptance_assets::validate(&repository_root()),
+        AcceptanceAssetsAction::List => {
+            acceptance_assets::list();
+            Ok(())
+        }
+        AcceptanceAssetsAction::ValidateReport { report } => {
+            acceptance_assets::validate_report(&repository_root(), &report)
+        }
+        AcceptanceAssetsAction::ValidateFeatureComplete { report } => {
+            acceptance_assets::validate_feature_complete(&repository_root(), &report)
+        }
+        AcceptanceAssetsAction::ValidateFixtures => {
+            acceptance_assets::validate_fixtures(&repository_root())
+        }
     }
 }
 
