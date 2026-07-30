@@ -58,6 +58,10 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
             "/api/v1/resource-leases/{lease_id}/renew",
             post(renew_lease),
         )
+        .route(
+            "/api/v1/resource-leases/{lease_id}/revoke",
+            post(revoke_lease),
+        )
         .with_state(state)
 }
 
@@ -307,6 +311,26 @@ async fn renew_lease(
     let lease = state
         .store
         .renew_lease(&key, lease_id, input.expected_revision, expires)
+        .await?;
+    let revision = lease.revision;
+    with_etag(Json(lease), revision)
+}
+
+async fn revoke_lease(
+    State(state): State<ResourceApiState>,
+    headers: HeaderMap,
+    Path(lease_id): Path<LeaseId>,
+    Json(input): Json<contracts::http::ResourceRequestMutation>,
+) -> Result<Response, ResourceApiError> {
+    authorize(&headers)?;
+    let _actor = actor(&headers)?;
+    if input.reason.trim().is_empty() || input.reason.chars().count() > 500 {
+        return Err(ResourceApiError::Invalid);
+    }
+    let key = required_header(&headers, "idempotency-key")?;
+    let lease = state
+        .store
+        .revoke_lease(&key, lease_id, input.expected_revision, input.reason)
         .await?;
     let revision = lease.revision;
     with_etag(Json(lease), revision)

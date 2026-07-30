@@ -449,6 +449,52 @@ impl PgResourceStore {
         Ok(result)
     }
 
+    /// Revokes a Lease with an exact revision and idempotency fence.
+    pub async fn revoke_lease(
+        &self,
+        idempotency_key: &str,
+        lease_id: LeaseId,
+        expected_revision: contracts::Revision,
+        reason: String,
+    ) -> Result<ResourceLease, ResourceStoreError> {
+        IdempotencyKey::parse(idempotency_key).map_err(|_| ResourceStoreError::IdempotencyKey)?;
+        let mut transaction = self.pool.begin().await?;
+        let lease = load_locked_lease(&mut transaction, lease_id).await?;
+        let hash = Sha256Digest::of_canonical(&(lease_id, expected_revision, &reason))?;
+        let result = match IdempotencyStore::reserve(
+            &mut transaction,
+            Domain::Resource,
+            "revoke_resource_lease",
+            idempotency_key,
+            hash,
+        )
+        .await?
+        {
+            IdempotencyDecision::Replay(value) => decode_lease(value)?,
+            IdempotencyDecision::Conflict => return Err(ResourceStoreError::IdempotencyConflict),
+            IdempotencyDecision::InProgress => {
+                return Err(ResourceStoreError::IdempotencyInProgress);
+            }
+            IdempotencyDecision::Reserved => {
+                let now = database_now(&mut transaction).await?;
+                let next = ResourceLifecycle::revoke_lease(&lease, expected_revision, now, reason)?;
+                update_lease(&mut transaction, &lease, &next).await?;
+                let value = serde_json::to_value(&next)?;
+                IdempotencyStore::complete(
+                    &mut transaction,
+                    Domain::Resource,
+                    "revoke_resource_lease",
+                    idempotency_key,
+                    &value,
+                )
+                .await?;
+                next
+            }
+        };
+        transaction.commit().await?;
+        Ok(result)
+    }
+
     /// Activates a Lease only after the selected capacity provider has read back its exact fence.
     pub async fn activate_lease(
         &self,
