@@ -12,6 +12,7 @@ async-nats = { version = "=0.45.0", default-features = false, features = ["ring"
 contracts = { path = "../../crates/contracts" }
 futures-util = "0.3.31"
 persistence-sqlx = { path = "../../crates/persistence-sqlx" }
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
