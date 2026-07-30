@@ -847,3 +847,9 @@ results. JWTs, NATS seeds, private keys, `.creds` contents, and secret hashes mu
 be printed, copied into Git, or included in logs. Debugging must use the existing
 root-owned bundle and the allowlisted Ansible foundation/application entrypoints;
 inspect permissions and stable diagnostics, not credential contents.
+
+Historical audit sources for the current signing decision are
+`019f5c40-3c06-7fd2-a521-b4526bcb45d2` and
+`019f61a6-88ac-78a1-8bf5-efd67b8d3a48`. They document Harbor/Private Sigstore
+signing material, not a NATS operator/account signing key; do not treat them
+as a usable NATS signing source.
