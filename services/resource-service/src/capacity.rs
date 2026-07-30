@@ -8,9 +8,44 @@ use contracts::resource::{CapacityClaim, ResourceRequest};
 use reqwest::{Certificate, Client, StatusCode, Url};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::sync::watch;
 
 const FIELD_MANAGER: &str = "labweaver-resource-service";
 const QUOTA_NAME: &str = "resource-quota";
+
+/// Resource capacity worker configuration. Every binding is explicit and unique.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResourceCapacityConfiguration {
+    pub poll_interval_milliseconds: u64,
+    pub providers: Vec<KubernetesCapacityProviderConfiguration>,
+}
+
+impl ResourceCapacityConfiguration {
+    pub fn build_worker(
+        self,
+        store: crate::store::PgResourceStore,
+    ) -> Result<CapacityReconcileWorker, CapacityProviderError> {
+        if !(100..=60_000).contains(&self.poll_interval_milliseconds) || self.providers.is_empty() {
+            return Err(CapacityProviderError::Configuration);
+        }
+        let mut providers = BTreeMap::new();
+        for configuration in self.providers {
+            let binding = configuration.binding.clone();
+            if providers
+                .insert(binding, KubernetesCapacityProvider::new(configuration)?)
+                .is_some()
+            {
+                return Err(CapacityProviderError::Configuration);
+            }
+        }
+        Ok(CapacityReconcileWorker {
+            store,
+            providers,
+            poll_interval: Duration::from_millis(self.poll_interval_milliseconds),
+        })
+    }
+}
 
 /// Reviewed non-secret binding for one capacity Provider. Selection is exact by `binding`.
 #[derive(Clone, Debug, Deserialize)]
@@ -145,6 +180,98 @@ pub struct KubernetesCapacityProvider {
     api_server: Url,
     client: Client,
     token: String,
+}
+
+/// Executes at most one durable capacity transition per poll. Errors stay auditable as `blocked`.
+pub struct CapacityReconcileWorker {
+    store: crate::store::PgResourceStore,
+    providers: BTreeMap<String, KubernetesCapacityProvider>,
+    poll_interval: Duration,
+}
+
+impl CapacityReconcileWorker {
+    /// Reconciles a single leased shell and returns whether work was found.
+    pub async fn reconcile_once(&self) -> Result<bool, crate::store::ResourceStoreError> {
+        let Some(item) = self.store.claim_next_capacity_shell().await? else {
+            return Ok(false);
+        };
+        let Some(provider) = self.providers.get(&item.claim.provider_binding) else {
+            self.store
+                .mark_capacity_shell_blocked(
+                    item.claim.id,
+                    item.claim.revision,
+                    "LW_RESOURCE_CAPACITY_PROVIDER_UNAVAILABLE",
+                )
+                .await?;
+            return Ok(true);
+        };
+        let plan = match KubernetesQuotaShellPlan::from_claim(
+            &provider.configuration,
+            &item.request,
+            &item.claim,
+        ) {
+            Ok(plan) => plan,
+            Err(error) => {
+                tracing::error!(event = "resource.capacity.plan_rejected", claim_id = %item.claim.id, diagnostic_code = %error.diagnostic());
+                if matches!(error, CapacityProviderError::Unavailable) {
+                    self.store
+                        .retry_or_block_capacity_shell(
+                            item.claim.id,
+                            item.claim.revision,
+                            error.diagnostic(),
+                        )
+                        .await?;
+                } else {
+                    self.store
+                        .mark_capacity_shell_blocked(
+                            item.claim.id,
+                            item.claim.revision,
+                            error.diagnostic(),
+                        )
+                        .await?;
+                }
+                return Ok(true);
+            }
+        };
+        match provider.reserve(&plan).await {
+            Ok(readback) => {
+                self.store
+                    .mark_capacity_shell_ready(
+                        item.claim.id,
+                        item.claim.revision,
+                        &plan.namespace,
+                        &readback.namespace_uid,
+                        &readback.quota_uid,
+                    )
+                    .await?;
+            }
+            Err(error) => {
+                tracing::error!(event = "resource.capacity.reserve_failed", claim_id = %item.claim.id, diagnostic_code = %error.diagnostic());
+                self.store
+                    .mark_capacity_shell_blocked(
+                        item.claim.id,
+                        item.claim.revision,
+                        error.diagnostic(),
+                    )
+                    .await?;
+            }
+        }
+        Ok(true)
+    }
+
+    /// Runs until shutdown; a retry always acquires a new durable claim fence.
+    pub async fn run(
+        &self,
+        mut shutdown: watch::Receiver<bool>,
+    ) -> Result<(), crate::store::ResourceStoreError> {
+        let mut interval = tokio::time::interval(self.poll_interval);
+        loop {
+            tokio::select! {
+                changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { return Ok(()); } }
+                _ = interval.tick() => { let _ = self.reconcile_once().await?; }
+            }
+        }
+    }
 }
 
 impl KubernetesCapacityProvider {
@@ -367,6 +494,21 @@ pub enum CapacityProviderError {
     Rejected,
     #[error("LW_RESOURCE_CAPACITY_UNAVAILABLE")]
     Unavailable,
+}
+
+impl CapacityProviderError {
+    const fn diagnostic(&self) -> &'static str {
+        match self {
+            Self::Configuration => "LW_RESOURCE_CAPACITY_PROVIDER_CONFIGURATION_INVALID",
+            Self::BindingMismatch => "LW_RESOURCE_CAPACITY_PROVIDER_BINDING_MISMATCH",
+            Self::Plan => "LW_RESOURCE_CAPACITY_PLAN_INVALID",
+            Self::GpuUnsupported => "LW_RESOURCE_CAPACITY_EXHAUSTED",
+            Self::IdentityMismatch => "LW_RESOURCE_CAPACITY_IDENTITY_MISMATCH",
+            Self::Readback => "LW_RESOURCE_CAPACITY_READBACK_INVALID",
+            Self::Rejected => "LW_RESOURCE_CAPACITY_REJECTED",
+            Self::Unavailable => "LW_RESOURCE_CAPACITY_UNAVAILABLE",
+        }
+    }
 }
 
 #[cfg(test)]

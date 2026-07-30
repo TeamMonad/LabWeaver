@@ -7,6 +7,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::watch;
 
+use crate::capacity::{
+    CapacityProviderError, CapacityReconcileWorker, ResourceCapacityConfiguration,
+};
 use crate::messaging::{NatsLeaseResponderError, NatsLeaseVerificationResponder};
 use crate::store::PgResourceStore;
 
@@ -17,11 +20,13 @@ const NATS_CLIENT_CERTIFICATE_PATH: &str = "LABWEAVER_NATS_CLIENT_CERT_PATH";
 const NATS_CLIENT_PRIVATE_KEY_PATH: &str = "LABWEAVER_NATS_CLIENT_KEY_PATH";
 const NATS_CREDENTIALS_PATH: &str = "LABWEAVER_NATS_CREDENTIALS_PATH";
 const LEASE_VERIFICATION_SUBJECT: &str = "LABWEAVER_RESOURCE_LEASE_VERIFICATION_SUBJECT";
+const CAPACITY_CONFIG_FILE: &str = "LABWEAVER_RESOURCE_CAPACITY_CONFIG_FILE";
 
 /// Production dependency graph for Resource-owned Lease authorization.
 pub struct ResourceProcessRuntime {
     responder: NatsLeaseVerificationResponder,
     store: PgResourceStore,
+    capacity_worker: CapacityReconcileWorker,
     readiness: Arc<AtomicBool>,
     _shutdown_sender: watch::Sender<bool>,
     shutdown: watch::Receiver<bool>,
@@ -51,10 +56,20 @@ impl ResourceProcessRuntime {
         .await?;
         let responder =
             NatsLeaseVerificationResponder::new(required(LEASE_VERIFICATION_SUBJECT)?, client)?;
+        let capacity_configuration: ResourceCapacityConfiguration = serde_json::from_slice(
+            &std::fs::read(required_path(CAPACITY_CONFIG_FILE)?)
+                .map_err(|_| ResourceProcessRuntimeError::CapacityConfiguration)?,
+        )
+        .map_err(|_| ResourceProcessRuntimeError::CapacityConfiguration)?;
+        let store = PgResourceStore::new(pool);
+        let capacity_worker = capacity_configuration
+            .build_worker(store.clone())
+            .map_err(ResourceProcessRuntimeError::CapacityProvider)?;
         let (shutdown_sender, shutdown) = watch::channel(false);
         Ok(Self {
             responder,
-            store: PgResourceStore::new(pool),
+            store,
+            capacity_worker,
             readiness: Arc::new(AtomicBool::new(true)),
             _shutdown_sender: shutdown_sender,
             shutdown,
@@ -68,9 +83,32 @@ impl ResourceProcessRuntime {
 
     /// Keeps the responder live. A failed authoritative dependency flips readiness false.
     pub async fn run(self) -> Result<(), ResourceProcessRuntimeError> {
-        let result = self.responder.serve(self.store, self.shutdown).await;
+        let Self {
+            responder,
+            store,
+            capacity_worker,
+            readiness,
+            _shutdown_sender,
+            shutdown,
+        } = self;
+        let responder_shutdown = shutdown.clone();
+        let result = tokio::try_join!(
+            async {
+                responder
+                    .serve(store, responder_shutdown)
+                    .await
+                    .map_err(ResourceProcessRuntimeError::Responder)
+            },
+            async {
+                capacity_worker
+                    .run(shutdown)
+                    .await
+                    .map_err(ResourceProcessRuntimeError::Store)
+            },
+        )
+        .map(|_| ());
         if result.is_err() {
-            self.readiness.store(false, Ordering::Release);
+            readiness.store(false, Ordering::Release);
         }
         result.map_err(Into::into)
     }
@@ -127,6 +165,12 @@ pub enum ResourceProcessRuntimeError {
     NatsCredentials,
     #[error("LW_RESOURCE_NATS_CONNECT_FAILED")]
     NatsConnect,
+    #[error("LW_RESOURCE_CAPACITY_CONFIGURATION_INVALID")]
+    CapacityConfiguration,
+    #[error("LW_RESOURCE_CAPACITY_PROVIDER_INITIALIZATION_FAILED: {0}")]
+    CapacityProvider(#[source] CapacityProviderError),
+    #[error("LW_RESOURCE_STORE_FAILED: {0}")]
+    Store(#[source] crate::store::ResourceStoreError),
     #[error("LW_RESOURCE_NATS_RESPONDER_FAILED: {0}")]
     Responder(#[from] NatsLeaseResponderError),
 }
