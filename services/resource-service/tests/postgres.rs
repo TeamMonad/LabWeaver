@@ -178,6 +178,19 @@ async fn resource_store_commits_request_approval_claim_lease_and_renewal_as_fenc
         store.load(request.id).await?.state,
         ResourceRequestState::Active
     );
+    let handoff = store
+        .next_ready_capacity_handoff()
+        .await?
+        .expect("ready shell remains Resource-owned until Environment acknowledges");
+    assert_eq!(handoff.lease.id, active.id);
+    assert_eq!(
+        store
+            .mark_capacity_handed_off(handoff.claim.id, handoff.claim.revision)
+            .await?
+            .state,
+        contracts::resource::CapacityClaimState::HandedOff
+    );
+    assert!(store.next_ready_capacity_handoff().await?.is_none());
     let renewed_expires = UtcTimestamp::from_utc(active_from.get() + time::Duration::minutes(15))?;
     let renewed = store
         .renew_lease(
