@@ -452,3 +452,41 @@ impl IntoResponse for ResourceApiError {
         (status, self.to_string()).into_response()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn caller_must_be_the_access_service_principal() {
+        let mut headers = HeaderMap::new();
+        assert!(matches!(
+            authorize(&headers),
+            Err(ResourceApiError::CallerDenied)
+        ));
+        headers.insert(
+            "x-labweaver-caller-san",
+            HeaderValue::from_static(ACCESS_CALLER_SAN),
+        );
+        assert!(authorize(&headers).is_ok());
+    }
+
+    #[test]
+    fn actor_header_is_required_and_must_be_a_typed_id() {
+        let headers = HeaderMap::new();
+        assert!(matches!(
+            actor(&headers),
+            Err(ResourceApiError::IdentityInvalid)
+        ));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-labweaver-actor-id",
+            HeaderValue::from_static("not-an-actor"),
+        );
+        assert!(matches!(
+            actor(&headers),
+            Err(ResourceApiError::IdentityInvalid)
+        ));
+    }
+}
