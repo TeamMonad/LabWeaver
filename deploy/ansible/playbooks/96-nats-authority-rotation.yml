@@ -217,20 +217,112 @@
   vars:
     sprint2_foundation_bundle: "{{ lookup('ansible.builtin.env', 'LABWEAVER_NATS_ROTATION_OUTPUT') }}/foundation-bundle.yaml"
 
-- import_playbook: 93-sprint2-application.yml
+- name: Rotate every NATS-bearing application identity
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: true
   vars:
-    sprint2_application_configuration_bundle: "{{ lookup('ansible.builtin.env', 'LABWEAVER_NATS_ROTATION_OUTPUT') }}/application-bundle.yaml"
-    sprint2_application_nats_credentials_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_NATS_ROTATION_OUTPUT') }}/nats-admin/nats.creds"
-    sprint2_application_nats_ca_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_NATS_ROTATION_OUTPUT') }}/nats-admin/nats-ca.pem"
-    sprint2_application_nats_client_certificate_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_NATS_ROTATION_OUTPUT') }}/nats-admin/nats-client.crt"
-    sprint2_application_nats_client_private_key_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_NATS_ROTATION_OUTPUT') }}/nats-admin/nats-client.key"
+    nats_rotation_output: "{{ lookup('ansible.builtin.env', 'LABWEAVER_NATS_ROTATION_OUTPUT') }}"
+    nats_rotation_kubeconfig: "{{ lookup('ansible.builtin.env', 'LABWEAVER_KUBECONFIG') }}"
+    nats_rotation_kubectl: "{{ lookup('ansible.builtin.env', 'LABWEAVER_KUBECTL') | default('/usr/bin/kubectl', true) }}"
+    nats_rotation_cli: "{{ lookup('ansible.builtin.env', 'LABWEAVER_NATS_CLI') | default('/usr/local/bin/nats', true) }}"
+    nats_rotation_server: "{{ lookup('ansible.builtin.env', 'LABWEAVER_NATS_SERVER') }}"
+    nats_rotation_deployments:
+      - control-service
+      - access-service
+      - agent-service
+      - build-executor
+      - environment-service
+      - evaluation-service
+      - container-executor
+      - kubevirt-executor
+      - resource-service
+  tasks:
+    - name: Load the public replacement authority identity
+      ansible.builtin.set_fact:
+        nats_rotation_record: >-
+          {{ lookup('ansible.builtin.file',
+                    nats_rotation_output ~ '/rotation-record.json') | from_json }}
 
-- import_playbook: 94-resource-application.yml
-  vars:
-    resource_application_configuration_bundle: "{{ lookup('ansible.builtin.env', 'LABWEAVER_NATS_ROTATION_OUTPUT') }}/resource-bundle.yaml"
-    resource_application_package_manifest: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_PACKAGE_MANIFEST') }}"
-    resource_application_expected_source_commit: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_PACKAGE_SOURCE_COMMIT') }}"
-    resource_application_kubeconfig: "{{ lookup('ansible.builtin.env', 'LABWEAVER_KUBECONFIG') }}"
+    - name: Require explicit application rotation transport
+      ansible.builtin.assert:
+        that:
+          - nats_rotation_kubeconfig | length > 0
+          - nats_rotation_server | length > 0
+          - nats_rotation_record.operator_public is match('^O[A-Z2-7]{55}$')
+        fail_msg: NATS_AUTHORITY_ROTATION_APPLICATION_INPUT_INVALID
+
+    - name: Apply only reviewed NATS-bearing application objects
+      ansible.builtin.command:
+        argv:
+          - "{{ nats_rotation_kubectl }}"
+          - --kubeconfig
+          - "{{ nats_rotation_kubeconfig }}"
+          - apply
+          - --server-side
+          - --field-manager=labweaver-nats-authority-rotation
+          - --filename
+          - "{{ item }}"
+      loop:
+        - "{{ nats_rotation_output }}/application-bundle.yaml"
+        - "{{ nats_rotation_output }}/resource-bundle.yaml"
+      changed_when: true
+      no_log: true
+
+    - name: Roll every affected workload to the replacement authority
+      ansible.builtin.command:
+        argv:
+          - "{{ nats_rotation_kubectl }}"
+          - --kubeconfig
+          - "{{ nats_rotation_kubeconfig }}"
+          - --namespace
+          - labweaver-system
+          - patch
+          - deployment
+          - "{{ item }}"
+          - --type=merge
+          - --patch
+          - >-
+            {"spec":{"template":{"metadata":{"annotations":{
+            "labweaver.io/nats-authority-public":
+            "{{ nats_rotation_record.operator_public }}"}}}}}
+      loop: "{{ nats_rotation_deployments }}"
+      changed_when: true
+
+    - name: Wait for every affected workload to adopt the replacement authority
+      ansible.builtin.command:
+        argv:
+          - "{{ nats_rotation_kubectl }}"
+          - --kubeconfig
+          - "{{ nats_rotation_kubeconfig }}"
+          - --namespace
+          - labweaver-system
+          - rollout
+          - status
+          - "deployment/{{ item }}"
+          - --timeout=10m
+      loop: "{{ nats_rotation_deployments }}"
+      changed_when: false
+
+    - name: Verify replacement administrator JWT and mutual TLS
+      ansible.builtin.command:
+        argv:
+          - "{{ nats_rotation_cli }}"
+          - --server
+          - "{{ nats_rotation_server }}"
+          - --creds
+          - "{{ nats_rotation_output }}/nats-admin/nats.creds"
+          - --tlsca
+          - "{{ nats_rotation_output }}/nats-admin/nats-ca.pem"
+          - --tlscert
+          - "{{ nats_rotation_output }}/nats-admin/nats-client.crt"
+          - --tlskey
+          - "{{ nats_rotation_output }}/nats-admin/nats-client.key"
+          - account
+          - info
+      changed_when: false
+      no_log: true
 
 - name: Record verified replacement authority deployment
   hosts: localhost

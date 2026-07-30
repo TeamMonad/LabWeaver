@@ -202,9 +202,11 @@ ansible-playbook -i deploy/ansible/inventories/demo/hosts.yml \
 
 The controller supplies all source/output locations through the
 `LABWEAVER_NATS_ROTATION_*`, `LABWEAVER_NATS_SOURCE_*`,
-`LABWEAVER_NATS_WORKLOADS_SEED_FILE`, and `LABWEAVER_KUBECONFIG`
-environment variables. The current Sprint 2 and Resource package manifests are
-also explicit inputs; the playbook refuses cross-commit package substitution.
+`LABWEAVER_NATS_WORKLOADS_SEED_FILE`, `LABWEAVER_KUBECONFIG`, and
+`LABWEAVER_NATS_SERVER` environment variables. The rotation never changes
+application image identity: it applies only the reviewed NATS-bearing
+ConfigMap/Secret objects and binds the replacement operator public ID to the
+affected Pod templates.
 Every private input and generated file is root-owned mode `0600`, while
 directories are mode `0700`.
 
