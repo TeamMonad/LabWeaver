@@ -76,9 +76,18 @@ NATS_USERS: dict[str, tuple[tuple[str, ...], tuple[str, ...], bool]] = {
     ),
     "container-executor": ((), ("_INBOX.>", "labweaver.provider.kubernetes.container.v1"), True),
     "kubevirt-executor": ((), ("_INBOX.>", "labweaver.provider.kubevirt.vm.v1"), True),
-    # Resource is the lease authority: it only consumes verification requests
-    # and replies to the request inbox. It must not publish domain events.
-    "resource-service": ((), ("_INBOX.>", "labweaver.resource.lease.verify.v1"), True),
+    # Resource is the lease authority. It publishes its transactional outbox
+    # through JetStream and consumes verification requests/replies.
+    "resource-service": (
+        (
+            "$JS.API.>",
+            "$JS.ACK.>",
+            "labweaver.resource.request.submitted.v1",
+            "labweaver.resource.request.approved.v1",
+        ),
+        ("_INBOX.>", "labweaver.resource.lease.verify.v1"),
+        True,
+    ),
 }
 
 PLATFORM_IDENTITIES: dict[str, tuple[tuple[str, ...], str]] = {

@@ -96,7 +96,15 @@ class FoundationAuthoringTests(unittest.TestCase):
         resource_publish, resource_subscribe, resource_response = FOUNDATION.NATS_USERS[
             "resource-service"
         ]
-        self.assertEqual(resource_publish, ())
+        self.assertEqual(
+            resource_publish,
+            (
+                "$JS.API.>",
+                "$JS.ACK.>",
+                "labweaver.resource.request.submitted.v1",
+                "labweaver.resource.request.approved.v1",
+            ),
+        )
         self.assertEqual(resource_subscribe, ("_INBOX.>", "labweaver.resource.lease.verify.v1"))
         self.assertTrue(resource_response)
 

@@ -18,6 +18,12 @@ from pathlib import Path
 
 IDENTITY = "resource-service"
 SUBJECT = "labweaver.resource.lease.verify.v1"
+PUBLISH_SUBJECTS = (
+    "$JS.API.>",
+    "$JS.ACK.>",
+    "labweaver.resource.request.submitted.v1",
+    "labweaver.resource.request.approved.v1",
+)
 
 
 class IssuanceError(RuntimeError):
@@ -69,7 +75,11 @@ def issue(store: Path, nsc: Path, output: Path, valid_days: int) -> dict[str, ob
     home.mkdir(mode=0o700)
     credentials = output / "resource-service.nats.creds"
     try:
-        run_nsc(nsc, store, ["add", "user", "--account", "WORKLOADS", "--name", IDENTITY, "--expiry", f"{valid_days}d", "--allow-sub", "_INBOX.>", "--allow-sub", SUBJECT, "--allow-pub-response"], home)
+        args = ["add", "user", "--account", "WORKLOADS", "--name", IDENTITY, "--expiry", f"{valid_days}d"]
+        for subject in PUBLISH_SUBJECTS:
+            args.extend(("--allow-pub", subject))
+        args.extend(("--allow-sub", "_INBOX.>", "--allow-sub", SUBJECT, "--allow-pub-response"))
+        run_nsc(nsc, store, args, home)
         run_nsc(nsc, store, ["generate", "creds", "--account", "WORKLOADS", "--name", IDENTITY, "--output-file", str(credentials)], home)
     except Exception:
         if credentials.exists():
@@ -83,7 +93,7 @@ def issue(store: Path, nsc: Path, output: Path, valid_days: int) -> dict[str, ob
                 "status": "issued",
                 "identity": IDENTITY,
                 "account": "WORKLOADS",
-                "subjects": {"publish": [], "subscribe": ["_INBOX.>", SUBJECT], "response": True},
+                "subjects": {"publish": list(PUBLISH_SUBJECTS), "subscribe": ["_INBOX.>", SUBJECT], "response": True},
                 "credential_locator": "resource-service.nats.creds",
                 "credential_mode": "0600",
                 "secret_material_in_record": False,

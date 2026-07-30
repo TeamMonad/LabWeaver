@@ -56,6 +56,15 @@ class ResourceIdentityIssuanceTests(unittest.TestCase):
     def test_permissions_are_bounded(self) -> None:
         self.assertEqual(MODULE.IDENTITY, "resource-service")
         self.assertEqual(MODULE.SUBJECT, "labweaver.resource.lease.verify.v1")
+        self.assertEqual(
+            MODULE.PUBLISH_SUBJECTS,
+            (
+                "$JS.API.>",
+                "$JS.ACK.>",
+                "labweaver.resource.request.submitted.v1",
+                "labweaver.resource.request.approved.v1",
+            ),
+        )
 
 
 if __name__ == "__main__":
