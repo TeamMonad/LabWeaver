@@ -9,6 +9,8 @@ enum MainError {
     Runtime(#[from] resource_service::ResourceProcessRuntimeError),
     #[error(transparent)]
     Startup(#[from] service_runtime::StartupError),
+    #[error("LW_RESOURCE_RUNTIME_TASK_FAILED: {0}")]
+    RuntimeTask(#[from] tokio::task::JoinError),
 }
 
 #[tokio::main]
@@ -16,11 +18,15 @@ async fn main() -> Result<(), MainError> {
     let runtime = resource_service::ResourceProcessRuntime::from_env().await?;
     let readiness = runtime.readiness();
     let api = resource_service::api::resource_api_router(runtime.api_state());
-    tokio::spawn(async move {
-        if let Err(error) = runtime.run().await {
-            tracing::error!(event = "resource.runtime.stopped", error = %error);
+    let runtime_task = tokio::spawn(runtime.run());
+    tokio::select! {
+        result = runtime_task => {
+            result??;
+            Ok(())
         }
-    });
-    service_runtime::run_with_router(env!("CARGO_PKG_NAME"), readiness, api).await?;
-    Ok(())
+        result = service_runtime::run_with_router(env!("CARGO_PKG_NAME"), readiness, api) => {
+            result?;
+            Ok(())
+        }
+    }
 }

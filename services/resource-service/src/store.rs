@@ -787,10 +787,10 @@ impl PgResourceStore {
         if claim.revision != expected_revision || claim.state != CapacityClaimState::Ready {
             return Err(ResourceStoreError::CapacityClaimStateConflict);
         }
-        let attempt: i64 = sqlx::query_scalar("SELECT count(*)::bigint + 1 FROM resource.capacity_attempts WHERE claim_id=$1 AND step='environment_handoff'")
+        let attempt: i64 = sqlx::query_scalar("SELECT count(*)::bigint + 1 FROM resource.capacity_attempts WHERE claim_id=$1 AND step='handoff_environment'")
             .bind(claim_id.as_uuid()).fetch_one(&mut *transaction).await?;
-        sqlx::query("INSERT INTO resource.capacity_attempts (claim_id,attempt,step,state,diagnostic_code) VALUES ($1,$2,'environment_handoff',$3,$4)")
-            .bind(claim_id.as_uuid()).bind(attempt).bind(if attempt >= 3 { "blocked" } else { "retry" }).bind(diagnostic_code)
+        sqlx::query("INSERT INTO resource.capacity_attempts (claim_id,attempt,step,state,diagnostic_code) VALUES ($1,$2,'handoff_environment',$3,$4)")
+            .bind(claim_id.as_uuid()).bind(attempt).bind(if attempt >= 3 { "failed" } else { "retry" }).bind(diagnostic_code)
             .execute(&mut *transaction).await?;
         if attempt >= 3 {
             let next = transition_claim(&claim, CapacityClaimState::Blocked)?;

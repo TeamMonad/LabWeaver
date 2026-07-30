@@ -212,9 +212,29 @@ async fn resource_store_commits_request_approval_claim_lease_and_renewal_as_fenc
         .await?
         .expect("ready shell remains Resource-owned until Environment acknowledges");
     assert_eq!(handoff.lease.id, active.id);
+    let retrying = store
+        .retry_or_block_capacity_handoff(
+            handoff.claim.id,
+            handoff.claim.revision,
+            "LW_RESOURCE_ENVIRONMENT_HANDOFF_UNAVAILABLE",
+        )
+        .await?;
+    assert_eq!(
+        retrying.state,
+        contracts::resource::CapacityClaimState::Ready
+    );
+    let (step, state, diagnostic): (String, String, String) = sqlx::query_as(
+        "SELECT step,state,diagnostic_code FROM resource.capacity_attempts WHERE claim_id=$1 AND attempt=1",
+    )
+    .bind(handoff.claim.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(step, "handoff_environment");
+    assert_eq!(state, "retry");
+    assert_eq!(diagnostic, "LW_RESOURCE_ENVIRONMENT_HANDOFF_UNAVAILABLE");
     assert_eq!(
         store
-            .mark_capacity_handed_off(handoff.claim.id, handoff.claim.revision)
+            .mark_capacity_handed_off(retrying.id, retrying.revision)
             .await?
             .state,
         contracts::resource::CapacityClaimState::HandedOff
