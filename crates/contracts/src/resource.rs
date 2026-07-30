@@ -191,7 +191,21 @@ pub struct CapacityClaim {
     pub workload_resources: WorkloadResources,
     pub quota_resources: WorkloadResources,
     pub quota_plan_sha256: Sha256Digest,
+    pub state: CapacityClaimState,
     pub revision: Revision,
+}
+
+/// Provider-owned capacity-shell lifecycle. Resource remains the authority for every transition.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapacityClaimState {
+    Reserved,
+    Provisioning,
+    Ready,
+    HandedOff,
+    Releasing,
+    Released,
+    Blocked,
 }
 
 impl CapacityClaim {

@@ -118,6 +118,7 @@ async fn resource_store_commits_request_approval_claim_lease_and_renewal_as_fenc
             workload_resources: resources.clone(),
             quota_resources: resources,
             quota_plan_sha256: digest(),
+            state: contracts::resource::CapacityClaimState::Reserved,
             revision: Revision::new(1)?,
         },
         lease_id: LeaseId::new(),

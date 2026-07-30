@@ -4,6 +4,19 @@
       "description": "Strongly typed UUIDv7 identifier for `CapacityClaimId`.",
       "type": "string"
     },
+    "CapacityClaimState": {
+      "description": "Provider-owned capacity-shell lifecycle. Resource remains the authority for every transition.",
+      "enum": [
+        "reserved",
+        "provisioning",
+        "ready",
+        "handed_off",
+        "releasing",
+        "released",
+        "blocked"
+      ],
+      "type": "string"
+    },
     "GpuRequest": {
       "additionalProperties": false,
       "description": "A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.",
@@ -107,6 +120,9 @@
     "revision": {
       "$ref": "#/$defs/Revision"
     },
+    "state": {
+      "$ref": "#/$defs/CapacityClaimState"
+    },
     "workloadResources": {
       "$ref": "#/$defs/WorkloadResources"
     }
@@ -120,6 +136,7 @@
     "workloadResources",
     "quotaResources",
     "quotaPlanSha256",
+    "state",
     "revision"
   ],
   "title": "CapacityClaim",

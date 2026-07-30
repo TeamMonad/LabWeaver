@@ -6,8 +6,8 @@ use contracts::environment::{
 };
 use contracts::http::IdempotencyKey;
 use contracts::resource::{
-    CapacityClaim, ResourceApproval, ResourceLease, ResourceLeaseState, ResourceRequest,
-    ResourceRequestState,
+    CapacityClaim, CapacityClaimState, ResourceApproval, ResourceLease, ResourceLeaseState,
+    ResourceRequest, ResourceRequestState,
 };
 use contracts::{EventId, LeaseId, ResourceRequestId, Sha256Digest, UtcTimestamp};
 use persistence_sqlx::{
@@ -43,6 +43,7 @@ impl PendingAllocation {
             || self.claim.provider_binding != approval.provider_binding
             || self.claim.policy_sha256 != approval.policy_sha256
             || self.claim.workload_resources != approval.approved_resources
+            || self.claim.state != CapacityClaimState::Reserved
         {
             return Err(ResourceStoreError::AllocationMismatch);
         }
@@ -470,8 +471,8 @@ async fn insert_claim(
 ) -> Result<(), ResourceStoreError> {
     let workload_gpu = claim.workload_resources.gpu.as_ref();
     let quota_gpu = claim.quota_resources.gpu.as_ref();
-    sqlx::query("INSERT INTO resource.capacity_claims (claim_id,request_id,approval_id,provider_binding,policy_sha256,quota_plan_sha256,state,revision,created_at,updated_at,workload_cpu_millicores,workload_memory_bytes,workload_storage_bytes,workload_gpu_class,workload_gpu_count,quota_cpu_millicores,quota_memory_bytes,quota_storage_bytes,quota_gpu_class,quota_gpu_count,contract) VALUES ($1,$2,$3,$4,$5,$6,'reserved',$7,clock_timestamp(),clock_timestamp(),$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)")
-        .bind(claim.id.as_uuid()).bind(claim.request_id.as_uuid()).bind(claim.approval_id.as_uuid()).bind(&claim.provider_binding).bind(claim.policy_sha256.to_string()).bind(claim.quota_plan_sha256.to_string()).bind(i64::try_from(claim.revision.get())?)
+    sqlx::query("INSERT INTO resource.capacity_claims (claim_id,request_id,approval_id,provider_binding,policy_sha256,quota_plan_sha256,state,revision,created_at,updated_at,workload_cpu_millicores,workload_memory_bytes,workload_storage_bytes,workload_gpu_class,workload_gpu_count,quota_cpu_millicores,quota_memory_bytes,quota_storage_bytes,quota_gpu_class,quota_gpu_count,contract) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,clock_timestamp(),clock_timestamp(),$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)")
+        .bind(claim.id.as_uuid()).bind(claim.request_id.as_uuid()).bind(claim.approval_id.as_uuid()).bind(&claim.provider_binding).bind(claim.policy_sha256.to_string()).bind(claim.quota_plan_sha256.to_string()).bind(wire(claim.state)?).bind(i64::try_from(claim.revision.get())?)
         .bind(i32::try_from(claim.workload_resources.cpu_millicores)?).bind(i64::try_from(claim.workload_resources.memory_bytes)?).bind(i64::try_from(claim.workload_resources.storage_bytes)?)
         .bind(workload_gpu.map(|value| value.class.as_str())).bind(workload_gpu.map(|value| i32::try_from(value.count)).transpose()?)
         .bind(i32::try_from(claim.quota_resources.cpu_millicores)?).bind(i64::try_from(claim.quota_resources.memory_bytes)?).bind(i64::try_from(claim.quota_resources.storage_bytes)?)

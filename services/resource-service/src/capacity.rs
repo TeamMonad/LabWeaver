@@ -70,6 +70,13 @@ impl KubernetesQuotaShellPlan {
         if claim.provider_binding != configuration.binding || claim.request_id != request.id {
             return Err(CapacityProviderError::BindingMismatch);
         }
+        if !matches!(
+            claim.state,
+            contracts::resource::CapacityClaimState::Reserved
+                | contracts::resource::CapacityClaimState::Provisioning
+        ) {
+            return Err(CapacityProviderError::Plan);
+        }
         // GPU classes are catalog values, not Kubernetes extended-resource names. Sprint 3
         // admits zero GPU capacity, so any such request must have been rejected before here.
         if claim.quota_resources.gpu.is_some() || claim.workload_resources.gpu.is_some() {
@@ -413,6 +420,7 @@ mod tests {
             workload_resources: resources(),
             quota_resources: resources(),
             quota_plan_sha256: digest(),
+            state: contracts::resource::CapacityClaimState::Reserved,
             revision: contracts::Revision::new(1).expect("positive"),
         };
         let plan = KubernetesQuotaShellPlan::from_claim(&configuration, &request, &claim)
