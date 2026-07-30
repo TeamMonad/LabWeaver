@@ -441,7 +441,7 @@ class AnsibleFixtureTests(unittest.TestCase):
             ROOT / "deploy/helm/labweaver/templates/cilium-ingress-policy.yaml"
         ).read_text(encoding="utf-8")
         self.assertIn(
-            "values: [container-executor, evaluation-service, kubevirt-executor]",
+            "values: [container-executor, evaluation-service, kubevirt-executor, resource-service]",
             policy,
         )
         self.assertIn("toEntities: [kube-apiserver]", policy)
