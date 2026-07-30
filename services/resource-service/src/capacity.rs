@@ -7,10 +7,11 @@ use std::time::Duration;
 use contracts::UtcTimestamp;
 use contracts::environment::ResourceWorkHandoff;
 use contracts::resource::{CapacityClaim, ResourceLeaseState, ResourceRequest};
-use reqwest::{Certificate, Client, Identity, StatusCode, Url};
+use reqwest::{Certificate, Client, Identity, StatusCode};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::watch;
+use url::Url;
 
 const FIELD_MANAGER: &str = "labweaver-resource-service";
 const QUOTA_NAME: &str = "resource-quota";
