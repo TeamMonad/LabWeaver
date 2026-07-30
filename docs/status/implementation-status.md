@@ -112,14 +112,17 @@ acceptance; three failed handoffs become an auditable `blocked` claim.
 The Resource public HTTP surface is now implemented locally: owner-scoped list
 and get, create, approve/resize-approve, cancel, reject, retry, Lease renew and
 Lease revoke all use explicit actor/caller checks, idempotency keys and revision
-fences backed by the PostgreSQL store. This is still **not a connected-runtime
-verification**: the mTLS caller identity adapter, deployment ConfigMap/Secret/
-NATS identity, and connected PostgreSQL/NATS/Kubernetes/Environment evidence are
-not complete. The Helm workload remains disabled, and no Release Gate or Sprint
-2 runtime capability is claimed for #142.
+fences backed by the PostgreSQL store. The retained application deployment and
+readiness checks are now connected on the demo cluster: the Resource Deployment
+is digest-pinned and Ready, migrations 0001-0005 were applied with an audited
+ledger, and a real create/get/approve request reached PostgreSQL. The lease flow
+remains blocked because the deployed NATS account resolver has not accepted a
+newly signed Resource user, so the transactional outbox is rejected by NATS.
+No lease or Environment handoff evidence is claimed until account publication is
+completed.
 
 The foundation authoring source now registers a dedicated `resource-service`
-NATS identity with no domain publish permissions, a bounded request/reply inbox
+NATS identity with JetStream and Resource outbox publish permissions, a bounded request/reply inbox
 subscription, and the Resource lease-verification subject. It also registers
 the matching mTLS platform identity. The retained signing source was recovered
 from the reviewed logical bundle `sprint2-foundation-547d8fea`, copied into an

@@ -24,6 +24,6 @@ WorkConfig, Resource approval, Tailnet, OpenAI Runtime,
 multi-provider routing, Sigstore, Kyverno and Packer are outside this matrix.
 The #140 row is planned connected coverage; its current evidence is local E1
 and remains blocked by #123 and D Verify.
-The #142 row currently has local contract/store coverage only; connected
-deployment, mTLS caller verification and Environment handoff evidence remain
-pending.
+The #142 row has connected deployment/readiness and PostgreSQL request/approval
+evidence. NATS account publication currently blocks outbox dispatch, so lease
+allocation, mTLS caller verification and Environment handoff remain pending.
