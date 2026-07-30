@@ -38,3 +38,6 @@ domains:
       - id: 1
         file: resource/0001_sprint2_baseline.sql
         sha256: 54b2f428109fb3e819da9db23802b58ecd760858f39404e7ef4d028cfa508e79
+      - id: 2
+        file: resource/0002_resource_request_capacity_lease.sql
+        sha256: 80ddbe36cf0bbf19758294388458c9763007042c967bc7b423f6f99bf9d3fda3

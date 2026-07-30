@@ -134,6 +134,22 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::environment::EnvironmentLeaseVerificationResponse
     );
     document!(
+        "schemas/contracts/v1/resource-request.schema.json",
+        crate::resource::ResourceRequest
+    );
+    document!(
+        "schemas/contracts/v1/resource-approval.schema.json",
+        crate::resource::ResourceApproval
+    );
+    document!(
+        "schemas/contracts/v1/capacity-claim.schema.json",
+        crate::resource::CapacityClaim
+    );
+    document!(
+        "schemas/contracts/v1/resource-lease-authorization.schema.json",
+        crate::resource::ResourceLeaseAuthorization
+    );
+    document!(
         "schemas/contracts/v1/environment-endpoint.schema.json",
         crate::environment::EnvironmentEndpoint
     );
@@ -308,6 +324,26 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/http/create-environment-request.schema.json",
         crate::http::CreateEnvironmentRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/create-resource-request.schema.json",
+        crate::http::CreateResourceRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/approve-resource-request.schema.json",
+        crate::http::ApproveResourceRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/resource-request-mutation.schema.json",
+        crate::http::ResourceRequestMutation
+    );
+    document!(
+        "schemas/contracts/v1/http/renew-resource-lease.schema.json",
+        crate::http::RenewResourceLease
+    );
+    document!(
+        "schemas/contracts/v1/http/resource-operation-accepted.schema.json",
+        crate::http::ResourceOperationAccepted
     );
     document!(
         "schemas/contracts/v1/http/environment-operation-accepted.schema.json",

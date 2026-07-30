@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AccessGrantId, ActorId, ApprovalId, BuildRequestId, CandidateId, CourseId, DiagnosticCode,
-    EndpointId, EnvironmentId, EventId, ImageArtifactId, OperationId, PlatformRole,
-    ProblemPackageId, ProjectId, ReleaseId, Revision, Sha256Digest, StreamSequence,
-    UploadSessionId, UtcTimestamp,
+    EndpointId, EnvironmentId, EventId, ImageArtifactId, LeaseId, OperationId, PlatformRole,
+    ProblemPackageId, ProjectId, ReleaseId, ResourceRequestId, Revision, Sha256Digest,
+    StreamSequence, UploadSessionId, UtcTimestamp,
 };
 
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -34,6 +34,59 @@ pub struct EnvironmentOperationAccepted {
     pub revision: Revision,
     pub status_url: String,
     pub environment_id: EnvironmentId,
+}
+
+/// Browser request for a new Work-environment capacity reservation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateResourceRequest {
+    pub course_id: CourseId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<ProjectId>,
+    pub request_key: String,
+    pub release_id: ReleaseId,
+    pub release_version: u64,
+    pub resources: crate::resource::WorkloadResources,
+    pub duration_seconds: u64,
+}
+
+/// Administrator approval or resize decision. The selected Provider is always explicit.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApproveResourceRequest {
+    pub expected_revision: Revision,
+    pub provider_binding: String,
+    pub resources: crate::resource::WorkloadResources,
+    pub duration_seconds: u64,
+    pub reason: String,
+}
+
+/// Revision-fenced reason-bearing Resource mutation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResourceRequestMutation {
+    pub expected_revision: Revision,
+    pub reason: String,
+}
+
+/// Revision-fenced Lease renewal. Resources and Provider binding are immutable after approval.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RenewResourceLease {
+    pub expected_revision: Revision,
+    pub duration_seconds: u64,
+    pub reason: String,
+}
+
+/// Stable response returned when Resource accepts an asynchronous allocation mutation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResourceOperationAccepted {
+    pub request_id: ResourceRequestId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_id: Option<LeaseId>,
+    pub revision: Revision,
+    pub status_url: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -672,6 +725,56 @@ const PLATFORM_ADMIN: &[PlatformRole] = &[PlatformRole::PlatformAdmin];
 /// Gateway requests, and service middleware share one semantic source.
 pub const OPERATION_AUTHORIZATIONS: &[OperationAuthorization] = &[
     OperationAuthorization {
+        operation_id: "createResourceRequest",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "listResourceRequests",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "getResourceRequest",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "cancelResourceRequest",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "approveResourceRequest",
+        allowed_roles: PLATFORM_ADMIN,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "rejectResourceRequest",
+        allowed_roles: PLATFORM_ADMIN,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "retryResourceRequest",
+        allowed_roles: PLATFORM_ADMIN,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "getResourceLease",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "renewResourceLease",
+        allowed_roles: PLATFORM_ADMIN,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "revokeResourceLease",
+        allowed_roles: PLATFORM_ADMIN,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
         operation_id: "createProblemPackageUpload",
         allowed_roles: TEACHER,
         scope: OperationScopeKind::Course,
@@ -965,6 +1068,126 @@ macro_rules! op {
 }
 
 pub const OPERATIONS: &[OperationContract] = &[
+    op!(
+        Public,
+        Post,
+        "/api/v1/resource-requests",
+        "createResourceRequest",
+        "resource_request:write",
+        BffSession,
+        IdempotentCreate,
+        202,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/resource-requests",
+        "listResourceRequests",
+        "resource_request:read",
+        BffSession,
+        None,
+        200,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/resource-requests/{requestId}",
+        "getResourceRequest",
+        "resource_request:read",
+        BffSession,
+        None,
+        200,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/resource-requests/{requestId}/cancel",
+        "cancelResourceRequest",
+        "resource_request:cancel",
+        BffSession,
+        IdempotentRevisioned,
+        202,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/resource-requests/{requestId}/approve",
+        "approveResourceRequest",
+        "resource_request:approve",
+        BffSession,
+        IdempotentRevisioned,
+        202,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/resource-requests/{requestId}/reject",
+        "rejectResourceRequest",
+        "resource_request:approve",
+        BffSession,
+        IdempotentRevisioned,
+        202,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/resource-requests/{requestId}/retry",
+        "retryResourceRequest",
+        "resource_request:retry",
+        BffSession,
+        IdempotentRevisioned,
+        202,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/resource-leases/{leaseId}",
+        "getResourceLease",
+        "resource_lease:read",
+        BffSession,
+        None,
+        200,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/resource-leases/{leaseId}/renew",
+        "renewResourceLease",
+        "resource_lease:renew",
+        BffSession,
+        IdempotentRevisioned,
+        202,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/resource-leases/{leaseId}/revoke",
+        "revokeResourceLease",
+        "resource_lease:revoke",
+        BffSession,
+        IdempotentRevisioned,
+        202,
+        false,
+        true
+    ),
     op!(
         Public,
         Post,

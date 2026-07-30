@@ -9,10 +9,15 @@ rust-version.workspace = true
 [dependencies]
 axum.workspace = true
 contracts = { path = "../../crates/contracts" }
+serde.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
 telemetry = { path = "../../crates/telemetry" }
 thiserror.workspace = true
+time.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true

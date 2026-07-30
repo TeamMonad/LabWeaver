@@ -25,6 +25,7 @@ pub mod evaluation;
 pub mod events;
 pub mod foundation;
 pub mod http;
+pub mod resource;
 pub mod schema;
 pub mod submission;
 pub mod supply_chain;

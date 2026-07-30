@@ -1,0 +1,161 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "CapacityClaimId": {
+      "description": "Strongly typed UUIDv7 identifier for `CapacityClaimId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "GpuRequest": {
+      "additionalProperties": false,
+      "description": "A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.",
+      "properties": {
+        "class": {
+          "type": "string"
+        },
+        "count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "class",
+        "count"
+      ],
+      "type": "object"
+    },
+    "LeaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "Sha256Digest": {
+      "description": "Canonical lowercase SHA-256 digest.",
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    },
+    "WorkloadResources": {
+      "additionalProperties": false,
+      "description": "Requested or approved workload resources, independent of Kubernetes quantity syntax.",
+      "properties": {
+        "cpuMillicores": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "gpu": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpuRequest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memoryBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "storageBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cpuMillicores",
+        "memoryBytes",
+        "storageBytes"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Resource-owned Active Lease authorization passed to Environment Service.",
+  "properties": {
+    "activeFrom": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "approvedResources": {
+      "$ref": "#/$defs/WorkloadResources"
+    },
+    "claimId": {
+      "$ref": "#/$defs/CapacityClaimId"
+    },
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    },
+    "environmentId": {
+      "$ref": "#/$defs/EnvironmentId"
+    },
+    "expiresAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "leaseId": {
+      "$ref": "#/$defs/LeaseId"
+    },
+    "leaseRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "ownerActorId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "projectId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ProjectId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "providerBinding": {
+      "type": "string"
+    },
+    "quotaPlanSha256": {
+      "$ref": "#/$defs/Sha256Digest"
+    }
+  },
+  "required": [
+    "leaseId",
+    "leaseRevision",
+    "claimId",
+    "environmentId",
+    "courseId",
+    "ownerActorId",
+    "providerBinding",
+    "approvedResources",
+    "quotaPlanSha256",
+    "activeFrom",
+    "expiresAt"
+  ],
+  "title": "ResourceLeaseAuthorization",
+  "type": "object"
+}

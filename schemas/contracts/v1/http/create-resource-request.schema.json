@@ -1,0 +1,119 @@
+{
+  "$defs": {
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "GpuRequest": {
+      "additionalProperties": false,
+      "description": "A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.",
+      "properties": {
+        "class": {
+          "type": "string"
+        },
+        "count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "class",
+        "count"
+      ],
+      "type": "object"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "ReleaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `ReleaseId`.",
+      "type": "string"
+    },
+    "WorkloadResources": {
+      "additionalProperties": false,
+      "description": "Requested or approved workload resources, independent of Kubernetes quantity syntax.",
+      "properties": {
+        "cpuMillicores": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "gpu": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpuRequest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memoryBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "storageBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cpuMillicores",
+        "memoryBytes",
+        "storageBytes"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Browser request for a new Work-environment capacity reservation.",
+  "properties": {
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    },
+    "durationSeconds": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "projectId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ProjectId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "releaseId": {
+      "$ref": "#/$defs/ReleaseId"
+    },
+    "releaseVersion": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "requestKey": {
+      "type": "string"
+    },
+    "resources": {
+      "$ref": "#/$defs/WorkloadResources"
+    }
+  },
+  "required": [
+    "courseId",
+    "requestKey",
+    "releaseId",
+    "releaseVersion",
+    "resources",
+    "durationSeconds"
+  ],
+  "title": "CreateResourceRequest",
+  "type": "object"
+}

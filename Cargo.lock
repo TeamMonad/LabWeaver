@@ -4917,10 +4917,15 @@ version = "0.1.0"
 dependencies = [
  "axum 0.8.9",
  "contracts",
+ "serde",
+ "sha2 0.10.9",
+ "sqlx",
  "telemetry",
  "thiserror 2.0.18",
+ "time",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
