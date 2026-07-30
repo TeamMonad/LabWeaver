@@ -1,5 +1,7 @@
 //! PostgreSQL evidence for Resource authority schema and pending Lease semantics.
 
+use std::time::Duration;
+
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
@@ -14,7 +16,10 @@ use contracts::{
     ResourceRequestId, Revision, Sha256Digest, UtcTimestamp,
 };
 use resource_service::ApprovalPolicy;
+use resource_service::outbox::{ResourceOutboxDispatcher, ResourceOutboxOutcome};
 use resource_service::store::{PendingAllocation, PgResourceStore};
+use testcontainers::GenericImage;
+use testcontainers::core::{IntoContainerPort, WaitFor};
 
 #[tokio::test]
 async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_invariants()
@@ -215,4 +220,99 @@ async fn migrated_pool()
 
 fn digest() -> Sha256Digest {
     "a".repeat(64).parse().expect("fixed SHA-256 digest")
+}
+
+#[tokio::test]
+async fn resource_outbox_waits_for_jetstream_ack_before_marking_published()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_postgres, pool) = migrated_pool().await?;
+    let request = outbox_request()?;
+    let event = contracts::events::CloudEvent {
+        specversion: contracts::events::SPEC_VERSION.into(),
+        id: contracts::EventId::new(),
+        source: "urn:labweaver:resource-service".into(),
+        event_type: contracts::events::subjects::RESOURCE_REQUEST_SUBMITTED.into(),
+        subject: contracts::events::subjects::RESOURCE_REQUEST_SUBMITTED.into(),
+        time: request.created_at,
+        datacontenttype: "application/json".into(),
+        dataschema: format!(
+            "{}/resource-request-submitted.schema.json",
+            contracts::events::DATA_SCHEMA_BASE
+        ),
+        course_id: request.course_id,
+        aggregate_revision: request.revision,
+        aggregate_sequence: contracts::Sequence(1),
+        trace_id: "resource-outbox-jetstream".into(),
+        data: contracts::events::ResourceRequestChanged { request },
+    };
+    let payload = serde_json::to_value(&event)?;
+    sqlx::query("INSERT INTO resource.outbox_events (event_id,subject,event_type,aggregate_id,aggregate_sequence,payload,payload_sha256) VALUES ($1,$2,$2,$3,1,$4,$5)")
+        .bind(event.id.as_uuid()).bind(&event.subject).bind(event.data.request.id.as_uuid()).bind(&payload).bind(Sha256Digest::of_canonical(&payload)?.to_string()).execute(&pool).await?;
+    let nats = GenericImage::new("nats", "2.11.8-alpine")
+        .with_exposed_port(4222.tcp())
+        .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
+        .with_cmd(["-js"])
+        .start()
+        .await?;
+    let client = async_nats::connect(format!(
+        "nats://127.0.0.1:{}",
+        nats.get_host_port_ipv4(4222).await?
+    ))
+    .await?;
+    let dispatcher =
+        ResourceOutboxDispatcher::new(pool.clone(), client.clone(), Duration::from_secs(5))?;
+    assert!(dispatcher.dispatch_once().await.is_err());
+    assert!(!published(&pool, event.id).await?);
+    let context = async_nats::jetstream::new(client);
+    context
+        .create_stream(async_nats::jetstream::stream::Config {
+            name: "RESOURCE_EVENTS".into(),
+            subjects: vec!["labweaver.resource.>".into()],
+            ..Default::default()
+        })
+        .await?;
+    assert!(
+        matches!(dispatcher.dispatch_once().await?, ResourceOutboxOutcome::Published { event_id } if event_id == event.id)
+    );
+    assert!(published(&pool, event.id).await?);
+    Ok(())
+}
+
+async fn published(pool: &sqlx::PgPool, event_id: contracts::EventId) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT published_at IS NOT NULL FROM resource.outbox_events WHERE event_id=$1",
+    )
+    .bind(event_id.as_uuid())
+    .fetch_one(pool)
+    .await
+}
+
+fn outbox_request() -> Result<ResourceRequest, Box<dyn std::error::Error>> {
+    let now: UtcTimestamp = "2026-07-30T00:00:00.000Z".parse()?;
+    Ok(ResourceRequest {
+        id: ResourceRequestId::new(),
+        generation: 1,
+        request_key: "outbox-1".into(),
+        requester_id: ActorId::new(),
+        course_id: CourseId::new(),
+        project_id: None,
+        target: ResourceTarget {
+            environment_id: EnvironmentId::new(),
+            release_id: ReleaseId::new(),
+            release_version: 1,
+            release_sha256: digest(),
+        },
+        requested_resources: WorkloadResources {
+            cpu_millicores: 1,
+            memory_bytes: 1,
+            storage_bytes: 1,
+            gpu: None,
+        },
+        requested_duration_seconds: 60,
+        state: ResourceRequestState::Reviewing,
+        revision: Revision::new(1)?,
+        created_at: now,
+        updated_at: now,
+        diagnostic_code: None,
+    })
 }
