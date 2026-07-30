@@ -223,6 +223,16 @@ The non-secret `rotation-record.json` and
 identity names, permission summaries, controlled locators, run/commit identity,
 and readiness counts only. Seeds, JWTs, `.creds`, TLS private keys, Secret
 payloads, or their hashes must never be copied to Git or deployment logs.
+`rotation-connected-verification.json` is written only after the replacement
+credentials are live. It must prove all ten public identities, rejection of the
+immediately preceding credentials, retained streams and consumers, zero pending
+Resource Outbox rows, and readiness of every NATS-bearing Deployment.
+
+The Environment user is the requester in the Resource Lease request/reply
+protocol. Its publish allowlist must include
+`labweaver.resource.lease.verify.v1`; Resource subscribes to that exact subject
+and receives a one-reply permission. A rotation that validates only Resource's
+subscription but not Environment's publish authority is incomplete.
 Before applying the private configuration bundle, the application role decodes
 only the public claims in the mounted Control user JWT and verifies that its
 publish allowlist covers both configured quarantine subjects. The validator

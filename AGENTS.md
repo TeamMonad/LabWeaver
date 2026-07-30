@@ -878,3 +878,21 @@ operator/SYS/WORKLOADS public identities, the ten JWT/mTLS identities
 and deployment verification. Run the playbook twice and require stable public
 identity, JetStream state, workload readiness, and a successful Resource
 request/approval/Lease verification flow before declaring adoption complete.
+
+The controlled locator layout is stable and must be used instead of searching
+chat history or copying credentials between services:
+
+| Identity set | Canonical private locator | Live Kubernetes object |
+| --- | --- | --- |
+| Operator, SYS and retained WORKLOADS signing authority | `${LABWEAVER_NATS_ROTATION_AUTHORITY_ROOT}` | `labweaver-data/nats-config` and `labweaver-data/nats-server-secrets` |
+| Control, Access, Agent, Build, Environment, Evaluation and both runtime executors | `${LABWEAVER_NATS_ROTATION_OUTPUT}/application-bundle.yaml` | matching `labweaver-system/*-secrets` object |
+| Resource Service | `${LABWEAVER_NATS_ROTATION_OUTPUT}/resource-bundle.yaml` | `labweaver-system/resource-service-secrets` |
+| Controller-side NATS administrator | `${LABWEAVER_NATS_ROTATION_OUTPUT}/nats-admin/` | not copied into a workload Secret |
+| Public identity and connected verification records | `${LABWEAVER_NATS_ROTATION_OUTPUT}/rotation-record.json`, `rotation-deployment-record.json`, and `rotation-connected-verification.json` | not applicable |
+| Pre-rotation rollback material | `${LABWEAVER_NATS_ROTATION_OUTPUT}/rollback/` | not applicable |
+
+Each workload Secret uses the fixed keys `nats.creds`, `nats-ca.pem`,
+`nats-client.crt`, and `nats-client.key`. The Environment identity must publish
+`labweaver.resource.lease.verify.v1`; Resource must subscribe to that subject
+and may publish only one reply. Validate this request/reply path after every
+rotation, in addition to decoding public JWT claims.

@@ -284,6 +284,16 @@
           - --tlskey
           - "{{ nats_rotation_output }}/nats-admin/nats-client.key"
 
+    - name: Wait for replacement NATS administrator transport
+      ansible.builtin.command:
+        argv: "{{ nats_rotation_admin_argv + ['account', 'info'] }}"
+      register: nats_rotation_admin_transport
+      changed_when: false
+      retries: 12
+      delay: 1
+      until: nats_rotation_admin_transport.rc == 0
+      no_log: true
+
     - name: Inspect the retained Resource stream
       ansible.builtin.command:
         argv: >-

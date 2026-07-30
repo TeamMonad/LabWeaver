@@ -112,37 +112,36 @@ acceptance; three failed handoffs become an auditable `blocked` claim.
 The Resource public HTTP surface is now implemented locally: owner-scoped list
 and get, create, approve/resize-approve, cancel, reject, retry, Lease renew and
 Lease revoke all use explicit actor/caller checks, idempotency keys and revision
-fences backed by the PostgreSQL store. The retained application deployment and
-readiness checks are now connected on the demo cluster: the Resource Deployment
-is digest-pinned and Ready, migrations 0001-0005 were applied with an audited
-ledger, and a real create/get/approve request reached PostgreSQL. The lease flow
-remains blocked because the deployed NATS account resolver has not accepted a
-newly signed Resource user, so the transactional outbox is rejected by NATS.
-The recovered `sprint2-foundation-547d8fea` and `cd2919c` stores do not match
-the active WORKLOADS account JWT hash (`b38c4eb7...`); they must not be used to
-push account state. No lease or Environment handoff evidence is claimed until
-the active operator signing source is recovered and account publication is
-completed.
+fences backed by the PostgreSQL store. The retained application deployment is
+connected on the demo cluster: Resource is digest-pinned and Ready, migrations
+0001-0005 have an audited ledger, and a real create/approve flow produced a
+read-back ResourceQuota shell and active Lease.
 
-The foundation authoring source now registers a dedicated `resource-service`
-NATS identity with JetStream and Resource outbox publish permissions, a bounded request/reply inbox
-subscription, and the Resource lease-verification subject. It also registers
-the matching mTLS platform identity. The retained signing source was recovered
-from the reviewed logical bundle `sprint2-foundation-547d8fea`, copied into an
-isolated root-owned store, and matched against the issuer of the deployed
-Control Service credential before use. The Ansible issuance entrypoint created
-a dedicated `resource-service` credential as `root:root 0600`; its issuer is
-the verified `WORKLOADS` account, its subscriptions are limited to `_INBOX.>`
-and `labweaver.resource.lease.verify.v1`, and response permission is limited to
-one reply. The remote non-secret recovery and issuance records are retained at
-the private controller locator described by `AGENTS.md`; no other service
-credential was reused. This closes NATS issuance only: Resource mTLS issuance,
-application bundle integration, workload deployment, and connected service
-verification remain incomplete.
+The former NATS operator seed was not recovered and is retired. A controlled
+forward rotation preserved only the reviewed `WORKLOADS` account key, created a
+new operator/SYS authority, and reissued all ten JWT/mTLS identities. Two
+independent playbook runs retained seven streams and five consumers, rejected
+the immediately preceding credentials, observed zero pending Resource Outbox
+rows, and left all nine NATS-bearing Deployments Ready. The Environment identity
+can publish `labweaver.resource.lease.verify.v1`; the bounded Resource
+request/reply path returned the exact active Lease. Root-only authority,
+deployment, connected-verification and rollback records use the controlled
+locators documented in `AGENTS.md`; no credential value or secret hash is a
+committed artifact.
 
-Local evidence: `cargo test -p resource-service` passes 12 tests, including
-API identity guards, lifecycle fences, PostgreSQL migration/store invariants and
-Outbox acknowledgement. This does not upgrade the connected-runtime status.
+Stale provisioning recovery preserves its authoritative failed phase, and the
+Resource process exits when its background runtime fails so Kubernetes can
+restart it. A deliberately invalid fixture handoff produced three auditable
+`retry`, `retry`, `failed` attempt rows without taking Resource down.
+Environment handoff is still blocked: the retained catalog contains only
+`experiment` releases and no approved `work` release suitable for a valid
+handoff replay. The invalid fixture is not positive handoff evidence.
+
+Local evidence includes six Resource unit tests, strict all-target/all-feature
+Clippy, migration/store test compilation, nine NATS rotation/foundation tests,
+format and diff checks. Docker-backed PostgreSQL execution is unavailable on
+the local Windows host; the connected PostgreSQL/NATS/Kubernetes evidence above
+is reported separately.
 
 ## Accepted Sprint 2 security exceptions
 
