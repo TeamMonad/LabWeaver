@@ -140,8 +140,16 @@ struct PackageArgs {
     env: String,
     #[arg(long)]
     release: String,
+    #[arg(long, value_enum, default_value_t = PackageProfile::Sprint2)]
+    profile: PackageProfile,
     #[arg(long)]
     yes: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum PackageProfile {
+    Sprint2,
+    Resource,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -463,9 +471,16 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::DevDeps(args) => destructive_not_implemented("dev-deps", args.yes),
         Command::Migrate(args) => destructive_not_implemented("migrate", args.yes),
         Command::Dev(args) => destructive_not_implemented("dev", args.yes),
-        Command::Package(args) => {
-            platform_images::package(&args.env, &args.release, args.yes, &repository_root())
-        }
+        Command::Package(args) => platform_images::package(
+            &args.env,
+            &args.release,
+            match args.profile {
+                PackageProfile::Sprint2 => "sprint2",
+                PackageProfile::Resource => "resource",
+            },
+            args.yes,
+            &repository_root(),
+        ),
         Command::PackageValidate(args) => platform_images::validate(
             &args.manifest,
             args.mode == PackageValidationMode::Connected,

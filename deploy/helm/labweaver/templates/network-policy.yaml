@@ -1,3 +1,4 @@
+{{- if .Values.network.defaultDenyEnabled }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -6,6 +7,7 @@ metadata:
 spec:
   podSelector: {}
   policyTypes: [Ingress, Egress]
+{{- end }}
 {{- $root := . -}}
 {{- range $name, $configuration := .Values.workloads }}
 {{- if $configuration.enabled }}
@@ -129,12 +131,13 @@ spec:
     {{- end }}
 {{- end }}
 {{- end }}
+{{- if $root.Values.network.cdiCloneSourcePolicyEnabled }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: cdi-clone-source
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ $root.Release.Namespace }}
 spec:
   podSelector:
     matchLabels:
@@ -151,9 +154,10 @@ spec:
         - {protocol: TCP, port: 53}
     - to:
         - namespaceSelector:
-            {{- toYaml .Values.network.environmentNamespaceSelector | nindent 12 }}
+            {{- toYaml $root.Values.network.environmentNamespaceSelector | nindent 12 }}
           podSelector:
             matchLabels:
               cdi.kubevirt.io: cdi-upload-server
       ports:
         - {protocol: TCP, port: 8443}
+{{- end }}

@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 use super::AppError;
 
-const COMPONENTS: [&str; 7] = [
+const SPRINT2_COMPONENTS: [&str; 7] = [
     "access-service",
     "agent-service",
     "control-service",
@@ -23,7 +23,10 @@ const COMPONENTS: [&str; 7] = [
     "openssh-gateway",
     "web",
 ];
+const RESOURCE_COMPONENTS: [&str; 1] = ["resource-service"];
 const PACKAGE_SCHEMA: &str = "platform-image-package-manifest.v1";
+const SPRINT2_PROFILE: &str = "sprint2";
+const RESOURCE_PROFILE: &str = "resource";
 #[cfg(target_os = "linux")]
 const DEPLOYMENT_SCHEMA: &str = "platform-image-deployment-manifest.v1";
 
@@ -76,6 +79,8 @@ struct BaseImageLock {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct PackageManifest {
     schema_version: String,
+    #[serde(default = "default_package_profile")]
+    profile: String,
     run_id: String,
     release_id: String,
     source_commit: String,
@@ -86,6 +91,18 @@ pub(crate) struct PackageManifest {
     builder: BuilderIdentity,
     images: Vec<ImageEvidence>,
     overall: String,
+}
+
+fn default_package_profile() -> String {
+    SPRINT2_PROFILE.to_owned()
+}
+
+fn components_for_profile(profile: &str) -> Option<&'static [&'static str]> {
+    match profile {
+        SPRINT2_PROFILE => Some(&SPRINT2_COMPONENTS),
+        RESOURCE_PROFILE => Some(&RESOURCE_COMPONENTS),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -156,6 +173,7 @@ pub(crate) fn validate(
 pub(crate) fn package(
     environment: &str,
     release: &str,
+    profile: &str,
     yes: bool,
     root: &Path,
 ) -> Result<(), AppError> {
@@ -164,6 +182,11 @@ pub(crate) fn package(
     }
     validate_environment(environment)?;
     validate_release(release)?;
+    if components_for_profile(profile).is_none() {
+        return Err(AppError::InvalidArgument {
+            role: "package profile",
+        });
+    }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = root;
@@ -171,7 +194,7 @@ pub(crate) fn package(
     }
     #[cfg(target_os = "linux")]
     {
-        package_linux(environment, release, root)
+        package_linux(environment, release, profile, root)
     }
 }
 
@@ -239,10 +262,13 @@ fn validate_manifest(manifest: &PackageManifest) -> Result<(), AppError> {
     {
         return manifest_invalid("top-level identity is incomplete or incompatible");
     }
+    let Some(components) = components_for_profile(&manifest.profile) else {
+        return manifest_invalid("package profile is unknown");
+    };
     validate_registry(&manifest.registry)?;
     let mut names = BTreeSet::new();
     for image in &manifest.images {
-        if !COMPONENTS.contains(&image.component.as_str())
+        if !components.contains(&image.component.as_str())
             || !names.insert(image.component.as_str())
         {
             return manifest_invalid("component set contains an unknown or duplicate name");
@@ -266,10 +292,8 @@ fn validate_manifest(manifest: &PackageManifest) -> Result<(), AppError> {
             return manifest_invalid("image reference is not the expected Harbor digest reference");
         }
     }
-    if names.len() != COMPONENTS.len() || COMPONENTS.iter().any(|name| !names.contains(name)) {
-        return manifest_invalid(
-            "manifest must contain exactly the seven Sprint 2 platform images",
-        );
+    if names.len() != components.len() || components.iter().any(|name| !names.contains(name)) {
+        return manifest_invalid("manifest component set does not match its package profile");
     }
     Ok(())
 }
@@ -411,7 +435,12 @@ fn run_checked(command: &mut Command, role: &'static str) -> Result<String, AppE
 }
 
 #[cfg(target_os = "linux")]
-fn package_linux(environment: &str, release: &str, root: &Path) -> Result<(), AppError> {
+fn package_linux(
+    environment: &str,
+    release: &str,
+    profile: &str,
+    root: &Path,
+) -> Result<(), AppError> {
     let source_commit = git_output(root, ["rev-parse", "HEAD"])?;
     if !is_commit(&source_commit) {
         return manifest_invalid("Git source commit is not a full lowercase SHA-1");
@@ -444,8 +473,9 @@ fn package_linux(environment: &str, release: &str, root: &Path) -> Result<(), Ap
     fs::create_dir_all(&run_dir)
         .map_err(|error| io_error("create package run directory", error))?;
     scan_build_context(root, &run_dir)?;
-    let mut images = Vec::with_capacity(COMPONENTS.len());
-    for component in COMPONENTS {
+    let components = components_for_profile(profile).expect("validated package profile");
+    let mut images = Vec::with_capacity(components.len());
+    for component in components {
         images.push(build_scan(
             root,
             &run_dir,
@@ -460,6 +490,7 @@ fn package_linux(environment: &str, release: &str, root: &Path) -> Result<(), Ap
     }
     let manifest = PackageManifest {
         schema_version: PACKAGE_SCHEMA.to_owned(),
+        profile: profile.to_owned(),
         run_id,
         release_id: release.to_owned(),
         source_commit,
@@ -1292,6 +1323,7 @@ mod tests {
     fn valid_manifest() -> PackageManifest {
         PackageManifest {
             schema_version: PACKAGE_SCHEMA.to_owned(),
+            profile: SPRINT2_PROFILE.to_owned(),
             run_id: "pkg-test-0001".to_owned(),
             release_id: "test-0001".to_owned(),
             source_commit: "a".repeat(40),
@@ -1305,7 +1337,7 @@ mod tests {
                 buildkit: "v0.31.1".to_owned(),
                 buildx: "v0.35.0".to_owned(),
             },
-            images: COMPONENTS
+            images: SPRINT2_COMPONENTS
                 .iter()
                 .enumerate()
                 .map(|(index, component)| {
@@ -1336,6 +1368,32 @@ mod tests {
     #[test]
     fn static_manifest_accepts_exact_complete_digest_set() {
         assert!(validate_manifest(&valid_manifest()).is_ok());
+    }
+
+    #[test]
+    fn resource_profile_accepts_only_the_resource_service_image() {
+        let mut manifest = valid_manifest();
+        manifest.profile = RESOURCE_PROFILE.to_owned();
+        manifest.images = vec![ImageEvidence {
+            component: RESOURCE_COMPONENTS[0].to_owned(),
+            reference: format!(
+                "harbor.internal.example/labweaver-system/resource-service@{}",
+                digest('3')
+            ),
+            digest: digest('3'),
+            scan: ScanEvidence {
+                scanner: "trivy:0.72.0".to_owned(),
+                database_digest: digest('1'),
+                critical: 0,
+                high: 0,
+                report: "artifact://package/resource-service/trivy.json".to_owned(),
+                report_sha256: digest('2'),
+            },
+        }];
+        assert!(validate_manifest(&manifest).is_ok());
+
+        manifest.images[0].component = "control-service".to_owned();
+        assert!(validate_manifest(&manifest).is_err());
     }
 
     #[test]

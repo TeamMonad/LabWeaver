@@ -19,6 +19,7 @@
   ],
   "properties": {
     "schema_version": { "const": "platform-image-package-manifest.v1" },
+    "profile": { "enum": ["sprint2", "resource"], "default": "sprint2" },
     "run_id": { "type": "string", "minLength": 1, "maxLength": 128 },
     "release_id": { "type": "string", "minLength": 1, "maxLength": 64 },
     "source_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
@@ -37,13 +38,50 @@
     },
     "images": {
       "type": "array",
-      "minItems": 7,
+      "minItems": 1,
       "maxItems": 7,
       "items": { "$ref": "#/$defs/image" }
     },
     "overall": { "const": "passed" }
   },
+  "allOf": [
+    {
+      "if": { "properties": { "profile": { "const": "resource" } }, "required": ["profile"] },
+      "then": {
+        "properties": {
+          "images": {
+            "minItems": 1,
+            "maxItems": 1,
+            "items": { "$ref": "#/$defs/resourceImage" }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "images": {
+            "minItems": 7,
+            "maxItems": 7,
+            "contains": { "properties": { "component": { "const": "access-service" } } },
+            "allOf": [
+              { "contains": { "properties": { "component": { "const": "agent-service" } } } },
+              { "contains": { "properties": { "component": { "const": "control-service" } } } },
+              { "contains": { "properties": { "component": { "const": "environment-service" } } } },
+              { "contains": { "properties": { "component": { "const": "evaluation-service" } } } },
+              { "contains": { "properties": { "component": { "const": "openssh-gateway" } } } },
+              { "contains": { "properties": { "component": { "const": "web" } } } }
+            ]
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
+    "resourceImage": {
+      "allOf": [
+        { "$ref": "#/$defs/image" },
+        { "properties": { "component": { "const": "resource-service" } } }
+      ]
+    },
     "sha256": {
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$"
@@ -61,6 +99,7 @@
             "environment-service",
             "evaluation-service",
             "openssh-gateway",
+            "resource-service",
             "web"
           ]
         },
