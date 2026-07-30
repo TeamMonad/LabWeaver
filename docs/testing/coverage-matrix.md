@@ -13,6 +13,7 @@ deployment for every PR.
 | Container environment | create, Ready, protected endpoint, stop/start, freeze, delete | RBAC denial, public route, stale generation, withdrawn release, partial cleanup | no residual namespace resources after freeze/delete |
 | KubeVirt environment | CDI disk, VM/VMI Ready, host key, SSH, stop/start, freeze, delete | wrong base disk, guest/host-key mismatch, forwarding, stale generation, failed cleanup | real VM preserves disk across stop/start and leaves no residual resource |
 | Access | key registration, Grant activation, one endpoint, session lifecycle | weak key, alias injection, cross-course access, expiry, revoke, token replay, dependency outage | new access fails closed and active session closes within 60 seconds |
+| Resource request and Lease authority (#142) | owner-scoped request list/get/create, approve/resize-approve, cancel, reject, retry, Lease renew/revoke; revision and idempotency fences | missing/invalid caller, cross-owner read/cancel/retry, duplicate/conflicting idempotency, stale revision, expired approval, zero/unsupported GPU, Lease renewal/revoke replay | connected PostgreSQL/NATS/Kubernetes quota-shell readback and Environment handoff on one deployment identity |
 | ConsoleCapability contract | AccessGrant-scoped xterm/noVNC discovery and 30-second one-time issuance | duplicate kind, stale Grant/Environment/Lease fence, Work without Lease, Experiment with Lease, malformed locator, subprotocol mismatch, consumed/expired handoff | E2 Schema/OpenAPI/Web SDK and cross-consumer checks only; #131/#124/#126 own runtime E3/E4 |
 | Submission freeze | PVC and certificate-bound SFTP sources, exact object version/hash | traversal, symlink, over-limit, changed-between-reads, missing required file, partial publish | both runtime sources create immutable FrozenSubmission records |
 | C++17 OJ execution (#140) | approved digest-pinned compiler, exact/token checker, deterministic case aggregation, hash-bound evidence receipt | mutable image, High/Critical finding, invalid limits/path/profile, oversized label, missing namespace default-deny, compile error, wrong answer, TLE, MLE, OLE, self-SIGKILL, daemon/process-group escape, PID exhaustion, duplicate/missing/forged evidence, egress, cancellation, replacement race and cleanup residue | #123-owned attempt runs a real isolated Job and publishes immutable evidence without private payload |
@@ -23,3 +24,6 @@ WorkConfig, Resource approval, Tailnet, OpenAI Runtime,
 multi-provider routing, Sigstore, Kyverno and Packer are outside this matrix.
 The #140 row is planned connected coverage; its current evidence is local E1
 and remains blocked by #123 and D Verify.
+The #142 row currently has local contract/store coverage only; connected
+deployment, mTLS caller verification and Environment handoff evidence remain
+pending.
