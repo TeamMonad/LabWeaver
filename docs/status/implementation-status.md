@@ -109,11 +109,14 @@ handoff bound to request, claim, Lease, Release hash and Provider binding.
 Handoff is idempotent at Environment and becomes `handed_off` only after its
 acceptance; three failed handoffs become an auditable `blocked` claim.
 
-This work is **local implementation only**. Resource's public API, authorized
-query/mutation path, deployment ConfigMap/Secret/NATS identity and connected
-PostgreSQL/NATS/Kubernetes/Environment evidence are not complete. The Helm
-workload remains disabled, and no Release Gate or Sprint 2 runtime capability
-is claimed for #142.
+The Resource public HTTP surface is now implemented locally: owner-scoped list
+and get, create, approve/resize-approve, cancel, reject, retry, Lease renew and
+Lease revoke all use explicit actor/caller checks, idempotency keys and revision
+fences backed by the PostgreSQL store. This is still **not a connected-runtime
+verification**: the mTLS caller identity adapter, deployment ConfigMap/Secret/
+NATS identity, and connected PostgreSQL/NATS/Kubernetes/Environment evidence are
+not complete. The Helm workload remains disabled, and no Release Gate or Sprint
+2 runtime capability is claimed for #142.
 
 ## Accepted Sprint 2 security exceptions
 
