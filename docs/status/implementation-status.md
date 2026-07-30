@@ -118,7 +118,10 @@ is digest-pinned and Ready, migrations 0001-0005 were applied with an audited
 ledger, and a real create/get/approve request reached PostgreSQL. The lease flow
 remains blocked because the deployed NATS account resolver has not accepted a
 newly signed Resource user, so the transactional outbox is rejected by NATS.
-No lease or Environment handoff evidence is claimed until account publication is
+The recovered `sprint2-foundation-547d8fea` and `cd2919c` stores do not match
+the active WORKLOADS account JWT hash (`b38c4eb7...`); they must not be used to
+push account state. No lease or Environment handoff evidence is claimed until
+the active operator signing source is recovered and account publication is
 completed.
 
 The foundation authoring source now registers a dedicated `resource-service`
