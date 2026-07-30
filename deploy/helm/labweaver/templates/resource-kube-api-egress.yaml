@@ -1,0 +1,20 @@
+{{- if and .Values.workloads.resource-service.enabled .Values.network.resourceKubernetesApiCiliumPolicyEnabled }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: resource-kube-api-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "labweaver.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: resource-service
+  egress:
+    - toEntities: [kube-apiserver]
+      toPorts:
+        - ports:
+            {{- range .Values.network.kubernetesApiPorts }}
+            - {port: {{ . | quote }}, protocol: TCP}
+            {{- end }}
+{{- end }}

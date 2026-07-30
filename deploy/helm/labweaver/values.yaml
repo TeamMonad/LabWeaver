@@ -248,6 +248,7 @@ network:
   defaultDenyEnabled: true
   cdiCloneSourcePolicyEnabled: true
   ciliumIngressPolicyEnabled: true
+  resourceKubernetesApiCiliumPolicyEnabled: false
   infrastructureNamespaceSelector:
     matchLabels: {labweaver.io/infrastructure: "true"}
   edgeNamespaceSelector:

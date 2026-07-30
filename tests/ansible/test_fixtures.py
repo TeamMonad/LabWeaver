@@ -441,10 +441,26 @@ class AnsibleFixtureTests(unittest.TestCase):
             ROOT / "deploy/helm/labweaver/templates/cilium-ingress-policy.yaml"
         ).read_text(encoding="utf-8")
         self.assertIn(
-            "values: [container-executor, evaluation-service, kubevirt-executor, resource-service]",
+            "values: [container-executor, evaluation-service, kubevirt-executor]",
             policy,
         )
         self.assertIn("toEntities: [kube-apiserver]", policy)
+
+    def test_resource_release_owns_only_its_kubernetes_api_egress(self) -> None:
+        policy = (
+            ROOT
+            / "deploy/helm/labweaver/templates/resource-kube-api-egress.yaml"
+        ).read_text(encoding="utf-8")
+        tasks = (
+            ROOT / "deploy/ansible/roles/resource_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("name: resource-kube-api-egress", policy)
+        self.assertIn("app.kubernetes.io/name: resource-service", policy)
+        self.assertIn("toEntities: [kube-apiserver]", policy)
+        self.assertIn(
+            "network.resourceKubernetesApiCiliumPolicyEnabled=true", tasks
+        )
 
     def test_sprint2_application_reads_kubernetes_items_as_a_mapping_key(self) -> None:
         tasks = (

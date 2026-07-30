@@ -86,6 +86,8 @@
       - "network.cdiCloneSourcePolicyEnabled=false"
       - "--set"
       - "network.ciliumIngressPolicyEnabled=false"
+      - "--set"
+      - "network.resourceKubernetesApiCiliumPolicyEnabled=true"
 
 - name: Disable every non-Resource workload explicitly
   ansible.builtin.set_fact:
