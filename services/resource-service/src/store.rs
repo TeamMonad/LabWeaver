@@ -546,6 +546,44 @@ impl PgResourceStore {
         Ok(next)
     }
 
+    /// Bounds transient handoff failures. After three attempts the claim is retained as
+    /// `blocked` for an explicit administrator recovery instead of retrying indefinitely.
+    pub async fn retry_or_block_capacity_handoff(
+        &self,
+        claim_id: contracts::CapacityClaimId,
+        expected_revision: contracts::Revision,
+        diagnostic_code: &str,
+    ) -> Result<CapacityClaim, ResourceStoreError> {
+        if !valid_diagnostic(diagnostic_code) {
+            return Err(ResourceStoreError::DiagnosticInvalid);
+        }
+        let mut transaction = self.pool.begin().await?;
+        let claim = load_locked_claim(&mut transaction, claim_id).await?;
+        if claim.revision != expected_revision || claim.state != CapacityClaimState::Ready {
+            return Err(ResourceStoreError::CapacityClaimStateConflict);
+        }
+        let attempt: i64 = sqlx::query_scalar("SELECT count(*)::bigint + 1 FROM resource.capacity_attempts WHERE claim_id=$1 AND step='environment_handoff'")
+            .bind(claim_id.as_uuid()).fetch_one(&mut *transaction).await?;
+        sqlx::query("INSERT INTO resource.capacity_attempts (claim_id,attempt,step,state,diagnostic_code) VALUES ($1,$2,'environment_handoff',$3,$4)")
+            .bind(claim_id.as_uuid()).bind(attempt).bind(if attempt >= 3 { "blocked" } else { "retry" }).bind(diagnostic_code)
+            .execute(&mut *transaction).await?;
+        if attempt >= 3 {
+            let next = transition_claim(&claim, CapacityClaimState::Blocked)?;
+            update_claim(&mut transaction, &claim, &next, None, None, None).await?;
+            sqlx::query(
+                "UPDATE resource.capacity_claims SET last_diagnostic_code=$2 WHERE claim_id=$1",
+            )
+            .bind(claim_id.as_uuid())
+            .bind(diagnostic_code)
+            .execute(&mut *transaction)
+            .await?;
+            transaction.commit().await?;
+            return Ok(next);
+        }
+        transaction.commit().await?;
+        Ok(claim)
+    }
+
     /// Retains a failed claim for explicit administrator retry; it never silently re-enters admission.
     pub async fn mark_capacity_shell_blocked(
         &self,
@@ -773,7 +811,10 @@ fn transition_claim(
         ) | (
             CapacityClaimState::Provisioning,
             CapacityClaimState::Reserved | CapacityClaimState::Ready | CapacityClaimState::Blocked
-        ) | (CapacityClaimState::Ready, CapacityClaimState::HandedOff)
+        ) | (
+            CapacityClaimState::Ready,
+            CapacityClaimState::HandedOff | CapacityClaimState::Blocked
+        )
     );
     if !valid {
         return Err(ResourceStoreError::CapacityClaimStateConflict);

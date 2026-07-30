@@ -415,6 +415,13 @@ impl CapacityReconcileWorker {
             }
             Err(error) => {
                 tracing::error!(event="resource.capacity.handoff_failed", claim_id=%refreshed.claim.id, diagnostic_code=%error.diagnostic());
+                self.store
+                    .retry_or_block_capacity_handoff(
+                        refreshed.claim.id,
+                        refreshed.claim.revision,
+                        error.diagnostic(),
+                    )
+                    .await?;
             }
         }
         Ok(())
