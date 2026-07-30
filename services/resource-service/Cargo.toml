@@ -25,3 +25,7 @@ uuid.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+testcontainers = { version = "=0.25.0", features = ["blocking", "properties-config"] }
+testcontainers-modules = { version = "0.13.0", features = ["postgres"] }
