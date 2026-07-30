@@ -4,8 +4,10 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use contracts::resource::{CapacityClaim, ResourceRequest};
-use reqwest::{Certificate, Client, StatusCode, Url};
+use contracts::UtcTimestamp;
+use contracts::environment::ResourceWorkHandoff;
+use contracts::resource::{CapacityClaim, ResourceLeaseState, ResourceRequest};
+use reqwest::{Certificate, Client, Identity, StatusCode, Url};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -19,6 +21,7 @@ const QUOTA_NAME: &str = "resource-quota";
 pub struct ResourceCapacityConfiguration {
     pub poll_interval_milliseconds: u64,
     pub providers: Vec<KubernetesCapacityProviderConfiguration>,
+    pub environment_handoff: EnvironmentHandoffConfiguration,
 }
 
 impl ResourceCapacityConfiguration {
@@ -42,8 +45,119 @@ impl ResourceCapacityConfiguration {
         Ok(CapacityReconcileWorker {
             store,
             providers,
+            environment_handoff: EnvironmentHandoffClient::new(self.environment_handoff)?,
             poll_interval: Duration::from_millis(self.poll_interval_milliseconds),
         })
+    }
+}
+
+/// Explicit mTLS destination for the Environment-owned Work command. No ambient roots,
+/// proxy, discovery, or alternate endpoint is permitted.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentHandoffConfiguration {
+    pub base_uri: Url,
+    pub ca_file: PathBuf,
+    pub client_certificate_file: PathBuf,
+    pub client_private_key_file: PathBuf,
+    pub timeout_milliseconds: u64,
+    pub system_actor_id: contracts::ActorId,
+}
+
+#[derive(Clone)]
+struct EnvironmentHandoffClient {
+    base_uri: Url,
+    client: Client,
+    system_actor_id: contracts::ActorId,
+}
+
+impl EnvironmentHandoffClient {
+    fn new(configuration: EnvironmentHandoffConfiguration) -> Result<Self, CapacityProviderError> {
+        if configuration.base_uri.scheme() != "https"
+            || configuration.base_uri.host_str().is_none()
+            || !configuration.ca_file.is_absolute()
+            || !configuration.client_certificate_file.is_absolute()
+            || !configuration.client_private_key_file.is_absolute()
+            || !(1..=30_000).contains(&configuration.timeout_milliseconds)
+        {
+            return Err(CapacityProviderError::Configuration);
+        }
+        let ca = std::fs::read(&configuration.ca_file)
+            .map_err(|_| CapacityProviderError::Configuration)?;
+        let mut identity = std::fs::read(&configuration.client_certificate_file)
+            .map_err(|_| CapacityProviderError::Configuration)?;
+        identity.push(b'\n');
+        identity.extend(
+            std::fs::read(&configuration.client_private_key_file)
+                .map_err(|_| CapacityProviderError::Configuration)?,
+        );
+        let client = Client::builder()
+            .no_proxy()
+            .https_only(true)
+            .tls_built_in_root_certs(false)
+            .add_root_certificate(
+                Certificate::from_pem(&ca).map_err(|_| CapacityProviderError::Configuration)?,
+            )
+            .identity(
+                Identity::from_pem(&identity).map_err(|_| CapacityProviderError::Configuration)?,
+            )
+            .timeout(Duration::from_millis(configuration.timeout_milliseconds))
+            .build()
+            .map_err(|_| CapacityProviderError::Configuration)?;
+        Ok(Self {
+            base_uri: configuration.base_uri,
+            client,
+            system_actor_id: configuration.system_actor_id,
+        })
+    }
+
+    async fn handoff(
+        &self,
+        item: &crate::store::ProvisioningCapacityClaim,
+    ) -> Result<(), CapacityProviderError> {
+        let lease = &item.lease;
+        if lease.state != ResourceLeaseState::Active {
+            return Err(CapacityProviderError::HandoffFence);
+        }
+        let handoff = ResourceWorkHandoff {
+            version: 1,
+            request_id: item.request.id,
+            request_revision: item.request.revision,
+            lease_id: lease.id,
+            lease_revision: lease.revision,
+            claim_id: item.claim.id,
+            claim_revision: item.claim.revision,
+            environment_id: item.request.target.environment_id,
+            course_id: item.request.course_id,
+            owner_actor_id: item.request.requester_id,
+            display_label: item.request.request_key.clone(),
+            project_id: item.request.project_id,
+            release_id: item.request.target.release_id,
+            release_version: item.request.target.release_version,
+            release_sha256: item.request.target.release_sha256,
+            provider_binding: item.claim.provider_binding.clone(),
+            capacity_binding: item.claim.id.to_string(),
+            trace_id: format!("resource-handoff-{}", item.claim.id),
+        };
+        handoff
+            .validate()
+            .map_err(|_| CapacityProviderError::HandoffFence)?;
+        let url = self
+            .base_uri
+            .join("internal/v1/resource/work-handoffs")
+            .map_err(|_| CapacityProviderError::Configuration)?;
+        let response = self
+            .client
+            .post(url)
+            .json(&handoff)
+            .send()
+            .await
+            .map_err(|_| CapacityProviderError::Unavailable)?;
+        if response.status() == StatusCode::ACCEPTED {
+            Ok(())
+        } else {
+            Err(CapacityProviderError::HandoffRejected)
+        }
     }
 }
 
@@ -186,6 +300,7 @@ pub struct KubernetesCapacityProvider {
 pub struct CapacityReconcileWorker {
     store: crate::store::PgResourceStore,
     providers: BTreeMap<String, KubernetesCapacityProvider>,
+    environment_handoff: EnvironmentHandoffClient,
     poll_interval: Duration,
 }
 
@@ -193,6 +308,7 @@ impl CapacityReconcileWorker {
     /// Reconciles a single leased shell and returns whether work was found.
     pub async fn reconcile_once(&self) -> Result<bool, crate::store::ResourceStoreError> {
         let Some(item) = self.store.claim_next_capacity_shell().await? else {
+            self.reconcile_ready_handoff().await?;
             return Ok(false);
         };
         let Some(provider) = self.providers.get(&item.claim.provider_binding) else {
@@ -256,7 +372,52 @@ impl CapacityReconcileWorker {
                     .await?;
             }
         }
+        self.reconcile_ready_handoff().await?;
         Ok(true)
+    }
+
+    async fn reconcile_ready_handoff(&self) -> Result<(), crate::store::ResourceStoreError> {
+        let Some(item) = self.store.next_ready_capacity_handoff().await? else {
+            return Ok(());
+        };
+        if item.lease.state != ResourceLeaseState::Active {
+            let now = self.store.current_time().await?;
+            let expires_at = UtcTimestamp::from_utc(
+                now.get()
+                    + time::Duration::seconds(
+                        i64::try_from(item.request.requested_duration_seconds).map_err(|_| {
+                            crate::store::ResourceStoreError::CapacityReadbackInvalid
+                        })?,
+                    ),
+            )
+            .map_err(|_| crate::store::ResourceStoreError::CapacityReadbackInvalid)?;
+            self.store
+                .activate_lease(
+                    item.lease.id,
+                    item.lease.revision,
+                    now,
+                    expires_at,
+                    self.environment_handoff.system_actor_id,
+                    &format!("resource-lease-activate-{}", item.claim.id),
+                )
+                .await?;
+        }
+        let refreshed = self
+            .store
+            .next_ready_capacity_handoff()
+            .await?
+            .ok_or(crate::store::ResourceStoreError::CapacityClaimStateConflict)?;
+        match self.environment_handoff.handoff(&refreshed).await {
+            Ok(()) => {
+                self.store
+                    .mark_capacity_handed_off(refreshed.claim.id, refreshed.claim.revision)
+                    .await?;
+            }
+            Err(error) => {
+                tracing::error!(event="resource.capacity.handoff_failed", claim_id=%refreshed.claim.id, diagnostic_code=%error.diagnostic());
+            }
+        }
+        Ok(())
     }
 
     /// Runs until shutdown; a retry always acquires a new durable claim fence.
@@ -494,6 +655,10 @@ pub enum CapacityProviderError {
     Rejected,
     #[error("LW_RESOURCE_CAPACITY_UNAVAILABLE")]
     Unavailable,
+    #[error("LW_RESOURCE_ENVIRONMENT_HANDOFF_FENCE_INVALID")]
+    HandoffFence,
+    #[error("LW_RESOURCE_ENVIRONMENT_HANDOFF_REJECTED")]
+    HandoffRejected,
 }
 
 impl CapacityProviderError {
@@ -507,6 +672,8 @@ impl CapacityProviderError {
             Self::Readback => "LW_RESOURCE_CAPACITY_READBACK_INVALID",
             Self::Rejected => "LW_RESOURCE_CAPACITY_REJECTED",
             Self::Unavailable => "LW_RESOURCE_CAPACITY_UNAVAILABLE",
+            Self::HandoffFence => "LW_RESOURCE_ENVIRONMENT_HANDOFF_FENCE_INVALID",
+            Self::HandoffRejected => "LW_RESOURCE_ENVIRONMENT_HANDOFF_REJECTED",
         }
     }
 }

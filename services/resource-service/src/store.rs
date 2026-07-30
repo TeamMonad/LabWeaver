@@ -507,6 +507,45 @@ impl PgResourceStore {
         Ok(next)
     }
 
+    /// Reads one provider-ready shell. Repeated reads are intentionally safe: the Environment
+    /// handoff uses a request/revision-derived idempotency key and is acknowledged before this
+    /// authoritative state advances to `handed_off`.
+    pub async fn next_ready_capacity_handoff(
+        &self,
+    ) -> Result<Option<ProvisioningCapacityClaim>, ResourceStoreError> {
+        let row = sqlx::query(
+            "SELECT c.contract AS claim_contract,r.contract AS request_contract,l.contract AS lease_contract FROM resource.capacity_claims c JOIN resource.resource_requests r ON r.request_id=c.request_id JOIN resource.resource_leases l ON l.claim_id=c.claim_id WHERE c.state='ready' ORDER BY c.updated_at LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        Ok(Some(ProvisioningCapacityClaim {
+            claim: decode_claim(row.try_get("claim_contract")?)?,
+            request: decode_request(row.try_get("request_contract")?)?,
+            lease: decode_lease(row.try_get("lease_contract")?)?,
+        }))
+    }
+
+    /// Records ownership transfer only after Environment durably accepts the idempotent Work
+    /// command. Resource retains all release responsibility before this transition.
+    pub async fn mark_capacity_handed_off(
+        &self,
+        claim_id: contracts::CapacityClaimId,
+        expected_revision: contracts::Revision,
+    ) -> Result<CapacityClaim, ResourceStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let claim = load_locked_claim(&mut transaction, claim_id).await?;
+        if claim.revision != expected_revision || claim.state != CapacityClaimState::Ready {
+            return Err(ResourceStoreError::CapacityClaimStateConflict);
+        }
+        let next = transition_claim(&claim, CapacityClaimState::HandedOff)?;
+        update_claim(&mut transaction, &claim, &next, None, None, None).await?;
+        transaction.commit().await?;
+        Ok(next)
+    }
+
     /// Retains a failed claim for explicit administrator retry; it never silently re-enters admission.
     pub async fn mark_capacity_shell_blocked(
         &self,
@@ -734,7 +773,7 @@ fn transition_claim(
         ) | (
             CapacityClaimState::Provisioning,
             CapacityClaimState::Reserved | CapacityClaimState::Ready | CapacityClaimState::Blocked
-        )
+        ) | (CapacityClaimState::Ready, CapacityClaimState::HandedOff)
     );
     if !valid {
         return Err(ResourceStoreError::CapacityClaimStateConflict);
