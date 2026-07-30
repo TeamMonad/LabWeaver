@@ -46,6 +46,10 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
             post(approve_request),
         )
         .route(
+            "/api/v1/resource-requests/{request_id}/resize-and-approve",
+            post(approve_request),
+        )
+        .route(
             "/api/v1/resource-requests/{request_id}/cancel",
             post(cancel_request),
         )
