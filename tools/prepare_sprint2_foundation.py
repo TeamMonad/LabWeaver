@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import stat
@@ -135,6 +136,10 @@ PLATFORM_IDENTITIES: dict[str, tuple[tuple[str, ...], str]] = {
 }
 
 NATS_ADMIN_TLS_IDENTITY = "sprint2-admin"
+NATS_ADMIN_USER = "sprint2-admin"
+NATS_ADMIN_PUBLISH = ("$JS.API.>", "$JS.ACK.>")
+NATS_ADMIN_SUBSCRIBE = ("_INBOX.>",)
+NATS_ACCOUNT_PUBLIC_PATTERN = re.compile(r"^A[A-Z2-7]{55}$")
 
 NATS_ACCOUNT_JETSTREAM_LIMITS = (
     "--js-disk-storage",
@@ -253,11 +258,39 @@ def _copy(source: Path, destination: Path) -> None:
         _write(destination, reader.read())
 
 
+def _workloads_seed_source(path: Path) -> tuple[Path, str]:
+    if not path.is_absolute():
+        raise FoundationError("LW_SPRINT2_FOUNDATION_WORKLOADS_SEED_INVALID")
+    try:
+        resolved = path.resolve(strict=True)
+        metadata = resolved.stat()
+    except OSError as error:
+        raise FoundationError("LW_SPRINT2_FOUNDATION_WORKLOADS_SEED_INVALID") from error
+    public_key = resolved.stem
+    if (
+        not resolved.is_file()
+        or not NATS_ACCOUNT_PUBLIC_PATTERN.fullmatch(public_key)
+        or (
+            os.name != "nt"
+            and metadata.st_mode & (stat.S_IRWXG | stat.S_IRWXO)
+        )
+    ):
+        raise FoundationError("LW_SPRINT2_FOUNDATION_WORKLOADS_SEED_INVALID")
+    return resolved, public_key
+
+
 def _nsc(nsc: Path, store: Path, arguments: list[str], private_home: Path) -> None:
     _run(nsc, ["--all-dirs", str(store), *arguments], private_home)
 
 
-def prepare(output: Path, openssl: Path, ssh_keygen: Path, nsc: Path, days: int) -> dict[str, object]:
+def prepare(
+    output: Path,
+    openssl: Path,
+    ssh_keygen: Path,
+    nsc: Path,
+    days: int,
+    workloads_seed_file: Path | None = None,
+) -> dict[str, object]:
     if not 30 <= days <= 825:
         raise FoundationError("LW_SPRINT2_FOUNDATION_VALIDITY_INVALID")
     private_home = output / "home"
@@ -365,7 +398,34 @@ def prepare(output: Path, openssl: Path, ssh_keygen: Path, nsc: Path, days: int)
                 _write(secret_root / "postgres-password", secrets.token_urlsafe(48).encode())
 
     _nsc(nsc, nsc_store, ["add", "operator", "--name", "LABWEAVER", "--sys", "--generate-signing-key", "--expiry", f"{days}d"], private_home)
-    _nsc(nsc, nsc_store, ["add", "account", "--name", "WORKLOADS", "--expiry", f"{days}d"], private_home)
+    workloads_account_public = None
+    if workloads_seed_file is None:
+        _nsc(nsc, nsc_store, ["add", "account", "--name", "WORKLOADS", "--expiry", f"{days}d"], private_home)
+    else:
+        source_seed, workloads_account_public = _workloads_seed_source(workloads_seed_file)
+        _nsc(
+            nsc,
+            nsc_store,
+            [
+                "add",
+                "account",
+                "--name",
+                "WORKLOADS",
+                "--public-key",
+                workloads_account_public,
+                "--expiry",
+                f"{days}d",
+            ],
+            private_home,
+        )
+        _copy(
+            source_seed,
+            nsc_store
+            / "keys"
+            / "A"
+            / workloads_account_public[1:3]
+            / f"{workloads_account_public}.nk",
+        )
     _nsc(
         nsc,
         nsc_store,
@@ -427,6 +487,40 @@ def prepare(output: Path, openssl: Path, ssh_keygen: Path, nsc: Path, days: int)
         _copy(client_certificate, clients / name / "nats-client.crt")
         _copy(ca_certificate, clients / name / "nats-ca.pem")
 
+    admin_arguments = [
+        "add",
+        "user",
+        "--account",
+        "WORKLOADS",
+        "--name",
+        NATS_ADMIN_USER,
+        "--expiry",
+        f"{days}d",
+    ]
+    for subject in NATS_ADMIN_PUBLISH:
+        admin_arguments.extend(["--allow-pub", subject])
+    for subject in NATS_ADMIN_SUBSCRIBE:
+        admin_arguments.extend(["--allow-sub", subject])
+    _nsc(nsc, nsc_store, admin_arguments, private_home)
+    admin_credentials = clients / NATS_ADMIN_USER / "nats.creds"
+    admin_credentials.parent.mkdir(mode=0o700, exist_ok=True)
+    _nsc(
+        nsc,
+        nsc_store,
+        [
+            "generate",
+            "creds",
+            "--account",
+            "WORKLOADS",
+            "--name",
+            NATS_ADMIN_USER,
+            "--output-file",
+            str(admin_credentials),
+        ],
+        private_home,
+    )
+    os.chmod(admin_credentials, 0o600)
+
     admin_material = authority / f"issued-{NATS_ADMIN_TLS_IDENTITY}"
     admin_material.mkdir(mode=0o700)
     _, admin_certificate = _certificate(
@@ -473,7 +567,10 @@ tls {
         "ca_sha256": hashlib.sha256(ca_certificate.read_bytes()).hexdigest(),
         "nats_config_sha256": hashlib.sha256(nats_config.encode()).hexdigest(),
         "nats_clients": len(NATS_USERS),
+        "nats_admin_jwt_clients": 1,
         "nats_admin_tls_clients": 1,
+        "preserved_workloads_account": workloads_seed_file is not None,
+        "workloads_account_public": workloads_account_public,
         "platform_ca_sha256": hashlib.sha256(platform_ca_certificate.read_bytes()).hexdigest(),
         "platform_identities": len(PLATFORM_IDENTITIES),
         "collector_ssh_ca_public_sha256": hashlib.sha256((ssh_authority / "collector-ca.pub").read_bytes()).hexdigest(),
@@ -487,6 +584,7 @@ def main() -> int:
     parser.add_argument("--openssl", type=Path, default=Path("/usr/bin/openssl"))
     parser.add_argument("--ssh-keygen", type=Path, default=Path("/usr/bin/ssh-keygen"))
     parser.add_argument("--nsc", type=Path, default=Path("/usr/local/bin/nsc"))
+    parser.add_argument("--workloads-seed-file", type=Path)
     parser.add_argument("--valid-days", type=int, default=365)
     arguments = parser.parse_args()
     output: Path | None = None
@@ -496,7 +594,14 @@ def main() -> int:
         ssh_keygen = _trusted_binary(arguments.ssh_keygen, "ssh-keygen")
         nsc = _trusted_binary(arguments.nsc, "nsc")
         output.mkdir(mode=0o700)
-        result = prepare(output, openssl, ssh_keygen, nsc, arguments.valid_days)
+        result = prepare(
+            output,
+            openssl,
+            ssh_keygen,
+            nsc,
+            arguments.valid_days,
+            arguments.workloads_seed_file,
+        )
     except (FoundationError, OSError, UnicodeError) as error:
         if output is not None and output.is_dir():
             shutil.rmtree(output)

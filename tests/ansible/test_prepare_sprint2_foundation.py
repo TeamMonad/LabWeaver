@@ -63,7 +63,10 @@ class FoundationAuthoringTests(unittest.TestCase):
             self.assertNotIn("*", subscribe)
 
         self.assertEqual(FOUNDATION.NATS_ADMIN_TLS_IDENTITY, "sprint2-admin")
+        self.assertEqual(FOUNDATION.NATS_ADMIN_USER, "sprint2-admin")
         self.assertNotIn(FOUNDATION.NATS_ADMIN_TLS_IDENTITY, FOUNDATION.NATS_USERS)
+        self.assertEqual(FOUNDATION.NATS_ADMIN_PUBLISH, ("$JS.API.>", "$JS.ACK.>"))
+        self.assertEqual(FOUNDATION.NATS_ADMIN_SUBSCRIBE, ("_INBOX.>",))
 
         control_publish, _, _ = FOUNDATION.NATS_USERS["control-service"]
         self.assertIn("labweaver.agent.quarantine.>", control_publish)
@@ -107,6 +110,38 @@ class FoundationAuthoringTests(unittest.TestCase):
         )
         self.assertEqual(resource_subscribe, ("_INBOX.>", "labweaver.resource.lease.verify.v1"))
         self.assertTrue(resource_response)
+
+    def test_reused_workloads_seed_requires_private_account_key_locator(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            public_key = "A" + "A" * 55
+            source = root / f"{public_key}.nk"
+            source.write_text("test-only", encoding="utf-8")
+            source.chmod(0o600)
+            resolved, observed_public_key = FOUNDATION._workloads_seed_source(
+                source.resolve()
+            )
+            self.assertEqual(resolved, source.resolve())
+            self.assertEqual(observed_public_key, public_key)
+
+            if FOUNDATION.os.name != "nt":
+                source.chmod(0o640)
+                with self.assertRaisesRegex(
+                    FOUNDATION.FoundationError,
+                    "LW_SPRINT2_FOUNDATION_WORKLOADS_SEED_INVALID",
+                ):
+                    FOUNDATION._workloads_seed_source(source.resolve())
+
+    def test_reused_workloads_seed_must_be_account_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / f"O{'A' * 55}.nk"
+            source.write_text("test-only", encoding="utf-8")
+            source.chmod(0o600)
+            with self.assertRaisesRegex(
+                FOUNDATION.FoundationError,
+                "LW_SPRINT2_FOUNDATION_WORKLOADS_SEED_INVALID",
+            ):
+                FOUNDATION._workloads_seed_source(source.resolve())
 
     def test_workloads_account_has_bounded_jetstream_limits(self) -> None:
         limits = FOUNDATION.NATS_ACCOUNT_JETSTREAM_LIMITS

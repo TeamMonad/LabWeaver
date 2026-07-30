@@ -186,6 +186,41 @@ is absent, then reads back its stream, durable name, explicit-ack policy and
 complete subject filter set. A retained consumer with conflicting semantics
 blocks as `SPRINT2_APPLICATION_CONSUMER_CONFLICT`; the role never deletes or
 silently replaces retained JetStream state.
+
+### NATS authority forward rotation
+
+If the active operator seed is unavailable, do not recover it from logs,
+Kubernetes Secrets, chat history, or raw disk fragments and do not reuse a
+different historical operator. Preserve only the reviewed `WORKLOADS` account
+seed, then use `96-nats-authority-rotation.yml` to create a new operator/SYS
+authority and reissue all workload and administrator JWT/mTLS identities:
+
+```sh
+ansible-playbook -i deploy/ansible/inventories/demo/hosts.yml \
+  deploy/ansible/playbooks/96-nats-authority-rotation.yml
+```
+
+The controller supplies all source/output locations through the
+`LABWEAVER_NATS_ROTATION_*`, `LABWEAVER_NATS_SOURCE_*`,
+`LABWEAVER_NATS_WORKLOADS_SEED_FILE`, and `LABWEAVER_KUBECONFIG`
+environment variables. The current Sprint 2 and Resource package manifests are
+also explicit inputs; the playbook refuses cross-commit package substitution.
+Every private input and generated file is root-owned mode `0600`, while
+directories are mode `0700`.
+
+Before mutation the playbook stores the current NATS ConfigMap and all affected
+Secrets in its root-only rollback directory. It then reconciles the retained
+NATS StatefulSet, the ten Sprint 2 deployments, and Resource Service. PostgreSQL,
+MinIO, PVCs, namespaces, JetStream streams/consumers, Harbor, and Keycloak are
+not deleted or recreated. Per-workload configuration hashes ensure an NATS-only
+rotation does not restart PostgreSQL or MinIO. A second run must preserve the
+operator/WORKLOADS public identities and the existing JetStream inventory.
+
+The non-secret `rotation-record.json` and
+`rotation-deployment-record.json` are the handoff records. They contain public
+identity names, permission summaries, controlled locators, run/commit identity,
+and readiness counts only. Seeds, JWTs, `.creds`, TLS private keys, Secret
+payloads, or their hashes must never be copied to Git or deployment logs.
 Before applying the private configuration bundle, the application role decodes
 only the public claims in the mounted Control user JWT and verifies that its
 publish allowlist covers both configured quarantine subjects. The validator

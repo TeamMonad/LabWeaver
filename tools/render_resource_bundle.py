@@ -72,7 +72,12 @@ def validate_creds(directory: Path, expected_issuer: str | None) -> None:
         raise BundleError("LW_RESOURCE_NATS_CREDENTIALS_INVALID") from error
     if expected_issuer and issuer != expected_issuer:
         raise BundleError("LW_RESOURCE_NATS_ISSUER_MISMATCH")
-    if publishes not in ([], None) or sorted(subscribes) != ["_INBOX.>", "labweaver.resource.lease.verify.v1"]:
+    if sorted(publishes) != [
+        "$JS.ACK.>",
+        "$JS.API.>",
+        "labweaver.resource.request.approved.v1",
+        "labweaver.resource.request.submitted.v1",
+    ] or sorted(subscribes) != ["_INBOX.>", "labweaver.resource.lease.verify.v1"]:
         raise BundleError("LW_RESOURCE_NATS_PERMISSIONS_INVALID")
     if responses.get("max") != 1:
         raise BundleError("LW_RESOURCE_NATS_RESPONSE_PERMISSION_INVALID")

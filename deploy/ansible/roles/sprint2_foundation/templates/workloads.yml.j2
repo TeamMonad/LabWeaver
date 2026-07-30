@@ -23,7 +23,7 @@ spec:
     metadata:
       labels: {app.kubernetes.io/name: postgres, app.kubernetes.io/part-of: labweaver-infrastructure}
       annotations:
-        labweaver.io/configuration-sha256: {{ sprint2_foundation_bundle_sha256 }}
+        labweaver.io/configuration-sha256: {{ sprint2_foundation_workload_configuration_sha256.postgres }}
     spec:
       automountServiceAccountToken: false
       securityContext:
@@ -104,7 +104,7 @@ spec:
     metadata:
       labels: {app.kubernetes.io/name: nats, app.kubernetes.io/part-of: labweaver-infrastructure}
       annotations:
-        labweaver.io/configuration-sha256: {{ sprint2_foundation_bundle_sha256 }}
+        labweaver.io/configuration-sha256: {{ sprint2_foundation_workload_configuration_sha256.nats }}
     spec:
       automountServiceAccountToken: false
       securityContext:
@@ -171,7 +171,7 @@ spec:
     metadata:
       labels: {app.kubernetes.io/name: minio, app.kubernetes.io/part-of: labweaver-infrastructure}
       annotations:
-        labweaver.io/configuration-sha256: {{ sprint2_foundation_bundle_sha256 }}
+        labweaver.io/configuration-sha256: {{ sprint2_foundation_workload_configuration_sha256.minio }}
     spec:
       automountServiceAccountToken: false
       securityContext:

@@ -91,7 +91,9 @@ class AnsibleFixtureTests(unittest.TestCase):
             "{{ sprint2_foundation_lock.postgresql.image }}": "registry.invalid/postgres@sha256:" + "a" * 64,
             "{{ sprint2_foundation_lock.sprint2_foundation.nats }}": "registry.invalid/nats@sha256:" + "b" * 64,
             "{{ sprint2_foundation_lock.sprint2_foundation.minio }}": "registry.invalid/minio@sha256:" + "c" * 64,
-            "{{ sprint2_foundation_bundle_sha256 }}": "d" * 64,
+            "{{ sprint2_foundation_workload_configuration_sha256.postgres }}": "d" * 64,
+            "{{ sprint2_foundation_workload_configuration_sha256.nats }}": "e" * 64,
+            "{{ sprint2_foundation_workload_configuration_sha256.minio }}": "f" * 64,
         }
         rendered = workloads
         for source, value in replacements.items():
@@ -99,12 +101,17 @@ class AnsibleFixtureTests(unittest.TestCase):
         documents = list(yaml.safe_load_all(rendered))
         self.assertEqual(len(documents), 9)
         self.assertEqual(sum(document["kind"] == "StatefulSet" for document in documents), 3)
+        expected_hashes = {
+            "postgres": "d" * 64,
+            "nats": "e" * 64,
+            "minio": "f" * 64,
+        }
         for document in documents:
             if document["kind"] == "StatefulSet":
                 self.assertEqual(
                     document["spec"]["template"]["metadata"]["annotations"]
                     ["labweaver.io/configuration-sha256"],
-                    "d" * 64,
+                    expected_hashes[document["metadata"]["name"]],
                 )
         minio = next(
             document for document in documents
@@ -131,6 +138,23 @@ class AnsibleFixtureTests(unittest.TestCase):
         reset_namespaces = reset.split("sprint2_reset_domains:", maxsplit=1)[0]
         self.assertNotIn("labweaver-data", reset_namespaces)
         self.assertNotIn("labweaver-build", reset_namespaces)
+
+    def test_nats_authority_rotation_is_bounded_and_recoverable(self) -> None:
+        playbook = (
+            ROOT / "deploy/ansible/playbooks/96-nats-authority-rotation.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("--workloads-seed-file", playbook)
+        self.assertIn("NATS_AUTHORITY_ROTATION_ROLLBACK_SURFACE_INCOMPLETE", playbook)
+        self.assertIn("rollback/kubernetes-objects.yaml", playbook)
+        self.assertIn("- import_playbook: 92-sprint2-foundation.yml", playbook)
+        self.assertIn("- import_playbook: 93-sprint2-application.yml", playbook)
+        self.assertIn("- import_playbook: 94-resource-application.yml", playbook)
+        self.assertIn("nats_rotation_record.identities | length == 10", playbook)
+        self.assertIn("LABWEAVER_RESOURCE_PACKAGE_MANIFEST", playbook)
+        self.assertNotIn("ansible.builtin.shell", playbook)
+        self.assertNotRegex(playbook, r"\bkubectl\s+delete\b")
+        self.assertNotRegex(playbook, r"\bDROP\s+(?:DATABASE|SCHEMA)\b")
 
     def test_sprint2_buildkit_is_rootless_isolated_and_explicitly_exception_bound(self) -> None:
         playbook = (ROOT / "deploy/ansible/playbooks/92-sprint2-buildkit.yml").read_text(

@@ -89,6 +89,31 @@
           | first).data['nats-server.conf'] }}
   no_log: true
 
+- name: Bind workload-scoped foundation configuration identities
+  ansible.builtin.set_fact:
+    sprint2_foundation_workload_configuration_sha256:
+      postgres: >-
+        {{ ((sprint2_foundation_objects
+             | selectattr('kind', 'equalto', 'Secret')
+             | selectattr('metadata.name', 'equalto', 'postgres-secrets')
+             | first).data | to_json | hash('sha256')) }}
+      nats: >-
+        {{ ((((sprint2_foundation_objects
+               | selectattr('kind', 'equalto', 'ConfigMap')
+               | selectattr('metadata.name', 'equalto', 'nats-config')
+               | first).data | to_json)
+             ~
+             ((sprint2_foundation_objects
+               | selectattr('kind', 'equalto', 'Secret')
+               | selectattr('metadata.name', 'equalto', 'nats-server-secrets')
+               | first).data | to_json)) | hash('sha256')) }}
+      minio: >-
+        {{ ((sprint2_foundation_objects
+             | selectattr('kind', 'equalto', 'Secret')
+             | selectattr('metadata.name', 'equalto', 'minio-secrets')
+             | first).data | to_json | hash('sha256')) }}
+  no_log: true
+
 - name: Require JetStream, operator credentials, and mutual TLS
   ansible.builtin.assert:
     that:
