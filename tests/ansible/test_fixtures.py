@@ -149,6 +149,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("rollback/kubernetes-objects.yaml", playbook)
         self.assertIn("- import_playbook: 92-sprint2-foundation.yml", playbook)
         self.assertIn("Apply only reviewed NATS-bearing application objects", playbook)
+        self.assertIn("--force-conflicts", playbook)
         self.assertIn("Roll every affected workload to the replacement authority", playbook)
         self.assertIn("resource-service", playbook)
         self.assertIn("nats_rotation_record.identities | length == 10", playbook)
