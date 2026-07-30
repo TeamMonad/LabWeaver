@@ -70,16 +70,27 @@
 
 - name: Build isolated Resource Helm arguments
   ansible.builtin.set_fact:
-    resource_application_helm_args: >-
-      {{ ['--values=' + resource_application_values_file,
-          '--set-string', 'imagePullSecrets[0].name=' + resource_application_image_pull_secret_name,
-          '--set-string', 'deploymentIdentity.configurationBundleSha256=' + resource_application_bundle_sha256,
-          '--set-string', 'images.resource_service=' + resource_application_package.images[0].reference,
-          '--set', 'workloads.resource-service.enabled=true',
-          '--set', 'network.defaultDenyEnabled=false',
-          '--set', 'network.cdiCloneSourcePolicyEnabled=false',
-          '--set', 'network.ciliumIngressPolicyEnabled=false']
-         + (resource_application_workloads | map('regex_replace', '^(.*)$', 'workloads.\\1.enabled=false') | list) }}
+    resource_application_helm_args:
+      - "--values={{ resource_application_values_file }}"
+      - "--set-string"
+      - "imagePullSecrets[0].name={{ resource_application_image_pull_secret_name }}"
+      - "--set-string"
+      - "deploymentIdentity.configurationBundleSha256={{ resource_application_bundle_sha256 }}"
+      - "--set-string"
+      - "images.resource_service={{ resource_application_package.images[0].reference }}"
+      - "--set"
+      - "workloads.resource-service.enabled=true"
+      - "--set"
+      - "network.defaultDenyEnabled=false"
+      - "--set"
+      - "network.cdiCloneSourcePolicyEnabled=false"
+      - "--set"
+      - "network.ciliumIngressPolicyEnabled=false"
+
+- name: Disable every non-Resource workload explicitly
+  ansible.builtin.set_fact:
+    resource_application_helm_args: "{{ resource_application_helm_args + ['--set', 'workloads.' + item + '.enabled=false'] }}"
+  loop: "{{ resource_application_workloads }}"
 
 - name: Atomically deploy the Resource authority without taking ownership of the Sprint 2 release
   ansible.builtin.command:
