@@ -1068,7 +1068,7 @@ impl PgResourceStore {
         .bind(step)
         .bind(if attempt >= 3 { "failed" } else { "retry" })
         .bind(diagnostic_code)
-        .bind(attempt.min(12) as f64)
+        .bind(i32::try_from(attempt.min(12)).map_err(|_| ResourceStoreError::RevisionOverflow)?)
         .execute(&mut *transaction)
         .await?;
         sqlx::query(
