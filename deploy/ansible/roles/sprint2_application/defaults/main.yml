@@ -101,7 +101,7 @@ sprint2_application_keycloak_endpoint_address: ""
 sprint2_application_keycloak_truststore_password: ""
 sprint2_application_keycloak_client_id: labweaver-web
 sprint2_application_keycloak_required_roles: [teacher, student, platform_admin]
-sprint2_application_keycloak_required_users: [sprint2-teacher, sprint2-student]
+sprint2_application_keycloak_required_users: [sprint2-teacher, sprint2-student, sprint2-admin]
 sprint2_application_access_seed_file: ""
 sprint2_application_chart_source: "{{ playbook_dir }}/../../helm/labweaver"
 sprint2_application_values_files: []

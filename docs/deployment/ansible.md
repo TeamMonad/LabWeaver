@@ -395,8 +395,9 @@ required Secrets in `labweaver-system`. The role rejects extra kinds, names or
 namespaces, applies the bundle only after namespace recreation, and records only
 its SHA-256. Secrets remain in Vault or root-owned controller files and are never
 copied into the report. A private Access seed is derived from the reviewed
-Keycloak realm so the OIDC `sub` hashes, durable Actor IDs and teacher/student
-course memberships are bound before either browser session is created:
+Keycloak realm so the OIDC `sub` hashes, durable Actor IDs and
+teacher/student/platform-admin course memberships are bound before any browser
+session is created:
 
 ```sh
 python3 tools/prepare_sprint2_access_seed.py \
@@ -405,6 +406,7 @@ python3 tools/prepare_sprint2_access_seed.py \
   --course-id 00000000-0000-7000-8000-000000000301 \
   --teacher-username teacher \
   --student-username student \
+  --admin-username platform-admin \
   --output .private/sprint2-access-seed.json
 ```
 

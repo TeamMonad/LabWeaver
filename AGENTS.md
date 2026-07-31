@@ -61,6 +61,22 @@ status:
   release_report_schema: "schemas/results/release-gate-report.schema.json"
 ```
 
+### 受控签发源与凭据 locator
+
+- NATS JWT、NATS mTLS、平台 service mTLS 与 Collector SSH CA 必须由
+  `deploy/ansible/playbooks/96-nats-authority-rotation.yml` 统一签发和轮换。
+  禁止从任务记录、日志、Git 历史或已部署 Secret 反向恢复私钥。
+- 服务器上的签发源使用 root-only locator
+  `/var/lib/labweaver/.private/nats-authority-rotation-<run-id>`；可部署派生物使用
+  `/var/lib/labweaver/.private/nats-authority-deploy-<run-id>`。两类目录及私钥、
+  credential、bundle 固定为 `root:root 0600`，目录固定为 `0700`。
+- `application-bundle.yaml`、`resource-bundle.yaml` 和 `nats-admin/` 是部署输入；
+  `authority/`、`platform-authority/`、`ssh-authority/` 与 `nsc/` 是签发源。
+  Inventory 只记录这些受控 locator，不复制 Secret 内容。
+- 丢失任一签发私钥时，舍弃受影响的旧 credentials，生成新的 Run ID，重新签发
+  全部受影响 identity，并通过 Ansible 原地 reconcile。验证必须覆盖证书链、
+  JWT permission、bundle hash、所有 workload rollout 和 connected NATS 探针。
+
 上述目录和命令是目标仓库契约。仓库初始化阶段尚未创建的入口必须显式记为 `planned` 或 `blocked`；在对应文件和命令真实存在且验证通过前，不得声称可用，也不得用静默跳过或空成功脚本代替。
 
 ## 2. 产品与架构硬约束
