@@ -1061,14 +1061,14 @@ impl PgResourceStore {
         sqlx::query(
             "INSERT INTO resource.capacity_attempts \
              (claim_id,attempt,step,state,next_attempt_at,diagnostic_code) \
-             VALUES ($1,$2,$3,$4,clock_timestamp() + ($6::bigint * interval '5 seconds'),$5)",
+             VALUES ($1,$2,$3,$4,clock_timestamp() + make_interval(secs => $6::double precision * 5),$5)",
         )
         .bind(claim_id.as_uuid())
         .bind(attempt)
         .bind(step)
         .bind(if attempt >= 3 { "failed" } else { "retry" })
         .bind(diagnostic_code)
-        .bind(attempt.min(12))
+        .bind(attempt.min(12) as f64)
         .execute(&mut *transaction)
         .await?;
         sqlx::query(
