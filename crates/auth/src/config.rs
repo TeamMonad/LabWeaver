@@ -843,6 +843,10 @@ nats:
     #[test]
     fn checked_in_deployment_example_is_a_valid_contract() {
         let example = include_str!("../../../deploy/config/access-auth.yaml.example");
-        assert!(AccessAuthFile::parse_yaml(example).is_ok());
+        let parsed = AccessAuthFile::parse_yaml(example).expect("deployment example must parse");
+        assert_eq!(
+            parsed.oidc.role_mappings.get("platform_admin"),
+            Some(&"platform_admin".to_owned())
+        );
     }
 }
