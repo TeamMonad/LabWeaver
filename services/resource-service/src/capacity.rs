@@ -333,6 +333,7 @@ impl KubernetesQuotaShellPlan {
             claim.state,
             contracts::resource::CapacityClaimState::Reserved
                 | contracts::resource::CapacityClaimState::Provisioning
+                | contracts::resource::CapacityClaimState::Blocked
                 | contracts::resource::CapacityClaimState::HandedOff
                 | contracts::resource::CapacityClaimState::Releasing
         ) {
