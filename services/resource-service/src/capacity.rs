@@ -596,6 +596,43 @@ impl CapacityReconcileWorker {
                 .await?;
             return Ok(());
         }
+        if item.claim.state == contracts::resource::CapacityClaimState::Blocked {
+            let Some(provider) = self.providers.get(&item.claim.provider_binding) else {
+                self.store
+                    .record_reconciliation_failure(
+                        item.claim.id,
+                        "release_capacity",
+                        "LW_RESOURCE_CAPACITY_PROVIDER_UNAVAILABLE",
+                    )
+                    .await?;
+                return Ok(());
+            };
+            let plan = KubernetesQuotaShellPlan::from_claim(
+                &provider.configuration,
+                &item.request,
+                &item.claim,
+            )
+            .map_err(|_| crate::store::ResourceStoreError::CapacityReadbackInvalid)?;
+            if let Err(error) = provider.release_before_handoff(&plan).await {
+                tracing::error!(
+                    event = "resource.capacity.pre_handoff_release_failed",
+                    claim_id = %item.claim.id,
+                    diagnostic_code = %error.diagnostic()
+                );
+                self.store
+                    .record_reconciliation_failure(
+                        item.claim.id,
+                        "release_capacity",
+                        error.diagnostic(),
+                    )
+                    .await?;
+                return Ok(());
+            }
+            self.store
+                .mark_capacity_releasing(item.claim.id, item.claim.revision)
+                .await?;
+            return Ok(());
+        }
         self.reconcile_releasing_capacity(&item).await
     }
 

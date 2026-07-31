@@ -904,7 +904,7 @@ impl PgResourceStore {
              FROM resource.capacity_claims c \
              JOIN resource.resource_requests r ON r.request_id=c.request_id \
              JOIN resource.resource_leases l ON l.claim_id=c.claim_id \
-             WHERE c.state IN ('handed_off','releasing') \
+             WHERE c.state IN ('blocked','handed_off','releasing') \
                AND (l.state='expiring' OR (l.state='active' AND l.expires_at<=clock_timestamp())) \
              ORDER BY l.expires_at,l.updated_at FOR UPDATE OF c,l SKIP LOCKED LIMIT 1",
         )
@@ -951,7 +951,12 @@ impl PgResourceStore {
     ) -> Result<CapacityClaim, ResourceStoreError> {
         let mut transaction = self.pool.begin().await?;
         let claim = load_locked_claim(&mut transaction, claim_id).await?;
-        if claim.revision != expected_revision || claim.state != CapacityClaimState::HandedOff {
+        if claim.revision != expected_revision
+            || !matches!(
+                claim.state,
+                CapacityClaimState::Blocked | CapacityClaimState::HandedOff
+            )
+        {
             return Err(ResourceStoreError::CapacityClaimStateConflict);
         }
         let next = transition_claim(&claim, CapacityClaimState::Releasing)?;
@@ -1331,11 +1336,13 @@ fn transition_claim(
         ) | (
             CapacityClaimState::Ready,
             CapacityClaimState::HandedOff | CapacityClaimState::Blocked
-        ) | (CapacityClaimState::HandedOff, CapacityClaimState::Releasing)
-            | (
-                CapacityClaimState::Releasing,
-                CapacityClaimState::Released | CapacityClaimState::Blocked
-            )
+        ) | (
+            CapacityClaimState::Blocked | CapacityClaimState::HandedOff,
+            CapacityClaimState::Releasing
+        ) | (
+            CapacityClaimState::Releasing,
+            CapacityClaimState::Released | CapacityClaimState::Blocked
+        )
     );
     if !valid {
         return Err(ResourceStoreError::CapacityClaimStateConflict);
@@ -1533,4 +1540,56 @@ pub enum ResourceStoreError {
     Database(#[from] sqlx::Error),
     #[error("LW_RESOURCE_SERIALIZATION_FAILED")]
     Serialization(#[from] serde_json::Error),
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "fixed test values are valid by construction"
+)]
+mod tests {
+    use contracts::resource::{CapacityClaim, CapacityClaimState, WorkloadResources};
+    use contracts::{
+        CapacityClaimId, ResourceApprovalId, ResourceRequestId, Revision, Sha256Digest,
+    };
+
+    use super::transition_claim;
+
+    #[test]
+    fn blocked_pre_handoff_claim_can_enter_release_readback() {
+        let claim = CapacityClaim {
+            id: CapacityClaimId::new(),
+            request_id: ResourceRequestId::new(),
+            approval_id: ResourceApprovalId::new(),
+            provider_binding: "kubernetes-standard".into(),
+            policy_sha256: "a"
+                .repeat(64)
+                .parse::<Sha256Digest>()
+                .expect("fixed digest"),
+            workload_resources: WorkloadResources {
+                cpu_millicores: 500,
+                memory_bytes: 512 * 1024 * 1024,
+                storage_bytes: 1024 * 1024 * 1024,
+                gpu: None,
+            },
+            quota_resources: WorkloadResources {
+                cpu_millicores: 500,
+                memory_bytes: 512 * 1024 * 1024,
+                storage_bytes: 1024 * 1024 * 1024,
+                gpu: None,
+            },
+            quota_plan_sha256: "b"
+                .repeat(64)
+                .parse::<Sha256Digest>()
+                .expect("fixed digest"),
+            state: CapacityClaimState::Blocked,
+            revision: Revision::new(4).expect("fixed revision"),
+        };
+        let releasing = transition_claim(&claim, CapacityClaimState::Releasing);
+        assert!(releasing.is_ok());
+        assert_eq!(
+            releasing.ok().map(|value| value.state),
+            Some(CapacityClaimState::Releasing)
+        );
+    }
 }
