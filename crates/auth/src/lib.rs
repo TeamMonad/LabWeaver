@@ -30,7 +30,7 @@ pub mod roles;
 pub use authorization::{AuthorizationContext, AuthorizationError, authorize};
 pub use config::{
     AccessAuthFile, AuthConfig, AuthConfigError, ControlGatewayFileConfig, GrantRuntimeFileConfig,
-    MtlsFileConfig, NatsFileConfig, TransportSecurityMode,
+    MtlsFileConfig, NatsFileConfig, ResourceGatewayFileConfig, TransportSecurityMode,
 };
 pub use crypto::{CryptoError, EncryptedValue, KeyRing};
 pub use csrf::{CsrfError, CsrfToken, verify_csrf_token};

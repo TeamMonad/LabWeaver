@@ -818,6 +818,7 @@ export const deleteSshPublicKey = <ThrowOnError extends boolean = false>(options
  * Permission: resource_lease:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
  */
 export const listResourceLeases = <ThrowOnError extends boolean = false>(options: Options<ListResourceLeasesData, ThrowOnError>): RequestResult<ListResourceLeasesResponses, ListResourceLeasesErrors, ThrowOnError> => (options.client ?? client).get<ListResourceLeasesResponses, ListResourceLeasesErrors, ThrowOnError>({
+    responseType: 'json',
     security: [{
             in: 'cookie',
             name: '__Host-labweaver_session',
@@ -833,6 +834,7 @@ export const listResourceLeases = <ThrowOnError extends boolean = false>(options
  * Permission: resource_lease:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
  */
 export const getResourceLease = <ThrowOnError extends boolean = false>(options: Options<GetResourceLeaseData, ThrowOnError>): RequestResult<GetResourceLeaseResponses, GetResourceLeaseErrors, ThrowOnError> => (options.client ?? client).get<GetResourceLeaseResponses, GetResourceLeaseErrors, ThrowOnError>({
+    responseType: 'json',
     security: [{
             in: 'cookie',
             name: '__Host-labweaver_session',
@@ -848,13 +850,18 @@ export const getResourceLease = <ThrowOnError extends boolean = false>(options: 
  * Permission: resource_lease:renew. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
  */
 export const renewResourceLease = <ThrowOnError extends boolean = false>(options: Options<RenewResourceLeaseData, ThrowOnError>): RequestResult<RenewResourceLeaseResponses, RenewResourceLeaseErrors, ThrowOnError> => (options.client ?? client).post<RenewResourceLeaseResponses, RenewResourceLeaseErrors, ThrowOnError>({
+    responseType: 'json',
     security: [{
             in: 'cookie',
             name: '__Host-labweaver_session',
             type: 'apiKey'
         }],
     url: '/api/v1/resource-leases/{leaseId}/renew',
-    ...options
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
 });
 
 /**
@@ -863,13 +870,18 @@ export const renewResourceLease = <ThrowOnError extends boolean = false>(options
  * Permission: resource_lease:revoke. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
  */
 export const revokeResourceLease = <ThrowOnError extends boolean = false>(options: Options<RevokeResourceLeaseData, ThrowOnError>): RequestResult<RevokeResourceLeaseResponses, RevokeResourceLeaseErrors, ThrowOnError> => (options.client ?? client).post<RevokeResourceLeaseResponses, RevokeResourceLeaseErrors, ThrowOnError>({
+    responseType: 'json',
     security: [{
             in: 'cookie',
             name: '__Host-labweaver_session',
             type: 'apiKey'
         }],
     url: '/api/v1/resource-leases/{leaseId}/revoke',
-    ...options
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
 });
 
 /**
@@ -878,6 +890,7 @@ export const revokeResourceLease = <ThrowOnError extends boolean = false>(option
  * Permission: resource_request:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
  */
 export const listResourceRequests = <ThrowOnError extends boolean = false>(options: Options<ListResourceRequestsData, ThrowOnError>): RequestResult<ListResourceRequestsResponses, ListResourceRequestsErrors, ThrowOnError> => (options.client ?? client).get<ListResourceRequestsResponses, ListResourceRequestsErrors, ThrowOnError>({
+    responseType: 'json',
     security: [{
             in: 'cookie',
             name: '__Host-labweaver_session',
@@ -893,13 +906,18 @@ export const listResourceRequests = <ThrowOnError extends boolean = false>(optio
  * Permission: resource_request:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
  */
 export const createResourceRequest = <ThrowOnError extends boolean = false>(options: Options<CreateResourceRequestData, ThrowOnError>): RequestResult<CreateResourceRequestResponses, CreateResourceRequestErrors, ThrowOnError> => (options.client ?? client).post<CreateResourceRequestResponses, CreateResourceRequestErrors, ThrowOnError>({
+    responseType: 'json',
     security: [{
             in: 'cookie',
             name: '__Host-labweaver_session',
             type: 'apiKey'
         }],
     url: '/api/v1/resource-requests',
-    ...options
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
 });
 
 /**
@@ -908,6 +926,7 @@ export const createResourceRequest = <ThrowOnError extends boolean = false>(opti
  * Permission: resource_request:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
  */
 export const getResourceRequest = <ThrowOnError extends boolean = false>(options: Options<GetResourceRequestData, ThrowOnError>): RequestResult<GetResourceRequestResponses, GetResourceRequestErrors, ThrowOnError> => (options.client ?? client).get<GetResourceRequestResponses, GetResourceRequestErrors, ThrowOnError>({
+    responseType: 'json',
     security: [{
             in: 'cookie',
             name: '__Host-labweaver_session',
@@ -923,13 +942,18 @@ export const getResourceRequest = <ThrowOnError extends boolean = false>(options
  * Permission: resource_request:approve. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
  */
 export const approveResourceRequest = <ThrowOnError extends boolean = false>(options: Options<ApproveResourceRequestData, ThrowOnError>): RequestResult<ApproveResourceRequestResponses, ApproveResourceRequestErrors, ThrowOnError> => (options.client ?? client).post<ApproveResourceRequestResponses, ApproveResourceRequestErrors, ThrowOnError>({
+    responseType: 'json',
     security: [{
             in: 'cookie',
             name: '__Host-labweaver_session',
             type: 'apiKey'
         }],
     url: '/api/v1/resource-requests/{requestId}/approve',
-    ...options
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
 });
 
 /**
@@ -938,13 +962,18 @@ export const approveResourceRequest = <ThrowOnError extends boolean = false>(opt
  * Permission: resource_request:cancel. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
  */
 export const cancelResourceRequest = <ThrowOnError extends boolean = false>(options: Options<CancelResourceRequestData, ThrowOnError>): RequestResult<CancelResourceRequestResponses, CancelResourceRequestErrors, ThrowOnError> => (options.client ?? client).post<CancelResourceRequestResponses, CancelResourceRequestErrors, ThrowOnError>({
+    responseType: 'json',
     security: [{
             in: 'cookie',
             name: '__Host-labweaver_session',
             type: 'apiKey'
         }],
     url: '/api/v1/resource-requests/{requestId}/cancel',
-    ...options
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
 });
 
 /**
@@ -953,13 +982,18 @@ export const cancelResourceRequest = <ThrowOnError extends boolean = false>(opti
  * Permission: resource_request:approve. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
  */
 export const rejectResourceRequest = <ThrowOnError extends boolean = false>(options: Options<RejectResourceRequestData, ThrowOnError>): RequestResult<RejectResourceRequestResponses, RejectResourceRequestErrors, ThrowOnError> => (options.client ?? client).post<RejectResourceRequestResponses, RejectResourceRequestErrors, ThrowOnError>({
+    responseType: 'json',
     security: [{
             in: 'cookie',
             name: '__Host-labweaver_session',
             type: 'apiKey'
         }],
     url: '/api/v1/resource-requests/{requestId}/reject',
-    ...options
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
 });
 
 /**
@@ -968,13 +1002,18 @@ export const rejectResourceRequest = <ThrowOnError extends boolean = false>(opti
  * Permission: resource_request:approve. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
  */
 export const resizeAndApproveResourceRequest = <ThrowOnError extends boolean = false>(options: Options<ResizeAndApproveResourceRequestData, ThrowOnError>): RequestResult<ResizeAndApproveResourceRequestResponses, ResizeAndApproveResourceRequestErrors, ThrowOnError> => (options.client ?? client).post<ResizeAndApproveResourceRequestResponses, ResizeAndApproveResourceRequestErrors, ThrowOnError>({
+    responseType: 'json',
     security: [{
             in: 'cookie',
             name: '__Host-labweaver_session',
             type: 'apiKey'
         }],
     url: '/api/v1/resource-requests/{requestId}/resize-and-approve',
-    ...options
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
 });
 
 /**
@@ -983,13 +1022,18 @@ export const resizeAndApproveResourceRequest = <ThrowOnError extends boolean = f
  * Permission: resource_request:retry. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
  */
 export const retryResourceRequest = <ThrowOnError extends boolean = false>(options: Options<RetryResourceRequestData, ThrowOnError>): RequestResult<RetryResourceRequestResponses, RetryResourceRequestErrors, ThrowOnError> => (options.client ?? client).post<RetryResourceRequestResponses, RetryResourceRequestErrors, ThrowOnError>({
+    responseType: 'json',
     security: [{
             in: 'cookie',
             name: '__Host-labweaver_session',
             type: 'apiKey'
         }],
     url: '/api/v1/resource-requests/{requestId}/retry',
-    ...options
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
 });
 
 /**

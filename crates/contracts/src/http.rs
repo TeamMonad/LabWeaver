@@ -41,8 +41,9 @@ pub struct EnvironmentOperationAccepted {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateResourceRequest {
     pub course_id: CourseId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<ProjectId>,
+    /// Required project scope. Work capacity is never allocated at an
+    /// unscoped course-wide boundary.
+    pub project_id: ProjectId,
     pub request_key: String,
     /// Preallocated Work aggregate identity. Resource never allocates this implicitly.
     pub environment_id: EnvironmentId,
@@ -723,6 +724,11 @@ pub struct OperationAuthorization {
 const TEACHER: &[PlatformRole] = &[PlatformRole::Teacher];
 const TEACHER_OR_STUDENT: &[PlatformRole] = &[PlatformRole::Teacher, PlatformRole::Student];
 const PLATFORM_ADMIN: &[PlatformRole] = &[PlatformRole::PlatformAdmin];
+const ALL_ROLES: &[PlatformRole] = &[
+    PlatformRole::Teacher,
+    PlatformRole::Student,
+    PlatformRole::PlatformAdmin,
+];
 
 /// Authorization policy for every public and gateway operation. This table is
 /// intentionally separate from route implementations so generated contracts,
@@ -735,12 +741,12 @@ pub const OPERATION_AUTHORIZATIONS: &[OperationAuthorization] = &[
     },
     OperationAuthorization {
         operation_id: "listResourceRequests",
-        allowed_roles: TEACHER_OR_STUDENT,
+        allowed_roles: ALL_ROLES,
         scope: OperationScopeKind::Course,
     },
     OperationAuthorization {
         operation_id: "getResourceRequest",
-        allowed_roles: TEACHER_OR_STUDENT,
+        allowed_roles: ALL_ROLES,
         scope: OperationScopeKind::Course,
     },
     OperationAuthorization {
@@ -770,12 +776,12 @@ pub const OPERATION_AUTHORIZATIONS: &[OperationAuthorization] = &[
     },
     OperationAuthorization {
         operation_id: "getResourceLease",
-        allowed_roles: TEACHER_OR_STUDENT,
+        allowed_roles: ALL_ROLES,
         scope: OperationScopeKind::Course,
     },
     OperationAuthorization {
         operation_id: "listResourceLeases",
-        allowed_roles: TEACHER_OR_STUDENT,
+        allowed_roles: ALL_ROLES,
         scope: OperationScopeKind::Course,
     },
     OperationAuthorization {
@@ -1210,7 +1216,7 @@ pub const OPERATIONS: &[OperationContract] = &[
         "resource_lease:renew",
         BffSession,
         IdempotentRevisioned,
-        202,
+        200,
         false,
         true
     ),
@@ -1222,7 +1228,7 @@ pub const OPERATIONS: &[OperationContract] = &[
         "resource_lease:revoke",
         BffSession,
         IdempotentRevisioned,
-        202,
+        200,
         false,
         true
     ),

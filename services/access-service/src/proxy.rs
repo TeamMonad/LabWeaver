@@ -2,7 +2,7 @@
 
 use std::{io, time::Duration};
 
-use auth::{ControlGatewayFileConfig, TransportSecurityMode};
+use auth::{ControlGatewayFileConfig, ResourceGatewayFileConfig, TransportSecurityMode};
 use axum::{
     body::{Body, Bytes},
     extract::{Query, State},
@@ -19,6 +19,9 @@ use super::{ApiError, AppState, authenticated_session, require_browser_origin};
 
 const ACTOR_HEADER: &str = "x-labweaver-actor-id";
 const SESSION_HEADER: &str = "x-labweaver-session-id";
+const RESOURCE_CALLER_HEADER: &str = "x-labweaver-caller-san";
+const RESOURCE_CALLER_SAN: &str = "spiffe://labweaver/access-service";
+const RESOURCE_ROLES_HEADER: &str = "x-labweaver-platform-roles";
 
 /// A fixed-origin mTLS client; callers cannot select an upstream host.
 #[derive(Clone)]
@@ -37,6 +40,39 @@ pub(super) struct RuntimeGatewayProxy {
     client: Client,
     max_request_bytes: usize,
     max_response_bytes: usize,
+}
+
+#[derive(Clone)]
+pub(super) struct ResourceGatewayProxy {
+    client: Client,
+    base_uri: Url,
+    max_request_bytes: usize,
+    max_response_bytes: usize,
+}
+
+impl ResourceGatewayProxy {
+    pub(super) fn new(config: &ResourceGatewayFileConfig) -> Result<Self, ControlGatewayError> {
+        let base_uri = Url::parse(&config.base_uri).map_err(|_| ControlGatewayError::Config)?;
+        if base_uri.scheme() != "http"
+            || base_uri.host_str().is_none()
+            || base_uri.path() != "/"
+            || base_uri.query().is_some()
+            || base_uri.fragment().is_some()
+        {
+            return Err(ControlGatewayError::Config);
+        }
+        Ok(Self {
+            client: Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(Duration::from_secs(3))
+                .timeout(Duration::from_millis(config.timeout_milliseconds))
+                .build()
+                .map_err(|_| ControlGatewayError::Config)?,
+            base_uri,
+            max_request_bytes: config.max_request_bytes,
+            max_response_bytes: config.max_response_bytes,
+        })
+    }
 }
 
 impl RuntimeGatewayProxy {
@@ -191,6 +227,328 @@ pub(super) async fn forward_evaluation(
         valid_evaluation_path,
     )
     .await
+}
+
+pub(super) async fn forward_resource(
+    State(state): State<std::sync::Arc<AppState>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    if !matches!(method, Method::GET | Method::POST) || !valid_resource_path(uri.path()) {
+        return Err(ApiError::bad_request("LW_AUTH_RESOURCE_PATH_REJECTED"));
+    }
+    if body.len() > state.resource_proxy.max_request_bytes {
+        return Err(ApiError::bad_request("LW_AUTH_RESOURCE_REQUEST_TOO_LARGE"));
+    }
+    let session = authenticated_session(&state, &headers).await?;
+    let operation_id = authorize_resource_request(&state, &session, &method, &uri, &body).await?;
+    if method != Method::GET {
+        require_browser_origin(&state, &headers)?;
+        let supplied = headers
+            .get(state.deployment.browser.csrf_header_name.as_str())
+            .and_then(|value| value.to_str().ok());
+        auth::verify_csrf_token(&session.csrf_token, supplied).map_err(ApiError::from)?;
+    }
+    let roles = resource_roles(&session)?;
+    let mut upstream = state.resource_proxy.base_uri.clone();
+    upstream.set_path(uri.path());
+    upstream.set_query(uri.query());
+    let request = state
+        .resource_proxy
+        .client
+        .request(method.clone(), upstream)
+        .header(ACTOR_HEADER, session.actor_id.to_string())
+        .header(SESSION_HEADER, session.session_id.to_string())
+        .header(RESOURCE_CALLER_HEADER, RESOURCE_CALLER_SAN)
+        .header(RESOURCE_ROLES_HEADER, roles)
+        .body(body);
+    let response = copy_request_headers(request, &headers)
+        .send()
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                event = "auth.resource_gateway.unavailable",
+                diagnostic = "LW_AUTH_RESOURCE_UNAVAILABLE",
+                operation_id,
+                error = %error
+            );
+            ApiError::unavailable("LW_AUTH_RESOURCE_UNAVAILABLE")
+        })?;
+    bounded_resource_response(&state.resource_proxy, response, operation_id).await
+}
+
+async fn authorize_resource_request(
+    state: &AppState,
+    session: &auth::BffSession,
+    method: &Method,
+    uri: &Uri,
+    body: &Bytes,
+) -> Result<&'static str, ApiError> {
+    let path = uri.path();
+    if *method == Method::POST && path == "/api/v1/resource-requests" {
+        let request = contracts::parse_strict_json::<contracts::http::CreateResourceRequest>(body)
+            .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+        authorize_resource_scope(
+            state,
+            session,
+            contracts::AuthorizationScope::Course {
+                course_id: request.course_id,
+            },
+            "createResourceRequest",
+        )
+        .await?;
+        return Ok("createResourceRequest");
+    }
+    if *method == Method::GET
+        && matches!(
+            path,
+            "/api/v1/resource-requests" | "/api/v1/resource-leases"
+        )
+    {
+        #[derive(serde::Deserialize)]
+        struct ResourceQuery {
+            course_id: contracts::CourseId,
+        }
+        let Query(query) = Query::<ResourceQuery>::try_from_uri(uri)
+            .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+        let operation = if path.ends_with("leases") {
+            "listResourceLeases"
+        } else {
+            "listResourceRequests"
+        };
+        authorize_resource_scope(
+            state,
+            session,
+            contracts::AuthorizationScope::Course {
+                course_id: query.course_id,
+            },
+            operation,
+        )
+        .await?;
+        return Ok(operation);
+    }
+    let (request, operation) = resource_target_request(state, session, method, path).await?;
+    if request.project_id.is_none() {
+        return Err(ApiError::forbidden("LW_AUTH_PROJECT_SCOPE_DENIED"));
+    }
+    authorize_resource_scope(
+        state,
+        session,
+        contracts::AuthorizationScope::Course {
+            course_id: request.course_id,
+        },
+        operation,
+    )
+    .await?;
+    Ok(operation)
+}
+
+async fn resource_target_request(
+    state: &AppState,
+    session: &auth::BffSession,
+    method: &Method,
+    path: &str,
+) -> Result<(contracts::resource::ResourceRequest, &'static str), ApiError> {
+    let segments = path.split('/').collect::<Vec<_>>();
+    match segments.as_slice() {
+        ["", "api", "v1", "resource-requests", request_id] if *method == Method::GET => {
+            let id = request_id
+                .parse()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            let request = fetch_resource_request(state, session, id).await?;
+            Ok((request, "getResourceRequest"))
+        }
+        ["", "api", "v1", "resource-requests", request_id, action] if *method == Method::POST => {
+            let id = request_id
+                .parse()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            let operation = match *action {
+                "approve" => "approveResourceRequest",
+                "resize-and-approve" => "resizeAndApproveResourceRequest",
+                "cancel" => "cancelResourceRequest",
+                "reject" => "rejectResourceRequest",
+                "retry" => "retryResourceRequest",
+                _ => return Err(ApiError::bad_request("LW_AUTH_RESOURCE_PATH_REJECTED")),
+            };
+            Ok((fetch_resource_request(state, session, id).await?, operation))
+        }
+        ["", "api", "v1", "resource-leases", lease_id] if *method == Method::GET => {
+            let id = lease_id
+                .parse()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            let lease = fetch_resource_lease(state, session, id).await?;
+            Ok((
+                fetch_resource_request(state, session, lease.request_id).await?,
+                "getResourceLease",
+            ))
+        }
+        ["", "api", "v1", "resource-leases", lease_id, action] if *method == Method::POST => {
+            let id = lease_id
+                .parse()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            let operation = match *action {
+                "renew" => "renewResourceLease",
+                "revoke" => "revokeResourceLease",
+                _ => return Err(ApiError::bad_request("LW_AUTH_RESOURCE_PATH_REJECTED")),
+            };
+            let lease = fetch_resource_lease(state, session, id).await?;
+            Ok((
+                fetch_resource_request(state, session, lease.request_id).await?,
+                operation,
+            ))
+        }
+        _ => Err(ApiError::bad_request("LW_AUTH_RESOURCE_PATH_REJECTED")),
+    }
+}
+
+async fn fetch_resource_request(
+    state: &AppState,
+    session: &auth::BffSession,
+    request_id: contracts::ResourceRequestId,
+) -> Result<contracts::resource::ResourceRequest, ApiError> {
+    fetch_resource_json(
+        state,
+        session,
+        &format!("/api/v1/resource-requests/{request_id}"),
+    )
+    .await
+}
+
+async fn fetch_resource_lease(
+    state: &AppState,
+    session: &auth::BffSession,
+    lease_id: contracts::LeaseId,
+) -> Result<contracts::resource::ResourceLease, ApiError> {
+    fetch_resource_json(
+        state,
+        session,
+        &format!("/api/v1/resource-leases/{lease_id}"),
+    )
+    .await
+}
+
+async fn fetch_resource_json<T: serde::de::DeserializeOwned>(
+    state: &AppState,
+    session: &auth::BffSession,
+    path: &str,
+) -> Result<T, ApiError> {
+    let mut upstream = state.resource_proxy.base_uri.clone();
+    upstream.set_path(path);
+    let response = state
+        .resource_proxy
+        .client
+        .get(upstream)
+        .header(ACTOR_HEADER, session.actor_id.to_string())
+        .header(SESSION_HEADER, session.session_id.to_string())
+        .header(RESOURCE_CALLER_HEADER, RESOURCE_CALLER_SAN)
+        .header(RESOURCE_ROLES_HEADER, resource_roles(session)?)
+        .send()
+        .await
+        .map_err(|_| ApiError::unavailable("LW_AUTH_RESOURCE_UNAVAILABLE"))?;
+    if !response.status().is_success() {
+        return Err(ApiError::forbidden("LW_AUTH_SCOPE_DENIED"));
+    }
+    if response.content_length().is_some_and(|length| {
+        length > u64::try_from(state.resource_proxy.max_response_bytes).unwrap_or(u64::MAX)
+    }) {
+        return Err(ApiError::unavailable("LW_AUTH_RESOURCE_RESPONSE_TOO_LARGE"));
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|_| ApiError::unavailable("LW_AUTH_RESOURCE_UNAVAILABLE"))?;
+    if bytes.len() > state.resource_proxy.max_response_bytes {
+        return Err(ApiError::unavailable("LW_AUTH_RESOURCE_RESPONSE_TOO_LARGE"));
+    }
+    contracts::parse_strict_json(&bytes)
+        .map_err(|_| ApiError::unavailable("LW_AUTH_RESOURCE_RESPONSE_INVALID"))
+}
+
+async fn authorize_resource_scope(
+    state: &AppState,
+    session: &auth::BffSession,
+    scope: contracts::AuthorizationScope,
+    operation_id: &'static str,
+) -> Result<(), ApiError> {
+    let actor = super::actor_from_session(session)?;
+    let memberships = auth::load_membership_snapshot(&state.pool, session.actor_id)
+        .await
+        .map_err(ApiError::from)?;
+    let policy = contracts::operation_authorization(operation_id)
+        .ok_or_else(|| ApiError::forbidden("LW_AUTH_SCOPE_DENIED"))?;
+    auth::authorize(
+        &auth::AuthorizationContext {
+            actor,
+            course_memberships: memberships.course_memberships,
+            project_memberships: memberships.project_memberships,
+            now: OffsetDateTime::now_utc(),
+        },
+        scope,
+        &policy.allowed_roles.iter().copied().collect(),
+    )
+    .map_err(ApiError::from)?;
+    Ok(())
+}
+
+fn resource_roles(session: &auth::BffSession) -> Result<String, ApiError> {
+    let roles = session
+        .roles
+        .iter()
+        .map(|role| match role {
+            contracts::PlatformRole::Teacher => "teacher",
+            contracts::PlatformRole::Student => "student",
+            contracts::PlatformRole::PlatformAdmin => "platform_admin",
+        })
+        .collect::<Vec<_>>();
+    if roles.is_empty() {
+        return Err(ApiError::forbidden("LW_AUTH_ROLE_DENIED"));
+    }
+    Ok(roles.join(","))
+}
+
+async fn bounded_resource_response(
+    proxy: &ResourceGatewayProxy,
+    response: reqwest::Response,
+    operation_id: &'static str,
+) -> Result<Response, ApiError> {
+    let status = response.status();
+    if response
+        .content_length()
+        .is_some_and(|length| length > u64::try_from(proxy.max_response_bytes).unwrap_or(u64::MAX))
+    {
+        return Err(ApiError::unavailable("LW_AUTH_RESOURCE_RESPONSE_TOO_LARGE"));
+    }
+    let headers = response.headers().clone();
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|_| ApiError::unavailable("LW_AUTH_RESOURCE_UNAVAILABLE"))?;
+    if bytes.len() > proxy.max_response_bytes {
+        return Err(ApiError::unavailable("LW_AUTH_RESOURCE_RESPONSE_TOO_LARGE"));
+    }
+    metrics::counter!(
+        "labweaver_auth_resource_gateway_requests",
+        "operation" => operation_id,
+        "status" => status.as_u16().to_string()
+    )
+    .increment(1);
+    let mut downstream = Response::builder().status(status);
+    for name in [
+        header::CONTENT_TYPE,
+        header::CACHE_CONTROL,
+        header::ETAG,
+        header::LOCATION,
+        header::RETRY_AFTER,
+    ] {
+        if let Some(value) = headers.get(&name) {
+            downstream = downstream.header(name, value);
+        }
+    }
+    downstream
+        .body(Body::from(bytes))
+        .map_err(|_| ApiError::internal("LW_AUTH_RESOURCE_RESPONSE_INVALID"))
 }
 
 #[allow(
@@ -649,6 +1007,26 @@ fn valid_evaluation_path(path: &str) -> bool {
         ))
 }
 
+fn valid_resource_path(path: &str) -> bool {
+    if !safe_path(path) {
+        return false;
+    }
+    let segments = path.split('/').collect::<Vec<_>>();
+    matches!(
+        segments.as_slice(),
+        ["", "api", "v1", "resource-requests" | "resource-leases"]
+            | ["", "api", "v1", "resource-requests" | "resource-leases", _]
+    ) || matches!(
+        segments.as_slice(),
+        ["", "api", "v1", "resource-requests", _, action]
+            if matches!(*action, "approve" | "resize-and-approve" | "cancel" | "reject" | "retry")
+    ) || matches!(
+        segments.as_slice(),
+        ["", "api", "v1", "resource-leases", _, action]
+            if matches!(*action, "renew" | "revoke")
+    )
+}
+
 fn safe_path(path: &str) -> bool {
     let lowercase = path.to_ascii_lowercase();
     !path.contains("//")
@@ -673,7 +1051,9 @@ pub(super) enum ControlGatewayError {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_runtime_path, valid_control_path, valid_evaluation_path};
+    use super::{
+        parse_runtime_path, valid_control_path, valid_evaluation_path, valid_resource_path,
+    };
 
     #[test]
     fn control_paths_are_bounded_to_the_course_api() {
@@ -714,5 +1094,22 @@ mod tests {
             parse_runtime_path("/connect/01900000-0000-7000-8000-000000000001/%2e%2e/internal")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn resource_paths_are_exact_and_injection_safe() {
+        assert!(valid_resource_path("/api/v1/resource-requests"));
+        assert!(valid_resource_path(
+            "/api/v1/resource-requests/01900000-0000-7000-8000-000000000001/approve"
+        ));
+        assert!(valid_resource_path(
+            "/api/v1/resource-leases/01900000-0000-7000-8000-000000000001/renew"
+        ));
+        assert!(!valid_resource_path(
+            "/api/v1/resource-requests/01900000-0000-7000-8000-000000000001/arbitrary"
+        ));
+        assert!(!valid_resource_path(
+            "/api/v1/resource-requests/../internal"
+        ));
     }
 }

@@ -96,6 +96,11 @@ evaluation_gateway:
   timeout_milliseconds: 5000
   max_request_bytes: 1048576
   max_response_bytes: 8388608
+resource_gateway:
+  base_uri: "http://resource-service:8087/"
+  timeout_milliseconds: 5000
+  max_request_bytes: 1048576
+  max_response_bytes: 8388608
 grants:
   gateway_san_uris:
     - spiffe://labweaver/openssh-gateway

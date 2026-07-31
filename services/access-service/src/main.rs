@@ -51,6 +51,7 @@ struct AppState {
     control_proxy: proxy::ControlGatewayProxy,
     environment_proxy: proxy::ControlGatewayProxy,
     evaluation_proxy: proxy::ControlGatewayProxy,
+    resource_proxy: proxy::ResourceGatewayProxy,
     runtime_proxy: proxy::RuntimeGatewayProxy,
     metrics: telemetry::PrometheusHandle,
     nats: async_nats::Client,
@@ -88,6 +89,10 @@ async fn main() -> Result<(), StartupError> {
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the browser surface is intentionally enumerated in one auditable router"
+)]
 fn browser_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/auth/login", get(login))
@@ -188,7 +193,33 @@ fn browser_router(state: Arc<AppState>) -> Router {
             "/connect/{endpoint_grant_id}/{*runtime_path}",
             axum::routing::any(proxy::forward_runtime),
         )
+        .merge(resource_browser_router())
         .with_state(state)
+}
+
+fn resource_browser_router() -> Router<Arc<AppState>> {
+    Router::new()
+        .route(
+            "/api/v1/resource-requests",
+            axum::routing::any(proxy::forward_resource),
+        )
+        .route(
+            "/api/v1/resource-requests/{request_id}",
+            axum::routing::any(proxy::forward_resource),
+        )
+        .route(
+            "/api/v1/resource-requests/{request_id}/{action}",
+            post(proxy::forward_resource),
+        )
+        .route("/api/v1/resource-leases", get(proxy::forward_resource))
+        .route(
+            "/api/v1/resource-leases/{lease_id}",
+            get(proxy::forward_resource),
+        )
+        .route(
+            "/api/v1/resource-leases/{lease_id}/{action}",
+            post(proxy::forward_resource),
+        )
 }
 
 fn internal_router(state: Arc<AppState>) -> Router {
@@ -290,6 +321,7 @@ async fn build_app_state(
     let control_proxy = build_control_proxy(&deployment)?;
     let environment_proxy = build_service_proxy(&deployment, &deployment.environment_gateway)?;
     let evaluation_proxy = build_service_proxy(&deployment, &deployment.evaluation_gateway)?;
+    let resource_proxy = proxy::ResourceGatewayProxy::new(&deployment.resource_gateway)?;
     let runtime_proxy = proxy::RuntimeGatewayProxy::new(&deployment.environment_gateway)?;
     let nats = grants::connect_nats(&deployment.nats).await?;
     Ok(Arc::new(AppState {
@@ -306,6 +338,7 @@ async fn build_app_state(
         control_proxy,
         environment_proxy,
         evaluation_proxy,
+        resource_proxy,
         runtime_proxy,
         metrics,
         nats,

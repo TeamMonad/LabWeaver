@@ -5336,6 +5336,16 @@
         ],
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "../contracts/v1/resource-lease.schema.json"
+                  },
+                  "type": "array"
+                }
+              }
+            },
             "description": "Successful response",
             "headers": {
               "ETag": {
@@ -5388,7 +5398,8 @@
         "summary": "listResourceLeases",
         "x-labweaver-allowed-roles": [
           "teacher",
-          "student"
+          "student",
+          "platform_admin"
         ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
@@ -5441,6 +5452,13 @@
         ],
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/resource-lease.schema.json"
+                }
+              }
+            },
             "description": "Successful response",
             "headers": {
               "ETag": {
@@ -5493,7 +5511,8 @@
         "summary": "getResourceLease",
         "x-labweaver-allowed-roles": [
           "teacher",
-          "student"
+          "student",
+          "platform_admin"
         ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
@@ -5560,8 +5579,25 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/renew-resource-lease.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
-          "202": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/resource-lease.schema.json"
+                }
+              }
+            },
             "description": "Successful response",
             "headers": {
               "ETag": {
@@ -5680,8 +5716,25 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/resource-request-mutation.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
-          "202": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/resource-lease.schema.json"
+                }
+              }
+            },
             "description": "Successful response",
             "headers": {
               "ETag": {
@@ -5777,6 +5830,16 @@
         ],
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "../contracts/v1/resource-request.schema.json"
+                  },
+                  "type": "array"
+                }
+              }
+            },
             "description": "Successful response",
             "headers": {
               "ETag": {
@@ -5829,7 +5892,8 @@
         "summary": "listResourceRequests",
         "x-labweaver-allowed-roles": [
           "teacher",
-          "student"
+          "student",
+          "platform_admin"
         ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
@@ -5877,8 +5941,25 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/create-resource-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/http/resource-operation-accepted.schema.json"
+                }
+              }
+            },
             "description": "Successful response",
             "headers": {
               "ETag": {
@@ -5984,6 +6065,13 @@
         ],
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/resource-request.schema.json"
+                }
+              }
+            },
             "description": "Successful response",
             "headers": {
               "ETag": {
@@ -6036,7 +6124,8 @@
         "summary": "getResourceRequest",
         "x-labweaver-allowed-roles": [
           "teacher",
-          "student"
+          "student",
+          "platform_admin"
         ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
@@ -6103,8 +6192,25 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/approve-resource-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/http/resource-operation-accepted.schema.json"
+                }
+              }
+            },
             "description": "Successful response",
             "headers": {
               "ETag": {
@@ -6223,8 +6329,25 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/resource-request-mutation.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/http/resource-operation-accepted.schema.json"
+                }
+              }
+            },
             "description": "Successful response",
             "headers": {
               "ETag": {
@@ -6344,8 +6467,25 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/resource-request-mutation.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/http/resource-operation-accepted.schema.json"
+                }
+              }
+            },
             "description": "Successful response",
             "headers": {
               "ETag": {
@@ -6464,8 +6604,25 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/approve-resource-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/http/resource-operation-accepted.schema.json"
+                }
+              }
+            },
             "description": "Successful response",
             "headers": {
               "ETag": {
@@ -6584,8 +6741,25 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/resource-request-mutation.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/http/resource-operation-accepted.schema.json"
+                }
+              }
+            },
             "description": "Successful response",
             "headers": {
               "ETag": {

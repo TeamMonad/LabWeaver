@@ -23,6 +23,7 @@ use crate::store::{PendingAllocation, PgResourceStore, ResourceStoreError};
 use contracts::Sha256Digest;
 
 const ACCESS_CALLER_SAN: &str = "spiffe://labweaver/access-service";
+const ROLES_HEADER: &str = "x-labweaver-platform-roles";
 
 #[derive(Clone)]
 pub struct ResourceApiState {
@@ -62,6 +63,7 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
             post(retry_request),
         )
         .route("/api/v1/resource-leases/{lease_id}", get(get_lease))
+        .route("/api/v1/resource-leases", get(list_leases))
         .route(
             "/api/v1/resource-leases/{lease_id}/renew",
             post(renew_lease),
@@ -85,7 +87,12 @@ async fn list_requests(
 ) -> Result<Json<Vec<ResourceRequest>>, ResourceApiError> {
     authorize(&headers)?;
     let actor = actor(&headers)?;
-    Ok(Json(state.store.list_owned(actor, query.course_id).await?))
+    let requests = if is_admin(&headers)? {
+        state.store.list_for_course(query.course_id).await?
+    } else {
+        state.store.list_owned(actor, query.course_id).await?
+    };
+    Ok(Json(requests))
 }
 
 async fn create_request(
@@ -103,7 +110,7 @@ async fn create_request(
         request_key: input.request_key,
         requester_id: actor,
         course_id: input.course_id,
-        project_id: input.project_id,
+        project_id: Some(input.project_id),
         target: ResourceTarget {
             environment_id: input.environment_id,
             release_id: input.release_id,
@@ -138,7 +145,7 @@ async fn get_request(
 ) -> Result<Response, ResourceApiError> {
     authorize(&headers)?;
     let request = state.store.load(request_id).await?;
-    scoped(&headers, request.requester_id)?;
+    scoped_or_admin(&headers, request.requester_id)?;
     let revision = request.revision;
     with_etag(Json(request), revision)
 }
@@ -150,6 +157,7 @@ async fn approve_request(
     Json(input): Json<ApproveResourceRequest>,
 ) -> Result<Response, ResourceApiError> {
     authorize(&headers)?;
+    require_admin(&headers)?;
     let approver = actor(&headers)?;
     let idempotency = required_header(&headers, "idempotency-key")?;
     let request = state.store.load(request_id).await?;
@@ -241,6 +249,7 @@ async fn reject_request(
     Path(request_id): Path<ResourceRequestId>,
     Json(input): Json<contracts::http::ResourceRequestMutation>,
 ) -> Result<Response, ResourceApiError> {
+    require_admin(&headers)?;
     terminal_request(
         state,
         headers,
@@ -258,12 +267,9 @@ async fn retry_request(
     Json(input): Json<contracts::http::ResourceRequestMutation>,
 ) -> Result<Response, ResourceApiError> {
     authorize(&headers)?;
+    require_admin(&headers)?;
     let actor = actor(&headers)?;
     let key = required_header(&headers, "idempotency-key")?;
-    let request = state.store.load(request_id).await?;
-    if request.requester_id != actor {
-        return Err(ResourceApiError::ScopeDenied);
-    }
     let result = state
         .store
         .retry(
@@ -327,8 +333,28 @@ async fn get_lease(
 ) -> Result<Response, ResourceApiError> {
     authorize(&headers)?;
     let lease = state.store.load_lease(lease_id).await?;
+    let request = state.store.load(lease.request_id).await?;
+    scoped_or_admin(&headers, request.requester_id)?;
     let revision = lease.revision;
     with_etag(Json(lease), revision)
+}
+
+async fn list_leases(
+    State(state): State<ResourceApiState>,
+    headers: HeaderMap,
+    Query(query): Query<ResourceListQuery>,
+) -> Result<Json<Vec<contracts::resource::ResourceLease>>, ResourceApiError> {
+    authorize(&headers)?;
+    let actor = actor(&headers)?;
+    let leases = if is_admin(&headers)? {
+        state.store.list_leases_for_course(query.course_id).await?
+    } else {
+        state
+            .store
+            .list_owned_leases(actor, query.course_id)
+            .await?
+    };
+    Ok(Json(leases))
 }
 
 async fn renew_lease(
@@ -338,7 +364,7 @@ async fn renew_lease(
     Json(input): Json<RenewResourceLease>,
 ) -> Result<Response, ResourceApiError> {
     authorize(&headers)?;
-    let _actor = actor(&headers)?;
+    require_admin(&headers)?;
     let key = required_header(&headers, "idempotency-key")?;
     let now = state.store.current_time().await?;
     let expires = UtcTimestamp::from_utc(
@@ -363,6 +389,7 @@ async fn revoke_lease(
     Json(input): Json<contracts::http::ResourceRequestMutation>,
 ) -> Result<Response, ResourceApiError> {
     authorize(&headers)?;
+    require_admin(&headers)?;
     let actor = actor(&headers)?;
     if input.reason.trim().is_empty() || input.reason.chars().count() > 500 {
         return Err(ResourceApiError::Invalid);
@@ -392,6 +419,41 @@ fn scoped(headers: &HeaderMap, expected: ActorId) -> Result<(), ResourceApiError
     } else {
         Err(ResourceApiError::ScopeDenied)
     }
+}
+
+fn scoped_or_admin(headers: &HeaderMap, expected: ActorId) -> Result<(), ResourceApiError> {
+    if is_admin(headers)? {
+        Ok(())
+    } else {
+        scoped(headers, expected)
+    }
+}
+
+fn require_admin(headers: &HeaderMap) -> Result<(), ResourceApiError> {
+    if is_admin(headers)? {
+        Ok(())
+    } else {
+        Err(ResourceApiError::ScopeDenied)
+    }
+}
+
+fn is_admin(headers: &HeaderMap) -> Result<bool, ResourceApiError> {
+    let roles = required_header(headers, ROLES_HEADER)?;
+    let mut parsed = roles.split(',').map(str::trim);
+    let mut any = false;
+    let mut admin = false;
+    for role in &mut parsed {
+        any = true;
+        match role {
+            "platform_admin" => admin = true,
+            "teacher" | "student" => {}
+            _ => return Err(ResourceApiError::CallerDenied),
+        }
+    }
+    if !any {
+        return Err(ResourceApiError::CallerDenied);
+    }
+    Ok(admin)
 }
 fn actor(headers: &HeaderMap) -> Result<ActorId, ResourceApiError> {
     required_header(headers, "x-labweaver-actor-id")
@@ -487,6 +549,25 @@ mod tests {
         assert!(matches!(
             actor(&headers),
             Err(ResourceApiError::IdentityInvalid)
+        ));
+    }
+
+    #[test]
+    fn administrator_role_is_explicit_and_unknown_roles_fail_closed() {
+        let mut headers = HeaderMap::new();
+        assert!(matches!(
+            is_admin(&headers),
+            Err(ResourceApiError::IdentityInvalid)
+        ));
+        headers.insert(
+            ROLES_HEADER,
+            HeaderValue::from_static("teacher,platform_admin"),
+        );
+        assert!(is_admin(&headers).is_ok_and(|value| value));
+        headers.insert(ROLES_HEADER, HeaderValue::from_static("teacher,root"));
+        assert!(matches!(
+            is_admin(&headers),
+            Err(ResourceApiError::CallerDenied)
         ));
     }
 }

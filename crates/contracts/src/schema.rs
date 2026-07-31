@@ -940,6 +940,15 @@ fn request_schema(operation_id: &str) -> Option<Value> {
             "http/withdraw-environment-template-release-request"
         }
         "createEnvironment" => "http/create-environment-request",
+        "createResourceRequest" => "http/create-resource-request",
+        "approveResourceRequest" | "resizeAndApproveResourceRequest" => {
+            "http/approve-resource-request"
+        }
+        "cancelResourceRequest"
+        | "rejectResourceRequest"
+        | "retryResourceRequest"
+        | "revokeResourceLease" => "http/resource-request-mutation",
+        "renewResourceLease" => "http/renew-resource-lease",
         "freezeSubmission" => "http/freeze-submission-request",
         "createSshPublicKey" => "http/create-ssh-public-key-request",
         "createAccessGrant" => "http/create-access-grant-request",
@@ -977,6 +986,16 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             json!({"type":"object","required":["items"],"properties":{"items":{"type":"array","items":contract_ref("http/environment-template-release-view")},"nextCursor":{"type":["string","null"]}}})
         }
         "getEnvironment" => contract_ref("environment-instance"),
+        "getResourceRequest" => contract_ref("resource-request"),
+        "listResourceRequests" => {
+            json!({"type":"array","items":contract_ref("resource-request")})
+        }
+        "getResourceLease" | "renewResourceLease" | "revokeResourceLease" => {
+            contract_ref("resource-lease")
+        }
+        "listResourceLeases" => {
+            json!({"type":"array","items":contract_ref("resource-lease")})
+        }
         "listEnvironments" => contract_ref("http/environment-summary-page"),
         "getEnvironmentOperation" => contract_ref("environment-operation-snapshot"),
         "listEnvironmentOperations" => contract_ref("http/environment-operation-page"),
@@ -1011,6 +1030,12 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             "recoverEnvironment",
             "deleteEnvironment",
             "freezeSubmission",
+            "createResourceRequest",
+            "approveResourceRequest",
+            "resizeAndApproveResourceRequest",
+            "cancelResourceRequest",
+            "rejectResourceRequest",
+            "retryResourceRequest",
             "revokeAccessGrant",
             "renewAccessGrant",
         ]
@@ -1030,6 +1055,17 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             .contains(&id)
             {
                 contract_ref("http/environment-operation-accepted")
+            } else if [
+                "createResourceRequest",
+                "approveResourceRequest",
+                "resizeAndApproveResourceRequest",
+                "cancelResourceRequest",
+                "rejectResourceRequest",
+                "retryResourceRequest",
+            ]
+            .contains(&id)
+            {
+                contract_ref("http/resource-operation-accepted")
             } else {
                 json!({"$ref":"#/components/schemas/OperationAccepted"})
             }

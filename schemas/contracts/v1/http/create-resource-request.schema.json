@@ -94,14 +94,8 @@
       "description": "Preallocated Work aggregate identity. Resource never allocates this implicitly."
     },
     "projectId": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/ProjectId"
-        },
-        {
-          "type": "null"
-        }
-      ]
+      "$ref": "#/$defs/ProjectId",
+      "description": "Required project scope. Work capacity is never allocated at an\nunscoped course-wide boundary."
     },
     "releaseId": {
       "$ref": "#/$defs/ReleaseId"
@@ -124,6 +118,7 @@
   },
   "required": [
     "courseId",
+    "projectId",
     "requestKey",
     "environmentId",
     "releaseId",

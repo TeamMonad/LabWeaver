@@ -22,6 +22,14 @@ spec:
     matchLabels: {app.kubernetes.io/name: {{ $name }}}
   policyTypes: [Ingress, Egress]
   ingress:
+    {{- if eq $name "resource-service" }}
+    # Resource accepts browser authority assertions only from Access Service.
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: access-service}
+      ports:
+        - {protocol: TCP, port: 8087}
+    {{- else }}
     - from:
         - podSelector:
             matchLabels: {app.kubernetes.io/part-of: labweaver}
@@ -31,6 +39,7 @@ spec:
         - {protocol: TCP, port: {{ .containerPort }}}
         {{- end }}
       {{- end }}
+    {{- end }}
     {{- if or (eq $name "web") (eq $name "access-service") (eq $name "openssh-gateway") }}
     - from:
         - namespaceSelector:

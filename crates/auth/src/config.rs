@@ -61,6 +61,9 @@ pub struct AccessAuthFile {
     pub environment_gateway: ControlGatewayFileConfig,
     /// Authenticated browser gateway for the freeze-only Evaluation API.
     pub evaluation_gateway: ControlGatewayFileConfig,
+    /// Access-only in-cluster gateway for the Resource public API. Kubernetes
+    /// `NetworkPolicy` restricts this cleartext hop to Access Service.
+    pub resource_gateway: ResourceGatewayFileConfig,
     /// `AccessGrant`, worker, and one-time authorization limits.
     pub grants: GrantRuntimeFileConfig,
     /// Mandatory mTLS `JetStream` connection.
@@ -216,6 +219,19 @@ pub struct ControlGatewayFileConfig {
     pub max_response_bytes: usize,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[allow(
+    missing_docs,
+    reason = "YAML keys are documented by deploy/config/access-auth.yaml.example"
+)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceGatewayFileConfig {
+    pub base_uri: String,
+    pub timeout_milliseconds: u64,
+    pub max_request_bytes: usize,
+    pub max_response_bytes: usize,
+}
+
 impl OwnerResolverFileConfig {
     /// Converts deployment YAML into the contract-owned resolver settings.
     #[must_use]
@@ -316,6 +332,7 @@ impl AccessAuthFile {
             || !parsed.service_gateway_is_valid(&parsed.control_gateway)
             || !parsed.service_gateway_is_valid(&parsed.environment_gateway)
             || !parsed.service_gateway_is_valid(&parsed.evaluation_gateway)
+            || !parsed.resource_gateway_is_valid()
             || !parsed.access_runtime_is_valid()
             || required_resolver_locators.iter().any(|locator| {
                 parsed
@@ -411,6 +428,20 @@ impl AccessAuthFile {
             })
     }
 
+    fn resource_gateway_is_valid(&self) -> bool {
+        let Ok(uri) = Url::parse(&self.resource_gateway.base_uri) else {
+            return false;
+        };
+        uri.scheme() == "http"
+            && uri.host_str().is_some()
+            && uri.path() == "/"
+            && uri.query().is_none()
+            && uri.fragment().is_none()
+            && (100..=30_000).contains(&self.resource_gateway.timeout_milliseconds)
+            && (1..=16 * 1024 * 1024).contains(&self.resource_gateway.max_request_bytes)
+            && (1..=32 * 1024 * 1024).contains(&self.resource_gateway.max_response_bytes)
+    }
+
     fn insecure_mode_is_loopback_only(&self) -> bool {
         let browser_bind = self.browser.bind_addr.parse::<std::net::SocketAddr>();
         let internal_bind = self.internal_mtls.bind_addr.parse::<std::net::SocketAddr>();
@@ -418,12 +449,14 @@ impl AccessAuthFile {
         let control = Url::parse(&self.control_gateway.base_uri);
         let environment = Url::parse(&self.environment_gateway.base_uri);
         let evaluation = Url::parse(&self.evaluation_gateway.base_uri);
+        let resource = Url::parse(&self.resource_gateway.base_uri);
         browser_bind.is_ok_and(|address| address.ip().is_loopback())
             && internal_bind.is_ok_and(|address| address.ip().is_loopback())
             && resolver.is_ok_and(|url| url_host_is_loopback(&url))
             && control.is_ok_and(|url| url_host_is_loopback(&url))
             && environment.is_ok_and(|url| url_host_is_loopback(&url))
             && evaluation.is_ok_and(|url| url_host_is_loopback(&url))
+            && resource.is_ok_and(|url| url_host_is_loopback(&url))
     }
 }
 
@@ -757,6 +790,11 @@ evaluation_gateway:
   client_certificate_locator: secret://access-service/control-client-cert
   client_private_key_locator: secret://access-service/control-client-key
   allowed_server_sans: [evaluation-service.example.test]
+  timeout_milliseconds: 5000
+  max_request_bytes: 1048576
+  max_response_bytes: 8388608
+resource_gateway:
+  base_uri: http://127.0.0.1:8087/
   timeout_milliseconds: 5000
   max_request_bytes: 1048576
   max_response_bytes: 8388608

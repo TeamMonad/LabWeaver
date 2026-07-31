@@ -207,6 +207,65 @@ impl PgResourceStore {
             .collect()
     }
 
+    /// Lists all requests in one course for an Access-authorized platform
+    /// administrator. The caller must enforce the course authorization before
+    /// invoking this method.
+    pub async fn list_for_course(
+        &self,
+        course_id: contracts::CourseId,
+    ) -> Result<Vec<ResourceRequest>, ResourceStoreError> {
+        let rows = sqlx::query(
+            "SELECT contract FROM resource.resource_requests WHERE course_id=$1 ORDER BY created_at, request_id",
+        )
+        .bind(course_id.as_uuid())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| decode_request(row.try_get("contract")?))
+            .collect()
+    }
+
+    /// Lists leases owned by one actor in one course without in-memory scope
+    /// filtering.
+    pub async fn list_owned_leases(
+        &self,
+        actor_id: contracts::ActorId,
+        course_id: contracts::CourseId,
+    ) -> Result<Vec<ResourceLease>, ResourceStoreError> {
+        let rows = sqlx::query(
+            "SELECT l.contract FROM resource.resource_leases l \
+             JOIN resource.resource_requests r ON r.request_id=l.request_id \
+             WHERE r.course_id=$1 AND r.requester_id=$2 \
+             ORDER BY l.created_at,l.lease_id",
+        )
+        .bind(course_id.as_uuid())
+        .bind(actor_id.as_uuid())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| decode_lease(row.try_get("contract")?))
+            .collect()
+    }
+
+    /// Lists all leases in one course for an Access-authorized administrator.
+    pub async fn list_leases_for_course(
+        &self,
+        course_id: contracts::CourseId,
+    ) -> Result<Vec<ResourceLease>, ResourceStoreError> {
+        let rows = sqlx::query(
+            "SELECT l.contract FROM resource.resource_leases l \
+             JOIN resource.resource_requests r ON r.request_id=l.request_id \
+             WHERE r.course_id=$1 \
+             ORDER BY l.created_at,l.lease_id",
+        )
+        .bind(course_id.as_uuid())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| decode_lease(row.try_get("contract")?))
+            .collect()
+    }
+
     /// Resolves the exact authorization fence required by Environment before Work creation.
     /// Mismatched scope deliberately receives the same non-active response as an expired Lease.
     pub async fn verify_environment_lease(

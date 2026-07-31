@@ -1452,6 +1452,42 @@ export type FrozenSubmissionSchemaSha256Digest = string;
 export type FrozenSubmissionSchemaUtcTimestamp = string;
 
 /**
+ * ApproveResourceRequest
+ *
+ * Administrator approval or resize decision. The selected Provider is always explicit.
+ */
+export type ApproveResourceRequestSchema = {
+    durationSeconds: number;
+    expectedRevision: ApproveResourceRequestSchemaRevision;
+    providerBinding: string;
+    reason: string;
+    resources: WorkloadResources;
+};
+
+/**
+ * A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.
+ */
+export type GpuRequest = {
+    class: string;
+    count: number;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type ApproveResourceRequestSchemaRevision = number;
+
+/**
+ * Requested or approved workload resources, independent of Kubernetes quantity syntax.
+ */
+export type WorkloadResources = {
+    cpuMillicores: number;
+    gpu?: GpuRequest | null;
+    memoryBytes: number;
+    storageBytes: number;
+};
+
+/**
  * CandidateDecisionRequest
  */
 export type CandidateDecisionRequestSchema = {
@@ -1644,6 +1680,76 @@ export type CreateProblemPackageUploadRequestSchemaRevision = number;
  * Canonical lowercase SHA-256 digest.
  */
 export type CreateProblemPackageUploadRequestSchemaSha256Digest = string;
+
+/**
+ * CreateResourceRequest
+ *
+ * Browser request for a new Work-environment capacity reservation.
+ */
+export type CreateResourceRequestSchema = {
+    courseId: CreateResourceRequestSchemaCourseId;
+    durationSeconds: number;
+    /**
+     * Preallocated Work aggregate identity. Resource never allocates this implicitly.
+     */
+    environmentId: CreateResourceRequestSchemaEnvironmentId;
+    /**
+     * Required project scope. Work capacity is never allocated at an
+     * unscoped course-wide boundary.
+     */
+    projectId: CreateResourceRequestSchemaProjectId;
+    releaseId: CreateResourceRequestSchemaReleaseId;
+    /**
+     * Immutable release document identity expected by Environment at handoff.
+     */
+    releaseSha256: CreateResourceRequestSchemaSha256Digest;
+    releaseVersion: number;
+    requestKey: string;
+    resources: CreateResourceRequestSchemaWorkloadResources;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type CreateResourceRequestSchemaCourseId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `EnvironmentId`.
+ */
+export type CreateResourceRequestSchemaEnvironmentId = string;
+
+/**
+ * A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.
+ */
+export type CreateResourceRequestSchemaGpuRequest = {
+    class: string;
+    count: number;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type CreateResourceRequestSchemaProjectId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ReleaseId`.
+ */
+export type CreateResourceRequestSchemaReleaseId = string;
+
+/**
+ * Canonical lowercase SHA-256 digest.
+ */
+export type CreateResourceRequestSchemaSha256Digest = string;
+
+/**
+ * Requested or approved workload resources, independent of Kubernetes quantity syntax.
+ */
+export type CreateResourceRequestSchemaWorkloadResources = {
+    cpuMillicores: number;
+    gpu?: CreateResourceRequestSchemaGpuRequest | null;
+    memoryBytes: number;
+    storageBytes: number;
+};
 
 /**
  * CreateSshPublicKeyRequest
@@ -4365,6 +4471,64 @@ export type RenewAccessGrantRequestSchemaAccessGrantId = string;
 export type RenewAccessGrantRequestSchemaUtcTimestamp = string;
 
 /**
+ * RenewResourceLease
+ *
+ * Revision-fenced Lease renewal. Resources and Provider binding are immutable after approval.
+ */
+export type RenewResourceLeaseSchema = {
+    durationSeconds: number;
+    expectedRevision: RenewResourceLeaseSchemaRevision;
+    reason: string;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type RenewResourceLeaseSchemaRevision = number;
+
+/**
+ * ResourceOperationAccepted
+ *
+ * Stable response returned when Resource accepts an asynchronous allocation mutation.
+ */
+export type ResourceOperationAcceptedSchema = {
+    leaseId?: ResourceOperationAcceptedSchemaLeaseId | null;
+    requestId: ResourceRequestId;
+    revision: ResourceOperationAcceptedSchemaRevision;
+    statusUrl: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `LeaseId`.
+ */
+export type ResourceOperationAcceptedSchemaLeaseId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ResourceRequestId`.
+ */
+export type ResourceRequestId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type ResourceOperationAcceptedSchemaRevision = number;
+
+/**
+ * ResourceRequestMutation
+ *
+ * Revision-fenced reason-bearing Resource mutation.
+ */
+export type ResourceRequestMutationSchema = {
+    expectedRevision: ResourceRequestMutationSchemaRevision;
+    reason: string;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type ResourceRequestMutationSchemaRevision = number;
+
+/**
  * RevokeAccessGrantRequest
  */
 export type RevokeAccessGrantRequestSchema = {
@@ -4518,6 +4682,154 @@ export type ProblemPackageSchemaSha256Digest = string;
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
  */
 export type ProblemPackageSchemaUtcTimestamp = string;
+
+/**
+ * ResourceLease
+ *
+ * PostgreSQL-authoritative Lease projection. Its authorization is valid only while Active.
+ */
+export type ResourceLeaseSchema = {
+    activeFrom?: ResourceLeaseSchemaUtcTimestamp | null;
+    claimId: CapacityClaimId;
+    createdAt: ResourceLeaseSchemaUtcTimestamp;
+    expiresAt?: ResourceLeaseSchemaUtcTimestamp | null;
+    id: ResourceLeaseSchemaLeaseId;
+    requestId: ResourceLeaseSchemaResourceRequestId;
+    revision: ResourceLeaseSchemaRevision;
+    revokeReasonCode?: string | null;
+    state: ResourceLeaseState;
+    updatedAt: ResourceLeaseSchemaUtcTimestamp;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `CapacityClaimId`.
+ */
+export type CapacityClaimId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `LeaseId`.
+ */
+export type ResourceLeaseSchemaLeaseId = string;
+
+/**
+ * Closed Lease state consumed by other service boundaries.
+ */
+export type ResourceLeaseState = 'allocating' | 'active' | 'expiring' | 'expired' | 'revoked';
+
+/**
+ * Strongly typed UUIDv7 identifier for `ResourceRequestId`.
+ */
+export type ResourceLeaseSchemaResourceRequestId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type ResourceLeaseSchemaRevision = number;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type ResourceLeaseSchemaUtcTimestamp = string;
+
+/**
+ * ResourceRequest
+ *
+ * PostgreSQL-authoritative request projection without provider internals.
+ */
+export type ResourceRequestSchema = {
+    courseId: ResourceRequestSchemaCourseId;
+    createdAt: ResourceRequestSchemaUtcTimestamp;
+    diagnosticCode?: string | null;
+    generation: number;
+    id: ResourceRequestSchemaResourceRequestId;
+    projectId?: ResourceRequestSchemaProjectId | null;
+    requestKey: string;
+    requestedDurationSeconds: number;
+    requestedResources: ResourceRequestSchemaWorkloadResources;
+    requesterId: ResourceRequestSchemaActorId;
+    revision: ResourceRequestSchemaRevision;
+    state: ResourceRequestState;
+    target: ResourceTarget;
+    updatedAt: ResourceRequestSchemaUtcTimestamp;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type ResourceRequestSchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type ResourceRequestSchemaCourseId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `EnvironmentId`.
+ */
+export type ResourceRequestSchemaEnvironmentId = string;
+
+/**
+ * A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.
+ */
+export type ResourceRequestSchemaGpuRequest = {
+    class: string;
+    count: number;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type ResourceRequestSchemaProjectId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ReleaseId`.
+ */
+export type ResourceRequestSchemaReleaseId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ResourceRequestId`.
+ */
+export type ResourceRequestSchemaResourceRequestId = string;
+
+/**
+ * Request lifecycle owned by Resource Service.
+ */
+export type ResourceRequestState = 'reviewing' | 'allocating' | 'active' | 'expiring' | 'expired' | 'rejected' | 'cancelled';
+
+/**
+ * Immutable identity of a Resource request's target Work environment.
+ */
+export type ResourceTarget = {
+    environmentId: ResourceRequestSchemaEnvironmentId;
+    releaseId: ResourceRequestSchemaReleaseId;
+    releaseSha256: ResourceRequestSchemaSha256Digest;
+    releaseVersion: number;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type ResourceRequestSchemaRevision = number;
+
+/**
+ * Canonical lowercase SHA-256 digest.
+ */
+export type ResourceRequestSchemaSha256Digest = string;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type ResourceRequestSchemaUtcTimestamp = string;
+
+/**
+ * Requested or approved workload resources, independent of Kubernetes quantity syntax.
+ */
+export type ResourceRequestSchemaWorkloadResources = {
+    cpuMillicores: number;
+    gpu?: ResourceRequestSchemaGpuRequest | null;
+    memoryBytes: number;
+    storageBytes: number;
+};
 
 /**
  * SshPublicKey
@@ -7694,8 +8006,10 @@ export type ListResourceLeasesResponses = {
     /**
      * Successful response
      */
-    200: unknown;
+    200: Array<ResourceLeaseSchema>;
 };
+
+export type ListResourceLeasesResponse = ListResourceLeasesResponses[keyof ListResourceLeasesResponses];
 
 export type GetResourceLeaseData = {
     body?: never;
@@ -7763,11 +8077,13 @@ export type GetResourceLeaseResponses = {
     /**
      * Successful response
      */
-    200: unknown;
+    200: ResourceLeaseSchema;
 };
 
+export type GetResourceLeaseResponse = GetResourceLeaseResponses[keyof GetResourceLeaseResponses];
+
 export type RenewResourceLeaseData = {
-    body?: never;
+    body: RenewResourceLeaseSchema;
     headers: {
         'Idempotency-Key': string;
         'If-Match': string;
@@ -7834,11 +8150,13 @@ export type RenewResourceLeaseResponses = {
     /**
      * Successful response
      */
-    202: unknown;
+    200: ResourceLeaseSchema;
 };
 
+export type RenewResourceLeaseResponse = RenewResourceLeaseResponses[keyof RenewResourceLeaseResponses];
+
 export type RevokeResourceLeaseData = {
-    body?: never;
+    body: ResourceRequestMutationSchema;
     headers: {
         'Idempotency-Key': string;
         'If-Match': string;
@@ -7905,8 +8223,10 @@ export type RevokeResourceLeaseResponses = {
     /**
      * Successful response
      */
-    202: unknown;
+    200: ResourceLeaseSchema;
 };
+
+export type RevokeResourceLeaseResponse = RevokeResourceLeaseResponses[keyof RevokeResourceLeaseResponses];
 
 export type ListResourceRequestsData = {
     body?: never;
@@ -7972,11 +8292,13 @@ export type ListResourceRequestsResponses = {
     /**
      * Successful response
      */
-    200: unknown;
+    200: Array<ResourceRequestSchema>;
 };
 
+export type ListResourceRequestsResponse = ListResourceRequestsResponses[keyof ListResourceRequestsResponses];
+
 export type CreateResourceRequestData = {
-    body?: never;
+    body: CreateResourceRequestSchema;
     headers: {
         'Idempotency-Key': string;
         Origin: string;
@@ -8040,8 +8362,10 @@ export type CreateResourceRequestResponses = {
     /**
      * Successful response
      */
-    202: unknown;
+    202: ResourceOperationAcceptedSchema;
 };
+
+export type CreateResourceRequestResponse = CreateResourceRequestResponses[keyof CreateResourceRequestResponses];
 
 export type GetResourceRequestData = {
     body?: never;
@@ -8109,11 +8433,13 @@ export type GetResourceRequestResponses = {
     /**
      * Successful response
      */
-    200: unknown;
+    200: ResourceRequestSchema;
 };
 
+export type GetResourceRequestResponse = GetResourceRequestResponses[keyof GetResourceRequestResponses];
+
 export type ApproveResourceRequestData = {
-    body?: never;
+    body: ApproveResourceRequestSchema;
     headers: {
         'Idempotency-Key': string;
         'If-Match': string;
@@ -8180,11 +8506,13 @@ export type ApproveResourceRequestResponses = {
     /**
      * Successful response
      */
-    202: unknown;
+    202: ResourceOperationAcceptedSchema;
 };
 
+export type ApproveResourceRequestResponse = ApproveResourceRequestResponses[keyof ApproveResourceRequestResponses];
+
 export type CancelResourceRequestData = {
-    body?: never;
+    body: ResourceRequestMutationSchema;
     headers: {
         'Idempotency-Key': string;
         'If-Match': string;
@@ -8251,11 +8579,13 @@ export type CancelResourceRequestResponses = {
     /**
      * Successful response
      */
-    202: unknown;
+    202: ResourceOperationAcceptedSchema;
 };
 
+export type CancelResourceRequestResponse = CancelResourceRequestResponses[keyof CancelResourceRequestResponses];
+
 export type RejectResourceRequestData = {
-    body?: never;
+    body: ResourceRequestMutationSchema;
     headers: {
         'Idempotency-Key': string;
         'If-Match': string;
@@ -8322,11 +8652,13 @@ export type RejectResourceRequestResponses = {
     /**
      * Successful response
      */
-    202: unknown;
+    202: ResourceOperationAcceptedSchema;
 };
 
+export type RejectResourceRequestResponse = RejectResourceRequestResponses[keyof RejectResourceRequestResponses];
+
 export type ResizeAndApproveResourceRequestData = {
-    body?: never;
+    body: ApproveResourceRequestSchema;
     headers: {
         'Idempotency-Key': string;
         'If-Match': string;
@@ -8393,11 +8725,13 @@ export type ResizeAndApproveResourceRequestResponses = {
     /**
      * Successful response
      */
-    202: unknown;
+    202: ResourceOperationAcceptedSchema;
 };
 
+export type ResizeAndApproveResourceRequestResponse = ResizeAndApproveResourceRequestResponses[keyof ResizeAndApproveResourceRequestResponses];
+
 export type RetryResourceRequestData = {
-    body?: never;
+    body: ResourceRequestMutationSchema;
     headers: {
         'Idempotency-Key': string;
         'If-Match': string;
@@ -8464,8 +8798,10 @@ export type RetryResourceRequestResponses = {
     /**
      * Successful response
      */
-    202: unknown;
+    202: ResourceOperationAcceptedSchema;
 };
+
+export type RetryResourceRequestResponse = RetryResourceRequestResponses[keyof RetryResourceRequestResponses];
 
 export type ConsumeOidcBackchannelLogoutData = {
     body: {
