@@ -906,6 +906,19 @@ impl PgResourceStore {
              JOIN resource.resource_leases l ON l.claim_id=c.claim_id \
              WHERE c.state IN ('blocked','handed_off','releasing') \
                AND (l.state='expiring' OR (l.state='active' AND l.expires_at<=clock_timestamp())) \
+               AND NOT EXISTS (\
+                 SELECT 1 FROM resource.capacity_attempts a\
+                 WHERE a.claim_id=c.claim_id\
+                   AND a.step IN ('expire_environment','release_capacity')\
+                   AND a.state='failed'\
+               )\
+               AND NOT EXISTS (\
+                 SELECT 1 FROM resource.capacity_attempts a\
+                 WHERE a.claim_id=c.claim_id\
+                   AND a.step IN ('expire_environment','release_capacity')\
+                   AND a.state='retry'\
+                   AND a.next_attempt_at>clock_timestamp()\
+               )\
              ORDER BY l.expires_at,l.updated_at FOR UPDATE OF c,l SKIP LOCKED LIMIT 1",
         )
         .fetch_optional(&mut *transaction)
@@ -1047,13 +1060,15 @@ impl PgResourceStore {
         .await?;
         sqlx::query(
             "INSERT INTO resource.capacity_attempts \
-             (claim_id,attempt,step,state,diagnostic_code) VALUES ($1,$2,$3,$4,$5)",
+             (claim_id,attempt,step,state,next_attempt_at,diagnostic_code) \
+             VALUES ($1,$2,$3,$4,clock_timestamp() + ($6::bigint * interval '5 seconds'),$5)",
         )
         .bind(claim_id.as_uuid())
         .bind(attempt)
         .bind(step)
         .bind(if attempt >= 3 { "failed" } else { "retry" })
         .bind(diagnostic_code)
+        .bind(attempt.min(12))
         .execute(&mut *transaction)
         .await?;
         sqlx::query(
