@@ -212,6 +212,24 @@ class ResourceAcceptanceProfileTests(unittest.TestCase):
         replay_tasks = (ROOT / "deploy/ansible/roles/resource_replay/tasks/main.yml").read_text(encoding="utf-8")
         self.assertNotIn("become: false", replay_tasks)
 
+    def test_browser_authentication_is_a_private_ansible_boundary(self) -> None:
+        defaults = (
+            ROOT / "deploy/ansible/roles/resource_replay_auth/defaults/main.yml"
+        ).read_text(encoding="utf-8")
+        tasks = (
+            ROOT / "deploy/ansible/roles/resource_replay_auth/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        locator = (
+            ROOT
+            / "deploy/ansible/roles/resource_replay_auth/templates/resource-replay-auth.json.j2"
+        ).read_text(encoding="utf-8")
+        self.assertIn(".private/resource-replay-auth", defaults)
+        self.assertIn("PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT", tasks)
+        self.assertIn("auth.setup.mjs", tasks)
+        self.assertIn("mode: '0600'", tasks)
+        self.assertIn("no_log: true", tasks)
+        self.assertIn("resource-replay-auth/v1", locator)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,114 @@
+---
+- name: Validate Resource replay browser authentication inputs
+  ansible.builtin.assert:
+    that:
+      - resource_replay_auth_web_root | length > 0
+      - resource_replay_auth_base_url is match('^https://[a-z0-9][a-z0-9.-]*(?::[0-9]+)?$')
+      - resource_replay_auth_teacher_username | length > 0
+      - resource_replay_auth_student_username | length > 0
+      - resource_replay_auth_platform_admin_username | length > 0
+      - resource_replay_auth_teacher_password_file | length > 0
+      - resource_replay_auth_student_password_file | length > 0
+      - resource_replay_auth_platform_admin_password_file | length > 0
+    fail_msg: LW_RESOURCE_REPLAY_AUTH_INPUT_INVALID
+
+- name: Inspect Resource replay browser authentication prerequisites
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ resource_replay_auth_web_root }}"
+    - "{{ resource_replay_auth_web_root }}/node_modules/.bin/playwright"
+    - "{{ resource_replay_auth_web_root }}/e2e/setup/auth.setup.mjs"
+    - "{{ resource_replay_auth_teacher_password_file }}"
+    - "{{ resource_replay_auth_student_password_file }}"
+    - "{{ resource_replay_auth_platform_admin_password_file }}"
+  register: resource_replay_auth_prerequisites
+  no_log: true
+
+- name: Reject missing Resource replay browser authentication prerequisites
+  ansible.builtin.assert:
+    that: resource_replay_auth_prerequisites.results | map(attribute='stat.exists') | min
+    fail_msg: LW_RESOURCE_REPLAY_AUTH_PREREQUISITE_MISSING
+
+- name: Create root-only Resource replay browser authentication directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  loop:
+    - "{{ resource_replay_auth_root }}"
+    - "{{ resource_replay_auth_browser_root }}"
+
+- name: Install the pinned Playwright Chromium browser when absent
+  ansible.builtin.command:
+    argv:
+      - "{{ resource_replay_auth_web_root }}/node_modules/.bin/playwright"
+      - install
+      - chromium
+  args:
+    chdir: "{{ resource_replay_auth_web_root }}"
+    creates: "{{ resource_replay_auth_browser_root }}/chromium-1228"
+  environment:
+    PLAYWRIGHT_BROWSERS_PATH: "{{ resource_replay_auth_browser_root }}"
+    PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT: "{{ resource_replay_auth_download_timeout_ms }}"
+  no_log: true
+
+- name: Create fresh Keycloak browser sessions for Resource replay
+  ansible.builtin.command:
+    argv:
+      - "{{ resource_replay_auth_web_root }}/node_modules/.bin/playwright"
+      - test
+      - e2e/setup/auth.setup.mjs
+      - --project=setup
+      - --workers=1
+  args:
+    chdir: "{{ resource_replay_auth_web_root }}"
+  environment:
+    PLAYWRIGHT_BROWSERS_PATH: "{{ resource_replay_auth_browser_root }}"
+    LABWEAVER_BASE_URL: "{{ resource_replay_auth_base_url }}"
+    LABWEAVER_TEACHER_USERNAME: "{{ resource_replay_auth_teacher_username }}"
+    LABWEAVER_STUDENT_USERNAME: "{{ resource_replay_auth_student_username }}"
+    LABWEAVER_PLATFORM_ADMIN_USERNAME: "{{ resource_replay_auth_platform_admin_username }}"
+    LABWEAVER_TEACHER_PASSWORD_FILE: "{{ resource_replay_auth_teacher_password_file }}"
+    LABWEAVER_STUDENT_PASSWORD_FILE: "{{ resource_replay_auth_student_password_file }}"
+    LABWEAVER_PLATFORM_ADMIN_PASSWORD_FILE: "{{ resource_replay_auth_platform_admin_password_file }}"
+  no_log: true
+
+- name: Copy fresh browser sessions into the private replay root
+  ansible.builtin.copy:
+    src: "{{ resource_replay_auth_state_source_root }}/{{ item }}.json"
+    dest: "{{ resource_replay_auth_root }}/{{ item }}.json"
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0600'
+  loop:
+    - teacher
+    - student
+    - platform-admin
+  no_log: true
+
+- name: Render the private Resource replay authentication locator
+  ansible.builtin.template:
+    src: resource-replay-auth.json.j2
+    dest: "{{ resource_replay_auth_locator }}"
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
+
+- name: Verify private Resource replay authentication locator permissions
+  ansible.builtin.stat:
+    path: "{{ resource_replay_auth_locator }}"
+  register: resource_replay_auth_locator_stat
+
+- name: Reject invalid Resource replay authentication locator permissions
+  ansible.builtin.assert:
+    that:
+      - resource_replay_auth_locator_stat.stat.exists
+      - resource_replay_auth_locator_stat.stat.pw_name == 'root'
+      - resource_replay_auth_locator_stat.stat.gr_name == 'root'
+      - resource_replay_auth_locator_stat.stat.mode == '0600'
+    fail_msg: LW_RESOURCE_REPLAY_AUTH_OUTPUT_INVALID
