@@ -1276,9 +1276,9 @@ async fn work_intent_rejects_an_experiment_candidate_without_defaulting()
         runtime
             .generate_for_class(
                 AgentTrackKind::Environment,
-                EnvironmentClass::Work,
                 input(&policy).await?,
                 RunCancellation::new(),
+                EnvironmentClass::Work,
             )
             .await,
         "experiment output unexpectedly satisfied a Work request",
