@@ -73,6 +73,14 @@ status:
 - `application-bundle.yaml`、`resource-bundle.yaml` 和 `nats-admin/` 是部署输入；
   `authority/`、`platform-authority/`、`ssh-authority/` 与 `nsc/` 是签发源。
   Inventory 只记录这些受控 locator，不复制 Secret 内容。
+- 部署控制器维护一个 root-only credential registry：其 `current/` 只包含指向当前
+  签发源、部署 bundle、Resource profile、replay authentication locator 和 controller
+  identity 的受控链接，`current.sha256` 仅记录相对 locator 与内容 hash。registry
+  目录必须为 `0700`，hash manifest 必须为 `0600`；它用于维护交接和漂移检测，
+  不替代签发源，也不得被工作负载或 Git 直接读取。
+- 每次 rotation、bundle adoption 或显式凭据同步后，必须原子更新该 registry 并重算
+  manifest；验证链接目标存在、权限不放宽、manifest 可重算。报告只可写记录计数和
+  manifest hash，禁止写入链接的绝对控制器路径或任何 Secret 内容。
 - 丢失任一签发私钥时，舍弃受影响的旧 credentials，生成新的 Run ID，重新签发
   全部受影响 identity，并通过 Ansible 原地 reconcile。验证必须覆盖证书链、
   JWT permission、bundle hash、所有 workload rollout 和 connected NATS 探针。
