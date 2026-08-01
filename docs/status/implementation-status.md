@@ -124,6 +124,16 @@ Release Gate v2 requires a Resource deployment manifest, immutable
 remain legacy and cannot close #142. A same-identity Resource replay on a clean
 validation environment remains required before this is marked verified.
 
+`cargo xtask resource replay` is implemented locally as the only replay entry.
+It accepts private profile/authentication/deployment/package locators, validates
+their identity chain, performs the Work AgentRun and Resource public API flow,
+and emits a root-only sanitized report. `cargo xtask demo replay` now requires
+and invokes it before live Playwright and Gate evaluation. The controller still
+has no Resource acceptance profile, authenticated replay state, Resource
+deployment manifest or Resource package locator, so this path remains
+`implemented; connected verification blocked`; no local report is treated as
+connected evidence.
+
 The Resource public HTTP surface is now implemented locally: owner-scoped list
 and get, create, approve/resize-approve, cancel, reject, retry, Lease renew and
 Lease revoke all use explicit actor/caller checks, idempotency keys and revision

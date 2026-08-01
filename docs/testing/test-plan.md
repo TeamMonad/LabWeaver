@@ -90,6 +90,10 @@ baseline migration to a disposable PostgreSQL instance.
   create candidates, approvals, releases, requests or leases.
 - Release Gate v2 requires the Resource deployment manifest, immutable
   `resource-service` identity and same-identity `resource-lease` evidence.
+- `cargo xtask resource replay` must run from an allowlisted Linux controller
+  using private profile/authentication/deployment/package locators. It must
+  demonstrate Work AgentRun through the public API; SQL, direct service mTLS
+  and Secret values are prohibited replay inputs.
 
 ## Issue #140 C++17 OJ gate
 
@@ -159,8 +163,9 @@ catalog, image digest set and Run ID. It must execute:
 3. invalid, expired, revoked and cross-course AccessGrant cases;
 4. a second idempotent Ansible deploy;
 5. real teacher and student Playwright projects without fixed sleeps;
-6. `cargo xtask demo replay` twice, each time using the exact connected package
-   through the non-destructive `sprint2-application` adoption path;
+6. `cargo xtask demo replay` twice, each time using the exact connected package,
+   Resource profile/authentication/deployment/package inputs and the
+   non-destructive `sprint2-application` adoption path;
 7. `cargo xtask release-gate` and report-schema validation.
 
 Failed browser runs retain Trace, screenshot and video. Failed deployment or
