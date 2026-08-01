@@ -4,7 +4,7 @@
 Sprint 2 report. It does not run a Fixture and it does not upgrade partial
 evidence. `cargo xtask demo replay` first runs the allowlisted,
 non-destructive Sprint 2 application adoption for the exact package, then live
-Playwright, and finally invokes the same gate. It does not reconcile Harbor or
+the Resource public replay, live Playwright, and finally invokes the same gate. It does not reconcile Harbor or
 rebind the retained infrastructure installation to the application commit.
 
 The Sprint 3 manual Demo, downstream implementation and evidence payloads use
@@ -22,6 +22,10 @@ project-relative locator:
 export LABWEAVER_RELEASE_GATE_INPUT=artifacts/release-gate/input.json
 export LABWEAVER_DEMO_ENV=demo
 export LABWEAVER_DEMO_PACKAGE_MANIFEST=artifacts/package/pkg-demo-sprint2/PlatformImagePackageManifest.json
+export LABWEAVER_RESOURCE_REPLAY_PROFILE=.private/resource-acceptance-profile.json
+export LABWEAVER_RESOURCE_REPLAY_AUTHENTICATION=.private/resource-replay-auth.json
+export LABWEAVER_RESOURCE_DEPLOYMENT_MANIFEST=.private/resource-deployment-manifest.json
+export LABWEAVER_RESOURCE_PACKAGE_MANIFEST=.private/resource-package-manifest.json
 cargo xtask demo replay
 ```
 
@@ -37,6 +41,12 @@ The input must bind:
 - Container and KubeVirt runtime artifact digests;
 - the exact eleven connected checks required by the input Schema, including
   `resource-lease`.
+
+`cargo xtask resource replay` accepts only those four private locators and its
+Run ID. It uploads the reviewed material, uses the separate Work AgentRun
+endpoint, and drives Resource only through the authenticated BFF/public API.
+It never accepts SQL, service credentials or a Secret value as a command-line
+argument.
 
 The deployment manifest also binds the package-manifest SHA-256. The
 `ansible-idempotent` evidence binds the schema-valid application adoption

@@ -1,0 +1,10 @@
+---
+resource_replay_run_id: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RUN_ID') }}"
+resource_replay_source_commit: "{{ lookup('ansible.builtin.env', 'LABWEAVER_COMMIT_SHA') }}"
+resource_replay_package_manifest: "{{ lookup('ansible.builtin.env', 'LABWEAVER_PACKAGE_MANIFEST') }}"
+resource_replay_profile: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_REPLAY_PROFILE') }}"
+resource_replay_authentication: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_REPLAY_AUTHENTICATION') }}"
+resource_replay_deployment_manifest: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_REPLAY_DEPLOYMENT_MANIFEST') }}"
+resource_replay_validator: "{{ playbook_dir }}/../../../tools/validate_resource_replay_inputs.py"
+resource_replay_driver: "{{ playbook_dir }}/../../../tools/resource_replay.py"
+resource_replay_report_root: /var/lib/labweaver/resource-replay

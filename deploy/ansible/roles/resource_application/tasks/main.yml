@@ -25,6 +25,7 @@
     - "{{ resource_application_configuration_manifest }}"
     - "{{ resource_application_values_file }}"
     - "{{ resource_application_chart_source }}"
+    - "{{ resource_application_postgres_service_file }}"
   register: resource_application_inputs
   delegate_to: localhost
   become: false

@@ -13,6 +13,18 @@
     "descriptionSha256": "98f2f0b0e290779932a56d5f8ca80201b5fc0e2392e10a219be9794bfb46679f"
   },
   "configurationSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "replay": {
+    "projectId": "019fbc00-0000-7000-8000-000000000401",
+    "providerBinding": "kubernetes-work",
+    "materialFile": {
+      "relativePath": "resource-acceptance-material.json",
+      "mediaType": "application/json",
+      "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "policy": {
+      "privateProfileOnly": true
+    }
+  },
   "courseMemberships": [
     {
       "actorId": "019fbc00-0000-7000-8000-000000000201",

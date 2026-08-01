@@ -1,0 +1,12 @@
+---
+- import_playbook: 00-preflight.yml
+  vars:
+    labweaver_preflight_scope: resource-replay
+    labweaver_preflight_validate_remote_hosts: false
+
+- name: Execute the identity-bound Resource Lease public replay
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: true
+  roles: [resource_replay]

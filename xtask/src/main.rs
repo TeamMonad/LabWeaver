@@ -50,6 +50,9 @@ enum Command {
     Sprint2Application(EnvironmentArgs),
     /// Deploy the independently reviewed Resource authority profile.
     ResourceApplication(EnvironmentArgs),
+    /// Execute the identity-bound public Resource Lease acceptance replay.
+    #[command(subcommand)]
+    Resource(ResourceCommand),
     Upgrade(UpgradeArgs),
     Rollback(RollbackArgs),
     Restore(RestoreArgs),
@@ -234,6 +237,26 @@ enum DemoCommand {
     Seed(EnvironmentArgs),
     Replay,
     Reset(EnvironmentArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum ResourceCommand {
+    /// Replay the Work publication and Resource Lease lifecycle through public APIs only.
+    Replay(ResourceReplayArgs),
+}
+
+#[derive(Debug, Args)]
+struct ResourceReplayArgs {
+    #[arg(long)]
+    env: String,
+    #[arg(long)]
+    profile: PathBuf,
+    #[arg(long)]
+    authentication: PathBuf,
+    #[arg(long)]
+    deployment_manifest: PathBuf,
+    #[arg(long)]
+    package_manifest: PathBuf,
 }
 
 #[derive(Debug, Subcommand)]
@@ -438,6 +461,7 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::Sprint2HarborRoute(args) => sprint2_harbor_route(&args),
         Command::Sprint2Application(args) => sprint2_application(&args),
         Command::ResourceApplication(args) => resource_application(&args),
+        Command::Resource(ResourceCommand::Replay(args)) => resource_replay(&args),
         Command::AcceptanceAssets(args) => run_acceptance_assets(args),
         Command::Upgrade(args) => destructive_not_implemented("upgrade", args.yes),
         Command::Rollback(args) => platform_images::rollback(
@@ -715,6 +739,7 @@ fn sprint2_application(args: &EnvironmentArgs) -> Result<(), AppError> {
         "93-sprint2-application.yml",
         "sprint2-application --infra",
         Some(&package_manifest),
+        &[],
     )
 }
 
@@ -742,7 +767,80 @@ fn resource_application(args: &EnvironmentArgs) -> Result<(), AppError> {
         "94-resource-application.yml",
         "resource-application --infra",
         Some(&package_manifest),
+        &[],
     )
+}
+
+fn resource_replay(args: &ResourceReplayArgs) -> Result<(), AppError> {
+    validate_environment_name(&args.env)?;
+    for (role, path) in [
+        ("Resource acceptance profile", &args.profile),
+        (
+            "Resource replay authentication locator",
+            &args.authentication,
+        ),
+        ("Resource deployment manifest", &args.deployment_manifest),
+        ("Resource package manifest", &args.package_manifest),
+    ] {
+        require_private_locator(role, path)?;
+    }
+    platform_images::validate_profile(&args.package_manifest, "resource", &repository_root())?;
+    let deployment_manifest =
+        fs::read(&args.deployment_manifest).map_err(|error| AppError::Io {
+            role: "read Resource deployment manifest",
+            detail: error.to_string(),
+        })?;
+    let deployment: serde_json::Value =
+        serde_json::from_slice(&deployment_manifest).map_err(|error| AppError::Io {
+            role: "parse Resource deployment manifest",
+            detail: error.to_string(),
+        })?;
+    if deployment
+        .get("schemaVersion")
+        .and_then(serde_json::Value::as_str)
+        != Some("resource-deployment-manifest.v1")
+    {
+        return Err(AppError::ReleaseGate {
+            code: "LW_RESOURCE_REPLAY_DEPLOYMENT_MANIFEST_INVALID",
+            detail: "Resource deployment manifest must use resource-deployment-manifest.v1"
+                .to_owned(),
+        });
+    }
+    run_infrastructure_with_package(
+        &args.env,
+        "95-resource-replay.yml",
+        "resource replay",
+        Some(&args.package_manifest),
+        &[
+            (
+                "LABWEAVER_RESOURCE_REPLAY_PROFILE",
+                args.profile.display().to_string(),
+            ),
+            (
+                "LABWEAVER_RESOURCE_REPLAY_AUTHENTICATION",
+                args.authentication.display().to_string(),
+            ),
+            (
+                "LABWEAVER_RESOURCE_REPLAY_DEPLOYMENT_MANIFEST",
+                args.deployment_manifest.display().to_string(),
+            ),
+        ],
+    )
+}
+
+fn require_private_locator(role: &'static str, path: &Path) -> Result<(), AppError> {
+    let canonical = path.canonicalize().map_err(|error| AppError::Io {
+        role,
+        detail: error.to_string(),
+    })?;
+    if canonical
+        .components()
+        .any(|component| component.as_os_str() == ".private")
+    {
+        Ok(())
+    } else {
+        Err(AppError::InvalidArgument { role })
+    }
 }
 
 fn require_infrastructure(args: &EnvironmentArgs, command: &'static str) -> Result<(), AppError> {
@@ -795,6 +893,23 @@ fn demo_replay() -> Result<(), AppError> {
         yes: true,
         package_manifest: Some(PathBuf::from(package_manifest)),
     })?;
+    let resource_profile = required_environment_path("LABWEAVER_RESOURCE_REPLAY_PROFILE")?;
+    let resource_authentication =
+        required_environment_path("LABWEAVER_RESOURCE_REPLAY_AUTHENTICATION")?;
+    let resource_deployment_manifest =
+        required_environment_path("LABWEAVER_RESOURCE_DEPLOYMENT_MANIFEST")?;
+    let resource_package_manifest =
+        required_environment_path("LABWEAVER_RESOURCE_PACKAGE_MANIFEST")?;
+    resource_replay(&ResourceReplayArgs {
+        env: std::env::var("LABWEAVER_DEMO_ENV").map_err(|_| AppError::ReleaseGate {
+            code: "LW_DEMO_ENVIRONMENT_MISSING",
+            detail: "LABWEAVER_DEMO_ENV is required".to_owned(),
+        })?,
+        profile: resource_profile,
+        authentication: resource_authentication,
+        deployment_manifest: resource_deployment_manifest,
+        package_manifest: resource_package_manifest,
+    })?;
     let status = ProcessCommand::new("pnpm")
         .args(["--dir=web", "test:e2e:live"])
         .current_dir(repository_root())
@@ -812,6 +927,20 @@ fn demo_replay() -> Result<(), AppError> {
         });
     }
     release_gate::run(&repository_root())
+}
+
+fn required_environment_path(name: &'static str) -> Result<PathBuf, AppError> {
+    let value = std::env::var(name).map_err(|_| AppError::ReleaseGate {
+        code: "LW_RESOURCE_REPLAY_INPUT_MISSING",
+        detail: format!("{name} is required"),
+    })?;
+    if value.trim().is_empty() {
+        return Err(AppError::ReleaseGate {
+            code: "LW_RESOURCE_REPLAY_INPUT_MISSING",
+            detail: format!("{name} is required"),
+        });
+    }
+    Ok(PathBuf::from(value))
 }
 
 fn sprint2_reset(args: &EnvironmentArgs) -> Result<(), AppError> {
@@ -835,7 +964,7 @@ fn run_infrastructure(
     playbook_name: &str,
     command: &'static str,
 ) -> Result<(), AppError> {
-    run_infrastructure_with_package(environment, playbook_name, command, None)
+    run_infrastructure_with_package(environment, playbook_name, command, None, &[])
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -844,6 +973,7 @@ fn run_infrastructure_with_package(
     _playbook_name: &str,
     command: &'static str,
     _package_manifest: Option<&Path>,
+    _extra_environment: &[(&str, String)],
 ) -> Result<(), AppError> {
     Err(AppError::UnsupportedPlatform { command })
 }
@@ -854,6 +984,7 @@ fn run_infrastructure_with_package(
     playbook_name: &str,
     _command: &'static str,
     package_manifest: Option<&Path>,
+    extra_environment: &[(&str, String)],
 ) -> Result<(), AppError> {
     use ansible::{Play, Playbook};
 
@@ -911,6 +1042,9 @@ fn run_infrastructure_with_package(
         )
         .add_env("LABWEAVER_IDENTITY_SECRET_LOCATOR", identity_secret_locator)
         .set_inventory(&inventory);
+    for (name, value) in extra_environment {
+        runner.add_env(*name, value);
+    }
     // ansible-rs 1.1.0 appends configured arguments twice in `run`; all
     // controller identity and vault inputs therefore travel through the
     // explicit environment contract above.

@@ -1,0 +1,96 @@
+---
+- name: Validate Resource replay invocation
+  ansible.builtin.assert:
+    that:
+      - resource_replay_run_id is match('^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
+      - resource_replay_source_commit is match('^[0-9a-f]{40,64}$')
+      - resource_replay_package_manifest | length > 0
+      - resource_replay_profile | length > 0
+      - resource_replay_authentication | length > 0
+      - resource_replay_deployment_manifest | length > 0
+    fail_msg: LW_RESOURCE_REPLAY_INPUT_INVALID
+
+- name: Inspect controller-owned replay inputs
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    checksum_algorithm: sha256
+  loop:
+    - "{{ resource_replay_package_manifest }}"
+    - "{{ resource_replay_profile }}"
+    - "{{ resource_replay_authentication }}"
+    - "{{ resource_replay_deployment_manifest }}"
+    - "{{ resource_replay_validator }}"
+    - "{{ resource_replay_driver }}"
+  register: resource_replay_inputs
+  delegate_to: localhost
+  become: false
+  no_log: true
+
+- name: Reject missing replay inputs
+  ansible.builtin.assert:
+    that: resource_replay_inputs.results | map(attribute='stat.exists') | min
+    fail_msg: LW_RESOURCE_REPLAY_INPUT_MISSING
+
+- name: Validate Resource replay identity bindings
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ resource_replay_validator }}"
+      - --profile
+      - "{{ resource_replay_profile }}"
+      - --authentication
+      - "{{ resource_replay_authentication }}"
+      - --deployment-manifest
+      - "{{ resource_replay_deployment_manifest }}"
+      - --package-manifest
+      - "{{ resource_replay_package_manifest }}"
+      - --source-commit
+      - "{{ resource_replay_source_commit }}"
+      - --run-id
+      - "{{ resource_replay_run_id }}"
+  changed_when: false
+  no_log: true
+
+- name: Create root-only Resource replay evidence directory
+  ansible.builtin.file:
+    path: "{{ resource_replay_report_root }}/{{ resource_replay_run_id }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Execute Resource replay through public authenticated APIs
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ resource_replay_driver }}"
+      - --profile
+      - "{{ resource_replay_profile }}"
+      - --authentication
+      - "{{ resource_replay_authentication }}"
+      - --deployment-manifest
+      - "{{ resource_replay_deployment_manifest }}"
+      - --package-manifest
+      - "{{ resource_replay_package_manifest }}"
+      - --source-commit
+      - "{{ resource_replay_source_commit }}"
+      - --run-id
+      - "{{ resource_replay_run_id }}"
+      - --report
+      - "{{ resource_replay_report_root }}/{{ resource_replay_run_id }}/resource-replay-report.json"
+  changed_when: false
+  no_log: true
+
+- name: Require root-only replay report
+  ansible.builtin.stat:
+    path: "{{ resource_replay_report_root }}/{{ resource_replay_run_id }}/resource-replay-report.json"
+  register: resource_replay_report
+
+- name: Verify Resource replay report permissions
+  ansible.builtin.assert:
+    that:
+      - resource_replay_report.stat.exists
+      - resource_replay_report.stat.pw_name == 'root'
+      - resource_replay_report.stat.gr_name == 'root'
+      - resource_replay_report.stat.mode == '0600'
+    fail_msg: LW_RESOURCE_REPLAY_REPORT_INVALID

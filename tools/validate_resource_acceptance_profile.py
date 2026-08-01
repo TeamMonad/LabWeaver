@@ -16,6 +16,7 @@ class ProfileError(Exception):
 
 API_VERSION = "deploy.labweaver.io/resource-acceptance-profile/v1"
 ROLES = {"teacher", "student", "platform_admin"}
+RUNTIME = {"container", "virtual_machine"}
 
 
 def _uuid7(value: object) -> str:
@@ -57,7 +58,7 @@ def validate(profile: dict[str, Any], access_seed: dict[str, Any]) -> str:
     if profile.get("apiVersion") != API_VERSION:
         raise ProfileError("LW_RESOURCE_ACCEPTANCE_PROFILE_VERSION_INVALID")
     course_id = _uuid7(profile.get("courseId"))
-    if profile.get("runtimeKind") not in {"container", "virtual_machine"}:
+    if profile.get("runtimeKind") not in RUNTIME:
         raise ProfileError("LW_RESOURCE_ACCEPTANCE_PROFILE_RUNTIME_INVALID")
     resources = profile.get("resources")
     if not isinstance(resources, dict) or any(
@@ -74,6 +75,30 @@ def validate(profile: dict[str, Any], access_seed: dict[str, Any]) -> str:
     if hashlib.sha256(material["description"].encode("utf-8")).hexdigest() != description_sha256:
         raise ProfileError("LW_RESOURCE_ACCEPTANCE_PROFILE_MATERIAL_HASH_MISMATCH")
     _sha256(profile.get("configurationSha256"))
+    replay = profile.get("replay")
+    if not isinstance(replay, dict):
+        raise ProfileError("LW_RESOURCE_ACCEPTANCE_PROFILE_REPLAY_INVALID")
+    if not isinstance(replay.get("projectId"), str):
+        raise ProfileError("LW_RESOURCE_ACCEPTANCE_PROFILE_REPLAY_INVALID")
+    _uuid7(replay["projectId"])
+    if not isinstance(replay.get("providerBinding"), str) or not replay["providerBinding"].strip():
+        raise ProfileError("LW_RESOURCE_ACCEPTANCE_PROFILE_REPLAY_INVALID")
+    material_file = replay.get("materialFile")
+    if not isinstance(material_file, dict):
+        raise ProfileError("LW_RESOURCE_ACCEPTANCE_PROFILE_REPLAY_INVALID")
+    relative_path = material_file.get("relativePath")
+    if (
+        not isinstance(relative_path, str)
+        or not relative_path
+        or Path(relative_path).is_absolute()
+        or ".." in Path(relative_path).parts
+        or not isinstance(material_file.get("mediaType"), str)
+        or not material_file["mediaType"].strip()
+    ):
+        raise ProfileError("LW_RESOURCE_ACCEPTANCE_PROFILE_REPLAY_INVALID")
+    _sha256(material_file.get("sha256"))
+    if not isinstance(replay.get("policy"), dict):
+        raise ProfileError("LW_RESOURCE_ACCEPTANCE_PROFILE_REPLAY_INVALID")
     members = profile.get("courseMemberships")
     seed_members = access_seed.get("courseMemberships") if isinstance(access_seed, dict) else None
     if not isinstance(members, list) or not isinstance(seed_members, list) or len(members) != 3:

@@ -51,4 +51,15 @@ BEGIN
 END
 $resource_seed$;
 {% endfor %}
+DO $resource_seed_exact$
+BEGIN
+    IF (
+        SELECT count(*)
+        FROM access.course_memberships
+        WHERE course_id = '{{ resource_application_access_seed.courseMemberships[0].courseId }}'::uuid
+    ) <> {{ resource_application_access_seed.courseMemberships | length }} THEN
+        RAISE EXCEPTION 'LW_RESOURCE_ACCEPTANCE_PROFILE_ACCESS_MEMBERSHIP_CONFLICT';
+    END IF;
+END
+$resource_seed_exact$;
 COMMIT;
