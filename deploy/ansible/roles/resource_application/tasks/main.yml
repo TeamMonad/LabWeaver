@@ -101,8 +101,8 @@
 
 - name: Derive exact Resource acceptance runtime identity
   ansible.builtin.set_fact:
-    resource_application_agent_image_sha256: "{{ resource_application_agent_image.stdout | regex_search('@sha256:([0-9a-f]{64})', '\\1') }}"
-    resource_application_claude_code_version: "{{ resource_application_claude_version.stdout | regex_search('^([0-9]+\\.[0-9]+\\.[0-9]+)', '\\1') }}"
+    resource_application_agent_image_sha256: "{{ resource_application_agent_image.stdout | regex_search('@sha256:[0-9a-f]{64}') | regex_replace('^@sha256:', '') }}"
+    resource_application_claude_code_version: "{{ resource_application_claude_version.stdout | regex_search('^[0-9]+\\.[0-9]+\\.[0-9]+') }}"
   no_log: true
 
 - name: Reject incomplete deployed Resource acceptance runtime identity
