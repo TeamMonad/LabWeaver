@@ -45,6 +45,14 @@ REPORT_MODULE = importlib.util.module_from_spec(REPORT_SPEC)
 sys.modules[REPORT_SPEC.name] = REPORT_MODULE
 REPORT_SPEC.loader.exec_module(REPORT_MODULE)
 
+REPLAY_SCRIPT = ROOT / "tools/resource_replay.py"
+REPLAY_SPEC = importlib.util.spec_from_file_location("resource_replay", REPLAY_SCRIPT)
+if REPLAY_SPEC is None or REPLAY_SPEC.loader is None:
+    raise RuntimeError("resource replay module could not be loaded")
+REPLAY_MODULE = importlib.util.module_from_spec(REPLAY_SPEC)
+sys.modules[REPLAY_SPEC.name] = REPLAY_MODULE
+REPLAY_SPEC.loader.exec_module(REPLAY_MODULE)
+
 
 class ResourceAcceptanceProfileTests(unittest.TestCase):
     def _profile(self) -> dict[str, object]:
@@ -67,6 +75,12 @@ class ResourceAcceptanceProfileTests(unittest.TestCase):
             path.write_text("{}", encoding="utf-8")
             with self.assertRaisesRegex(MODULE.ProfileError, "PRIVATE_PATH_REQUIRED"):
                 MODULE.load(path)
+
+    def test_replay_accepts_case_insensitive_http_etag(self) -> None:
+        self.assertEqual(REPLAY_MODULE.etag({"etag": '"r7"'}), '"r7"')
+        self.assertEqual(REPLAY_MODULE.etag({"ETag": '"r8"'}), '"r8"')
+        with self.assertRaisesRegex(REPLAY_MODULE.ReplayError, "ETAG_MISSING"):
+            REPLAY_MODULE.etag({"content-type": "application/json"})
 
     def test_renderer_binds_seed_and_material_without_retaining_source_path(self) -> None:
         profile = self._profile()

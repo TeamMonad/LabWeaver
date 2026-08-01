@@ -163,7 +163,11 @@ def require(value: Any, key: str, code: str) -> Any:
 
 
 def etag(headers: dict[str, str]) -> str:
-    value = headers.get("Etag", headers.get("ETag"))
+    # HTTP field names are case-insensitive.  The portal path is allowed to
+    # preserve the upstream spelling (for example, nginx returns `etag`), so
+    # indexing one canonical spelling would turn a valid optimistic-lock
+    # response into a false replay blocker.
+    value = next((value for key, value in headers.items() if key.lower() == "etag"), None)
     if not value:
         raise ReplayError("LW_RESOURCE_REPLAY_ETAG_MISSING")
     return value
