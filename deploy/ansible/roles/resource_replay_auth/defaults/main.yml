@@ -3,10 +3,9 @@
 # replay.  Every locator is controller-owned and private; no password, cookie,
 # bearer token or browser state is copied into a report or the repository.
 resource_replay_auth_root: /var/lib/labweaver/.private/resource-replay-auth
-resource_replay_auth_web_root: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_REPLAY_WEB_ROOT') }}"
 resource_replay_auth_base_url: "{{ lookup('ansible.builtin.env', 'LABWEAVER_BASE_URL') }}"
-resource_replay_auth_browser_root: /var/lib/labweaver/playwright-browsers
-resource_replay_auth_download_timeout_ms: '180000'
+resource_replay_auth_trusted_ca_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_REPLAY_TRUSTED_CA_FILE') }}"
+resource_replay_auth_driver: "{{ playbook_dir }}/../../../tools/create_resource_replay_auth.py"
 resource_replay_auth_teacher_username: "{{ lookup('ansible.builtin.env', 'LABWEAVER_TEACHER_USERNAME') }}"
 resource_replay_auth_student_username: "{{ lookup('ansible.builtin.env', 'LABWEAVER_STUDENT_USERNAME') }}"
 resource_replay_auth_platform_admin_username: "{{ lookup('ansible.builtin.env', 'LABWEAVER_PLATFORM_ADMIN_USERNAME') }}"
@@ -14,4 +13,3 @@ resource_replay_auth_teacher_password_file: "{{ lookup('ansible.builtin.env', 'L
 resource_replay_auth_student_password_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_STUDENT_PASSWORD_FILE') }}"
 resource_replay_auth_platform_admin_password_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_PLATFORM_ADMIN_PASSWORD_FILE') }}"
 resource_replay_auth_locator: "{{ resource_replay_auth_root }}/resource-replay-auth.json"
-resource_replay_auth_state_source_root: "{{ resource_replay_auth_web_root }}/.auth"

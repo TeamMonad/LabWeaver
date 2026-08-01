@@ -96,12 +96,12 @@ baseline migration to a disposable PostgreSQL instance.
   and Secret values are prohibited replay inputs.
 - `cargo xtask resource auth --infra --env demo --yes` is the only supported
   controller entry for producing those browser-session locators. It invokes
-  `deploy/ansible/playbooks/94-resource-replay-auth.yml`, installs
-  the pinned Chromium only under a root-owned browser cache, obtains fresh
-  teacher, student and platform-admin Keycloak sessions through the real BFF,
-  and writes each state and the locator with mode `0600`. Browser-download or
-  OIDC failures block replay; cached or copied session material is not a
-  substitute.
+  `deploy/ansible/playbooks/94-resource-replay-auth.yml`, obtains fresh
+  teacher, student and platform-admin BFF sessions through the real OIDC form
+  flow with a configured private CA, and writes each state and locator with
+  mode `0600`. OIDC or trust failures block replay; cached or copied session
+  material is not a substitute. This authentication setup is separate from
+  the required browser Playwright evidence.
 
 ## Issue #140 C++17 OJ gate
 

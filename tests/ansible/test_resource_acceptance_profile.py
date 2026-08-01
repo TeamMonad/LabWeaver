@@ -219,16 +219,14 @@ class ResourceAcceptanceProfileTests(unittest.TestCase):
         tasks = (
             ROOT / "deploy/ansible/roles/resource_replay_auth/tasks/main.yml"
         ).read_text(encoding="utf-8")
-        locator = (
-            ROOT
-            / "deploy/ansible/roles/resource_replay_auth/templates/resource-replay-auth.json.j2"
-        ).read_text(encoding="utf-8")
         self.assertIn(".private/resource-replay-auth", defaults)
-        self.assertIn("PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT", tasks)
-        self.assertIn("auth.setup.mjs", tasks)
+        self.assertIn("resource_replay_auth_driver", tasks)
+        self.assertIn("--trusted-ca", tasks)
         self.assertIn("mode: '0600'", tasks)
         self.assertIn("no_log: true", tasks)
-        self.assertIn("resource-replay-auth/v1", locator)
+        driver = (ROOT / "tools/create_resource_replay_auth.py").read_text(encoding="utf-8")
+        self.assertIn("resource-replay-auth/v1", driver)
+        self.assertIn("create_resource_replay_auth.py", defaults)
         playbook = (ROOT / "deploy/ansible/playbooks/94-resource-replay-auth.yml").read_text(
             encoding="utf-8"
         )

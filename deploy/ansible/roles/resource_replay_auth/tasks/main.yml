@@ -2,8 +2,8 @@
 - name: Validate Resource replay browser authentication inputs
   ansible.builtin.assert:
     that:
-      - resource_replay_auth_web_root | length > 0
       - resource_replay_auth_base_url is match('^https://[a-z0-9][a-z0-9.-]*(?::[0-9]+)?$')
+      - resource_replay_auth_trusted_ca_file | length > 0
       - resource_replay_auth_teacher_username | length > 0
       - resource_replay_auth_student_username | length > 0
       - resource_replay_auth_platform_admin_username | length > 0
@@ -16,9 +16,8 @@
   ansible.builtin.stat:
     path: "{{ item }}"
   loop:
-    - "{{ resource_replay_auth_web_root }}"
-    - "{{ resource_replay_auth_web_root }}/node_modules/.bin/playwright"
-    - "{{ resource_replay_auth_web_root }}/e2e/setup/auth.setup.mjs"
+    - "{{ resource_replay_auth_driver }}"
+    - "{{ resource_replay_auth_trusted_ca_file }}"
     - "{{ resource_replay_auth_teacher_password_file }}"
     - "{{ resource_replay_auth_student_password_file }}"
     - "{{ resource_replay_auth_platform_admin_password_file }}"
@@ -39,64 +38,29 @@
     mode: '0700'
   loop:
     - "{{ resource_replay_auth_root }}"
-    - "{{ resource_replay_auth_browser_root }}"
-
-- name: Install the pinned Playwright Chromium browser when absent
+- name: Create fresh BFF sessions for Resource replay through OIDC
   ansible.builtin.command:
     argv:
-      - "{{ resource_replay_auth_web_root }}/node_modules/.bin/playwright"
-      - install
-      - chromium
-  args:
-    chdir: "{{ resource_replay_auth_web_root }}"
-    creates: "{{ resource_replay_auth_browser_root }}/chromium-1228"
-  environment:
-    PLAYWRIGHT_BROWSERS_PATH: "{{ resource_replay_auth_browser_root }}"
-    PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT: "{{ resource_replay_auth_download_timeout_ms }}"
-  no_log: true
-
-- name: Create fresh Keycloak browser sessions for Resource replay
-  ansible.builtin.command:
-    argv:
-      - "{{ resource_replay_auth_web_root }}/node_modules/.bin/playwright"
-      - test
-      - e2e/setup/auth.setup.mjs
-      - --project=setup
-      - --workers=1
-  args:
-    chdir: "{{ resource_replay_auth_web_root }}"
-  environment:
-    PLAYWRIGHT_BROWSERS_PATH: "{{ resource_replay_auth_browser_root }}"
-    LABWEAVER_BASE_URL: "{{ resource_replay_auth_base_url }}"
-    LABWEAVER_TEACHER_USERNAME: "{{ resource_replay_auth_teacher_username }}"
-    LABWEAVER_STUDENT_USERNAME: "{{ resource_replay_auth_student_username }}"
-    LABWEAVER_PLATFORM_ADMIN_USERNAME: "{{ resource_replay_auth_platform_admin_username }}"
-    LABWEAVER_TEACHER_PASSWORD_FILE: "{{ resource_replay_auth_teacher_password_file }}"
-    LABWEAVER_STUDENT_PASSWORD_FILE: "{{ resource_replay_auth_student_password_file }}"
-    LABWEAVER_PLATFORM_ADMIN_PASSWORD_FILE: "{{ resource_replay_auth_platform_admin_password_file }}"
-  no_log: true
-
-- name: Copy fresh browser sessions into the private replay root
-  ansible.builtin.copy:
-    src: "{{ resource_replay_auth_state_source_root }}/{{ item }}.json"
-    dest: "{{ resource_replay_auth_root }}/{{ item }}.json"
-    remote_src: true
-    owner: root
-    group: root
-    mode: '0600'
-  loop:
-    - teacher
-    - student
-    - platform-admin
-  no_log: true
-
-- name: Render the private Resource replay authentication locator
-  ansible.builtin.template:
-    src: resource-replay-auth.json.j2
-    dest: "{{ resource_replay_auth_locator }}"
-    owner: root
-    group: root
-    mode: '0600'
+      - python3
+      - "{{ resource_replay_auth_driver }}"
+      - --base-url
+      - "{{ resource_replay_auth_base_url }}"
+      - --trusted-ca
+      - "{{ resource_replay_auth_trusted_ca_file }}"
+      - --output-root
+      - "{{ resource_replay_auth_root }}"
+      - --teacher-username
+      - "{{ resource_replay_auth_teacher_username }}"
+      - --teacher-password-file
+      - "{{ resource_replay_auth_teacher_password_file }}"
+      - --student-username
+      - "{{ resource_replay_auth_student_username }}"
+      - --student-password-file
+      - "{{ resource_replay_auth_student_password_file }}"
+      - --platform-admin-username
+      - "{{ resource_replay_auth_platform_admin_username }}"
+      - --platform-admin-password-file
+      - "{{ resource_replay_auth_platform_admin_password_file }}"
   no_log: true
 
 - name: Verify private Resource replay authentication locator permissions
