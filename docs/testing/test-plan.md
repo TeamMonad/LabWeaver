@@ -94,6 +94,13 @@ baseline migration to a disposable PostgreSQL instance.
   using private profile/authentication/deployment/package locators. It must
   demonstrate Work AgentRun through the public API; SQL, direct service mTLS
   and Secret values are prohibited replay inputs.
+- `deploy/ansible/playbooks/94-resource-replay-auth.yml` is the only supported
+  controller entry for producing those browser-session locators. It installs
+  the pinned Chromium only under a root-owned browser cache, obtains fresh
+  teacher, student and platform-admin Keycloak sessions through the real BFF,
+  and writes each state and the locator with mode `0600`. Browser-download or
+  OIDC failures block replay; cached or copied session material is not a
+  substitute.
 
 ## Issue #140 C++17 OJ gate
 
