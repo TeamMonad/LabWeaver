@@ -487,6 +487,16 @@ class AnsibleFixtureTests(unittest.TestCase):
             "network.resourceKubernetesApiCiliumPolicyEnabled=true", tasks
         )
         self.assertIn("resource_application_run_id is match('^[0-9a-f]{8}", tasks)
+        self.assertIn("Apply or verify Resource Access bootstrap", tasks)
+        self.assertIn("PGSERVICEFILE", tasks)
+        seed = (
+            ROOT
+            / "deploy/ansible/roles/resource_application/templates/access-seed-adopt.sql.j2"
+        ).read_text(encoding="utf-8")
+        self.assertIn("LW_RESOURCE_ACCEPTANCE_PROFILE_ACCESS_SEED_CONFLICT", seed)
+        self.assertIn("LW_RESOURCE_ACCEPTANCE_PROFILE_ACCESS_ROLE_CONFLICT", seed)
+        self.assertNotIn("resource_requests", seed)
+        self.assertNotIn("environment_template_releases", seed)
 
     def test_sprint2_application_reads_kubernetes_items_as_a_mapping_key(self) -> None:
         tasks = (

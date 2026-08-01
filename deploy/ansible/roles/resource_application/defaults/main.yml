@@ -9,6 +9,9 @@ resource_application_configuration_bundle: "{{ lookup('ansible.builtin.env', 'LA
 resource_application_acceptance_profile_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_ACCEPTANCE_PROFILE') }}"
 resource_application_access_seed_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_ACCESS_SEED_FILE') }}"
 resource_application_profile_validator: "{{ playbook_dir }}/../../../tools/validate_resource_acceptance_profile.py"
+resource_application_psql: /usr/bin/psql
+resource_application_postgres_service: "{{ lookup('ansible.builtin.env', 'LABWEAVER_POSTGRES_SERVICE') }}"
+resource_application_postgres_service_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_POSTGRES_SERVICE_FILE') }}"
 resource_application_configuration_manifest: "{{ playbook_dir }}/../../config/resource-bundle-manifest.json"
 resource_application_values_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_VALUES_FILE') }}"
 resource_application_chart_source: "{{ playbook_dir }}/../../helm/labweaver"

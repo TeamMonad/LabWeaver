@@ -8,6 +8,8 @@
       - resource_application_configuration_bundle | length > 0
       - resource_application_acceptance_profile_file | length > 0
       - resource_application_access_seed_file | length > 0
+      - resource_application_postgres_service | length > 0
+      - resource_application_postgres_service_file | length > 0
       - resource_application_values_file | length > 0
     fail_msg: RESOURCE_APPLICATION_INPUT_INVALID
 
@@ -51,6 +53,48 @@
       - "{{ resource_application_access_seed_file }}"
   register: resource_application_acceptance_profile
   changed_when: false
+  no_log: true
+
+- name: Load validated private Access bootstrap
+  ansible.builtin.set_fact:
+    resource_application_access_seed: >-
+      {{ lookup('ansible.builtin.file', resource_application_access_seed_file) | from_json }}
+  no_log: true
+
+- name: Create bounded Resource bootstrap workspace
+  ansible.builtin.file:
+    path: "{{ resource_application_report_root }}/{{ resource_application_run_id }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  become: true
+
+- name: Render conflict-detecting Access bootstrap
+  ansible.builtin.template:
+    src: access-seed-adopt.sql.j2
+    dest: "{{ resource_application_report_root }}/{{ resource_application_run_id }}/access-seed-adopt.sql"
+    owner: root
+    group: root
+    mode: '0600'
+  become: true
+  no_log: true
+
+- name: Apply or verify Resource Access bootstrap
+  ansible.builtin.command:
+    argv:
+      - "{{ resource_application_psql }}"
+      - "service={{ resource_application_postgres_service }}"
+      - --no-psqlrc
+      - --file
+      - "{{ resource_application_report_root }}/{{ resource_application_run_id }}/access-seed-adopt.sql"
+  environment:
+    PGSERVICEFILE: "{{ resource_application_postgres_service_file }}"
+  register: resource_application_access_seed_apply
+  changed_when: true
+  retries: 6
+  delay: 2
+  until: resource_application_access_seed_apply.rc == 0
   no_log: true
 
 - name: Enforce exact Resource package and configuration boundaries
@@ -133,15 +177,6 @@
       - deployment/resource-service
       - "--timeout={{ resource_application_rollout_timeout }}"
   changed_when: false
-
-- name: Create Resource deployment report directory
-  ansible.builtin.file:
-    path: "{{ resource_application_report_root }}/{{ resource_application_run_id }}"
-    state: directory
-    owner: root
-    group: root
-    mode: '0700'
-  become: true
 
 - name: Publish identity-bound Resource deployment manifest
   ansible.builtin.copy:
