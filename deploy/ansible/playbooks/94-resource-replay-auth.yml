@@ -1,5 +1,11 @@
----
-- hosts: control_plane
+- import_playbook: 00-preflight.yml
+  vars:
+    labweaver_preflight_scope: resource-replay-auth
+    labweaver_preflight_validate_remote_hosts: false
+
+- name: Create private browser sessions for the Resource public replay
+  hosts: localhost
+  connection: local
   become: true
   gather_facts: false
   vars:

@@ -229,6 +229,11 @@ class ResourceAcceptanceProfileTests(unittest.TestCase):
         self.assertIn("mode: '0600'", tasks)
         self.assertIn("no_log: true", tasks)
         self.assertIn("resource-replay-auth/v1", locator)
+        playbook = (ROOT / "deploy/ansible/playbooks/94-resource-replay-auth.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("connection: local", playbook)
+        self.assertIn("resource-replay-auth", playbook)
 
 
 if __name__ == "__main__":
