@@ -179,15 +179,17 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
     approval = environment.get("approvals", [])[-1] if environment.get("approvals") else None
     if not isinstance(approval, dict) or approval.get("decision") != "approved":
         raise ReplayError("LW_RESOURCE_REPLAY_APPROVAL_INVALID")
-    release, _ = teacher.request("POST", f"/api/v1/courses/{course_id}/environment-template-releases", {
+    release_operation, _ = teacher.request("POST", f"/api/v1/courses/{course_id}/environment-template-releases", {
         "approvalId": approval["id"], "candidateId": candidate["id"], "candidateRevision": candidate["revision"],
         "environmentSpecSha256": candidate["specSha256"], "runtimeKind": profile["runtimeKind"],
     }, "publish-work-release")
-    environment, _ = teacher.request("POST", "/api/v1/environments", {"courseId": course_id, "releaseId": release["releaseId"], "releaseVersion": release["revision"], "displayLabel": "resource-acceptance"}, "create-environment")
+    release_view, _ = teacher.request("GET", release_operation["statusUrl"], None, "work-release", csrf=False)
+    release = require(release_view, "release", "LW_RESOURCE_REPLAY_RELEASE_INVALID")
+    environment, _ = teacher.request("POST", "/api/v1/environments", {"courseId": course_id, "releaseId": release["id"], "releaseVersion": release["version"], "displayLabel": "resource-acceptance"}, "create-environment")
     observed = teacher.poll(environment["statusUrl"], {"ready"}, "environment-ready")
     request, _ = teacher.request("POST", "/api/v1/resource-requests", {
         "courseId": course_id, "projectId": replay["projectId"], "requestKey": f"resource-replay-{arguments.run_id}",
-        "environmentId": observed["id"], "releaseId": release["releaseId"], "releaseVersion": release["revision"],
+        "environmentId": observed["id"], "releaseId": release["id"], "releaseVersion": release["version"],
         "releaseSha256": release["releaseSha256"], "resources": profile["resources"], "durationSeconds": profile["durationSeconds"],
     }, "resource-request")
     resource, resource_headers = admin.request("GET", request["statusUrl"], None, "resource-request", csrf=False)
