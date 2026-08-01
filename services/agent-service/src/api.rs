@@ -144,6 +144,7 @@ async fn create_run(
         .reserve_dispatch(
             request.course_id,
             &request.request,
+            request.expected_environment_class,
             &request.package,
             &request.object_locators,
             &request.policy,

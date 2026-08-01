@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use contracts::authoring::{
-    AgentTrackKind, CourseLlmEgressPolicy, DeniedDataClass, EnvironmentSpec, LlmBudget, LlmUsage,
-    ProblemPackage, environment_spec_schema,
+    AgentTrackKind, CourseLlmEgressPolicy, DeniedDataClass, EnvironmentClass, EnvironmentSpec,
+    LlmBudget, LlmUsage, ProblemPackage, environment_spec_schema,
 };
 use contracts::diagnostic;
 use contracts::evaluation::{EvaluationSpec, evaluation_spec_schema};
@@ -55,6 +55,16 @@ Before returning, silently self-check all of these invariants: the response pars
 
 When the materials provide no explicit executable or probe binding, use this structurally valid minimal shape and replace only its metadata, relative required file paths, and bounded maxBytes:
 {"apiVersion":"evaluation.labweaver.io/v1","kind":"EvaluationSpec","metadata":{"name":"submission-files-v1","version":"1.0.0"},"spec":{"submission":{"collector":{"kind":"workspace_snapshot","include":["result.txt"],"exclude":[],"maxBytes":4194304},"llmReadable":[]},"steps":[{"role":"gate","id":"required-files","dependsOn":[],"runner":{"kind":"file_assertion","requiredFiles":["result.txt"]},"checker":{"kind":"exit_code","expected":0},"failurePolicy":"stop"}],"aggregation":{"kind":"deterministic_sum","maxScore":0,"gates":[{"step":"required-files","requiredStatus":"passed"}]},"review":{"teacherApprovalRequiredForRelease":true,"forceManualWhen":["invalidEvidence"]}}}"#;
+
+fn environment_prompt(expected: EnvironmentClass) -> String {
+    let class = match expected {
+        EnvironmentClass::Experiment => "experiment",
+        EnvironmentClass::Work => "work",
+    };
+    format!(
+        "{ENVIRONMENT_PROMPT}\n\nThis Control-authoritative invocation requires class={class}. Return that exact class; any other class is rejected before review."
+    )
+}
 
 /// Immutable, bounded bytes that passed the service-owned LLM egress gate.
 #[derive(Clone)]
@@ -1052,6 +1062,18 @@ impl ClaudeCodeRuntime {
         input: ImmutableEgressInput,
         cancellation: RunCancellation,
     ) -> Result<ClaudeCodeExecution, ClaudeCodeFailure> {
+        self.generate_for_class(track, input, cancellation, EnvironmentClass::Experiment)
+            .await
+    }
+
+    /// Generates one candidate constrained by the Control-authoritative Environment class.
+    pub async fn generate_for_class(
+        &self,
+        track: AgentTrackKind,
+        input: ImmutableEgressInput,
+        cancellation: RunCancellation,
+        expected_environment_class: EnvironmentClass,
+    ) -> Result<ClaudeCodeExecution, ClaudeCodeFailure> {
         let (schema, prompt) = match track {
             AgentTrackKind::Environment => (
                 environment_spec_schema().map_err(|_| {
@@ -1064,7 +1086,7 @@ impl ClaudeCodeRuntime {
                         None,
                     )
                 })?,
-                ENVIRONMENT_PROMPT,
+                environment_prompt(expected_environment_class),
             ),
             AgentTrackKind::Evaluation => (
                 evaluation_spec_schema().map_err(|_| {
@@ -1077,7 +1099,7 @@ impl ClaudeCodeRuntime {
                         None,
                     )
                 })?,
-                EVALUATION_PROMPT,
+                EVALUATION_PROMPT.to_owned(),
             ),
         };
         let schema_text = serde_json::to_string(&schema).map_err(|_| {
@@ -1085,12 +1107,12 @@ impl ClaudeCodeRuntime {
                 track,
                 &input,
                 &schema,
-                prompt,
+                &prompt,
                 ClaudeCodeRuntimeError::ProtocolInvalid,
                 None,
             )
         })?;
-        let prompt = candidate_json_prompt(prompt, &schema_text);
+        let prompt = candidate_json_prompt(&prompt, &schema_text);
         let _permit = if cancellation.is_cancelled() {
             return Err(self.failure(
                 track,
@@ -1147,7 +1169,14 @@ impl ClaudeCodeRuntime {
                     };
                     self.failure(track, &input, &schema, &prompt, runtime_error, None)
                 })?;
-        self.parse_result(track, &input, &schema, &prompt, &process_output)
+        self.parse_result(
+            track,
+            &input,
+            &schema,
+            &prompt,
+            &process_output,
+            expected_environment_class,
+        )
     }
 
     /// Runs both candidate tracks concurrently while preserving independent results.
@@ -1176,6 +1205,7 @@ impl ClaudeCodeRuntime {
         schema: &Value,
         prompt: &str,
         process_output: &ClaudeCodeProcessOutput,
+        expected_environment_class: EnvironmentClass,
     ) -> Result<ClaudeCodeExecution, ClaudeCodeFailure> {
         let stream = match parse_stream_output(process_output.stdout()) {
             Ok(stream) => stream,
@@ -1256,6 +1286,14 @@ impl ClaudeCodeRuntime {
                 .map(CandidateDocument::Evaluation),
         }
         .map_err(|_| failure_with_audit(ClaudeCodeRuntimeError::SchemaInvalid, audit.clone()))?;
+        if let CandidateDocument::Environment(spec) = &document {
+            if spec.class != expected_environment_class {
+                return Err(failure_with_audit(
+                    ClaudeCodeRuntimeError::EnvironmentClassMismatch,
+                    audit,
+                ));
+            }
+        }
         let output_sha256 = Sha256Digest::of_canonical(&output).map_err(|_| {
             failure_with_audit(ClaudeCodeRuntimeError::ProtocolInvalid, audit.clone())
         })?;
@@ -1765,6 +1803,11 @@ pub enum ClaudeCodeRuntimeError {
     /// Candidate JSON failed the exact candidate contract.
     #[error("LW_LLM_SCHEMA_INVALID: Claude Code candidate JSON is invalid")]
     SchemaInvalid,
+    /// The Environment candidate contradicted the class bound by Control at reservation time.
+    #[error(
+        "LW_LLM_ENVIRONMENT_CLASS_MISMATCH: Environment candidate class contradicts Control intent"
+    )]
+    EnvironmentClassMismatch,
     /// Candidate JSON attempted to write protected authority state.
     #[error("LW_LLM_PROTECTED_FIELD: Claude Code output contains a protected field")]
     ProtectedField,
@@ -1807,6 +1850,7 @@ impl ClaudeCodeRuntimeError {
             Self::ExecutionFailed | Self::ToolDenied => diagnostic::AGENT_RUNTIME_FAILED,
             Self::ProtocolInvalid => diagnostic::AGENT_RUNTIME_PROTOCOL_INVALID,
             Self::SchemaInvalid => diagnostic::LLM_SCHEMA_INVALID,
+            Self::EnvironmentClassMismatch => diagnostic::LLM_ENVIRONMENT_CLASS_MISMATCH,
             Self::ProtectedField => diagnostic::LLM_PROTECTED_FIELD,
             Self::OutputLimitExceeded => diagnostic::AGENT_RUNTIME_OUTPUT_LIMIT_EXCEEDED,
             Self::TimedOut => diagnostic::LLM_TIMEOUT,

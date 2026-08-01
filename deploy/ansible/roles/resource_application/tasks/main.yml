@@ -6,6 +6,8 @@
       - resource_application_source_commit is match('^[0-9a-f]{40,64}$')
       - resource_application_package_manifest | length > 0
       - resource_application_configuration_bundle | length > 0
+      - resource_application_acceptance_profile_file | length > 0
+      - resource_application_access_seed_file | length > 0
       - resource_application_values_file | length > 0
     fail_msg: RESOURCE_APPLICATION_INPUT_INVALID
 
@@ -16,6 +18,8 @@
   loop:
     - "{{ resource_application_package_manifest }}"
     - "{{ resource_application_configuration_bundle }}"
+    - "{{ resource_application_acceptance_profile_file }}"
+    - "{{ resource_application_access_seed_file }}"
     - "{{ resource_application_configuration_manifest }}"
     - "{{ resource_application_values_file }}"
     - "{{ resource_application_chart_source }}"
@@ -34,6 +38,19 @@
     resource_application_bundle_manifest: "{{ lookup('ansible.builtin.file', resource_application_configuration_manifest) | from_json }}"
     resource_application_bundle_objects: "{{ lookup('ansible.builtin.file', resource_application_configuration_bundle) | from_yaml_all | list }}"
     resource_application_bundle_sha256: "sha256:{{ resource_application_inputs.results[1].stat.checksum }}"
+  no_log: true
+
+- name: Validate private Resource acceptance profile against Access bootstrap
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ resource_application_profile_validator }}"
+      - --profile
+      - "{{ resource_application_acceptance_profile_file }}"
+      - --access-seed
+      - "{{ resource_application_access_seed_file }}"
+  register: resource_application_acceptance_profile
+  changed_when: false
   no_log: true
 
 - name: Enforce exact Resource package and configuration boundaries
@@ -116,3 +133,30 @@
       - deployment/resource-service
       - "--timeout={{ resource_application_rollout_timeout }}"
   changed_when: false
+
+- name: Create Resource deployment report directory
+  ansible.builtin.file:
+    path: "{{ resource_application_report_root }}/{{ resource_application_run_id }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  become: true
+
+- name: Publish identity-bound Resource deployment manifest
+  ansible.builtin.copy:
+    dest: "{{ resource_application_report_root }}/{{ resource_application_run_id }}/resource-deployment-manifest.json"
+    owner: root
+    group: root
+    mode: '0600'
+    content: >-
+      {{ {
+        'schemaVersion': 'resource-deployment-manifest.v1',
+        'sourceCommit': resource_application_package.source_commit,
+        'runId': resource_application_run_id,
+        'packageManifestSha256': 'sha256:' ~ resource_application_inputs.results[0].stat.checksum,
+        'configurationBundleSha256': resource_application_bundle_sha256,
+        'image': resource_application_package.images[0]
+      } | to_nice_json }}
+  become: true
+  no_log: true

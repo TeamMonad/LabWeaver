@@ -109,6 +109,21 @@ handoff bound to request, claim, Lease, Release hash and Provider binding.
 Handoff is idempotent at Environment and becomes `handed_off` only after its
 acceptance; three failed handoffs become an auditable `blocked` claim.
 
+The Work publication boundary and empty-deployment bootstrap are implemented
+locally but not yet connected-verified. `POST /api/v1/courses/{courseId}/work-agent-runs`
+uses a distinct request contract and persists `EnvironmentClass::Work` through
+the Agent dispatch. An experiment, absent or conflicting Environment class is
+rejected with `LW_LLM_ENVIRONMENT_CLASS_MISMATCH`; the existing AgentRun route
+continues to bind `experiment`. A private Resource acceptance profile is
+cross-checked against the Access seed and requires UUIDv7 course/actor IDs plus
+exact teacher, student and platform-admin memberships. It cannot seed
+candidates, approvals, releases, requests or leases directly.
+
+Release Gate v2 requires a Resource deployment manifest, immutable
+`resource-service` identity and `resource-lease` connected evidence. v1 reports
+remain legacy and cannot close #142. A same-identity Resource replay on a clean
+validation environment remains required before this is marked verified.
+
 The Resource public HTTP surface is now implemented locally: owner-scoped list
 and get, create, approve/resize-approve, cancel, reject, retry, Lease renew and
 Lease revoke all use explicit actor/caller checks, idempotency keys and revision

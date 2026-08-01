@@ -409,6 +409,7 @@ impl Worker {
                 .execute(ExecuteAgentRun {
                     course_id: lease.run.course_id,
                     request: &lease.request,
+                    expected_environment_class: lease.expected_environment_class,
                     idempotency_key: &lease.idempotency_key,
                     input,
                     cancellation: RunCancellation::new(),

@@ -322,6 +322,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::http::CreateAgentRunRequest
     );
     document!(
+        "schemas/contracts/v1/http/create-work-agent-run-request.schema.json",
+        crate::http::CreateWorkAgentRunRequest
+    );
+    document!(
         "schemas/contracts/v1/http/candidate-decision-request.schema.json",
         crate::http::CandidateDecisionRequest
     );
@@ -932,6 +936,7 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "completeProblemPackageUpload" => "http/complete-problem-package-upload-request",
         "createCourseLlmPolicy" => "course-llm-egress-policy",
         "createAgentRun" => "http/create-agent-run-request",
+        "createWorkAgentRun" => "http/create-work-agent-run-request",
         "appendEnvironmentCandidateDecision" | "appendEvaluationCandidateDecision" => {
             "http/candidate-decision-request"
         }
@@ -973,9 +978,8 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "createCourseLlmPolicy" | "getActiveCourseLlmPolicy" => {
             contract_ref("course-llm-egress-policy")
         }
-        "createAgentRun" | "getAgentRun" | "cancelAgentRun" | "retryAgentRunTrack" => {
-            contract_ref("agent-run")
-        }
+        "createAgentRun" | "createWorkAgentRun" | "getAgentRun" | "cancelAgentRun"
+        | "retryAgentRunTrack" => contract_ref("agent-run"),
         "getEnvironmentCandidate" => contract_ref("http/environment-candidate-view"),
         "getEvaluationCandidate" => contract_ref("http/evaluation-candidate-view"),
         "appendEnvironmentCandidateDecision" | "appendEvaluationCandidateDecision" => {

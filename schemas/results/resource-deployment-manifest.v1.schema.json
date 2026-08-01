@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://labweaver.invalid/schemas/results/resource-deployment-manifest.v1.schema.json",
+  "title": "ResourceDeploymentManifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "sourceCommit", "runId", "packageManifestSha256", "configurationBundleSha256", "image"],
+  "properties": {
+    "schemaVersion": {"const": "resource-deployment-manifest.v1"},
+    "sourceCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "runId": {"type": "string", "format": "uuid"},
+    "packageManifestSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "configurationBundleSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "image": {"type": "object", "additionalProperties": false, "required": ["component", "reference"], "properties": {"component": {"const": "resource-service"}, "reference": {"type": "string", "pattern": "^[^@\\s]+/[^@\\s]+@sha256:[0-9a-f]{64}$"}}}
+  }
+}

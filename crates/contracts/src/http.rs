@@ -148,6 +148,33 @@ pub struct CreateAgentRunRequest {
     pub requested_runtime: crate::authoring::RuntimeKind,
 }
 
+/// Public request for an AgentRun whose Environment candidate is explicitly a Resource-managed
+/// Work environment. This is deliberately separate from [`CreateAgentRunRequest`]: the legacy
+/// route always requests an Experiment candidate and must never gain an implicit class default.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateWorkAgentRunRequest {
+    pub package_id: ProblemPackageId,
+    pub package_revision: Revision,
+    pub package_sha256: Sha256Digest,
+    pub policy_id: crate::PolicyId,
+    pub policy_revision: Revision,
+    pub requested_runtime: crate::authoring::RuntimeKind,
+}
+
+impl From<CreateWorkAgentRunRequest> for CreateAgentRunRequest {
+    fn from(value: CreateWorkAgentRunRequest) -> Self {
+        Self {
+            package_id: value.package_id,
+            package_revision: value.package_revision,
+            package_sha256: value.package_sha256,
+            policy_id: value.policy_id,
+            policy_revision: value.policy_revision,
+            requested_runtime: value.requested_runtime,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CandidateDecisionRequest {
@@ -227,6 +254,8 @@ pub struct InternalCreateAgentRunRequest {
     pub course_id: CourseId,
     /// Public immutable request whose idempotency key remains an HTTP header.
     pub request: CreateAgentRunRequest,
+    /// Explicit class that the Environment candidate must retain through Agent execution.
+    pub expected_environment_class: crate::authoring::EnvironmentClass,
     /// Completed Control-owned package; Agent re-reads and re-hashes every object.
     pub package: crate::authoring::ProblemPackage,
     /// Internal artifact ID to opaque object-key mapping; keys never contain original paths.
@@ -825,6 +854,11 @@ pub const OPERATION_AUTHORIZATIONS: &[OperationAuthorization] = &[
         scope: OperationScopeKind::Course,
     },
     OperationAuthorization {
+        operation_id: "createWorkAgentRun",
+        allowed_roles: TEACHER,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
         operation_id: "getAgentRun",
         allowed_roles: TEACHER,
         scope: OperationScopeKind::Course,
@@ -1321,6 +1355,18 @@ pub const OPERATIONS: &[OperationContract] = &[
         Post,
         "/api/v1/courses/{courseId}/agent-runs",
         "createAgentRun",
+        "agent_run:write",
+        Oidc,
+        IdempotentCreate,
+        202,
+        true,
+        true
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/courses/{courseId}/work-agent-runs",
+        "createWorkAgentRun",
         "agent_run:write",
         Oidc,
         IdempotentCreate,

@@ -8,9 +8,11 @@ use sha2::{Digest, Sha256};
 
 use super::AppError;
 
-const INPUT_SCHEMA: &str = "schemas/results/sprint2-release-gate-input.v1.schema.json";
-const REPORT_SCHEMA: &str = "schemas/results/release-gate-report.schema.json";
+const INPUT_SCHEMA: &str = "schemas/results/sprint2-release-gate-input.v2.schema.json";
+const REPORT_SCHEMA: &str = "schemas/results/release-gate-report.v2.schema.json";
 const DEPLOYMENT_SCHEMA: &str = "schemas/results/platform-image-deployment-manifest.v1.schema.json";
+const RESOURCE_DEPLOYMENT_SCHEMA: &str =
+    "schemas/results/resource-deployment-manifest.v1.schema.json";
 const PLATFORM_COMPONENTS: [&str; 7] = [
     "access-service",
     "agent-service",
@@ -21,7 +23,7 @@ const PLATFORM_COMPONENTS: [&str; 7] = [
     "web",
 ];
 const RUNTIME_ARTIFACTS: [&str; 2] = ["container-runtime", "kubevirt-runtime"];
-const REQUIRED_CHECKS: [&str; 10] = [
+const REQUIRED_CHECKS: [&str; 11] = [
     "teacher-agent-approval",
     "build-supply-chain",
     "container-lifecycle",
@@ -32,7 +34,9 @@ const REQUIRED_CHECKS: [&str; 10] = [
     "keycloak-playwright",
     "ansible-idempotent",
     "rollback-drill",
+    "resource-lease",
 ];
+const RESOURCE_COMPONENTS: [&str; 1] = ["resource-service"];
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -41,8 +45,10 @@ struct GateInput {
     source_commit: String,
     run_id: uuid::Uuid,
     deployment_manifest: EvidenceFile,
+    resource_deployment_manifest: EvidenceFile,
     migration_catalog: EvidenceFile,
     platform_images: Vec<ImageIdentity>,
+    resource_images: Vec<ImageIdentity>,
     runtime_artifacts: Vec<ArtifactIdentity>,
     checks: Vec<CheckInput>,
 }
@@ -87,8 +93,10 @@ struct GateReport {
     source_commit: String,
     run_id: uuid::Uuid,
     deployment_manifest: EvidenceFile,
+    resource_deployment_manifest: EvidenceFile,
     migration_catalog: EvidenceFile,
     platform_images: Vec<ImageIdentity>,
+    resource_images: Vec<ImageIdentity>,
     runtime_artifacts: Vec<ArtifactIdentity>,
     checks: Vec<CheckInput>,
 }
@@ -118,13 +126,15 @@ fn run_with_locator(root: &Path, input_locator: &str) -> Result<(), AppError> {
     validate_input(root, &input)?;
 
     let report = GateReport {
-        schema_version: "sprint2-release-gate-report.v1",
+        schema_version: "sprint2-release-gate-report.v2",
         status: "passed",
         source_commit: input.source_commit,
         run_id: input.run_id,
         deployment_manifest: input.deployment_manifest,
+        resource_deployment_manifest: input.resource_deployment_manifest,
         migration_catalog: input.migration_catalog,
         platform_images: input.platform_images,
+        resource_images: input.resource_images,
         runtime_artifacts: input.runtime_artifacts,
         checks: input.checks,
     };
@@ -157,7 +167,7 @@ fn run_with_locator(root: &Path, input_locator: &str) -> Result<(), AppError> {
     reason = "the gate keeps every fail-closed identity and evidence check visible in one ordered boundary"
 )]
 fn validate_input(root: &Path, input: &GateInput) -> Result<(), AppError> {
-    if input.schema_version != "sprint2-release-gate-input.v1" {
+    if input.schema_version != "sprint2-release-gate-input.v2" {
         return Err(gate(
             "LW_RELEASE_GATE_INPUT_SCHEMA_INVALID",
             "unexpected schemaVersion",
@@ -177,6 +187,7 @@ fn validate_input(root: &Path, input: &GateInput) -> Result<(), AppError> {
         ));
     }
     verify_evidence(root, &input.deployment_manifest)?;
+    verify_evidence(root, &input.resource_deployment_manifest)?;
     verify_evidence(root, &input.migration_catalog)?;
     let catalog = relative_path(root, &secure_file(root, &input.migration_catalog.path)?)?;
     if catalog != "migrations/catalog.yaml" {
@@ -208,6 +219,30 @@ fn validate_input(root: &Path, input: &GateInput) -> Result<(), AppError> {
         return Err(gate(
             "LW_RELEASE_GATE_IMAGE_IDENTITY_INVALID",
             "seven immutable platform image identities are required",
+        ));
+    }
+    unique_nonempty(
+        input
+            .resource_images
+            .iter()
+            .map(|item| item.component.as_str()),
+        "LW_RELEASE_GATE_RESOURCE_IMAGE_IDENTITY_INVALID",
+    )?;
+    let resource_components = input
+        .resource_images
+        .iter()
+        .map(|item| item.component.as_str())
+        .collect::<BTreeSet<_>>();
+    if input.resource_images.len() != 1
+        || resource_components != RESOURCE_COMPONENTS.into_iter().collect()
+        || input
+            .resource_images
+            .iter()
+            .any(|item| !immutable_image(&item.reference))
+    {
+        return Err(gate(
+            "LW_RELEASE_GATE_RESOURCE_IMAGE_IDENTITY_INVALID",
+            "one immutable resource-service image identity is required",
         ));
     }
     unique_nonempty(
@@ -262,6 +297,56 @@ fn validate_input(root: &Path, input: &GateInput) -> Result<(), AppError> {
         verify_evidence(root, &check.evidence)?;
     }
     validate_deployment_manifest(root, input)?;
+    validate_resource_deployment_manifest(root, input)?;
+    Ok(())
+}
+
+fn validate_resource_deployment_manifest(root: &Path, input: &GateInput) -> Result<(), AppError> {
+    let path = secure_file(root, &input.resource_deployment_manifest.path)?;
+    let bytes = fs::read(path).map_err(|error| {
+        gate(
+            "LW_RELEASE_GATE_RESOURCE_DEPLOYMENT_MANIFEST_INVALID",
+            &error.to_string(),
+        )
+    })?;
+    validate_schema(
+        root,
+        RESOURCE_DEPLOYMENT_SCHEMA,
+        &bytes,
+        "LW_RELEASE_GATE_RESOURCE_DEPLOYMENT_MANIFEST_INVALID",
+    )?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+        gate(
+            "LW_RELEASE_GATE_RESOURCE_DEPLOYMENT_MANIFEST_INVALID",
+            &error.to_string(),
+        )
+    })?;
+    let run_id = input.run_id.to_string();
+    let image = input.resource_images.first().ok_or_else(|| {
+        gate(
+            "LW_RELEASE_GATE_RESOURCE_IMAGE_IDENTITY_INVALID",
+            "resource image is missing",
+        )
+    })?;
+    if value
+        .get("sourceCommit")
+        .and_then(serde_json::Value::as_str)
+        != Some(input.source_commit.as_str())
+        || value.get("runId").and_then(serde_json::Value::as_str) != Some(run_id.as_str())
+        || value
+            .pointer("/image/component")
+            .and_then(serde_json::Value::as_str)
+            != Some(image.component.as_str())
+        || value
+            .pointer("/image/reference")
+            .and_then(serde_json::Value::as_str)
+            != Some(image.reference.as_str())
+    {
+        return Err(gate(
+            "LW_RELEASE_GATE_RESOURCE_DEPLOYMENT_IDENTITY_MISMATCH",
+            "resource deployment manifest differs from the gate input",
+        ));
+    }
     Ok(())
 }
 
@@ -492,11 +577,13 @@ mod tests {
     use super::{REQUIRED_CHECKS, run_with_locator};
 
     const INPUT_SCHEMA: &str =
-        include_str!("../../schemas/results/sprint2-release-gate-input.v1.schema.json");
+        include_str!("../../schemas/results/sprint2-release-gate-input.v2.schema.json");
     const REPORT_SCHEMA: &str =
-        include_str!("../../schemas/results/release-gate-report.schema.json");
+        include_str!("../../schemas/results/release-gate-report.v2.schema.json");
     const DEPLOYMENT_SCHEMA: &str =
         include_str!("../../schemas/results/platform-image-deployment-manifest.v1.schema.json");
+    const RESOURCE_DEPLOYMENT_SCHEMA: &str =
+        include_str!("../../schemas/results/resource-deployment-manifest.v1.schema.json");
 
     #[test]
     #[allow(
@@ -509,18 +596,23 @@ mod tests {
         let root = temporary.path();
         write(
             root,
-            "schemas/results/sprint2-release-gate-input.v1.schema.json",
+            "schemas/results/sprint2-release-gate-input.v2.schema.json",
             INPUT_SCHEMA,
         )?;
         write(
             root,
-            "schemas/results/release-gate-report.schema.json",
+            "schemas/results/release-gate-report.v2.schema.json",
             REPORT_SCHEMA,
         )?;
         write(
             root,
             "schemas/results/platform-image-deployment-manifest.v1.schema.json",
             DEPLOYMENT_SCHEMA,
+        )?;
+        write(
+            root,
+            "schemas/results/resource-deployment-manifest.v1.schema.json",
+            RESOURCE_DEPLOYMENT_SCHEMA,
         )?;
         copy_tree(
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("../migrations"),
@@ -574,13 +666,32 @@ mod tests {
             "artifacts/evidence/deployment.json",
             &serde_json::to_string_pretty(&deployment)?,
         )?;
+        let resource_images = vec![json!({
+            "component": "resource-service",
+            "reference": format!("harbor.invalid/labweaver/resource-service@sha256:{}", "d".repeat(64))
+        })];
+        let resource_deployment = json!({
+            "schemaVersion": "resource-deployment-manifest.v1",
+            "sourceCommit": commit,
+            "runId": run_id,
+            "packageManifestSha256": format!("sha256:{}", "e".repeat(64)),
+            "configurationBundleSha256": format!("sha256:{}", "f".repeat(64)),
+            "image": resource_images[0]
+        });
+        write(
+            root,
+            "artifacts/evidence/resource-deployment.json",
+            &serde_json::to_string_pretty(&resource_deployment)?,
+        )?;
         let input = json!({
-            "schemaVersion": "sprint2-release-gate-input.v1",
+            "schemaVersion": "sprint2-release-gate-input.v2",
             "sourceCommit": commit,
             "runId": run_id,
             "deploymentManifest": {"path": "artifacts/evidence/deployment.json", "sha256": file_hash(root, "artifacts/evidence/deployment.json")?},
+            "resourceDeploymentManifest": {"path": "artifacts/evidence/resource-deployment.json", "sha256": file_hash(root, "artifacts/evidence/resource-deployment.json")?},
             "migrationCatalog": {"path": "migrations/catalog.yaml", "sha256": migration_hash},
             "platformImages": images,
+            "resourceImages": resource_images,
             "runtimeArtifacts": [
                 {"name": "container-runtime", "digest": format!("sha256:{}", "a".repeat(64))},
                 {"name": "kubevirt-runtime", "digest": format!("sha256:{}", "b".repeat(64))}

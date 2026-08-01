@@ -1,22 +1,35 @@
 {
-  "apiVersion": "deploy.labweaver.io/sprint2-access-seed/v1",
+  "apiVersion": "deploy.labweaver.io/resource-acceptance-profile/v1",
+  "courseId": "019fbc00-0000-7000-8000-000000000301",
+  "runtimeKind": "container",
+  "resources": {
+    "cpuMillicores": 1000,
+    "memoryBytes": 2147483648,
+    "storageBytes": 10737418240
+  },
+  "durationSeconds": 600,
+  "material": {
+    "description": "Reviewed non-secret Resource acceptance material; actual upload is performed through the Control public API.",
+    "descriptionSha256": "98f2f0b0e290779932a56d5f8ca80201b5fc0e2392e10a219be9794bfb46679f"
+  },
+  "configurationSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   "courseMemberships": [
     {
-      "actorId": "00000000-0000-7000-8000-000000000201",
+      "actorId": "019fbc00-0000-7000-8000-000000000201",
       "issuer": "https://keycloak.example.invalid/realms/workloads",
       "subjectSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "courseId": "019fbc00-0000-7000-8000-000000000301",
       "role": "teacher"
     },
     {
-      "actorId": "00000000-0000-7000-8000-000000000202",
+      "actorId": "019fbc00-0000-7000-8000-000000000202",
       "issuer": "https://keycloak.example.invalid/realms/workloads",
       "subjectSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "courseId": "019fbc00-0000-7000-8000-000000000301",
       "role": "student"
     },
     {
-      "actorId": "00000000-0000-7000-8000-000000000203",
+      "actorId": "019fbc00-0000-7000-8000-000000000203",
       "issuer": "https://keycloak.example.invalid/realms/workloads",
       "subjectSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "courseId": "019fbc00-0000-7000-8000-000000000301",

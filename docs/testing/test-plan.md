@@ -81,6 +81,15 @@ baseline migration to a disposable PostgreSQL instance.
 - invalid state transitions, duplicate IDs, illegal paths, over-limit content,
   timeout, cancellation and dependency failure return stable diagnostics;
 - LLM output cannot approve, execute, publish or score a candidate.
+- The Work authoring route is separate from the Experiment route: Control binds
+  `EnvironmentClass::Work` before dispatch and Agent rejects an experiment,
+  absent or contradictory candidate class without conversion.
+- Empty deployment bootstrap reads only a private Resource acceptance profile
+  and Access membership seed. Both must agree on UUIDv7 course/actor identities,
+  issuer and exactly teacher, student and platform-admin roles; no SQL may
+  create candidates, approvals, releases, requests or leases.
+- Release Gate v2 requires the Resource deployment manifest, immutable
+  `resource-service` identity and same-identity `resource-lease` evidence.
 
 ## Issue #140 C++17 OJ gate
 

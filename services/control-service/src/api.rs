@@ -18,9 +18,10 @@ use axum::{Extension, Json, Router};
 use contracts::authoring::{AgentRun, AgentTrackKind, CourseLlmEgressPolicy};
 use contracts::http::{
     CandidateDecisionRequest, CompleteProblemPackageUploadRequest, CreateAgentRunRequest,
-    CreateEnvironmentTemplateReleaseRequest, CreateProblemPackageUploadRequest, CursorPage,
-    IdempotencyKey, InternalAgentRunMutationRequest, InternalCreateAgentRunRequest,
-    OperationAccepted, StrongEtag, WithdrawEnvironmentTemplateReleaseRequest, resolve_sse_resume,
+    CreateEnvironmentTemplateReleaseRequest, CreateProblemPackageUploadRequest,
+    CreateWorkAgentRunRequest, CursorPage, IdempotencyKey, InternalAgentRunMutationRequest,
+    InternalCreateAgentRunRequest, OperationAccepted, StrongEtag,
+    WithdrawEnvironmentTemplateReleaseRequest, resolve_sse_resume,
 };
 use contracts::{
     ActorId, AgentRunId, AuthorizationDecisionRequest, AuthorizationScope, BffSessionId,
@@ -84,6 +85,10 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route(
             "/api/v1/courses/{course_id}/agent-runs",
             post(create_agent_run),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/work-agent-runs",
+            post(create_work_agent_run),
         )
         .route(
             "/api/v1/courses/{course_id}/agent-runs/{run_id}",
@@ -298,7 +303,54 @@ async fn create_agent_run(
     headers: HeaderMap,
     Json(request): Json<CreateAgentRunRequest>,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &principal, &headers, "createAgentRun", course_id).await?;
+    create_agent_run_for_class(
+        state,
+        principal,
+        course_id,
+        headers,
+        request,
+        contracts::authoring::EnvironmentClass::Experiment,
+        "createAgentRun",
+    )
+    .await
+}
+
+async fn create_work_agent_run(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path(course_id): Path<CourseId>,
+    headers: HeaderMap,
+    Json(request): Json<CreateWorkAgentRunRequest>,
+) -> Result<Response, ApiError> {
+    create_agent_run_for_class(
+        state,
+        principal,
+        course_id,
+        headers,
+        request.into(),
+        contracts::authoring::EnvironmentClass::Work,
+        "createWorkAgentRun",
+    )
+    .await
+}
+
+async fn create_agent_run_for_class(
+    state: Arc<ApiState>,
+    principal: GatewayPrincipal,
+    course_id: CourseId,
+    headers: HeaderMap,
+    request: CreateAgentRunRequest,
+    expected_environment_class: contracts::authoring::EnvironmentClass,
+    authorization_operation: &'static str,
+) -> Result<Response, ApiError> {
+    authorize(
+        &state,
+        &principal,
+        &headers,
+        authorization_operation,
+        course_id,
+    )
+    .await?;
     let key = idempotency(&headers)?;
     let package = state.control.package(course_id, request.package_id).await?;
     let object_locators = state
@@ -319,6 +371,7 @@ async fn create_agent_run(
             &InternalCreateAgentRunRequest {
                 course_id,
                 request,
+                expected_environment_class,
                 package,
                 object_locators,
                 policy,

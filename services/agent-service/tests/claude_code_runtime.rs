@@ -19,8 +19,8 @@ use agent_service::run_store::{
 };
 use async_trait::async_trait;
 use contracts::authoring::{
-    AgentRunState, AgentTrackKind, CourseLlmEgressPolicy, DeniedDataClass, EnvironmentSpec,
-    PackageFile, ProblemPackage, RuntimeKind,
+    AgentRunState, AgentTrackKind, CourseLlmEgressPolicy, DeniedDataClass, EnvironmentClass,
+    EnvironmentSpec, PackageFile, ProblemPackage, RuntimeKind,
 };
 use contracts::evaluation::EvaluationSpec;
 use contracts::http::{CreateAgentRunRequest, IdempotencyKey};
@@ -712,6 +712,7 @@ async fn assert_dispatch_does_not_replay_live_tracks(
         .reserve_dispatch(
             policy.course_id,
             &request,
+            EnvironmentClass::Experiment,
             &package,
             &locators,
             &policy,
@@ -776,6 +777,7 @@ async fn assert_exact_replay(
     let first = service
         .execute(ExecuteAgentRun {
             course_id: policy.course_id,
+            expected_environment_class: EnvironmentClass::Experiment,
             request: &request,
             idempotency_key: &idempotency_key,
             input: initial_input,
@@ -799,6 +801,7 @@ async fn assert_exact_replay(
     let second = service
         .execute(ExecuteAgentRun {
             course_id: policy.course_id,
+            expected_environment_class: EnvironmentClass::Experiment,
             request: &request,
             idempotency_key: &idempotency_key,
             input: replay_input,
@@ -1033,6 +1036,7 @@ async fn assert_concurrent_idempotency(
             service
                 .execute(ExecuteAgentRun {
                     course_id,
+                    expected_environment_class: EnvironmentClass::Experiment,
                     request: &request,
                     idempotency_key: &key,
                     input,
@@ -1072,6 +1076,7 @@ async fn assert_distinct_runs(
             service
                 .execute(ExecuteAgentRun {
                     course_id,
+                    expected_environment_class: EnvironmentClass::Experiment,
                     request: &request,
                     idempotency_key: &key,
                     input,
@@ -1260,6 +1265,25 @@ async fn successful_invocation_is_shell_free_hardened_and_hash_audited()
     let debug = format!("{command:?}");
     assert!(!debug.contains("ignore all previous instructions"));
     assert!(!debug.contains("Generate exactly one"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn work_intent_rejects_an_experiment_candidate_without_defaulting()
+-> Result<(), Box<dyn Error>> {
+    let (runtime, _process, policy) = runtime(FakeMode::Success)?;
+    let failure = expected_failure(
+        runtime
+            .generate_for_class(
+                AgentTrackKind::Environment,
+                EnvironmentClass::Work,
+                input(&policy).await?,
+                RunCancellation::new(),
+            )
+            .await,
+        "experiment output unexpectedly satisfied a Work request",
+    )?;
+    assert_diagnostic(&failure, "LW_LLM_ENVIRONMENT_CLASS_MISMATCH");
     Ok(())
 }
 

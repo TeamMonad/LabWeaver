@@ -1,4 +1,4 @@
-# Sprint 2 Release Gate
+# Sprint 2 Release Gate v2
 
 `cargo xtask release-gate` is the only command that can produce a passing
 Sprint 2 report. It does not run a Fixture and it does not upgrade partial
@@ -15,7 +15,7 @@ That contract does not create another gate or change the v1 JSON shapes.
 ## Inputs
 
 The deployment controller writes a private, ignored JSON input conforming to
-`schemas/results/sprint2-release-gate-input.v1.schema.json` and exports its
+`schemas/results/sprint2-release-gate-input.v2.schema.json` and exports its
 project-relative locator:
 
 ```sh
@@ -28,13 +28,15 @@ cargo xtask demo replay
 The input must bind:
 
 - the current clean Git commit and one Run ID;
-- the hashed platform deployment manifest;
+- the hashed platform deployment manifest and hashed Resource deployment manifest;
+- all seven platform images plus the immutable `resource-service` image;
 - the checked-in `migrations/catalog.yaml` and its hash;
 - all seven immutable Harbor platform image references (`access-service`,
   `agent-service`, `control-service`, `environment-service`,
   `evaluation-service`, `openssh-gateway` and `web`);
 - Container and KubeVirt runtime artifact digests;
-- the exact ten connected checks required by the input Schema.
+- the exact eleven connected checks required by the input Schema, including
+  `resource-lease`.
 
 The deployment manifest also binds the package-manifest SHA-256. The
 `ansible-idempotent` evidence binds the schema-valid application adoption
@@ -48,7 +50,7 @@ non-symlink evidence file with a SHA-256 digest. The gate rereads and hashes eac
 file. Missing, changed, Fixture, local-only, failed or cross-identity evidence
 blocks without writing a passing report.
 
-The ten evidence files retain their authoritative product/runtime identity and
+The eleven evidence files retain their authoritative product/runtime identity and
 readback rather than a boolean-only summary:
 
 | Check | Required evidence boundary |
@@ -63,8 +65,10 @@ readback rather than a boolean-only summary:
 | `keycloak-playwright` | fresh teacher/student sessions and sanitized Trace, screenshot and video locators |
 | `ansible-idempotent` | same-identity application adoption reports; second replay has no conflicting or destructive change |
 | `rollback-drill` | reviewed Helm atomic rollback identity and restored immutable image set |
+| `resource-lease` | Work AgentRun/release, Resource approval, quota shell, Environment handoff, renewal/revocation and capacity cleanup readback |
 
-The Release Gate validates the v1 envelope and rehashes these files. Producers
+The Release Gate validates the v2 envelope and rehashes these files. v1 inputs
+and reports are legacy evidence and cannot satisfy Issue #142. Producers
 and D Verify remain responsible for the inner evidence semantics frozen by the
 Demo contract; an empty or fabricated evidence file is not acceptance evidence
 even if its hash is internally consistent.
@@ -73,6 +77,6 @@ even if its hash is internally consistent.
 
 On success the gate writes exactly one ignored report at
 `artifacts/release-gate/<run-id>.json` and validates it against
-`schemas/results/release-gate-report.schema.json`. The report is evidence for
+`schemas/results/release-gate-report.v2.schema.json`. The report is evidence for
 the bound deployment only; changing source, migration catalog, image set,
 runtime artifact or any referenced evidence requires a new Run ID and replay.

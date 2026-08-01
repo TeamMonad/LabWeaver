@@ -6,6 +6,9 @@ resource_application_expected_source_commit: >-
      | default(resource_application_source_commit, true) }}
 resource_application_package_manifest: "{{ lookup('ansible.builtin.env', 'LABWEAVER_PACKAGE_MANIFEST') }}"
 resource_application_configuration_bundle: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_CONFIGURATION_BUNDLE') }}"
+resource_application_acceptance_profile_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_ACCEPTANCE_PROFILE') }}"
+resource_application_access_seed_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_ACCESS_SEED_FILE') }}"
+resource_application_profile_validator: "{{ playbook_dir }}/../../../tools/validate_resource_acceptance_profile.py"
 resource_application_configuration_manifest: "{{ playbook_dir }}/../../config/resource-bundle-manifest.json"
 resource_application_values_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_VALUES_FILE') }}"
 resource_application_chart_source: "{{ playbook_dir }}/../../helm/labweaver"

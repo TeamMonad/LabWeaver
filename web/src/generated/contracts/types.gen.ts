@@ -1759,6 +1759,47 @@ export type CreateSshPublicKeyRequestSchema = {
 };
 
 /**
+ * CreateWorkAgentRunRequest
+ *
+ * Public request for an AgentRun whose Environment candidate is explicitly a Resource-managed
+ * Work environment. This is deliberately separate from [`CreateAgentRunRequest`]: the legacy
+ * route always requests an Experiment candidate and must never gain an implicit class default.
+ */
+export type CreateWorkAgentRunRequestSchema = {
+    packageId: CreateWorkAgentRunRequestSchemaProblemPackageId;
+    packageRevision: CreateWorkAgentRunRequestSchemaRevision;
+    packageSha256: CreateWorkAgentRunRequestSchemaSha256Digest;
+    policyId: CreateWorkAgentRunRequestSchemaPolicyId;
+    policyRevision: CreateWorkAgentRunRequestSchemaRevision;
+    requestedRuntime: CreateWorkAgentRunRequestSchemaRuntimeKind;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `PolicyId`.
+ */
+export type CreateWorkAgentRunRequestSchemaPolicyId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProblemPackageId`.
+ */
+export type CreateWorkAgentRunRequestSchemaProblemPackageId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type CreateWorkAgentRunRequestSchemaRevision = number;
+
+/**
+ * Runtime kind shared by candidates, releases, and instances.
+ */
+export type CreateWorkAgentRunRequestSchemaRuntimeKind = 'container' | 'virtual_machine';
+
+/**
+ * Canonical lowercase SHA-256 digest.
+ */
+export type CreateWorkAgentRunRequestSchemaSha256Digest = string;
+
+/**
  * SnapshotPage
  *
  * Cursor page bound to one consistent REST/SSE snapshot.
@@ -4018,6 +4059,10 @@ export type InternalCreateAgentRunRequestSchema = {
      */
     courseId: InternalCreateAgentRunRequestSchemaCourseId;
     /**
+     * Explicit class that the Environment candidate must retain through Agent execution.
+     */
+    expectedEnvironmentClass: InternalCreateAgentRunRequestSchemaEnvironmentClass;
+    /**
      * Internal artifact ID to opaque object-key mapping; keys never contain original paths.
      */
     objectLocators: {
@@ -4138,6 +4183,11 @@ export type CreateAgentRunRequest = {
  * Non-overridable content classifications at the LLM boundary.
  */
 export type InternalCreateAgentRunRequestSchemaDeniedDataClass = 'secret' | 'token' | 'private_key' | 'personally_identifiable_information' | 'unallowlisted_student_submission';
+
+/**
+ * Environment business class retained from the v2.1 architecture.
+ */
+export type InternalCreateAgentRunRequestSchemaEnvironmentClass = 'experiment' | 'work';
 
 /**
  * Per-attempt bounded LLM budget.
@@ -6440,6 +6490,76 @@ export type GetProblemPackageResponses = {
 };
 
 export type GetProblemPackageResponse = GetProblemPackageResponses[keyof GetProblemPackageResponses];
+
+export type CreateWorkAgentRunData = {
+    body: CreateWorkAgentRunRequestSchema;
+    headers: {
+        'Idempotency-Key': string;
+    };
+    path: {
+        courseId: string;
+    };
+    query?: never;
+    url: '/api/v1/courses/{courseId}/work-agent-runs';
+};
+
+export type CreateWorkAgentRunErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type CreateWorkAgentRunError = CreateWorkAgentRunErrors[keyof CreateWorkAgentRunErrors];
+
+export type CreateWorkAgentRunResponses = {
+    /**
+     * Successful response
+     */
+    202: AgentRunSchema;
+};
+
+export type CreateWorkAgentRunResponse = CreateWorkAgentRunResponses[keyof CreateWorkAgentRunResponses];
 
 export type ListEnvironmentsData = {
     body?: never;
