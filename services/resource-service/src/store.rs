@@ -907,13 +907,13 @@ impl PgResourceStore {
              WHERE c.state IN ('blocked','handed_off','releasing') \
                AND (l.state='expiring' OR (l.state='active' AND l.expires_at<=clock_timestamp())) \
                AND NOT EXISTS (\
-                 SELECT 1 FROM resource.capacity_attempts a\
+                 SELECT 1 FROM resource.capacity_attempts a \
                  WHERE a.claim_id=c.claim_id\
                    AND a.step IN ('expire_environment','release_capacity')\
                    AND a.state='failed'\
                )\
                AND NOT EXISTS (\
-                 SELECT 1 FROM resource.capacity_attempts a\
+                 SELECT 1 FROM resource.capacity_attempts a \
                  WHERE a.claim_id=c.claim_id\
                    AND a.step IN ('expire_environment','release_capacity')\
                    AND a.state='retry'\
