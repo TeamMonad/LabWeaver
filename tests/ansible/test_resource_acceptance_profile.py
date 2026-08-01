@@ -234,6 +234,9 @@ class ResourceAcceptanceProfileTests(unittest.TestCase):
         )
         self.assertIn("connection: local", playbook)
         self.assertIn("resource-replay-auth", playbook)
+        xtask = (ROOT / "xtask/src/main.rs").read_text(encoding="utf-8")
+        self.assertIn("ResourceCommand::Auth", xtask)
+        self.assertIn('"94-resource-replay-auth.yml"', xtask)
 
 
 if __name__ == "__main__":

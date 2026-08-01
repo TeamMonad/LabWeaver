@@ -241,6 +241,8 @@ enum DemoCommand {
 
 #[derive(Debug, Subcommand)]
 enum ResourceCommand {
+    /// Produce fresh private browser BFF sessions for the public Resource replay.
+    Auth(EnvironmentArgs),
     /// Replay the Work publication and Resource Lease lifecycle through public APIs only.
     Replay(ResourceReplayArgs),
 }
@@ -461,6 +463,7 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::Sprint2HarborRoute(args) => sprint2_harbor_route(&args),
         Command::Sprint2Application(args) => sprint2_application(&args),
         Command::ResourceApplication(args) => resource_application(&args),
+        Command::Resource(ResourceCommand::Auth(args)) => resource_replay_auth(&args),
         Command::Resource(ResourceCommand::Replay(args)) => resource_replay(&args),
         Command::AcceptanceAssets(args) => run_acceptance_assets(args),
         Command::Upgrade(args) => destructive_not_implemented("upgrade", args.yes),
@@ -768,6 +771,25 @@ fn resource_application(args: &EnvironmentArgs) -> Result<(), AppError> {
         "resource-application --infra",
         Some(&package_manifest),
         &[],
+    )
+}
+
+fn resource_replay_auth(args: &EnvironmentArgs) -> Result<(), AppError> {
+    if !args.yes {
+        return Err(AppError::ConfirmationRequired {
+            command: "resource auth",
+        });
+    }
+    require_infrastructure(args, "resource auth --infra")?;
+    if args.package_manifest.is_some() {
+        return Err(AppError::InvalidArgument {
+            role: "Resource replay browser authentication does not accept --package-manifest",
+        });
+    }
+    run_infrastructure(
+        &args.env,
+        "94-resource-replay-auth.yml",
+        "resource auth --infra",
     )
 }
 
