@@ -1138,11 +1138,6 @@ impl InfrastructureInputs {
         )?;
 
         let shared_controller_root = infrastructure_dependency_root()?;
-        let collections_path = resolve_infrastructure_directory(
-            "approved Ansible collections",
-            [controller_root.as_path(), shared_controller_root.as_path()],
-            "collections",
-        )?;
         let roles_path = resolve_infrastructure_directory(
             "approved Ansible roles",
             [controller_root.as_path(), shared_controller_root.as_path()],
@@ -1158,7 +1153,14 @@ impl InfrastructureInputs {
             vault_password: infrastructure_path(&vault_password),
             playbook: infrastructure_path(&playbook),
             ansible_config: infrastructure_path(&ansible_config),
-            collections_path: infrastructure_path(&collections_path),
+            // Collection requirements are lockfile inputs, but a controller may
+            // legitimately execute these playbooks using only built-in modules
+            // and repository-local modules.  Requiring an otherwise unused
+            // `collections/` directory made the allowlisted entrypoint reject
+            // the same controller that Ansible could safely execute directly.
+            // Keep the standard location explicit for Ansible without making a
+            // non-existent directory a false deployment dependency.
+            collections_path: infrastructure_path(&controller_root.join("collections")),
             roles_path: infrastructure_path(&roles_path),
             commit_sha: infrastructure_commit_sha()?,
             controller_id: approved_controller_identity(&controller_lock)?,
