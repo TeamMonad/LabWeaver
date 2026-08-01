@@ -908,16 +908,16 @@ impl PgResourceStore {
                AND (l.state='expiring' OR (l.state='active' AND l.expires_at<=clock_timestamp())) \
                AND NOT EXISTS (\
                  SELECT 1 FROM resource.capacity_attempts a \
-                 WHERE a.claim_id=c.claim_id\
-                   AND a.step IN ('expire_environment','release_capacity')\
-                   AND a.state='failed'\
+                 WHERE a.claim_id=c.claim_id \
+                   AND a.step IN ('expire_environment','release_capacity') \
+                   AND a.state='failed' \
                )\
                AND NOT EXISTS (\
                  SELECT 1 FROM resource.capacity_attempts a \
-                 WHERE a.claim_id=c.claim_id\
-                   AND a.step IN ('expire_environment','release_capacity')\
-                   AND a.state='retry'\
-                   AND a.next_attempt_at>clock_timestamp()\
+                 WHERE a.claim_id=c.claim_id \
+                   AND a.step IN ('expire_environment','release_capacity') \
+                   AND a.state='retry' \
+                   AND a.next_attempt_at>clock_timestamp() \
                )\
              ORDER BY l.expires_at,l.updated_at FOR UPDATE OF c,l SKIP LOCKED LIMIT 1",
         )
