@@ -4,6 +4,7 @@
     that:
       - resource_replay_auth_base_url is match('^https://[a-z0-9][a-z0-9.-]*(?::[0-9]+)?$')
       - resource_replay_auth_trusted_ca_file | length > 0
+      - resource_replay_auth_keycloak_ca_file | length > 0
       - resource_replay_auth_teacher_username | length > 0
       - resource_replay_auth_student_username | length > 0
       - resource_replay_auth_platform_admin_username | length > 0
@@ -18,6 +19,7 @@
   loop:
     - "{{ resource_replay_auth_driver }}"
     - "{{ resource_replay_auth_trusted_ca_file }}"
+    - "{{ resource_replay_auth_keycloak_ca_file }}"
     - "{{ resource_replay_auth_teacher_password_file }}"
     - "{{ resource_replay_auth_student_password_file }}"
     - "{{ resource_replay_auth_platform_admin_password_file }}"
@@ -47,6 +49,8 @@
       - "{{ resource_replay_auth_base_url }}"
       - --trusted-ca
       - "{{ resource_replay_auth_trusted_ca_file }}"
+      - --trusted-ca
+      - "{{ resource_replay_auth_keycloak_ca_file }}"
       - --output-root
       - "{{ resource_replay_auth_root }}"
       - --teacher-username

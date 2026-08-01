@@ -5,6 +5,7 @@
 resource_replay_auth_root: /var/lib/labweaver/.private/resource-replay-auth
 resource_replay_auth_base_url: "{{ lookup('ansible.builtin.env', 'LABWEAVER_BASE_URL') }}"
 resource_replay_auth_trusted_ca_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_REPLAY_TRUSTED_CA_FILE') }}"
+resource_replay_auth_keycloak_ca_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_REPLAY_KEYCLOAK_CA_FILE') }}"
 resource_replay_auth_driver: "{{ playbook_dir }}/../../../tools/create_resource_replay_auth.py"
 resource_replay_auth_teacher_username: "{{ lookup('ansible.builtin.env', 'LABWEAVER_TEACHER_USERNAME') }}"
 resource_replay_auth_student_username: "{{ lookup('ansible.builtin.env', 'LABWEAVER_STUDENT_USERNAME') }}"

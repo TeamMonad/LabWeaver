@@ -19,8 +19,9 @@ def password(path: Path) -> str:
     if not value or "\n" in value or "\r" in value or "\0" in value: raise Error("LW_RESOURCE_REPLAY_AUTH_PASSWORD_FILE_INVALID")
     return value
 
-def login(base: str, ca: Path, username: str, secret: Path, destination: Path) -> None:
-    jar=http.cookiejar.CookieJar(); context=ssl.create_default_context(cafile=str(ca))
+def login(base: str, cas: list[Path], username: str, secret: Path, destination: Path) -> None:
+    jar=http.cookiejar.CookieJar(); context=ssl.create_default_context()
+    for ca in cas: context.load_verify_locations(cafile=str(ca))
     opener=urllib.request.build_opener(urllib.request.HTTPSHandler(context=context), urllib.request.HTTPCookieProcessor(jar))
     try:
         response=opener.open(base + "/auth/login?return_to=%2F", timeout=30); page=response.read().decode("utf-8", "strict")
@@ -36,10 +37,10 @@ def login(base: str, ca: Path, username: str, secret: Path, destination: Path) -
     destination.write_text(json.dumps({"cookies":cookies,"origins":[]},separators=(",",":")),encoding="utf-8"); os.chmod(destination,0o600)
 
 def main() -> int:
-    p=argparse.ArgumentParser(); p.add_argument("--base-url",required=True); p.add_argument("--trusted-ca",type=Path,required=True); p.add_argument("--output-root",type=Path,required=True)
+    p=argparse.ArgumentParser(); p.add_argument("--base-url",required=True); p.add_argument("--trusted-ca",type=Path,required=True,action="append"); p.add_argument("--output-root",type=Path,required=True)
     for role in ("teacher","student","platform-admin"): p.add_argument(f"--{role}-username",required=True); p.add_argument(f"--{role}-password-file",type=Path,required=True)
     a=p.parse_args()
-    if not a.base_url.startswith("https://") or urllib.parse.urlparse(a.base_url).path not in ("", "/") or not a.trusted_ca.is_file(): raise SystemExit("LW_RESOURCE_REPLAY_AUTH_INPUT_INVALID")
+    if not a.base_url.startswith("https://") or urllib.parse.urlparse(a.base_url).path not in ("", "/") or not all(ca.is_file() for ca in a.trusted_ca): raise SystemExit("LW_RESOURCE_REPLAY_AUTH_INPUT_INVALID")
     try:
         a.output_root.mkdir(mode=0o700,parents=True,exist_ok=True); os.chmod(a.output_root,0o700)
         for role in ("teacher","student","platform-admin"):
