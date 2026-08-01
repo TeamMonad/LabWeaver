@@ -61,7 +61,17 @@
       - "{{ resource_replay_auth_platform_admin_username }}"
       - --platform-admin-password-file
       - "{{ resource_replay_auth_platform_admin_password_file }}"
+  register: resource_replay_auth_result
+  failed_when: false
   no_log: true
+
+- name: Surface a stable Resource replay authentication diagnostic
+  ansible.builtin.assert:
+    that: resource_replay_auth_result.rc == 0
+    fail_msg: >-
+      {{ resource_replay_auth_result.stderr
+         | regex_search('LW_[A-Z0-9_]+')
+         | default('LW_RESOURCE_REPLAY_AUTH_OIDC_FAILED', true) }}
 
 - name: Verify private Resource replay authentication locator permissions
   ansible.builtin.stat:
