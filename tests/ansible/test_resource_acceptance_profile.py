@@ -28,6 +28,14 @@ RENDER_MODULE = importlib.util.module_from_spec(RENDER_SPEC)
 sys.modules[RENDER_SPEC.name] = RENDER_MODULE
 RENDER_SPEC.loader.exec_module(RENDER_MODULE)
 
+REPORT_SCRIPT = ROOT / "tools/validate_resource_replay_report.py"
+REPORT_SPEC = importlib.util.spec_from_file_location("resource_replay_report", REPORT_SCRIPT)
+if REPORT_SPEC is None or REPORT_SPEC.loader is None:
+    raise RuntimeError("resource replay report validator could not be loaded")
+REPORT_MODULE = importlib.util.module_from_spec(REPORT_SPEC)
+sys.modules[REPORT_SPEC.name] = REPORT_MODULE
+REPORT_SPEC.loader.exec_module(REPORT_MODULE)
+
 
 class ResourceAcceptanceProfileTests(unittest.TestCase):
     def _profile(self) -> dict[str, object]:
@@ -94,6 +102,23 @@ class ResourceAcceptanceProfileTests(unittest.TestCase):
             with self.assertRaisesRegex(RENDER_MODULE.RenderError, "ACCESS_SEED_INVALID"):
                 RENDER_MODULE.private(path, "LW_RESOURCE_PROFILE_RENDER_ACCESS_SEED_INVALID")
 
+    def test_report_requires_tombstone_identity_and_counts(self) -> None:
+        run_id = "019fbc00-0000-7000-8000-000000000501"
+        commit = "a" * 40
+        report = {
+            "schemaVersion": "resource-lease-replay-report.v1",
+            "runId": run_id,
+            "sourceCommit": commit,
+            "checks": ["work-agent-run", "dual-approval", "work-release", "resource-request", "lease-renew", "lease-revoke", "environment-tombstone"],
+            "identity": {"runId": run_id, "sourceCommit": commit},
+            "counts": {"uploadedFiles": 1, "agentTracks": 2, "resourceRequests": 1, "leases": 1, "environmentTombstones": 1},
+            "cleanup": {"observedState": "deleted"},
+        }
+        REPORT_MODULE.validate(report, commit, run_id)
+        report["cleanup"] = {"observedState": "ready"}
+        with self.assertRaisesRegex(REPORT_MODULE.ReportError, "CLEANUP_INVALID"):
+            REPORT_MODULE.validate(report, commit, run_id)
+
     def test_bootstrap_rejects_extra_course_memberships(self) -> None:
         template = (
             ROOT
@@ -121,6 +146,9 @@ class ResourceAcceptanceProfileTests(unittest.TestCase):
         self.assertIn("LW_RESOURCE_REPLAY_AUTHENTICATION_INVALID", validator)
         self.assertIn(".private", validator)
         self.assertIn("def regular_file", validator)
+        report_validator = (ROOT / "tools/validate_resource_replay_report.py").read_text(encoding="utf-8")
+        self.assertIn("environment-tombstone", report_validator)
+        self.assertIn("LW_RESOURCE_REPLAY_REPORT_CLEANUP_INVALID", report_validator)
 
 
 if __name__ == "__main__":

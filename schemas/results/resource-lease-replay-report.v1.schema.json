@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schemas/results/resource-lease-replay-report.v1.schema.json",
+  "title": "Resource Lease Connected Replay Report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "runId", "sourceCommit", "checks", "identity", "counts", "cleanup"],
+  "properties": {
+    "schemaVersion": {"const": "resource-lease-replay-report.v1"},
+    "runId": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+    "sourceCommit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "checks": {"type": "array", "uniqueItems": true, "contains": {"const": "environment-tombstone"}},
+    "identity": {"type": "object", "additionalProperties": {"type": "string"}},
+    "counts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["uploadedFiles", "agentTracks", "resourceRequests", "leases", "environmentTombstones"],
+      "properties": {
+        "uploadedFiles": {"const": 1}, "agentTracks": {"const": 2},
+        "resourceRequests": {"const": 1}, "leases": {"const": 1},
+        "environmentTombstones": {"const": 1}
+      }
+    },
+    "cleanup": {
+      "type": "object", "additionalProperties": false, "required": ["observedState"],
+      "properties": {"observedState": {"const": "deleted"}}
+    }
+  }
+}

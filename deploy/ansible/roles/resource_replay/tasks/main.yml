@@ -21,6 +21,7 @@
     - "{{ resource_replay_deployment_manifest }}"
     - "{{ resource_replay_validator }}"
     - "{{ resource_replay_driver }}"
+    - "{{ resource_replay_report_validator }}"
   register: resource_replay_inputs
   delegate_to: localhost
   become: false
@@ -94,3 +95,17 @@
       - resource_replay_report.stat.gr_name == 'root'
       - resource_replay_report.stat.mode == '0600'
     fail_msg: LW_RESOURCE_REPLAY_REPORT_INVALID
+
+- name: Validate identity-bound Resource replay report
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ resource_replay_report_validator }}"
+      - --report
+      - "{{ resource_replay_report_root }}/{{ resource_replay_run_id }}/resource-replay-report.json"
+      - --source-commit
+      - "{{ resource_replay_source_commit }}"
+      - --run-id
+      - "{{ resource_replay_run_id }}"
+  changed_when: false
+  no_log: true
