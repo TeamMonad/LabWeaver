@@ -249,18 +249,9 @@
   no_log: true
 
 - name: Apply only the independently reviewed Resource configuration
-  ansible.builtin.command:
-    argv:
-      - "{{ resource_application_kubectl }}"
-      - --kubeconfig
-      - "{{ resource_application_kubeconfig }}"
-      - apply
-      - --server-side
-      - --field-manager=labweaver-resource-application
-      - --filename
-      - "{{ resource_application_configuration_bundle }}"
-  changed_when: true
-  no_log: true
+  labweaver_resource_bundle_apply:
+    kubeconfig: "{{ resource_application_kubeconfig }}"
+    bundle: "{{ resource_application_configuration_bundle }}"
 
 - name: Build isolated Resource Helm arguments
   ansible.builtin.set_fact:

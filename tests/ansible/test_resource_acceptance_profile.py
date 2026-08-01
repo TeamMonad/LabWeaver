@@ -182,6 +182,13 @@ class ResourceAcceptanceProfileTests(unittest.TestCase):
         self.assertIn("tunnel.terminate()", module)
         self.assertIn("RESOURCE_APPLICATION_POSTGRES_TUNNEL_CONFLICT", module)
         self.assertIn("labweaver_postgres_apply:", tasks)
+        resource_bundle_module = (
+            ROOT / "deploy/ansible/library/labweaver_resource_bundle_apply.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("RESOURCE_APPLICATION_SECRET_OWNERSHIP_CONFLICT", resource_bundle_module)
+        self.assertIn("resource-service-secrets", resource_bundle_module)
+        self.assertNotIn("force-conflicts", resource_bundle_module)
+        self.assertIn("labweaver_resource_bundle_apply:", tasks)
         self.assertIn("/var/lib/labweaver/.private/resource-acceptance", defaults)
         self.assertIn("library = library", ansible_config)
 
