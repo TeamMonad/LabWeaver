@@ -222,11 +222,12 @@ class ResourceAcceptanceProfileTests(unittest.TestCase):
         self.assertIn(".private/resource-replay-auth", defaults)
         self.assertIn("resource_replay_auth_driver", tasks)
         self.assertIn("--trusted-ca", tasks)
-        self.assertIn("mode: '0600'", tasks)
+        self.assertIn("stat.mode == '0600'", tasks)
         self.assertIn("no_log: true", tasks)
         driver = (ROOT / "tools/create_resource_replay_auth.py").read_text(encoding="utf-8")
         self.assertIn("resource-replay-auth/v1", driver)
         self.assertIn("create_resource_replay_auth.py", defaults)
+        self.assertIn("os.chmod", driver)
         playbook = (ROOT / "deploy/ansible/playbooks/94-resource-replay-auth.yml").read_text(
             encoding="utf-8"
         )
