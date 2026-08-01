@@ -223,21 +223,12 @@
   no_log: true
 
 - name: Apply or verify Resource Access bootstrap
-  ansible.builtin.command:
-    argv:
-      - "{{ resource_application_psql }}"
-      - "service={{ resource_application_postgres_service }}"
-      - --no-psqlrc
-      - --file
-      - "{{ resource_application_report_root }}/{{ resource_application_run_id }}/access-seed-adopt.sql"
-  environment:
-    PGSERVICEFILE: "{{ resource_application_postgres_service_file }}"
-  register: resource_application_access_seed_apply
-  changed_when: true
-  retries: 6
-  delay: 2
-  until: resource_application_access_seed_apply.rc == 0
-  no_log: true
+  labweaver_postgres_apply:
+    kubeconfig: "{{ resource_application_kubeconfig }}"
+    psql: "{{ resource_application_psql }}"
+    service_file: "{{ resource_application_postgres_service_file }}"
+    service: "{{ resource_application_postgres_service }}"
+    sql_file: "{{ resource_application_report_root }}/{{ resource_application_run_id }}/access-seed-adopt.sql"
 
 - name: Enforce exact Resource package and configuration boundaries
   ansible.builtin.assert:

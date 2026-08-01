@@ -488,7 +488,12 @@ class AnsibleFixtureTests(unittest.TestCase):
         )
         self.assertIn("resource_application_run_id is match('^[0-9a-f]{8}", tasks)
         self.assertIn("Apply or verify Resource Access bootstrap", tasks)
-        self.assertIn("PGSERVICEFILE", tasks)
+        self.assertIn("labweaver_postgres_apply:", tasks)
+        postgres_apply = (
+            ROOT / "deploy/ansible/library/labweaver_postgres_apply.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("PGSERVICEFILE", postgres_apply)
+        self.assertIn("port-forward", postgres_apply)
         seed = (
             ROOT
             / "deploy/ansible/roles/resource_application/templates/access-seed-adopt.sql.j2"
