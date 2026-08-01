@@ -100,7 +100,20 @@ class BffClient:
                 return (json.loads(raw) if raw else {}, dict(response.headers.items()))
         except urllib.error.HTTPError as error:
             raw = error.read(4096).decode("utf-8", errors="replace")
-            diagnostic = raw.strip() if raw.startswith("LW_") else "LW_RESOURCE_REPLAY_PUBLIC_API_REJECTED"
+            diagnostic = raw.strip() if raw.startswith("LW_") else ""
+            if not diagnostic:
+                try:
+                    payload = json.loads(raw)
+                except json.JSONDecodeError:
+                    payload = None
+                if isinstance(payload, dict):
+                    candidate = payload.get("diagnosticCode")
+                    if isinstance(candidate, str) and candidate.startswith("LW_"):
+                        diagnostic = candidate
+            if not diagnostic:
+                # The step labels are fixed in this program and therefore do
+                # not expose a server response, request payload, or actor data.
+                diagnostic = "LW_RESOURCE_REPLAY_PUBLIC_API_REJECTED_" + step.upper().replace("-", "_")
             raise ReplayError(diagnostic) from error
         except (OSError, json.JSONDecodeError) as error:
             raise ReplayError("LW_RESOURCE_REPLAY_PUBLIC_API_UNAVAILABLE") from error
