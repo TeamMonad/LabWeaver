@@ -779,10 +779,14 @@ fn resource_replay(args: &ResourceReplayArgs) -> Result<(), AppError> {
             "Resource replay authentication locator",
             &args.authentication,
         ),
+    ] {
+        require_private_locator(role, path)?;
+    }
+    for (role, path) in [
         ("Resource deployment manifest", &args.deployment_manifest),
         ("Resource package manifest", &args.package_manifest),
     ] {
-        require_private_locator(role, path)?;
+        require_regular_locator(role, path)?;
     }
     platform_images::validate_profile(&args.package_manifest, "resource", &repository_root())?;
     let deployment_manifest =
@@ -841,6 +845,17 @@ fn require_private_locator(role: &'static str, path: &Path) -> Result<(), AppErr
     } else {
         Err(AppError::InvalidArgument { role })
     }
+}
+
+fn require_regular_locator(role: &'static str, path: &Path) -> Result<(), AppError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| AppError::Io {
+        role,
+        detail: error.to_string(),
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(AppError::InvalidArgument { role });
+    }
+    Ok(())
 }
 
 fn require_infrastructure(args: &EnvironmentArgs, command: &'static str) -> Result<(), AppError> {

@@ -43,6 +43,12 @@ def private_file(path: Path, code: str) -> Path:
     return resolved
 
 
+def regular_file(path: Path, code: str) -> Path:
+    if path.is_symlink() or not path.is_file():
+        raise ReplayInputError(code)
+    return path.resolve()
+
+
 def json_file(path: Path, code: str) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -69,7 +75,7 @@ def validate_authentication(path: Path) -> dict[str, Any]:
 
 
 def validate_package(path: Path, source_commit: str) -> dict[str, Any]:
-    manifest = json_file(private_file(path, "LW_RESOURCE_REPLAY_PACKAGE_INVALID"), "LW_RESOURCE_REPLAY_PACKAGE_INVALID")
+    manifest = json_file(regular_file(path, "LW_RESOURCE_REPLAY_PACKAGE_INVALID"), "LW_RESOURCE_REPLAY_PACKAGE_INVALID")
     images = manifest.get("images")
     if (
         manifest.get("schema_version") != "platform-image-package-manifest.v1"
@@ -88,7 +94,7 @@ def validate_package(path: Path, source_commit: str) -> dict[str, Any]:
 
 
 def validate_deployment(path: Path, source_commit: str, run_id: str, package: dict[str, Any]) -> dict[str, Any]:
-    deployment = json_file(private_file(path, "LW_RESOURCE_REPLAY_DEPLOYMENT_MANIFEST_INVALID"), "LW_RESOURCE_REPLAY_DEPLOYMENT_MANIFEST_INVALID")
+    deployment = json_file(regular_file(path, "LW_RESOURCE_REPLAY_DEPLOYMENT_MANIFEST_INVALID"), "LW_RESOURCE_REPLAY_DEPLOYMENT_MANIFEST_INVALID")
     if (
         deployment.get("schemaVersion") != "resource-deployment-manifest.v1"
         or deployment.get("sourceCommit") != source_commit

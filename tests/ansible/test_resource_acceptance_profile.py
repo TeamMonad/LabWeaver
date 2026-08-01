@@ -64,6 +64,7 @@ class ResourceAcceptanceProfileTests(unittest.TestCase):
         self.assertNotIn("Authorization: Bearer", replay)
         self.assertIn("LW_RESOURCE_REPLAY_AUTHENTICATION_INVALID", validator)
         self.assertIn(".private", validator)
+        self.assertIn("def regular_file", validator)
 
 
 if __name__ == "__main__":
