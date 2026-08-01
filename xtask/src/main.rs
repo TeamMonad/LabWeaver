@@ -1497,22 +1497,39 @@ fn required_run_id(variable: &str, role: &'static str) -> Result<String, AppErro
         code: None,
         detail: Some(format!("{variable} is required")),
     })?;
-    let valid = (8..=96).contains(&value.len())
+    let named_run_id = (8..=96).contains(&value.len())
         && value.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
-    if valid {
+    if named_run_id || is_uuid_v7_run_id(&value) {
         Ok(value)
     } else {
         Err(AppError::ExternalCommand {
             role,
             code: None,
             detail: Some(format!(
-                "{variable} must be an explicit lowercase run identifier"
+                "{variable} must be an explicit lowercase run identifier or UUIDv7"
             )),
         })
     }
+}
+
+#[cfg(target_os = "linux")]
+fn is_uuid_v7_run_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 36
+        || ![8, 13, 18, 23]
+            .iter()
+            .all(|index| bytes.get(*index) == Some(&b'-'))
+        || bytes.get(14) != Some(&b'7')
+        || !matches!(bytes.get(19), Some(b'8'..=b'b'))
+    {
+        return false;
+    }
+    bytes.iter().enumerate().all(|(index, byte)| {
+        matches!(index, 8 | 13 | 18 | 23) || byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')
+    })
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1559,11 +1576,22 @@ fn not_implemented(command: impl Into<String>) -> Result<(), AppError> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    use super::is_uuid_v7_run_id;
     use super::{
         EnvironmentArgs, IdentityFoundationAction, IdentityFoundationArgs, deploy,
         identity_foundation, sprint2_application, sprint2_buildkit, sprint2_foundation,
         sprint2_harbor_route,
     };
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn explicit_run_identity_accepts_only_uuidv7() {
+        assert!(is_uuid_v7_run_id("019fa9d0-0000-7000-8000-000000000142"));
+        assert!(!is_uuid_v7_run_id("019fa9d0-0000-6000-8000-000000000142"));
+        assert!(!is_uuid_v7_run_id("019fa9d0-0000-7000-c000-000000000142"));
+        assert!(!is_uuid_v7_run_id("019FA9D0-0000-7000-8000-000000000142"));
+    }
 
     fn identity_args(env: &str, infra: bool, yes: bool) -> IdentityFoundationArgs {
         IdentityFoundationArgs {
