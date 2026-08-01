@@ -2,7 +2,7 @@
 - name: Validate Resource deployment inputs
   ansible.builtin.assert:
     that:
-      - resource_application_run_id is match('^[a-z0-9][a-z0-9-]{2,62}$')
+      - resource_application_run_id is match('^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
       - resource_application_source_commit is match('^[0-9a-f]{40,64}$')
       - resource_application_package_manifest | length > 0
       - resource_application_configuration_bundle | length > 0

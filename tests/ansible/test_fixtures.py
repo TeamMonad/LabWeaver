@@ -486,6 +486,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn(
             "network.resourceKubernetesApiCiliumPolicyEnabled=true", tasks
         )
+        self.assertIn("resource_application_run_id is match('^[0-9a-f]{8}", tasks)
 
     def test_sprint2_application_reads_kubernetes_items_as_a_mapping_key(self) -> None:
         tasks = (
