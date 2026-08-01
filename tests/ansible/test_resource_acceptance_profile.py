@@ -149,6 +149,8 @@ class ResourceAcceptanceProfileTests(unittest.TestCase):
         report_validator = (ROOT / "tools/validate_resource_replay_report.py").read_text(encoding="utf-8")
         self.assertIn("environment-tombstone", report_validator)
         self.assertIn("LW_RESOURCE_REPLAY_REPORT_CLEANUP_INVALID", report_validator)
+        replay_tasks = (ROOT / "deploy/ansible/roles/resource_replay/tasks/main.yml").read_text(encoding="utf-8")
+        self.assertNotIn("become: false", replay_tasks)
 
 
 if __name__ == "__main__":
