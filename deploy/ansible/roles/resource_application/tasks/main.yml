@@ -137,7 +137,17 @@
       - --material-output
       - "{{ resource_application_profile_material_file }}"
   changed_when: true
+  register: resource_application_profile_prepare
+  failed_when: false
   no_log: true
+
+- name: Surface a stable Resource acceptance source preparation diagnostic
+  ansible.builtin.assert:
+    that: resource_application_profile_prepare.rc == 0
+    fail_msg: >-
+      {{ resource_application_profile_prepare.stderr
+         | regex_search('LW_[A-Z0-9_]+')
+         | default('RESOURCE_APPLICATION_PROFILE_PREPARE_FAILED', true) }}
 
 - name: Render root-owned Resource acceptance profile from private source inputs
   ansible.builtin.command:
