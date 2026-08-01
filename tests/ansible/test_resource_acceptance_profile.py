@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -27,6 +28,14 @@ if RENDER_SPEC is None or RENDER_SPEC.loader is None:
 RENDER_MODULE = importlib.util.module_from_spec(RENDER_SPEC)
 sys.modules[RENDER_SPEC.name] = RENDER_MODULE
 RENDER_SPEC.loader.exec_module(RENDER_MODULE)
+
+PREPARE_SCRIPT = ROOT / "tools/prepare_resource_acceptance_profile.py"
+PREPARE_SPEC = importlib.util.spec_from_file_location("prepare_resource_acceptance_profile", PREPARE_SCRIPT)
+if PREPARE_SPEC is None or PREPARE_SPEC.loader is None:
+    raise RuntimeError("resource profile preparer could not be loaded")
+PREPARE_MODULE = importlib.util.module_from_spec(PREPARE_SPEC)
+sys.modules[PREPARE_SPEC.name] = PREPARE_MODULE
+PREPARE_SPEC.loader.exec_module(PREPARE_MODULE)
 
 REPORT_SCRIPT = ROOT / "tools/validate_resource_replay_report.py"
 REPORT_SPEC = importlib.util.spec_from_file_location("resource_replay_report", REPORT_SCRIPT)
@@ -101,6 +110,31 @@ class ResourceAcceptanceProfileTests(unittest.TestCase):
             path.write_text("{}", encoding="utf-8")
             with self.assertRaisesRegex(RENDER_MODULE.RenderError, "ACCESS_SEED_INVALID"):
                 RENDER_MODULE.private(path, "LW_RESOURCE_PROFILE_RENDER_ACCESS_SEED_INVALID")
+
+    def test_preparer_generates_stable_private_source_without_secrets(self) -> None:
+        profile = self._profile()
+        with tempfile.TemporaryDirectory() as temporary:
+            private = Path(temporary) / ".private"
+            private.mkdir()
+            seed_path = private / "access-seed.json"
+            runtime_path = private / "agent-runtime.yaml"
+            configuration_path = private / "configuration.json"
+            material_path = private / "material.md"
+            seed_path.write_text(json.dumps({"courseMemberships": profile["courseMemberships"]}), encoding="utf-8")
+            runtime_path.write_text("runtime: reviewed\n", encoding="utf-8")
+            configuration = PREPARE_MODULE.build_configuration(
+                json.loads(seed_path.read_text(encoding="utf-8")), runtime_path,
+                "e" * 64, "2.1.215", "ecnu-plus", "claude-code-production", "kubernetes-standard",
+            )
+            PREPARE_MODULE.atomic_json(configuration_path, configuration)
+            PREPARE_MODULE.atomic_material(material_path)
+            rendered = RENDER_MODULE.render(
+                json.loads(seed_path.read_text(encoding="utf-8")), configuration, material_path
+            )
+            self.assertRegex(MODULE.validate(rendered, json.loads(seed_path.read_text(encoding="utf-8"))), r"^[0-9a-f]{64}$")
+            if os.name != "nt":
+                self.assertEqual(material_path.stat().st_mode & 0o777, 0o600)
+            self.assertNotIn("token", material_path.read_text(encoding="utf-8").lower())
 
     def test_report_requires_tombstone_identity_and_counts(self) -> None:
         run_id = "019fbc00-0000-7000-8000-000000000501"

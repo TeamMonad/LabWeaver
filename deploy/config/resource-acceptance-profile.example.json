@@ -22,7 +22,35 @@
       "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
     },
     "policy": {
-      "privateProfileOnly": true
+      "id": "019fbc00-0000-7000-8000-000000000501",
+      "courseId": "019fbc00-0000-7000-8000-000000000301",
+      "revision": 1,
+      "binding": {
+        "runtimeBinding": "claude-code-production",
+        "model": "ecnu-plus",
+        "claudeCodeVersion": "2.1.215",
+        "workerImageSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "runtimeConfigSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "maxInFlightPerWorker": 1
+      },
+      "budget": {
+        "maxInputTokens": 100000,
+        "maxOutputTokens": 16000,
+        "maxRequests": 4,
+        "maxCostMicrousd": 2000000,
+        "timeoutMilliseconds": 120000,
+        "maxTransientRetries": 1,
+        "maxSchemaRepairs": 1
+      },
+      "deniedDataClasses": [
+        "secret",
+        "token",
+        "private_key",
+        "personally_identifiable_information",
+        "unallowlisted_student_submission"
+      ],
+      "studentContentMode": "manifest_allowlist_only",
+      "activatedAt": "2026-08-01T00:00:00.000Z"
     }
   },
   "courseMemberships": [

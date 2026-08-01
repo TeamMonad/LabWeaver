@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,15 @@ class ProfileError(Exception):
 API_VERSION = "deploy.labweaver.io/resource-acceptance-profile/v1"
 ROLES = {"teacher", "student", "platform_admin"}
 RUNTIME = {"container", "virtual_machine"}
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
+RFC3339_MILLIS = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
+DENIED_DATA_CLASSES = {
+    "secret",
+    "token",
+    "private_key",
+    "personally_identifiable_information",
+    "unallowlisted_student_submission",
+}
 
 
 def _uuid7(value: object) -> str:
@@ -32,13 +42,50 @@ def _uuid7(value: object) -> str:
 
 
 def _sha256(value: object) -> str:
-    if not isinstance(value, str) or len(value) != 64:
+    if not isinstance(value, str) or not SHA256.fullmatch(value):
         raise ProfileError("LW_RESOURCE_ACCEPTANCE_PROFILE_HASH_INVALID")
-    try:
-        int(value, 16)
-    except ValueError as error:
-        raise ProfileError("LW_RESOURCE_ACCEPTANCE_PROFILE_HASH_INVALID") from error
     return value
+
+
+def _policy(policy: object, course_id: str) -> None:
+    if not isinstance(policy, dict):
+        raise ProfileError("LW_RESOURCE_ACCEPTANCE_PROFILE_POLICY_INVALID")
+    if _uuid7(policy.get("id")) is None or policy.get("courseId") != course_id:
+        raise ProfileError("LW_RESOURCE_ACCEPTANCE_PROFILE_POLICY_INVALID")
+    if not isinstance(policy.get("revision"), int) or policy["revision"] < 1:
+        raise ProfileError("LW_RESOURCE_ACCEPTANCE_PROFILE_POLICY_INVALID")
+    binding = policy.get("binding")
+    if not isinstance(binding, dict):
+        raise ProfileError("LW_RESOURCE_ACCEPTANCE_PROFILE_POLICY_INVALID")
+    required_binding = ("runtimeBinding", "model", "claudeCodeVersion")
+    if any(not isinstance(binding.get(field), str) or not binding[field].strip() for field in required_binding):
+        raise ProfileError("LW_RESOURCE_ACCEPTANCE_PROFILE_POLICY_INVALID")
+    if "://" in binding["runtimeBinding"] or binding["model"].strip().lower() in {"latest", "default"}:
+        raise ProfileError("LW_RESOURCE_ACCEPTANCE_PROFILE_POLICY_INVALID")
+    _sha256(binding.get("workerImageSha256"))
+    _sha256(binding.get("runtimeConfigSha256"))
+    if not isinstance(binding.get("maxInFlightPerWorker"), int) or binding["maxInFlightPerWorker"] < 1:
+        raise ProfileError("LW_RESOURCE_ACCEPTANCE_PROFILE_POLICY_INVALID")
+    budget = policy.get("budget")
+    if not isinstance(budget, dict) or any(
+        not isinstance(budget.get(field), int) or budget[field] < 1
+        for field in (
+            "maxInputTokens", "maxOutputTokens", "maxRequests", "maxCostMicrousd", "timeoutMilliseconds",
+        )
+    ):
+        raise ProfileError("LW_RESOURCE_ACCEPTANCE_PROFILE_POLICY_INVALID")
+    if any(
+        not isinstance(budget.get(field), int) or budget[field] < 0
+        for field in ("maxTransientRetries", "maxSchemaRepairs")
+    ):
+        raise ProfileError("LW_RESOURCE_ACCEPTANCE_PROFILE_POLICY_INVALID")
+    denied = policy.get("deniedDataClasses")
+    if not isinstance(denied, list) or set(denied) != DENIED_DATA_CLASSES or len(denied) != len(DENIED_DATA_CLASSES):
+        raise ProfileError("LW_RESOURCE_ACCEPTANCE_PROFILE_POLICY_INVALID")
+    if policy.get("studentContentMode") != "manifest_allowlist_only":
+        raise ProfileError("LW_RESOURCE_ACCEPTANCE_PROFILE_POLICY_INVALID")
+    if not isinstance(policy.get("activatedAt"), str) or not RFC3339_MILLIS.fullmatch(policy["activatedAt"]):
+        raise ProfileError("LW_RESOURCE_ACCEPTANCE_PROFILE_POLICY_INVALID")
 
 
 def load(path: Path) -> dict[str, Any]:
@@ -97,8 +144,7 @@ def validate(profile: dict[str, Any], access_seed: dict[str, Any]) -> str:
     ):
         raise ProfileError("LW_RESOURCE_ACCEPTANCE_PROFILE_REPLAY_INVALID")
     _sha256(material_file.get("sha256"))
-    if not isinstance(replay.get("policy"), dict):
-        raise ProfileError("LW_RESOURCE_ACCEPTANCE_PROFILE_REPLAY_INVALID")
+    _policy(replay.get("policy"), course_id)
     members = profile.get("courseMemberships")
     seed_members = access_seed.get("courseMemberships") if isinstance(access_seed, dict) else None
     if not isinstance(members, list) or not isinstance(seed_members, list) or len(members) != 3:

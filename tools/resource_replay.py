@@ -164,7 +164,7 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
     course_id = profile["courseId"]
     policy, _ = teacher.request("POST", f"/api/v1/courses/{course_id}/llm-egress-policies", replay["policy"], "policy")
     upload, _ = teacher.request("POST", f"/api/v1/courses/{course_id}/problem-package-uploads", {
-        "files": [{"path": "README.md", "sizeBytes": len(material_bytes), "sha256": material["sha256"], "mediaType": material["mediaType"]}],
+        "files": [{"path": material["relativePath"], "sizeBytes": len(material_bytes), "sha256": material["sha256"], "mediaType": material["mediaType"]}],
         "retentionPolicyRevision": 1,
     }, "upload")
     target = require(upload, "uploadTargets", "LW_RESOURCE_REPLAY_UPLOAD_INVALID")
