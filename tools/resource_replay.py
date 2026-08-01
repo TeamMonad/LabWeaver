@@ -10,6 +10,7 @@ only identity hashes, counts, stable phase names and diagnostics.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import hashlib
 import json
 import time
@@ -88,6 +89,12 @@ class BffClient:
             data = json.dumps(body, separators=(",", ":")).encode("utf-8")
         if csrf:
             headers["X-CSRF-Token"] = self.csrf
+            # The BFF verifies both the synchronizer token and the browser
+            # origin for every state-changing request.  This replay is a
+            # public-browser API client, so it must supply the configured
+            # portal origin rather than relying on an ambient HTTP client
+            # default.
+            headers["Origin"] = self.base_url
             headers["Idempotency-Key"] = f"resource-replay-{self.run_id}-{step}"[:128]
         if if_match is not None:
             if not if_match.startswith('"') or not if_match.endswith('"'):
@@ -162,6 +169,63 @@ def etag(headers: dict[str, str]) -> str:
     return value
 
 
+def replay_policy(template: Any, run_id: str) -> dict[str, Any]:
+    """Bind the immutable profile policy configuration to one replay identity.
+
+    A course policy is append-only.  Reusing the profile template identifier
+    caused a second public replay to collide with the first persisted policy,
+    even though their idempotency keys were intentionally distinct.  The
+    replay Run ID is already UUIDv7 and therefore provides a deterministic,
+    auditable policy identity and activation instant without inventing a
+    database-side shortcut.
+    """
+    if not isinstance(template, dict):
+        raise ReplayError("LW_RESOURCE_REPLAY_PROFILE_INVALID")
+    try:
+        value = uuid.UUID(run_id)
+    except ValueError as error:
+        raise ReplayError("LW_RESOURCE_REPLAY_IDENTITY_INVALID") from error
+    if value.version != 7:
+        raise ReplayError("LW_RESOURCE_REPLAY_IDENTITY_INVALID")
+    milliseconds = value.int >> 80
+    activated_at = dt.datetime.fromtimestamp(milliseconds / 1000, tz=dt.UTC)
+    policy = json.loads(json.dumps(template, separators=(",", ":")))
+    policy["id"] = run_id
+    policy["activatedAt"] = activated_at.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return policy
+
+
+def upload_manifest_sha256(files: Any) -> str:
+    """Match the public browser manifest hashing contract for upload completion."""
+    if not isinstance(files, list):
+        raise ReplayError("LW_RESOURCE_REPLAY_UPLOAD_INVALID")
+    normalized: list[dict[str, Any]] = []
+    for item in files:
+        if not isinstance(item, dict):
+            raise ReplayError("LW_RESOURCE_REPLAY_UPLOAD_INVALID")
+        value = {
+            "path": item.get("path"),
+            "sizeBytes": item.get("sizeBytes"),
+            "sha256": item.get("sha256"),
+            "mediaType": item.get("mediaType"),
+        }
+        if (
+            not isinstance(value["path"], str)
+            or not isinstance(value["sizeBytes"], int)
+            or not isinstance(value["sha256"], str)
+            or not isinstance(value["mediaType"], str)
+        ):
+            raise ReplayError("LW_RESOURCE_REPLAY_UPLOAD_INVALID")
+        normalized.append(value)
+    canonical = json.dumps(
+        sorted(normalized, key=lambda item: item["path"]),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
 def run(arguments: argparse.Namespace) -> dict[str, Any]:
     identity = validate(arguments)
     profile = load_json(arguments.profile, "LW_RESOURCE_REPLAY_PROFILE_INVALID")
@@ -175,8 +239,13 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
     teacher = BffClient(auth["baseUrl"], Path(auth["teacherStorageState"]), arguments.run_id, "teacher")
     admin = BffClient(auth["baseUrl"], Path(auth["platformAdminStorageState"]), arguments.run_id, "platform-admin")
     course_id = profile["courseId"]
-    policy, _ = teacher.request("POST", f"/api/v1/courses/{course_id}/llm-egress-policies", replay["policy"], "policy")
-    upload, _ = teacher.request("POST", f"/api/v1/courses/{course_id}/problem-package-uploads", {
+    policy, _ = teacher.request(
+        "POST",
+        f"/api/v1/courses/{course_id}/llm-egress-policies",
+        replay_policy(replay["policy"], arguments.run_id),
+        "policy",
+    )
+    upload, upload_headers = teacher.request("POST", f"/api/v1/courses/{course_id}/problem-package-uploads", {
         "files": [{"path": material["relativePath"], "sizeBytes": len(material_bytes), "sha256": material["sha256"], "mediaType": material["mediaType"]}],
         "retentionPolicyRevision": 1,
     }, "upload")
@@ -188,9 +257,28 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
     try:
         with urllib.request.urlopen(put, timeout=30):
             pass
+    except urllib.error.HTTPError as error:
+        if error.code == 412:
+            # The upload object is immutable (`If-None-Match: *`).  A replay
+            # may be interrupted after the successful PUT but before the
+            # public completion call.  In that narrow case, let Control
+            # re-validate the declared hash and object identity below instead
+            # of attempting an unsafe overwrite or abandoning the operation.
+            pass
+        else:
+            # A presigned upload URL contains sensitive query material.
+            # Preserve only the HTTP class so deployment evidence can
+            # distinguish storage authorization from transport failure.
+            raise ReplayError(f"LW_RESOURCE_REPLAY_UPLOAD_HTTP_{error.code}") from error
     except OSError as error:
         raise ReplayError("LW_RESOURCE_REPLAY_UPLOAD_FAILED") from error
-    package, _ = teacher.request("POST", f"/api/v1/courses/{course_id}/problem-package-uploads/{upload['id']}/complete", {"manifestSha256": upload["manifestSha256"]}, "complete-upload")
+    package, _ = teacher.request(
+        "POST",
+        f"/api/v1/courses/{course_id}/problem-package-uploads/{upload['id']}/complete",
+        {"manifestSha256": upload_manifest_sha256(upload.get("files"))},
+        "complete-upload",
+        if_match=etag(upload_headers),
+    )
     run_value, _ = teacher.request("POST", f"/api/v1/courses/{course_id}/work-agent-runs", {
         "packageId": package["id"], "packageRevision": package["revision"], "packageSha256": package["manifestSha256"],
         "policyId": policy["id"], "policyRevision": policy["revision"], "requestedRuntime": profile["runtimeKind"],
