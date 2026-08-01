@@ -211,6 +211,8 @@ class ResourceAcceptanceProfileTests(unittest.TestCase):
         self.assertIn("LW_RESOURCE_REPLAY_REPORT_CLEANUP_INVALID", report_validator)
         replay_tasks = (ROOT / "deploy/ansible/roles/resource_replay/tasks/main.yml").read_text(encoding="utf-8")
         self.assertNotIn("become: false", replay_tasks)
+        self.assertIn("Surface a stable Resource replay diagnostic", replay_tasks)
+        self.assertIn("LW_RESOURCE_REPLAY_FAILED", replay_tasks)
 
     def test_browser_authentication_is_a_private_ansible_boundary(self) -> None:
         defaults = (
