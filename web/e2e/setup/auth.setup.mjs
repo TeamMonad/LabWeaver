@@ -23,6 +23,15 @@ const actors = Object.freeze([
     entryLabel: '学生入口',
     heading: '环境控制台',
   }),
+  Object.freeze({
+    role: 'platform-admin',
+    usernameVariable: 'LABWEAVER_PLATFORM_ADMIN_USERNAME',
+    passwordFileVariable: 'LABWEAVER_PLATFORM_ADMIN_PASSWORD_FILE',
+    destination: path.join(authDir, 'platform-admin.json'),
+    landingPath: '/admin',
+    entryLabel: '管理入口',
+    heading: '管理员工作台',
+  }),
 ])
 
 function requiredEnvironment(name) {
