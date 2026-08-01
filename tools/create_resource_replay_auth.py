@@ -19,7 +19,7 @@ def password(path: Path) -> str:
     if not value or "\n" in value or "\r" in value or "\0" in value: raise Error("LW_RESOURCE_REPLAY_AUTH_PASSWORD_FILE_INVALID")
     return value
 
-def login(base: str, cas: list[Path], username: str, secret: Path, destination: Path) -> None:
+def login(base: str, cas: list[Path], role: str, username: str, secret: Path, destination: Path) -> None:
     jar=http.cookiejar.CookieJar(); context=ssl.create_default_context()
     for ca in cas: context.load_verify_locations(cafile=str(ca))
     opener=urllib.request.build_opener(urllib.request.HTTPSHandler(context=context), urllib.request.HTTPCookieProcessor(jar))
@@ -31,7 +31,10 @@ def login(base: str, cas: list[Path], username: str, secret: Path, destination: 
         response=opener.open(urllib.request.Request(form.action, data=urllib.parse.urlencode(form.fields).encode(), method="POST"), timeout=30); response.read()
         csrf=opener.open(base + "/api/v1/auth/csrf", timeout=30); payload=json.loads(csrf.read())
         if not isinstance(payload,dict) or not isinstance(payload.get("token",payload.get("csrfToken")),str): raise Error("LW_RESOURCE_REPLAY_AUTH_CSRF_INVALID")
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc: raise Error("LW_RESOURCE_REPLAY_AUTH_OIDC_FAILED") from exc
+    except urllib.error.HTTPError as exc:
+        raise Error(f"LW_RESOURCE_REPLAY_AUTH_OIDC_{role.upper().replace('-', '_')}_HTTP_{exc.code}") from exc
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise Error(f"LW_RESOURCE_REPLAY_AUTH_OIDC_{role.upper().replace('-', '_')}_FAILED") from exc
     cookies=[{"name":c.name,"value":c.value,"domain":c.domain,"path":c.path,"expires":c.expires or -1,"httpOnly":False,"secure":bool(c.secure),"sameSite":"Lax"} for c in jar if urllib.parse.urlparse(base).hostname and c.domain.lstrip(".").endswith(urllib.parse.urlparse(base).hostname)]
     if not cookies: raise Error("LW_RESOURCE_REPLAY_AUTH_SESSION_INVALID")
     destination.write_text(json.dumps({"cookies":cookies,"origins":[]},separators=(",",":")),encoding="utf-8"); os.chmod(destination,0o600)
@@ -44,7 +47,7 @@ def main() -> int:
     try:
         a.output_root.mkdir(mode=0o700,parents=True,exist_ok=True); os.chmod(a.output_root,0o700)
         for role in ("teacher","student","platform-admin"):
-            login(a.base_url.rstrip("/"),a.trusted_ca,getattr(a,f"{role.replace('-','_')}_username"),getattr(a,f"{role.replace('-','_')}_password_file"),a.output_root/f"{role}.json")
+            login(a.base_url.rstrip("/"),a.trusted_ca,role,getattr(a,f"{role.replace('-','_')}_username"),getattr(a,f"{role.replace('-','_')}_password_file"),a.output_root/f"{role}.json")
         (a.output_root/"resource-replay-auth.json").write_text(json.dumps({"apiVersion":"deploy.labweaver.io/resource-replay-auth/v1","baseUrl":a.base_url.rstrip("/"),"teacherStorageState":str(a.output_root/"teacher.json"),"studentStorageState":str(a.output_root/"student.json"),"platformAdminStorageState":str(a.output_root/"platform-admin.json")},separators=(",",":")),encoding="utf-8"); os.chmod(a.output_root/"resource-replay-auth.json",0o600)
     except Error as exc: raise SystemExit(str(exc))
     return 0
