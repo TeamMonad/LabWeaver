@@ -176,12 +176,14 @@ class ResourceAcceptanceProfileTests(unittest.TestCase):
         defaults = (
             ROOT / "deploy/ansible/roles/resource_application/defaults/main.yml"
         ).read_text(encoding="utf-8")
+        ansible_config = (ROOT / "deploy/ansible/ansible.cfg").read_text(encoding="utf-8")
         self.assertIn("port-forward", module)
         self.assertIn("service/postgres", module)
         self.assertIn("tunnel.terminate()", module)
         self.assertIn("RESOURCE_APPLICATION_POSTGRES_TUNNEL_CONFLICT", module)
         self.assertIn("labweaver_postgres_apply:", tasks)
         self.assertIn("/var/lib/labweaver/.private/resource-acceptance", defaults)
+        self.assertIn("library = library", ansible_config)
 
     def test_public_replay_accepts_locators_not_sql_or_secret_values(self) -> None:
         replay = (ROOT / "tools/resource_replay.py").read_text(encoding="utf-8")
