@@ -11,6 +11,12 @@
       - resource_application_postgres_service | length > 0
       - resource_application_postgres_service_file | length > 0
       - resource_application_values_file | length > 0
+      - >-
+        (resource_application_profile_configuration_file | length == 0
+         and resource_application_profile_material_file | length == 0)
+        or
+        (resource_application_profile_configuration_file | length > 0
+         and resource_application_profile_material_file | length > 0)
     fail_msg: RESOURCE_APPLICATION_INPUT_INVALID
 
 - name: Verify controller-owned Resource deployment inputs
@@ -20,19 +26,60 @@
   loop:
     - "{{ resource_application_package_manifest }}"
     - "{{ resource_application_configuration_bundle }}"
-    - "{{ resource_application_acceptance_profile_file }}"
     - "{{ resource_application_access_seed_file }}"
     - "{{ resource_application_configuration_manifest }}"
     - "{{ resource_application_values_file }}"
     - "{{ resource_application_chart_source }}"
     - "{{ resource_application_postgres_service_file }}"
   register: resource_application_inputs
-  delegate_to: localhost
-  become: false
 
 - name: Reject missing Resource deployment inputs
   ansible.builtin.assert:
     that: resource_application_inputs.results | map(attribute='stat.exists') | min
+    fail_msg: RESOURCE_APPLICATION_REQUIRED_PATH_MISSING
+
+- name: Verify optional private Resource profile source inputs
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    checksum_algorithm: sha256
+  loop:
+    - "{{ resource_application_profile_configuration_file }}"
+    - "{{ resource_application_profile_material_file }}"
+  when: resource_application_profile_configuration_file | length > 0
+  register: resource_application_profile_source_inputs
+
+- name: Reject missing private Resource profile source inputs
+  ansible.builtin.assert:
+    that: resource_application_profile_source_inputs.results | map(attribute='stat.exists') | min
+    fail_msg: RESOURCE_APPLICATION_PROFILE_SOURCE_MISSING
+  when: resource_application_profile_configuration_file | length > 0
+
+- name: Render root-owned Resource acceptance profile from private source inputs
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ resource_application_profile_renderer }}"
+      - --access-seed
+      - "{{ resource_application_access_seed_file }}"
+      - --configuration
+      - "{{ resource_application_profile_configuration_file }}"
+      - --material
+      - "{{ resource_application_profile_material_file }}"
+      - --output
+      - "{{ resource_application_acceptance_profile_file }}"
+  when: resource_application_profile_configuration_file | length > 0
+  changed_when: true
+  no_log: true
+
+- name: Verify rendered or pre-existing private Resource acceptance profile
+  ansible.builtin.stat:
+    path: "{{ resource_application_acceptance_profile_file }}"
+    checksum_algorithm: sha256
+  register: resource_application_acceptance_profile_input
+
+- name: Reject missing private Resource acceptance profile
+  ansible.builtin.assert:
+    that: resource_application_acceptance_profile_input.stat.exists
     fail_msg: RESOURCE_APPLICATION_REQUIRED_PATH_MISSING
 
 - name: Parse immutable Resource package and private configuration

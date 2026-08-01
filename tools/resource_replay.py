@@ -69,7 +69,16 @@ class BffClient:
             raise ReplayError("LW_RESOURCE_REPLAY_CSRF_INVALID")
         return token
 
-    def request(self, method: str, path: str, body: Any, step: str, *, csrf: bool = True) -> tuple[Any, dict[str, str]]:
+    def request(
+        self,
+        method: str,
+        path: str,
+        body: Any,
+        step: str,
+        *,
+        csrf: bool = True,
+        if_match: str | None = None,
+    ) -> tuple[Any, dict[str, str]]:
         if not path.startswith("/") or ".." in path.split("/"):
             raise ReplayError("LW_RESOURCE_REPLAY_PATH_INVALID")
         headers = {"Cookie": self.cookie, "Accept": "application/json"}
@@ -80,6 +89,10 @@ class BffClient:
         if csrf:
             headers["X-CSRF-Token"] = self.csrf
             headers["Idempotency-Key"] = f"resource-replay-{self.run_id}-{step}"[:128]
+        if if_match is not None:
+            if not if_match.startswith('"') or not if_match.endswith('"'):
+                raise ReplayError("LW_RESOURCE_REPLAY_ETAG_INVALID")
+            headers["If-Match"] = if_match
         request = urllib.request.Request(self.base_url + path, data=data, headers=headers, method=method)
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
@@ -103,6 +116,22 @@ class BffClient:
                 return value
             if state in {"failed", "cancelled", "rejected", "expired", "revoked"}:
                 raise ReplayError(str(value.get("diagnosticCode") or "LW_RESOURCE_REPLAY_TERMINAL_FAILURE"))
+            time.sleep(1)
+        raise ReplayError("LW_RESOURCE_REPLAY_TIMEOUT")
+
+    def poll_deleted_environment(self, environment_id: str) -> dict[str, Any]:
+        deadline = time.monotonic() + 600
+        path = f"/api/v1/environments/{environment_id}"
+        while time.monotonic() < deadline:
+            value, _ = self.request("GET", path, None, "environment-tombstone", csrf=False)
+            if not isinstance(value, dict):
+                raise ReplayError("LW_RESOURCE_REPLAY_PUBLIC_DOCUMENT_INVALID")
+            if value.get("desiredState") == "deleted" and value.get("observedState") == "deleted":
+                if not isinstance(value.get("cleanupEvidence"), dict):
+                    raise ReplayError("LW_RESOURCE_REPLAY_ENVIRONMENT_TOMBSTONE_INVALID")
+                return value
+            if value.get("observedState") == "failed":
+                raise ReplayError(str(value.get("lastDiagnosticCode") or "LW_RESOURCE_REPLAY_ENVIRONMENT_CLEANUP_FAILED"))
             time.sleep(1)
         raise ReplayError("LW_RESOURCE_REPLAY_TIMEOUT")
 
@@ -201,7 +230,31 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
     renewed, renew_headers = admin.request("POST", f"/api/v1/resource-leases/{lease['id']}/renew", {"expectedRevision": lease["revision"], "durationSeconds": profile["durationSeconds"], "reason": "resource-acceptance-renew"}, "renew-lease")
     revoked, _ = admin.request("POST", f"/api/v1/resource-leases/{lease['id']}/revoke", {"expectedRevision": renewed["revision"], "reason": "resource-acceptance-revoke"}, "revoke-lease")
     admin.poll(f"/api/v1/resource-leases/{lease['id']}", {"revoked", "expired"}, "lease-terminal")
-    return {"schemaVersion": "resource-lease-replay-report.v1", "runId": arguments.run_id, "sourceCommit": arguments.source_commit, "checks": ["work-agent-run", "dual-approval", "work-release", "resource-request", "lease-renew", "lease-revoke"], "identity": identity, "counts": {"uploadedFiles": 1, "agentTracks": 2, "resourceRequests": 1, "leases": 1}}
+    _, environment_headers = teacher.request(
+        "GET", f"/api/v1/environments/{observed['id']}", None, "environment-before-delete", csrf=False
+    )
+    delete, _ = teacher.request(
+        "DELETE",
+        f"/api/v1/environments/{observed['id']}",
+        None,
+        "delete-environment",
+        if_match=etag(environment_headers),
+    )
+    if not isinstance(delete, dict) or not isinstance(delete.get("statusUrl"), str):
+        raise ReplayError("LW_RESOURCE_REPLAY_ENVIRONMENT_DELETE_INVALID")
+    tombstone = teacher.poll_deleted_environment(observed["id"])
+    return {
+        "schemaVersion": "resource-lease-replay-report.v1",
+        "runId": arguments.run_id,
+        "sourceCommit": arguments.source_commit,
+        "checks": [
+            "work-agent-run", "dual-approval", "work-release", "resource-request",
+            "lease-renew", "lease-revoke", "environment-tombstone",
+        ],
+        "identity": identity,
+        "counts": {"uploadedFiles": 1, "agentTracks": 2, "resourceRequests": 1, "leases": 1, "environmentTombstones": 1},
+        "cleanup": {"observedState": tombstone["observedState"]},
+    }
 
 
 def main() -> int:

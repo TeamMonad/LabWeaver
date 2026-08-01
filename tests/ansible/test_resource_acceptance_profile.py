@@ -9,6 +9,9 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[2]
+TOOLS = str(ROOT / "tools")
+if TOOLS not in sys.path:
+    sys.path.insert(0, TOOLS)
 SCRIPT = ROOT / "tools/validate_resource_acceptance_profile.py"
 SPEC = importlib.util.spec_from_file_location("resource_acceptance_profile", SCRIPT)
 if SPEC is None or SPEC.loader is None:
@@ -16,6 +19,14 @@ if SPEC is None or SPEC.loader is None:
 MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
+
+RENDER_SCRIPT = ROOT / "tools/render_resource_acceptance_profile.py"
+RENDER_SPEC = importlib.util.spec_from_file_location("render_resource_acceptance_profile", RENDER_SCRIPT)
+if RENDER_SPEC is None or RENDER_SPEC.loader is None:
+    raise RuntimeError("resource profile renderer could not be loaded")
+RENDER_MODULE = importlib.util.module_from_spec(RENDER_SPEC)
+sys.modules[RENDER_SPEC.name] = RENDER_MODULE
+RENDER_SPEC.loader.exec_module(RENDER_MODULE)
 
 
 class ResourceAcceptanceProfileTests(unittest.TestCase):
@@ -40,6 +51,49 @@ class ResourceAcceptanceProfileTests(unittest.TestCase):
             with self.assertRaisesRegex(MODULE.ProfileError, "PRIVATE_PATH_REQUIRED"):
                 MODULE.load(path)
 
+    def test_renderer_binds_seed_and_material_without_retaining_source_path(self) -> None:
+        profile = self._profile()
+        with tempfile.TemporaryDirectory() as temporary:
+            private = Path(temporary) / ".private"
+            private.mkdir()
+            seed_path = private / "access-seed.json"
+            configuration_path = private / "profile-configuration.json"
+            material_path = private / "assignment.md"
+            seed_path.write_text(json.dumps({"courseMemberships": profile["courseMemberships"]}), encoding="utf-8")
+            configuration_path.write_text(
+                json.dumps(
+                    {
+                        "runtimeKind": profile["runtimeKind"],
+                        "resources": profile["resources"],
+                        "durationSeconds": profile["durationSeconds"],
+                        "configurationSha256": profile["configurationSha256"],
+                        "projectId": profile["replay"]["projectId"],
+                        "providerBinding": profile["replay"]["providerBinding"],
+                        "policy": profile["replay"]["policy"],
+                        "material": {"description": profile["material"]["description"], "mediaType": profile["replay"]["materialFile"]["mediaType"]},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            material_path.write_text("verified acceptance material\n", encoding="utf-8")
+            rendered = RENDER_MODULE.render(
+                RENDER_MODULE.document(seed_path, "invalid"),
+                RENDER_MODULE.document(configuration_path, "invalid"),
+                material_path,
+            )
+            self.assertEqual(rendered["courseId"], profile["courseId"])
+            self.assertEqual(rendered["replay"]["materialFile"]["relativePath"], "assignment.md")
+            self.assertNotIn(str(material_path), json.dumps(rendered))
+            self.assertRegex(MODULE.validate(rendered, rendered), r"^[0-9a-f]{64}$")
+
+    def test_renderer_rejects_non_private_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "seed.json"
+            path.write_text("{}", encoding="utf-8")
+            with self.assertRaisesRegex(RENDER_MODULE.RenderError, "ACCESS_SEED_INVALID"):
+                RENDER_MODULE.private(path, "LW_RESOURCE_PROFILE_RENDER_ACCESS_SEED_INVALID")
+
     def test_bootstrap_rejects_extra_course_memberships(self) -> None:
         template = (
             ROOT
@@ -50,6 +104,8 @@ class ResourceAcceptanceProfileTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("LW_RESOURCE_ACCEPTANCE_PROFILE_ACCESS_MEMBERSHIP_CONFLICT", template)
         self.assertIn("resource_application_postgres_service_file", tasks)
+        self.assertIn("resource_application_profile_renderer", tasks)
+        self.assertNotIn("become: false", tasks)
 
     def test_public_replay_accepts_locators_not_sql_or_secret_values(self) -> None:
         replay = (ROOT / "tools/resource_replay.py").read_text(encoding="utf-8")
