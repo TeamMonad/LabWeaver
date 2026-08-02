@@ -4,6 +4,20 @@
     sprint2_application_lock: >-
       {{ lookup('ansible.builtin.file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml }}
 
+- name: Load the reviewed private application variable locator
+  ansible.builtin.include_vars:
+    file: "{{ sprint2_application_vars_file }}"
+    name: sprint2_application_reviewed_vars
+  when: sprint2_application_vars_file | length > 0
+  no_log: true
+
+- name: Apply reviewed private application variables
+  ansible.builtin.set_fact:
+    "{{ item.key }}": "{{ item.value }}"
+  loop: "{{ sprint2_application_reviewed_vars | default({}) | dict2items }}"
+  when: sprint2_application_reviewed_vars is defined
+  no_log: true
+
 - name: Validate non-destructive application inputs
   ansible.builtin.assert:
     that:

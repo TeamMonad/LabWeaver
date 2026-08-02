@@ -2,6 +2,7 @@
 sprint2_application_run_id: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RUN_ID') }}"
 sprint2_application_source_commit: "{{ lookup('ansible.builtin.env', 'LABWEAVER_COMMIT_SHA') }}"
 sprint2_application_package_manifest: "{{ lookup('ansible.builtin.env', 'LABWEAVER_PACKAGE_MANIFEST') }}"
+sprint2_application_vars_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_APPLICATION_VARS_FILE') }}"
 sprint2_application_migration_catalog: "{{ playbook_dir }}/../../../migrations/catalog.yaml"
 sprint2_application_kubeconfig: /etc/kubernetes/admin.conf
 sprint2_application_kubectl: /usr/bin/kubectl
