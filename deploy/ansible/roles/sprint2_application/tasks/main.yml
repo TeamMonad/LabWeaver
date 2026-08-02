@@ -118,6 +118,12 @@
     - "{{ sprint2_application_harbor_ca_file }}"
   register: sprint2_application_remote_inputs
 
+- name: Report missing remote application locators before blocking
+  ansible.builtin.debug:
+    msg: "SPRINT2_APPLICATION_MISSING_REMOTE_LOCATOR={{ item.item }}"
+  loop: "{{ sprint2_application_remote_inputs.results }}"
+  when: not item.stat.exists
+
 - name: Validate controller-owned reviewed inputs
   ansible.builtin.stat:
     path: "{{ item }}"
