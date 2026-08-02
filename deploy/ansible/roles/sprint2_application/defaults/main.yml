@@ -23,8 +23,8 @@ sprint2_application_retained_baseline_sha256:
   evaluation: 5f1cf9d27b0bf4976d86dc23a7d65adbf8ac107ee6786ccf5db81d664adce884
   resource: 3096083438fbb06d20c13a012663fbde4ad2f787771449adf1c52ca91696f380
 sprint2_application_runtime_passwords: {}
-sprint2_application_postgres_service_file: ""
-sprint2_application_postgres_service: sprint2-admin
+sprint2_application_postgres_service_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_POSTGRES_SERVICE_FILE') }}"
+sprint2_application_postgres_service: "{{ lookup('ansible.builtin.env', 'LABWEAVER_POSTGRES_SERVICE') | default('sprint2-admin', true) }}"
 sprint2_application_postgres_database: labweaver
 sprint2_application_nats_server: ""
 sprint2_application_nats_controller_address: ""
