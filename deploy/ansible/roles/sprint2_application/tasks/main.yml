@@ -958,9 +958,19 @@
       - -file
       - "{{ sprint2_application_keycloak_ca_file }}"
       - -keystore
-      - "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak-truststore.p12"
+      - "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak-truststore.p12.tmp"
       - -storepass
       - "{{ sprint2_application_keycloak_truststore_password }}"
+  changed_when: true
+  no_log: true
+
+- name: Atomically publish the Keycloak administration truststore
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/mv
+      - -f
+      - "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak-truststore.p12.tmp"
+      - "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak-truststore.p12"
   changed_when: true
   no_log: true
 
