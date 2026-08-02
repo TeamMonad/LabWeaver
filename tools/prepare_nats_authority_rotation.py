@@ -80,6 +80,20 @@ def _private_directory(path: Path) -> Path:
     return resolved
 
 
+def _contract_file(path: Path) -> Path:
+    """Resolve a checked-in, non-secret contract file."""
+    if not path.is_absolute():
+        raise RotationError("LW_NATS_ROTATION_CONTRACT_INVALID")
+    try:
+        resolved = path.resolve(strict=True)
+        metadata = resolved.stat()
+    except OSError as error:
+        raise RotationError("LW_NATS_ROTATION_CONTRACT_INVALID") from error
+    if not resolved.is_file() or metadata.st_mode & stat.S_IRWXO == 0o111:
+        raise RotationError("LW_NATS_ROTATION_CONTRACT_INVALID")
+    return resolved
+
+
 def _new_private_output(path: Path) -> Path:
     if not path.is_absolute() or not any(
         part in {".private", "private"} for part in path.parts
@@ -236,7 +250,7 @@ def _ensure_access_resource_gateway(
     """Apply the reviewed non-secret Resource gateway contract to Access."""
     try:
         example_documents = list(
-            yaml.safe_load_all(_private_file(example_path).read_text(encoding="utf-8"))
+            yaml.safe_load_all(_contract_file(example_path).read_text(encoding="utf-8"))
         )
         example = next(
             document
