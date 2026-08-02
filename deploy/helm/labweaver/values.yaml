@@ -30,12 +30,12 @@ portalRoute:
   gatewaySectionName: http
 
 objectStoreRoute:
-  enabled: true
+  enabled: false
   namespace: ""
   serviceName: minio
   serviceNamespace: labweaver-data
   servicePort: 9000
-  pathPrefix: /labweaver-artifacts
+  pathPrefix: ""
   backendHostname: ""
   caCertificate: ""
 
