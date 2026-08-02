@@ -179,6 +179,8 @@ class FoundationAuthoringTests(unittest.TestCase):
         self.assertEqual(identities["openssh-gateway"][1], "clientAuth")
         self.assertIn("URI:spiffe://labweaver/access-service", identities["access-service"][0])
         self.assertIn("URI:spiffe://labweaver/control-service", identities["control-service"][0])
+        self.assertIn("URI:spiffe://labweaver/agent-service", identities["agent-service"][0])
+        self.assertEqual(identities["agent-service"][1], "serverAuth,clientAuth")
 
     def test_certificate_authoring_activates_san_extension_section(self) -> None:
         source = inspect.getsource(FOUNDATION._certificate)
