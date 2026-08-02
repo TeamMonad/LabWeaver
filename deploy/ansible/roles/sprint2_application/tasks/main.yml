@@ -744,10 +744,11 @@
       - --ignore-existing
       - "{{ sprint2_application_minio_alias }}/{{ sprint2_application_minio_bucket }}"
   changed_when: false
+  register: sprint2_application_minio_bucket_create
   environment:
     MC_CONFIG_DIR: "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/mc"
     SSL_CERT_FILE: "{{ sprint2_application_minio_ca_file }}"
-  no_log: true
+  no_log: false
 
 - name: Enable versioning without removing existing objects
   ansible.builtin.command:
