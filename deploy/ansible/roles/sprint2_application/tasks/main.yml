@@ -518,12 +518,16 @@
   until: sprint2_application_access_seed_apply.rc == 0
   no_log: true
 
+- name: Bind controller NATS probe endpoint
+  ansible.builtin.set_fact:
+    sprint2_application_nats_probe_server: "{{ sprint2_application_nats_controller_address | default(sprint2_application_nats_server, true) }}"
+
 - name: Probe retained JetStream
   ansible.builtin.command:
     argv:
       - "{{ sprint2_application_nats }}"
       - --server
-      - "{{ sprint2_application_nats_server }}"
+      - "{{ sprint2_application_nats_probe_server }}"
       - --creds
       - "{{ sprint2_application_nats_credentials_file }}"
       - --tlsca
@@ -541,7 +545,7 @@
     argv:
       - "{{ sprint2_application_nats }}"
       - --server
-      - "{{ sprint2_application_nats_server }}"
+      - "{{ sprint2_application_nats_probe_server }}"
       - --creds
       - "{{ sprint2_application_nats_credentials_file }}"
       - --tlsca
@@ -564,7 +568,7 @@
     argv:
       - "{{ sprint2_application_nats }}"
       - --server
-      - "{{ sprint2_application_nats_server }}"
+      - "{{ sprint2_application_nats_probe_server }}"
       - --creds
       - "{{ sprint2_application_nats_credentials_file }}"
       - --tlsca
@@ -596,7 +600,7 @@
     argv:
       - "{{ sprint2_application_nats }}"
       - --server
-      - "{{ sprint2_application_nats_server }}"
+      - "{{ sprint2_application_nats_probe_server }}"
       - --creds
       - "{{ sprint2_application_nats_credentials_file }}"
       - --tlsca
@@ -623,7 +627,7 @@
     argv:
       - "{{ sprint2_application_nats }}"
       - --server
-      - "{{ sprint2_application_nats_server }}"
+      - "{{ sprint2_application_nats_probe_server }}"
       - --creds
       - "{{ sprint2_application_nats_credentials_file }}"
       - --tlsca
@@ -657,7 +661,7 @@
     argv:
       - "{{ sprint2_application_nats }}"
       - --server
-      - "{{ sprint2_application_nats_server }}"
+      - "{{ sprint2_application_nats_probe_server }}"
       - --creds
       - "{{ sprint2_application_nats_credentials_file }}"
       - --tlsca
@@ -680,7 +684,7 @@
   ansible.builtin.command:
     argv: >-
       {{ [sprint2_application_nats,
-          '--server', sprint2_application_nats_server,
+          '--server', sprint2_application_nats_probe_server,
           '--creds', sprint2_application_nats_credentials_file,
           '--tlsca', sprint2_application_nats_ca_file,
           '--tlscert', sprint2_application_nats_client_certificate_file,
@@ -698,7 +702,7 @@
     argv:
       - "{{ sprint2_application_nats }}"
       - --server
-      - "{{ sprint2_application_nats_server }}"
+      - "{{ sprint2_application_nats_probe_server }}"
       - --creds
       - "{{ sprint2_application_nats_credentials_file }}"
       - --tlsca
