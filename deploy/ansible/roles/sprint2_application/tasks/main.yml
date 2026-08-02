@@ -27,8 +27,6 @@
       - sprint2_application_postgres_service_file | length > 0
       - sprint2_application_postgres_client_certificate_file | length > 0
       - sprint2_application_postgres_client_private_key_file | length > 0
-      - sprint2_application_postgres_password_file | length > 0
-      - sprint2_application_postgres_root_certificate_file | length > 0
       - sprint2_application_postgres_database is match('^[a-z][a-z0-9_]{0,62}$')
       - sprint2_application_nats_server | length > 0
       - sprint2_application_nats_credentials_file | length > 0
@@ -110,8 +108,6 @@
     - "{{ sprint2_application_postgres_service_file }}"
     - "{{ sprint2_application_postgres_client_certificate_file }}"
     - "{{ sprint2_application_postgres_client_private_key_file }}"
-    - "{{ sprint2_application_postgres_password_file }}"
-    - "{{ sprint2_application_postgres_root_certificate_file }}"
     - "{{ sprint2_application_nats_credentials_file }}"
     - "{{ sprint2_application_nats_ca_file }}"
     - "{{ sprint2_application_nats_client_certificate_file }}"
@@ -457,28 +453,9 @@
   register: sprint2_application_postgres_service_source
   no_log: true
 
-- name: Load retained PostgreSQL password and CA locators
-  ansible.builtin.slurp:
-    src: "{{ item }}"
-  loop:
-    - "{{ sprint2_application_postgres_password_file }}"
-    - "{{ sprint2_application_postgres_root_certificate_file }}"
-  register: sprint2_application_postgres_private_inputs
-  no_log: true
-
-- name: Render effective PostgreSQL service identity atomically
-  ansible.builtin.copy:
-    dest: "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/postgres-service-effective.conf"
-    owner: root
-    group: root
-    mode: "0600"
-    content: "{{ sprint2_application_postgres_service_source.content | b64decode }}"
-  register: sprint2_application_postgres_effective_service
-  no_log: true
-
 - name: Bind effective PostgreSQL service identity
   ansible.builtin.set_fact:
-    sprint2_application_postgres_effective_service_file: "{{ sprint2_application_postgres_effective_service.dest }}"
+    sprint2_application_postgres_effective_service_file: "{{ sprint2_application_postgres_service_file }}"
 
 - name: Probe retained PostgreSQL database identity
   ansible.builtin.command:
