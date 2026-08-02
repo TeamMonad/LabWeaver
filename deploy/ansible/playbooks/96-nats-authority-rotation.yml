@@ -17,6 +17,7 @@
     nats_rotation_source_foundation_bundle: "{{ lookup('ansible.builtin.env', 'LABWEAVER_NATS_SOURCE_FOUNDATION_BUNDLE') }}"
     nats_rotation_source_application_bundle: "{{ lookup('ansible.builtin.env', 'LABWEAVER_NATS_SOURCE_APPLICATION_BUNDLE') }}"
     nats_rotation_source_resource_bundle: "{{ lookup('ansible.builtin.env', 'LABWEAVER_NATS_SOURCE_RESOURCE_BUNDLE') }}"
+    nats_rotation_access_config_example: "{{ lookup('ansible.builtin.env', 'LABWEAVER_ACCESS_CONFIG_EXAMPLE') }}"
     nats_rotation_expected_workloads_account: "{{ lookup('ansible.builtin.env', 'LABWEAVER_NATS_EXPECTED_WORKLOADS_ACCOUNT') }}"
     nats_rotation_valid_days: "{{ lookup('ansible.builtin.env', 'LABWEAVER_NATS_ROTATION_VALID_DAYS') | default('365', true) }}"
     nats_rotation_kubeconfig: "{{ lookup('ansible.builtin.env', 'LABWEAVER_KUBECONFIG') }}"
@@ -57,6 +58,7 @@
           - nats_rotation_source_foundation_bundle | length > 0
           - nats_rotation_source_application_bundle | length > 0
           - nats_rotation_source_resource_bundle | length > 0
+          - nats_rotation_access_config_example | length > 0
           - nats_rotation_expected_workloads_account is match('^A[A-Z2-7]{55}$')
           - nats_rotation_kubeconfig | length > 0
           - "'.private' in nats_rotation_authority_root or '/private/' in nats_rotation_authority_root"
@@ -77,6 +79,7 @@
         - "{{ nats_rotation_source_foundation_bundle }}"
         - "{{ nats_rotation_source_application_bundle }}"
         - "{{ nats_rotation_source_resource_bundle }}"
+        - "{{ nats_rotation_access_config_example }}"
       register: nats_rotation_inputs
       no_log: true
 
@@ -136,6 +139,8 @@
           - "{{ nats_rotation_authority_root }}"
           - --output
           - "{{ nats_rotation_output }}"
+          - --access-config-example
+          - "{{ nats_rotation_access_config_example }}"
       when: not nats_rotation_prepared_directories.results[1].stat.exists
       changed_when: true
       no_log: true

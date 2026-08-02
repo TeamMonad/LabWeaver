@@ -230,15 +230,49 @@ def _dump_bundle(path: Path, documents: list[dict[str, Any]]) -> None:
     _write(path, payload)
 
 
+def _ensure_access_resource_gateway(
+    application_bundle: list[dict[str, Any]], example_path: Path
+) -> None:
+    """Apply the reviewed non-secret Resource gateway contract to Access."""
+    try:
+        example_documents = list(
+            yaml.safe_load_all(_private_file(example_path).read_text(encoding="utf-8"))
+        )
+        example = next(
+            document
+            for document in example_documents
+            if isinstance(document, dict) and document.get("kind") == "ConfigMap"
+        )
+        example_config = yaml.safe_load(example["data"]["config.yaml"])
+        access = _object(application_bundle, "ConfigMap", "access-service-config")
+        config = yaml.safe_load(access["data"]["config.yaml"])
+        resource_gateway = example_config.get("resource_gateway")
+        if not isinstance(resource_gateway, dict):
+            raise RotationError("LW_NATS_ROTATION_CONTRACT_INVALID")
+        existing = config.get("resource_gateway")
+        if existing is None:
+            config["resource_gateway"] = resource_gateway
+        elif existing != resource_gateway:
+            raise RotationError("LW_NATS_ROTATION_CONTRACT_INVALID")
+        access["data"]["config.yaml"] = yaml.safe_dump(
+            config, sort_keys=False, allow_unicode=False
+        )
+    except (KeyError, TypeError, StopIteration, yaml.YAMLError, OSError) as error:
+        raise RotationError("LW_NATS_ROTATION_CONTRACT_INVALID") from error
+
+
 def prepare(
     foundation_bundle_path: Path,
     application_bundle_path: Path,
     resource_bundle_path: Path,
     authority_root: Path,
     output_path: Path,
+    access_config_example_path: Path | None = None,
 ) -> dict[str, Any]:
     foundation_bundle = _load_bundle(_private_file(foundation_bundle_path))
     application_bundle = _load_bundle(_private_file(application_bundle_path))
+    if access_config_example_path is not None:
+        _ensure_access_resource_gateway(application_bundle, access_config_example_path)
     resource_bundle = _load_bundle(_private_file(resource_bundle_path))
     authority = _private_directory(authority_root)
     output = _new_private_output(output_path)
@@ -387,6 +421,7 @@ def main() -> int:
     parser.add_argument("--resource-bundle", type=Path, required=True)
     parser.add_argument("--authority-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--access-config-example", type=Path, required=True)
     arguments = parser.parse_args()
     try:
         result = prepare(
@@ -395,6 +430,7 @@ def main() -> int:
             arguments.resource_bundle,
             arguments.authority_root,
             arguments.output,
+            arguments.access_config_example,
         )
     except RotationError as error:
         print(str(error), file=sys.stderr)
