@@ -454,7 +454,11 @@ def prepare(
     _nsc(
         nsc,
         nsc_store,
-        ["edit", "account", "--name", "WORKLOADS", "--js-enable", "0"],
+        # Resource/Lease replay depends on JetStream for durable lifecycle
+        # events and request/reply replay. Keep the account explicitly enabled
+        # and bounded by NATS_ACCOUNT_JETSTREAM_LIMITS; disabling it here makes
+        # every fresh foundation appear healthy while breaking the real path.
+        ["edit", "account", "--name", "WORKLOADS", "--js-enable", "1"],
         private_home,
     )
     _nsc(
