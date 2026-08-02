@@ -1050,7 +1050,7 @@ fn run_infrastructure_with_package(
         .filter_envs(["HOME"])
         .add_env("PATH", "/usr/local/bin:/usr/bin:/bin")
         .add_env("ANSIBLE_CONFIG", ansible_config)
-        .add_env("ANSIBLE_COLLECTIONS_PATH", collections_path)
+        .add_env("ANSIBLE_COLLECTIONS_PATH", collections_path.clone())
         // ansible-rs may launch from a different working directory; pass the
         // documented plural variable as well as the legacy spelling.
         .add_env("ANSIBLE_COLLECTIONS_PATHS", collections_path)
