@@ -133,6 +133,34 @@ candidate, local Docker report, or formal Resource Gate v2.
 | Machine-readable Release Gate | legacy | Earlier source identity produced a schema-valid report for Run `a2835d47-7f9b-48a3-b8a0-60d22f57d5e2`; it is invalid for current #142. Evidence remains private/ignored and contains no Secret. |
 | Full `cargo xtask demo replay` | not run | The authoritative gate was run directly after connected checks. The wrapper's repeated infrastructure Verify and Playwright execution was intentionally skipped; this is not represented as a replay pass. |
 
+## Issue #123 local implementation
+
+The `codex/issue-123-control-plane` worktree adds the PostgreSQL-authoritative
+EvaluationRelease, EvaluationRun and StepRun control plane. The contract now
+binds source, package, configuration, migration catalog, digest-pinned runner
+image, runtime artifact, frozen submission, release identity and trace ID.
+Evaluation Service owns internal mTLS routes for release publication, run
+creation, readback, cancellation, StepRun retry, StepRun cleanup verification
+and fenced worker completion. The evaluation migration adds release, run,
+step-run and attempt tables with idempotency, lease and pending-cleanup
+constraints, and Outbox events remain payload-safe and hash-only.
+
+Current evidence is local E2:
+
+```sh
+cargo test -p contracts --all-targets --all-features
+DOCKER_HOST=unix:///Users/zeyi2/.colima/default/docker.sock \
+  cargo test -p evaluation-service --test control_plane -- --nocapture
+cargo xtask contracts check
+```
+
+This evidence proves the contract/schema surface and real disposable
+PostgreSQL behavior for idempotent release/run creation, identity mismatch
+rejection, worker lease fencing, cancel, retry, expired-lease recovery and
+cleanup-boundary completion. It does not prove a real Control Service caller,
+Kubernetes/OJ runner, runner image digest, provider binding, shared cluster,
+Release Gate report or D connected Verify.
+
 ## Issue #140 local implementation
 
 The `feature/140-oj-cpp17-runner` worktree adds the internal C++17 OJ request,
@@ -144,9 +172,8 @@ before Job creation, rejects process-group/namespace escape syscalls, limits
 student processes, and binds deletion to UID/resourceVersion preconditions.
 
 Its current evidence is **E1 only**. The implementation is not connected to a
-public EvaluationRun or StepRun because Issue #123's authoritative lifecycle,
-Outbox and persistence contract is not present on the current `develop`
-baseline. No local container daemon or real Kubernetes run has verified the
+merged public EvaluationRun or StepRun, and this #123 branch has not yet been
+revalidated with the OJ runner branch. No real Kubernetes run has verified the
 compiler image, cgroup outcomes, NetworkPolicy, cancellation or cleanup.
 Accordingly Issue #140 is not `done`, is not a release-gate pass and does not
 change the connected Sprint 2 identity above.

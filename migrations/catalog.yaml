@@ -36,6 +36,9 @@ domains:
       - id: 1
         file: evaluation/0001_sprint2_baseline.sql
         sha256: 81bc4a539f5ecc56beb709c797917ade281e68a7483e6fadb3574b503c6a6dba
+      - id: 2
+        file: evaluation/0002_evaluation_control_plane.sql
+        sha256: 3fb956d02ecadb22d1abc8a2e2f47f8e43572e2e84ae58c585fd8c049ee6e1fd
   - name: resource
     migrations:
       - id: 1

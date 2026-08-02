@@ -5,8 +5,9 @@ result does not close a connected blocker.
 
 ## Issue #140 C++17 OJ execution
 
-- Issue #123 must provide the authoritative EvaluationRun, StepRun, attempt,
-  Outbox, persistence and immutable artifact integration.
+- Issue #123's local control-plane implementation must be reviewed, merged,
+  deployed and connected-verified before #140 can claim a production
+  EvaluationRun or StepRun path.
 - The dedicated runner image must build reproducibly and pass the digest-bound
   High/Critical/secret scan in CI; its Trivy JSON must remain attached to the
   same workflow identity.

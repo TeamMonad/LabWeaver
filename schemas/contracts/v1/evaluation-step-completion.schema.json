@@ -1,0 +1,64 @@
+{
+  "$defs": {
+    "DiagnosticCode": {
+      "description": "Stable machine-readable diagnostic code.\n\nConsumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so\nadditive diagnostics do not force a wire-version change.",
+      "type": "string"
+    },
+    "EvaluationStepRunState": {
+      "description": "Public step lifecycle.",
+      "enum": [
+        "pending",
+        "running",
+        "retryable",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "skipped"
+      ],
+      "type": "string"
+    },
+    "Sha256Digest": {
+      "description": "Canonical lowercase SHA-256 digest.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Terminal worker result accepted by the Evaluation authority.",
+  "properties": {
+    "awardedScore": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "cleanupVerified": {
+      "type": "boolean"
+    },
+    "diagnosticCode": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DiagnosticCode"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "evidenceSha256": {
+      "$ref": "#/$defs/Sha256Digest"
+    },
+    "state": {
+      "$ref": "#/$defs/EvaluationStepRunState"
+    }
+  },
+  "required": [
+    "state",
+    "evidenceSha256",
+    "cleanupVerified"
+  ],
+  "title": "EvaluationStepCompletion",
+  "type": "object"
+}

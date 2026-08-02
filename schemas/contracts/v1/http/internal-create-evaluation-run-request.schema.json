@@ -1,0 +1,135 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "EvaluationReleaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `EvaluationReleaseId`.",
+      "type": "string"
+    },
+    "EvaluationRunIdentity": {
+      "additionalProperties": false,
+      "description": "Immutable run identity joining release, frozen submission and trace evidence.",
+      "properties": {
+        "evaluationSpecSha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "frozenSubmissionSha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "releaseIdentitySha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "runtimeIdentity": {
+          "$ref": "#/$defs/EvaluationRuntimeIdentity"
+        },
+        "sourceIdentitySha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "traceId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "releaseIdentitySha256",
+        "evaluationSpecSha256",
+        "frozenSubmissionSha256",
+        "sourceIdentitySha256",
+        "runtimeIdentity",
+        "traceId"
+      ],
+      "type": "object"
+    },
+    "EvaluationRuntimeIdentity": {
+      "additionalProperties": false,
+      "description": "Immutable build and deployment identity that must match every run using the release.",
+      "properties": {
+        "configurationSha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Effective non-secret runtime configuration identity."
+        },
+        "migrationCatalogSha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Checked-in Migration catalog identity."
+        },
+        "packageSha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Approved problem package identity."
+        },
+        "runnerImage": {
+          "description": "Digest-pinned runner image reference.",
+          "type": "string"
+        },
+        "runtimeArtifactSha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Runtime artifact identity, such as the worker binary or image manifest digest."
+        },
+        "sourceSha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Clean source tree or source bundle identity."
+        }
+      },
+      "required": [
+        "sourceSha256",
+        "packageSha256",
+        "configurationSha256",
+        "migrationCatalogSha256",
+        "runnerImage",
+        "runtimeArtifactSha256"
+      ],
+      "type": "object"
+    },
+    "FrozenSubmissionId": {
+      "description": "Strongly typed UUIDv7 identifier for `FrozenSubmissionId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "Sha256Digest": {
+      "description": "Canonical lowercase SHA-256 digest.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Control-to-Evaluation command that starts one run from a release and frozen submission.",
+  "properties": {
+    "actorId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    },
+    "frozenSubmissionId": {
+      "$ref": "#/$defs/FrozenSubmissionId"
+    },
+    "identity": {
+      "$ref": "#/$defs/EvaluationRunIdentity"
+    },
+    "releaseId": {
+      "$ref": "#/$defs/EvaluationReleaseId"
+    },
+    "releaseRevision": {
+      "$ref": "#/$defs/Revision"
+    }
+  },
+  "required": [
+    "courseId",
+    "releaseId",
+    "releaseRevision",
+    "frozenSubmissionId",
+    "actorId",
+    "identity"
+  ],
+  "title": "InternalCreateEvaluationRunRequest",
+  "type": "object"
+}
