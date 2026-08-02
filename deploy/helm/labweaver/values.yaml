@@ -33,6 +33,7 @@ objectStoreRoute:
   enabled: false
   namespace: ""
   serviceName: minio
+  serviceNamespace: labweaver-data
   servicePort: 9000
   pathPrefix: ""
   backendHostname: ""

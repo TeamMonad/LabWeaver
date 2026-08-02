@@ -17,7 +17,8 @@ spec:
   to:
     - group: ""
       kind: Service
-      name: web
+      name: {{ required "objectStoreRoute.serviceName is required" .Values.objectStoreRoute.serviceName }}
+      namespace: {{ default "labweaver-data" .Values.objectStoreRoute.serviceNamespace }}
     - group: ""
       kind: Service
       name: access-service
@@ -42,9 +43,9 @@ spec:
             type: PathPrefix
             value: {{ required "objectStoreRoute.pathPrefix is required" .Values.objectStoreRoute.pathPrefix | quote }}
       backendRefs:
-        - name: web
-          namespace: {{ .Release.Namespace }}
-          port: 8080
+        - name: {{ required "objectStoreRoute.serviceName is required" .Values.objectStoreRoute.serviceName }}
+          namespace: {{ default "labweaver-data" .Values.objectStoreRoute.serviceNamespace }}
+          port: {{ required "objectStoreRoute.servicePort is required" .Values.objectStoreRoute.servicePort }}
     {{- end }}
     - matches:
         - path: {type: PathPrefix, value: /api}
