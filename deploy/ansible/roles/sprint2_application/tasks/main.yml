@@ -796,11 +796,25 @@
     (sprint2_application_minio_version.stdout | from_json).status != 'success' or
     (sprint2_application_minio_version.stdout | from_json).versioning.status != 'Enabled'
 
+- name: Load the retained Harbor project-admin credential locator
+  ansible.builtin.slurp:
+    src: "{{ sprint2_application_harbor_admin_password_file }}"
+  register: sprint2_application_harbor_admin_password_raw
+  changed_when: false
+  no_log: true
+
+- name: Validate the retained Harbor project-admin credential
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_harbor_admin_password_file | length > 0
+      - sprint2_application_harbor_admin_password_raw.content | length > 0
+    fail_msg: LW_HARBOR_PROJECT_ADMIN_CREDENTIAL_MISSING
+
 - name: Inspect the adopted Harbor project without mutation
   ansible.builtin.uri:
     url: "{{ sprint2_application_harbor_api }}/api/v2.0/projects?name={{ sprint2_application_harbor_project | urlencode }}"
-    user: "{{ sprint2_application_harbor_username }}"
-    password: "{{ sprint2_application_harbor_password }}"
+    user: "{{ sprint2_application_harbor_admin_username }}"
+    password: "{{ sprint2_application_harbor_admin_password_raw.content | b64decode | trim }}"
     force_basic_auth: true
     validate_certs: true
     ca_path: "{{ sprint2_application_harbor_ca_file }}"
@@ -813,8 +827,8 @@
   ansible.builtin.uri:
     url: "{{ sprint2_application_harbor_api }}/api/v2.0/projects"
     method: POST
-    user: "{{ sprint2_application_harbor_username }}"
-    password: "{{ sprint2_application_harbor_password }}"
+    user: "{{ sprint2_application_harbor_admin_username }}"
+    password: "{{ sprint2_application_harbor_admin_password_raw.content | b64decode | trim }}"
     force_basic_auth: true
     validate_certs: true
     ca_path: "{{ sprint2_application_harbor_ca_file }}"
@@ -829,8 +843,8 @@
 - name: Verify adopted private Harbor project identity
   ansible.builtin.uri:
     url: "{{ sprint2_application_harbor_api }}/api/v2.0/projects?name={{ sprint2_application_harbor_project | urlencode }}"
-    user: "{{ sprint2_application_harbor_username }}"
-    password: "{{ sprint2_application_harbor_password }}"
+    user: "{{ sprint2_application_harbor_admin_username }}"
+    password: "{{ sprint2_application_harbor_admin_password_raw.content | b64decode | trim }}"
     force_basic_auth: true
     validate_certs: true
     ca_path: "{{ sprint2_application_harbor_ca_file }}"

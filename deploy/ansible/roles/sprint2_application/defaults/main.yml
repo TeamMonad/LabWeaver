@@ -88,6 +88,8 @@ sprint2_application_harbor_ca_file: ""
 sprint2_application_harbor_username: ""
 sprint2_application_harbor_password: ""
 sprint2_application_harbor_project: labweaver-system
+sprint2_application_harbor_admin_username: admin
+sprint2_application_harbor_admin_password_file: ""
 sprint2_application_image_pull_secret_name: harbor-labweaver-system-pull
 sprint2_application_data_namespace: labweaver-data
 sprint2_application_data_services: [postgres, nats, minio]
