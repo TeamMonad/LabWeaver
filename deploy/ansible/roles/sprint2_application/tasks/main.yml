@@ -736,6 +736,20 @@
   loop: "{{ sprint2_application_consumer_info_after.results }}"
   no_log: true
 
+- name: Inspect the immutable artifact bucket without mutation
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_mc }}"
+      - ls
+      - "{{ sprint2_application_minio_alias }}/{{ sprint2_application_minio_bucket }}"
+  register: sprint2_application_minio_bucket_before
+  changed_when: false
+  failed_when: false
+  environment:
+    MC_CONFIG_DIR: "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/mc"
+    SSL_CERT_FILE: "{{ sprint2_application_minio_ca_file }}"
+  no_log: true
+
 - name: Create the immutable artifact bucket only when missing
   ansible.builtin.command:
     argv:
@@ -745,6 +759,7 @@
       - "{{ sprint2_application_minio_alias }}/{{ sprint2_application_minio_bucket }}"
   changed_when: false
   register: sprint2_application_minio_bucket_create
+  when: sprint2_application_minio_bucket_before.rc != 0
   environment:
     MC_CONFIG_DIR: "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/mc"
     SSL_CERT_FILE: "{{ sprint2_application_minio_ca_file }}"
