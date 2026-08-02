@@ -407,6 +407,20 @@ def prepare(
             _copy(ca_certificate, secret_root / "ca.crt")
             if service == "postgres":
                 _write(secret_root / "postgres-password", secrets.token_urlsafe(48).encode())
+                client_material = authority / "issued-postgres-admin"
+                client_material.mkdir(mode=0o700)
+                client_key, client_certificate = _certificate(
+                    openssl,
+                    private_home,
+                    authority,
+                    client_material,
+                    "postgres-admin",
+                    ("URI:spiffe://labweaver/postgres-admin",),
+                    "clientAuth",
+                    days,
+                )
+                _copy(client_key, secret_root / "client.key")
+                _copy(client_certificate, secret_root / "client.crt")
 
     _nsc(nsc, nsc_store, ["add", "operator", "--name", "LABWEAVER", "--sys", "--generate-signing-key", "--expiry", f"{days}d"], private_home)
     workloads_account_public = None
