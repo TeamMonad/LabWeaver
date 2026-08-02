@@ -249,15 +249,9 @@ def _ensure_access_resource_gateway(
 ) -> None:
     """Apply the reviewed non-secret Resource gateway contract to Access."""
     try:
-        example_documents = list(
-            yaml.safe_load_all(_contract_file(example_path).read_text(encoding="utf-8"))
+        example_config = yaml.safe_load(
+            _contract_file(example_path).read_text(encoding="utf-8")
         )
-        example = next(
-            document
-            for document in example_documents
-            if isinstance(document, dict) and document.get("kind") == "ConfigMap"
-        )
-        example_config = yaml.safe_load(example["data"]["config.yaml"])
         access = _object(application_bundle, "ConfigMap", "access-service-config")
         config = yaml.safe_load(access["data"]["config.yaml"])
         resource_gateway = example_config.get("resource_gateway")
