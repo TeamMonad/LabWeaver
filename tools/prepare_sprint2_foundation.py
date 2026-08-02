@@ -451,16 +451,11 @@ def prepare(
             / workloads_account_public[1:3]
             / f"{workloads_account_public}.nk",
         )
-    _nsc(
-        nsc,
-        nsc_store,
-        # Resource/Lease replay depends on JetStream for durable lifecycle
-        # events and request/reply replay. Keep the account explicitly enabled
-        # and bounded by NATS_ACCOUNT_JETSTREAM_LIMITS; disabling it here makes
-        # every fresh foundation appear healthy while breaking the real path.
-        ["edit", "account", "--name", "WORKLOADS", "--js-enable", "1"],
-        private_home,
-    )
+    # The nsc version used by the deployment controller promotes an account to
+    # tiered JetStream limits when --js-enable is applied. A second edit with
+    # global limits then fails with "cannot set a jetstream global limit when a
+    # configuration has tiered limits R1". Apply the bounded global limits once;
+    # nsc enables JetStream as part of that operation.
     _nsc(
         nsc,
         nsc_store,
