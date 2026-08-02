@@ -796,7 +796,7 @@
     (sprint2_application_minio_version.stdout | from_json).status != 'success' or
     (sprint2_application_minio_version.stdout | from_json).versioning.status != 'Enabled'
 
-- name: Verify retained private Harbor project
+- name: Inspect the adopted Harbor project without mutation
   ansible.builtin.uri:
     url: "{{ sprint2_application_harbor_api }}/api/v2.0/projects?name={{ sprint2_application_harbor_project | urlencode }}"
     user: "{{ sprint2_application_harbor_username }}"
@@ -806,10 +806,40 @@
     ca_path: "{{ sprint2_application_harbor_ca_file }}"
     return_content: true
   register: sprint2_application_harbor_project_info
+  failed_when: sprint2_application_harbor_project_info.status != 200 or sprint2_application_harbor_project_info.json | length > 1
+  no_log: true
+
+- name: Create the adopted Harbor project only when missing
+  ansible.builtin.uri:
+    url: "{{ sprint2_application_harbor_api }}/api/v2.0/projects"
+    method: POST
+    user: "{{ sprint2_application_harbor_username }}"
+    password: "{{ sprint2_application_harbor_password }}"
+    force_basic_auth: true
+    validate_certs: true
+    ca_path: "{{ sprint2_application_harbor_ca_file }}"
+    body_format: json
+    body:
+      project_name: "{{ sprint2_application_harbor_project }}"
+      public: false
+    status_code: [201, 409]
+  when: sprint2_application_harbor_project_info.json | length == 0
+  no_log: true
+
+- name: Verify adopted private Harbor project identity
+  ansible.builtin.uri:
+    url: "{{ sprint2_application_harbor_api }}/api/v2.0/projects?name={{ sprint2_application_harbor_project | urlencode }}"
+    user: "{{ sprint2_application_harbor_username }}"
+    password: "{{ sprint2_application_harbor_password }}"
+    force_basic_auth: true
+    validate_certs: true
+    ca_path: "{{ sprint2_application_harbor_ca_file }}"
+    return_content: true
+  register: sprint2_application_harbor_project_verified
   failed_when: >-
-    sprint2_application_harbor_project_info.status != 200 or
-    sprint2_application_harbor_project_info.json | length != 1 or
-    sprint2_application_harbor_project_info.json[0].name != sprint2_application_harbor_project
+    sprint2_application_harbor_project_verified.status != 200 or
+    sprint2_application_harbor_project_verified.json | length != 1 or
+    sprint2_application_harbor_project_verified.json[0].name != sprint2_application_harbor_project
   no_log: true
 
 - name: Load the adopted Harbor CA for Kubernetes nodes
