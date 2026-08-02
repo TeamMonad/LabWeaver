@@ -30,6 +30,7 @@ sprint2_application_postgres_service: "{{ lookup('ansible.builtin.env', 'LABWEAV
 sprint2_application_postgres_database: labweaver
 sprint2_application_nats_server: ""
 sprint2_application_nats_controller_address: ""
+sprint2_application_nats_controller_port: 4222
 sprint2_application_nats_credentials_file: ""
 sprint2_application_nats_ca_file: ""
 sprint2_application_nats_client_certificate_file: ""
