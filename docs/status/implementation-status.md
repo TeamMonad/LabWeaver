@@ -124,15 +124,28 @@ Release Gate v2 requires a Resource deployment manifest, immutable
 remain legacy and cannot close #142. A same-identity Resource replay on a clean
 validation environment remains required before this is marked verified.
 
+The current source identity is `c6201066`. Local `xtask` tests (38 passed),
+strict `xtask` Clippy, format and diff checks pass. Retained connected
+deployment evidence is bound to the earlier `611013a2` source and cannot be
+reused for this source identity. The controller ledger records six historical
+Resource-application attempts (two succeeded) and two Resource-replay
+failures; no replay report was produced. The operation-wide ledger budget now
+returns `LW_EXECUTION_OPERATION_BUDGET_EXHAUSTED` instead of allowing more
+candidates to extend the test cycle. No further connected write is authorized
+until the ledger and cluster state are audited in a separately recorded
+validation window; deleting the ledger or changing its root is not an
+acceptable reset.
+
 `cargo xtask resource replay` is implemented locally as the only replay entry.
 It accepts private profile/authentication/deployment/package locators, validates
 their identity chain, performs the Work AgentRun and Resource public API flow,
 and emits a root-only sanitized report. `cargo xtask demo replay` now requires
-and invokes it before live Playwright and Gate evaluation. The controller still
-has no Resource acceptance profile, authenticated replay state, Resource
-deployment manifest or Resource package locator, so this path remains
-`implemented; connected verification blocked`; no local report is treated as
-connected evidence.
+and invokes it before live Playwright and Gate evaluation. The controller has
+private profile, authenticated replay state, Resource deployment manifests and
+package locators, but the available deployment and replay evidence is bound to
+the earlier source and is either failed or non-current. This path remains
+`implemented; connected verification blocked`; no local or stale report is
+treated as connected evidence.
 
 The Resource public HTTP surface is now implemented locally: owner-scoped list
 and get, create, approve/resize-approve, cancel, reject, retry, Lease renew and
@@ -154,6 +167,10 @@ have an audited ledger, and a real create/approve flow produced a read-back
 ResourceQuota shell and active Lease. Migration 0006 and the renewal/cleanup
 saga are implemented and locally verified but require a new same-identity
 package, deployment and connected replay before they are marked verified.
+The current source identity cannot reuse this retained evidence. The
+operation-wide connected ledger now stops additional blind candidates after
+its budget; a new package/deployment/replay requires an explicitly audited
+validation window rather than ledger deletion or a second controller root.
 
 The former NATS operator seed was not recovered and is retired. A controlled
 forward rotation preserved only the reviewed `WORKLOADS` account key, created a
