@@ -495,16 +495,7 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::DevDeps(args) => destructive_not_implemented("dev-deps", args.yes),
         Command::Migrate(args) => destructive_not_implemented("migrate", args.yes),
         Command::Dev(args) => destructive_not_implemented("dev", args.yes),
-        Command::Package(args) => platform_images::package(
-            &args.env,
-            &args.release,
-            match args.profile {
-                PackageProfile::Sprint2 => "sprint2",
-                PackageProfile::Resource => "resource",
-            },
-            args.yes,
-            &repository_root(),
-        ),
+        Command::Package(args) => package_command(&args),
         Command::PackageValidate(args) => platform_images::validate(
             &args.manifest,
             args.mode == PackageValidationMode::Connected,
@@ -538,6 +529,99 @@ fn run_acceptance_assets(args: AcceptanceAssetsArgs) -> Result<(), AppError> {
 
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
+}
+
+#[cfg(target_os = "linux")]
+fn git_output<const N: usize>(root: &Path, arguments: [&str; N]) -> Result<String, AppError> {
+    let output = ProcessCommand::new("git")
+        .current_dir(root)
+        .args(arguments)
+        .output()
+        .map_err(|error| AppError::ExternalCommand {
+            role: "read Git package identity",
+            code: None,
+            detail: Some(error.to_string()),
+        })?;
+    if !output.status.success() {
+        return Err(AppError::ExternalCommand {
+            role: "read Git package identity",
+            code: output.status.code(),
+            detail: Some(String::from_utf8_lossy(&output.stderr).trim().to_owned()),
+        });
+    }
+    String::from_utf8(output.stdout)
+        .map(|value| value.trim().to_owned())
+        .map_err(|error| AppError::Io {
+            role: "decode Git package identity",
+            detail: error.to_string(),
+        })
+}
+
+fn package_command(args: &PackageArgs) -> Result<(), AppError> {
+    let profile = match args.profile {
+        PackageProfile::Sprint2 => "sprint2",
+        PackageProfile::Resource => "resource",
+    };
+    if !args.yes {
+        return Err(AppError::ConfirmationRequired { command: "package" });
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let root = repository_root();
+        let source_commit = git_output(&root, ["rev-parse", "HEAD"])?;
+        let component_lock_hash = file_sha256(&root.join("deploy/versions.lock.yml"))?;
+        let migration_catalog_hash = file_sha256(&root.join("migrations/catalog.yaml"))?;
+        let configuration_sha256 = identity_hash(&[&component_lock_hash, &migration_catalog_hash]);
+        let run_id = format!(
+            "pkg-{}-{}-{}",
+            args.env,
+            args.release,
+            &source_commit[..source_commit.len().min(12)]
+        );
+        let root_path = std::env::var_os("LABWEAVER_EXECUTION_LEDGER_ROOT")
+            .map(PathBuf::from)
+            .ok_or_else(|| AppError::ExecutionLedger {
+                code: "LW_EXECUTION_LEDGER_ROOT_MISSING",
+                detail: "LABWEAVER_EXECUTION_LEDGER_ROOT is required for connected packaging; provide a private controller directory before starting another package".to_owned(),
+            })?;
+        let lease = execution_ledger::acquire(
+            &root_path,
+            execution_ledger::ExecutionIdentity {
+                operation: format!("package-{profile}-{}", args.release),
+                environment: args.env.clone(),
+                source_commit,
+                configuration_sha256: Some(configuration_sha256),
+                package_sha256: None,
+                deployment_sha256: None,
+                run_id,
+                testflight_run_id: None,
+            },
+            1,
+        )
+        .map_err(|error| AppError::ExecutionLedger {
+            code: error.diagnostic_code(),
+            detail: "a package with this candidate identity is already active, exhausted, or requires operator inspection; do not start another package".to_owned(),
+        })?;
+        let result = platform_images::package(&args.env, &args.release, profile, args.yes, &root);
+        let diagnostic = result.as_ref().err().map(AppError::diagnostic_code);
+        lease
+            .finish(result.is_ok(), diagnostic)
+            .map_err(|error| AppError::ExecutionLedger {
+                code: error.diagnostic_code(),
+                detail: "could not finalize the package execution ledger; package state must be inspected before another package".to_owned(),
+            })?;
+        result
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        platform_images::package(
+            &args.env,
+            &args.release,
+            profile,
+            args.yes,
+            &repository_root(),
+        )
+    }
 }
 
 fn contracts_generate() -> Result<(), AppError> {

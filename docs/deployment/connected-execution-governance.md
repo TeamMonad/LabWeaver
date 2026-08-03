@@ -41,6 +41,7 @@ Owner 先做只读进程、Helm、Ansible 和集群状态检查。
 
 | 操作 | 最大尝试 | 失败后的动作 |
 | --- | ---: | --- |
+| package | 1 | 同一 source/config/release 只允许一次；失败后必须修复并产生新候选 |
 | Resource replay | 1 | 记录 diagnostic；无新根因修复不得重放 |
 | application reconcile | 2 | 第一次部署和一次幂等重放；第二次仍失败即 Blocked |
 | 其他 deploy/reset | 1 | 只读核对，创建责任域 Issue |

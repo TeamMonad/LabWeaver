@@ -24,8 +24,15 @@ export LABWEAVER_PLATFORM_REGISTRY=harbor.example.internal
 export LABWEAVER_TRIVY_DATABASE_REFERENCE=harbor.example.internal/cache/trivy-db@sha256:<digest>
 export LABWEAVER_TRIVY_DATABASE_DIGEST=sha256:<digest>
 export LABWEAVER_KUBECONFIG="$HOME/.config/labweaver/package/kubeconfig"
+export LABWEAVER_EXECUTION_LEDGER_ROOT=/var/lib/labweaver/execution-ledger
 cargo xtask package --env demo --release sprint2 --yes
 ```
+
+The connected controller reserves one package attempt for the exact
+`source_commit + component-lock + migration-catalog + release` identity. A
+failed or completed package cannot be started again with the same identity;
+use a repaired commit or an explicitly new release candidate after the ledger
+and the BuildKit process have been inspected.
 
 Before packaging, run the non-destructive `sprint2-buildkit` adoption with
 `sprint2_buildkit_controller_enabled=true`, an exact router-local kubeconfig source, and explicit
