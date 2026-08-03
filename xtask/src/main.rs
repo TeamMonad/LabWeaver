@@ -1158,20 +1158,20 @@ fn run_infrastructure_with_package(
         .add_env("ANSIBLE_AUTO_INSTALL", "false")
         .add_env("ANSIBLE_NOCOWS", "1")
         .add_env("ANSIBLE_VAULT_PASSWORD_FILE", vault_password)
-        .add_env("LABWEAVER_RUN_ID", run_id)
-        .add_env("LABWEAVER_COMMIT_SHA", commit_sha)
+        .add_env("LABWEAVER_RUN_ID", &run_id)
+        .add_env("LABWEAVER_COMMIT_SHA", &commit_sha)
         .add_env(
             "LABWEAVER_PACKAGE_SOURCE_COMMIT",
             std::env::var("LABWEAVER_PACKAGE_SOURCE_COMMIT").unwrap_or_else(|_| String::new()),
         )
-        .add_env("LABWEAVER_CONTROLLER_ID", controller_id)
-        .add_env("LABWEAVER_INVENTORY_HASH", inventory_hash)
-        .add_env("LABWEAVER_COMPONENT_LOCK_HASH", component_lock_hash)
+        .add_env("LABWEAVER_CONTROLLER_ID", &controller_id)
+        .add_env("LABWEAVER_INVENTORY_HASH", &inventory_hash)
+        .add_env("LABWEAVER_COMPONENT_LOCK_HASH", &component_lock_hash)
         .add_env(
             "LABWEAVER_HARBOR_DATA_BACKUP_LOCATOR",
             harbor_data_backup_locator,
         )
-        .add_env("LABWEAVER_TESTFLIGHT_RUN_ID", testflight_run_id)
+        .add_env("LABWEAVER_TESTFLIGHT_RUN_ID", &testflight_run_id)
         .add_env(
             "LABWEAVER_PACKAGE_MANIFEST",
             package_manifest.map_or_else(String::new, infrastructure_path),
