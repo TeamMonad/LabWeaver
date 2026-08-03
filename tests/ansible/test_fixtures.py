@@ -507,7 +507,12 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertNotIn("kind: BackendTLSPolicy", backend)
         self.assertNotIn("kind: CiliumNetworkPolicy", backend)
         self.assertIn("- name: web", route)
-        self.assertEqual(route.count("kind: ReferenceGrant"), 2)
+        self.assertEqual(route.count("kind: ReferenceGrant"), 1)
+        object_store_rule = route.split("value: {{ required \"objectStoreRoute.pathPrefix is required\"", 1)[1]
+        self.assertIn("- name: web", object_store_rule)
+        self.assertIn("namespace: {{ .Release.Namespace }}", object_store_rule)
+        self.assertIn("port: 8080", object_store_rule)
+        self.assertNotIn("objectStoreRoute.serviceName", object_store_rule)
         self.assertIn("name: web", route)
         self.assertIn("object-store", route)
         self.assertNotIn("name: minio\n      namespace:", route)

@@ -21,25 +21,6 @@ spec:
     - group: ""
       kind: Service
       name: web
-{{- if .Values.objectStoreRoute.enabled }}
----
-apiVersion: gateway.networking.k8s.io/v1beta1
-kind: ReferenceGrant
-metadata:
-  name: {{ printf "%s-object-store" $routeName | trunc 63 | trimSuffix "-" }}
-  namespace: {{ default "labweaver-data" .Values.objectStoreRoute.serviceNamespace }}
-  labels:
-    {{- include "labweaver.labels" . | nindent 4 }}
-spec:
-  from:
-    - group: gateway.networking.k8s.io
-      kind: HTTPRoute
-      namespace: {{ $routeNamespace }}
-  to:
-    - group: ""
-      kind: Service
-      name: {{ required "objectStoreRoute.serviceName is required" .Values.objectStoreRoute.serviceName }}
-{{- end }}
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
@@ -61,9 +42,13 @@ spec:
             type: PathPrefix
             value: {{ required "objectStoreRoute.pathPrefix is required" .Values.objectStoreRoute.pathPrefix | quote }}
       backendRefs:
-        - name: {{ required "objectStoreRoute.serviceName is required" .Values.objectStoreRoute.serviceName }}
-          namespace: {{ default "labweaver-data" .Values.objectStoreRoute.serviceNamespace }}
-          port: {{ required "objectStoreRoute.servicePort is required" .Values.objectStoreRoute.servicePort }}
+        # Route uploads through the existing Web Nginx object-store proxy.
+        # The retained Cilium Gateway controller does not reconcile
+        # BackendTLSPolicy, so sending the request directly to MinIO would
+        # make the Gateway speak plaintext to MinIO's TLS port and return 503.
+        - name: web
+          namespace: {{ .Release.Namespace }}
+          port: 8080
     {{- end }}
     - matches:
         - path: {type: PathPrefix, value: /api}
