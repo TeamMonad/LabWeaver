@@ -124,8 +124,9 @@ Release Gate v2 requires a Resource deployment manifest, immutable
 remain legacy and cannot close #142. A same-identity Resource replay on a clean
 validation environment remains required before this is marked verified.
 
-The current source identity is `c6201066`. Local `xtask` tests (38 passed),
-strict `xtask` Clippy, format and diff checks pass. Retained connected
+The current source identity is `7d389c51`. Local `xtask` tests (38 passed),
+strict `xtask` Clippy, format and diff checks pass; the Resource replay input
+tests (13 passed) also cover the asynchronous Container build gate. Retained connected
 deployment evidence is bound to the earlier `611013a2` source and cannot be
 reused for this source identity. The controller ledger records six historical
 Resource-application attempts (two succeeded) and two Resource-replay
@@ -146,6 +147,15 @@ package locators, but the available deployment and replay evidence is bound to
 the earlier source and is either failed or non-current. This path remains
 `implemented; connected verification blocked`; no local or stale report is
 treated as connected evidence.
+
+The replay driver now waits on the public Control candidate view until a
+Container candidate's authoritative build projection is `succeeded` and its
+artifact/policy evidence is present before publishing the Work release. A
+failed or cancelled projection returns its stable diagnostic, and a missing,
+invalid or timed-out projection blocks without attempting release publication.
+This removes the approval-to-build race observed by the previous connected
+attempts; it has not yet been connected-verified under the remaining execution
+ledger budget.
 
 The Resource public HTTP surface is now implemented locally: owner-scoped list
 and get, create, approve/resize-approve, cancel, reject, retry, Lease renew and
