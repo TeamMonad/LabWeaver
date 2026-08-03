@@ -223,6 +223,8 @@ class ResourceAcceptanceProfileTests(unittest.TestCase):
         self.assertIn("diagnosticCode", replay)
         self.assertIn("LW_RESOURCE_REPLAY_PUBLIC_API_REJECTED_", replay)
         self.assertIn("LW_RESOURCE_REPLAY_AUTHENTICATION_INVALID", validator)
+        self.assertIn("LW_RESOURCE_REPLAY_AUTHENTICATION_EXPIRED", validator)
+        self.assertIn("time.time() + 30", validator)
         self.assertIn(".private", validator)
         self.assertIn("def regular_file", validator)
         report_validator = (ROOT / "tools/validate_resource_replay_report.py").read_text(encoding="utf-8")

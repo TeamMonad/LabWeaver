@@ -942,6 +942,32 @@ fn resource_replay(args: &ResourceReplayArgs) -> Result<(), AppError> {
                 .to_owned(),
         });
     }
+    #[cfg(target_os = "linux")]
+    {
+        let deployment_run_id = deployment
+            .get("runId")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(AppError::ReleaseGate {
+                code: "LW_RESOURCE_REPLAY_DEPLOYMENT_MANIFEST_INVALID",
+                detail: "Resource deployment manifest must contain runId".to_owned(),
+            })?;
+        let run_id = required_run_id("LABWEAVER_RUN_ID", "Resource replay run identity")?;
+        if run_id != deployment_run_id {
+            return Err(AppError::ReleaseGate {
+                code: "LW_RESOURCE_REPLAY_DEPLOYMENT_IDENTITY_MISMATCH",
+                detail: "LABWEAVER_RUN_ID must match the Resource deployment manifest before the connected ledger is acquired".to_owned(),
+            });
+        }
+        let source_commit = git_output(&repository_root(), ["rev-parse", "HEAD"])?;
+        validate_resource_replay_inputs_before_ledger(
+            &args.profile,
+            &args.authentication,
+            &args.deployment_manifest,
+            &package_manifest,
+            &source_commit,
+            deployment_run_id,
+        )?;
+    }
     run_infrastructure_with_package(
         &args.env,
         "95-resource-replay.yml",
@@ -962,6 +988,56 @@ fn resource_replay(args: &ResourceReplayArgs) -> Result<(), AppError> {
             ),
         ],
     )
+}
+
+#[cfg(target_os = "linux")]
+fn validate_resource_replay_inputs_before_ledger(
+    profile: &Path,
+    authentication: &Path,
+    deployment_manifest: &Path,
+    package_manifest: &Path,
+    source_commit: &str,
+    run_id: &str,
+) -> Result<(), AppError> {
+    let python = std::env::var("LABWEAVER_PYTHON").unwrap_or_else(|_| "python3".to_owned());
+    let validator = repository_root().join("tools/validate_resource_replay_inputs.py");
+    let profile = profile.to_string_lossy().into_owned();
+    let authentication = authentication.to_string_lossy().into_owned();
+    let deployment_manifest = deployment_manifest.to_string_lossy().into_owned();
+    let package_manifest = package_manifest.to_string_lossy().into_owned();
+    let output = ProcessCommand::new(python)
+        .arg(&validator)
+        .args([
+            "--profile",
+            &profile,
+            "--authentication",
+            &authentication,
+            "--deployment-manifest",
+            &deployment_manifest,
+            "--package-manifest",
+            &package_manifest,
+            "--source-commit",
+            source_commit,
+            "--run-id",
+            run_id,
+        ])
+        .current_dir(repository_root())
+        .output()
+        .map_err(|error| AppError::ReleaseGate {
+            code: "LW_RESOURCE_REPLAY_INPUT_PREFLIGHT_FAILED",
+            detail: format!("could not execute the replay input validator: {error}"),
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let diagnostic = String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .find(|line| line.starts_with("LW_"))
+        .unwrap_or("LW_RESOURCE_REPLAY_INPUT_PREFLIGHT_FAILED");
+    Err(AppError::ReleaseGate {
+        code: "LW_RESOURCE_REPLAY_INPUT_PREFLIGHT_FAILED",
+        detail: format!("replay input validator blocked the operation: {diagnostic}"),
+    })
 }
 
 fn require_private_locator(role: &'static str, path: &Path) -> Result<(), AppError> {

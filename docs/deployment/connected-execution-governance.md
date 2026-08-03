@@ -59,6 +59,13 @@ commit、package/deployment/locator hash 进入候选键，而不是创建新的
 总预算耗尽返回 `LW_EXECUTION_OPERATION_BUDGET_EXHAUSTED`，必须停止写操作并登记
 `Blocked`。
 
+Resource replay 在取得账本租约前还必须完成本地 preflight：deployment manifest 的
+`runId` 必须等于本次 `LABWEAVER_RUN_ID`，package/profile/auth locator 必须通过
+当前提交的 identity 校验，storage-state 必须存在有效 cookie；所有带 expiry 的 cookie
+都过期时返回 `LW_RESOURCE_REPLAY_AUTHENTICATION_EXPIRED`，不得消耗一次 connected
+replay 预算。这样已知的身份错配和陈旧浏览器会话不会把昂贵的远程尝试留到 Ansible
+或公共 API 阶段才暴露。
+
 ## 开发期缓存与发布 pin
 
 不要通过取消 commit 绑定来“修复”重复部署。正确分层是：

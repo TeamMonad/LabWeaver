@@ -13,6 +13,7 @@ import importlib.util
 import json
 import re
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -70,7 +71,32 @@ def validate_authentication(path: Path) -> dict[str, Any]:
         locator = auth.get(f"{role}StorageState")
         if not isinstance(locator, str):
             raise ReplayInputError("LW_RESOURCE_REPLAY_AUTHENTICATION_INVALID")
-        private_file(Path(locator), "LW_RESOURCE_REPLAY_AUTHENTICATION_INVALID")
+        state_path = private_file(Path(locator), "LW_RESOURCE_REPLAY_AUTHENTICATION_INVALID")
+        state = json_file(state_path, "LW_RESOURCE_REPLAY_AUTHENTICATION_INVALID")
+        cookies = state.get("cookies")
+        if not isinstance(cookies, list) or not cookies:
+            raise ReplayInputError("LW_RESOURCE_REPLAY_AUTHENTICATION_INVALID")
+        expirations: list[float] = []
+        for cookie in cookies:
+            if not isinstance(cookie, dict):
+                raise ReplayInputError("LW_RESOURCE_REPLAY_AUTHENTICATION_INVALID")
+            name = cookie.get("name")
+            value = cookie.get("value")
+            if not isinstance(name, str) or not name or not isinstance(value, str) or not value:
+                raise ReplayInputError("LW_RESOURCE_REPLAY_AUTHENTICATION_INVALID")
+            expires = cookie.get("expires")
+            if isinstance(expires, bool):
+                raise ReplayInputError("LW_RESOURCE_REPLAY_AUTHENTICATION_INVALID")
+            if isinstance(expires, (int, float)) and expires > 0:
+                expirations.append(float(expires))
+            elif expires is not None and not isinstance(expires, (int, float)):
+                raise ReplayInputError("LW_RESOURCE_REPLAY_AUTHENTICATION_INVALID")
+        # Session cookies use -1 and cannot be checked locally. When the state
+        # contains expiry-bearing cookies, fail before acquiring the connected
+        # ledger lease if every such cookie is already expired. This prevents a
+        # stale browser session from consuming a replay attempt.
+        if expirations and max(expirations) <= time.time() + 30:
+            raise ReplayInputError("LW_RESOURCE_REPLAY_AUTHENTICATION_EXPIRED")
     return auth
 
 
