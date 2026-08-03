@@ -572,6 +572,7 @@ class AnsibleFixtureTests(unittest.TestCase):
             / "deploy/ansible/roles/sprint2_application/templates/postgres-port-forward.service.j2"
         ).read_text(encoding="utf-8")
         self.assertIn("sprint2_application_postgres_forward_enabled", defaults)
+        self.assertIn("sprint2_application_postgres_forward_service_name is match", tasks)
         self.assertIn("Restart=on-failure", service)
         self.assertIn("service/{{ sprint2_application_postgres_forward_kubernetes_service }}", service)
         self.assertIn("Apply the PostgreSQL port-forward before database adoption", tasks)

@@ -129,6 +129,7 @@
     that:
       - sprint2_application_postgres_forward_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
       - sprint2_application_postgres_forward_kubernetes_service is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - sprint2_application_postgres_forward_service_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?\\.service$')
       - sprint2_application_postgres_forward_port | int > 1024
       - sprint2_application_postgres_forward_port | int < 65536
     fail_msg: SPRINT2_APPLICATION_POSTGRES_FORWARD_INPUT_INVALID
