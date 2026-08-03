@@ -1316,8 +1316,7 @@ fn execution_budget(command: &str) -> Option<(u32, u32)> {
         Some((1, 3))
     } else if command.contains("application") {
         Some((2, 3))
-    } else if command.contains("resource auth")
-        || command.contains("identity-foundation-deploy")
+    } else if command.contains("identity-foundation-deploy")
         || command.contains("sprint2-foundation")
         || command.contains("sprint2-buildkit")
         || command.contains("sprint2-harbor-route")
@@ -1326,6 +1325,11 @@ fn execution_budget(command: &str) -> Option<(u32, u32)> {
         || command.contains("reset")
     {
         Some((1, 1))
+    } else if command.contains("resource auth") {
+        // Browser BFF sessions are short-lived and must be refreshed immediately
+        // before every replay attempt; keep the per-candidate fence but allow
+        // one refresh per replay slot in the operation budget.
+        Some((1, 3))
     } else {
         None
     }
