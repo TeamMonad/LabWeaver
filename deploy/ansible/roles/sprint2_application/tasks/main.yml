@@ -124,6 +124,38 @@
   loop: "{{ sprint2_application_remote_inputs.results }}"
   when: not item.stat.exists
 
+- name: Validate the PostgreSQL port-forward contract
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_postgres_forward_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - sprint2_application_postgres_forward_kubernetes_service is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - sprint2_application_postgres_forward_port | int > 1024
+      - sprint2_application_postgres_forward_port | int < 65536
+    fail_msg: SPRINT2_APPLICATION_POSTGRES_FORWARD_INPUT_INVALID
+  when: sprint2_application_postgres_forward_enabled | bool
+
+- name: Install the persistent PostgreSQL port-forward
+  ansible.builtin.template:
+    src: postgres-port-forward.service.j2
+    dest: /etc/systemd/system/{{ sprint2_application_postgres_forward_service_name }}
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart the adopted PostgreSQL port-forward
+  when: sprint2_application_postgres_forward_enabled | bool
+
+- name: Apply the PostgreSQL port-forward before database adoption
+  ansible.builtin.meta: flush_handlers
+  when: sprint2_application_postgres_forward_enabled | bool
+
+- name: Require the adopted PostgreSQL port-forward endpoint
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ sprint2_application_postgres_forward_port }}"
+    state: started
+    timeout: 30
+  when: sprint2_application_postgres_forward_enabled | bool
+
 - name: Validate controller-owned reviewed inputs
   ansible.builtin.stat:
     path: "{{ item }}"

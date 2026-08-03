@@ -30,6 +30,11 @@ sprint2_application_postgres_client_certificate_file: "{{ lookup('ansible.builti
 sprint2_application_postgres_client_private_key_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_POSTGRES_CLIENT_PRIVATE_KEY_FILE') }}"
 sprint2_application_postgres_service: "{{ lookup('ansible.builtin.env', 'LABWEAVER_POSTGRES_SERVICE') | default('sprint2-admin', true) }}"
 sprint2_application_postgres_database: labweaver
+sprint2_application_postgres_forward_enabled: "{{ lookup('ansible.builtin.env', 'LABWEAVER_POSTGRES_FORWARD_ENABLED') | default('false', true) | bool }}"
+sprint2_application_postgres_forward_service_name: labweaver-postgres-forward.service
+sprint2_application_postgres_forward_namespace: labweaver-data
+sprint2_application_postgres_forward_kubernetes_service: postgres
+sprint2_application_postgres_forward_port: 15432
 sprint2_application_nats_server: ""
 sprint2_application_nats_controller_address: ""
 sprint2_application_nats_controller_port: 4222

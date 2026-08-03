@@ -28,6 +28,9 @@ domains:
       - id: 2
         file: agent/0002_allow_content_addressed_image_reuse.sql
         sha256: e1d86262aa597e0b61b7731ac39671a77ad7e9c0eb8b19279e4082d54c5e9b00
+      - id: 3
+        file: agent/0003_work_agent_run_class.sql
+        sha256: da55512193a801d0a95dee51af4ca87701eba5da8bee696f9efdb07e636b7646
   - name: evaluation
     migrations:
       - id: 1

@@ -11,3 +11,11 @@
   delegate_to: "{{ item }}"
   become: true
   loop: "{{ groups['k8s_cluster'] }}"
+
+- name: Restart the adopted PostgreSQL port-forward
+  ansible.builtin.systemd_service:
+    name: "{{ sprint2_application_postgres_forward_service_name }}"
+    enabled: true
+    state: restarted
+    daemon_reload: true
+  become: true

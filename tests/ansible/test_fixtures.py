@@ -553,6 +553,28 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("SPRINT2_APPLICATION_RETAINED_BASELINE_IDENTITY_INVALID", tasks)
         self.assertIn("sprint2_application_retained_baseline_sha256", defaults)
 
+    def test_sprint2_application_owns_a_reconnectable_postgres_port_forward(self) -> None:
+        defaults = (
+            ROOT / "deploy/ansible/roles/sprint2_application/defaults/main.yml"
+        ).read_text(encoding="utf-8")
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        handlers = (
+            ROOT / "deploy/ansible/roles/sprint2_application/handlers/main.yml"
+        ).read_text(encoding="utf-8")
+        service = (
+            ROOT
+            / "deploy/ansible/roles/sprint2_application/templates/postgres-port-forward.service.j2"
+        ).read_text(encoding="utf-8")
+        self.assertIn("sprint2_application_postgres_forward_enabled", defaults)
+        self.assertIn("Restart=on-failure", service)
+        self.assertIn("service/{{ sprint2_application_postgres_forward_kubernetes_service }}", service)
+        self.assertIn("Apply the PostgreSQL port-forward before database adoption", tasks)
+        self.assertIn("Require the adopted PostgreSQL port-forward endpoint", tasks)
+        self.assertIn("Restart the adopted PostgreSQL port-forward", handlers)
+        self.assertIn("sprint2_application_postgres_forward_service_name", handlers)
+
     def test_sprint2_application_preflight_does_not_requalify_retained_hosts(self) -> None:
         application = (
             ROOT / "deploy/ansible/playbooks/93-sprint2-application.yml"
