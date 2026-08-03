@@ -1255,10 +1255,12 @@ fn begin_execution_ledger(
         .map(|(_, value)| file_sha256(Path::new(value)))
         .transpose()?;
     let migration_catalog_sha256 = file_sha256(&repository_root().join("migrations/catalog.yaml"))?;
+    let extra_environment_sha256 = extra_environment_identity(extra_environment)?;
     let configuration_sha256 = identity_hash(&[
         inventory_hash,
         component_lock_hash,
         &migration_catalog_sha256,
+        &extra_environment_sha256,
     ]);
     let root = std::env::var_os("LABWEAVER_EXECUTION_LEDGER_ROOT")
         .map(PathBuf::from)
@@ -1295,6 +1297,25 @@ fn identity_hash(fields: &[&str]) -> String {
         hasher.update([0]);
     }
     format!("sha256:{:x}", hasher.finalize())
+}
+
+#[cfg(target_os = "linux")]
+fn extra_environment_identity(extra_environment: &[(&str, String)]) -> Result<String, AppError> {
+    let mut fields = Vec::with_capacity(extra_environment.len());
+    for (name, value) in extra_environment {
+        let locator_hash = {
+            let path = std::path::Path::new(value);
+            if path.is_file() {
+                file_sha256(path)?
+            } else {
+                "missing".to_owned()
+            }
+        };
+        fields.push(format!("{name}={value}\0{locator_hash}"));
+    }
+    fields.sort();
+    let references = fields.iter().map(String::as_str).collect::<Vec<_>>();
+    Ok(identity_hash(&references))
 }
 
 #[cfg(target_os = "linux")]
@@ -1803,6 +1824,8 @@ fn not_implemented(command: impl Into<String>) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     #[cfg(target_os = "linux")]
+    use super::extra_environment_identity;
+    #[cfg(target_os = "linux")]
     use super::is_uuid_v7_run_id;
     use super::{
         EnvironmentArgs, IdentityFoundationAction, IdentityFoundationArgs, deploy,
@@ -1817,6 +1840,29 @@ mod tests {
         assert!(!is_uuid_v7_run_id("019fa9d0-0000-6000-8000-000000000142"));
         assert!(!is_uuid_v7_run_id("019fa9d0-0000-7000-c000-000000000142"));
         assert!(!is_uuid_v7_run_id("019FA9D0-0000-7000-8000-000000000142"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn connected_identity_changes_when_a_private_locator_changes() -> Result<(), String> {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let path = directory.path().join("locator.json");
+        std::fs::write(&path, b"first").map_err(|error| error.to_string())?;
+        let first = extra_environment_identity(&[(
+            "LABWEAVER_RESOURCE_REPLAY_AUTHENTICATION",
+            path.display().to_string(),
+        )])
+        .map_err(|error| error.to_string())?;
+        std::fs::write(&path, b"second").map_err(|error| error.to_string())?;
+        let second = extra_environment_identity(&[(
+            "LABWEAVER_RESOURCE_REPLAY_AUTHENTICATION",
+            path.display().to_string(),
+        )])
+        .map_err(|error| error.to_string())?;
+        if first == second {
+            return Err("connected identity ignored a changed private locator".into());
+        }
+        Ok(())
     }
 
     fn identity_args(env: &str, infra: bool, yes: bool) -> IdentityFoundationArgs {

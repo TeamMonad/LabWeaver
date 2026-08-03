@@ -17,6 +17,10 @@ BuildKit、数据库和真实运行时。没有执行边界时，一个失败会
 - migration/configuration identity（由 Ansible report 绑定）；
 - environment、operation、Run ID 和 testflight Run ID。
 
+Resource replay 的额外 profile、authentication、deployment 和 package locator 也会
+参与 configuration identity；`xtask` 对存在的 locator 计算内容哈希。因此同一路径原地
+轮换凭据会形成新的候选，不能把新凭据伪装成旧尝试；账本仍按候选固定预算阻止无限重放。
+
 Release Gate 只接受同一组身份。开发期可以复用 BuildKit/OCI 层缓存来减少编译，
 但缓存不是验收证据，也不能把旧 digest、旧 Run ID 或旧 report 拼接到新候选中。
 影响运行时、合同、部署、测试或证据生成的提交必须重新 package；仅文档变更应先
