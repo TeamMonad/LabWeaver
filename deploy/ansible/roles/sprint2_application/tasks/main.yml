@@ -195,6 +195,13 @@
          | from_yaml_all | list }}
     sprint2_application_access_seed: >-
       {{ lookup('ansible.builtin.file', sprint2_application_access_seed_file) | from_json }}
+    sprint2_application_access_configuration: >-
+      {{ (
+        sprint2_application_configuration_objects
+        | selectattr('kind', 'equalto', 'ConfigMap')
+        | selectattr('metadata.name', 'equalto', 'access-service-config')
+        | first
+      ).data['config.yaml'] | from_yaml }}
     sprint2_application_configuration_bundle_sha256: >-
       sha256:{{ sprint2_application_controller_inputs.results[4].stat.checksum }}
   no_log: true
@@ -255,6 +262,15 @@
       - sprint2_application_configuration_manifest_value.configMaps.keys() | sort == sprint2_application_required_configmaps | sort
       - sprint2_application_configuration_manifest_value.secrets.keys() | sort == sprint2_application_required_secrets | sort
     fail_msg: SPRINT2_APPLICATION_CONFIGURATION_INVALID
+  no_log: true
+
+- name: Require canonical platform administrator role binding
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_access_configuration.oidc.role_claim_path == ['realm_access', 'roles']
+      - sprint2_application_access_configuration.oidc.role_mappings.platform_admin == 'platform_admin'
+      - sprint2_application_access_configuration.oidc.role_mappings['platform-admin'] == 'platform_admin'
+    fail_msg: SPRINT2_APPLICATION_OIDC_ROLE_MAPPING_INVALID
   no_log: true
 
 - name: Validate every private configuration key

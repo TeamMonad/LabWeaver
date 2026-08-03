@@ -379,6 +379,21 @@ class AnsibleFixtureTests(unittest.TestCase):
             "'component', 'equalto', 'evaluation-service'",
             tasks,
         )
+
+    def test_sprint2_application_requires_canonical_oidc_platform_admin_mapping(self) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("sprint2_application_access_configuration", tasks)
+        self.assertIn(
+            "sprint2_application_access_configuration.oidc.role_mappings.platform_admin == 'platform_admin'",
+            tasks,
+        )
+        self.assertIn(
+            "sprint2_application_access_configuration.oidc.role_mappings['platform-admin'] == 'platform_admin'",
+            tasks,
+        )
+        self.assertIn("SPRINT2_APPLICATION_OIDC_ROLE_MAPPING_INVALID", tasks)
         self.assertIn(
             "'workerImage':\n                              sprint2_application_evaluation_worker_image",
             tasks,
