@@ -237,7 +237,10 @@
       {{ ((sprint2_application_control_secret_objects | first).data['nats-ca.pem']
           | b64decode) | hash('sha256') }}
     sprint2_application_remote_nats_ca_sha256: >-
-      {{ lookup('ansible.builtin.file', sprint2_application_nats_ca_file) | hash('sha256') }}
+      {{ (sprint2_application_remote_inputs.results
+          | selectattr('item', 'equalto', sprint2_application_nats_ca_file)
+          | map(attribute='stat.checksum')
+          | first) }}
   no_log: true
 
 - name: Require reviewed configuration bindings before any cluster mutation

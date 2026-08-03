@@ -420,6 +420,11 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("sprint2_application_bundle_nats_ca_sha256", tasks)
         self.assertIn("sprint2_application_remote_nats_ca_sha256", tasks)
         self.assertIn(
+            "selectattr('item', 'equalto', sprint2_application_nats_ca_file)",
+            tasks,
+        )
+        self.assertIn("map(attribute='stat.checksum')", tasks)
+        self.assertIn(
             "sprint2_application_bundle_nats_ca_sha256 == sprint2_application_remote_nats_ca_sha256",
             tasks,
         )
