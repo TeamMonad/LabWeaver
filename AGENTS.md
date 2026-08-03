@@ -168,6 +168,33 @@ status:
 
 普通 Issue/PR 不得为了合并、Review 或 Verify 在共享集群中启动部署、replay、connected E2E 或 Release Gate。每个 Sprint 只由一个明确范围的 Sprint 结束验收 Issue 执行集群证据验证；该 Issue 冻结 commit、deployment manifest、Migration catalog、镜像 digest 集合和 Run ID，并集中承载真实 Container/KubeVirt、connected Playwright、Ansible Verify 与 Release Gate 证据。部署尝试预算、attempt ledger、停止条件和人工接管规则只在该 Sprint 验收 Issue 内适用。
 
+### 8.2 Connected 执行账本与部署收敛
+
+涉及 package、Ansible/Kubernetes reconcile、Resource replay、Playwright 或
+Release Gate 的 connected 操作必须先取得候选身份和执行账本租约。租约按
+`operation + environment` 串行化，并将 source commit、package/deployment
+manifest hash、Run ID、testflight Run ID、尝试次数、终态和稳定 diagnostic
+写入控制器的私有账本；账本只保存 hash、locator 和状态，不保存 Secret、JWT、私钥
+或用户内容。
+
+- `LABWEAVER_EXECUTION_LEDGER_ROOT` 必须指向控制器上的 root-only（`0700`）目录；
+  未提供该 locator 时，connected 写操作直接以
+  `LW_EXECUTION_LEDGER_ROOT_MISSING` 阻断。
+- 同一环境同一 operation 同时只能有一个租约；发现运行中的锁、损坏账本或无法确认
+  的旧进程时，只能只读检查并转为 `Blocked`，不得启动第二个实例。
+- Resource replay 每个候选最多 1 次；应用 reconcile 最多 2 次（首次和幂等重放）。
+  相同 diagnostic 只有在有新观测和根因修复、且通过低成本回归检查后才能重试一次；
+  不得用新 Run ID、旧 package 或改名报告绕过预算。
+- package/deploy/replay 超时后必须先确认原进程终态和集群状态；无法确认时按
+  `unknown`/`Blocked` 处理。账本终态写入失败同样阻断后续写操作。
+- 开发期可以复用经验证的组件/层缓存，但不得改变 connected 验收身份；Release
+  Gate 仍必须 pin 完整 source commit、deployment manifest、migration catalog、
+  immutable image digest 集合和 Run ID。任何影响运行时、契约、部署、测试或证据生成
+  的改动都会创建新候选；纯文档改动应批量提交后再决定是否需要重放。
+
+详细的账本格式、停止条件和排障步骤见
+[`docs/deployment/connected-execution-governance.md`](docs/deployment/connected-execution-governance.md)。
+
 ## 9. 测试与证据
 
 - 普通 Issue/PR 的合并证据止于同一候选身份下通过的本地集成测试和相应诊断报告；不得为了普通 Issue 的合并在共享集群中启动部署、replay 或 connected E2E。

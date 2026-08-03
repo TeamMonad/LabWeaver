@@ -11,6 +11,8 @@ use sha2::{Digest, Sha256};
 
 mod acceptance_assets;
 mod integration;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod execution_ledger;
 mod migration_catalog;
 mod platform_images;
 mod release_gate;
@@ -313,6 +315,11 @@ enum AppError {
         code: &'static str,
         detail: String,
     },
+    #[allow(dead_code)]
+    ExecutionLedger {
+        code: &'static str,
+        detail: String,
+    },
     InvalidArgument {
         role: &'static str,
     },
@@ -334,6 +341,7 @@ impl AppError {
             Self::AcceptanceAsset { code, .. } => code,
             Self::Integration { code, .. } => code,
             Self::ReleaseGate { code, .. } => code,
+            Self::ExecutionLedger { code, .. } => code,
             Self::InvalidArgument { .. } => "XTASK_INVALID_ARGUMENT",
             #[cfg(not(target_os = "linux"))]
             Self::UnsupportedPlatform { .. } => "XTASK_INFRA_UNSUPPORTED_PLATFORM",
@@ -371,6 +379,7 @@ impl Display for AppError {
             Self::AcceptanceAsset { detail, .. } => write!(formatter, "{detail}"),
             Self::Integration { detail, .. } => write!(formatter, "{detail}"),
             Self::ReleaseGate { detail, .. } => write!(formatter, "{detail}"),
+            Self::ExecutionLedger { detail, .. } => write!(formatter, "{detail}"),
             Self::InvalidArgument { role } => {
                 write!(
                     formatter,
@@ -810,7 +819,14 @@ fn resource_replay(args: &ResourceReplayArgs) -> Result<(), AppError> {
     ] {
         require_regular_locator(role, path)?;
     }
-    platform_images::validate_profile(&args.package_manifest, "resource", &repository_root())?;
+    let package_manifest = args
+        .package_manifest
+        .canonicalize()
+        .map_err(|error| AppError::Io {
+            role: "resolve Resource replay package manifest",
+            detail: error.to_string(),
+        })?;
+    platform_images::validate_profile(&package_manifest, "resource", &repository_root())?;
     let deployment_manifest =
         fs::read(&args.deployment_manifest).map_err(|error| AppError::Io {
             role: "read Resource deployment manifest",
@@ -836,7 +852,7 @@ fn resource_replay(args: &ResourceReplayArgs) -> Result<(), AppError> {
         &args.env,
         "95-resource-replay.yml",
         "resource replay",
-        Some(&args.package_manifest),
+        Some(&package_manifest),
         &[
             (
                 "LABWEAVER_RESOURCE_REPLAY_PROFILE",
@@ -1019,7 +1035,7 @@ fn run_infrastructure_with_package(
 fn run_infrastructure_with_package(
     environment: &str,
     playbook_name: &str,
-    _command: &'static str,
+    command: &'static str,
     package_manifest: Option<&Path>,
     extra_environment: &[(&str, String)],
 ) -> Result<(), AppError> {
@@ -1085,17 +1101,116 @@ fn run_infrastructure_with_package(
     for (name, value) in extra_environment {
         runner.add_env(*name, value);
     }
+    let ledger = begin_execution_ledger(
+        environment,
+        command,
+        &commit_sha,
+        &inventory_hash,
+        &component_lock_hash,
+        &run_id,
+        &testflight_run_id,
+        package_manifest,
+        extra_environment,
+    )?;
     // ansible-rs 1.1.0 appends configured arguments twice in `run`; all
     // controller identity and vault inputs therefore travel through the
     // explicit environment contract above.
-    runner
+    let result = runner
         .run(Play::from_file(playbook))
         .map(|_| ())
         .map_err(|error| AppError::ExternalCommand {
             role: "allowlisted infrastructure playbook",
             code: None,
             detail: Some(format!("ansible-rs returned a non-zero result: {error:?}")),
-        })
+        });
+    if let Some(ledger) = ledger {
+        let diagnostic = result.as_ref().err().map(AppError::diagnostic_code);
+        ledger
+            .finish(result.is_ok(), diagnostic)
+            .map_err(|error| AppError::ExecutionLedger {
+                code: error.diagnostic_code(),
+                detail: "could not finalize the connected execution ledger; cluster state must be inspected before another write".to_owned(),
+            })?;
+    }
+    result
+}
+
+#[cfg(target_os = "linux")]
+fn execution_budget(command: &str) -> Option<u32> {
+    let command = command.to_ascii_lowercase();
+    if command.contains("resource replay") {
+        Some(1)
+    } else if command.contains("application") {
+        Some(2)
+    } else if command.contains("deploy") || command.contains("reset") {
+        Some(1)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn begin_execution_ledger(
+    environment: &str,
+    command: &str,
+    source_commit: &str,
+    inventory_hash: &str,
+    component_lock_hash: &str,
+    run_id: &str,
+    testflight_run_id: &str,
+    package_manifest: Option<&Path>,
+    extra_environment: &[(&str, String)],
+) -> Result<Option<execution_ledger::ExecutionLease>, AppError> {
+    let Some(max_attempts) = execution_budget(command) else {
+        return Ok(None);
+    };
+    let package_sha256 = package_manifest.map(|path| file_sha256(path)).transpose()?;
+    let deployment_sha256 = extra_environment
+        .iter()
+        .find(|(name, _)| *name == "LABWEAVER_RESOURCE_REPLAY_DEPLOYMENT_MANIFEST")
+        .map(|(_, value)| file_sha256(Path::new(value)))
+        .transpose()?;
+    let migration_catalog_sha256 = file_sha256(&repository_root().join("migrations/catalog.yaml"))?;
+    let configuration_sha256 = identity_hash(&[
+        inventory_hash,
+        component_lock_hash,
+        &migration_catalog_sha256,
+    ]);
+    let root = std::env::var_os("LABWEAVER_EXECUTION_LEDGER_ROOT")
+        .map(PathBuf::from)
+        .ok_or_else(|| AppError::ExecutionLedger {
+            code: "LW_EXECUTION_LEDGER_ROOT_MISSING",
+            detail: "LABWEAVER_EXECUTION_LEDGER_ROOT is required for connected execution; provide a private controller directory before starting another deployment".to_owned(),
+        })?;
+    execution_ledger::acquire(
+        &root,
+        execution_ledger::ExecutionIdentity {
+            operation: command.to_owned(),
+            environment: environment.to_owned(),
+            source_commit: source_commit.to_owned(),
+            configuration_sha256: Some(configuration_sha256),
+            package_sha256,
+            deployment_sha256,
+            run_id: run_id.to_owned(),
+            testflight_run_id: Some(testflight_run_id.to_owned()),
+        },
+        max_attempts,
+    )
+    .map(Some)
+    .map_err(|error| AppError::ExecutionLedger {
+        code: error.diagnostic_code(),
+        detail: "a connected operation with this target or candidate is already active, exhausted, or requires operator inspection; do not start another deployment".to_owned(),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn identity_hash(fields: &[&str]) -> String {
+    let mut hasher = Sha256::new();
+    for field in fields {
+        hasher.update(field.as_bytes());
+        hasher.update([0]);
+    }
+    format!("sha256:{:x}", hasher.finalize())
 }
 
 #[cfg(target_os = "linux")]

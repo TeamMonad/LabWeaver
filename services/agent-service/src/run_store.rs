@@ -1286,6 +1286,28 @@ impl AgentRunService {
         let run = match reservation {
             AgentRunReservation::Created(run) | AgentRunReservation::Replayed(run) => run,
         };
+        self.execute_reserved(command, run).await
+    }
+
+    /// Executes a dispatch whose durable run was already reserved by the Control-facing
+    /// dispatch boundary.
+    ///
+    /// `reserve_dispatch` and `reserve` intentionally use different request hashes: the
+    /// former binds the Control-verified package, policy and required environment class, while
+    /// the latter is the public AgentRun reservation path. Calling `execute` from the background
+    /// dispatch worker therefore attempts to reserve the same idempotency key a second time and
+    /// turns every valid Work dispatch into `LW_IDEMPOTENCY_CONFLICT`. The worker must execute
+    /// the already reserved run through this method instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns the stable runtime-state, contract or persistence failure from the reserved run.
+    pub async fn execute_reserved(
+        &self,
+        command: ExecuteAgentRun<'_>,
+        run: AgentRun,
+    ) -> Result<AgentRunDispatch, AgentRunStoreError> {
+        validate_reserved_run(&command, &run)?;
         let input_sha256 = command.input.sha256();
         let environment = self
             .store
@@ -1511,6 +1533,29 @@ fn validate_reservation(command: &ReserveAgentRun<'_>) -> Result<(), AgentRunSto
         .policy
         .validate()
         .map_err(|_| AgentRunStoreError::IdentityMismatch)
+}
+
+fn validate_reserved_run(
+    command: &ExecuteAgentRun<'_>,
+    run: &AgentRun,
+) -> Result<(), AgentRunStoreError> {
+    if run.course_id != command.course_id
+        || run.package_id != command.request.package_id
+        || run.policy_id != command.request.policy_id
+        || run.state == AgentRunState::Failed
+        || run.state == AgentRunState::Cancelled
+    {
+        return Err(AgentRunStoreError::IdentityMismatch);
+    }
+    if command.trace_id.trim().is_empty()
+        || command.input.course_id() != command.course_id
+        || command.input.package_id() != command.request.package_id
+        || command.input.package_revision() != command.request.package_revision
+        || command.input.package_manifest_sha256() != command.request.package_sha256
+    {
+        return Err(AgentRunStoreError::IdentityMismatch);
+    }
+    Ok(())
 }
 
 fn requested_run(
