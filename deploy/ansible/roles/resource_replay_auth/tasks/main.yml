@@ -307,6 +307,7 @@
       - "{{ resource_replay_auth_identity_seed_file }}"
   register: resource_replay_auth_result
   failed_when: false
+  changed_when: true
   no_log: true
 
 - name: Surface a stable Resource replay authentication diagnostic

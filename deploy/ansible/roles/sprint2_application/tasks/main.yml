@@ -643,7 +643,10 @@
 
 - name: Bind controller NATS probe endpoint
   ansible.builtin.set_fact:
-    sprint2_application_nats_probe_server: "{{ ('tls://nats.labweaver-data.svc:' ~ sprint2_application_nats_controller_port) if sprint2_application_nats_controller_address | length > 0 else sprint2_application_nats_server }}"
+    sprint2_application_nats_probe_server: >-
+      {{ ('tls://nats.labweaver-data.svc:' ~ sprint2_application_nats_controller_port)
+         if sprint2_application_nats_controller_address | length > 0
+         else sprint2_application_nats_server }}
 
 - name: Probe retained JetStream
   ansible.builtin.command:

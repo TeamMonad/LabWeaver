@@ -655,6 +655,7 @@ async fn known_runtime_failures_are_classified_without_leaking_stderr() -> Resul
 
 #[tokio::test]
 #[ignore = "requires LABWEAVER_TEST_DATABASE_URL or a real PostgreSQL Docker container"]
+#[allow(clippy::large_futures)]
 async fn postgres_run_is_atomic_and_exact_replay_is_not_billed_twice() -> Result<(), Box<dyn Error>>
 {
     let mut container = None;

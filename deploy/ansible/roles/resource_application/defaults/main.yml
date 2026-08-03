@@ -7,13 +7,19 @@ resource_application_expected_source_commit: >-
 resource_application_package_manifest: "{{ lookup('ansible.builtin.env', 'LABWEAVER_PACKAGE_MANIFEST') }}"
 resource_application_configuration_bundle: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_CONFIGURATION_BUNDLE') }}"
 resource_application_profile_root: /var/lib/labweaver/.private/resource-acceptance
-resource_application_acceptance_profile_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_ACCEPTANCE_PROFILE') | default(resource_application_profile_root ~ '/profile.json', true) }}"
+resource_application_acceptance_profile_file: >-
+  {{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_ACCEPTANCE_PROFILE')
+     | default(resource_application_profile_root ~ '/profile.json', true) }}
 resource_application_access_seed_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_ACCESS_SEED_FILE') }}"
 resource_application_profile_validator: "{{ playbook_dir }}/../../../tools/validate_resource_acceptance_profile.py"
 resource_application_profile_renderer: "{{ playbook_dir }}/../../../tools/render_resource_acceptance_profile.py"
 resource_application_profile_preparer: "{{ playbook_dir }}/../../../tools/prepare_resource_acceptance_profile.py"
-resource_application_profile_configuration_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_PROFILE_CONFIGURATION') | default(resource_application_profile_root ~ '/configuration.json', true) }}"
-resource_application_profile_material_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_PROFILE_MATERIAL') | default(resource_application_profile_root ~ '/material.md', true) }}"
+resource_application_profile_configuration_file: >-
+  {{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_PROFILE_CONFIGURATION')
+     | default(resource_application_profile_root ~ '/configuration.json', true) }}
+resource_application_profile_material_file: >-
+  {{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_PROFILE_MATERIAL')
+     | default(resource_application_profile_root ~ '/material.md', true) }}
 resource_application_profile_runtime_configuration_file: "{{ resource_application_profile_root }}/agent-runtime-config.yaml"
 resource_application_profile_model: ecnu-plus
 resource_application_profile_runtime_binding: claude-code-production

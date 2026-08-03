@@ -1067,6 +1067,7 @@ impl ClaudeCodeRuntime {
     }
 
     /// Generates one candidate constrained by the Control-authoritative Environment class.
+    #[allow(clippy::too_many_lines)]
     pub async fn generate_for_class(
         &self,
         track: AgentTrackKind,

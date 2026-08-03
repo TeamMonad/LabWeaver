@@ -1294,7 +1294,7 @@ impl AgentRunService {
     ///
     /// `reserve_dispatch` and `reserve` intentionally use different request hashes: the
     /// former binds the Control-verified package, policy and required environment class, while
-    /// the latter is the public AgentRun reservation path. Calling `execute` from the background
+    /// the latter is the public `AgentRun` reservation path. Calling `execute` from the background
     /// dispatch worker therefore attempts to reserve the same idempotency key a second time and
     /// turns every valid Work dispatch into `LW_IDEMPOTENCY_CONFLICT`. The worker must execute
     /// the already reserved run through this method instead.
