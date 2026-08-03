@@ -332,11 +332,13 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
     _phase("dual-approval")
     for label, view, headers in (("environment", environment, environment_headers), ("evaluation", evaluation, evaluation_headers)):
         candidate_value = require(view, "candidate", "LW_RESOURCE_REPLAY_AGENT_INVALID")
+        # Candidate decisions are optimistic-lock updates: the candidate GET above
+        # returns the revision ETag that append*CandidateDecision requires as If-Match.
         teacher.request("POST", f"/api/v1/courses/{course_id}/{label}-candidates/{candidate_value['id']}/decisions", {
             "candidateRevision": candidate_value["revision"], "candidateSha256": candidate_value.get("specSha256"),
             "policyRevision": candidate_value.get("policyRevision", policy["revision"]), "schemaSha256": candidate_value.get("schemaSha256"),
             "trustRevision": view["trustRevision"], "decision": "approved", "reason": "resource-acceptance",
-        }, f"approve-{label}")
+        }, f"approve-{label}", if_match=etag(headers))
     environment, environment_headers = teacher.request("GET", f"/api/v1/courses/{course_id}/environment-candidates/{environment_id}", None, "environment-approved", csrf=False)
     candidate = environment["candidate"]
     approval = environment.get("approvals", [])[-1] if environment.get("approvals") else None
