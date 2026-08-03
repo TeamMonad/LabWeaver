@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -81,6 +82,38 @@ class ResourceAcceptanceProfileTests(unittest.TestCase):
         self.assertEqual(REPLAY_MODULE.etag({"ETag": '"r8"'}), '"r8"')
         with self.assertRaisesRegex(REPLAY_MODULE.ReplayError, "ETAG_MISSING"):
             REPLAY_MODULE.etag({"content-type": "application/json"})
+
+    def test_replay_waits_for_authoritative_container_build(self) -> None:
+        client = object.__new__(REPLAY_MODULE.BffClient)
+        responses = iter(
+            [
+                ({"build": {"state": "requested"}}, {}),
+                (
+                    {
+                        "build": {
+                            "state": "succeeded",
+                            "artifact": {},
+                            "imagePolicyEvaluation": {},
+                        }
+                    },
+                    {},
+                ),
+            ]
+        )
+        client.request = lambda *args, **kwargs: next(responses)
+        with mock.patch.object(REPLAY_MODULE.time, "sleep") as sleep:
+            result = client.poll_container_build("course", "candidate")
+        self.assertEqual(result["build"]["state"], "succeeded")
+        sleep.assert_called_once_with(1)
+
+    def test_replay_surfaces_terminal_container_build_diagnostic(self) -> None:
+        client = object.__new__(REPLAY_MODULE.BffClient)
+        client.request = lambda *args, **kwargs: (
+            {"build": {"state": "failed", "diagnosticCode": "LW_BUILD_FAILED"}},
+            {},
+        )
+        with self.assertRaisesRegex(REPLAY_MODULE.ReplayError, "LW_BUILD_FAILED"):
+            client.poll_container_build("course", "candidate")
 
     def test_renderer_binds_seed_and_material_without_retaining_source_path(self) -> None:
         profile = self._profile()
@@ -277,6 +310,9 @@ class ResourceAcceptanceProfileTests(unittest.TestCase):
         self.assertIn('policy["id"] = run_id', replay_driver)
         self.assertIn("def upload_manifest_sha256", replay_driver)
         self.assertIn("if_match=etag(upload_headers)", replay_driver)
+        self.assertIn("def poll_container_build", replay_driver)
+        self.assertIn("LW_RESOURCE_REPLAY_BUILD_TIMEOUT", replay_driver)
+        self.assertIn('"container-build"', replay_driver)
         self.assertIn('"94-resource-replay-auth.yml"', xtask)
 
 

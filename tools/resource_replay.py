@@ -166,6 +166,44 @@ class BffClient:
             time.sleep(1)
         raise ReplayError("LW_RESOURCE_REPLAY_TIMEOUT")
 
+    def poll_container_build(
+        self, course_id: str, candidate_id: str
+    ) -> dict[str, Any]:
+        """Wait for the Control-owned build projection before publishing.
+
+        Candidate approval appends the build request to Control's outbox. The
+        release endpoint intentionally refuses to publish until the matching
+        immutable artifact projection is succeeded, so publishing immediately
+        after approval races the asynchronous build consumer. Poll the public
+        candidate view instead of reaching into PostgreSQL or an internal
+        executor route.
+        """
+        deadline = time.monotonic() + 600
+        path = f"/api/v1/courses/{course_id}/environment-candidates/{candidate_id}"
+        while time.monotonic() < deadline:
+            value, _ = self.request("GET", path, None, "container-build", csrf=False)
+            if not isinstance(value, dict):
+                raise ReplayError("LW_RESOURCE_REPLAY_PUBLIC_DOCUMENT_INVALID")
+            build = value.get("build")
+            if not isinstance(build, dict):
+                raise ReplayError("LW_RESOURCE_REPLAY_BUILD_STATE_MISSING")
+            state = build.get("state")
+            if state == "succeeded":
+                if not isinstance(build.get("artifact"), dict) or not isinstance(
+                    build.get("imagePolicyEvaluation"), dict
+                ):
+                    raise ReplayError("LW_RESOURCE_REPLAY_BUILD_EVIDENCE_INVALID")
+                return value
+            if state in {"failed", "cancelled"}:
+                diagnostic = build.get("diagnosticCode")
+                if isinstance(diagnostic, str) and diagnostic.startswith("LW_"):
+                    raise ReplayError(diagnostic)
+                raise ReplayError("LW_RESOURCE_REPLAY_BUILD_TERMINAL_FAILURE")
+            if state != "requested":
+                raise ReplayError("LW_RESOURCE_REPLAY_BUILD_STATE_INVALID")
+            time.sleep(1)
+        raise ReplayError("LW_RESOURCE_REPLAY_BUILD_TIMEOUT")
+
 
 def require(value: Any, key: str, code: str) -> Any:
     if not isinstance(value, dict) or key not in value:
@@ -339,6 +377,9 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
             "policyRevision": candidate_value.get("policyRevision", policy["revision"]), "schemaSha256": candidate_value.get("schemaSha256"),
             "trustRevision": view["trustRevision"], "decision": "approved", "reason": "resource-acceptance",
         }, f"approve-{label}", if_match=etag(headers))
+    if profile["runtimeKind"] == "container":
+        _phase("container-build")
+        teacher.poll_container_build(course_id, environment_id)
     environment, environment_headers = teacher.request("GET", f"/api/v1/courses/{course_id}/environment-candidates/{environment_id}", None, "environment-approved", csrf=False)
     candidate = environment["candidate"]
     approval = environment.get("approvals", [])[-1] if environment.get("approvals") else None
