@@ -48,6 +48,75 @@ def credentials(claims: dict) -> bytes:
 
 
 class NatsAuthorityRotationTests(unittest.TestCase):
+    def test_access_rotation_adds_canonical_platform_admin_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            example = root / "access-auth.example.yaml"
+            example.write_text(
+                "resource_gateway:\n"
+                "  base_uri: https://resource-service:9448/\n",
+                encoding="utf-8",
+            )
+            application = [
+                {
+                    "apiVersion": "v1",
+                    "kind": "ConfigMap",
+                    "metadata": {"name": "access-service-config"},
+                    "data": {
+                        "config.yaml": yaml.safe_dump(
+                            {
+                                "oidc": {
+                                    "role_mappings": {
+                                        "platform-admin": "platform_admin"
+                                    }
+                                }
+                            }
+                        )
+                    },
+                }
+            ]
+            example.chmod(0o600)
+            ROTATION._ensure_access_resource_gateway(application, example)
+            config = yaml.safe_load(application[0]["data"]["config.yaml"])
+            self.assertEqual(
+                config["oidc"]["role_mappings"]["platform_admin"],
+                "platform_admin",
+            )
+
+    def test_access_rotation_rejects_conflicting_platform_admin_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            example = root / "access-auth.example.yaml"
+            example.write_text(
+                "resource_gateway:\n"
+                "  base_uri: https://resource-service:9448/\n",
+                encoding="utf-8",
+            )
+            application = [
+                {
+                    "apiVersion": "v1",
+                    "kind": "ConfigMap",
+                    "metadata": {"name": "access-service-config"},
+                    "data": {
+                        "config.yaml": yaml.safe_dump(
+                            {
+                                "oidc": {
+                                    "role_mappings": {
+                                        "platform-admin": "platform_admin",
+                                        "platform_admin": "teacher",
+                                    }
+                                }
+                            }
+                        )
+                    },
+                }
+            ]
+            example.chmod(0o600)
+            with self.assertRaisesRegex(
+                ROTATION.RotationError, "LW_NATS_ROTATION_CONTRACT_INVALID"
+            ):
+                ROTATION._ensure_access_resource_gateway(application, example)
+
     def test_rotation_preserves_workloads_account_and_replaces_every_client(
         self,
     ) -> None:

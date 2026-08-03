@@ -247,7 +247,7 @@ def _dump_bundle(path: Path, documents: list[dict[str, Any]]) -> None:
 def _ensure_access_resource_gateway(
     application_bundle: list[dict[str, Any]], example_path: Path
 ) -> None:
-    """Apply the reviewed non-secret Resource gateway contract to Access."""
+    """Apply the reviewed Access aliases and Resource gateway contract."""
     try:
         example_config = yaml.safe_load(
             _contract_file(example_path).read_text(encoding="utf-8")
@@ -262,6 +262,13 @@ def _ensure_access_resource_gateway(
             config["resource_gateway"] = resource_gateway
         elif existing != resource_gateway:
             raise RotationError("LW_NATS_ROTATION_CONTRACT_INVALID")
+        oidc = config.get("oidc")
+        role_mappings = oidc.get("role_mappings") if isinstance(oidc, dict) else None
+        if not isinstance(role_mappings, dict) or role_mappings.get("platform-admin") != "platform_admin":
+            raise RotationError("LW_NATS_ROTATION_CONTRACT_INVALID")
+        if "platform_admin" in role_mappings and role_mappings["platform_admin"] != "platform_admin":
+            raise RotationError("LW_NATS_ROTATION_CONTRACT_INVALID")
+        role_mappings["platform_admin"] = "platform_admin"
         access["data"]["config.yaml"] = yaml.safe_dump(
             config, sort_keys=False, allow_unicode=False
         )
