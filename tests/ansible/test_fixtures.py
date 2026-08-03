@@ -412,6 +412,27 @@ class AnsibleFixtureTests(unittest.TestCase):
             tasks,
         )
 
+    def test_sprint2_application_rejects_stale_nats_ca_and_incomplete_evaluation_binding(self) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Select reviewed NATS and Evaluation configuration objects", tasks)
+        self.assertIn("sprint2_application_bundle_nats_ca_sha256", tasks)
+        self.assertIn("sprint2_application_remote_nats_ca_sha256", tasks)
+        self.assertIn(
+            "sprint2_application_bundle_nats_ca_sha256 == sprint2_application_remote_nats_ca_sha256",
+            tasks,
+        )
+        self.assertIn(
+            "sprint2_application_evaluation_configuration.coordinator.workerRegistryPullConfigFile",
+            tasks,
+        )
+        self.assertIn("SPRINT2_APPLICATION_CONFIGURATION_BINDING_INVALID", tasks)
+        self.assertLess(
+            tasks.index("Require reviewed configuration bindings before any cluster mutation"),
+            tasks.index("Atomically deploy the immutable Sprint 2 profile"),
+        )
+
     def test_sprint2_application_preinstalls_evaluation_runner_default_deny(
         self,
     ) -> None:

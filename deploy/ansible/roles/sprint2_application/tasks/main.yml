@@ -96,6 +96,7 @@
 - name: Validate remote application tools and credentials
   ansible.builtin.stat:
     path: "{{ item }}"
+    checksum_algorithm: sha256
   loop:
     - "{{ sprint2_application_kubeconfig }}"
     - "{{ sprint2_application_kubectl }}"
@@ -211,6 +212,43 @@
          | from_yaml_all
          | selectattr('oidc', 'defined')
          | first }}
+  no_log: true
+
+- name: Select reviewed NATS and Evaluation configuration objects
+  ansible.builtin.set_fact:
+    sprint2_application_control_secret_objects: >-
+      {{ sprint2_application_configuration_objects
+         | selectattr('kind', 'equalto', 'Secret')
+         | selectattr('metadata.name', 'equalto', 'control-service-secrets')
+         | list }}
+    sprint2_application_evaluation_config_objects: >-
+      {{ sprint2_application_configuration_objects
+         | selectattr('kind', 'equalto', 'ConfigMap')
+         | selectattr('metadata.name', 'equalto', 'evaluation-service-config')
+         | list }}
+  no_log: true
+
+- name: Parse reviewed Evaluation configuration and NATS CA binding
+  ansible.builtin.set_fact:
+    sprint2_application_evaluation_configuration: >-
+      {{ (sprint2_application_evaluation_config_objects | first).data['config.yaml']
+         | from_yaml }}
+    sprint2_application_bundle_nats_ca_sha256: >-
+      {{ ((sprint2_application_control_secret_objects | first).data['nats-ca.pem']
+          | b64decode) | hash('sha256') }}
+    sprint2_application_remote_nats_ca_sha256: >-
+      {{ lookup('ansible.builtin.file', sprint2_application_nats_ca_file) | hash('sha256') }}
+  no_log: true
+
+- name: Require reviewed configuration bindings before any cluster mutation
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_control_secret_objects | length == 1
+      - sprint2_application_evaluation_config_objects | length == 1
+      - sprint2_application_bundle_nats_ca_sha256 == sprint2_application_remote_nats_ca_sha256
+      - sprint2_application_evaluation_configuration.coordinator.workerRegistryPullConfigFile is string
+      - sprint2_application_evaluation_configuration.coordinator.workerRegistryPullConfigFile is match('^/etc/labweaver/secrets/[^/]+$')
+    fail_msg: SPRINT2_APPLICATION_CONFIGURATION_BINDING_INVALID
   no_log: true
 
 - name: Validate immutable package identity
