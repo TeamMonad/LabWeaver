@@ -195,6 +195,9 @@ class ResourceAcceptanceProfileTests(unittest.TestCase):
         self.assertIn("service/postgres", module)
         self.assertIn("tunnel.terminate()", module)
         self.assertIn("RESOURCE_APPLICATION_POSTGRES_TUNNEL_CONFLICT", module)
+        self.assertIn("canonical_forward_service_active", module)
+        self.assertIn("labweaver-postgres-forward.service", module)
+        self.assertIn("15432:5432", module)
         self.assertIn("labweaver_postgres_apply:", tasks)
         resource_bundle_module = (
             ROOT / "deploy/ansible/library/labweaver_resource_bundle_apply.py"

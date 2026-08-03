@@ -43,6 +43,49 @@ def local_port_ready() -> bool:
         return connection.connect_ex(("127.0.0.1", 15432)) == 0
 
 
+def canonical_forward_service_active() -> bool:
+    """Return whether the reviewed, persistent forward service is active.
+
+    A listener on the bootstrap port is not sufficient evidence to reuse it:
+    accepting an arbitrary process here would allow a stale or unrelated
+    tunnel to receive database credentials.  The service unit is installed by
+    the deployment role and its ExecStart is checked for the exact, fixed
+    Kubernetes service and port-forward tuple before it can be reused.
+    """
+    try:
+        active = subprocess.run(
+            ["/usr/bin/systemctl", "is-active", "labweaver-postgres-forward.service"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+            timeout=3,
+        )
+        if active.returncode != 0 or active.stdout.strip() != "active":
+            return False
+        command = subprocess.run(
+            [
+                "/usr/bin/systemctl",
+                "show",
+                "--property=ExecStart",
+                "--value",
+                "labweaver-postgres-forward.service",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+            timeout=3,
+        )
+        normalized = command.stdout.replace(r"\x20", " ")
+        required = ("kubectl", "port-forward", "service/postgres", "15432:5432")
+        return command.returncode == 0 and all(token in normalized for token in required)
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def process_diagnostic(process: subprocess.Popen[str], fallback: str) -> str:
     output = ""
     if process.stderr is not None:
@@ -71,29 +114,34 @@ def main() -> None:
     service = module.params["service"]
     if not SERVICE.fullmatch(service):
         fail(module, "RESOURCE_APPLICATION_POSTGRES_SERVICE_INVALID")
+    tunnel: subprocess.Popen[str] | None = None
     if local_port_ready():
-        fail(module, "RESOURCE_APPLICATION_POSTGRES_TUNNEL_CONFLICT")
-
-    tunnel = subprocess.Popen(
-        [
-            "/usr/bin/kubectl", "--kubeconfig", str(kubeconfig), "--namespace", "labweaver-data",
-            "port-forward", "service/postgres", "15432:5432",
-        ],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    try:
-        deadline = time.monotonic() + 20
-        while time.monotonic() < deadline:
-            if local_port_ready():
-                break
-            if tunnel.poll() is not None:
-                fail(module, process_diagnostic(tunnel, "RESOURCE_APPLICATION_POSTGRES_TUNNEL_UNAVAILABLE"))
-            time.sleep(0.2)
-        else:
+        if not canonical_forward_service_active():
+            fail(module, "RESOURCE_APPLICATION_POSTGRES_TUNNEL_CONFLICT")
+    else:
+        if canonical_forward_service_active():
             fail(module, "RESOURCE_APPLICATION_POSTGRES_TUNNEL_UNAVAILABLE")
+        tunnel = subprocess.Popen(
+            [
+                "/usr/bin/kubectl", "--kubeconfig", str(kubeconfig), "--namespace", "labweaver-data",
+                "port-forward", "service/postgres", "15432:5432",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    try:
+        if tunnel is not None:
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                if local_port_ready():
+                    break
+                if tunnel.poll() is not None:
+                    fail(module, process_diagnostic(tunnel, "RESOURCE_APPLICATION_POSTGRES_TUNNEL_UNAVAILABLE"))
+                time.sleep(0.2)
+            else:
+                fail(module, "RESOURCE_APPLICATION_POSTGRES_TUNNEL_UNAVAILABLE")
 
         result = subprocess.run(
             [str(psql), f"service={service}", "--no-psqlrc", "--file", str(sql_file)],
@@ -111,7 +159,7 @@ def main() -> None:
     except subprocess.TimeoutExpired:
         fail(module, "RESOURCE_APPLICATION_ACCESS_SEED_TIMEOUT")
     finally:
-        if tunnel.poll() is None:
+        if tunnel is not None and tunnel.poll() is None:
             tunnel.terminate()
             try:
                 tunnel.wait(timeout=5)
