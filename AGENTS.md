@@ -182,9 +182,16 @@ manifest hash、Run ID、testflight Run ID、尝试次数、终态和稳定 diag
   `LW_EXECUTION_LEDGER_ROOT_MISSING` 阻断。
 - 同一环境同一 operation 同时只能有一个租约；发现运行中的锁、损坏账本或无法确认
   的旧进程时，只能只读检查并转为 `Blocked`，不得启动第二个实例。
-- Resource replay 每个候选最多 1 次；应用 reconcile 最多 2 次（首次和幂等重放）。
+- Resource replay 每个候选最多 1 次，且同一 `operation + environment` 的所有候选
+  合计最多 3 次；应用 reconcile 每个候选最多 2 次（首次和幂等重放），同一
+  `operation + environment` 的所有候选合计也最多 3 次。package 使用稳定的
+  operation 名称，release label 只进入候选配置 hash，避免改名 release 无限绕过总预算。
   相同 diagnostic 只有在有新观测和根因修复、且通过低成本回归检查后才能重试一次；
-  不得用新 Run ID、旧 package 或改名报告绕过预算。
+  不得用新 commit、Run ID、release label、旧 package 或改名报告绕过预算。
+- operation-wide 预算耗尽时必须返回 `LW_EXECUTION_OPERATION_BUDGET_EXHAUSTED`，
+  保留账本和现场并转为 `Blocked`；不得删除账本、切换 ledger root 或通过新环境变量
+  静默开启第四次 connected cycle。只有 Owner 在独立维护窗口完成只读审计后，才能
+  创建带原因、影响和回滚说明的后续 Issue/新验收环境。
 - package/deploy/replay 超时后必须先确认原进程终态和集群状态；无法确认时按
   `unknown`/`Blocked` 处理。账本终态写入失败同样阻断后续写操作。
 - 开发期可以复用经验证的组件/层缓存，但不得改变 connected 验收身份；Release

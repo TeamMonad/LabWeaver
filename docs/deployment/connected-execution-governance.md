@@ -41,18 +41,23 @@ Owner 先做只读进程、Helm、Ansible 和集群状态检查。
 
 ## 固定预算
 
-同一候选、同一环境按下表执行：
+同一候选、同一环境按下表执行；账本同时限制同一 `operation + environment`
+跨不同 commit、release label 或私有 locator 形成的新候选总数。这样修复一个问题
+不会把 connected 测试变成无限的新候选循环。
 
-| 操作 | 最大尝试 | 失败后的动作 |
-| --- | ---: | --- |
-| package | 1 | 同一 source/config/release 只允许一次；失败后必须修复并产生新候选 |
-| Resource replay | 1 | 记录 diagnostic；无新根因修复不得重放 |
-| application reconcile | 2 | 第一次部署和一次幂等重放；第二次仍失败即 Blocked |
-| 其他 deploy/reset | 1 | 只读核对，创建责任域 Issue |
+| 操作 | 单候选最大尝试 | operation 总预算 | 失败后的动作 |
+| --- | ---: | ---: | --- |
+| package | 1 | 3 | 同一 source/config/release 只允许一次；失败后必须修复并产生新候选；第四个候选直接阻断 |
+| Resource replay | 1 | 3 | 记录 diagnostic；无新根因修复不得重放；第四个候选直接阻断 |
+| application reconcile | 2 | 3 | 第一次部署和一次幂等重放；第二次仍失败即 Blocked，跨候选累计第三次后停止 |
+| 其他 deploy/reset | 1 | 1 | 只读核对，创建责任域 Issue |
 
 每次尝试必须在同一账本中记录前置检查、唯一根因假设、实际状态变化、证据 locator、
-终态和下一步。外部连接瞬时失败只允许一次有界只读复核；超时先读取原进程，不得
-直接再开新 Run ID。
+终态和下一步。账本的 operation 名称必须跨 release label 稳定；release label、source
+commit、package/deployment/locator hash 进入候选键，而不是创建新的预算文件。外部连接
+瞬时失败只允许一次有界只读复核；超时先读取原进程，不得直接再开新 Run ID。operation
+总预算耗尽返回 `LW_EXECUTION_OPERATION_BUDGET_EXHAUSTED`，必须停止写操作并登记
+`Blocked`。
 
 ## 开发期缓存与发布 pin
 

@@ -571,7 +571,12 @@ fn package_command(args: &PackageArgs) -> Result<(), AppError> {
         let source_commit = git_output(&root, ["rev-parse", "HEAD"])?;
         let component_lock_hash = file_sha256(&root.join("deploy/versions.lock.yml"))?;
         let migration_catalog_hash = file_sha256(&root.join("migrations/catalog.yaml"))?;
-        let configuration_sha256 = identity_hash(&[&component_lock_hash, &migration_catalog_hash]);
+        let configuration_sha256 = identity_hash(&[
+            &component_lock_hash,
+            &migration_catalog_hash,
+            profile,
+            &args.release,
+        ]);
         let run_id = format!(
             "pkg-{}-{}-{}",
             args.env,
@@ -587,7 +592,11 @@ fn package_command(args: &PackageArgs) -> Result<(), AppError> {
         let lease = execution_ledger::acquire(
             &root_path,
             execution_ledger::ExecutionIdentity {
-                operation: format!("package-{profile}-{}", args.release),
+                // Keep the ledger operation stable across release labels. The
+                // release label participates in configuration_sha256 above, so
+                // distinct packages remain distinct candidates while the
+                // operation-wide cycle budget still prevents endless retries.
+                operation: format!("package-{profile}"),
                 environment: args.env.clone(),
                 source_commit,
                 configuration_sha256: Some(configuration_sha256),
@@ -597,6 +606,7 @@ fn package_command(args: &PackageArgs) -> Result<(), AppError> {
                 testflight_run_id: None,
             },
             1,
+            3,
         )
         .map_err(|error| AppError::ExecutionLedger {
             code: error.diagnostic_code(),
@@ -1220,14 +1230,14 @@ fn run_infrastructure_with_package(
 }
 
 #[cfg(target_os = "linux")]
-fn execution_budget(command: &str) -> Option<u32> {
+fn execution_budget(command: &str) -> Option<(u32, u32)> {
     let command = command.to_ascii_lowercase();
     if command.contains("resource replay") {
-        Some(1)
+        Some((1, 3))
     } else if command.contains("application") {
-        Some(2)
+        Some((2, 3))
     } else if command.contains("deploy") || command.contains("reset") {
-        Some(1)
+        Some((1, 1))
     } else {
         None
     }
@@ -1245,7 +1255,7 @@ fn begin_execution_ledger(
     package_manifest: Option<&Path>,
     extra_environment: &[(&str, String)],
 ) -> Result<Option<execution_ledger::ExecutionLease>, AppError> {
-    let Some(max_attempts) = execution_budget(command) else {
+    let Some((max_attempts, max_operation_attempts)) = execution_budget(command) else {
         return Ok(None);
     };
     let package_sha256 = package_manifest.map(|path| file_sha256(path)).transpose()?;
@@ -1281,6 +1291,7 @@ fn begin_execution_ledger(
             testflight_run_id: Some(testflight_run_id.to_owned()),
         },
         max_attempts,
+        max_operation_attempts,
     )
     .map(Some)
     .map_err(|error| AppError::ExecutionLedger {

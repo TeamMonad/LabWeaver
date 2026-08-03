@@ -29,10 +29,14 @@ cargo xtask package --env demo --release sprint2 --yes
 ```
 
 The connected controller reserves one package attempt for the exact
-`source_commit + component-lock + migration-catalog + release` identity. A
-failed or completed package cannot be started again with the same identity;
-use a repaired commit or an explicitly new release candidate after the ledger
-and the BuildKit process have been inspected.
+`source_commit + component-lock + migration-catalog + profile + release` identity.
+The ledger operation is stable across release labels and also enforces a total
+three-candidate package budget for the environment. A failed or completed
+package cannot be started again with the same identity, and a fourth candidate
+is blocked instead of extending the test cycle indefinitely. Use BuildKit cache
+for development iterations; after the operation budget is exhausted, inspect
+the ledger and open an explicitly approved new validation window rather than
+deleting the ledger or changing its root.
 
 Before packaging, run the non-destructive `sprint2-buildkit` adoption with
 `sprint2_buildkit_controller_enabled=true`, an exact router-local kubeconfig source, and explicit

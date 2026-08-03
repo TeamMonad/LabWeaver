@@ -36,6 +36,7 @@ pub enum LedgerError {
     InProgress,
     DuplicateAttempt,
     AttemptBudgetExhausted,
+    OperationBudgetExhausted,
 }
 
 impl LedgerError {
@@ -48,6 +49,7 @@ impl LedgerError {
             Self::InProgress => "LW_EXECUTION_IN_PROGRESS",
             Self::DuplicateAttempt => "LW_EXECUTION_ATTEMPT_DUPLICATE",
             Self::AttemptBudgetExhausted => "LW_EXECUTION_ATTEMPT_BUDGET_EXHAUSTED",
+            Self::OperationBudgetExhausted => "LW_EXECUTION_OPERATION_BUDGET_EXHAUSTED",
         }
     }
 }
@@ -88,12 +90,18 @@ enum EntryState {
 }
 
 /// Acquire the single controller operation lock and reserve one bounded attempt.
+///
+/// `max_attempts` limits retries for one exact candidate. `max_operation_attempts`
+/// limits all candidates in this operation ledger, so changing a commit, release
+/// label, or locator cannot turn a bounded validation into an unbounded loop.
 pub fn acquire(
     root: &Path,
     identity: ExecutionIdentity,
     max_attempts: u32,
+    max_operation_attempts: u32,
 ) -> Result<ExecutionLease, LedgerError> {
     if max_attempts == 0
+        || max_operation_attempts == 0
         || identity.operation.trim().is_empty()
         || identity.environment.trim().is_empty()
     {
@@ -130,6 +138,10 @@ pub fn acquire(
     if entries.iter().any(|entry| entry.attempt_key == attempt_key) {
         let _ = fs::remove_file(&lock_path);
         return Err(LedgerError::DuplicateAttempt);
+    }
+    if entries.len() >= usize::try_from(max_operation_attempts).map_err(|_| LedgerError::Corrupt)? {
+        let _ = fs::remove_file(&lock_path);
+        return Err(LedgerError::OperationBudgetExhausted);
     }
     let candidate_attempts = entries
         .iter()
@@ -260,10 +272,14 @@ mod tests {
     use tempfile::tempdir;
 
     fn identity(run_id: &str) -> ExecutionIdentity {
+        identity_with_source(run_id, "a")
+    }
+
+    fn identity_with_source(run_id: &str, source: &str) -> ExecutionIdentity {
         ExecutionIdentity {
             operation: "resource-replay".to_owned(),
             environment: "demo".to_owned(),
-            source_commit: "a".repeat(40),
+            source_commit: source.repeat(40),
             configuration_sha256: Some("sha256:configuration".to_owned()),
             package_sha256: Some("sha256:package".to_owned()),
             deployment_sha256: Some("sha256:deployment".to_owned()),
@@ -275,9 +291,9 @@ mod tests {
     #[test]
     fn concurrent_execution_is_rejected_without_second_process() {
         let root = tempdir().expect("tempdir");
-        let first = acquire(root.path(), identity("run-one"), 1).expect("first lease");
+        let first = acquire(root.path(), identity("run-one"), 1, 3).expect("first lease");
         assert!(matches!(
-            acquire(root.path(), identity("run-two"), 1),
+            acquire(root.path(), identity("run-two"), 1, 3),
             Err(LedgerError::InProgress)
         ));
         first
@@ -288,27 +304,43 @@ mod tests {
     #[test]
     fn failed_attempt_can_be_repaired_once_but_not_repeated_forever() {
         let root = tempdir().expect("tempdir");
-        let first = acquire(root.path(), identity("run-one"), 2).expect("first lease");
+        let first = acquire(root.path(), identity("run-one"), 2, 3).expect("first lease");
         first
             .finish(false, Some("LW_TEST_BLOCKED"))
             .expect("finish");
-        let second = acquire(root.path(), identity("run-two"), 2).expect("repair lease");
+        let second = acquire(root.path(), identity("run-two"), 2, 3).expect("repair lease");
         second.finish(true, None).expect("finish");
         assert!(matches!(
-            acquire(root.path(), identity("run-three"), 2),
+            acquire(root.path(), identity("run-three"), 2, 3),
             Err(LedgerError::AttemptBudgetExhausted)
+        ));
+    }
+
+    #[test]
+    fn operation_budget_stops_new_candidates_after_three_cycles() {
+        let root = tempdir().expect("tempdir");
+        for (run_id, source) in [("run-one", "a"), ("run-two", "b"), ("run-three", "c")] {
+            let lease = acquire(root.path(), identity_with_source(run_id, source), 1, 3)
+                .expect("cycle lease");
+            lease
+                .finish(false, Some("LW_TEST_BLOCKED"))
+                .expect("finish");
+        }
+        assert!(matches!(
+            acquire(root.path(), identity_with_source("run-four", "d"), 1, 3),
+            Err(LedgerError::OperationBudgetExhausted)
         ));
     }
 
     #[test]
     fn exact_attempt_identity_cannot_be_reused() {
         let root = tempdir().expect("tempdir");
-        let first = acquire(root.path(), identity("run-one"), 2).expect("first lease");
+        let first = acquire(root.path(), identity("run-one"), 2, 3).expect("first lease");
         first
             .finish(false, Some("LW_TEST_BLOCKED"))
             .expect("finish");
         assert!(matches!(
-            acquire(root.path(), identity("run-one"), 2),
+            acquire(root.path(), identity("run-one"), 2, 3),
             Err(LedgerError::DuplicateAttempt)
         ));
     }
