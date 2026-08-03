@@ -386,6 +386,14 @@ class AnsibleFixtureTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("sprint2_application_access_configuration", tasks)
         self.assertIn("| from_yaml_all", tasks)
+        self.assertLess(
+            tasks.index("Parse immutable package and private configuration"),
+            tasks.index("Parse Access Service role configuration from the reviewed bundle"),
+        )
+        self.assertNotIn(
+            "sprint2_application_configuration_objects\n         | selectattr('kind'",
+            tasks.split("Parse Access Service role configuration from the reviewed bundle", 1)[0],
+        )
         self.assertIn(
             "sprint2_application_access_configuration.oidc.role_mappings.platform_admin == 'platform_admin'",
             tasks,

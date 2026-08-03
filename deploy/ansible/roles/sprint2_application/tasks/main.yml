@@ -195,6 +195,12 @@
          | from_yaml_all | list }}
     sprint2_application_access_seed: >-
       {{ lookup('ansible.builtin.file', sprint2_application_access_seed_file) | from_json }}
+    sprint2_application_configuration_bundle_sha256: >-
+      sha256:{{ sprint2_application_controller_inputs.results[4].stat.checksum }}
+  no_log: true
+
+- name: Parse Access Service role configuration from the reviewed bundle
+  ansible.builtin.set_fact:
     sprint2_application_access_configuration: >-
       {{ (
         sprint2_application_configuration_objects
@@ -205,8 +211,6 @@
          | from_yaml_all
          | selectattr('oidc', 'defined')
          | first }}
-    sprint2_application_configuration_bundle_sha256: >-
-      sha256:{{ sprint2_application_controller_inputs.results[4].stat.checksum }}
   no_log: true
 
 - name: Validate immutable package identity
