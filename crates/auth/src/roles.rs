@@ -102,4 +102,21 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn accepts_explicit_keycloak_platform_role_aliases() -> Result<(), Box<dyn std::error::Error>> {
+        let mappings = RoleMappings::parse(BTreeMap::from([
+            ("platform_admin".into(), "platform_admin".into()),
+            ("platform-admin".into(), "platform_admin".into()),
+        ]))?;
+        for keycloak_role in ["platform_admin", "platform-admin"] {
+            let roles = extract_platform_roles(
+                &json!({"realm_access":{"roles":[keycloak_role]}}),
+                &["realm_access".into(), "roles".into()],
+                &mappings,
+            )?;
+            assert!(roles.contains(&PlatformRole::PlatformAdmin));
+        }
+        Ok(())
+    }
 }

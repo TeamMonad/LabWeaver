@@ -17,6 +17,7 @@ oidc:
     teacher: teacher
     student: student
     platform_admin: platform_admin
+    platform-admin: platform_admin
   jwt_algorithms: ["RS256"]
   jwks_refresh_seconds: 600
   jwks_retry_seconds: 10
