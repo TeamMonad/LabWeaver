@@ -201,7 +201,10 @@
         | selectattr('kind', 'equalto', 'ConfigMap')
         | selectattr('metadata.name', 'equalto', 'access-service-config')
         | first
-      ).data['config.yaml'] | from_yaml }}
+      ).data['config.yaml']
+         | from_yaml_all
+         | selectattr('oidc', 'defined')
+         | first }}
     sprint2_application_configuration_bundle_sha256: >-
       sha256:{{ sprint2_application_controller_inputs.results[4].stat.checksum }}
   no_log: true

@@ -385,6 +385,7 @@ class AnsibleFixtureTests(unittest.TestCase):
             ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
         ).read_text(encoding="utf-8")
         self.assertIn("sprint2_application_access_configuration", tasks)
+        self.assertIn("| from_yaml_all", tasks)
         self.assertIn(
             "sprint2_application_access_configuration.oidc.role_mappings.platform_admin == 'platform_admin'",
             tasks,
