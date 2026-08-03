@@ -457,6 +457,10 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertNotIn("kind: BackendTLSPolicy", backend)
         self.assertNotIn("kind: CiliumNetworkPolicy", backend)
         self.assertIn("- name: web", route)
+        self.assertEqual(route.count("kind: ReferenceGrant"), 2)
+        self.assertIn("name: web", route)
+        self.assertIn("object-store", route)
+        self.assertNotIn("name: minio\n      namespace:", route)
         self.assertNotIn("-object-store\n", route)
         self.assertIn("include /etc/nginx/labweaver-conf.d/*.conf;", nginx)
 

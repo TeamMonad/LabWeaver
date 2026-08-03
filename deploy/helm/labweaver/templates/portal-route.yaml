@@ -17,11 +17,29 @@ spec:
   to:
     - group: ""
       kind: Service
-      name: {{ required "objectStoreRoute.serviceName is required" .Values.objectStoreRoute.serviceName }}
-      namespace: {{ default "labweaver-data" .Values.objectStoreRoute.serviceNamespace }}
+      name: access-service
     - group: ""
       kind: Service
-      name: access-service
+      name: web
+{{- if .Values.objectStoreRoute.enabled }}
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: {{ printf "%s-object-store" $routeName | trunc 63 | trimSuffix "-" }}
+  namespace: {{ default "labweaver-data" .Values.objectStoreRoute.serviceNamespace }}
+  labels:
+    {{- include "labweaver.labels" . | nindent 4 }}
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: {{ $routeNamespace }}
+  to:
+    - group: ""
+      kind: Service
+      name: {{ required "objectStoreRoute.serviceName is required" .Values.objectStoreRoute.serviceName }}
+{{- end }}
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
