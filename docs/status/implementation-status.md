@@ -137,6 +137,13 @@ until the ledger and cluster state are audited in a separately recorded
 validation window; deleting the ledger or changing its root is not an
 acceptable reset.
 
+At the last controller readback, `resource-application-repair --infra` had
+consumed its 3/3 operation attempts, `resource replay repair` had consumed 2/3,
+and `package-resource` had consumed 2/3. The build-gate repair is therefore
+locally verified but intentionally has not been sent through a fourth
+application cycle or an unpaired replay; doing so would bypass the shared
+environment convergence policy.
+
 `cargo xtask resource replay` is implemented locally as the only replay entry.
 It accepts private profile/authentication/deployment/package locators, validates
 their identity chain, performs the Work AgentRun and Resource public API flow,
