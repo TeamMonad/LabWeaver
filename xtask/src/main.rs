@@ -759,7 +759,10 @@ fn identity_foundation(args: &IdentityFoundationArgs) -> Result<(), AppError> {
     run_infrastructure(
         &args.environment.env,
         args.action.playbook(),
-        "identity-foundation --infra",
+        match args.action {
+            IdentityFoundationAction::Deploy => "identity-foundation-deploy --infra",
+            IdentityFoundationAction::Verify => "identity-foundation-verify --infra",
+        },
     )
 }
 
@@ -871,7 +874,7 @@ fn resource_application(args: &EnvironmentArgs) -> Result<(), AppError> {
     run_infrastructure_with_package(
         &args.env,
         "94-resource-application.yml",
-        "resource-application --infra",
+        "resource-application-repair --infra",
         Some(&package_manifest),
         &[],
     )
@@ -971,7 +974,7 @@ fn resource_replay(args: &ResourceReplayArgs) -> Result<(), AppError> {
     run_infrastructure_with_package(
         &args.env,
         "95-resource-replay.yml",
-        "resource replay",
+        "resource replay repair",
         Some(&package_manifest),
         &[
             (
@@ -1030,7 +1033,8 @@ fn validate_resource_replay_inputs_before_ledger(
     if output.status.success() {
         return Ok(());
     }
-    let diagnostic = String::from_utf8_lossy(&output.stderr)
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let diagnostic = stderr
         .lines()
         .find(|line| line.starts_with("LW_"))
         .unwrap_or("LW_RESOURCE_REPLAY_INPUT_PREFLIGHT_FAILED");
@@ -1312,7 +1316,15 @@ fn execution_budget(command: &str) -> Option<(u32, u32)> {
         Some((1, 3))
     } else if command.contains("application") {
         Some((2, 3))
-    } else if command.contains("deploy") || command.contains("reset") {
+    } else if command.contains("resource auth")
+        || command.contains("identity-foundation-deploy")
+        || command.contains("sprint2-foundation")
+        || command.contains("sprint2-buildkit")
+        || command.contains("sprint2-harbor-route")
+        || command.contains("backup")
+        || command.contains("deploy")
+        || command.contains("reset")
+    {
         Some((1, 1))
     } else {
         None
@@ -1320,6 +1332,7 @@ fn execution_budget(command: &str) -> Option<(u32, u32)> {
 }
 
 #[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
 fn begin_execution_ledger(
     environment: &str,
     command: &str,
@@ -1334,7 +1347,7 @@ fn begin_execution_ledger(
     let Some((max_attempts, max_operation_attempts)) = execution_budget(command) else {
         return Ok(None);
     };
-    let package_sha256 = package_manifest.map(|path| file_sha256(path)).transpose()?;
+    let package_sha256 = package_manifest.map(file_sha256).transpose()?;
     let deployment_sha256 = extra_environment
         .iter()
         .find(|(name, _)| *name == "LABWEAVER_RESOURCE_REPLAY_DEPLOYMENT_MANIFEST")

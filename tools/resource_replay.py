@@ -28,6 +28,17 @@ class ReplayError(Exception):
     """Stable, secret-free blocker."""
 
 
+# Tracks the fixed replay phase so an unexpected (non-ReplayError) exception can
+# still surface a stable diagnostic instead of a bare traceback that the
+# Ansible boundary cannot classify.
+_CURRENT_PHASE = "startup"
+
+
+def _phase(name: str) -> None:
+    global _CURRENT_PHASE
+    _CURRENT_PHASE = name
+
+
 def load_json(path: Path, code: str) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -231,7 +242,9 @@ def upload_manifest_sha256(files: Any) -> str:
 
 
 def run(arguments: argparse.Namespace) -> dict[str, Any]:
+    _phase("validate-inputs")
     identity = validate(arguments)
+    _phase("load-profile")
     profile = load_json(arguments.profile, "LW_RESOURCE_REPLAY_PROFILE_INVALID")
     auth = load_json(arguments.authentication, "LW_RESOURCE_REPLAY_AUTHENTICATION_INVALID")
     replay = require(profile, "replay", "LW_RESOURCE_REPLAY_PROFILE_INVALID")
@@ -240,15 +253,19 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
     material_bytes = material_path.read_bytes()
     if hashlib.sha256(material_bytes).hexdigest() != require(material, "sha256", "LW_RESOURCE_REPLAY_PROFILE_INVALID"):
         raise ReplayError("LW_RESOURCE_REPLAY_MATERIAL_HASH_MISMATCH")
+    _phase("teacher-session")
     teacher = BffClient(auth["baseUrl"], Path(auth["teacherStorageState"]), arguments.run_id, "teacher")
+    _phase("admin-session")
     admin = BffClient(auth["baseUrl"], Path(auth["platformAdminStorageState"]), arguments.run_id, "platform-admin")
     course_id = profile["courseId"]
+    _phase("policy")
     policy, _ = teacher.request(
         "POST",
         f"/api/v1/courses/{course_id}/llm-egress-policies",
         replay_policy(replay["policy"], arguments.run_id),
         "policy",
     )
+    _phase("upload")
     upload, upload_headers = teacher.request("POST", f"/api/v1/courses/{course_id}/problem-package-uploads", {
         "files": [{"path": material["relativePath"], "sizeBytes": len(material_bytes), "sha256": material["sha256"], "mediaType": material["mediaType"]}],
         "retentionPolicyRevision": 1,
@@ -257,6 +274,7 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
     if not isinstance(target, list) or len(target) != 1 or not isinstance(target[0], dict):
         raise ReplayError("LW_RESOURCE_REPLAY_UPLOAD_INVALID")
     upload_target = target[0]
+    _phase("upload-put")
     put = urllib.request.Request(upload_target["uploadUrl"], data=material_bytes, headers=upload_target.get("requiredHeaders", {}), method="PUT")
     try:
         with urllib.request.urlopen(put, timeout=30):
@@ -276,6 +294,7 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
             raise ReplayError(f"LW_RESOURCE_REPLAY_UPLOAD_HTTP_{error.code}") from error
     except OSError as error:
         raise ReplayError("LW_RESOURCE_REPLAY_UPLOAD_FAILED") from error
+    _phase("complete-upload")
     package, _ = teacher.request(
         "POST",
         f"/api/v1/courses/{course_id}/problem-package-uploads/{upload['id']}/complete",
@@ -283,11 +302,19 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
         "complete-upload",
         if_match=etag(upload_headers),
     )
+    _phase("work-agent-run")
     run_value, _ = teacher.request("POST", f"/api/v1/courses/{course_id}/work-agent-runs", {
         "packageId": package["id"], "packageRevision": package["revision"], "packageSha256": package["manifestSha256"],
         "policyId": policy["id"], "policyRevision": policy["revision"], "requestedRuntime": profile["runtimeKind"],
     }, "work-agent-run")
-    agent = teacher.poll(run_value["statusUrl"], {"succeeded"}, "agent-run")
+    _phase("agent-poll")
+    # The contract returns the agent-run view for createAgentRun/createWorkAgentRun
+    # (no operation envelope), so the polling URL is derived from the run identity
+    # instead of an undeclared statusUrl field.
+    work_run_id = require(run_value, "id", "LW_RESOURCE_REPLAY_AGENT_INVALID")
+    if not isinstance(work_run_id, str) or not work_run_id:
+        raise ReplayError("LW_RESOURCE_REPLAY_AGENT_INVALID")
+    agent = teacher.poll(f"/api/v1/courses/{course_id}/agent-runs/{work_run_id}", {"succeeded"}, "agent-run")
     tracks = require(agent, "tracks", "LW_RESOURCE_REPLAY_AGENT_INVALID")
     if not isinstance(tracks, list) or len(tracks) != 2:
         raise ReplayError("LW_RESOURCE_REPLAY_AGENT_INVALID")
@@ -296,11 +323,13 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
     evaluation_id = candidates.get("evaluation")
     if not isinstance(environment_id, str) or not isinstance(evaluation_id, str):
         raise ReplayError("LW_RESOURCE_REPLAY_AGENT_INVALID")
+    _phase("candidates")
     environment, environment_headers = teacher.request("GET", f"/api/v1/courses/{course_id}/environment-candidates/{environment_id}", None, "environment-candidate", csrf=False)
     evaluation, evaluation_headers = teacher.request("GET", f"/api/v1/courses/{course_id}/evaluation-candidates/{evaluation_id}", None, "evaluation-candidate", csrf=False)
     candidate = require(environment, "candidate", "LW_RESOURCE_REPLAY_AGENT_INVALID")
     if candidate.get("spec", {}).get("class") != "work":
         raise ReplayError("LW_RESOURCE_REPLAY_WORK_CLASS_REJECTED")
+    _phase("dual-approval")
     for label, view, headers in (("environment", environment, environment_headers), ("evaluation", evaluation, evaluation_headers)):
         candidate_value = require(view, "candidate", "LW_RESOURCE_REPLAY_AGENT_INVALID")
         teacher.request("POST", f"/api/v1/courses/{course_id}/{label}-candidates/{candidate_value['id']}/decisions", {
@@ -313,28 +342,40 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
     approval = environment.get("approvals", [])[-1] if environment.get("approvals") else None
     if not isinstance(approval, dict) or approval.get("decision") != "approved":
         raise ReplayError("LW_RESOURCE_REPLAY_APPROVAL_INVALID")
+    _phase("publish-work-release")
     release_operation, _ = teacher.request("POST", f"/api/v1/courses/{course_id}/environment-template-releases", {
         "approvalId": approval["id"], "candidateId": candidate["id"], "candidateRevision": candidate["revision"],
         "environmentSpecSha256": candidate["specSha256"], "runtimeKind": profile["runtimeKind"],
     }, "publish-work-release")
     release_view, _ = teacher.request("GET", release_operation["statusUrl"], None, "work-release", csrf=False)
     release = require(release_view, "release", "LW_RESOURCE_REPLAY_RELEASE_INVALID")
+    _phase("create-environment")
     environment, _ = teacher.request("POST", "/api/v1/environments", {"courseId": course_id, "releaseId": release["id"], "releaseVersion": release["version"], "displayLabel": "resource-acceptance"}, "create-environment")
+    _phase("environment-ready")
     observed = teacher.poll(environment["statusUrl"], {"ready"}, "environment-ready")
+    _phase("resource-request")
     request, _ = teacher.request("POST", "/api/v1/resource-requests", {
         "courseId": course_id, "projectId": replay["projectId"], "requestKey": f"resource-replay-{arguments.run_id}",
         "environmentId": observed["id"], "releaseId": release["id"], "releaseVersion": release["version"],
         "releaseSha256": release["releaseSha256"], "resources": profile["resources"], "durationSeconds": profile["durationSeconds"],
     }, "resource-request")
     resource, resource_headers = admin.request("GET", request["statusUrl"], None, "resource-request", csrf=False)
+    _phase("approve-resource")
     approval, _ = admin.request("POST", f"/api/v1/resource-requests/{resource['id']}/approve", {
         "expectedRevision": resource["revision"], "providerBinding": replay["providerBinding"], "resources": profile["resources"],
         "durationSeconds": profile["durationSeconds"], "reason": "resource-acceptance",
     }, "approve-resource")
-    lease = admin.poll(f"/api/v1/resource-leases/{approval['leaseId']}", {"active"}, "lease-active")
+    _phase("lease-lifecycle")
+    # approveResourceRequest answers a ResourceOperationAccepted; the lease identity is a
+    # declared optional field, so fail closed with a stable diagnostic when it is absent.
+    lease_id = require(approval, "leaseId", "LW_RESOURCE_REPLAY_APPROVAL_INVALID")
+    if not isinstance(lease_id, str) or not lease_id:
+        raise ReplayError("LW_RESOURCE_REPLAY_APPROVAL_INVALID")
+    lease = admin.poll(f"/api/v1/resource-leases/{lease_id}", {"active"}, "lease-active")
     renewed, renew_headers = admin.request("POST", f"/api/v1/resource-leases/{lease['id']}/renew", {"expectedRevision": lease["revision"], "durationSeconds": profile["durationSeconds"], "reason": "resource-acceptance-renew"}, "renew-lease")
     revoked, _ = admin.request("POST", f"/api/v1/resource-leases/{lease['id']}/revoke", {"expectedRevision": renewed["revision"], "reason": "resource-acceptance-revoke"}, "revoke-lease")
     admin.poll(f"/api/v1/resource-leases/{lease['id']}", {"revoked", "expired"}, "lease-terminal")
+    _phase("delete-environment")
     _, environment_headers = teacher.request(
         "GET", f"/api/v1/environments/{observed['id']}", None, "environment-before-delete", csrf=False
     )
@@ -347,6 +388,7 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
     )
     if not isinstance(delete, dict) or not isinstance(delete.get("statusUrl"), str):
         raise ReplayError("LW_RESOURCE_REPLAY_ENVIRONMENT_DELETE_INVALID")
+    _phase("environment-tombstone")
     tombstone = teacher.poll_deleted_environment(observed["id"])
     return {
         "schemaVersion": "resource-lease-replay-report.v1",
@@ -377,6 +419,13 @@ def main() -> int:
         arguments.report.chmod(0o600)
     except (ReplayInputError, ReplayError) as error:
         raise SystemExit(str(error)) from error
+    except Exception as error:
+        # Fail closed with a stable diagnostic instead of letting a bare
+        # traceback escape the Ansible boundary unclassified.  The phase label
+        # and exception type are fixed program vocabulary, not actor data.
+        raise SystemExit(
+            f"LW_RESOURCE_REPLAY_TERMINAL_FAILURE phase={_CURRENT_PHASE} exception={type(error).__name__}"
+        ) from error
     return 0
 
 

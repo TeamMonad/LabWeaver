@@ -89,3 +89,15 @@ replay 预算。这样已知的身份错配和陈旧浏览器会话不会把昂�
 
 禁止删除账本、切换旧 package、伪造成功 report、用 Fixture 替代 connected evidence，
 或通过并行部署“碰运气”。
+
+## 预算耗尽后的 Owner 续行决定（2026-08-03）
+
+`resource replay` 与 `resource-application --infra` 在 demo 的原始预算已被多个不同
+根因的失败耗尽：候选身份未绑定私有 locator、BFF 会话过期、replay driver 误用契约
+未声明的 `statusUrl` 字段。旧账本文件完整保留为审计记录，不做任何删除或改写。
+经 Owner（A）决定，根因修复提交之后启用一次性、有界的续行 operation：
+`resource replay repair` 与 `resource-application-repair --infra`。它们各自拥有独立
+的固定预算（单候选 1 次、operation 3 条），再次耗尽即阻断。该机制只允许在“每个
+失败候选都有已证实且已修复的不同根因”时使用一次；同一根因的重复尝试仍然被候选
+预算拒绝。Release Gate 不消费 repair operation 之外的旧证据，最终发布身份必须以
+同一候选完整闭合 package、application、replay 与 report。
