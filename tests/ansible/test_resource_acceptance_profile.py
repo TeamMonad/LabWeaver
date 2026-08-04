@@ -232,7 +232,6 @@ class ResourceAcceptanceProfileTests(unittest.TestCase):
         self.assertIn("labweaver-postgres-forward.service", module)
         self.assertIn("15432:5432", module)
         self.assertIn("labweaver_postgres_apply:", tasks)
-        self.assertIn("remote_tmp = /tmp/.ansible-labweaver", ansible_config)
         resource_bundle_module = (
             ROOT / "deploy/ansible/library/labweaver_resource_bundle_apply.py"
         ).read_text(encoding="utf-8")

@@ -23,3 +23,4 @@ sprint2_buildkit_controller_api_server: ""
 sprint2_buildkit_controller_api_address: ""
 sprint2_buildkit_controller_client_path: /home/rocky/.config/labweaver/package/buildkit
 sprint2_buildkit_controller_port: 1234
+ansible_remote_tmp: /tmp/.ansible-labweaver

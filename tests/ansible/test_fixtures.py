@@ -730,6 +730,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("SPRINT2_BUILDKIT_CONTROLLER_IDENTITY_INVALID", tasks)
         self.assertIn("tcp://127.0.0.1:1234", tasks)
         self.assertIn("groups['routers'] | first", defaults)
+        self.assertIn("ansible_remote_tmp: /tmp/.ansible-labweaver", defaults)
         self.assertNotIn("groups['edge_router']", defaults)
         self.assertIn("--server {{ sprint2_buildkit_controller_api_server }}", unit)
         self.assertIn("ProtectSystem=strict", unit)
