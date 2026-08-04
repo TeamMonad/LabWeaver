@@ -1148,6 +1148,8 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("replicas: {{ identity_keycloak_replicas }}", workloads)
         self.assertIn("standardFlowEnabled=false", provision_job)
         self.assertIn("directAccessGrantsEnabled=false", provision_job)
+        self.assertIn('get "realms/{{ identity_realm }}"', provision_job)
+        self.assertIn('create realms', provision_job)
         self.assertIn("keycloak: docker.io/keycloak/keycloak:26.7.0@sha256:", lock)
         self.assertIn("postgres: docker.io/library/postgres:17.6-alpine@sha256:", lock)
         self.assertIn("python_kubernetes_rpm: python3-kubernetes-34.1.0-2.el10_2", lock)

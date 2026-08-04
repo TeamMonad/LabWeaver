@@ -21,6 +21,12 @@ spec:
           args:
             - |
               /opt/keycloak/bin/kcadm.sh config credentials --server "http://{{ identity_name }}-http:8080" --realm master --user "$ADMIN_USERNAME" --password "$ADMIN_PASSWORD"
+              if ! /opt/keycloak/bin/kcadm.sh get "realms/{{ identity_realm }}" >/dev/null 2>&1; then
+                /opt/keycloak/bin/kcadm.sh create realms \
+                  -s realm="{{ identity_realm }}" -s enabled=true -s sslRequired=external \
+                  -s registrationAllowed=false -s resetPasswordAllowed=false \
+                  -s loginWithEmailAllowed=false -s bruteForceProtected=true
+              fi
               client_id=$(/opt/keycloak/bin/kcadm.sh get clients -r "{{ identity_realm }}" -q clientId="{{ identity_workload_client_id }}" --fields id --format csv --noquotes)
               if [ -z "$client_id" ]; then
                 /opt/keycloak/bin/kcadm.sh create clients -r "{{ identity_realm }}" -s clientId="{{ identity_workload_client_id }}" -s enabled=true -s publicClient=false -s serviceAccountsEnabled=true -s standardFlowEnabled=false -s directAccessGrantsEnabled=false -s fullScopeAllowed=false
