@@ -1168,6 +1168,8 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("resources: [jobs, cronjobs]", operator_rbac)
         self.assertNotIn("private-sigstore", operator_rbac)
         self.assertIn("name: labweaver-devops-admin", operator_rbac)
+        self.assertNotIn("'labweaver-demo'", operator_rbac)
+        self.assertIn("[identity_namespace, 'harbor']", operator_rbac)
         self.assertNotIn("sigstore-system", operator_rbac)
         self.assertNotIn("resources: [secrets", operator_rbac)
         self.assertNotIn(":latest", workloads)
