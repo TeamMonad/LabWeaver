@@ -7527,8 +7527,11 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "ansible-rs",
+ "async-nats",
+ "bollard",
  "clap",
  "contracts",
+ "futures-util",
  "jsonschema",
  "persistence-sqlx",
  "serde",

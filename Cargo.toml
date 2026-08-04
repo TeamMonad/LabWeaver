@@ -26,11 +26,14 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 async-trait = "0.1.88"
+async-nats = { version = "=0.45.0", default-features = false, features = ["ring", "server_2_10", "server_2_11"] }
 aws-config = { version = "=1.5.16", default-features = false, features = ["behavior-version-latest", "rt-tokio", "rustls"] }
 aws-credential-types = "=1.2.1"
 aws-sdk-s3 = { version = "=1.70.0", default-features = false, features = ["behavior-version-latest", "rt-tokio", "rustls"] }
 axum = "0.8.4"
 base64 = "0.22.1"
+bollard = "=0.19.1"
+futures-util = "0.3.31"
 cap-std = "4.0.2"
 cap-fs-ext = "4.0.2"
 chacha20poly1305 = "0.10.1"

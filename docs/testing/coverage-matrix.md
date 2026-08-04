@@ -1,5 +1,11 @@
 # Coverage Matrix
 
+Issue/PR merge evidence is the local integration gate from
+`cargo xtask test --suite integration`. Connected cluster evidence is collected
+only by the dedicated Sprint-end acceptance Issue; the rows below describe the
+full product evidence expected there and must not be used to require a cluster
+deployment for every PR.
+
 | Product path | Positive coverage | Required negative coverage | Connected exit condition |
 | --- | --- | --- | --- |
 | Teacher authoring | Keycloak login, material upload, AgentRun, two candidates, independent approval | invalid hash/schema, refusal, cancellation, cross-course or incomplete build context, unapproved release | real browser and backend share one identity |

@@ -8,6 +8,9 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+async-nats.workspace = true
+bollard.workspace = true
+futures-util.workspace = true
 clap = { version = "4.5.40", features = ["derive"] }
 sha2 = "0.10"
 contracts = { path = "../crates/contracts" }

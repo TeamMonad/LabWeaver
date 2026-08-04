@@ -90,7 +90,7 @@ status:
 - 保留与任务无关的工作区改动；禁止破坏性 Git 操作覆盖用户工作。
 - 大规模重构、公共 API 变更、数据迁移和实验性改动必须先创建独立分支。
 - 文档、代码、测试、报告和状态必须一致；状态结论只能由当前提交或明确工作区身份下的实际证据支持。
-- 代码在提交前必须通过格式、lint、typecheck、单元测试和契约测试；PR 合入前必须通过集成测试、E2E 测试和 Release Gate。确保不影响在线 CI、测试和演示环境的可用性。
+- 代码在提交前必须通过格式、lint、typecheck、单元测试和契约测试；Issue 对应 PR 的合并门禁以本地集成测试通过为准。集群部署、connected E2E 与 Release Gate 只在 Sprint 结束时的专门验收 Issue 中执行，不作为每个 Issue/PR 的合并前置条件。
 
 ## 4. 模块边界与所有权
 
@@ -135,15 +135,22 @@ status:
 2. **定义**：记录目标、非目标、接口、失败矩阵、证据等级、验收标准和需要同步的文档。
 3. **设计**：公共契约先于实现；跨域或高风险决策写 ADR；安全与数据边界必须显式。
 4. **实现**：完成真实主路径、负向行为、可观测性、清理/恢复和文档，不交付 smoke-only 或 fixture-only 替代品。
-5. **验证**：依次执行格式/静态检查、单元、负向、Contract、集成、真实 Container/VM/Job、E2E、部署验证和 Release Gate。
+5. **验证**：Issue 开发阶段依次执行格式/静态检查、单元、负向、Contract 和本地集成测试；真实 Container/VM/Job、connected E2E、部署验证和 Release Gate 归入 Sprint 结束时的专门验收 Issue。
 6. **对账**：同步状态、测试矩阵、coverage、ADR/API/Schema、部署手册、限制和 blocker。
 
 任何失败、超时、依赖缺失、报告无效或构建身份不匹配都必须保留为明确 blocker。不得用局部通过、旧缓存、重命名报告或人工口头确认替代。
 
+### 8.1 Sprint 结束集群证据边界
+
+普通 Issue/PR 不得为了合并、Review 或 Verify 在共享集群中启动部署、replay、connected E2E 或 Release Gate。每个 Sprint 只由一个明确范围的 Sprint 结束验收 Issue 执行集群证据验证；该 Issue 冻结 commit、deployment manifest、Migration catalog、镜像 digest 集合和 Run ID，并集中承载真实 Container/KubeVirt、connected Playwright、Ansible Verify 与 Release Gate 证据。部署尝试预算、attempt ledger、停止条件和人工接管规则只在该 Sprint 验收 Issue 内适用。
+
 ## 9. 测试与证据
 
+- 普通 Issue/PR 的合并证据止于同一候选身份下通过的本地集成测试和相应诊断报告；不得为了普通 Issue 的合并在共享集群中启动部署、replay 或 connected E2E。
+- 每个 Sprint 只由明确命名和范围的 Sprint 结束验收 Issue 执行集群证据验证。该 Issue 冻结 commit、manifest、migration catalog、镜像 digest 集合和 Run ID，并集中承载真实 Container/KubeVirt、connected Playwright、Ansible Verify 与 Release Gate 证据。
+- 本地集成、Fixture、静态检查和单元测试不能冒充集群证据；集群证据也不能回填为普通 Issue 的本地合并门禁。
+
 - 日常状态不再为每项能力维护 E0-E4 标签。状态只写清 `planned`、`implemented`、`verified` 或 `blocked`，并附当前构建身份、实际测试或报告和限制。
-- Fixture、静态检查和单元测试不能证明真实集群行为；集成、浏览器和真实部署证据必须分别表述。
 - Sprint 2 发布判断必须在同一 commit、deployment manifest、Migration catalog、镜像 digest 集合和 Run ID 下闭合 Container 与真实 KubeVirt 两条路径。
 - 重要功能必须覆盖正常、空、边界、超大、非法、重复、冲突、越权、版本不兼容、Provider 不可用、IO/网络失败、超时、取消、重试、并发、乱序、恢复和资源清理。
 - 失败路径必须验证无部分提交、无错误评分、无越权访问、无可发布产物和无敏感信息泄露。
@@ -181,7 +188,7 @@ Release Gate 是发布前唯一权威入口，必须输出版本化、machine-re
 - 创建或更新 PR 前，必须先将当前分支 rebase 到最新 `origin/develop`；禁止带有过期 develop 基线或未说明 merge 拓扑的 PR。
 - 作者创建或更新 PR 后，必须使用 `gh pr edit <pr-number> --add-reviewer <github-login>` 显式请求主 Reviewer；不得仅依赖 CODEOWNERS 的自动路由。PR 描述必须列出 Reviewer、验收人、风险等级与是否可 auto-merge。
 - 常规 PR 合入 `develop` 时，一名匹配 CODEOWNERS 的人类批准即可满足 GitHub 审批门禁。高风险路径（Contract、Schema、Migration、权限/安全、评分、Agent Tool、CRD）必须获得 A+B 两名人类批准；涉及测试、部署或运行证据时，D 必须完成 Verify。高风险 PR 禁止 auto-merge，由 A 在全部门禁通过后手动 squash。
-- 只有目标为 `develop`、非 Draft、关联 Issue 标记 `risk:low`、未修改高风险路径、已有匹配 CODEOWNERS 的人类批准、所有必需 CI 通过且所有 Review Thread 已解决的低风险 PR，作者才可执行 `gh pr merge --auto --squash`。`main` 永不启用 auto-merge；Release PR 维持两名批准、D Verify、Release Gate 与人工 squash。
+- 只有目标为 `develop`、非 Draft、关联 Issue 标记 `risk:low`、未修改高风险路径、已有匹配 CODEOWNERS 的人类批准、本地集成测试门禁通过且所有 Review Thread 已解决的低风险 PR，作者才可执行 `gh pr merge --auto --squash`。`main` 永不启用 auto-merge；Release PR 维持两名批准、D Verify、Release Gate 与人工 squash。集群证据只属于 Sprint 结束验收 Issue。
 - 2026-07-13 后不增加微服务，2026-07-16 后不增加 Runner 类型，2026-07-20 后不增加用户功能；突破冻结点必须由架构师记录新的范围决策和影响。
 - 一个 Issue 连续两天未完成必须拆分或降级；阻塞超过 4 小时必须登记 `Blocked`、负责人和解除条件。
 - P1 不得占用 P0 交付时间。核心优先级为：真实 KubeVirt → Environment 闭环 → Collector → EvaluationSpec → OJ Runner → Linux Probe → AccessGrant → Playwright → Ansible → 文档与演示。
@@ -302,8 +309,8 @@ Issue 进入 `Done` 前必须满足：
 - [ ] 实现仅覆盖 Issue 约定范围；
 - [ ] 代码已合入目标分支；
 - [ ] 至少一名人类 Reviewer 批准；
-- [ ] 所有必需 CI 检查通过；
-- [ ] 单元、契约、集成或 E2E 测试按要求完成；
+- [ ] 本地集成测试门禁通过并保留同一候选身份的报告；
+- [ ] 单元、契约及与改动相关的本地测试按要求完成；
 - [ ] 验收条件逐项勾选；
 - [ ] API、事件、Schema、部署或用户文档已同步；
 - [ ] 有测试日志、截图、Trace、报告或演示记录；
@@ -552,7 +559,7 @@ Relates to #123
 合入 `develop` 必须满足：
 
 - 至少 1 名人类 Reviewer 批准；
-- 必需 CI 检查全部通过；
+- 本地集成测试门禁全部通过；
 - 所有 Review Thread 已解决；
 - 无未说明的 Breaking Change；
 - 测试和文档已同步；
@@ -560,7 +567,7 @@ Relates to #123
 
 常规 PR 由一名匹配 CODEOWNERS 的人类批准即可满足 GitHub 审批门禁，但作者仍须显式请求主 Reviewer。以下高风险路径必须由 A 与 B 两名人类批准：破坏性 API 或事件、YAML/JSON Schema、数据库 Migration、CRD/Operator 调谐、身份/RBAC/AccessGrant/网络策略、Agent Tool/工具权限、Evaluation Runner/Checker/Aggregator、数值评分、Secret/凭据/数据删除、Kyverno/安全上下文/镜像策略。涉及测试、部署或运行证据时，D 必须完成 Verify。
 
-仅当 PR 的目标为 `develop`、不是 Draft、关联 Issue 带有 `risk:low`、未涉及上述高风险路径、已有匹配 CODEOWNERS 的人类批准、必需 CI 全绿且所有 Review Thread 已解决时，作者可启用 `gh pr merge --auto --squash`。高风险 PR 禁止 auto-merge，由 A 在全部门禁通过后手动 squash。
+仅当 PR 的目标为 `develop`、不是 Draft、关联 Issue 带有 `risk:low`、未涉及上述高风险路径、已有匹配 CODEOWNERS 的人类批准、本地集成测试门禁通过且所有 Review Thread 已解决时，作者可启用 `gh pr merge --auto --squash`。高风险 PR 禁止 auto-merge，由 A 在全部门禁通过后手动 squash。集群证据不属于普通 PR 合并门禁。
 
 以下变更必须由两名核心成员评审：
 

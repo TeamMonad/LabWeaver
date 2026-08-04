@@ -106,6 +106,8 @@ identity_foundation:
 test_images:
   busybox: docker.io/library/busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
   cirros: quay.io/kubevirt/cirros-container-disk-demo@sha256:e2a45211b1f4a73e40b5356e503786c6dc7b5fb003b5d1d4ffa0a450a3dfdefe
+  kind_node: kindest/node:v1.35.0@sha256:452d707d4862f52530247495d180205e029056831160e22870e37e3f6c1ac31f
+  registry: docker.io/library/registry:3.0.0@sha256:6c5666b861f3505b116bb9aa9b25175e71210414bd010d92035ff64018f9457e
 sprint2_vm_base:
   binding: ubuntu-24.04-v1
   release: ubuntu-24.04
