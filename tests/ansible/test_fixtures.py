@@ -733,6 +733,13 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertNotIn("groups['edge_router']", defaults)
         self.assertIn("--server {{ sprint2_buildkit_controller_api_server }}", unit)
         self.assertIn("ProtectSystem=strict", unit)
+        tunnel_tasks = tasks.split(
+            "- name: Ensure the router-owned BuildKit tunnel is enabled and started",
+            maxsplit=1,
+        )[1].split("- name: Require the router-owned BuildKit endpoint", maxsplit=1)[0]
+        self.assertIn("enabled: true", tunnel_tasks)
+        self.assertIn("state: started", tunnel_tasks)
+        self.assertIn("daemon_reload: true", tunnel_tasks)
         self.assertNotIn("state: absent", tasks)
 
     def test_sprint2_application_adopts_portal_route_and_shared_ssh_service(self) -> None:

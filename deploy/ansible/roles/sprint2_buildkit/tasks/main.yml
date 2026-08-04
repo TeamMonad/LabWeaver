@@ -407,6 +407,16 @@
   ansible.builtin.meta: flush_handlers
   when: sprint2_buildkit_controller_enabled | bool
 
+- name: Ensure the router-owned BuildKit tunnel is enabled and started
+  ansible.builtin.systemd_service:
+    name: labweaver-buildkit-port-forward.service
+    enabled: true
+    state: started
+    daemon_reload: true
+  delegate_to: "{{ sprint2_buildkit_controller_host }}"
+  become: true
+  when: sprint2_buildkit_controller_enabled | bool
+
 - name: Require the router-owned BuildKit endpoint
   ansible.builtin.wait_for:
     host: 127.0.0.1
