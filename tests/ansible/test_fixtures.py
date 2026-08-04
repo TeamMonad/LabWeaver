@@ -742,6 +742,13 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("daemon_reload: true", tunnel_tasks)
         self.assertNotIn("state: absent", tasks)
 
+    def test_cluster_addons_use_the_control_plane_kubeconfig(self) -> None:
+        tasks = (ROOT / "deploy/ansible/roles/cluster_addons/tasks/main.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(tasks.count("kubeconfig: /etc/kubernetes/admin.conf"), 3)
+        self.assertEqual(tasks.count("KUBECONFIG: /etc/kubernetes/admin.conf"), 2)
+
     def test_sprint2_application_adopts_portal_route_and_shared_ssh_service(self) -> None:
         tasks = (
             ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
