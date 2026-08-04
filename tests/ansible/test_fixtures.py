@@ -77,6 +77,10 @@ class AnsibleFixtureTests(unittest.TestCase):
             ROOT / "docs/deployment/ansible.md"
         ).read_text(encoding="utf-8"))
         self.assertIn("SPRINT2_FOUNDATION_BUNDLE_KEYS_INVALID", tasks)
+        self.assertIn("sprint2_foundation_postgres_admin_role", tasks)
+        self.assertIn("kubernetes.core.k8s_exec", tasks)
+        self.assertIn("SPRINT2_FOUNDATION_POSTGRES_ADMIN_ROLE_INVALID", tasks)
+        self.assertIn("sprint2_foundation_postgres_database", tasks)
         self.assertIn("Delete exact pod blocked on a superseded failed revision", tasks)
         self.assertIn("item.status.currentRevision != item.status.updateRevision", tasks)
         self.assertIn("kind: StatefulSet", workloads)
@@ -1273,6 +1277,11 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("DROP SCHEMA IF EXISTS", baseline)
         self.assertIn("0001_sprint2_baseline.sql", baseline)
         self.assertEqual(baseline.count("0001_roles_and_schemas.sql"), 2)
+        bootstrap = (ROOT / "migrations/bootstrap/0001_roles_and_schemas.sql").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("current_user = 'postgres-admin'", bootstrap)
+        self.assertIn("GRANT %I TO %I", bootstrap)
         self.assertIn("SET ROLE lw_{{ domain }}_owner", baseline)
         self.assertIn("schema_migrations", baseline)
         self.assertIn("catalog_sha256", baseline)
