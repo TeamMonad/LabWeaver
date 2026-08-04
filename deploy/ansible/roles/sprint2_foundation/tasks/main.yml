@@ -262,7 +262,7 @@
   when:
     - (sprint2_foundation_postgres_admin_readback.stdout | default('') | trim) != ''
     - (sprint2_foundation_postgres_admin_readback.stdout | default('') | trim)
-      != (sprint2_foundation_postgres_admin_role ~ '|f|t|t|t|t')
+      != (sprint2_foundation_postgres_admin_role ~ '|false|true|true|true|true')
   register: sprint2_foundation_postgres_admin_repair
   changed_when: true
   no_log: true
@@ -301,6 +301,6 @@
   ansible.builtin.assert:
     that:
       - (sprint2_foundation_postgres_admin_verified.stdout | trim)
-        == (sprint2_foundation_postgres_admin_role ~ '|f|t|t|t|t')
+        == (sprint2_foundation_postgres_admin_role ~ '|false|true|true|true|true')
     fail_msg: SPRINT2_FOUNDATION_POSTGRES_ADMIN_ROLE_INVALID
   no_log: true
