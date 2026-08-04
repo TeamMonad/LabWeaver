@@ -156,7 +156,7 @@ The sanitized repair readback is retained at
 with readback digest
 `sha256:23a10e75f622577d29a04872e869a397d56b5d2c7431d666046e28ffc8d821f`.
 
-The current source identity is `489997d2`. Local `xtask` tests (38 passed),
+The current source identity is `40318900`. Local `xtask` tests (38 passed),
 strict `xtask` Clippy, format and diff checks pass; the Resource replay input
 tests (13 passed) also cover the asynchronous Container build gate. Retained connected
 deployment evidence is bound to the earlier `611013a2` source and cannot be
