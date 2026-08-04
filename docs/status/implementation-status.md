@@ -151,8 +151,12 @@ The retained Harbor Trivy deployment had a real NFS `root_squash`/kubelet
 `fsGroupChangePolicy: OnRootMismatch` with `fsGroup: 10000` before readiness;
 the live StatefulSet was reconciled and read back `1/1 Ready`. This repair is
 part of the source-of-truth role and is covered by the Ansible fixture test.
+The sanitized repair readback is retained at
+`remote://edge-router/var/lib/labweaver/cleanup/resource142-clean/resource142-trivy-fsgroup-repair-20260804T040500Z/manifest.sha256`
+with readback digest
+`sha256:23a10e75f622577d29a04872e869a397d56b5d2c7431d666046e28ffc8d821f`.
 
-The current source identity is `7fedd1fa`. Local `xtask` tests (38 passed),
+The current source identity is `ebf531d3`. Local `xtask` tests (38 passed),
 strict `xtask` Clippy, format and diff checks pass; the Resource replay input
 tests (13 passed) also cover the asynchronous Container build gate. Retained connected
 deployment evidence is bound to the earlier `611013a2` source and cannot be
