@@ -11,11 +11,19 @@ spec:
   policyTypes: [Ingress, Egress]
   ingress:
     - from:
-        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ identity_namespace }}}}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: "{{ identity_namespace }}"
         - ipBlock: {cidr: 10.20.0.0/16}
   egress:
-    - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ identity_namespace }}}}]
-    - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}}]
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: "{{ identity_namespace }}"
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
       ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
 ---
 apiVersion: cilium.io/v2
