@@ -1110,6 +1110,9 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("HARBOR_CHART_ARCHIVE_IDENTITY_INVALID", harbor)
         self.assertIn("database_permissions", harbor)
         self.assertIn("harbor_component_resources", harbor)
+        self.assertIn("Wait for the Harbor Trivy StatefulSet object before applying the NFS policy", harbor)
+        self.assertIn("fsGroupChangePolicy: OnRootMismatch", harbor)
+        self.assertIn("Reconcile the Harbor Trivy NFS fsGroup policy before readiness", harbor)
         self.assertIn("chart_archive_sha256", lock)
         self.assertNotIn("busybox:1.36", lock)
 

@@ -124,20 +124,49 @@ Release Gate v2 requires a Resource deployment manifest, immutable
 remain legacy and cannot close #142. A same-identity Resource replay on a clean
 validation environment remains required before this is marked verified.
 
-The current source identity is `7d389c51`. Local `xtask` tests (38 passed),
+### Authorized destructive clean-validation reset (2026-08-04)
+
+The user explicitly authorized destruction of LabWeaver application state and
+legacy credentials so the next validation can start from a clean environment.
+Run `resource142-clean-20260804T032949Z` completed on `edge-router`. Its
+sanitized root-only manifest is retained at the controlled locator
+`remote://edge-router/var/lib/labweaver/cleanup/resource142-clean/resource142-clean-20260804T032949Z/manifest.sha256`
+with digest
+`sha256:c8ae79fa2acf114726f06dbb097e0b5c7284800fde460f1fccbc0032abf4ea33`;
+33 recorded files all verified `OK`.
+
+The reset removed the LabWeaver application namespace and auxiliary runtime
+namespaces, truncated all six business schemas while preserving migration
+tables, removed NATS state and application credentials, removed the Workloads
+Keycloak realm and the LabWeaver Harbor project, and removed the old private
+bundle, credential registry, package kubeconfig and execution ledger. PostgreSQL,
+MinIO, Harbor, Keycloak, Kubernetes/KubeVirt and their foundation storage were
+retained. No Secret values, JWTs, private keys or user material are included in
+the manifest. Previous connected reports and attempt-ledger conclusions are
+therefore invalid for the next candidate; only evidence produced after the new
+package, deployment and Resource replay may close #142.
+
+The retained Harbor Trivy deployment had a real NFS `root_squash`/kubelet
+`applyFSGroup` blocker. The Harbor Ansible role now applies
+`fsGroupChangePolicy: OnRootMismatch` with `fsGroup: 10000` before readiness;
+the live StatefulSet was reconciled and read back `1/1 Ready`. This repair is
+part of the source-of-truth role and is covered by the Ansible fixture test.
+
+The current source identity is `7fedd1fa`. Local `xtask` tests (38 passed),
 strict `xtask` Clippy, format and diff checks pass; the Resource replay input
 tests (13 passed) also cover the asynchronous Container build gate. Retained connected
 deployment evidence is bound to the earlier `611013a2` source and cannot be
-reused for this source identity. The controller ledger records six historical
-Resource-application attempts (two succeeded) and two Resource-replay
-failures; no replay report was produced. The operation-wide ledger budget now
-returns `LW_EXECUTION_OPERATION_BUDGET_EXHAUSTED` instead of allowing more
-candidates to extend the test cycle. No further connected write is authorized
-until the ledger and cluster state are audited in a separately recorded
-validation window; deleting the ledger or changing its root is not an
-acceptable reset.
+reused for this source identity. The next connected candidate must be built
+from the clean state above and produce a new package, deployment, replay and
+Gate identity.
 
-At the last controller readback, `resource-application-repair --infra` had
+The attempt counts and `LW_EXECUTION_OPERATION_BUDGET_EXHAUSTED` diagnostic
+below are historical pre-reset observations only. The user explicitly
+authorized their destruction as part of the clean-validation reset; they are
+retained here as a bounded explanation of the prior failure, not as an active
+ledger or permission to reuse old evidence.
+
+Before the reset, `resource-application-repair --infra` had
 consumed its 3/3 operation attempts, `resource replay repair` had consumed 2/3,
 and `package-resource` had consumed 2/3. The build-gate repair is therefore
 locally verified but intentionally has not been sent through a fourth
@@ -148,10 +177,10 @@ environment convergence policy.
 It accepts private profile/authentication/deployment/package locators, validates
 their identity chain, performs the Work AgentRun and Resource public API flow,
 and emits a root-only sanitized report. `cargo xtask demo replay` now requires
-and invokes it before live Playwright and Gate evaluation. The controller has
-private profile, authenticated replay state, Resource deployment manifests and
-package locators, but the available deployment and replay evidence is bound to
-the earlier source and is either failed or non-current. This path remains
+and invokes it before live Playwright and Gate evaluation. The clean reset
+removed all previous private profile, authentication, Resource deployment
+manifest, package locator and replay report inputs; a new controlled bundle
+must be provisioned before connected execution. This path remains
 `implemented; connected verification blocked`; no local or stale report is
 treated as connected evidence.
 
