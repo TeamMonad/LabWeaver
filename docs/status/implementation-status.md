@@ -90,6 +90,23 @@ mdev extension resource, so GPU capacity remains an explicit negative
 capability for this environment. These observations are diagnostic only and
 cannot satisfy the same-identity connected Resource replay or Release Gate v2.
 
+### Development-cluster redeploy feasibility (2026-08-05)
+
+The latest recorded read-only preflight shows that the LabWeaver application
+surface is already absent while the shared foundation is retained. A second
+"thorough clean" followed by deployment is therefore not currently eligible
+from #142/#147: the connected operation budget is exhausted, the remote checkout
+has no package/deployment identity for this source, the Resource NATS signing
+source is unavailable, and the cluster publishes no GPU or mdev capacity.
+
+No ledger deletion, ledger-root rotation, stale-package reuse or fourth
+connected cycle is allowed. A future clean redeploy requires an Owner-approved
+acceptance window under #126 (or the separate v1 deployment project #148), a
+fresh source/package/deployment identity, a reviewed private bundle including
+the NATS signing source, and a new read-only capacity/credential preflight.
+Until those conditions are recorded, only local/CI and read-only preflight are
+permitted; this assessment is not deployment or Release Gate evidence.
+
 ## Legacy Sprint 1 and Sprint 2 connected result (superseded)
 
 The table below is retained only as historical context for the previous
