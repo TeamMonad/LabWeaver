@@ -252,11 +252,16 @@
 - name: Derive sanitized storage facts
   ansible.builtin.set_fact:
     foundation_ownership_preflight_pvc_count: >-
-      {{ (foundation_ownership_preflight_pvcs_raw.stdout | from_json).items | length }}
+      {{ foundation_ownership_preflight_pvcs['items'] | length }}
     foundation_ownership_preflight_pv_claims: >-
-      {{ (foundation_ownership_preflight_pvs_raw.stdout | from_json).items
+      {{ foundation_ownership_preflight_pvs['items']
          | map(attribute='spec.claimRef.namespace', default='') | list
          | difference(['']) | unique | sort }}
+  vars:
+    foundation_ownership_preflight_pvcs: >-
+      {{ foundation_ownership_preflight_pvcs_raw.stdout | from_json }}
+    foundation_ownership_preflight_pvs: >-
+      {{ foundation_ownership_preflight_pvs_raw.stdout | from_json }}
 
 - name: Block destruction when a persistent volume claims an unknown namespace
   ansible.builtin.assert:

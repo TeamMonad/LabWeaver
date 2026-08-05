@@ -138,14 +138,14 @@
       {{ {'schema_version': 'labweaver.foundation-clean-pre-destruction.v1',
           'run_id': foundation_clean_redeploy_run_id,
           'cluster_uid': foundation_clean_redeploy_cluster_uid.stdout | trim,
-          'namespaces': (foundation_clean_redeploy_namespaces_raw.stdout | from_json).items
+          'namespaces': (foundation_clean_redeploy_namespaces_raw.stdout | from_json)['items']
             | selectattr('metadata.name', 'in', foundation_clean_redeploy_namespaces)
             | map(attribute='metadata.name') | list | sort,
           'helm_releases': (foundation_clean_redeploy_helm_raw.stdout | default('null', true) | from_json)
             | default([], true)
             | selectattr('namespace', 'in', foundation_clean_redeploy_namespaces)
             | map(attribute='name') | list | sort,
-          'persistent_volume_claims': (foundation_clean_redeploy_pvcs_raw.stdout | from_json).items
+          'persistent_volume_claims': (foundation_clean_redeploy_pvcs_raw.stdout | from_json)['items']
             | selectattr('metadata.namespace', 'in', foundation_clean_redeploy_namespaces)
             | map(attribute='metadata.name') | list | sort}
          | to_nice_json }}
@@ -229,17 +229,17 @@
     fail_msg: FOUNDATION_CLEAN_READBACK_FAILED
   vars:
     foundation_clean_redeploy_present_namespaces: >-
-      {{ (foundation_clean_redeploy_namespace_readback.stdout | from_json).items
+      {{ (foundation_clean_redeploy_namespace_readback.stdout | from_json)['items']
          | map(attribute='metadata.name') | list }}
     foundation_clean_redeploy_remaining_namespaces: >-
       {{ foundation_clean_redeploy_namespaces
          | intersect(foundation_clean_redeploy_present_namespaces) }}
     foundation_clean_redeploy_residual_pvcs: >-
-      {{ (foundation_clean_redeploy_pvc_readback.stdout | from_json).items
+      {{ (foundation_clean_redeploy_pvc_readback.stdout | from_json)['items']
          | selectattr('metadata.namespace', 'in', foundation_clean_redeploy_namespaces)
          | map(attribute='metadata.name') | list }}
     foundation_clean_redeploy_residual_pv_claims: >-
-      {{ (foundation_clean_redeploy_pv_readback.stdout | from_json).items
+      {{ (foundation_clean_redeploy_pv_readback.stdout | from_json)['items']
          | map(attribute='spec.claimRef.namespace', default='') | list
          | difference(['']) | unique
          | intersect(foundation_clean_redeploy_namespaces) }}
