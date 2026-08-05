@@ -45,6 +45,9 @@ Sprint-end acceptance Issue.
   `HEAD`; a dirty tree is never release evidence.
 - Connected cluster identity: not present in this checkout
 - Resource package/deployment/replay identity: not generated for this source
+- Local Resource replay identity envelope: implemented; it records only
+  repository-relative locators, SHA-256 hashes, immutable Resource image and
+  configuration-bundle identity; no private values are emitted
 - Formal Release Gate v2: blocked until same-identity Resource connected replay
 
 The Docker Desktop local validation profile is deliberately separate from the

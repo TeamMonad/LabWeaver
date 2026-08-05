@@ -169,6 +169,9 @@ work. Run `cargo xtask local preflight --profile local-hostpath` or invoke
 locator. The command records a sanitized
 `local-connected-non-release` report and fails with stable blockers for missing
 KubeVirt/CDI, `nfs-rwx`, a ready single node, or `ECNU_API_KEY`.
+The report also binds its source/run identity; Resource local replay adds
+repository-relative, hashed input locators and the immutable Resource image
+reference without exposing authentication material.
 
 The local overlay may render a Container-only hostpath adapter, but it cannot
 prove RWX semantics, VM lifecycle, GPU capacity, or the formal Resource Gate.
