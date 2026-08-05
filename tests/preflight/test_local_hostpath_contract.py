@@ -177,6 +177,7 @@ class LocalHostpathContractTests(unittest.TestCase):
             "ansible_core: 2.18.6",
             "ansible_lint: 25.6.1",
             "python_kubernetes: 34.1.0",
+            "python_jsonschema: 4.24.0",
             "helm: v3.21.3",
             "kubectl: v1.34.1",
         ):
