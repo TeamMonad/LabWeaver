@@ -140,6 +140,16 @@ class LocalHostpathContractTests(unittest.TestCase):
         self.assertIn("services/**", workflow)
         self.assertIn("Cargo.lock", workflow)
 
+    def test_verifier_workflow_installs_its_pinned_schema_dependency(self) -> None:
+        workflow = (ROOT / ".github/workflows/vm01a-preflight.yml").read_text(
+            encoding="utf-8"
+        )
+        requirements = (ROOT / "tools/requirements-preflight.txt").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("requirements-preflight.txt", workflow)
+        self.assertIn("jsonschema==4.24.0", requirements)
+
 
 if __name__ == "__main__":
     unittest.main()
