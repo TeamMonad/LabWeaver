@@ -54,6 +54,7 @@
 - name: Derive the namespace ownership map
   ansible.builtin.set_fact:
     foundation_ownership_preflight_namespace_map: {}
+    foundation_ownership_preflight_ownership_state: {}
 
 - name: Populate the namespace ownership map
   ansible.builtin.set_fact:
@@ -61,6 +62,23 @@
       {{ foundation_ownership_preflight_namespace_map
          | combine({item.metadata.name:
                     item.metadata.labels | default({}, true)}) }}
+    foundation_ownership_preflight_ownership_state: >-
+      {{ foundation_ownership_preflight_ownership_state
+         | combine({item.metadata.name: foundation_ownership_preflight_state}) }}
+  vars:
+    foundation_ownership_preflight_labels: >-
+      {{ item.metadata.labels | default({}, true) }}
+    foundation_ownership_preflight_partof: >-
+      {{ foundation_ownership_preflight_labels.get('app.kubernetes.io/part-of', '') }}
+    foundation_ownership_preflight_infra: >-
+      {{ foundation_ownership_preflight_labels.get('labweaver.io/infrastructure', '') }}
+    foundation_ownership_preflight_managed: >-
+      {{ foundation_ownership_preflight_labels.get('labweaver.io/managed', '') }}
+    foundation_ownership_preflight_state: >-
+      {{ 'infrastructure'
+         if foundation_ownership_preflight_partof == foundation_ownership_preflight_infrastructure_label_value
+         or foundation_ownership_preflight_infra == 'true'
+         else ('managed' if foundation_ownership_preflight_managed == 'true' else 'none') }}
   loop: >-
     {{ (foundation_ownership_preflight_namespaces_raw.stdout | from_json)['items'] }}
   loop_control:
@@ -83,11 +101,7 @@
 - name: Gate strongly labelled infrastructure namespaces
   ansible.builtin.assert:
     that:
-      - (foundation_ownership_preflight_namespace_map[item]
-         | default({))['app.kubernetes.io/part-of'] | default('')
-        == foundation_ownership_preflight_infrastructure_label_value
-        or (foundation_ownership_preflight_namespace_map[item]
-            | default({))['labweaver.io/infrastructure'] | default('') == 'true'
+      - foundation_ownership_preflight_ownership_state[item] | default('none') == 'infrastructure'
     fail_msg: FOUNDATION_OWNERSHIP_LABEL_MISSING
   loop: "{{ foundation_ownership_preflight_label_required_namespaces }}"
   loop_control:
@@ -96,13 +110,8 @@
 - name: Gate application namespaces on an explicit LabWeaver ownership mark
   ansible.builtin.assert:
     that:
-      - (foundation_ownership_preflight_namespace_map[item]
-         | default({))['app.kubernetes.io/part-of'] | default('')
-        == foundation_ownership_preflight_infrastructure_label_value
-        or (foundation_ownership_preflight_namespace_map[item]
-            | default({))['labweaver.io/infrastructure'] | default('') == 'true'
-        or (foundation_ownership_preflight_namespace_map[item]
-            | default({))['labweaver.io/managed'] | default('') == 'true'
+      - foundation_ownership_preflight_ownership_state[item] | default('none')
+        in ['infrastructure', 'managed']
     fail_msg: FOUNDATION_OWNERSHIP_UNCONFIRMED
   loop: >-
     {{ foundation_ownership_preflight_namespaces
