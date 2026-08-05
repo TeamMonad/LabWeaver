@@ -42,6 +42,10 @@ foundation_ownership_preflight_helm_release_allowlist:
 foundation_ownership_preflight_keycloak_namespace: keycloak-system
 foundation_ownership_preflight_keycloak_ca_bundle: labweaver-identity-ca-bundle
 foundation_ownership_preflight_keycloak_ownership_confirmed: false
+# Operator-confirmed ownership override for namespaces created by LabWeaver
+# playbooks that never applied an ownership label. Every entry is recorded in
+# the sanitized inventory for audit; the default empty list fails closed.
+foundation_ownership_preflight_operator_confirmed_namespaces: []
 # Stable label gate that marks LabWeaver-owned infrastructure objects.
 foundation_ownership_preflight_infrastructure_label: app.kubernetes.io/part-of
 foundation_ownership_preflight_infrastructure_label_value: labweaver-infrastructure

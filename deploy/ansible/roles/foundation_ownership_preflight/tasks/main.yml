@@ -9,6 +9,8 @@
       - foundation_ownership_preflight_label_required_namespaces | difference(foundation_ownership_preflight_namespaces) | length == 0
       - foundation_ownership_preflight_protected_namespaces | intersect(foundation_ownership_preflight_namespaces) | length == 0
       - foundation_ownership_preflight_keycloak_namespace in foundation_ownership_preflight_namespaces
+      - foundation_ownership_preflight_operator_confirmed_namespaces | unique | length == foundation_ownership_preflight_operator_confirmed_namespaces | length
+      - foundation_ownership_preflight_operator_confirmed_namespaces | difference(foundation_ownership_preflight_namespaces) | length == 0
     fail_msg: FOUNDATION_OWNERSHIP_INPUT_INVALID
 
 - name: Stat ownership preflight tools
@@ -112,6 +114,7 @@
     that:
       - foundation_ownership_preflight_ownership_state[item] | default('none')
         in ['infrastructure', 'managed']
+        or item in foundation_ownership_preflight_operator_confirmed_namespaces
     fail_msg: FOUNDATION_OWNERSHIP_UNCONFIRMED
   loop: >-
     {{ foundation_ownership_preflight_namespaces
@@ -294,6 +297,8 @@
           'helm_release_namespaces': foundation_ownership_preflight_helm_releases
             | map(attribute='namespace') | list | sort,
           'external_pod_namespaces': foundation_ownership_preflight_external_namespaces,
+          'operator_confirmed_namespaces': foundation_ownership_preflight_operator_confirmed_namespaces | sort,
+          'ownership_states': foundation_ownership_preflight_ownership_state | to_json,
           'persistent_volume_claim_count': foundation_ownership_preflight_pvc_count,
           'persistent_volume_claim_namespaces': foundation_ownership_preflight_pv_claims}
          | to_nice_json }}
