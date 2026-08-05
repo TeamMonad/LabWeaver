@@ -183,6 +183,7 @@ class LocalHostpathContractTests(unittest.TestCase):
         ):
             self.assertIn(fragment, versions_lock)
         self.assertIn("helm_version: 3.21.3", controller_lock)
+        self.assertIn("python_jsonschema_version: 4.24.0", controller_lock)
         self.assertIn(
             "helm_linux_amd64_sha256: 35da09ba0716fc7c3cd63b6b31ee380a9c7662e95f29ab0e4ae962420afd315b",
             controller_lock,
