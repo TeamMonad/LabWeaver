@@ -316,6 +316,18 @@ class ResourceAcceptanceProfileTests(unittest.TestCase):
         self.assertIn('"container-build"', replay_driver)
         self.assertIn('"94-resource-replay-auth.yml"', xtask)
 
+    def test_resource_deployment_manifest_uses_contract_image_projection(self) -> None:
+        validator = (ROOT / "tools/validate_resource_replay_inputs.py").read_text(
+            encoding="utf-8"
+        )
+        tasks = (ROOT / "deploy/ansible/roles/resource_application/tasks/main.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('set(deployment_image) != {"component", "reference"}', validator)
+        self.assertIn("'component': resource_application_package.images[0].component", tasks)
+        self.assertIn("'reference': resource_application_package.images[0].reference", tasks)
+        self.assertNotIn("'image': resource_application_package.images[0]", tasks)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -162,12 +162,16 @@ pub(crate) fn run_with_identity(
 }
 
 pub(crate) fn file_identity(root: &Path, path: &Path) -> Result<Value, AppError> {
+    let canonical_root = root.canonicalize().map_err(|error| AppError::Io {
+        role: "resolve local replay repository root",
+        detail: error.to_string(),
+    })?;
     let canonical = path.canonicalize().map_err(|error| AppError::Io {
         role: "resolve local replay identity locator",
         detail: error.to_string(),
     })?;
     let relative = canonical
-        .strip_prefix(root)
+        .strip_prefix(&canonical_root)
         .map_err(|_| AppError::ReleaseGate {
             code: "LW_LOCAL_REPLAY_IDENTITY_LOCATOR_OUTSIDE_REPOSITORY",
             detail: "local replay identity locators must be relative to the repository".to_owned(),
@@ -414,8 +418,10 @@ fn relative_path(root: &Path, path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{item_count, names, ready_node_count};
+    use super::{file_identity, item_count, names, ready_node_count};
     use serde_json::json;
+    use std::fs;
+    use tempfile::tempdir;
 
     #[test]
     fn capability_probe_counts_only_ready_nodes() {
@@ -428,5 +434,28 @@ mod tests {
         assert_eq!(item_count(&value), Some(2));
         assert_eq!(ready_node_count(&value), Some(1));
         assert_eq!(names(&value), vec!["docker-desktop", "not-ready"]);
+    }
+
+    #[test]
+    fn file_identity_accepts_a_noncanonical_repository_root() -> Result<(), String> {
+        let temporary = tempdir().map_err(|error| error.to_string())?;
+        let repository = temporary.path().join("repo");
+        fs::create_dir(&repository).map_err(|error| error.to_string())?;
+        let locator = repository.join(".private").join("locator.json");
+        let parent = locator
+            .parent()
+            .ok_or_else(|| "locator parent is missing".to_owned())?;
+        fs::create_dir(parent).map_err(|error| error.to_string())?;
+        fs::write(&locator, b"synthetic locator").map_err(|error| error.to_string())?;
+        let aliased_root = temporary.path().join("repo").join("..").join("repo");
+        let identity =
+            file_identity(&aliased_root, &locator).map_err(|error| format!("{error:?}"))?;
+        assert_eq!(identity["path"], ".private/locator.json");
+        assert!(
+            identity["sha256"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("sha256:"))
+        );
+        Ok(())
     }
 }

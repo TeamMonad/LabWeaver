@@ -318,7 +318,10 @@
         'runId': resource_application_run_id,
         'packageManifestSha256': 'sha256:' ~ resource_application_inputs.results[0].stat.checksum,
         'configurationBundleSha256': resource_application_bundle_sha256,
-        'image': resource_application_package.images[0]
+        'image': {
+          'component': resource_application_package.images[0].component,
+          'reference': resource_application_package.images[0].reference
+        }
       } | to_nice_json }}
   become: true
   no_log: true

@@ -121,11 +121,16 @@ def validate_package(path: Path, source_commit: str) -> dict[str, Any]:
 
 def validate_deployment(path: Path, source_commit: str, run_id: str, package: dict[str, Any]) -> dict[str, Any]:
     deployment = json_file(regular_file(path, "LW_RESOURCE_REPLAY_DEPLOYMENT_MANIFEST_INVALID"), "LW_RESOURCE_REPLAY_DEPLOYMENT_MANIFEST_INVALID")
+    package_image = package["images"][0]
+    deployment_image = deployment.get("image")
     if (
         deployment.get("schemaVersion") != "resource-deployment-manifest.v1"
         or deployment.get("sourceCommit") != source_commit
         or deployment.get("runId") != run_id
-        or deployment.get("image") != package["images"][0]
+        or not isinstance(deployment_image, dict)
+        or set(deployment_image) != {"component", "reference"}
+        or deployment_image.get("component") != package_image.get("component")
+        or deployment_image.get("reference") != package_image.get("reference")
     ):
         raise ReplayInputError("LW_RESOURCE_REPLAY_DEPLOYMENT_MANIFEST_INVALID")
     return deployment
