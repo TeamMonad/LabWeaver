@@ -1032,7 +1032,43 @@ fn resource_replay_local(
         &source_commit,
         deployment_run_id,
     )?;
-    local_preflight::run(&root, "local-hostpath")
+    let profile = args.profile.canonicalize().map_err(|error| AppError::Io {
+        role: "resolve local Resource acceptance profile",
+        detail: error.to_string(),
+    })?;
+    let authentication = args
+        .authentication
+        .canonicalize()
+        .map_err(|error| AppError::Io {
+            role: "resolve local Resource replay authentication locator",
+            detail: error.to_string(),
+        })?;
+    let deployment_manifest =
+        args.deployment_manifest
+            .canonicalize()
+            .map_err(|error| AppError::Io {
+                role: "resolve local Resource deployment manifest",
+                detail: error.to_string(),
+            })?;
+    let configuration_bundle_sha256 = deployment
+        .get("configurationBundleSha256")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| is_sha256_digest(value))
+        .ok_or(AppError::ReleaseGate {
+            code: "LW_LOCAL_REPLAY_DEPLOYMENT_MANIFEST_INVALID",
+            detail: "Resource deployment manifest must contain a valid configurationBundleSha256"
+                .to_owned(),
+        })?;
+    let identity = serde_json::json!({
+        "kind": "resource-replay-plan",
+        "profile": local_preflight::file_identity(&root, &profile)?,
+        "authentication": local_preflight::file_identity(&root, &authentication)?,
+        "deploymentManifest": local_preflight::file_identity(&root, &deployment_manifest)?,
+        "packageManifest": local_preflight::file_identity(&root, package_manifest)?,
+        "resourceImage": local_preflight::resource_image_reference(package_manifest)?,
+        "configurationBundleSha256": configuration_bundle_sha256,
+    });
+    local_preflight::run_with_identity(&root, "local-hostpath", Some(identity))
 }
 
 fn resource_replay_connected(
@@ -1169,6 +1205,14 @@ fn require_regular_locator(role: &'static str, path: &Path) -> Result<(), AppErr
         return Err(AppError::InvalidArgument { role });
     }
     Ok(())
+}
+
+fn is_sha256_digest(value: &str) -> bool {
+    value.len() == "sha256:".len() + 64
+        && value.starts_with("sha256:")
+        && value["sha256:".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn require_infrastructure(args: &EnvironmentArgs, command: &'static str) -> Result<(), AppError> {

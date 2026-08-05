@@ -27,6 +27,20 @@ def validate(report_path: Path) -> None:
         raise ValueError("LW_LOCAL_PREFLIGHT_REPORT_SCHEMA_INVALID")
     if report.get("releaseEligible") is not False or report.get("mode") != "local-hostpath":
         raise ValueError("LW_LOCAL_PREFLIGHT_REPORT_RELEASE_BOUNDARY_INVALID")
+    identity = report.get("identity")
+    if not isinstance(identity, dict):
+        raise ValueError("LW_LOCAL_PREFLIGHT_REPORT_IDENTITY_INVALID")
+    if identity.get("sourceCommit") != report.get("sourceCommit") or identity.get("runId") != report.get("runId"):
+        raise ValueError("LW_LOCAL_PREFLIGHT_REPORT_IDENTITY_MISMATCH")
+    gaps = report.get("capabilityGaps")
+    blockers = report.get("blockers")
+    if not isinstance(gaps, list) or not isinstance(blockers, list) or not set(gaps).issubset(blockers):
+        raise ValueError("LW_LOCAL_PREFLIGHT_REPORT_CAPABILITY_GAPS_INVALID")
+    if identity.get("kind") == "resource-replay-plan":
+        for field in ("profile", "authentication", "deploymentManifest", "packageManifest"):
+            locator = identity.get(field)
+            if not isinstance(locator, dict) or locator.get("path", "").startswith(("/", "\\")):
+                raise ValueError("LW_LOCAL_PREFLIGHT_REPORT_LOCATOR_INVALID")
 
 
 def main() -> int:

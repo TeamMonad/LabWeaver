@@ -5,6 +5,7 @@ use std::path::Path;
 use std::process::Command;
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::AppError;
@@ -13,6 +14,22 @@ const PROFILE: &str = "local-hostpath";
 const REPORT_SCHEMA: &str = "local-connected-non-release.v1";
 
 pub(crate) fn run(root: &Path, profile: &str) -> Result<(), AppError> {
+    run_with_identity(root, profile, None)
+}
+
+/// Run the read-only local probe and attach a sanitized replay identity when
+/// the caller has already validated a Resource replay input set. The identity
+/// is deliberately JSON-shaped so this module cannot accidentally gain access
+/// to credentials or private payloads.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the local preflight boundary assembles one complete sanitized report"
+)]
+pub(crate) fn run_with_identity(
+    root: &Path,
+    profile: &str,
+    replay_identity: Option<Value>,
+) -> Result<(), AppError> {
     if profile != PROFILE {
         return Err(AppError::InvalidArgument {
             role: "local preflight profile",
@@ -20,7 +37,18 @@ pub(crate) fn run(root: &Path, profile: &str) -> Result<(), AppError> {
     }
 
     let source_commit = git_commit(root)?;
-    let run_id = Uuid::now_v7();
+    let run_id = replay_identity
+        .as_ref()
+        .and_then(|value| value.get("runId"))
+        .and_then(Value::as_str)
+        .map(|value| {
+            Uuid::parse_str(value).map_err(|error| AppError::ReleaseGate {
+                code: "LW_LOCAL_REPLAY_IDENTITY_INVALID",
+                detail: format!("local replay runId is invalid: {error}"),
+            })
+        })
+        .transpose()?
+        .unwrap_or_else(Uuid::now_v7);
     let mut blockers = Vec::new();
     let (docker_context, kubernetes_context) = probe_contexts(&mut blockers);
     let cluster = probe_cluster(&mut blockers);
@@ -38,6 +66,41 @@ pub(crate) fn run(root: &Path, profile: &str) -> Result<(), AppError> {
         .crd_names
         .iter()
         .any(|name| name == "datavolumes.cdi.kubevirt.io" || name == "cdis.cdi.kubevirt.io");
+    let capability_gaps = blockers
+        .iter()
+        .filter(|code| {
+            matches!(
+                code.as_str(),
+                "LW_LOCAL_PREFLIGHT_NFS_RWX_UNAVAILABLE"
+                    | "LW_LOCAL_PREFLIGHT_KUBEVIRT_UNAVAILABLE"
+                    | "LW_LOCAL_PREFLIGHT_CDI_UNAVAILABLE"
+                    | "LW_LOCAL_PREFLIGHT_HOSTPATH_UNAVAILABLE"
+                    | "LW_LOCAL_PREFLIGHT_SINGLE_READY_NODE_REQUIRED"
+                    | "LW_LOCAL_PREFLIGHT_DOCKER_CONTEXT_INVALID"
+                    | "LW_LOCAL_PREFLIGHT_KUBERNETES_CONTEXT_INVALID"
+                    | "LW_LOCAL_PREFLIGHT_ECNU_KEY_MISSING"
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let identity = replay_identity
+        .map(|mut value| {
+            let object = value.as_object_mut().ok_or(AppError::ReleaseGate {
+                code: "LW_LOCAL_REPLAY_IDENTITY_INVALID",
+                detail: "local replay identity must be a JSON object".to_owned(),
+            })?;
+            object.insert("sourceCommit".to_owned(), json!(source_commit));
+            object.insert("runId".to_owned(), json!(run_id));
+            Ok::<Value, AppError>(value)
+        })
+        .transpose()?
+        .unwrap_or_else(|| {
+            json!({
+                "kind": "local-preflight",
+                "sourceCommit": source_commit,
+                "runId": run_id,
+            })
+        });
 
     let report = json!({
         "schemaVersion": REPORT_SCHEMA,
@@ -58,7 +121,9 @@ pub(crate) fn run(root: &Path, profile: &str) -> Result<(), AppError> {
             "cdi": cdi,
             "ecnuApiKey": ecnu_configured,
         },
+        "capabilityGaps": capability_gaps,
         "blockers": blockers,
+        "identity": identity,
     });
     let report_bytes = serde_json::to_vec_pretty(&report).map_err(|error| AppError::Io {
         role: "serialize local preflight report",
@@ -94,6 +159,58 @@ pub(crate) fn run(root: &Path, profile: &str) -> Result<(), AppError> {
             ),
         })
     }
+}
+
+pub(crate) fn file_identity(root: &Path, path: &Path) -> Result<Value, AppError> {
+    let canonical = path.canonicalize().map_err(|error| AppError::Io {
+        role: "resolve local replay identity locator",
+        detail: error.to_string(),
+    })?;
+    let relative = canonical
+        .strip_prefix(root)
+        .map_err(|_| AppError::ReleaseGate {
+            code: "LW_LOCAL_REPLAY_IDENTITY_LOCATOR_OUTSIDE_REPOSITORY",
+            detail: "local replay identity locators must be relative to the repository".to_owned(),
+        })?;
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::ParentDir | std::path::Component::RootDir
+        )
+    }) {
+        return Err(AppError::ReleaseGate {
+            code: "LW_LOCAL_REPLAY_IDENTITY_LOCATOR_INVALID",
+            detail: "local replay identity locator must not escape the repository".to_owned(),
+        });
+    }
+    let bytes = fs::read(&canonical).map_err(|error| AppError::Io {
+        role: "hash local replay identity locator",
+        detail: error.to_string(),
+    })?;
+    Ok(json!({
+        "path": relative.to_string_lossy().replace('\\', "/"),
+        "sha256": format!("sha256:{:x}", Sha256::digest(bytes)),
+    }))
+}
+
+pub(crate) fn resource_image_reference(package_manifest: &Path) -> Result<String, AppError> {
+    let bytes = fs::read(package_manifest).map_err(|error| AppError::Io {
+        role: "read local Resource package manifest",
+        detail: error.to_string(),
+    })?;
+    let manifest: Value =
+        serde_json::from_slice(&bytes).map_err(|error| AppError::ReleaseGate {
+            code: "LW_LOCAL_REPLAY_PACKAGE_MANIFEST_INVALID",
+            detail: error.to_string(),
+        })?;
+    manifest
+        .pointer("/images/0/reference")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or(AppError::ReleaseGate {
+            code: "LW_LOCAL_REPLAY_PACKAGE_MANIFEST_INVALID",
+            detail: "Resource package manifest has no immutable image reference".to_owned(),
+        })
 }
 
 #[derive(Debug, Default)]

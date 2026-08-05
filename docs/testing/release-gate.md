@@ -88,7 +88,12 @@ even if its hash is internally consistent.
 `cargo xtask local preflight --profile local-hostpath` performs only read-only
 Docker and Kubernetes probes. It writes an ignored
 `artifacts/local-replay/local-connected-non-release-<run-id>.json` report with
-the source commit, context, node/storage capabilities and stable blockers.
+the source commit, context, node/storage capabilities, explicit capability
+gaps and stable blockers. A local Resource replay report also contains a
+sanitized identity envelope: repository-relative profile, authentication,
+deployment and package locators with SHA-256 hashes, the immutable
+`resource-service` reference and configuration-bundle hash. It never contains
+cookie, token, JWT, key or user-content values.
 `cargo xtask resource replay --mode local --preflight ...` additionally checks
 the private Resource profile, authentication locator and package/deployment
 identity before running that same read-only probe.
