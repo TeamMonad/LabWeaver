@@ -48,7 +48,7 @@ Sprint-end acceptance Issue.
 - Local Resource replay identity envelope: implemented; it records only
   repository-relative locators, SHA-256 hashes, immutable Resource image and
   configuration-bundle identity; no private values are emitted
-- Formal Release Gate v2: blocked until same-identity Resource connected replay
+- Formal Release Gate v2: owned by Sprint-end acceptance Issue #126; not a per-PR deployment gate
 
 The Docker Desktop local validation profile is deliberately separate from the
 formal gate. It records a `local-connected-non-release` preflight report and
@@ -156,8 +156,11 @@ candidates, approvals, releases, requests or leases directly.
 
 Release Gate v2 requires a Resource deployment manifest, immutable
 `resource-service` identity and `resource-lease` connected evidence. v1 reports
-remain legacy and cannot close #142. A same-identity Resource replay on a clean
-validation environment remains required before this is marked verified.
+remain legacy and cannot close #142. The connected replay, real Container/VM
+evidence and Release Gate are owned exclusively by Sprint-end acceptance Issue
+#126; ordinary development PRs must stop at local and CI evidence. #142 remains
+implemented locally and cannot be marked Done or release-ready until #126
+supplies the connected evidence.
 
 ### Authorized destructive clean-validation reset (2026-08-04)
 
@@ -301,14 +304,15 @@ host; the new PostgreSQL migration and saga still require connected execution.
 
 ## Release decision
 
-Issue #142 is **implemented locally; connected verification blocked**. PR #147
-remains a Draft high-risk PR and still requires:
+Issue #142 is **implemented locally; ready for human review**. Its ordinary
+development gate is local integration, contract, Ansible/Helm render, targeted
+tests and CI evidence. Shared-cluster deployment, Resource replay, real
+Container/KubeVirt evidence, connected Playwright and Release Gate v2 are
+delegated to Sprint-end acceptance Issue #126 and must not be duplicated from
+PR #147. #142 cannot be marked Done or release-ready until #126 completes its
+frozen-identity acceptance window.
 
-1. a same-identity Resource package and deployment;
-2. Resource connected replay, real Container and KubeVirt evidence;
-3. B human review and approval for core/security changes;
-4. D connected Verify and acceptance;
-5. resolution of any resulting review threads and a final green CI readback.
-
-The author must not approve or merge the PR. No Tag, formal release or `main`
-merge is included.
+PR #147 still requires the appropriate human core/security review and resolved
+review threads; it is not a connected acceptance or release pass. The author
+must not approve or merge the PR. No Tag, formal release or `main` merge is
+included.

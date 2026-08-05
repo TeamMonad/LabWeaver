@@ -24,6 +24,9 @@ Cluster deployment, connected Playwright, Ansible Verify and Release Gate are
 not ordinary Issue/PR merge gates. One dedicated Sprint-end acceptance Issue
 freezes the release identity and owns those connected checks. Local, Fixture and
 static evidence must never be promoted to the Sprint-end cluster conclusion.
+For the current Sprint, Issue #126 is that sole acceptance owner; development
+Issues and PRs, including #142/#147, must not start shared-cluster deployment,
+Resource replay, connected E2E or Release Gate commands.
 
 Tests are grouped by the boundary they actually exercise. Reports must name the
 source identity and must not promote Fixture or static evidence to a connected
