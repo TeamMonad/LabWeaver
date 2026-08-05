@@ -1,0 +1,32 @@
+---
+# Issue #152 post-reinstall credential rotation verification.
+# Proves the old dedicated-foundation credentials are rejected, freezes the
+# sanitized new-credential registry in the remote root-only registry, and
+# emits a non-release clean-rebuild report.
+foundation_rotation_verify_run_id: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RUN_ID') }}"
+foundation_rotation_verify_source_commit: "{{ lookup('ansible.builtin.env', 'LABWEAVER_COMMIT_SHA') }}"
+foundation_rotation_verify_kubeconfig: /etc/kubernetes/admin.conf
+foundation_rotation_verify_kubectl: /usr/bin/kubectl
+foundation_rotation_verify_psql: /usr/bin/psql
+foundation_rotation_verify_nats: /usr/local/bin/nats
+foundation_rotation_verify_mc: /usr/local/bin/mc
+foundation_rotation_verify_report_root: /var/lib/labweaver/foundation-clean-redeploy
+foundation_rotation_verify_registry_root: /var/lib/labweaver/credential-registry
+foundation_rotation_verify_foundation_namespace: labweaver-data
+foundation_rotation_verify_foundation_workloads: [minio, nats, postgres]
+foundation_rotation_verify_rollout_retries: 60
+foundation_rotation_verify_rollout_delay: 5
+# Old (pre-rotation) credential locators. Every probe below must FAIL against the
+# reinstalled foundation; a successful old credential authenticates a rotation
+# failure and blocks the run.
+foundation_rotation_verify_old_postgres_service_file: ""
+foundation_rotation_verify_old_postgres_service: sprint2-admin
+foundation_rotation_verify_old_nats_server: ""
+foundation_rotation_verify_old_nats_credentials_file: ""
+foundation_rotation_verify_old_minio_alias: ""
+# Optional old Harbor robot credentials; probed only when a username is given.
+foundation_rotation_verify_old_harbor_api: ""
+foundation_rotation_verify_old_harbor_username: ""
+foundation_rotation_verify_old_harbor_password: ""
+# The sanitized registry rendered locally with tools/render_credential_registry.py.
+foundation_rotation_verify_credential_registry_file: ""

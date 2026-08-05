@@ -1,0 +1,283 @@
+---
+# Issue #152 read-only ownership preflight. Every task here is a read or a
+# local evidence write; nothing on the cluster is created, patched or deleted.
+- name: Validate ownership preflight inputs
+  ansible.builtin.assert:
+    that:
+      - foundation_ownership_preflight_run_id is match('^[a-z0-9][a-z0-9-]{2,62}$')
+      - foundation_ownership_preflight_namespaces | unique | length == foundation_ownership_preflight_namespaces | length
+      - foundation_ownership_preflight_label_required_namespaces | difference(foundation_ownership_preflight_namespaces) | length == 0
+      - foundation_ownership_preflight_protected_namespaces | intersect(foundation_ownership_preflight_namespaces) | length == 0
+      - foundation_ownership_preflight_keycloak_namespace in foundation_ownership_preflight_namespaces
+    fail_msg: FOUNDATION_OWNERSHIP_INPUT_INVALID
+
+- name: Stat ownership preflight tools
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ foundation_ownership_preflight_kubeconfig }}"
+    - "{{ foundation_ownership_preflight_kubectl }}"
+  register: foundation_ownership_preflight_tools
+
+- name: Reject missing ownership preflight tools
+  ansible.builtin.assert:
+    that: foundation_ownership_preflight_tools.results | map(attribute='stat.exists') | min
+    fail_msg: FOUNDATION_OWNERSHIP_TOOL_MISSING
+
+- name: Read the target cluster UID
+  ansible.builtin.command:
+    argv:
+      - "{{ foundation_ownership_preflight_kubectl }}"
+      - --kubeconfig
+      - "{{ foundation_ownership_preflight_kubeconfig }}"
+      - get
+      - namespace
+      - kube-system
+      - -o
+      - jsonpath={.metadata.uid}
+  register: foundation_ownership_preflight_cluster_uid
+  changed_when: false
+
+- name: Read every namespace with labels
+  ansible.builtin.command:
+    argv:
+      - "{{ foundation_ownership_preflight_kubectl }}"
+      - --kubeconfig
+      - "{{ foundation_ownership_preflight_kubeconfig }}"
+      - get
+      - namespaces
+      - -o
+      - json
+  register: foundation_ownership_preflight_namespaces_raw
+  changed_when: false
+
+- name: Derive the namespace ownership map
+  ansible.builtin.set_fact:
+    foundation_ownership_preflight_namespace_map: >-
+      {{ dict((foundation_ownership_preflight_namespaces_raw.stdout | from_json).items
+         | map(attribute='metadata.name')
+         | zip((foundation_ownership_preflight_namespaces_raw.stdout | from_json).items
+               | map(attribute='metadata.labels') | map('default', {}, true) | list)) }}
+
+- name: Require every candidate namespace to exist
+  ansible.builtin.assert:
+    that:
+      - foundation_ownership_preflight_namespaces
+        | difference(foundation_ownership_preflight_namespace_map.keys() | list) | length == 0
+    fail_msg: FOUNDATION_OWNERSHIP_NAMESPACE_MISSING
+
+- name: Require every protected shared namespace to exist untouched
+  ansible.builtin.assert:
+    that:
+      - foundation_ownership_preflight_protected_namespaces
+        | difference(foundation_ownership_preflight_namespace_map.keys() | list) | length == 0
+    fail_msg: FOUNDATION_PROTECTED_NAMESPACE_MISSING
+
+- name: Gate strongly labelled infrastructure namespaces
+  ansible.builtin.assert:
+    that:
+      - (foundation_ownership_preflight_namespace_map[item]
+         | default({))['app.kubernetes.io/part-of'] | default('')
+        == foundation_ownership_preflight_infrastructure_label_value
+        or (foundation_ownership_preflight_namespace_map[item]
+            | default({))['labweaver.io/infrastructure'] | default('') == 'true'
+    fail_msg: FOUNDATION_OWNERSHIP_LABEL_MISSING
+  loop: "{{ foundation_ownership_preflight_label_required_namespaces }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Gate application namespaces on an explicit LabWeaver ownership mark
+  ansible.builtin.assert:
+    that:
+      - (foundation_ownership_preflight_namespace_map[item]
+         | default({))['app.kubernetes.io/part-of'] | default('')
+        == foundation_ownership_preflight_infrastructure_label_value
+        or (foundation_ownership_preflight_namespace_map[item]
+            | default({))['labweaver.io/infrastructure'] | default('') == 'true'
+        or (foundation_ownership_preflight_namespace_map[item]
+            | default({))['labweaver.io/managed'] | default('') == 'true'
+    fail_msg: FOUNDATION_OWNERSHIP_UNCONFIRMED
+  loop: >-
+    {{ foundation_ownership_preflight_namespaces
+       | difference(foundation_ownership_preflight_label_required_namespaces)
+       | difference([foundation_ownership_preflight_keycloak_namespace]) }}
+  loop_control:
+    label: "{{ item }}"
+
+- name: Read the keycloak identity CA bundle ownership mark
+  ansible.builtin.command:
+    argv:
+      - "{{ foundation_ownership_preflight_kubectl }}"
+      - --kubeconfig
+      - "{{ foundation_ownership_preflight_kubeconfig }}"
+      - get
+      - configmap
+      - "{{ foundation_ownership_preflight_keycloak_ca_bundle }}"
+      - --namespace
+      - "{{ foundation_ownership_preflight_keycloak_namespace }}"
+      - -o
+      - jsonpath={.metadata.labels.labweaver\.io/authority}
+  register: foundation_ownership_preflight_keycloak_authority
+  changed_when: false
+  failed_when: false
+
+- name: Require confirmed keycloak ownership before destruction
+  ansible.builtin.assert:
+    that:
+      - foundation_ownership_preflight_keycloak_authority.rc == 0
+      - foundation_ownership_preflight_keycloak_authority.stdout | trim == 'identity-ca'
+      - foundation_ownership_preflight_keycloak_ownership_confirmed | bool
+    fail_msg: FOUNDATION_KEYCLOAK_OWNERSHIP_UNCONFIRMED
+
+- name: Read every Helm release without secret values
+  ansible.builtin.command:
+    argv:
+      - "{{ foundation_ownership_preflight_helm }}"
+      - --kubeconfig
+      - "{{ foundation_ownership_preflight_kubeconfig }}"
+      - list
+      - --all-namespaces
+      - --output
+      - json
+  register: foundation_ownership_preflight_helm_raw
+  changed_when: false
+
+- name: Derive the Helm release inventory
+  ansible.builtin.set_fact:
+    foundation_ownership_preflight_helm_releases: >-
+      {{ (foundation_ownership_preflight_helm_raw.stdout | default('null', true)
+         | from_json) | default([], true) | list }}
+
+- name: Reject concurrent Helm operations anywhere on the cluster
+  ansible.builtin.assert:
+    that:
+      - foundation_ownership_preflight_helm_releases
+        | rejectattr('status', 'equalto', 'deployed')
+        | rejectattr('status', 'equalto', 'uninstalled')
+        | list | length == 0
+    fail_msg: FOUNDATION_CONCURRENT_OPERATION_DETECTED
+
+- name: Derive dedicated Helm release identities
+  ansible.builtin.set_fact:
+    foundation_ownership_preflight_dedicated_releases: >-
+      {{ (foundation_ownership_preflight_helm_releases
+          | selectattr('namespace', 'in', foundation_ownership_preflight_namespaces)
+          | map(attribute='namespace') | list)
+         | zip(foundation_ownership_preflight_helm_releases
+               | selectattr('namespace', 'in', foundation_ownership_preflight_namespaces)
+               | map(attribute='name') | list)
+         | map('join', '/') | list }}
+    foundation_ownership_preflight_allowed_releases: >-
+      {{ (foundation_ownership_preflight_helm_release_allowlist
+          | map(attribute='namespace') | list)
+         | zip(foundation_ownership_preflight_helm_release_allowlist
+               | map(attribute='name') | list)
+         | map('join', '/') | list }}
+
+- name: Reject unknown Helm owners inside dedicated namespaces
+  ansible.builtin.assert:
+    that:
+      - foundation_ownership_preflight_dedicated_releases
+        | difference(foundation_ownership_preflight_allowed_releases) | length == 0
+    fail_msg: FOUNDATION_EXTERNAL_OWNER_DETECTED
+
+- name: Read every pod namespace for the external dependency inventory
+  ansible.builtin.command:
+    argv:
+      - "{{ foundation_ownership_preflight_kubectl }}"
+      - --kubeconfig
+      - "{{ foundation_ownership_preflight_kubeconfig }}"
+      - get
+      - pods
+      - --all-namespaces
+      - -o
+      - jsonpath={range .items[*]}{.metadata.namespace}{"\n"}{end}
+  register: foundation_ownership_preflight_pod_namespaces
+  changed_when: false
+
+- name: Derive external workload namespaces for reviewer evidence
+  ansible.builtin.set_fact:
+    foundation_ownership_preflight_external_namespaces: >-
+      {{ foundation_ownership_preflight_pod_namespaces.stdout_lines
+         | unique | sort
+         | difference(foundation_ownership_preflight_namespaces)
+         | difference(foundation_ownership_preflight_protected_namespaces) }}
+
+- name: Read persistent volume claims for the sanitized inventory
+  ansible.builtin.command:
+    argv:
+      - "{{ foundation_ownership_preflight_kubectl }}"
+      - --kubeconfig
+      - "{{ foundation_ownership_preflight_kubeconfig }}"
+      - get
+      - persistentvolumeclaims
+      - --all-namespaces
+      - -o
+      - json
+  register: foundation_ownership_preflight_pvcs_raw
+  changed_when: false
+
+- name: Read persistent volumes for the sanitized inventory
+  ansible.builtin.command:
+    argv:
+      - "{{ foundation_ownership_preflight_kubectl }}"
+      - --kubeconfig
+      - "{{ foundation_ownership_preflight_kubeconfig }}"
+      - get
+      - persistentvolumes
+      - -o
+      - json
+  register: foundation_ownership_preflight_pvs_raw
+  changed_when: false
+
+- name: Derive sanitized storage facts
+  ansible.builtin.set_fact:
+    foundation_ownership_preflight_pvc_count: >-
+      {{ (foundation_ownership_preflight_pvcs_raw.stdout | from_json).items | length }}
+    foundation_ownership_preflight_pv_claims: >-
+      {{ (foundation_ownership_preflight_pvs_raw.stdout | from_json).items
+         | map(attribute='spec.claimRef.namespace', default='') | list
+         | difference(['']) | unique | sort }}
+
+- name: Block destruction when a persistent volume claims an unknown namespace
+  ansible.builtin.assert:
+    that:
+      - foundation_ownership_preflight_pv_claims
+        | difference(foundation_ownership_preflight_namespaces)
+        | difference(foundation_ownership_preflight_protected_namespaces)
+        | difference(foundation_ownership_preflight_external_namespaces)
+        | length == 0
+    fail_msg: FOUNDATION_STORAGE_OWNERSHIP_UNCONFIRMED
+
+- name: Create the protected preflight report directory
+  ansible.builtin.file:
+    path: "{{ foundation_ownership_preflight_report_root }}/{{ foundation_ownership_preflight_run_id }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Persist the sanitized ownership inventory
+  ansible.builtin.copy:
+    dest: >-
+      {{ foundation_ownership_preflight_report_root }}/{{ foundation_ownership_preflight_run_id }}/ownership-inventory.json
+    owner: root
+    group: root
+    mode: "0600"
+    content: >-
+      {{ {'schema_version': 'labweaver.foundation-ownership-preflight.v1',
+          'run_id': foundation_ownership_preflight_run_id,
+          'cluster_uid': foundation_ownership_preflight_cluster_uid.stdout | trim,
+          'release_eligible': false,
+          'candidate_namespaces': foundation_ownership_preflight_namespaces | sort,
+          'namespace_labels': foundation_ownership_preflight_namespace_map
+            | dictsort | map('map', 'to_json') | map('join', '=') | list,
+          'protected_namespaces': foundation_ownership_preflight_protected_namespaces | sort,
+          'helm_releases': foundation_ownership_preflight_helm_releases
+            | map(attribute='name') | list | sort,
+          'helm_release_namespaces': foundation_ownership_preflight_helm_releases
+            | map(attribute='namespace') | list | sort,
+          'external_pod_namespaces': foundation_ownership_preflight_external_namespaces,
+          'persistent_volume_claim_count': foundation_ownership_preflight_pvc_count,
+          'persistent_volume_claim_namespaces': foundation_ownership_preflight_pv_claims}
+         | to_nice_json }}

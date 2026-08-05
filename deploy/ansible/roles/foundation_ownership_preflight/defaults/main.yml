@@ -1,0 +1,47 @@
+---
+# Issue #152 read-only ownership preflight for the dedicated-infrastructure
+# clean redeploy. This role never mutates cluster state; it either proves that
+# every object slated for destruction is LabWeaver-owned, or it fails closed.
+foundation_ownership_preflight_kubeconfig: /etc/kubernetes/admin.conf
+foundation_ownership_preflight_kubectl: /usr/bin/kubectl
+foundation_ownership_preflight_helm: /usr/local/bin/helm
+foundation_ownership_preflight_run_id: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RUN_ID') }}"
+foundation_ownership_preflight_report_root: /var/lib/labweaver/foundation-clean-redeploy
+# Every namespace the clean redeploy is allowed to destroy. Ownership must be
+# proven for each one before any destructive step may run.
+foundation_ownership_preflight_namespaces:
+  - labweaver-data
+  - labweaver-build
+  - labweaver-demo
+  - labweaver-evaluation
+  - labweaver-operations
+  - labweaver-system
+  - harbor
+  - keycloak-system
+# Namespaces whose ownership is proven by the strong LabWeaver infrastructure
+# label gate and must satisfy it unconditionally.
+foundation_ownership_preflight_label_required_namespaces:
+  - labweaver-data
+  - labweaver-build
+  - harbor
+# Shared infrastructure that must exist and must never be touched by the clean
+# redeploy. Recorded in the sanitized inventory only.
+foundation_ownership_preflight_protected_namespaces:
+  - kube-system
+  - kube-public
+  - kube-node-lease
+  - kubevirt
+  - cdi
+# Known Helm releases that LabWeaver itself owns inside candidate namespaces.
+# Any other release inside a candidate namespace is an unknown owner and blocks
+# the clean redeploy.
+foundation_ownership_preflight_helm_release_allowlist:
+  - {namespace: labweaver-system, name: labweaver}
+# keycloak-system has no namespace-level ownership label today; its ownership
+# is proven object-level (identity CA bundle) plus this explicit confirmation.
+foundation_ownership_preflight_keycloak_namespace: keycloak-system
+foundation_ownership_preflight_keycloak_ca_bundle: labweaver-identity-ca-bundle
+foundation_ownership_preflight_keycloak_ownership_confirmed: false
+# Stable label gate that marks LabWeaver-owned infrastructure objects.
+foundation_ownership_preflight_infrastructure_label: app.kubernetes.io/part-of
+foundation_ownership_preflight_infrastructure_label_value: labweaver-infrastructure

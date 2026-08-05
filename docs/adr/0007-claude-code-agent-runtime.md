@@ -27,11 +27,14 @@ in-flight limit. Provider endpoint,
 transport and authentication fields are deliberately absent from the public
 contract and remain deployment-owned Claude Code configuration.
 
-For the Sprint 2 deployment profile, that opaque configuration is concretely bound to ECNU's
-Anthropic-compatible endpoint. A reviewed ConfigMap file supplies `ANTHROPIC_BASE_URL`; an
-operator-owned Secret file supplies `ANTHROPIC_AUTH_TOKEN` from `ECNU_API_KEY`. The exact two
-values are injected into the env-cleared child. The endpoint is not selectable per run, and the
-credential value is never persisted in a public contract, log, report or runtime identity.
+For the Sprint 2 deployment profile, that opaque configuration is concretely bound to the
+reviewed Anthropic-compatible endpoint using only the three generic provider fields. Reviewed
+ConfigMap files supply `ANTHROPIC_BASE_URL` and `ANTHROPIC_MODEL`; an operator-owned Secret
+file supplies `ANTHROPIC_AUTH_TOKEN` (Issue #152 retired the operator-specific
+`ECNU_API_KEY` name: it is no longer read, and no compatibility alias or fallback exists). The
+exact three values are injected into the env-cleared child. The endpoint is not selectable per
+run, and the credential value is never persisted in a public contract, log, report or runtime
+identity.
 
 Before the billable command starts, the worker verifies the actual `claude
 --version` result against the binding. A service-owned egress gate reads every

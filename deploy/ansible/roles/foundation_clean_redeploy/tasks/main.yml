@@ -1,0 +1,284 @@
+---
+# Destructive LabWeaver-dedicated foundation cleanup for Issue #152.
+# Hard gates: exact confirmation binding, proven ownership preflight evidence,
+# and a protected shared-namespace boundary. No credential value is read,
+# logged or persisted; only names, labels, counts and hashes are recorded.
+- name: Validate clean redeploy inputs
+  ansible.builtin.assert:
+    that:
+      - foundation_clean_redeploy_run_id is match('^[a-z0-9][a-z0-9-]{2,62}$')
+      - foundation_clean_redeploy_source_commit is match('^[0-9a-f]{40,64}$')
+      - foundation_clean_redeploy_namespaces | unique | length == foundation_clean_redeploy_namespaces | length
+      - foundation_clean_redeploy_namespaces | intersect(foundation_clean_redeploy_protected_namespaces) | length == 0
+    fail_msg: FOUNDATION_CLEAN_INPUT_INVALID
+
+- name: Stat clean redeploy tools
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ foundation_clean_redeploy_kubeconfig }}"
+    - "{{ foundation_clean_redeploy_kubectl }}"
+    - "{{ foundation_clean_redeploy_helm }}"
+  register: foundation_clean_redeploy_tools
+
+- name: Reject missing clean redeploy tools
+  ansible.builtin.assert:
+    that: foundation_clean_redeploy_tools.results | map(attribute='stat.exists') | min
+    fail_msg: FOUNDATION_CLEAN_TOOL_MISSING
+
+- name: Read target cluster UID
+  ansible.builtin.command:
+    argv:
+      - "{{ foundation_clean_redeploy_kubectl }}"
+      - --kubeconfig
+      - "{{ foundation_clean_redeploy_kubeconfig }}"
+      - get
+      - namespace
+      - kube-system
+      - -o
+      - jsonpath={.metadata.uid}
+  register: foundation_clean_redeploy_cluster_uid
+  changed_when: false
+
+- name: Bind confirmation to the exact cluster and clean redeploy run
+  ansible.builtin.assert:
+    that:
+      - foundation_clean_redeploy_cluster_uid.stdout | trim | length > 0
+      - foundation_clean_redeploy_confirmation ==
+        'destroy-labweaver-foundation:' + (foundation_clean_redeploy_cluster_uid.stdout | trim)
+        + ':' + foundation_clean_redeploy_run_id
+    fail_msg: FOUNDATION_CLEAN_CONFIRMATION_MISMATCH
+
+- name: Require same-run ownership preflight evidence
+  ansible.builtin.stat:
+    path: >-
+      {{ foundation_clean_redeploy_report_root }}/{{ foundation_clean_redeploy_run_id }}/ownership-inventory.json
+  register: foundation_clean_redeploy_ownership_stat
+
+- name: Reject destruction without ownership preflight evidence
+  ansible.builtin.assert:
+    that: foundation_clean_redeploy_ownership_stat.stat.exists
+    fail_msg: FOUNDATION_OWNERSHIP_PREFLIGHT_MISSING
+
+- name: Read the ownership preflight evidence
+  ansible.builtin.slurp:
+    src: >-
+      {{ foundation_clean_redeploy_report_root }}/{{ foundation_clean_redeploy_run_id }}/ownership-inventory.json
+  register: foundation_clean_redeploy_ownership_raw
+
+- name: Verify the ownership evidence matches this cluster, run and namespace set
+  ansible.builtin.assert:
+    that:
+      - foundation_clean_redeploy_ownership.schema_version == 'labweaver.foundation-ownership-preflight.v1'
+      - foundation_clean_redeploy_ownership.run_id == foundation_clean_redeploy_run_id
+      - foundation_clean_redeploy_ownership.cluster_uid == foundation_clean_redeploy_cluster_uid.stdout | trim
+      - foundation_clean_redeploy_ownership.candidate_namespaces == foundation_clean_redeploy_namespaces | sort
+      - foundation_clean_redeploy_ownership.release_eligible == false
+    fail_msg: FOUNDATION_OWNERSHIP_EVIDENCE_MISMATCH
+  vars:
+    foundation_clean_redeploy_ownership: >-
+      {{ foundation_clean_redeploy_ownership_raw.content | b64decode | from_json }}
+
+- name: Create the protected clean redeploy report directory
+  ansible.builtin.file:
+    path: "{{ foundation_clean_redeploy_report_root }}/{{ foundation_clean_redeploy_run_id }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Read the pre-destruction namespace state without secret values
+  ansible.builtin.command:
+    argv:
+      - "{{ foundation_clean_redeploy_kubectl }}"
+      - --kubeconfig
+      - "{{ foundation_clean_redeploy_kubeconfig }}"
+      - get
+      - namespaces
+      - -o
+      - json
+  register: foundation_clean_redeploy_namespaces_raw
+  changed_when: false
+
+- name: Read the pre-destruction Helm releases without secret values
+  ansible.builtin.command:
+    argv:
+      - "{{ foundation_clean_redeploy_helm }}"
+      - --kubeconfig
+      - "{{ foundation_clean_redeploy_kubeconfig }}"
+      - list
+      - --all-namespaces
+      - --output
+      - json
+  register: foundation_clean_redeploy_helm_raw
+  changed_when: false
+
+- name: Read the pre-destruction persistent volume claims
+  ansible.builtin.command:
+    argv:
+      - "{{ foundation_clean_redeploy_kubectl }}"
+      - --kubeconfig
+      - "{{ foundation_clean_redeploy_kubeconfig }}"
+      - get
+      - persistentvolumeclaims
+      - --all-namespaces
+      - -o
+      - json
+  register: foundation_clean_redeploy_pvcs_raw
+  changed_when: false
+
+- name: Persist the sanitized pre-destruction inventory
+  ansible.builtin.copy:
+    dest: >-
+      {{ foundation_clean_redeploy_report_root }}/{{ foundation_clean_redeploy_run_id }}/pre-destruction-inventory.json
+    owner: root
+    group: root
+    mode: "0600"
+    content: >-
+      {{ {'schema_version': 'labweaver.foundation-clean-pre-destruction.v1',
+          'run_id': foundation_clean_redeploy_run_id,
+          'cluster_uid': foundation_clean_redeploy_cluster_uid.stdout | trim,
+          'namespaces': (foundation_clean_redeploy_namespaces_raw.stdout | from_json).items
+            | selectattr('metadata.name', 'in', foundation_clean_redeploy_namespaces)
+            | map(attribute='metadata.name') | list | sort,
+          'helm_releases': (foundation_clean_redeploy_helm_raw.stdout | default('null', true) | from_json)
+            | default([], true)
+            | selectattr('namespace', 'in', foundation_clean_redeploy_namespaces)
+            | map(attribute='name') | list | sort,
+          'persistent_volume_claims': (foundation_clean_redeploy_pvcs_raw.stdout | from_json).items
+            | selectattr('metadata.namespace', 'in', foundation_clean_redeploy_namespaces)
+            | map(attribute='metadata.name') | list | sort}
+         | to_nice_json }}
+
+- name: Uninstall the application release before destroying its namespace
+  ansible.builtin.command:
+    argv:
+      - "{{ foundation_clean_redeploy_helm }}"
+      - --kubeconfig
+      - "{{ foundation_clean_redeploy_kubeconfig }}"
+      - uninstall
+      - "{{ foundation_clean_redeploy_application_release }}"
+      - --namespace
+      - "{{ foundation_clean_redeploy_application_namespace }}"
+      - --ignore-not-found
+      - --wait
+  register: foundation_clean_redeploy_release_uninstall
+  changed_when: foundation_clean_redeploy_release_uninstall.rc == 0
+  failed_when: >-
+    foundation_clean_redeploy_release_uninstall.rc != 0
+    and 'not found' not in foundation_clean_redeploy_release_uninstall.stderr | lower
+
+- name: Delete the exact LabWeaver-dedicated namespaces and their data
+  ansible.builtin.command:
+    argv: >-
+      {{ [foundation_clean_redeploy_kubectl, '--kubeconfig', foundation_clean_redeploy_kubeconfig,
+          'delete', 'namespace'] + foundation_clean_redeploy_namespaces
+          + ['--ignore-not-found=true', '--wait=true',
+             '--timeout=' + foundation_clean_redeploy_delete_timeout] }}
+  register: foundation_clean_redeploy_namespace_delete
+  changed_when: foundation_clean_redeploy_namespace_delete.stdout | length > 0
+
+- name: Read back the namespace topology after destruction
+  ansible.builtin.command:
+    argv:
+      - "{{ foundation_clean_redeploy_kubectl }}"
+      - --kubeconfig
+      - "{{ foundation_clean_redeploy_kubeconfig }}"
+      - get
+      - namespaces
+      - -o
+      - json
+  register: foundation_clean_redeploy_namespace_readback
+  changed_when: false
+
+- name: Read back residual persistent volume claims
+  ansible.builtin.command:
+    argv:
+      - "{{ foundation_clean_redeploy_kubectl }}"
+      - --kubeconfig
+      - "{{ foundation_clean_redeploy_kubeconfig }}"
+      - get
+      - persistentvolumeclaims
+      - --all-namespaces
+      - -o
+      - json
+  register: foundation_clean_redeploy_pvc_readback
+  changed_when: false
+
+- name: Read back residual persistent volume claim references
+  ansible.builtin.command:
+    argv:
+      - "{{ foundation_clean_redeploy_kubectl }}"
+      - --kubeconfig
+      - "{{ foundation_clean_redeploy_kubeconfig }}"
+      - get
+      - persistentvolumes
+      - -o
+      - json
+  register: foundation_clean_redeploy_pv_readback
+  changed_when: false
+
+- name: Require every dedicated namespace destroyed and every shared namespace intact
+  ansible.builtin.assert:
+    that:
+      - foundation_clean_redeploy_remaining_namespaces | length == 0
+      - foundation_clean_redeploy_protected_namespaces
+        | difference(foundation_clean_redeploy_present_namespaces) | length == 0
+      - foundation_clean_redeploy_residual_pvcs | length == 0
+      - foundation_clean_redeploy_residual_pv_claims | length == 0
+    fail_msg: FOUNDATION_CLEAN_READBACK_FAILED
+  vars:
+    foundation_clean_redeploy_present_namespaces: >-
+      {{ (foundation_clean_redeploy_namespace_readback.stdout | from_json).items
+         | map(attribute='metadata.name') | list }}
+    foundation_clean_redeploy_remaining_namespaces: >-
+      {{ foundation_clean_redeploy_namespaces
+         | intersect(foundation_clean_redeploy_present_namespaces) }}
+    foundation_clean_redeploy_residual_pvcs: >-
+      {{ (foundation_clean_redeploy_pvc_readback.stdout | from_json).items
+         | selectattr('metadata.namespace', 'in', foundation_clean_redeploy_namespaces)
+         | map(attribute='metadata.name') | list }}
+    foundation_clean_redeploy_residual_pv_claims: >-
+      {{ (foundation_clean_redeploy_pv_readback.stdout | from_json).items
+         | map(attribute='spec.claimRef.namespace', default='') | list
+         | difference(['']) | unique
+         | intersect(foundation_clean_redeploy_namespaces) }}
+
+- name: Hash the ownership preflight evidence
+  ansible.builtin.stat:
+    path: >-
+      {{ foundation_clean_redeploy_report_root }}/{{ foundation_clean_redeploy_run_id }}/ownership-inventory.json
+    checksum_algorithm: sha256
+  register: foundation_clean_redeploy_ownership_hash
+
+- name: Hash the pre-destruction inventory
+  ansible.builtin.stat:
+    path: >-
+      {{ foundation_clean_redeploy_report_root }}/{{ foundation_clean_redeploy_run_id }}/pre-destruction-inventory.json
+    checksum_algorithm: sha256
+  register: foundation_clean_redeploy_pre_destruction_hash
+
+- name: Persist the sanitized clean redeploy report
+  ansible.builtin.template:
+    src: clean-redeploy-report.json.j2
+    dest: "{{ foundation_clean_redeploy_report_root }}/{{ foundation_clean_redeploy_run_id }}/report.json"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Persist the destruction tombstone
+  ansible.builtin.copy:
+    dest: >-
+      {{ foundation_clean_redeploy_report_root }}/{{ foundation_clean_redeploy_run_id }}/tombstone.json
+    owner: root
+    group: root
+    mode: "0600"
+    content: >-
+      {{ {'schema_version': 'labweaver.foundation-tombstone.v1',
+          'run_id': foundation_clean_redeploy_run_id,
+          'source_commit': foundation_clean_redeploy_source_commit,
+          'cluster_uid': foundation_clean_redeploy_cluster_uid.stdout | trim,
+          'destroyed_namespaces': foundation_clean_redeploy_namespaces | sort,
+          'destroyed_at': now(utc=true).timestamp() | int | strftime('%Y-%m-%dT%H:%M:%SZ'),
+          'release_eligible': false,
+          'report_sha256': 'sha256:' + foundation_clean_redeploy_pre_destruction_hash.stat.checksum} | to_nice_json }}

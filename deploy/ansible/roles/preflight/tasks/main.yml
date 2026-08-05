@@ -5,7 +5,8 @@
       (labweaver_preflight_scope | default('cluster')) in
       ['cluster', 'identity-foundation', 'sprint2-foundation',
        'sprint2-buildkit', 'sprint2-harbor-route', 'sprint2-application', 'sprint2-reset',
-       'resource-application', 'resource-replay', 'resource-replay-auth']
+       'resource-application', 'resource-replay', 'resource-replay-auth',
+       'foundation-clean-redeploy', 'foundation-rotation-verify']
     fail_msg: PREFLIGHT_SCOPE_INVALID
   run_once: true
   delegate_to: localhost
@@ -24,7 +25,8 @@
     (labweaver_preflight_scope | default('cluster')) in
     ['cluster', 'sprint2-foundation', 'sprint2-buildkit',
      'sprint2-harbor-route', 'sprint2-application', 'sprint2-reset',
-     'resource-application', 'resource-replay', 'resource-replay-auth']
+     'resource-application', 'resource-replay', 'resource-replay-auth',
+     'foundation-clean-redeploy', 'foundation-rotation-verify']
 
 - name: Assert the minimal identity-foundation inventory boundary
   ansible.builtin.assert:

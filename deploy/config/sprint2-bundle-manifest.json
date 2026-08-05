@@ -3,7 +3,7 @@
   "namespace": "labweaver-system",
   "configMaps": {
     "access-service-config": ["config.yaml"],
-    "agent-service-config": ["anthropic-base-url", "config.yaml"],
+    "agent-service-config": ["anthropic-base-url", "anthropic-model", "config.yaml"],
     "build-executor-config": ["config.yaml"],
     "container-executor-config": ["config.yaml"],
     "control-service-config": ["config.yaml"],

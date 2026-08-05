@@ -34,6 +34,18 @@ use time::OffsetDateTime;
 #[path = "../../service_runtime.rs"]
 mod service_runtime;
 
+/// The exact provider environment the env-cleared Claude Code worker receives.
+///
+/// Issue #152 generalizes the provider binding to the three standard Anthropic
+/// fields. The set is closed: operator-specific names such as `ECNU_API_KEY`
+/// are not read, and no compatibility alias, ambient credential, or fallback
+/// provider route may enter this map.
+const REQUIRED_WORKER_ENVIRONMENT: [&str; 3] = [
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_MODEL",
+];
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DeploymentFile {
@@ -486,10 +498,21 @@ fn validate_deployment(deployment: &DeploymentFile) -> Result<(), StartupError> 
         || deployment.build.retry_delay_milliseconds > 300_000
         || deployment.build.max_attempts == 0
         || deployment.build.max_attempts > 100
+        || !worker_environment_contract_holds(deployment)
     {
         return Err(StartupError::Configuration);
     }
     Ok(())
+}
+
+fn worker_environment_contract_holds(deployment: &DeploymentFile) -> bool {
+    let mut keys = deployment
+        .worker_environment_files
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    keys == REQUIRED_WORKER_ENVIRONMENT
 }
 
 fn read_worker_environment(
@@ -600,9 +623,39 @@ mod deployment_contract_tests {
                     "ANTHROPIC_BASE_URL".to_owned(),
                     "/etc/labweaver/config/anthropic-base-url".to_owned(),
                 ),
+                (
+                    "ANTHROPIC_MODEL".to_owned(),
+                    "/etc/labweaver/config/anthropic-model".to_owned(),
+                ),
             ])
         );
         assert!(!example.contains(".v2"));
+        assert!(!example.contains("ECNU_API_KEY"));
+        assert!(super::worker_environment_contract_holds(&deployment));
+    }
+
+    fn example_deployment() -> super::DeploymentFile {
+        let example = include_str!("../../../deploy/config/agent-control-plane.yaml.example");
+        serde_yaml::from_str(example).expect("agent deployment example must deserialize")
+    }
+
+    #[test]
+    fn worker_environment_missing_model_is_rejected() {
+        let mut deployment = example_deployment();
+        deployment
+            .worker_environment_files
+            .remove("ANTHROPIC_MODEL");
+        assert!(!super::worker_environment_contract_holds(&deployment));
+    }
+
+    #[test]
+    fn worker_environment_rejects_legacy_operator_aliases() {
+        let mut deployment = example_deployment();
+        deployment.worker_environment_files.insert(
+            "ECNU_API_KEY".to_owned(),
+            "/etc/labweaver/secrets/legacy".to_owned(),
+        );
+        assert!(!super::worker_environment_contract_holds(&deployment));
     }
 
     #[test]
