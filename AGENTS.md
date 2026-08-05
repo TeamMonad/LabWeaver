@@ -51,6 +51,7 @@ commands:
   release_gate: "cargo xtask release-gate"
   deploy_demo: "cargo xtask deploy --env demo"
   local_preflight: "cargo xtask local preflight --profile local-hostpath"
+  local_stack_plan: "ansible-playbook deploy/ansible/playbooks/local-hostpath-stack-plan.yml"
   resource_local_replay: "cargo xtask resource replay --mode local --preflight --env demo --profile <private-profile> --authentication <private-auth> --deployment-manifest <manifest> --package-manifest <manifest>"
   adopt_sprint2_application: "cargo xtask sprint2-application --infra --env demo --package-manifest <manifest> --yes"
   deploy_verify: "cargo xtask verify --env demo"

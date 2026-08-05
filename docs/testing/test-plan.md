@@ -175,6 +175,11 @@ prove RWX semantics, VM lifecycle, GPU capacity, or the formal Resource Gate.
 It must not apply namespaces, PVCs, Secrets, streams, buckets, realms or
 workloads as part of a normal PR check.
 
+The companion `local-hostpath-stack-plan.yml` validates the dependency overlay,
+renders the application Helm chart against isolated local namespace names and
+prints a teardown order only. It is deliberately not an install or cleanup
+playbook; no Kubernetes write operation is permitted in this local phase.
+
 ## Connected Sprint 2 verification
 
 The adopted-cluster run uses one commit, deployment manifest, migration

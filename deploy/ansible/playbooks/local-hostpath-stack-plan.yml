@@ -1,0 +1,84 @@
+---
+# Render and validate the Docker Desktop dependency overlay without applying
+# or deleting any Kubernetes object. This is a plan artifact, not deployment.
+- name: Render the local-hostpath dependency stack plan
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    local_stack_overlay: >-
+      {{ lookup('env', 'LABWEAVER_LOCAL_HOSTPATH_STACK_OVERLAY')
+         | default(playbook_dir ~ '/../../config/local-hostpath-stack.overlay.json', true) }}
+    local_chart_root: "{{ playbook_dir ~ '/../../helm/labweaver' }}"
+    local_fixture_values: "{{ playbook_dir ~ '/../../../tests/fixtures/platform-images-values.yaml' }}"
+    local_application_values: "{{ local_chart_root }}/values.local-hostpath.yaml"
+  tasks:
+    - name: Read the local stack overlay locator
+      ansible.builtin.stat:
+        path: "{{ local_stack_overlay }}"
+      register: local_stack_overlay_stat
+      changed_when: false
+
+    - name: Require a regular local stack overlay
+      ansible.builtin.assert:
+        that:
+          - local_stack_overlay_stat.stat.exists
+          - local_stack_overlay_stat.stat.isreg
+        fail_msg: LW_LOCAL_STACK_OVERLAY_MISSING
+
+    - name: Load the local stack overlay
+      ansible.builtin.include_vars:
+        file: "{{ local_stack_overlay }}"
+        name: local_stack
+
+    - name: Require the non-release, no-write policy
+      ansible.builtin.assert:
+        that:
+          - local_stack.apiVersion == 'deploy.labweaver.io/v1'
+          - local_stack.kind == 'LocalHostpathStackOverlay'
+          - local_stack.spec.mode == 'local-hostpath'
+          - not local_stack.spec.releaseEligible
+          - not local_stack.spec.writePolicy.apply
+          - not local_stack.spec.writePolicy.delete
+          - local_stack.spec.teardown.mode == 'plan-only'
+        fail_msg: LW_LOCAL_STACK_OVERLAY_WRITE_POLICY_INVALID
+
+    - name: Read the Docker Desktop context
+      ansible.builtin.command: docker context show
+      register: local_stack_docker_context
+      changed_when: false
+
+    - name: Read the Kubernetes context
+      ansible.builtin.command: kubectl config current-context
+      register: local_stack_kubernetes_context
+      changed_when: false
+
+    - name: Render the application chart only
+      ansible.builtin.command:
+        argv:
+          - helm
+          - template
+          - labweaver-local
+          - "{{ local_chart_root }}"
+          - --namespace
+          - "{{ local_stack.spec.namespaces.system }}"
+          - --values
+          - "{{ local_fixture_values }}"
+          - --values
+          - "{{ local_application_values }}"
+          - --set-string
+          - deploymentIdentity.configurationBundleSha256=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          - --set-string
+          - network.kubernetesApiCidrs[0]=10.0.0.1/32
+      register: local_stack_render
+      changed_when: false
+
+    - name: Emit the plan-only teardown order
+      ansible.builtin.debug:
+        msg:
+          mode: "{{ local_stack.spec.teardown.mode }}"
+          order: "{{ local_stack.spec.teardown.order }}"
+          selectors: "{{ local_stack.spec.teardown.selectors }}"
+          docker_context: "{{ local_stack_docker_context.stdout | trim }}"
+          kubernetes_context: "{{ local_stack_kubernetes_context.stdout | trim }}"
+          rendered_bytes: "{{ local_stack_render.stdout | length }}"

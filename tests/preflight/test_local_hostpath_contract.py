@@ -150,6 +150,38 @@ class LocalHostpathContractTests(unittest.TestCase):
         self.assertIn("requirements-preflight.txt", workflow)
         self.assertIn("jsonschema==4.24.0", requirements)
 
+    def test_local_stack_overlay_and_plan_are_non_release_and_no_write(self) -> None:
+        schema = json.loads(
+            (ROOT / "schemas/infrastructure/local-hostpath-stack-overlay.v1.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        overlay = json.loads(
+            (ROOT / "deploy/config/local-hostpath-stack.overlay.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        from jsonschema import Draft202012Validator
+
+        Draft202012Validator(schema).validate(overlay)
+        self.assertFalse(overlay["spec"]["releaseEligible"])
+        self.assertFalse(overlay["spec"]["writePolicy"]["apply"])
+        self.assertFalse(overlay["spec"]["writePolicy"]["delete"])
+        self.assertEqual(
+            {item["name"] for item in overlay["spec"]["dependencies"]},
+            {"postgresql", "nats", "minio", "keycloak", "harbor", "buildkit", "labweaver"},
+        )
+
+        plan = (ROOT / "deploy/ansible/playbooks/local-hostpath-stack-plan.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("plan-only", plan)
+        self.assertNotIn("kubernetes.core.k8s:", plan)
+        self.assertNotIn("kubectl apply", plan)
+        self.assertNotIn("kubectl delete", plan)
+        self.assertNotIn("helm upgrade", plan)
+        self.assertNotIn("helm uninstall", plan)
+
 
 if __name__ == "__main__":
     unittest.main()

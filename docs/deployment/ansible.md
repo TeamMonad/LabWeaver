@@ -44,6 +44,15 @@ diagnostics; it contains no Kubernetes apply module or delete operation. The
 Docker controller may invoke the Rust preflight instead, but both paths share
 the same read-only boundary and `local-connected-non-release` report contract.
 
+The dependency-stack overlay at
+`deploy/config/local-hostpath-stack.overlay.json` names isolated Docker Desktop
+namespaces for PostgreSQL, NATS, MinIO, Keycloak, Harbor, BuildKit and
+LabWeaver. `deploy/ansible/playbooks/local-hostpath-stack-plan.yml` validates
+the overlay and renders the LabWeaver chart, then prints a plan-only teardown
+order. It contains no Kubernetes apply/delete, Helm install/upgrade/uninstall,
+or namespace/PVC/Secret mutation; applying the stack requires separate
+deployment authorization.
+
 The retained data-service CiliumNetworkPolicy admits credentialed administration probes only from
 Cilium's `host` and `remote-node` reserved identities, and only on PostgreSQL 5432, NATS 4222 and
 MinIO 9000. Cilium represents node-originated traffic with those identities rather than a source

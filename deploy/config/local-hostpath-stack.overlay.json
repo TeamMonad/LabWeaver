@@ -1,0 +1,42 @@
+{
+  "apiVersion": "deploy.labweaver.io/v1",
+  "kind": "LocalHostpathStackOverlay",
+  "metadata": {
+    "name": "docker-desktop-local-hostpath",
+    "profile": "local-hostpath"
+  },
+  "spec": {
+    "mode": "local-hostpath",
+    "releaseEligible": false,
+    "writePolicy": {"apply": false, "delete": false},
+    "namespaces": {
+      "data": "labweaver-local-data",
+      "identity": "labweaver-local-identity",
+      "build": "labweaver-local-build",
+      "harbor": "labweaver-local-harbor",
+      "system": "labweaver-local-system",
+      "evaluation": "labweaver-local-evaluation",
+      "runtimePrefix": "labweaver-local-env-"
+    },
+    "storage": {
+      "provisioner": "hostpath",
+      "defaultAccessMode": "ReadWriteOnce",
+      "formalSharedProvisioner": "nfs-rwx",
+      "formalAccessMode": "ReadWriteMany"
+    },
+    "dependencies": [
+      {"name": "postgresql", "namespaceRef": "data", "owner": "ansible", "installMode": "render-only"},
+      {"name": "nats", "namespaceRef": "data", "owner": "ansible", "installMode": "render-only"},
+      {"name": "minio", "namespaceRef": "data", "owner": "ansible", "installMode": "render-only"},
+      {"name": "keycloak", "namespaceRef": "identity", "owner": "ansible", "installMode": "render-only"},
+      {"name": "harbor", "namespaceRef": "harbor", "owner": "ansible", "installMode": "render-only"},
+      {"name": "buildkit", "namespaceRef": "build", "owner": "ansible", "installMode": "render-only"},
+      {"name": "labweaver", "namespaceRef": "system", "owner": "helm", "installMode": "render-only"}
+    ],
+    "teardown": {
+      "mode": "plan-only",
+      "order": ["runtime", "evaluation", "system", "build", "harbor", "identity", "data"],
+      "selectors": ["labweaver.io/local-profile=local-hostpath", "labweaver.io/owner=labweaver"]
+    }
+  }
+}
