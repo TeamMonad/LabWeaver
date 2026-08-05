@@ -74,6 +74,7 @@ CREATE TABLE evaluation_step_runs (
     position integer NOT NULL CHECK (position > 0),
     step_id text NOT NULL CHECK (length(step_id) BETWEEN 1 AND 96),
     role text NOT NULL CHECK (role IN ('gate', 'score', 'advisory')),
+    failure_policy text NOT NULL CHECK (failure_policy IN ('stop', 'continue', 'continue_advisory')),
     depends_on text[] NOT NULL DEFAULT '{}',
     state text NOT NULL CHECK (state IN ('pending', 'running', 'retryable', 'succeeded', 'failed', 'cancelled', 'skipped')),
     revision bigint NOT NULL CHECK (revision > 0),
@@ -93,6 +94,20 @@ CREATE TABLE evaluation_step_runs (
     CHECK (cardinality(depends_on) <= 64),
     CHECK (role = 'score' OR (max_score = 0 AND awarded_score IS NULL)),
     CHECK (
+        (role = 'gate' AND failure_policy = 'stop')
+        OR
+        (role = 'score' AND failure_policy IN ('stop', 'continue'))
+        OR
+        (role = 'advisory' AND failure_policy = 'continue_advisory')
+    ),
+    CHECK (
+        (state = 'succeeded' AND role = 'score' AND awarded_score IS NOT NULL)
+        OR
+        (state = 'succeeded' AND role <> 'score' AND awarded_score IS NULL)
+        OR
+        (state <> 'succeeded' AND awarded_score IS NULL)
+    ),
+    CHECK (
         (state IN ('pending', 'running', 'retryable') AND completed_at IS NULL)
         OR
         (state = 'succeeded' AND completed_at IS NOT NULL AND diagnostic_code IS NULL AND cleanup_verified)
@@ -110,6 +125,11 @@ CREATE TABLE evaluation_step_attempts (
     attempt integer NOT NULL CHECK (attempt > 0),
     state text NOT NULL CHECK (state IN ('running', 'succeeded', 'failed', 'cancelled')),
     worker_id text,
+    worker_san_uri text,
+    provider_binding text,
+    runner_image text,
+    runtime_artifact_sha256 text CHECK (runtime_artifact_sha256 IS NULL OR runtime_artifact_sha256 ~ '^[0-9a-f]{64}$'),
+    runtime_identity_sha256 text CHECK (runtime_identity_sha256 IS NULL OR runtime_identity_sha256 ~ '^[0-9a-f]{64}$'),
     lease_token uuid,
     lease_expires_at timestamptz,
     diagnostic_code text,
@@ -120,11 +140,31 @@ CREATE TABLE evaluation_step_attempts (
     completed_at timestamptz,
     PRIMARY KEY (step_run_id, attempt),
     CHECK (
-        (state = 'running' AND worker_id IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL AND completed_at IS NULL)
+        worker_id IS NULL
         OR
-        (state = 'succeeded' AND worker_id IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL AND diagnostic_code IS NULL AND evidence_sha256 IS NOT NULL AND cleanup_verified AND completed_at IS NOT NULL)
+        (length(worker_id) BETWEEN 1 AND 96 AND worker_id !~ '[^A-Za-z0-9._:-]')
+    ),
+    CHECK (
+        worker_san_uri IS NULL
         OR
-        (state IN ('failed', 'cancelled') AND worker_id IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL AND diagnostic_code IS NOT NULL AND evidence_sha256 IS NOT NULL AND completed_at IS NOT NULL)
+        worker_san_uri ~ '^spiffe://labweaver/evaluation-worker/[A-Za-z0-9._:-]{1,96}$'
+    ),
+    CHECK (
+        provider_binding IS NULL
+        OR
+        (length(provider_binding) BETWEEN 1 AND 128 AND btrim(provider_binding) <> '' AND provider_binding !~ '[[:cntrl:]]')
+    ),
+    CHECK (
+        runner_image IS NULL
+        OR
+        runner_image ~ '^[^[:space:]]+@sha256:[0-9a-f]{64}$'
+    ),
+    CHECK (
+        (state = 'running' AND worker_id IS NOT NULL AND worker_san_uri IS NOT NULL AND provider_binding IS NOT NULL AND runner_image IS NOT NULL AND runtime_artifact_sha256 IS NOT NULL AND runtime_identity_sha256 IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL AND completed_at IS NULL)
+        OR
+        (state = 'succeeded' AND worker_id IS NOT NULL AND worker_san_uri IS NOT NULL AND provider_binding IS NOT NULL AND runner_image IS NOT NULL AND runtime_artifact_sha256 IS NOT NULL AND runtime_identity_sha256 IS NOT NULL AND lease_token IS NULL AND lease_expires_at IS NULL AND diagnostic_code IS NULL AND evidence_sha256 IS NOT NULL AND cleanup_verified AND completed_at IS NOT NULL)
+        OR
+        (state IN ('failed', 'cancelled') AND worker_id IS NOT NULL AND worker_san_uri IS NOT NULL AND provider_binding IS NOT NULL AND runner_image IS NOT NULL AND runtime_artifact_sha256 IS NOT NULL AND runtime_identity_sha256 IS NOT NULL AND lease_token IS NULL AND lease_expires_at IS NULL AND diagnostic_code IS NOT NULL AND evidence_sha256 IS NOT NULL AND completed_at IS NOT NULL)
     )
 );
 

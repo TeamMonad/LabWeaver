@@ -438,8 +438,18 @@ pub struct InternalCompleteEvaluationStepRequest {
     pub step_run_id: EvaluationStepRunId,
     pub attempt: u32,
     pub worker_id: String,
+    pub runtime_identity: crate::evaluation::EvaluationRuntimeIdentity,
     pub lease_token: String,
     pub completion: crate::evaluation::EvaluationStepCompletion,
+}
+
+impl InternalCompleteEvaluationStepRequest {
+    /// Validates the worker-supplied runtime binding before persistence fencing.
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        self.runtime_identity
+            .validate()
+            .map_err(|_| HttpContractError::InvalidEvaluationControl)
+    }
 }
 
 impl InternalImageArtifactResolution {

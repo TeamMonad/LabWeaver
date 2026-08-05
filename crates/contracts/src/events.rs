@@ -552,6 +552,7 @@ pub struct EvaluationRunEvent {
     pub revision: Revision,
     pub state: String,
     pub diagnostic_code: Option<String>,
+    pub operator_actor_id: Option<ActorId>,
 }
 
 impl EvaluationRunEvent {
@@ -578,6 +579,7 @@ pub struct EvaluationStepRunEvent {
     pub diagnostic_code: Option<String>,
     pub evidence_sha256: Option<Sha256Digest>,
     pub cleanup_verified: Option<bool>,
+    pub operator_actor_id: Option<ActorId>,
 }
 
 impl EvaluationStepRunEvent {

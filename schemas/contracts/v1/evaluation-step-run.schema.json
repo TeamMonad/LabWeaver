@@ -8,6 +8,15 @@
       "description": "Strongly typed UUIDv7 identifier for `EvaluationRunId`.",
       "type": "string"
     },
+    "EvaluationStepFailurePolicy": {
+      "description": "Stable failure behavior copied from the immutable `EvaluationSpec` step.",
+      "enum": [
+        "stop",
+        "continue",
+        "continue_advisory"
+      ],
+      "type": "string"
+    },
     "EvaluationStepRole": {
       "description": "Stable role copied from the immutable `EvaluationSpec` step.",
       "enum": [
@@ -105,6 +114,9 @@
         }
       ]
     },
+    "failurePolicy": {
+      "$ref": "#/$defs/EvaluationStepFailurePolicy"
+    },
     "id": {
       "$ref": "#/$defs/EvaluationStepRunId"
     },
@@ -150,6 +162,7 @@
     "stepId",
     "position",
     "role",
+    "failurePolicy",
     "dependsOn",
     "state",
     "revision",

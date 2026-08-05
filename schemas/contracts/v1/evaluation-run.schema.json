@@ -81,6 +81,10 @@
           "$ref": "#/$defs/Sha256Digest",
           "description": "Approved problem package identity."
         },
+        "providerBinding": {
+          "description": "Explicit runtime provider binding chosen by Control and enforced by Evaluation.",
+          "type": "string"
+        },
         "runnerImage": {
           "description": "Digest-pinned runner image reference.",
           "type": "string"
@@ -96,6 +100,7 @@
       },
       "required": [
         "sourceSha256",
+        "providerBinding",
         "packageSha256",
         "configurationSha256",
         "migrationCatalogSha256",
@@ -103,6 +108,15 @@
         "runtimeArtifactSha256"
       ],
       "type": "object"
+    },
+    "EvaluationStepFailurePolicy": {
+      "description": "Stable failure behavior copied from the immutable `EvaluationSpec` step.",
+      "enum": [
+        "stop",
+        "continue",
+        "continue_advisory"
+      ],
+      "type": "string"
     },
     "EvaluationStepRole": {
       "description": "Stable role copied from the immutable `EvaluationSpec` step.",
@@ -169,6 +183,9 @@
             }
           ]
         },
+        "failurePolicy": {
+          "$ref": "#/$defs/EvaluationStepFailurePolicy"
+        },
         "id": {
           "$ref": "#/$defs/EvaluationStepRunId"
         },
@@ -214,6 +231,7 @@
         "stepId",
         "position",
         "role",
+        "failurePolicy",
         "dependsOn",
         "state",
         "revision",

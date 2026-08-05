@@ -475,6 +475,10 @@
           "$ref": "#/$defs/Sha256Digest",
           "description": "Approved problem package identity."
         },
+        "providerBinding": {
+          "description": "Explicit runtime provider binding chosen by Control and enforced by Evaluation.",
+          "type": "string"
+        },
         "runnerImage": {
           "description": "Digest-pinned runner image reference.",
           "type": "string"
@@ -490,6 +494,7 @@
       },
       "required": [
         "sourceSha256",
+        "providerBinding",
         "packageSha256",
         "configurationSha256",
         "migrationCatalogSha256",

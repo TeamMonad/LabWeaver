@@ -19,6 +19,8 @@ pub const EVALUATION_RUN_SCHEMA_VERSION: &str = "evaluation.labweaver.io/evaluat
 pub struct EvaluationRuntimeIdentity {
     /// Clean source tree or source bundle identity.
     pub source_sha256: Sha256Digest,
+    /// Explicit runtime provider binding chosen by Control and enforced by Evaluation.
+    pub provider_binding: String,
     /// Approved problem package identity.
     pub package_sha256: Sha256Digest,
     /// Effective non-secret runtime configuration identity.
@@ -34,6 +36,7 @@ pub struct EvaluationRuntimeIdentity {
 impl EvaluationRuntimeIdentity {
     /// Validates bounded, immutable, non-secret runtime bindings.
     pub fn validate(&self) -> Result<(), EvaluationControlContractError> {
+        validate_token(&self.provider_binding, 128)?;
         if !is_digest_pinned_image(&self.runner_image) {
             return Err(EvaluationControlContractError::RuntimeIdentityInvalid);
         }
@@ -259,6 +262,7 @@ pub struct EvaluationStepRun {
     pub step_id: String,
     pub position: u32,
     pub role: EvaluationStepRole,
+    pub failure_policy: EvaluationStepFailurePolicy,
     pub depends_on: Vec<String>,
     pub state: EvaluationStepRunState,
     pub revision: Revision,
@@ -294,6 +298,15 @@ impl EvaluationStepRun {
         if self.role != EvaluationStepRole::Score && self.max_score != 0 {
             return Err(EvaluationControlContractError::ScoreInvalid);
         }
+        match (self.role, self.failure_policy) {
+            (
+                EvaluationStepRole::Gate | EvaluationStepRole::Score,
+                EvaluationStepFailurePolicy::Stop,
+            )
+            | (EvaluationStepRole::Score, EvaluationStepFailurePolicy::Continue)
+            | (EvaluationStepRole::Advisory, EvaluationStepFailurePolicy::ContinueAdvisory) => {}
+            _ => return Err(EvaluationControlContractError::TerminalStateInvalid),
+        }
         if self
             .awarded_score
             .is_some_and(|score| score > self.max_score)
@@ -312,14 +325,20 @@ impl EvaluationStepRun {
             EvaluationStepRunState::Succeeded
                 if self.completed_at.is_some()
                     && self.diagnostic_code.is_none()
-                    && self.cleanup_verified =>
+                    && self.cleanup_verified
+                    && ((self.role == EvaluationStepRole::Score
+                        && self.awarded_score.is_some())
+                        || (self.role != EvaluationStepRole::Score
+                            && self.awarded_score.is_none())) =>
             {
                 Ok(())
             }
             EvaluationStepRunState::Failed
             | EvaluationStepRunState::Cancelled
             | EvaluationStepRunState::Skipped
-                if self.completed_at.is_some() && self.diagnostic_code.is_some() =>
+                if self.completed_at.is_some()
+                    && self.diagnostic_code.is_some()
+                    && self.awarded_score.is_none() =>
             {
                 Ok(())
             }
@@ -343,6 +362,15 @@ pub enum EvaluationStepRole {
     Gate,
     Score,
     Advisory,
+}
+
+/// Stable failure behavior copied from the immutable `EvaluationSpec` step.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvaluationStepFailurePolicy {
+    Stop,
+    Continue,
+    ContinueAdvisory,
 }
 
 /// Public step lifecycle.
@@ -382,13 +410,14 @@ impl EvaluationStepCompletion {
             EvaluationStepRunState::Succeeded
                 if self.diagnostic_code.is_none()
                     && self.cleanup_verified
-                    && (role == EvaluationStepRole::Score || self.awarded_score.is_none())
+                    && ((role == EvaluationStepRole::Score && self.awarded_score.is_some())
+                        || (role != EvaluationStepRole::Score && self.awarded_score.is_none()))
                     && self.awarded_score.unwrap_or(0) <= max_score =>
             {
                 Ok(())
             }
             EvaluationStepRunState::Failed | EvaluationStepRunState::Cancelled
-                if self.diagnostic_code.is_some() && self.cleanup_verified =>
+                if self.diagnostic_code.is_some() && self.awarded_score.is_none() =>
             {
                 Ok(())
             }

@@ -6,15 +6,16 @@
     reason = "the transaction fences and state derivation are intentionally colocated"
 )]
 
-use std::{str::FromStr, time::Duration};
+use std::{collections::BTreeSet, str::FromStr, time::Duration};
 
 use contracts::{
-    CourseId, DiagnosticCode, EvaluationReleaseId, EvaluationRunId, EvaluationStepRunId, EventId,
-    Revision, Sequence, Sha256Digest, UtcTimestamp,
+    ActorId, CourseId, DiagnosticCode, EvaluationReleaseId, EvaluationRunId, EvaluationStepRunId,
+    EventId, Revision, Sequence, Sha256Digest, UtcTimestamp,
     evaluation::{
         EVALUATION_RELEASE_SCHEMA_VERSION, EVALUATION_RUN_SCHEMA_VERSION, EvaluationRelease,
-        EvaluationReleaseState, EvaluationRun, EvaluationRunState, EvaluationStepCompletion,
-        EvaluationStepRole, EvaluationStepRun, EvaluationStepRunState,
+        EvaluationReleaseState, EvaluationRun, EvaluationRunState, EvaluationRuntimeIdentity,
+        EvaluationStepCompletion, EvaluationStepFailurePolicy, EvaluationStepRole,
+        EvaluationStepRun, EvaluationStepRunState,
     },
     events::{
         CloudEvent, EVENT_CONTRACTS, EvaluationReleasePublished, EvaluationRunEvent,
@@ -36,6 +37,7 @@ const CANCEL_RUN_OPERATION: &str = "cancel_evaluation_run_v1";
 const RETRY_STEP_OPERATION: &str = "retry_evaluation_step_v1";
 const VERIFY_STEP_CLEANUP_OPERATION: &str = "verify_evaluation_step_cleanup_v1";
 const CONTROL_SERVICE_SAN: &str = "spiffe://labweaver/control-service";
+const WORKER_SERVICE_SAN_PREFIX: &str = "spiffe://labweaver/evaluation-worker/";
 
 /// Result of publishing a release through the idempotency ledger.
 #[derive(Clone, Debug, PartialEq)]
@@ -62,6 +64,8 @@ pub struct EvaluationStepLease {
     pub max_score: u32,
     pub attempt: u32,
     pub worker_id: String,
+    pub worker_san_uri: String,
+    pub runtime_identity: EvaluationRuntimeIdentity,
     pub trace_id: String,
     lease_token: Uuid,
 }
@@ -340,6 +344,7 @@ impl PgEvaluationControlStore {
             subjects::EVALUATION_RUN_REQUESTED,
             now,
             trace_id,
+            None,
         )
         .await?;
         IdempotencyStore::complete(
@@ -481,6 +486,7 @@ impl PgEvaluationControlStore {
             transaction.rollback().await?;
             return Err(EvaluationControlStoreError::StateConflict);
         }
+        let mut changed_step_ids = Vec::new();
         match kind {
             MutationKind::Cancel => {
                 if is_terminal_run(run.state) {
@@ -499,7 +505,7 @@ impl PgEvaluationControlStore {
                 };
                 run.revision = next_revision(run.revision)?;
                 run.updated_at = now;
-                cancel_unstarted_steps(&mut transaction, &mut run, now).await?;
+                changed_step_ids = cancel_unstarted_steps(&mut transaction, &mut run, now).await?;
                 if run.state == EvaluationRunState::Cancelled {
                     run.diagnostic_code =
                         Some(DiagnosticCode::registered("LW_EVALUATION_CANCELLED"));
@@ -516,10 +522,9 @@ impl PgEvaluationControlStore {
                     .find(|step| step.id == step_run_id)
                     .cloned()
                     .ok_or(EvaluationControlStoreError::StepNotFound)?;
-                if !matches!(
-                    step.state,
-                    EvaluationStepRunState::Failed | EvaluationStepRunState::Cancelled
-                ) || !step.cleanup_verified
+                if run.cancellation_requested
+                    || step.state != EvaluationStepRunState::Failed
+                    || !step.cleanup_verified
                 {
                     transaction.rollback().await?;
                     return Err(EvaluationControlStoreError::StateConflict);
@@ -529,8 +534,18 @@ impl PgEvaluationControlStore {
                 step.awarded_score = None;
                 step.diagnostic_code = None;
                 step.evidence_sha256 = None;
+                step.started_at = None;
                 step.completed_at = None;
                 save_step(&mut transaction, &step).await?;
+                push_step_change(&mut changed_step_ids, step.id);
+                changed_step_ids.extend(
+                    restore_dependency_skipped_successors(
+                        &mut transaction,
+                        run_id,
+                        step.step_id.as_str(),
+                    )
+                    .await?,
+                );
                 run.state = EvaluationRunState::Running;
                 run.cancellation_requested = false;
                 run.diagnostic_code = None;
@@ -558,12 +573,22 @@ impl PgEvaluationControlStore {
                 }
                 step.cleanup_verified = true;
                 step.revision = next_revision(step.revision)?;
+                mark_attempt_cleanup_verified(&mut transaction, &step, now).await?;
                 save_step(&mut transaction, &step).await?;
+                push_step_change(&mut changed_step_ids, step.id);
                 run.revision = next_revision(run.revision)?;
                 run.updated_at = now;
             }
         }
-        refresh_and_save_run(&mut transaction, &mut run, now, trace_id).await?;
+        refresh_and_save_run(
+            &mut transaction,
+            &mut run,
+            now,
+            &changed_step_ids,
+            trace_id,
+            Some(request.actor_id),
+        )
+        .await?;
         let contract =
             serde_json::to_value(&run).map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
         IdempotencyStore::complete(
@@ -584,6 +609,7 @@ impl PgEvaluationControlStore {
         lease_duration: Duration,
     ) -> Result<Option<EvaluationStepLease>, EvaluationControlStoreError> {
         validate_worker(worker_id, lease_duration)?;
+        let worker_san_uri = worker_service_san(worker_id)?;
         let lease_milliseconds = i64::try_from(lease_duration.as_millis())
             .map_err(|_| EvaluationControlStoreError::WorkerIdentityInvalid)?;
         let mut transaction = self.pool.begin().await?;
@@ -599,7 +625,15 @@ impl PgEvaluationControlStore {
                    SELECT 1 FROM evaluation.evaluation_step_runs dep \
                    WHERE dep.run_id=step.run_id \
                      AND dep.step_id=ANY(step.depends_on) \
-                     AND dep.state <> 'succeeded') \
+                     AND NOT ( \
+                         dep.state='succeeded' \
+                         OR \
+                         (dep.role='score' AND dep.failure_policy='continue' \
+                          AND dep.state IN ('failed','cancelled')) \
+                         OR \
+                         (dep.role='advisory' AND dep.failure_policy='continue_advisory' \
+                          AND dep.state IN ('failed','cancelled')) \
+                     )) \
              ORDER BY run.created_at,step.position \
              FOR UPDATE SKIP LOCKED LIMIT 1",
         )
@@ -620,6 +654,7 @@ impl PgEvaluationControlStore {
         let lease_token = Uuid::now_v7();
         let now = authority_now(&mut transaction).await?;
         let lease_expires_at = now.get() + time::Duration::milliseconds(lease_milliseconds);
+        let runtime_identity_sha256 = runtime_identity_sha256(&run.identity.runtime_identity)?;
         step.state = EvaluationStepRunState::Running;
         step.revision = next_revision(step.revision)?;
         step.current_attempt = attempt;
@@ -632,12 +667,24 @@ impl PgEvaluationControlStore {
         save_step(&mut transaction, &step).await?;
         sqlx::query(
             "INSERT INTO evaluation.evaluation_step_attempts \
-             (step_run_id,attempt,state,worker_id,lease_token,lease_expires_at,created_at,updated_at) \
-             VALUES ($1,$2,'running',$3,$4,$5,$6,$6)",
+             (step_run_id,attempt,state,worker_id,worker_san_uri,provider_binding,runner_image,\
+              runtime_artifact_sha256,runtime_identity_sha256,lease_token,lease_expires_at,\
+              created_at,updated_at) \
+             VALUES ($1,$2,'running',$3,$4,$5,$6,$7,$8,$9,$10,$11,$11)",
         )
         .bind(step_run_id.as_uuid())
         .bind(i32::try_from(attempt).map_err(|_| EvaluationControlStoreError::AttemptOverflow)?)
         .bind(worker_id)
+        .bind(&worker_san_uri)
+        .bind(&run.identity.runtime_identity.provider_binding)
+        .bind(&run.identity.runtime_identity.runner_image)
+        .bind(
+            run.identity
+                .runtime_identity
+                .runtime_artifact_sha256
+                .to_string(),
+        )
+        .bind(runtime_identity_sha256.to_string())
         .bind(lease_token)
         .bind(lease_expires_at)
         .bind(now.get())
@@ -645,11 +692,11 @@ impl PgEvaluationControlStore {
         .await?;
         if run.state == EvaluationRunState::Queued {
             run.state = EvaluationRunState::Running;
-            run.revision = next_revision(run.revision)?;
-            run.updated_at = now;
         }
+        run.revision = next_revision(run.revision)?;
+        run.updated_at = now;
         let trace_id = run.identity.trace_id.clone();
-        refresh_and_save_run(&mut transaction, &mut run, now, &trace_id).await?;
+        refresh_and_save_run(&mut transaction, &mut run, now, &[step.id], &trace_id, None).await?;
         transaction.commit().await?;
         Ok(Some(EvaluationStepLease {
             course_id: run.course_id,
@@ -660,6 +707,8 @@ impl PgEvaluationControlStore {
             max_score: step.max_score,
             attempt,
             worker_id: worker_id.to_owned(),
+            worker_san_uri,
+            runtime_identity: run.identity.runtime_identity.clone(),
             trace_id: run.identity.trace_id,
             lease_token,
         }))
@@ -673,12 +722,13 @@ impl PgEvaluationControlStore {
         step_run_id: EvaluationStepRunId,
         attempt: u32,
         worker_id: &str,
+        worker_san_uri: &str,
+        runtime_identity: &EvaluationRuntimeIdentity,
         lease_token: Uuid,
         completion: &EvaluationStepCompletion,
-        now: UtcTimestamp,
         trace_id: &str,
     ) -> Result<EvaluationRun, EvaluationControlStoreError> {
-        validate_worker_id(worker_id)?;
+        validate_worker_san(worker_id, worker_san_uri)?;
         validate_trace(trace_id)?;
         if attempt == 0 {
             return Err(EvaluationControlStoreError::ContractInvalid);
@@ -689,6 +739,12 @@ impl PgEvaluationControlStore {
             transaction.rollback().await?;
             return Err(EvaluationControlStoreError::CourseMismatch);
         }
+        runtime_identity.validate()?;
+        if runtime_identity != &run.identity.runtime_identity {
+            transaction.rollback().await?;
+            return Err(EvaluationControlStoreError::IdentityMismatch);
+        }
+        let runtime_identity_sha256 = runtime_identity_sha256(runtime_identity)?;
         let mut step = load_step_for_update(&mut transaction, step_run_id).await?;
         if step.run_id != run_id || step.current_attempt != attempt {
             transaction.rollback().await?;
@@ -698,19 +754,28 @@ impl PgEvaluationControlStore {
         let attempt_i32 =
             i32::try_from(attempt).map_err(|_| EvaluationControlStoreError::AttemptOverflow)?;
         let terminal_state = step_state_name(completion.state);
-        let updated = sqlx::query(
-            "UPDATE evaluation.evaluation_step_attempts \
-             SET state=$6,worker_id=NULL,lease_token=NULL,lease_expires_at=NULL,\
+        let completed_at: Option<time::OffsetDateTime> = sqlx::query_scalar(
+            "WITH authority AS ( \
+                 SELECT date_trunc('milliseconds', clock_timestamp()) AS completed_at \
+             ) \
+             UPDATE evaluation.evaluation_step_attempts AS attempt \
+             SET state=$6,lease_token=NULL,lease_expires_at=NULL,\
                  diagnostic_code=$7,evidence_sha256=$8,cleanup_verified=$9,\
-                 completed_at=$10,updated_at=$10 \
-             WHERE step_run_id=$1 AND attempt=$2 AND worker_id=$3 AND lease_token=$4 \
-               AND state='running' AND lease_expires_at > $5",
+                 completed_at=authority.completed_at,updated_at=authority.completed_at \
+             FROM authority \
+             WHERE attempt.step_run_id=$1 AND attempt.attempt=$2 \
+               AND attempt.worker_id=$3 AND attempt.worker_san_uri=$4 \
+               AND attempt.lease_token=$5 AND attempt.state='running' \
+               AND attempt.provider_binding=$10 AND attempt.runner_image=$11 \
+               AND attempt.runtime_artifact_sha256=$12 AND attempt.runtime_identity_sha256=$13 \
+               AND attempt.lease_expires_at > authority.completed_at \
+             RETURNING attempt.completed_at",
         )
         .bind(step_run_id.as_uuid())
         .bind(attempt_i32)
         .bind(worker_id)
+        .bind(worker_san_uri)
         .bind(lease_token)
-        .bind(now.get())
         .bind(terminal_state)
         .bind(
             completion
@@ -720,29 +785,53 @@ impl PgEvaluationControlStore {
         )
         .bind(completion.evidence_sha256.to_string())
         .bind(completion.cleanup_verified)
-        .bind(now.get())
-        .execute(&mut *transaction)
+        .bind(&runtime_identity.provider_binding)
+        .bind(&runtime_identity.runner_image)
+        .bind(runtime_identity.runtime_artifact_sha256.to_string())
+        .bind(runtime_identity_sha256.to_string())
+        .fetch_optional(&mut *transaction)
         .await?;
-        if updated.rows_affected() != 1 {
+        let Some(completed_at) = completed_at else {
             transaction.rollback().await?;
             return Err(EvaluationControlStoreError::LeaseLost);
-        }
+        };
+        let completed_at = UtcTimestamp::from_utc(completed_at)
+            .map_err(|_| EvaluationControlStoreError::ClockInvalid)?;
         step.state = completion.state;
         step.revision = next_revision(step.revision)?;
         step.awarded_score = completion.awarded_score;
         step.diagnostic_code.clone_from(&completion.diagnostic_code);
         step.evidence_sha256 = Some(completion.evidence_sha256);
         step.cleanup_verified = completion.cleanup_verified;
-        step.completed_at = Some(now);
+        step.completed_at = Some(completed_at);
         save_step(&mut transaction, &step).await?;
+        let mut changed_step_ids = vec![step.id];
         if matches!(
             step.state,
             EvaluationStepRunState::Failed | EvaluationStepRunState::Cancelled
-        ) && step.role != EvaluationStepRole::Advisory
+        ) && failure_stops_dependency_successors(&step)
         {
-            skip_unfinished_steps(&mut transaction, run_id, now).await?;
+            changed_step_ids.extend(
+                skip_dependency_successors(
+                    &mut transaction,
+                    run_id,
+                    step.step_id.as_str(),
+                    completed_at,
+                )
+                .await?,
+            );
         }
-        refresh_and_save_run(&mut transaction, &mut run, now, trace_id).await?;
+        run.revision = next_revision(run.revision)?;
+        run.updated_at = completed_at;
+        refresh_and_save_run(
+            &mut transaction,
+            &mut run,
+            completed_at,
+            &changed_step_ids,
+            trace_id,
+            None,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(run)
     }
@@ -759,21 +848,23 @@ impl PgEvaluationControlStore {
             "SELECT attempt.step_run_id,attempt.attempt \
              FROM evaluation.evaluation_step_attempts attempt \
              JOIN evaluation.evaluation_step_runs step ON step.step_run_id=attempt.step_run_id \
+             JOIN evaluation.evaluation_runs run ON run.run_id=step.run_id \
              WHERE attempt.state='running' AND attempt.lease_expires_at <= clock_timestamp() \
-             ORDER BY attempt.lease_expires_at,attempt.step_run_id LIMIT $1 FOR UPDATE SKIP LOCKED",
+             ORDER BY attempt.lease_expires_at,attempt.step_run_id LIMIT $1 \
+             FOR UPDATE OF run,step,attempt SKIP LOCKED",
         )
         .bind(limit)
         .fetch_all(&mut *transaction)
         .await?;
         let now = authority_now(&mut transaction).await?;
         let mut recovered = 0_u64;
-        let mut affected_runs = Vec::new();
+        let mut affected_runs: Vec<(EvaluationRunId, Vec<EvaluationStepRunId>)> = Vec::new();
         for row in rows {
             let step_run_id = parse_id::<EvaluationStepRunId>(row.try_get("step_run_id")?)?;
             let attempt: i32 = row.try_get("attempt")?;
             let updated = sqlx::query(
                 "UPDATE evaluation.evaluation_step_attempts \
-                 SET state='failed',worker_id=NULL,lease_token=NULL,lease_expires_at=NULL,\
+                 SET state='failed',lease_token=NULL,lease_expires_at=NULL,\
                      diagnostic_code='LW_EVALUATION_STEP_LEASE_EXPIRED',\
                      evidence_sha256=$3,cleanup_verified=false,completed_at=$4,updated_at=$4 \
                  WHERE step_run_id=$1 AND attempt=$2 AND state='running'",
@@ -796,22 +887,37 @@ impl PgEvaluationControlStore {
                 step.cleanup_verified = false;
                 step.completed_at = Some(now);
                 save_step(&mut transaction, &step).await?;
-                if step.role != EvaluationStepRole::Advisory {
-                    skip_unfinished_steps(&mut transaction, run_id, now).await?;
+                let mut changed_step_ids = vec![step.id];
+                if failure_stops_dependency_successors(&step) {
+                    changed_step_ids.extend(
+                        skip_dependency_successors(
+                            &mut transaction,
+                            run_id,
+                            step.step_id.as_str(),
+                            now,
+                        )
+                        .await?,
+                    );
                 }
-                if !affected_runs.contains(&run_id) {
-                    affected_runs.push(run_id);
-                }
+                push_run_step_changes(&mut affected_runs, run_id, changed_step_ids);
                 recovered = recovered
                     .checked_add(1)
                     .ok_or(EvaluationControlStoreError::ContractInvalid)?;
             }
         }
-        for run_id in affected_runs {
+        for (run_id, changed_step_ids) in affected_runs {
             let mut run = load_run_for_update(&mut transaction, run_id).await?;
             run.revision = next_revision(run.revision)?;
             let trace_id = run.identity.trace_id.clone();
-            refresh_and_save_run(&mut transaction, &mut run, now, &trace_id).await?;
+            refresh_and_save_run(
+                &mut transaction,
+                &mut run,
+                now,
+                &changed_step_ids,
+                &trace_id,
+                None,
+            )
+            .await?;
         }
         transaction.commit().await?;
         Ok(recovered)
@@ -876,6 +982,7 @@ fn step_runs_for(
                 step_id: step.id().to_owned(),
                 position,
                 role,
+                failure_policy: step.failure_policy(),
                 depends_on: step.dependencies().to_vec(),
                 state: EvaluationStepRunState::Pending,
                 revision: Revision::new(1)
@@ -904,15 +1011,16 @@ async fn save_new_step(
         serde_json::to_value(step).map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
     sqlx::query(
         "INSERT INTO evaluation.evaluation_step_runs \
-         (step_run_id,run_id,position,step_id,role,depends_on,state,revision,current_attempt,\
+         (step_run_id,run_id,position,step_id,role,failure_policy,depends_on,state,revision,current_attempt,\
           max_score,cleanup_verified,contract,created_at,updated_at) \
-         VALUES ($1,$2,$3,$4,$5,$6,'pending',$7,0,$8,false,$9,$10,$10)",
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8,0,$9,false,$10,$11,$11)",
     )
     .bind(step.id.as_uuid())
     .bind(step.run_id.as_uuid())
     .bind(i32::try_from(step.position).map_err(|_| EvaluationControlStoreError::ContractInvalid)?)
     .bind(&step.step_id)
     .bind(step_role_name(step.role))
+    .bind(step_failure_policy_name(step.failure_policy))
     .bind(&step.depends_on)
     .bind(revision_i64(step.revision)?)
     .bind(i32::try_from(step.max_score).map_err(|_| EvaluationControlStoreError::ScoreInvalid)?)
@@ -1025,9 +1133,10 @@ async fn refresh_and_save_run(
     transaction: &mut Transaction<'_, Postgres>,
     run: &mut EvaluationRun,
     now: UtcTimestamp,
+    changed_step_ids: &[EvaluationStepRunId],
     trace_id: &str,
+    operator_actor_id: Option<ActorId>,
 ) -> Result<(), EvaluationControlStoreError> {
-    let previous_state = run.state;
     run.steps = load_steps(transaction, run.id).await?;
     run.awarded_score = run
         .steps
@@ -1044,45 +1153,76 @@ async fn refresh_and_save_run(
                 | EvaluationStepRunState::Retryable
         )
     });
-    let deterministic_failure = run.steps.iter().find(|step| {
-        step.role != EvaluationStepRole::Advisory
-            && (step.state == EvaluationStepRunState::Failed
-                || (step.state == EvaluationStepRunState::Cancelled && !run.cancellation_requested))
-    });
+    let deterministic_failure = run
+        .steps
+        .iter()
+        .find(|step| failure_breaks_run(step, run.cancellation_requested));
     if let Some(step) = deterministic_failure {
-        run.state = EvaluationRunState::Failed;
         run.diagnostic_code.clone_from(&step.diagnostic_code);
-        run.cleanup_verified = !non_terminal
-            && run
+        if non_terminal {
+            run.state = if run.cancellation_requested {
+                EvaluationRunState::Cancelling
+            } else {
+                EvaluationRunState::Running
+            };
+            run.cleanup_verified = false;
+            run.completed_at = None;
+        } else {
+            run.state = EvaluationRunState::Failed;
+            run.cleanup_verified = run
                 .steps
                 .iter()
                 .filter(|step| !matches!(step.state, EvaluationStepRunState::Skipped))
                 .all(|step| step.cleanup_verified);
+            run.completed_at = if run.cleanup_verified {
+                Some(now)
+            } else {
+                None
+            };
+        }
+    } else if run.cancellation_requested && !non_terminal {
+        run.state = EvaluationRunState::Cancelled;
+        run.diagnostic_code = Some(DiagnosticCode::registered("LW_EVALUATION_CANCELLED"));
+        run.cleanup_verified = run
+            .steps
+            .iter()
+            .filter(|step| !matches!(step.state, EvaluationStepRunState::Skipped))
+            .all(|step| step.cleanup_verified);
         run.completed_at = if run.cleanup_verified {
             Some(now)
         } else {
             None
         };
-    } else if run.cancellation_requested && !non_terminal {
-        run.state = EvaluationRunState::Cancelled;
-        run.diagnostic_code = Some(DiagnosticCode::registered("LW_EVALUATION_CANCELLED"));
-        run.cleanup_verified = true;
-        run.completed_at = Some(now);
     } else if !non_terminal {
-        run.state = EvaluationRunState::Succeeded;
-        run.diagnostic_code = None;
-        run.cleanup_verified = true;
-        run.completed_at = Some(now);
+        let cleanup_verified = run
+            .steps
+            .iter()
+            .filter(|step| !matches!(step.state, EvaluationStepRunState::Skipped))
+            .all(|step| step.cleanup_verified);
+        if cleanup_verified {
+            run.state = EvaluationRunState::Succeeded;
+            run.diagnostic_code = None;
+            run.cleanup_verified = true;
+            run.completed_at = Some(now);
+        } else {
+            run.state = EvaluationRunState::Running;
+            run.diagnostic_code = None;
+            run.cleanup_verified = false;
+            run.completed_at = None;
+        }
     } else if run.cancellation_requested {
         run.state = EvaluationRunState::Cancelling;
         run.cleanup_verified = false;
+        run.completed_at = None;
     } else if run
         .steps
         .iter()
         .any(|step| step.state == EvaluationStepRunState::Running)
     {
         run.state = EvaluationRunState::Running;
+        run.diagnostic_code = None;
         run.cleanup_verified = false;
+        run.completed_at = None;
     }
     run.updated_at = now;
     run.validate()?;
@@ -1109,18 +1249,22 @@ async fn refresh_and_save_run(
     if updated.rows_affected() != 1 {
         return Err(EvaluationControlStoreError::StateConflict);
     }
-    if previous_state != run.state || is_terminal_run(run.state) {
-        enqueue_run_event(
-            transaction,
-            run,
-            subjects::EVALUATION_RUN_STATE_CHANGED,
-            now,
-            trace_id,
-        )
-        .await?;
-    }
-    for step in &run.steps {
-        enqueue_step_event(transaction, run, step, now, trace_id).await?;
+    enqueue_run_event(
+        transaction,
+        run,
+        subjects::EVALUATION_RUN_STATE_CHANGED,
+        now,
+        trace_id,
+        operator_actor_id,
+    )
+    .await?;
+    for step_run_id in changed_step_ids {
+        let step = run
+            .steps
+            .iter()
+            .find(|step| step.id == *step_run_id)
+            .ok_or(EvaluationControlStoreError::StepNotFound)?;
+        enqueue_step_event(transaction, run, step, now, trace_id, operator_actor_id).await?;
     }
     Ok(())
 }
@@ -1129,7 +1273,8 @@ async fn cancel_unstarted_steps(
     transaction: &mut Transaction<'_, Postgres>,
     run: &mut EvaluationRun,
     now: UtcTimestamp,
-) -> Result<(), EvaluationControlStoreError> {
+) -> Result<Vec<EvaluationStepRunId>, EvaluationControlStoreError> {
+    let mut changed_step_ids = Vec::new();
     for step in &mut run.steps {
         if matches!(
             step.state,
@@ -1142,34 +1287,149 @@ async fn cancel_unstarted_steps(
             step.cleanup_verified = true;
             step.completed_at = Some(now);
             save_step(transaction, step).await?;
+            push_step_change(&mut changed_step_ids, step.id);
         }
+    }
+    Ok(changed_step_ids)
+}
+
+async fn skip_dependency_successors(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: EvaluationRunId,
+    failed_step_id: &str,
+    now: UtcTimestamp,
+) -> Result<Vec<EvaluationStepRunId>, EvaluationControlStoreError> {
+    let mut steps = load_steps(transaction, run_id).await?;
+    let mut blocked = BTreeSet::from([failed_step_id.to_owned()]);
+    let mut changed_step_ids = Vec::new();
+    let mut progressed = true;
+    while progressed {
+        progressed = false;
+        for step in &mut steps {
+            if !step
+                .depends_on
+                .iter()
+                .any(|dependency| blocked.contains(dependency))
+            {
+                continue;
+            }
+            match step.state {
+                EvaluationStepRunState::Pending | EvaluationStepRunState::Retryable => {
+                    step.state = EvaluationStepRunState::Skipped;
+                    step.revision = next_revision(step.revision)?;
+                    step.awarded_score = None;
+                    step.diagnostic_code = Some(DiagnosticCode::registered(
+                        "LW_EVALUATION_DEPENDENCY_FAILED",
+                    ));
+                    step.evidence_sha256 = Some(Sha256Digest::of_bytes(b"dependency-failed"));
+                    step.cleanup_verified = true;
+                    step.completed_at = Some(now);
+                    save_step(transaction, step).await?;
+                    push_step_change(&mut changed_step_ids, step.id);
+                    progressed |= blocked.insert(step.step_id.clone());
+                }
+                EvaluationStepRunState::Skipped
+                    if step.diagnostic_code.as_ref().is_some_and(|diagnostic| {
+                        diagnostic.as_str() == "LW_EVALUATION_DEPENDENCY_FAILED"
+                    }) =>
+                {
+                    progressed |= blocked.insert(step.step_id.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(changed_step_ids)
+}
+
+async fn restore_dependency_skipped_successors(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: EvaluationRunId,
+    retried_step_id: &str,
+) -> Result<Vec<EvaluationStepRunId>, EvaluationControlStoreError> {
+    let mut steps = load_steps(transaction, run_id).await?;
+    let mut restored = BTreeSet::from([retried_step_id.to_owned()]);
+    let mut changed_step_ids = Vec::new();
+    let mut progressed = true;
+    while progressed {
+        progressed = false;
+        for step in &mut steps {
+            if step.state != EvaluationStepRunState::Skipped
+                || !step.diagnostic_code.as_ref().is_some_and(|diagnostic| {
+                    diagnostic.as_str() == "LW_EVALUATION_DEPENDENCY_FAILED"
+                })
+                || !step
+                    .depends_on
+                    .iter()
+                    .any(|dependency| restored.contains(dependency))
+            {
+                continue;
+            }
+            step.state = EvaluationStepRunState::Pending;
+            step.revision = next_revision(step.revision)?;
+            step.awarded_score = None;
+            step.diagnostic_code = None;
+            step.evidence_sha256 = None;
+            step.cleanup_verified = false;
+            step.started_at = None;
+            step.completed_at = None;
+            save_step(transaction, step).await?;
+            push_step_change(&mut changed_step_ids, step.id);
+            progressed |= restored.insert(step.step_id.clone());
+        }
+    }
+    Ok(changed_step_ids)
+}
+
+async fn mark_attempt_cleanup_verified(
+    transaction: &mut Transaction<'_, Postgres>,
+    step: &EvaluationStepRun,
+    now: UtcTimestamp,
+) -> Result<(), EvaluationControlStoreError> {
+    let updated = sqlx::query(
+        "UPDATE evaluation.evaluation_step_attempts \
+         SET cleanup_verified=true,updated_at=$3 \
+         WHERE step_run_id=$1 AND attempt=$2 \
+           AND state IN ('failed','cancelled') AND cleanup_verified=false",
+    )
+    .bind(step.id.as_uuid())
+    .bind(
+        i32::try_from(step.current_attempt)
+            .map_err(|_| EvaluationControlStoreError::AttemptOverflow)?,
+    )
+    .bind(now.get())
+    .execute(&mut **transaction)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(EvaluationControlStoreError::StateConflict);
     }
     Ok(())
 }
 
-async fn skip_unfinished_steps(
-    transaction: &mut Transaction<'_, Postgres>,
-    run_id: EvaluationRunId,
-    now: UtcTimestamp,
-) -> Result<(), EvaluationControlStoreError> {
-    let mut steps = load_steps(transaction, run_id).await?;
-    for step in &mut steps {
-        if matches!(
-            step.state,
-            EvaluationStepRunState::Pending | EvaluationStepRunState::Retryable
-        ) {
-            step.state = EvaluationStepRunState::Skipped;
-            step.revision = next_revision(step.revision)?;
-            step.diagnostic_code = Some(DiagnosticCode::registered(
-                "LW_EVALUATION_DEPENDENCY_FAILED",
-            ));
-            step.evidence_sha256 = Some(Sha256Digest::of_bytes(b"dependency-failed"));
-            step.cleanup_verified = true;
-            step.completed_at = Some(now);
-            save_step(transaction, step).await?;
-        }
+fn push_step_change(
+    changed_step_ids: &mut Vec<EvaluationStepRunId>,
+    step_run_id: EvaluationStepRunId,
+) {
+    if !changed_step_ids.contains(&step_run_id) {
+        changed_step_ids.push(step_run_id);
     }
-    Ok(())
+}
+
+fn push_run_step_changes(
+    affected_runs: &mut Vec<(EvaluationRunId, Vec<EvaluationStepRunId>)>,
+    run_id: EvaluationRunId,
+    changed_step_ids: Vec<EvaluationStepRunId>,
+) {
+    if let Some((_, existing)) = affected_runs
+        .iter_mut()
+        .find(|(affected_run_id, _)| *affected_run_id == run_id)
+    {
+        for step_run_id in changed_step_ids {
+            push_step_change(existing, step_run_id);
+        }
+    } else {
+        affected_runs.push((run_id, changed_step_ids));
+    }
 }
 
 async fn enqueue_release_published(
@@ -1206,6 +1466,7 @@ async fn enqueue_run_event(
     subject: &'static str,
     now: UtcTimestamp,
     trace_id: &str,
+    operator_actor_id: Option<ActorId>,
 ) -> Result<(), EvaluationControlStoreError> {
     let contract = event_contract(subject)?;
     let sequence = next_outbox_sequence(transaction, run.id.as_uuid()).await?;
@@ -1218,6 +1479,7 @@ async fn enqueue_run_event(
             .diagnostic_code
             .as_ref()
             .map(|diagnostic| diagnostic.as_str().to_owned()),
+        operator_actor_id,
     };
     data.validate()?;
     let event = event_envelope(
@@ -1239,6 +1501,7 @@ async fn enqueue_step_event(
     step: &EvaluationStepRun,
     now: UtcTimestamp,
     trace_id: &str,
+    operator_actor_id: Option<ActorId>,
 ) -> Result<(), EvaluationControlStoreError> {
     let contract = event_contract(subjects::EVALUATION_STEP_RUN_STATE_CHANGED)?;
     let sequence = next_outbox_sequence(transaction, step.id.as_uuid()).await?;
@@ -1255,6 +1518,7 @@ async fn enqueue_step_event(
             .map(|diagnostic| diagnostic.as_str().to_owned()),
         evidence_sha256: step.evidence_sha256,
         cleanup_verified: Some(step.cleanup_verified),
+        operator_actor_id,
     };
     data.validate()?;
     let event = event_envelope(
@@ -1408,6 +1672,28 @@ const fn is_terminal_run(state: EvaluationRunState) -> bool {
     )
 }
 
+fn failure_stops_dependency_successors(step: &EvaluationStepRun) -> bool {
+    matches!(
+        step.state,
+        EvaluationStepRunState::Failed | EvaluationStepRunState::Cancelled
+    ) && step.failure_policy == EvaluationStepFailurePolicy::Stop
+}
+
+fn failure_breaks_run(step: &EvaluationStepRun, cancellation_requested: bool) -> bool {
+    if step.failure_policy != EvaluationStepFailurePolicy::Stop {
+        return false;
+    }
+    step.state == EvaluationStepRunState::Failed
+        || (step.state == EvaluationStepRunState::Cancelled && !cancellation_requested)
+}
+
+fn runtime_identity_sha256(
+    runtime_identity: &EvaluationRuntimeIdentity,
+) -> Result<Sha256Digest, EvaluationControlStoreError> {
+    Sha256Digest::of_canonical(runtime_identity)
+        .map_err(|_| EvaluationControlStoreError::IdentityMismatch)
+}
+
 const fn run_state_name(state: EvaluationRunState) -> &'static str {
     match state {
         EvaluationRunState::Queued => "queued",
@@ -1436,6 +1722,14 @@ const fn step_role_name(role: EvaluationStepRole) -> &'static str {
         EvaluationStepRole::Gate => "gate",
         EvaluationStepRole::Score => "score",
         EvaluationStepRole::Advisory => "advisory",
+    }
+}
+
+const fn step_failure_policy_name(policy: EvaluationStepFailurePolicy) -> &'static str {
+    match policy {
+        EvaluationStepFailurePolicy::Stop => "stop",
+        EvaluationStepFailurePolicy::Continue => "continue",
+        EvaluationStepFailurePolicy::ContinueAdvisory => "continue_advisory",
     }
 }
 
@@ -1471,6 +1765,16 @@ fn validate_worker_id(worker_id: &str) -> Result<(), EvaluationControlStoreError
     Ok(())
 }
 
+fn validate_worker_san(
+    worker_id: &str,
+    worker_san_uri: &str,
+) -> Result<(), EvaluationControlStoreError> {
+    if worker_service_san(worker_id)?.as_str() != worker_san_uri {
+        return Err(EvaluationControlStoreError::WorkerIdentityInvalid);
+    }
+    Ok(())
+}
+
 fn map_unique(error: sqlx::Error) -> EvaluationControlStoreError {
     if error
         .as_database_error()
@@ -1485,6 +1789,11 @@ fn map_unique(error: sqlx::Error) -> EvaluationControlStoreError {
 #[must_use]
 pub fn control_service_san() -> &'static str {
     CONTROL_SERVICE_SAN
+}
+
+pub fn worker_service_san(worker_id: &str) -> Result<String, EvaluationControlStoreError> {
+    validate_worker_id(worker_id)?;
+    Ok(format!("{WORKER_SERVICE_SAN_PREFIX}{worker_id}"))
 }
 
 /// Stable payload-free control-plane failures.

@@ -1,5 +1,9 @@
 {
   "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
     "CourseId": {
       "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
       "type": "string"
@@ -33,6 +37,16 @@
           "anyOf": [
             {
               "$ref": "#/$defs/Sha256Digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "operatorActorId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActorId"
             },
             {
               "type": "null"

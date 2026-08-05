@@ -12,6 +12,50 @@
       "description": "Strongly typed UUIDv7 identifier for `EvaluationRunId`.",
       "type": "string"
     },
+    "EvaluationRuntimeIdentity": {
+      "additionalProperties": false,
+      "description": "Immutable build and deployment identity that must match every run using the release.",
+      "properties": {
+        "configurationSha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Effective non-secret runtime configuration identity."
+        },
+        "migrationCatalogSha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Checked-in Migration catalog identity."
+        },
+        "packageSha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Approved problem package identity."
+        },
+        "providerBinding": {
+          "description": "Explicit runtime provider binding chosen by Control and enforced by Evaluation.",
+          "type": "string"
+        },
+        "runnerImage": {
+          "description": "Digest-pinned runner image reference.",
+          "type": "string"
+        },
+        "runtimeArtifactSha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Runtime artifact identity, such as the worker binary or image manifest digest."
+        },
+        "sourceSha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Clean source tree or source bundle identity."
+        }
+      },
+      "required": [
+        "sourceSha256",
+        "providerBinding",
+        "packageSha256",
+        "configurationSha256",
+        "migrationCatalogSha256",
+        "runnerImage",
+        "runtimeArtifactSha256"
+      ],
+      "type": "object"
+    },
     "EvaluationStepCompletion": {
       "additionalProperties": false,
       "description": "Terminal worker result accepted by the Evaluation authority.",
@@ -94,6 +138,9 @@
     "runId": {
       "$ref": "#/$defs/EvaluationRunId"
     },
+    "runtimeIdentity": {
+      "$ref": "#/$defs/EvaluationRuntimeIdentity"
+    },
     "stepRunId": {
       "$ref": "#/$defs/EvaluationStepRunId"
     },
@@ -107,6 +154,7 @@
     "stepRunId",
     "attempt",
     "workerId",
+    "runtimeIdentity",
     "leaseToken",
     "completion"
   ],

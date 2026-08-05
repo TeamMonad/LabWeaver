@@ -37,7 +37,8 @@ use hyper_util::{
 use crate::{
     EvaluationControlStoreError, EvaluationReleaseReservation, EvaluationRunReservation,
     FreezeCommandStoreError, PgFreezeCommandStore, PgFreezeStore, SubmissionFreezeCommand,
-    control_plane::PgEvaluationControlStore, freeze_store::FreezeStoreError,
+    control_plane::{PgEvaluationControlStore, worker_service_san},
+    freeze_store::FreezeStoreError,
 };
 
 const ACCESS_SERVICE_SAN: &str = "spiffe://labweaver/access-service";
@@ -308,15 +309,17 @@ async fn complete_evaluation_step(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<EvaluationRun>, EvaluationApiError> {
-    require_control(principal)?;
     let request = contracts::parse_strict_json::<InternalCompleteEvaluationStepRequest>(&body)
         .map_err(|_| EvaluationApiError::RequestInvalid)?;
+    request
+        .validate()
+        .map_err(|_| EvaluationApiError::RequestInvalid)?;
+    let worker_san_uri = require_worker(principal, &request.worker_id)?;
     if request.run_id != run_id || request.step_run_id != step_run_id {
         return Err(EvaluationApiError::RequestInvalid);
     }
     let lease_token = uuid::Uuid::parse_str(&request.lease_token)
         .map_err(|_| EvaluationApiError::RequestInvalid)?;
-    let now = state.control.authority_now().await?;
     Ok(Json(
         state
             .control
@@ -326,9 +329,10 @@ async fn complete_evaluation_step(
                 step_run_id,
                 request.attempt,
                 &request.worker_id,
+                &worker_san_uri,
+                &request.runtime_identity,
                 lease_token,
                 &request.completion,
-                now,
                 &trace_id(&headers)?,
             )
             .await?,
@@ -384,6 +388,17 @@ fn require_control(
         Ok(())
     } else {
         Err(EvaluationApiError::CallerDenied)
+    }
+}
+
+fn require_worker(
+    principal: Option<Extension<GatewayPrincipal>>,
+    worker_id: &str,
+) -> Result<String, EvaluationApiError> {
+    let expected = worker_service_san(worker_id).map_err(EvaluationApiError::Control)?;
+    match principal {
+        Some(Extension(principal)) if principal.san_uri == expected => Ok(principal.san_uri),
+        _ => Err(EvaluationApiError::CallerDenied),
     }
 }
 
@@ -587,9 +602,12 @@ impl IntoResponse for EvaluationApiError {
 
 #[cfg(test)]
 mod tests {
+    use axum::Extension;
     use axum::response::IntoResponse;
 
-    use super::EvaluationApiError;
+    use crate::control_plane::{control_service_san, worker_service_san};
+
+    use super::{EvaluationApiError, GatewayPrincipal, require_control, require_worker};
 
     #[test]
     fn terminal_freeze_failure_is_a_conflict() {
@@ -597,5 +615,30 @@ mod tests {
             .into_response();
 
         assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn completion_requires_matching_worker_san_not_control_san() -> Result<(), String> {
+        assert!(require_control(Some(principal(control_service_san()))).is_ok());
+        assert!(require_worker(Some(principal(control_service_san())), "worker-a").is_err());
+
+        let worker_a = worker_service_san("worker-a").map_err(|error| format!("{error:?}"))?;
+        assert_eq!(
+            require_worker(Some(principal(&worker_a)), "worker-a")
+                .map_err(|error| format!("{error:?}"))?,
+            worker_a
+        );
+        assert!(require_control(Some(principal(&worker_a))).is_err());
+
+        let worker_b = worker_service_san("worker-b").map_err(|error| format!("{error:?}"))?;
+        assert!(require_worker(Some(principal(&worker_b)), "worker-a").is_err());
+        assert!(require_worker(Some(principal(&worker_a)), "bad/worker").is_err());
+        Ok(())
+    }
+
+    fn principal(san_uri: &str) -> Extension<GatewayPrincipal> {
+        Extension(GatewayPrincipal {
+            san_uri: san_uri.to_owned(),
+        })
     }
 }

@@ -9,7 +9,7 @@ pub use control::{
     EVALUATION_RELEASE_SCHEMA_VERSION, EVALUATION_RUN_SCHEMA_VERSION,
     EvaluationControlContractError, EvaluationRelease, EvaluationReleaseState, EvaluationRun,
     EvaluationRunIdentity, EvaluationRunState, EvaluationRuntimeIdentity, EvaluationStepCompletion,
-    EvaluationStepRole, EvaluationStepRun, EvaluationStepRunState,
+    EvaluationStepFailurePolicy, EvaluationStepRole, EvaluationStepRun, EvaluationStepRunState,
 };
 pub use review::{
     EvidenceLocation, FindingResult, GoalAssessment, GoalFinding, GoalReview, GoalReviewError,

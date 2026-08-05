@@ -1,5 +1,9 @@
 {
   "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
     "CourseId": {
       "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
       "type": "string"
@@ -16,6 +20,16 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "operatorActorId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActorId"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "releaseId": {

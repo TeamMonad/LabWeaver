@@ -300,6 +300,21 @@ impl EvaluationStep {
         }
     }
 
+    /// Returns the role-specific failure behavior declared in the immutable spec.
+    #[must_use]
+    pub const fn failure_policy(&self) -> super::control::EvaluationStepFailurePolicy {
+        match self {
+            Self::Gate(_) => super::control::EvaluationStepFailurePolicy::Stop,
+            Self::Score(step) => match step.failure_policy {
+                ScoreFailurePolicy::Stop => super::control::EvaluationStepFailurePolicy::Stop,
+                ScoreFailurePolicy::Continue => {
+                    super::control::EvaluationStepFailurePolicy::Continue
+                }
+            },
+            Self::Advisory(_) => super::control::EvaluationStepFailurePolicy::ContinueAdvisory,
+        }
+    }
+
     /// Returns the deterministic runner for Gate and Score steps.
     #[must_use]
     pub fn deterministic_runner(&self) -> Option<&DeterministicRunnerSpec> {
