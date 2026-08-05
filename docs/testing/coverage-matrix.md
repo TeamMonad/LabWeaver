@@ -30,5 +30,6 @@ earlier identity. Forward rotation reissued ten JWT/mTLS identities, rejected
 the preceding credentials, retained seven streams and five consumers, and
 drained the Resource Outbox. The same-namespace quota adoption and
 renewal/revoke/expiry saga are implemented locally; approved Work handoff and
-terminal cleanup remain blocked until the new package and migration are
-deployed and replayed.
+terminal cleanup remain delegated to Sprint-end acceptance Issue #126 until the
+new package and migration are deployed and replayed. The #142 development PR
+does not launch that connected path.

@@ -81,7 +81,10 @@ The Release Gate validates the v2 envelope and rehashes these files. v1 inputs
 and reports are legacy evidence and cannot satisfy Issue #142. Producers
 and D Verify remain responsible for the inner evidence semantics frozen by the
 Demo contract; an empty or fabricated evidence file is not acceptance evidence
-even if its hash is internally consistent.
+even if its hash is internally consistent. For the current Sprint, Issue #126
+is the sole connected-acceptance owner; development Issues and PRs, including
+#142/#147, must not start deployment, Resource replay, connected E2E or Release
+Gate commands.
 
 ## Docker Desktop local boundary
 

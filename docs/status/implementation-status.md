@@ -181,8 +181,9 @@ bundle, credential registry, package kubeconfig and execution ledger. PostgreSQL
 MinIO, Harbor, Keycloak, Kubernetes/KubeVirt and their foundation storage were
 retained. No Secret values, JWTs, private keys or user material are included in
 the manifest. Previous connected reports and attempt-ledger conclusions are
-therefore invalid for the next candidate; only evidence produced after the new
-package, deployment and Resource replay may close #142.
+therefore invalid for the next candidate; only evidence produced in the
+Sprint-end acceptance window owned by #126, after the new package, deployment
+and Resource replay, may close #142.
 
 The retained Harbor Trivy deployment had a real NFS `root_squash`/kubelet
 `applyFSGroup` blocker. The Harbor Ansible role now applies
@@ -220,9 +221,10 @@ and emits a root-only sanitized report. `cargo xtask demo replay` now requires
 and invokes it before live Playwright and Gate evaluation. The clean reset
 removed all previous private profile, authentication, Resource deployment
 manifest, package locator and replay report inputs; a new controlled bundle
-must be provisioned before connected execution. This path remains
-`implemented; connected verification blocked`; no local or stale report is
-treated as connected evidence.
+must be provisioned before connected execution. This path remains `implemented;
+ready for human review`; connected verification is delegated to Sprint-end
+acceptance Issue #126. No local or stale report is treated as connected
+evidence.
 
 The replay driver now waits on the public Control candidate view until a
 Container candidate's authoritative build projection is `succeeded` and its
