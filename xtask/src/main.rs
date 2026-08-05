@@ -10,9 +10,9 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use sha2::{Digest, Sha256};
 
 mod acceptance_assets;
-mod integration;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod execution_ledger;
+mod integration;
 mod migration_catalog;
 mod platform_images;
 mod release_gate;
