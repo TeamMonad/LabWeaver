@@ -114,3 +114,8 @@ cargo xtask rollback --env demo --revision <helm-revision> --yes
 ```
 
 Package, connected validation, deployment, rollback, and real runtime verification are distinct evidence boundaries. A static manifest or successful image build is not evidence that Container or KubeVirt flows work in the cluster.
+
+The Docker Desktop `local-hostpath` profile has a separate render-only stack
+overlay and plan-only teardown order. It must not invoke the connected rollback
+command, delete local namespaces, or promote its report; local evidence remains
+`releaseEligible: false`.

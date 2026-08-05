@@ -58,3 +58,6 @@ those reviews or self-approve the merge.
 `local-connected-non-release` report. Docker Desktop's single-node `hostpath`
 profile cannot satisfy the formal `nfs-rwx` or KubeVirt requirements, so its
 report cannot be consumed by `cargo xtask release-gate` or close #142.
+The dependency stack is represented by a schema-validated render-only overlay
+and a plan-only teardown order; no local namespace, PVC, Secret, stream, bucket,
+realm or workload is created or deleted in this phase.
