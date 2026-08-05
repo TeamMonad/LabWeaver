@@ -34,9 +34,10 @@ foundation_ownership_preflight_protected_namespaces:
   - cdi
 # Known Helm releases that LabWeaver itself owns inside candidate namespaces.
 # Any other release inside a candidate namespace is an unknown owner and blocks
-# the clean redeploy.
+# the clean redeploy. Harbor is installed through its own Helm chart; the Sprint 2
+# application profile is applied by Ansible, not Helm, in this environment.
 foundation_ownership_preflight_helm_release_allowlist:
-  - {namespace: labweaver-system, name: labweaver}
+  - {namespace: harbor, name: harbor}
 # keycloak-system has no namespace-level ownership label today; its ownership
 # is proven object-level (identity CA bundle) plus this explicit confirmation.
 foundation_ownership_preflight_keycloak_namespace: keycloak-system
