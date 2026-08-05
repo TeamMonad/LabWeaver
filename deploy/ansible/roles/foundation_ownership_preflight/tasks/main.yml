@@ -53,11 +53,18 @@
 
 - name: Derive the namespace ownership map
   ansible.builtin.set_fact:
+    foundation_ownership_preflight_namespace_map: {}
+
+- name: Populate the namespace ownership map
+  ansible.builtin.set_fact:
     foundation_ownership_preflight_namespace_map: >-
-      {{ dict((foundation_ownership_preflight_namespaces_raw.stdout | from_json).items
-         | map(attribute='metadata.name')
-         | zip((foundation_ownership_preflight_namespaces_raw.stdout | from_json).items
-               | map(attribute='metadata.labels') | map('default', {}, true) | list)) }}
+      {{ foundation_ownership_preflight_namespace_map
+         | combine({item.metadata.name:
+                    item.metadata.labels | default({}, true)}) }}
+  loop: >-
+    {{ (foundation_ownership_preflight_namespaces_raw.stdout | from_json)['items'] }}
+  loop_control:
+    label: "{{ item.metadata.name }}"
 
 - name: Require every candidate namespace to exist
   ansible.builtin.assert:
