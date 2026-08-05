@@ -4,6 +4,33 @@ This document records current repository and connected-runtime facts. Design
 documents, fixtures, health endpoints and reports from another source identity
 are not completion evidence.
 
+## Local integration candidate gate (#150)
+
+The local Docker-first integration entry point is implemented at
+`cargo xtask test --suite integration`. `--scope changed` performs explicit
+path selection; `--scope candidate` runs the full local Docker dependency and
+BuildKit/Registry/Trivy canary gate, with optional fresh kind API validation.
+Container lifecycle (network, create/start, labels, random host ports, env,
+image pull, inspect, exec readiness, logs, cleanup) uses the Bollard API;
+BuildKit, `docker push`, `docker save` and Trivy remain CLI entry points.
+JetStream is probed through `async-nats` (unique stream, publish, ack, message
+count).
+
+Verified local evidence (working tree on `9b8d5abf`, dirty): run
+`019fcdd980467d7094c65e1915e1ec38` passed the host contract probe, dependency
+contract probe, BuildKit/Registry/Trivy supply chain and the fresh kind gate
+with cleanup passed. The earlier Docker Hub pull timeout blocker cleared once
+external registry connectivity recovered; pinned images are digest-verified.
+
+Not claimed: real service binaries starting against the shared dependencies,
+MinIO immutable-object semantics, Keycloak token issuance/JWT validation, CI
+execution of the manual-dispatch workflow, connected deployment, KubeVirt or
+Release Gate evidence. kind proves Kubernetes API and Helm rendering semantics
+only. Reports remain ignored local evidence and do not satisfy Sprint-end
+connected acceptance. Ordinary Issue/PR merge gates stop at this local evidence
+boundary; cluster deployment and Release Gate remain owned by the dedicated
+Sprint-end acceptance Issue.
+
 ## Sprint 3 ConsoleCapability contract
 
 | Capability | State | Current evidence and boundary |

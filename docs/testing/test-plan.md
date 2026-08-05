@@ -4,6 +4,27 @@ The Sprint 2 terminal gate and its evidence contract are documented in
 [`release-gate.md`](release-gate.md). A local or Fixture pass cannot satisfy a
 check whose gate mode is `connected`.
 
+## Issue and Sprint verification boundary
+
+Every Issue and its PR use the local integration gate as the merge evidence:
+
+```sh
+cargo xtask test --suite integration --scope changed --base-ref origin/develop
+cargo xtask test --suite integration --scope candidate --base-ref origin/develop
+cargo xtask test --suite integration --scope candidate --kind-only
+```
+
+The changed scope selects only affected Docker/kind groups. The candidate scope
+runs the Docker dependency and supply-chain gate and adds fresh kind when
+requested or when Kubernetes/deployment paths changed. It records an ignored
+JSON report with source identity, image digests, selected paths, phase timings,
+diagnostic and cleanup status.
+
+Cluster deployment, connected Playwright, Ansible Verify and Release Gate are
+not ordinary Issue/PR merge gates. One dedicated Sprint-end acceptance Issue
+freezes the release identity and owns those connected checks. Local, Fixture and
+static evidence must never be promoted to the Sprint-end cluster conclusion.
+
 Tests are grouped by the boundary they actually exercise. Reports must name the
 source identity and must not promote Fixture or static evidence to a connected
 runtime claim.

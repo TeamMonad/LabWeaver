@@ -1,0 +1,61 @@
+name: Local Integration
+
+on:
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: "Local gate to execute"
+        required: true
+        type: choice
+        options:
+          - docker
+          - kind
+          - all
+        default: docker
+permissions:
+  contents: read
+
+concurrency:
+  group: local-integration-\${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  local-integration:
+    name: local-integration-\${{ inputs.scope }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.x"
+      - uses: azure/setup-helm@v4.3.0
+        with:
+          version: v3.21.3
+      - name: Install pinned kind client
+        shell: bash
+        run: |
+          set -euo pipefail
+          GOBIN="$RUNNER_TEMP/bin" go install sigs.k8s.io/kind@v0.32.0
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          kind version
+      - name: Run Docker local gate
+        if: inputs.scope == 'docker'
+        run: cargo run -p xtask --locked -- test --suite integration --scope candidate
+      - name: Run Docker and kind local gate
+        if: inputs.scope == 'all'
+        run: cargo run -p xtask --locked -- test --suite integration --scope candidate --include-kind
+      - name: Run kind local gate
+        if: inputs.scope == 'kind'
+        run: cargo run -p xtask --locked -- test --suite integration --scope candidate --kind-only
+      - name: Upload local integration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-integration-\${{ github.run_id }}
+          path: artifacts/local-integration/
+          if-no-files-found: warn
+          retention-days: 14

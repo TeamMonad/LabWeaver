@@ -10,6 +10,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use sha2::{Digest, Sha256};
 
 mod acceptance_assets;
+mod integration;
 mod migration_catalog;
 mod platform_images;
 mod release_gate;
@@ -97,6 +98,20 @@ enum AcceptanceAssetsAction {
 struct TestArgs {
     #[arg(long, value_enum, default_value_t = TestSuite::All)]
     suite: TestSuite,
+    #[arg(long, value_enum, default_value_t = IntegrationScope::Candidate)]
+    scope: IntegrationScope,
+    #[arg(long)]
+    base_ref: Option<String>,
+    #[arg(long)]
+    include_kind: bool,
+    #[arg(long)]
+    kind_only: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum IntegrationScope {
+    Changed,
+    Candidate,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -255,6 +270,10 @@ enum AppError {
         code: &'static str,
         detail: String,
     },
+    Integration {
+        code: &'static str,
+        detail: String,
+    },
     ReleaseGate {
         code: &'static str,
         detail: String,
@@ -278,6 +297,7 @@ impl AppError {
             Self::ContractDrift { .. } => "LW_CONTRACT_DRIFT",
             Self::PlatformImage { code, .. } => code,
             Self::AcceptanceAsset { code, .. } => code,
+            Self::Integration { code, .. } => code,
             Self::ReleaseGate { code, .. } => code,
             Self::InvalidArgument { .. } => "XTASK_INVALID_ARGUMENT",
             #[cfg(not(target_os = "linux"))]
@@ -314,6 +334,7 @@ impl Display for AppError {
             }
             Self::PlatformImage { code, detail } => write!(formatter, "{code}: {detail}"),
             Self::AcceptanceAsset { detail, .. } => write!(formatter, "{detail}"),
+            Self::Integration { detail, .. } => write!(formatter, "{detail}"),
             Self::ReleaseGate { detail, .. } => write!(formatter, "{detail}"),
             Self::InvalidArgument { role } => {
                 write!(
@@ -342,6 +363,10 @@ fn main() -> ExitCode {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the workflow command dispatch is the single public xtask boundary"
+)]
 fn run(cli: Cli) -> Result<(), AppError> {
     match cli.command {
         Command::Format => run_cargo("format", ["fmt", "--all", "--", "--check"]),
@@ -363,7 +388,13 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::Test(args) => match args.suite {
             TestSuite::All => run_cargo("test", ["test", "--workspace", "--exclude", "xtask"]),
             TestSuite::Contract => contract_test_suite(),
-            TestSuite::Integration => not_implemented("test --suite integration"),
+            TestSuite::Integration => integration::run(
+                &repository_root(),
+                args.scope,
+                args.base_ref.as_deref(),
+                args.include_kind,
+                args.kind_only,
+            ),
             TestSuite::E2e => not_implemented("test --suite e2e"),
         },
         Command::Check => {
@@ -379,6 +410,10 @@ fn run(cli: Cli) -> Result<(), AppError> {
             run(Cli {
                 command: Command::Test(TestArgs {
                     suite: TestSuite::All,
+                    scope: IntegrationScope::Candidate,
+                    base_ref: None,
+                    include_kind: false,
+                    kind_only: false,
                 }),
             })
         }
