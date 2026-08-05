@@ -60,6 +60,35 @@ failed closed with four blockers: missing `nfs-rwx`, KubeVirt, CDI and
 `ECNU_API_KEY`; the report is `releaseEligible: false` and is bound only to
 the exact `sourceCommit` embedded in that report.
 
+### Approved-environment read-only preflight (2026-08-05)
+
+The approved cluster was inspected through the controlled SSH entry points only;
+no Kubernetes, Ansible, package, credential or filesystem write was performed.
+The three-node cluster is reachable and all nodes are `Ready`; KubeVirt is
+`Deployed`, CDI is healthy, and both `nfs-rwx` (immediate) and `local-path`
+storage classes are present. PostgreSQL, NATS, MinIO, BuildKit, Harbor and
+Keycloak foundation workloads are ready. No LabWeaver application Deployment,
+Resource Service Pod, environment Namespace or VirtualMachine is currently
+running.
+
+The only remote source checkout found for the earlier Resource validation is a
+detached, stale identity and has no package or deployment manifest for the
+current `feature/142-resource-lease` HEAD. Its latest replay log returns
+`LW_EXECUTION_ATTEMPT_BUDGET_EXHAUSTED`; no replay process is active, and the
+existing clean-validation lock and root-only logs are retained unchanged. The
+connected operation budget therefore prevents starting another package,
+application reconcile or replay cycle without an explicitly recorded Owner
+validation window.
+
+The Resource NATS issuance record is also fail-closed with
+`LW_RESOURCE_NATS_SIGNING_SOURCE_UNAVAILABLE`: no operator/account signing key
+store was found, although existing service-credential locators were detected.
+No service credential, JWT, private key or signing material was read. Node
+allocatable resources expose no `nvidia.com/gpu` device-plugin capacity or
+mdev extension resource, so GPU capacity remains an explicit negative
+capability for this environment. These observations are diagnostic only and
+cannot satisfy the same-identity connected Resource replay or Release Gate v2.
+
 ## Legacy Sprint 1 and Sprint 2 connected result (superseded)
 
 The table below is retained only as historical context for the previous
