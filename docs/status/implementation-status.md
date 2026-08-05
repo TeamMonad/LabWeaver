@@ -40,7 +40,8 @@ Sprint-end acceptance Issue.
 
 ## Current identity
 
-- Draft PR: #147, branch `feature/142-resource-lease`, target `develop`
+- PR #147: Ready for review / release-blocked, branch
+  `feature/142-resource-lease`, target `develop`
 - Source identity: every candidate report and package must record the full Git
   `HEAD`; a dirty tree is never release evidence.
 - Connected cluster identity: not present in this checkout
