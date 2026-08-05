@@ -1,0 +1,15 @@
+---
+# Issue #152 clean redeploy finalization (same run ID as
+# 94-foundation-clean-redeploy.yml). Completes the single authorized cleanup
+# cycle: reclaims residual LabWeaver-owned PersistentVolumes, re-runs the
+# final destruction readback, and persists the sanitized report + tombstone.
+# Confirmation: finalize-labweaver-foundation:<cluster-uid>:<run-id>
+- import_playbook: 00-preflight.yml
+  vars:
+    labweaver_preflight_scope: foundation-clean-redeploy
+
+- name: Finalize the LabWeaver-dedicated foundation cleanup
+  hosts: control_plane
+  gather_facts: false
+  become: true
+  roles: [foundation_clean_redeploy_finalize]

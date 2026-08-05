@@ -1,0 +1,212 @@
+---
+# Finalization of the Issue #152 destructive cycle. Runs on the same run ID
+# after 94-foundation-clean-redeploy.yml and completes what the strict
+# readback intentionally refused to accept mid-cycle: reclaiming the residual
+# PersistentVolumes whose claims lived in the destroyed LabWeaver namespaces.
+- name: Validate finalize inputs
+  ansible.builtin.assert:
+    that:
+      - foundation_clean_redeploy_finalize_run_id is match('^[a-z0-9][a-z0-9-]{2,62}$')
+      - foundation_clean_redeploy_finalize_source_commit is match('^[0-9a-f]{40,64}$')
+      - foundation_clean_redeploy_finalize_namespaces | intersect(foundation_clean_redeploy_finalize_protected_namespaces) | length == 0
+    fail_msg: FOUNDATION_FINALIZE_INPUT_INVALID
+
+- name: Stat finalize tools
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ foundation_clean_redeploy_finalize_kubeconfig }}"
+    - "{{ foundation_clean_redeploy_finalize_kubectl }}"
+  register: foundation_clean_redeploy_finalize_tools
+
+- name: Reject missing finalize tools
+  ansible.builtin.assert:
+    that: foundation_clean_redeploy_finalize_tools.results | map(attribute='stat.exists') | min
+    fail_msg: FOUNDATION_FINALIZE_TOOL_MISSING
+
+- name: Read target cluster UID
+  ansible.builtin.command:
+    argv:
+      - "{{ foundation_clean_redeploy_finalize_kubectl }}"
+      - --kubeconfig
+      - "{{ foundation_clean_redeploy_finalize_kubeconfig }}"
+      - get
+      - namespace
+      - kube-system
+      - -o
+      - jsonpath={.metadata.uid}
+  register: foundation_clean_redeploy_finalize_cluster_uid
+  changed_when: false
+
+- name: Bind finalize confirmation to the exact cluster and run
+  ansible.builtin.assert:
+    that:
+      - foundation_clean_redeploy_finalize_cluster_uid.stdout | trim | length > 0
+      - foundation_clean_redeploy_finalize_confirmation ==
+        'finalize-labweaver-foundation:' + (foundation_clean_redeploy_finalize_cluster_uid.stdout | trim)
+        + ':' + foundation_clean_redeploy_finalize_run_id
+    fail_msg: FOUNDATION_FINALIZE_CONFIRMATION_MISMATCH
+
+- name: Require same-run ownership evidence
+  ansible.builtin.stat:
+    path: >-
+      {{ foundation_clean_redeploy_finalize_report_root }}/{{ foundation_clean_redeploy_finalize_run_id }}/ownership-inventory.json
+  register: foundation_clean_redeploy_finalize_ownership_stat
+
+- name: Reject finalization without ownership evidence
+  ansible.builtin.assert:
+    that: foundation_clean_redeploy_finalize_ownership_stat.stat.exists
+    fail_msg: FOUNDATION_OWNERSHIP_PREFLIGHT_MISSING
+
+- name: Read the ownership evidence
+  ansible.builtin.slurp:
+    src: >-
+      {{ foundation_clean_redeploy_finalize_report_root }}/{{ foundation_clean_redeploy_finalize_run_id }}/ownership-inventory.json
+  register: foundation_clean_redeploy_finalize_ownership_raw
+
+- name: Verify the ownership evidence matches this cluster and run
+  ansible.builtin.assert:
+    that:
+      - foundation_clean_redeploy_finalize_ownership.schema_version == 'labweaver.foundation-ownership-preflight.v1'
+      - foundation_clean_redeploy_finalize_ownership.run_id == foundation_clean_redeploy_finalize_run_id
+      - foundation_clean_redeploy_finalize_ownership.cluster_uid == foundation_clean_redeploy_finalize_cluster_uid.stdout | trim
+      - foundation_clean_redeploy_finalize_ownership.candidate_namespaces == foundation_clean_redeploy_finalize_namespaces | sort
+    fail_msg: FOUNDATION_OWNERSHIP_EVIDENCE_MISMATCH
+  vars:
+    foundation_clean_redeploy_finalize_ownership: >-
+      {{ foundation_clean_redeploy_finalize_ownership_raw.content | b64decode | from_json }}
+
+- name: Read residual persistent volumes
+  ansible.builtin.command:
+    argv:
+      - "{{ foundation_clean_redeploy_finalize_kubectl }}"
+      - --kubeconfig
+      - "{{ foundation_clean_redeploy_finalize_kubeconfig }}"
+      - get
+      - persistentvolumes
+      - -o
+      - json
+  register: foundation_clean_redeploy_finalize_pv_read
+  changed_when: false
+
+- name: Derive residual LabWeaver persistent volumes
+  ansible.builtin.set_fact:
+    foundation_clean_redeploy_finalize_residual_pvs: >-
+      {{ foundation_clean_redeploy_finalize_pvs['items']
+         | selectattr('spec.claimRef.namespace', 'in', foundation_clean_redeploy_finalize_namespaces)
+         | map(attribute='metadata.name') | list | sort }}
+  vars:
+    foundation_clean_redeploy_finalize_pvs: >-
+      {{ foundation_clean_redeploy_finalize_pv_read.stdout | from_json }}
+
+- name: Delete residual persistent volumes bound to destroyed LabWeaver claims
+  ansible.builtin.command:
+    argv: >-
+      {{ [foundation_clean_redeploy_finalize_kubectl, '--kubeconfig',
+          foundation_clean_redeploy_finalize_kubeconfig, 'delete', 'persistentvolume']
+         + foundation_clean_redeploy_finalize_residual_pvs
+         + ['--wait=true', '--timeout=10m'] }}
+  when: foundation_clean_redeploy_finalize_residual_pvs | length > 0
+  changed_when: true
+
+- name: Read back the final cluster topology
+  ansible.builtin.command:
+    argv:
+      - "{{ foundation_clean_redeploy_finalize_kubectl }}"
+      - --kubeconfig
+      - "{{ foundation_clean_redeploy_finalize_kubeconfig }}"
+      - get
+      - namespaces
+      - -o
+      - json
+  register: foundation_clean_redeploy_finalize_namespace_readback
+  changed_when: false
+
+- name: Read back final persistent volume claims
+  ansible.builtin.command:
+    argv:
+      - "{{ foundation_clean_redeploy_finalize_kubectl }}"
+      - --kubeconfig
+      - "{{ foundation_clean_redeploy_finalize_kubeconfig }}"
+      - get
+      - persistentvolumeclaims
+      - --all-namespaces
+      - -o
+      - json
+  register: foundation_clean_redeploy_finalize_pvc_readback
+  changed_when: false
+
+- name: Read back final persistent volumes
+  ansible.builtin.command:
+    argv:
+      - "{{ foundation_clean_redeploy_finalize_kubectl }}"
+      - --kubeconfig
+      - "{{ foundation_clean_redeploy_finalize_kubeconfig }}"
+      - get
+      - persistentvolumes
+      - -o
+      - json
+  register: foundation_clean_redeploy_finalize_pv_readback
+  changed_when: false
+
+- name: Require the final clean state
+  ansible.builtin.assert:
+    that:
+      - foundation_clean_redeploy_finalize_remaining_namespaces | length == 0
+      - foundation_clean_redeploy_finalize_protected_namespaces
+        | difference(foundation_clean_redeploy_finalize_present_namespaces) | length == 0
+      - foundation_clean_redeploy_finalize_residual_pvcs | length == 0
+      - foundation_clean_redeploy_finalize_residual_pv_claims | length == 0
+    fail_msg: FOUNDATION_FINALIZE_READBACK_FAILED
+  vars:
+    foundation_clean_redeploy_finalize_present_namespaces: >-
+      {{ (foundation_clean_redeploy_finalize_namespace_readback.stdout | from_json)['items']
+         | map(attribute='metadata.name') | list }}
+    foundation_clean_redeploy_finalize_remaining_namespaces: >-
+      {{ foundation_clean_redeploy_finalize_namespaces
+         | intersect(foundation_clean_redeploy_finalize_present_namespaces) }}
+    foundation_clean_redeploy_finalize_residual_pvcs: >-
+      {{ (foundation_clean_redeploy_finalize_pvc_readback.stdout | from_json)['items']
+         | selectattr('metadata.namespace', 'in', foundation_clean_redeploy_finalize_namespaces)
+         | map(attribute='metadata.name') | list }}
+    foundation_clean_redeploy_finalize_residual_pv_claims: >-
+      {{ (foundation_clean_redeploy_finalize_pv_readback.stdout | from_json)['items']
+         | map(attribute='spec.claimRef.namespace', default='') | list
+         | difference(['']) | unique
+         | intersect(foundation_clean_redeploy_finalize_namespaces) }}
+
+- name: Hash the evidence files
+  ansible.builtin.stat:
+    path: >-
+      {{ foundation_clean_redeploy_finalize_report_root }}/{{ foundation_clean_redeploy_finalize_run_id }}/{{ item }}
+    checksum_algorithm: sha256
+  loop:
+    - ownership-inventory.json
+    - pre-destruction-inventory.json
+  register: foundation_clean_redeploy_finalize_evidence
+
+- name: Persist the sanitized clean redeploy report
+  ansible.builtin.template:
+    src: finalize-report.json.j2
+    dest: >-
+      {{ foundation_clean_redeploy_finalize_report_root }}/{{ foundation_clean_redeploy_finalize_run_id }}/report.json
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Persist the destruction tombstone
+  ansible.builtin.copy:
+    dest: >-
+      {{ foundation_clean_redeploy_finalize_report_root }}/{{ foundation_clean_redeploy_finalize_run_id }}/tombstone.json
+    owner: root
+    group: root
+    mode: "0600"
+    content: >-
+      {{ {'schema_version': 'labweaver.foundation-tombstone.v1',
+          'run_id': foundation_clean_redeploy_finalize_run_id,
+          'source_commit': foundation_clean_redeploy_finalize_source_commit,
+          'cluster_uid': foundation_clean_redeploy_finalize_cluster_uid.stdout | trim,
+          'destroyed_namespaces': foundation_clean_redeploy_finalize_namespaces | sort,
+          'destroyed_at': now(utc=true).timestamp() | int | strftime('%Y-%m-%dT%H:%M:%SZ'),
+          'reclaimed_persistent_volumes': foundation_clean_redeploy_finalize_residual_pvs,
+          'release_eligible': false} | to_nice_json }}

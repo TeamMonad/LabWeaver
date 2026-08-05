@@ -240,6 +240,7 @@
          | map(attribute='metadata.name') | list }}
     foundation_clean_redeploy_residual_pv_claims: >-
       {{ (foundation_clean_redeploy_pv_readback.stdout | from_json)['items']
+         | selectattr('status.phase', 'equalto', 'Bound')
          | map(attribute='spec.claimRef.namespace', default='') | list
          | difference(['']) | unique
          | intersect(foundation_clean_redeploy_namespaces) }}
