@@ -22,6 +22,28 @@ another Linux host is rejected before Ansible starts. Missing, malformed, or
 unreadable identity/dependency inputs fail before Ansible starts; the bundle
 does not infer a dependency directory from its temporary extraction path.
 
+## Docker Desktop local controller (read-only)
+
+For local #142 development, `tools/docker_controller.py` runs the pinned
+`containers/Containerfile.controller` image without SSH or WSL. It mounts the
+Docker Desktop kubeconfig and the explicit private `.env` locator read-only and
+invokes only `cargo xtask local preflight`. The image must not receive a broad
+host environment or a writable repository mount; generated reports are written
+only under ignored `artifacts/`.
+
+The `local-hostpath` overlay is a Container-only compatibility profile. It
+declares Docker Desktop `hostpath`, single-node scheduling and
+`releaseEligible: false`; it does not change the production `nfs-rwx` contract,
+enable KubeVirt, or authorize any Kubernetes write. Missing KubeVirt/CDI,
+`nfs-rwx`, or ECNU private input is reported as a stable blocker.
+
+The equivalent Ansible entry point is
+`deploy/ansible/playbooks/local-hostpath-preflight.yml`. It uses only
+`ansible.builtin.command` probes with `changed_when: false` and assertion
+diagnostics; it contains no Kubernetes apply module or delete operation. The
+Docker controller may invoke the Rust preflight instead, but both paths share
+the same read-only boundary and `local-connected-non-release` report contract.
+
 The retained data-service CiliumNetworkPolicy admits credentialed administration probes only from
 Cilium's `host` and `remote-node` reserved identities, and only on PostgreSQL 5432, NATS 4222 and
 MinIO 9000. Cilium represents node-originated traffic with those identities rather than a source

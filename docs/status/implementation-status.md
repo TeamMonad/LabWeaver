@@ -40,26 +40,29 @@ Sprint-end acceptance Issue.
 
 ## Current identity
 
-- Draft PR: #121, branch `release/sprint2`, target `develop`
-- Source commit: `748c2470ad0f3fba848761f0113853a6870576d6`
-- Cluster UID: `171e3e6b-1e8b-4666-9936-b5f8a514132e`
-- Package manifest:
-  `sha256:6fa824800ac83e51c826242128687b4734622bdcf348969fed8dae4c89cc63d9`
-- Configuration bundle:
-  `sha256:564cf33c34b8d851c349f8e45bf10da34665ea9ad05d21e4fe49199292fe6518`
-- Migration catalog:
-  `sha256:0c9d5dbac9c9f7855147f35f21ea492a8ec1a5f7d4a1fff49e9b413c1e0ef1c3`
-- Non-destructive application runs: `deploy-748c2470` and
-  `deploy-748c2470-repeat`
-- Release Gate Run:
-  `a2835d47-7f9b-48a3-b8a0-60d22f57d5e2`
+- Draft PR: #147, branch `feature/142-resource-lease`, target `develop`
+- Source identity: every candidate report and package must record the full Git
+  `HEAD`; a dirty tree is never release evidence.
+- Connected cluster identity: not present in this checkout
+- Resource package/deployment/replay identity: not generated for this source
+- Formal Release Gate v2: blocked until same-identity Resource connected replay
 
-The second application reconcile completed at Helm revision 265. All ten
-declared Deployments read back one ready replica and use immutable Harbor
-digests. Kubernetes, KubeVirt, PostgreSQL, NATS, MinIO, Harbor and Keycloak
-were retained; no infrastructure reset was used.
+The Docker Desktop local validation profile is deliberately separate from the
+formal gate. It records a `local-connected-non-release` preflight report and
+must never be described as Kubernetes/KubeVirt connected evidence.
 
-## Sprint 1 and Sprint 2 connected result
+The native Docker Desktop preflight was run against context `docker-desktop`
+and recorded under the ignored `artifacts/local-replay/` locator. It correctly
+failed closed with four blockers: missing `nfs-rwx`, KubeVirt, CDI and
+`ECNU_API_KEY`; the report is `releaseEligible: false` and is bound only to
+the exact `sourceCommit` embedded in that report.
+
+## Legacy Sprint 1 and Sprint 2 connected result (superseded)
+
+The table below is retained only as historical context for the previous
+connected validation. Its reports, Run IDs and source identities are legacy
+evidence and cannot be reused for the current `feature/142-resource-lease`
+candidate, local Docker report, or formal Resource Gate v2.
 
 | Capability | State | Current evidence and boundary |
 | --- | --- | --- |
@@ -77,7 +80,7 @@ were retained; no infrastructure reset was used.
 | Application adoption and idempotence | verified | Two non-destructive application reconciles retained the same package, configuration, migration and seven-image identities. |
 | Rollback drill | verified | Helm rollback from revision 260 to 259 created revision 261; all workloads recovered. The current source deployment was then restored and verified at revision 265. |
 | Cleanup readback | verified | No namespace labeled `labweaver.io/environment=true` remained after the final cleanup; all ten platform Deployments remained ready. |
-| Machine-readable Release Gate | verified | `cargo xtask release-gate` produced a schema-valid passing report for Run `a2835d47-7f9b-48a3-b8a0-60d22f57d5e2`. Evidence remains private/ignored and contains no Secret. |
+| Machine-readable Release Gate | legacy | Earlier source identity produced a schema-valid report for Run `a2835d47-7f9b-48a3-b8a0-60d22f57d5e2`; it is invalid for current #142. Evidence remains private/ignored and contains no Secret. |
 | Full `cargo xtask demo replay` | not run | The authoritative gate was run directly after connected checks. The wrapper's repeated infrastructure Verify and Playwright execution was intentionally skipped; this is not represented as a replay pass. |
 
 ## Issue #140 local implementation
@@ -156,13 +159,11 @@ The sanitized repair readback is retained at
 with readback digest
 `sha256:23a10e75f622577d29a04872e869a397d56b5d2c7431d666046e28ffc8d821f`.
 
-The current source identity is `40318900`. Local `xtask` tests (38 passed),
-strict `xtask` Clippy, format and diff checks pass; the Resource replay input
-tests (13 passed) also cover the asynchronous Container build gate. Retained connected
-deployment evidence is bound to the earlier `611013a2` source and cannot be
-reused for this source identity. The next connected candidate must be built
-from the clean state above and produce a new package, deployment, replay and
-Gate identity.
+The source identity for each checkout is recorded by its package and report.
+Earlier source identities and retained connected deployment evidence are legacy
+and cannot be reused. The next connected candidate must be built from the clean
+state above and produce a new package, deployment, Resource replay and Gate
+identity.
 
 The attempt counts and `LW_EXECUTION_OPERATION_BUDGET_EXHAUSTED` diagnostic
 below are historical pre-reset observations only. The user explicitly
@@ -268,14 +269,14 @@ host; the new PostgreSQL migration and saga still require connected execution.
 
 ## Release decision
 
-The implementation and connected technical gate for Sprint 1+2 are verified
-for the identity above. PR #121 remains **blocked from merge** because it is a
-Draft high-risk PR and still requires:
+Issue #142 is **implemented locally; connected verification blocked**. PR #147
+remains a Draft high-risk PR and still requires:
 
-1. B human review and approval for core/security changes;
-2. C human review for Web changes;
-3. D connected Verify and acceptance;
-4. resolution of any resulting review threads and a final green CI readback.
+1. a same-identity Resource package and deployment;
+2. Resource connected replay, real Container and KubeVirt evidence;
+3. B human review and approval for core/security changes;
+4. D connected Verify and acceptance;
+5. resolution of any resulting review threads and a final green CI readback.
 
 The author must not approve or merge the PR. No Tag, formal release or `main`
 merge is included.

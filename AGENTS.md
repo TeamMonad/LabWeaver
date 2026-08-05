@@ -50,6 +50,8 @@ commands:
   package_validate: "cargo xtask package-validate"
   release_gate: "cargo xtask release-gate"
   deploy_demo: "cargo xtask deploy --env demo"
+  local_preflight: "cargo xtask local preflight --profile local-hostpath"
+  resource_local_replay: "cargo xtask resource replay --mode local --preflight --env demo --profile <private-profile> --authentication <private-auth> --deployment-manifest <manifest> --package-manifest <manifest>"
   adopt_sprint2_application: "cargo xtask sprint2-application --infra --env demo --package-manifest <manifest> --yes"
   deploy_verify: "cargo xtask verify --env demo"
   demo_replay: "cargo xtask demo replay"

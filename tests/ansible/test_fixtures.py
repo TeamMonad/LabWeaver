@@ -241,7 +241,10 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("cargo xtask deploy --infra", docs)
         self.assertIn("ansible-rs", docs)
         self.assertNotIn("tools/ansible.py", docs)
-        self.assertIn("approved_controller_ids: edge-router,wsl-a-controller", controller_lock)
+        self.assertIn(
+            "approved_controller_ids: edge-router,wsl-a-controller,docker-desktop-controller",
+            controller_lock,
+        )
         self.assertIn("python_kubernetes_version: 34.1.0", controller_lock)
         self.assertIn("require_python_module_version", xtask)
         self.assertIn("inventory_identity_hash(&inventory_root)", xtask)

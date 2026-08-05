@@ -83,6 +83,31 @@ and D Verify remain responsible for the inner evidence semantics frozen by the
 Demo contract; an empty or fabricated evidence file is not acceptance evidence
 even if its hash is internally consistent.
 
+## Docker Desktop local boundary
+
+`cargo xtask local preflight --profile local-hostpath` performs only read-only
+Docker and Kubernetes probes. It writes an ignored
+`artifacts/local-replay/local-connected-non-release-<run-id>.json` report with
+the source commit, context, node/storage capabilities and stable blockers.
+`cargo xtask resource replay --mode local --preflight ...` additionally checks
+the private Resource profile, authentication locator and package/deployment
+identity before running that same read-only probe.
+
+The local profile intentionally maps the single-node Docker Desktop
+`hostpath` provisioner to a Container-only test adapter. It is not `nfs-rwx`,
+does not provide KubeVirt/CDI and is never accepted by the formal Release Gate.
+No local report may be promoted, renamed or copied into the connected evidence
+set. A successful local preflight therefore remains development evidence and
+does not close Issue #142.
+
+The local profile does not build or publish a release package by itself. When a
+controller image is needed for the read-only probe, use the pinned
+`containers/Containerfile.controller` through `tools/docker_controller.py` and
+mount only the Docker Desktop kubeconfig plus the explicit ignored `.env`
+locator. The controller uses a read-only repository mount and writes only to
+the ignored `artifacts/` and `target/` mounts; it never applies a namespace,
+PVC, Secret, Stream, Bucket, Realm or workload.
+
 ## Output
 
 On success the gate writes exactly one ignored report at

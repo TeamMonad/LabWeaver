@@ -1,0 +1,37 @@
+# Linux controller image for Docker Desktop local validation.
+# This image is never a production workload and never receives a Kubernetes
+# write permission by itself. The caller must mount a read-only kubeconfig and
+# an explicit private env-file locator.
+ARG RUST_BUILDER="docker.io/library/rust:1.85.1-bookworm@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4"
+ARG HELM_IMAGE="docker.io/alpine/helm:3.21.3@sha256:35da09ba0716fc7c3cd63b6b31ee380a9c7662e95f29ab0e4ae962420afd315b"
+ARG KUBECTL_IMAGE="registry.k8s.io/kubectl:v1.34.1@sha256:1c4b5d27637ee81e189e792a6e94371f4aa3ad12ac0d6d0e69216e7f420f6692"
+
+FROM ${RUST_BUILDER} AS controller-base
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes \
+       ca-certificates git jq python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m pip install --break-system-packages --no-cache-dir \
+       ansible-core==2.18.6 ansible-lint==25.6.1 kubernetes==34.1.0
+
+FROM ${HELM_IMAGE} AS helm-tools
+FROM ${KUBECTL_IMAGE} AS kubectl-tools
+
+FROM controller-base
+COPY --from=helm-tools /usr/bin/helm /usr/local/bin/helm
+COPY --from=kubectl-tools /bin/kubectl /usr/local/bin/kubectl
+WORKDIR /workspace
+ENV ANSIBLE_NOCOWS=1 \
+    ANSIBLE_LOCALHOST_WARNING=false \
+    ANSIBLE_HOME=/tmp/ansible \
+    ANSIBLE_LOCAL_TEMP=/tmp/ansible/tmp \
+    ANSIBLE_REMOTE_TEMP=/tmp/ansible/tmp \
+    PYTHONDONTWRITEBYTECODE=1 \
+    CARGO_HOME=/tmp/cargo \
+    RUSTUP_HOME=/usr/local/rustup \
+    RUSTUP_TOOLCHAIN=1.85.1-x86_64-unknown-linux-gnu \
+    RUSTUP_NO_UPDATE_CHECK=1 \
+    CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
+    CARGO_TARGET_DIR=/workspace/target/controller \
+    CARGO_TERM_COLOR=never
+ENTRYPOINT ["cargo", "+1.85.1-x86_64-unknown-linux-gnu", "run", "--locked", "-p", "xtask", "--"]

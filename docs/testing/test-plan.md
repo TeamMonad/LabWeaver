@@ -161,6 +161,20 @@ UID/resourceVersion precondition produces an identity conflict.
   rollout, and contains no namespace, schema, stream, bucket, project, realm,
   trust-plane, CRD, PVC or image deletion step.
 
+## Docker Desktop local preflight
+
+The native Windows Docker Desktop path is read-only during ordinary Issue/PR
+work. Run `cargo xtask local preflight --profile local-hostpath` or invoke
+`tools/docker_controller.py` with an explicit kubeconfig and private `.env`
+locator. The command records a sanitized
+`local-connected-non-release` report and fails with stable blockers for missing
+KubeVirt/CDI, `nfs-rwx`, a ready single node, or `ECNU_API_KEY`.
+
+The local overlay may render a Container-only hostpath adapter, but it cannot
+prove RWX semantics, VM lifecycle, GPU capacity, or the formal Resource Gate.
+It must not apply namespaces, PVCs, Secrets, streams, buckets, realms or
+workloads as part of a normal PR check.
+
 ## Connected Sprint 2 verification
 
 The adopted-cluster run uses one commit, deployment manifest, migration

@@ -34,29 +34,27 @@ schemas, Fixture, historical PR #138 or mixed-source demonstrations:
 - #126 must demonstrate same-identity shared-cluster multi-role E4, negative
   revocation/expiry/control-channel-loss behavior and Release Gate evidence.
 
-## Human review and acceptance
+## Issue #142 local implementation and acceptance
 
-The connected technical gate passed at source
-`748c2470ad0f3fba848761f0113853a6870576d6`, Release Gate Run
-`a2835d47-7f9b-48a3-b8a0-60d22f57d5e2`. Access/Gateway negatives,
-dual-runtime lifecycle, real Keycloak Playwright, non-destructive application
-idempotence, rollback and cleanup readback are closed for that identity.
+The candidate source identity is the full Git `HEAD` recorded by each local
+report and package manifest. Native contract, Resource and local integration
+checks are the only current evidence. No package, deployment, Resource replay
+or Release Gate report is accepted unless it binds the same immutable `HEAD`.
 
-PR #121 remains `risk:high` and Draft. It must not use auto-merge. The
-remaining blockers are human governance gates:
+PR #147 remains `risk:high` and Draft. The remaining blockers are:
 
-- B `@zeyi2`: core implementation and security approval;
-- C `@yingxvemiao`: Web review;
-- D `@Nova-Lciop-J`: connected deployment/Release Gate Verify;
+- same-identity Resource package and deployment manifest;
+- approved-environment Resource connected replay and real dual-runtime evidence;
+- B `@zeyi2` core/security review;
+- D `@Nova-Lciop-J` connected Verify;
 - all review threads resolved and final required CI checks green.
 
 Owner A `@2018wzh` remains author and acceptance owner and cannot replace
 those reviews or self-approve the merge.
 
-## Explicit non-blocking limitation
+## Docker Desktop boundary
 
-The full `cargo xtask demo replay` wrapper was not run after the direct
-connected checks because it repeats infrastructure Verify and live Playwright.
-The fail-closed `cargo xtask release-gate` command itself passed and produced
-the unique schema-valid report. This limitation must remain visible in the PR
-and acceptance record; D may require the wrapper replay during Verify.
+`cargo xtask local preflight` is read-only and records a
+`local-connected-non-release` report. Docker Desktop's single-node `hostpath`
+profile cannot satisfy the formal `nfs-rwx` or KubeVirt requirements, so its
+report cannot be consumed by `cargo xtask release-gate` or close #142.

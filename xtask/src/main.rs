@@ -13,6 +13,7 @@ mod acceptance_assets;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod execution_ledger;
 mod integration;
+mod local_preflight;
 mod migration_catalog;
 mod platform_images;
 mod release_gate;
@@ -55,6 +56,9 @@ enum Command {
     /// Execute the identity-bound public Resource Lease acceptance replay.
     #[command(subcommand)]
     Resource(ResourceCommand),
+    /// Read-only Docker Desktop capability discovery for local validation.
+    #[command(subcommand)]
+    Local(LocalCommand),
     Upgrade(UpgradeArgs),
     Rollback(RollbackArgs),
     Restore(RestoreArgs),
@@ -249,6 +253,24 @@ enum ResourceCommand {
     Replay(ResourceReplayArgs),
 }
 
+#[derive(Debug, Subcommand)]
+enum LocalCommand {
+    /// Probe Docker Desktop Kubernetes without applying any object.
+    Preflight(LocalPreflightArgs),
+}
+
+#[derive(Debug, Args)]
+struct LocalPreflightArgs {
+    #[arg(long, default_value = "local-hostpath")]
+    profile: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum ResourceReplayMode {
+    Connected,
+    Local,
+}
+
 #[derive(Debug, Args)]
 struct ResourceReplayArgs {
     #[arg(long)]
@@ -261,6 +283,10 @@ struct ResourceReplayArgs {
     deployment_manifest: PathBuf,
     #[arg(long)]
     package_manifest: PathBuf,
+    #[arg(long, value_enum, default_value_t = ResourceReplayMode::Connected)]
+    mode: ResourceReplayMode,
+    #[arg(long)]
+    preflight: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -474,6 +500,9 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::ResourceApplication(args) => resource_application(&args),
         Command::Resource(ResourceCommand::Auth(args)) => resource_replay_auth(&args),
         Command::Resource(ResourceCommand::Replay(args)) => resource_replay(&args),
+        Command::Local(LocalCommand::Preflight(args)) => {
+            local_preflight::run(&repository_root(), &args.profile)
+        }
         Command::AcceptanceAssets(args) => run_acceptance_assets(args),
         Command::Upgrade(args) => destructive_not_implemented("upgrade", args.yes),
         Command::Rollback(args) => platform_images::rollback(
@@ -529,6 +558,26 @@ fn run_acceptance_assets(args: AcceptanceAssetsArgs) -> Result<(), AppError> {
 
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
+}
+
+fn git_output_any<const N: usize>(root: &Path, arguments: [&str; N]) -> Result<String, AppError> {
+    let output = ProcessCommand::new("git")
+        .current_dir(root)
+        .args(arguments)
+        .output()
+        .map_err(|error| AppError::ExternalCommand {
+            role: "read Git source identity",
+            code: None,
+            detail: Some(error.to_string()),
+        })?;
+    if !output.status.success() {
+        return Err(AppError::ExternalCommand {
+            role: "read Git source identity",
+            code: output.status.code(),
+            detail: Some(String::from_utf8_lossy(&output.stderr).trim().to_owned()),
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 #[cfg(target_os = "linux")]
@@ -900,6 +949,18 @@ fn resource_replay_auth(args: &EnvironmentArgs) -> Result<(), AppError> {
 }
 
 fn resource_replay(args: &ResourceReplayArgs) -> Result<(), AppError> {
+    let (package_manifest, deployment) = validate_resource_replay_common(args)?;
+    match args.mode {
+        ResourceReplayMode::Local => resource_replay_local(args, &package_manifest, &deployment),
+        ResourceReplayMode::Connected => {
+            resource_replay_connected(args, &package_manifest, &deployment)
+        }
+    }
+}
+
+fn validate_resource_replay_common(
+    args: &ResourceReplayArgs,
+) -> Result<(PathBuf, serde_json::Value), AppError> {
     validate_environment_name(&args.env)?;
     for (role, path) in [
         ("Resource acceptance profile", &args.profile),
@@ -923,7 +984,8 @@ fn resource_replay(args: &ResourceReplayArgs) -> Result<(), AppError> {
             role: "resolve Resource replay package manifest",
             detail: error.to_string(),
         })?;
-    platform_images::validate_profile(&package_manifest, "resource", &repository_root())?;
+    let root = repository_root();
+    platform_images::validate_profile(&package_manifest, "resource", &root)?;
     let deployment_manifest =
         fs::read(&args.deployment_manifest).map_err(|error| AppError::Io {
             role: "read Resource deployment manifest",
@@ -945,15 +1007,44 @@ fn resource_replay(args: &ResourceReplayArgs) -> Result<(), AppError> {
                 .to_owned(),
         });
     }
+    Ok((package_manifest, deployment))
+}
+
+fn resource_replay_local(
+    args: &ResourceReplayArgs,
+    package_manifest: &Path,
+    deployment: &serde_json::Value,
+) -> Result<(), AppError> {
+    if !args.preflight {
+        return Err(AppError::Integration {
+            code: "LW_LOCAL_REPLAY_WRITES_DISABLED",
+            detail: "local replay is read-only in this workflow; run `cargo xtask local preflight` or pass --preflight".to_owned(),
+        });
+    }
+    let deployment_run_id = resource_replay_run_id(deployment)?;
+    let root = repository_root();
+    let source_commit = git_output_any(&root, ["rev-parse", "HEAD"])?;
+    validate_resource_replay_inputs_before_ledger(
+        &args.profile,
+        &args.authentication,
+        &args.deployment_manifest,
+        package_manifest,
+        &source_commit,
+        deployment_run_id,
+    )?;
+    local_preflight::run(&root, "local-hostpath")
+}
+
+fn resource_replay_connected(
+    args: &ResourceReplayArgs,
+    package_manifest: &Path,
+    deployment: &serde_json::Value,
+) -> Result<(), AppError> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = deployment;
     #[cfg(target_os = "linux")]
     {
-        let deployment_run_id = deployment
-            .get("runId")
-            .and_then(serde_json::Value::as_str)
-            .ok_or(AppError::ReleaseGate {
-                code: "LW_RESOURCE_REPLAY_DEPLOYMENT_MANIFEST_INVALID",
-                detail: "Resource deployment manifest must contain runId".to_owned(),
-            })?;
+        let deployment_run_id = resource_replay_run_id(deployment)?;
         let run_id = required_run_id("LABWEAVER_RUN_ID", "Resource replay run identity")?;
         if run_id != deployment_run_id {
             return Err(AppError::ReleaseGate {
@@ -961,12 +1052,13 @@ fn resource_replay(args: &ResourceReplayArgs) -> Result<(), AppError> {
                 detail: "LABWEAVER_RUN_ID must match the Resource deployment manifest before the connected ledger is acquired".to_owned(),
             });
         }
-        let source_commit = git_output(&repository_root(), ["rev-parse", "HEAD"])?;
+        let root = repository_root();
+        let source_commit = git_output(&root, ["rev-parse", "HEAD"])?;
         validate_resource_replay_inputs_before_ledger(
             &args.profile,
             &args.authentication,
             &args.deployment_manifest,
-            &package_manifest,
+            package_manifest,
             &source_commit,
             deployment_run_id,
         )?;
@@ -975,7 +1067,7 @@ fn resource_replay(args: &ResourceReplayArgs) -> Result<(), AppError> {
         &args.env,
         "95-resource-replay.yml",
         "resource replay repair",
-        Some(&package_manifest),
+        Some(package_manifest),
         &[
             (
                 "LABWEAVER_RESOURCE_REPLAY_PROFILE",
@@ -993,7 +1085,16 @@ fn resource_replay(args: &ResourceReplayArgs) -> Result<(), AppError> {
     )
 }
 
-#[cfg(target_os = "linux")]
+fn resource_replay_run_id(deployment: &serde_json::Value) -> Result<&str, AppError> {
+    deployment
+        .get("runId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(AppError::ReleaseGate {
+            code: "LW_RESOURCE_REPLAY_DEPLOYMENT_MANIFEST_INVALID",
+            detail: "Resource deployment manifest must contain runId".to_owned(),
+        })
+}
+
 fn validate_resource_replay_inputs_before_ledger(
     profile: &Path,
     authentication: &Path,
@@ -1136,6 +1237,8 @@ fn demo_replay() -> Result<(), AppError> {
         authentication: resource_authentication,
         deployment_manifest: resource_deployment_manifest,
         package_manifest: resource_package_manifest,
+        mode: ResourceReplayMode::Connected,
+        preflight: false,
     })?;
     let status = ProcessCommand::new("pnpm")
         .args(["--dir=web", "test:e2e:live"])
