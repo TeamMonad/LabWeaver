@@ -38,7 +38,14 @@ Copy and specialize the examples as follows:
 - `build-executor.yaml.example` → `build-executor-config/config.yaml`
 - `environment-providers.json.example` → `environment-service-config/providers.json`
 - `runtime-executor.yaml.example` → both runtime executor `config.yaml` files
+- `resource-service.yaml.example` → `resource-service-config/mtls.yaml`
 - `web-deployment.json.example` → `web-config/deployment.json`
+
+The Resource API is exposed only on its mTLS listener. The Access and Resource private bundles
+must contain the same generated `resource-delegation-key` under their respective Secret objects;
+the key is a root-owned `0600` input and is never written to this repository, a report or a log.
+Resource accepts only the CA-verified Access SPIFFE URI SAN and a short-lived signed delegation;
+actor and role HTTP headers are not an identity mechanism.
 
 Sprint 2 binds the pinned Claude Code CLI to ECNU's Anthropic-compatible endpoint. Put the
 operator-provided `ECNU_API_KEY` value in

@@ -17,11 +17,9 @@ use time::OffsetDateTime;
 
 use super::{ApiError, AppState, authenticated_session, require_browser_origin};
 
+const RESOURCE_DELEGATION_HEADER: &str = "x-labweaver-resource-delegation";
 const ACTOR_HEADER: &str = "x-labweaver-actor-id";
 const SESSION_HEADER: &str = "x-labweaver-session-id";
-const RESOURCE_CALLER_HEADER: &str = "x-labweaver-caller-san";
-const RESOURCE_CALLER_SAN: &str = "spiffe://labweaver/access-service";
-const RESOURCE_ROLES_HEADER: &str = "x-labweaver-platform-roles";
 
 /// A fixed-origin mTLS client; callers cannot select an upstream host.
 #[derive(Clone)]
@@ -46,29 +44,73 @@ pub(super) struct RuntimeGatewayProxy {
 pub(super) struct ResourceGatewayProxy {
     client: Client,
     base_uri: Url,
+    delegation_key: Vec<u8>,
     max_request_bytes: usize,
     max_response_bytes: usize,
 }
 
 impl ResourceGatewayProxy {
-    pub(super) fn new(config: &ResourceGatewayFileConfig) -> Result<Self, ControlGatewayError> {
+    pub(super) fn new(
+        config: &ResourceGatewayFileConfig,
+        ca_certificate_pem: &[u8],
+        client_certificate_pem: &[u8],
+        client_private_key_pem: &[u8],
+        delegation_key: &[u8],
+        transport_security: TransportSecurityMode,
+    ) -> Result<Self, ControlGatewayError> {
         let base_uri = Url::parse(&config.base_uri).map_err(|_| ControlGatewayError::Config)?;
-        if base_uri.scheme() != "http"
+        let host = base_uri.host_str().ok_or(ControlGatewayError::Config)?;
+        if base_uri.scheme() != "https"
             || base_uri.host_str().is_none()
             || base_uri.path() != "/"
             || base_uri.query().is_some()
             || base_uri.fragment().is_some()
+            || !config.allowed_server_sans.iter().any(|san| san == host)
         {
             return Err(ControlGatewayError::Config);
         }
+        if transport_security == TransportSecurityMode::InsecureTestOnly
+            && !host.eq_ignore_ascii_case("localhost")
+            && !host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+        {
+            return Err(ControlGatewayError::Config);
+        }
+        let roots = Certificate::from_pem_bundle(ca_certificate_pem)
+            .map_err(|_| ControlGatewayError::Certificate)?;
+        if roots.is_empty() {
+            return Err(ControlGatewayError::Certificate);
+        }
+        if delegation_key.len() < 32 {
+            return Err(ControlGatewayError::Config);
+        }
+        let mut identity_pem =
+            Vec::with_capacity(client_certificate_pem.len() + client_private_key_pem.len() + 1);
+        identity_pem.extend_from_slice(client_certificate_pem);
+        identity_pem.push(b'\n');
+        identity_pem.extend_from_slice(client_private_key_pem);
+        let identity =
+            Identity::from_pem(&identity_pem).map_err(|_| ControlGatewayError::Certificate)?;
+        let mut builder = Client::builder()
+            .https_only(true)
+            .tls_built_in_root_certs(false)
+            .redirect(reqwest::redirect::Policy::none())
+            .identity(identity)
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(Duration::from_millis(config.timeout_milliseconds));
+        if transport_security == TransportSecurityMode::InsecureTestOnly {
+            builder = builder.danger_accept_invalid_certs(true);
+        }
+        for root in roots {
+            builder = builder.add_root_certificate(root);
+        }
         Ok(Self {
-            client: Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .connect_timeout(Duration::from_secs(3))
-                .timeout(Duration::from_millis(config.timeout_milliseconds))
+            client: builder
                 .build()
-                .map_err(|_| ControlGatewayError::Config)?,
+                .map_err(|_| ControlGatewayError::Certificate)?,
             base_uri,
+            delegation_key: delegation_key.to_vec(),
             max_request_bytes: config.max_request_bytes,
             max_response_bytes: config.max_response_bytes,
         })
@@ -251,7 +293,12 @@ pub(super) async fn forward_resource(
             .and_then(|value| value.to_str().ok());
         auth::verify_csrf_token(&session.csrf_token, supplied).map_err(ApiError::from)?;
     }
-    let roles = resource_roles(&session)?;
+    let delegation = auth::encode_resource_delegation(
+        &state.resource_proxy.delegation_key,
+        &session,
+        OffsetDateTime::now_utc(),
+    )
+    .map_err(|_| ApiError::unavailable("LW_AUTH_RESOURCE_DELEGATION_INVALID"))?;
     let mut upstream = state.resource_proxy.base_uri.clone();
     upstream.set_path(uri.path());
     upstream.set_query(uri.query());
@@ -259,10 +306,7 @@ pub(super) async fn forward_resource(
         .resource_proxy
         .client
         .request(method.clone(), upstream)
-        .header(ACTOR_HEADER, session.actor_id.to_string())
-        .header(SESSION_HEADER, session.session_id.to_string())
-        .header(RESOURCE_CALLER_HEADER, RESOURCE_CALLER_SAN)
-        .header(RESOURCE_ROLES_HEADER, roles)
+        .header(RESOURCE_DELEGATION_HEADER, delegation)
         .body(body);
     let response = copy_request_headers(request, &headers)
         .send()
@@ -440,10 +484,15 @@ async fn fetch_resource_json<T: serde::de::DeserializeOwned>(
         .resource_proxy
         .client
         .get(upstream)
-        .header(ACTOR_HEADER, session.actor_id.to_string())
-        .header(SESSION_HEADER, session.session_id.to_string())
-        .header(RESOURCE_CALLER_HEADER, RESOURCE_CALLER_SAN)
-        .header(RESOURCE_ROLES_HEADER, resource_roles(session)?)
+        .header(
+            RESOURCE_DELEGATION_HEADER,
+            auth::encode_resource_delegation(
+                &state.resource_proxy.delegation_key,
+                session,
+                OffsetDateTime::now_utc(),
+            )
+            .map_err(|_| ApiError::unavailable("LW_AUTH_RESOURCE_DELEGATION_INVALID"))?,
+        )
         .send()
         .await
         .map_err(|_| ApiError::unavailable("LW_AUTH_RESOURCE_UNAVAILABLE"))?;
@@ -490,22 +539,6 @@ async fn authorize_resource_scope(
     )
     .map_err(ApiError::from)?;
     Ok(())
-}
-
-fn resource_roles(session: &auth::BffSession) -> Result<String, ApiError> {
-    let roles = session
-        .roles
-        .iter()
-        .map(|role| match role {
-            contracts::PlatformRole::Teacher => "teacher",
-            contracts::PlatformRole::Student => "student",
-            contracts::PlatformRole::PlatformAdmin => "platform_admin",
-        })
-        .collect::<Vec<_>>();
-    if roles.is_empty() {
-        return Err(ApiError::forbidden("LW_AUTH_ROLE_DENIED"));
-    }
-    Ok(roles.join(","))
 }
 
 async fn bounded_resource_response(

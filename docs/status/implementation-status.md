@@ -258,14 +258,33 @@ and get, create, approve/resize-approve, cancel, reject, retry, Lease renew and
 Lease revoke all use explicit actor/caller checks, idempotency keys and revision
 fences backed by the PostgreSQL store. Migration 0006 adds a durable
 Lease-revision acknowledgement fence. Renewal is synchronized over the
-Resource mTLS boundary and may only extend the exact Work aggregate. Revocation
+Resource mTLS boundary and may only extend the exact Work aggregate. The
+Resource listener now requires a CA-verified client certificate with the exact
+`spiffe://labweaver/access-service` URI SAN. Access supplies actor, session and
+roles only through a short-lived signed delegation bound to the BFF session;
+the Resource API does not trust caller, actor or role HTTP headers. Revocation
 and database-clock expiry now share one persistent saga: Environment revokes
 Access before deletion, Resource waits for the Environment tombstone and exact
 namespace-absence readback, then and only then marks the capacity claim and
 Lease terminal. Cleanup failures remain `expiring`/`releasing`, retain a stable
 diagnostic and append a bounded attempt record instead of releasing capacity.
 The Resource quota shell uses the same deterministic `lw-env-*` namespace that
-Environment adopts, so the approved quota governs the actual workload.
+Environment adopts, so the approved quota governs the actual workload. Namespace
+deletion is fenced by the observed claim labels/annotations, UID and
+`resourceVersion`; a same-name or conflicting object is rejected. Every request
+terminal transition and Lease activation, renewal, revocation, expiry and
+capacity-release transition enqueues its versioned v1 event in the same SQL
+transaction as the state change. Rejected and cancelled requests use distinct
+event subjects rather than the submitted subject.
+
+### PR #147 review remediation (local, not connected-verified)
+
+The current working tree contains the fixes requested by D's review: the
+Resource mTLS/delegation boundary, claim-fenced namespace cleanup with
+collision tests, lifecycle Outbox atomicity, and corrected request event
+semantics. Local Rust, contract/schema, and Ansible fixture checks pass. A
+same-identity package, connected replay, Release Gate v2 and B/D human review
+remain outstanding and are not claimed by this local status.
 
 The retained application deployment at source `46d22482` remains connected on
 the demo cluster: Resource is digest-pinned and Ready, migrations 0001-0005
@@ -300,12 +319,13 @@ current implementation must create an approved Work release through the
 teacher/Agent/approval path; no database shortcut or invalid fixture counts as
 positive handoff evidence.
 
-Local evidence includes six Resource unit tests, sixteen Environment unit
-tests, strict all-target/all-feature Clippy for affected crates, contract and
-generated Web SDK drift checks, migration catalog validation, migration/store
-test compilation, 53 Ansible fixture tests, Web lint/typecheck, format and diff
-checks. Docker-backed PostgreSQL execution is unavailable on the local Windows
-host; the new PostgreSQL migration and saga still require connected execution.
+Local evidence includes Resource unit tests covering mTLS/delegation identity,
+claim-fenced cleanup and lifecycle fencing, sixteen Environment unit tests,
+strict all-target/all-feature Clippy for affected crates, contract and generated
+Web SDK drift checks, migration catalog validation, migration/store test
+compilation, Ansible fixture tests, Web lint/typecheck, format and diff checks.
+Docker-backed PostgreSQL execution is unavailable on the local Windows host; the
+new PostgreSQL migration and saga still require connected execution.
 
 ## Accepted Sprint 2 security exceptions
 

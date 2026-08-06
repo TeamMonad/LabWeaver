@@ -710,6 +710,7 @@ impl CapacityReconcileWorker {
                         item.lease.id,
                         item.lease.revision,
                         self.environment_handoff.system_actor_id,
+                        &format!("resource-capacity-release-{}", item.claim.id),
                     )
                     .await?;
             }
@@ -818,15 +819,44 @@ impl KubernetesCapacityProvider {
         &self,
         plan: &KubernetesQuotaShellPlan,
     ) -> Result<(), CapacityProviderError> {
+        if plan.binding != self.configuration.binding {
+            return Err(CapacityProviderError::BindingMismatch);
+        }
+        let namespace_url = self.url(&format!("api/v1/namespaces/{}", plan.namespace))?;
+        let observed = self
+            .client
+            .get(namespace_url.clone())
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(|_| CapacityProviderError::Unavailable)?;
+        if observed.status() == StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        if !observed.status().is_success() {
+            return Err(classify(observed.status()));
+        }
+        let actual: Value = observed
+            .json()
+            .await
+            .map_err(|_| CapacityProviderError::Readback)?;
+        verify_document(&actual, &plan.namespace_document)?;
+        let uid = metadata_uid(&actual)?;
+        let resource_version = metadata_resource_version(&actual)?;
         let response = self
             .client
-            .delete(self.url(&format!("api/v1/namespaces/{}", plan.namespace))?)
+            .delete(namespace_url)
             .bearer_auth(&self.token)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .json(&namespace_delete_options(&uid, &resource_version))
             .send()
             .await
             .map_err(|_| CapacityProviderError::Unavailable)?;
         if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
             Ok(())
+        } else if response.status() == StatusCode::CONFLICT {
+            Err(CapacityProviderError::IdentityMismatch)
         } else {
             Err(classify(response.status()))
         }
@@ -954,6 +984,27 @@ fn metadata_uid(document: &Value) -> Result<String, CapacityProviderError> {
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
         .ok_or(CapacityProviderError::Readback)
+}
+
+fn metadata_resource_version(document: &Value) -> Result<String, CapacityProviderError> {
+    document
+        .pointer("/metadata/resourceVersion")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or(CapacityProviderError::Readback)
+}
+
+fn namespace_delete_options(uid: &str, resource_version: &str) -> Value {
+    json!({
+        "apiVersion": "v1",
+        "kind": "DeleteOptions",
+        "propagationPolicy": "Foreground",
+        "preconditions": {
+            "uid": uid,
+            "resourceVersion": resource_version,
+        },
+    })
 }
 fn classify(status: StatusCode) -> CapacityProviderError {
     if matches!(
@@ -1113,6 +1164,55 @@ mod tests {
         assert!(matches!(
             KubernetesQuotaShellPlan::from_claim(&configuration, &request, &gpu_claim),
             Err(CapacityProviderError::GpuUnsupported)
+        ));
+    }
+
+    #[test]
+    fn namespace_delete_is_fenced_by_claim_identity_and_resource_version() {
+        let options = namespace_delete_options("namespace-uid", "42");
+        assert_eq!(
+            options
+                .pointer("/preconditions/uid")
+                .and_then(Value::as_str),
+            Some("namespace-uid")
+        );
+        assert_eq!(
+            options
+                .pointer("/preconditions/resourceVersion")
+                .and_then(Value::as_str),
+            Some("42")
+        );
+        assert_eq!(
+            options
+                .pointer("/propagationPolicy")
+                .and_then(Value::as_str),
+            Some("Foreground")
+        );
+    }
+
+    #[test]
+    fn same_name_namespace_without_the_claim_fence_is_not_verified() {
+        let expected = serde_json::json!({
+            "metadata": {
+                "name": "lw-env-example",
+                "labels": {
+                    "labweaver.io/managed-by": "resource-service",
+                    "labweaver.io/environment-id": "environment",
+                    "labweaver.io/capacity-claim-id": "claim",
+                },
+                "annotations": {
+                    "labweaver.io/capacity-claim-revision": "1",
+                    "labweaver.io/quota-plan-sha256": "digest",
+                    "labweaver.io/provider-binding": "kubernetes-standard",
+                },
+            }
+        });
+        let mut actual = expected.clone();
+        actual["metadata"]["labels"]["labweaver.io/capacity-claim-id"] =
+            Value::String("other-claim".into());
+        assert!(matches!(
+            verify_document(&actual, &expected),
+            Err(CapacityProviderError::IdentityMismatch)
         ));
     }
 

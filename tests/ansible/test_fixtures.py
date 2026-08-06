@@ -569,6 +569,26 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertNotIn("resource_requests", seed)
         self.assertNotIn("environment_template_releases", seed)
 
+    def test_resource_api_uses_mtls_and_signed_access_delegation(self) -> None:
+        values = (ROOT / "deploy/helm/labweaver/values.yaml").read_text(encoding="utf-8")
+        access_config = (
+            ROOT / "deploy/config/access-auth.yaml.example"
+        ).read_text(encoding="utf-8")
+        resource_config = (
+            ROOT / "deploy/config/resource-service.yaml.example"
+        ).read_text(encoding="utf-8")
+        network_policy = (
+            ROOT / "deploy/helm/labweaver/templates/network-policy.yaml"
+        ).read_text(encoding="utf-8")
+        resource_values = values.split("  resource-service:", maxsplit=1)[1].split(
+            "resources:", maxsplit=1
+        )[0]
+        self.assertIn("LABWEAVER_RESOURCE_MTLS_CONFIG_FILE", resource_values)
+        self.assertIn("containerPort: 9448", resource_values)
+        self.assertIn("delegation_key_locator", access_config)
+        self.assertIn("delegation_key_file", resource_config)
+        self.assertIn("port: 9448", network_policy)
+
     def test_sprint2_application_reads_kubernetes_items_as_a_mapping_key(self) -> None:
         tasks = (
             ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"

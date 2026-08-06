@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::authoring::{CandidateApproval, CandidateDecision, EnvironmentSpec};
-use crate::resource::ResourceRequest;
+use crate::resource::{ResourceLease, ResourceRequest};
 use crate::submission::FrozenSubmission;
 use crate::supply_chain::{BuildRequest, EnvironmentTemplateRelease};
 use crate::{
@@ -57,6 +57,14 @@ pub mod subjects {
         "labweaver.control.environment_template_release.withdrawn.v1";
     pub const RESOURCE_REQUEST_SUBMITTED: &str = "labweaver.resource.request.submitted.v1";
     pub const RESOURCE_REQUEST_APPROVED: &str = "labweaver.resource.request.approved.v1";
+    pub const RESOURCE_REQUEST_REJECTED: &str = "labweaver.resource.request.rejected.v1";
+    pub const RESOURCE_REQUEST_CANCELLED: &str = "labweaver.resource.request.cancelled.v1";
+    pub const RESOURCE_REQUEST_STATE_CHANGED: &str = "labweaver.resource.request.state_changed.v1";
+    pub const RESOURCE_LEASE_ACTIVATED: &str = "labweaver.resource.lease.activated.v1";
+    pub const RESOURCE_LEASE_RENEWED: &str = "labweaver.resource.lease.renewed.v1";
+    pub const RESOURCE_LEASE_REVOKED: &str = "labweaver.resource.lease.revoked.v1";
+    pub const RESOURCE_LEASE_EXPIRING: &str = "labweaver.resource.lease.expiring.v1";
+    pub const RESOURCE_LEASE_EXPIRED: &str = "labweaver.resource.lease.expired.v1";
 }
 
 /// Strict CloudEvents 1.0 envelope carried as structured JSON.
@@ -83,6 +91,16 @@ pub struct CloudEvent<T> {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResourceRequestChanged {
+    pub request: ResourceRequest,
+}
+
+/// Resource-owned Lease lifecycle fact. The request is included so downstream
+/// consumers can authorize and project the transition without a cross-domain
+/// read race. Both snapshots were read and written in the same SQL transaction.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResourceLeaseChanged {
+    pub lease: ResourceLease,
     pub request: ResourceRequest,
 }
 
@@ -148,6 +166,46 @@ pub const EVENT_CONTRACTS: &[EventContract] = &[
         subject: subjects::RESOURCE_REQUEST_APPROVED,
         event_type: subjects::RESOURCE_REQUEST_APPROVED,
         schema_name: "resource-request-approved",
+    },
+    EventContract {
+        subject: subjects::RESOURCE_REQUEST_REJECTED,
+        event_type: subjects::RESOURCE_REQUEST_REJECTED,
+        schema_name: "resource-request-rejected",
+    },
+    EventContract {
+        subject: subjects::RESOURCE_REQUEST_CANCELLED,
+        event_type: subjects::RESOURCE_REQUEST_CANCELLED,
+        schema_name: "resource-request-cancelled",
+    },
+    EventContract {
+        subject: subjects::RESOURCE_REQUEST_STATE_CHANGED,
+        event_type: subjects::RESOURCE_REQUEST_STATE_CHANGED,
+        schema_name: "resource-request-state-changed",
+    },
+    EventContract {
+        subject: subjects::RESOURCE_LEASE_ACTIVATED,
+        event_type: subjects::RESOURCE_LEASE_ACTIVATED,
+        schema_name: "resource-lease-activated",
+    },
+    EventContract {
+        subject: subjects::RESOURCE_LEASE_RENEWED,
+        event_type: subjects::RESOURCE_LEASE_RENEWED,
+        schema_name: "resource-lease-renewed",
+    },
+    EventContract {
+        subject: subjects::RESOURCE_LEASE_REVOKED,
+        event_type: subjects::RESOURCE_LEASE_REVOKED,
+        schema_name: "resource-lease-revoked",
+    },
+    EventContract {
+        subject: subjects::RESOURCE_LEASE_EXPIRING,
+        event_type: subjects::RESOURCE_LEASE_EXPIRING,
+        schema_name: "resource-lease-expiring",
+    },
+    EventContract {
+        subject: subjects::RESOURCE_LEASE_EXPIRED,
+        event_type: subjects::RESOURCE_LEASE_EXPIRED,
+        schema_name: "resource-lease-expired",
     },
     EventContract {
         subject: subjects::AGENT_RUN_REQUESTED,

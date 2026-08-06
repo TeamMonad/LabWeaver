@@ -107,6 +107,7 @@ async fn mtls_sans_rotation_and_outage_fail_closed_on_control_routes()
         client_ca_file: path(&ca_file),
         allowed_san_uris: BTreeSet::from([GATEWAY_URI.to_owned()]),
         required_eku: "clientAuth".to_owned(),
+        delegation_key_file: None,
     })?;
     let control_task = tokio::spawn(serve_mtls(listener, router(state), control_mtls));
     let control_url = format!("https://localhost:{}/", control_address.port());
@@ -267,6 +268,7 @@ async fn start_mtls(
         client_ca_file: path(ca),
         allowed_san_uris: BTreeSet::from([allowed_uri.to_owned()]),
         required_eku: "clientAuth".to_owned(),
+        delegation_key_file: None,
     })?;
     let task = tokio::spawn(async move {
         let acceptor = tokio_rustls::TlsAcceptor::from(Arc::clone(&mtls.server_config));

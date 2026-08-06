@@ -427,6 +427,38 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         CloudEvent<events::ResourceRequestChanged>
     );
     document!(
+        "schemas/contracts/v1/events/resource-request-rejected.schema.json",
+        CloudEvent<events::ResourceRequestChanged>
+    );
+    document!(
+        "schemas/contracts/v1/events/resource-request-cancelled.schema.json",
+        CloudEvent<events::ResourceRequestChanged>
+    );
+    document!(
+        "schemas/contracts/v1/events/resource-request-state-changed.schema.json",
+        CloudEvent<events::ResourceRequestChanged>
+    );
+    document!(
+        "schemas/contracts/v1/events/resource-lease-activated.schema.json",
+        CloudEvent<events::ResourceLeaseChanged>
+    );
+    document!(
+        "schemas/contracts/v1/events/resource-lease-renewed.schema.json",
+        CloudEvent<events::ResourceLeaseChanged>
+    );
+    document!(
+        "schemas/contracts/v1/events/resource-lease-revoked.schema.json",
+        CloudEvent<events::ResourceLeaseChanged>
+    );
+    document!(
+        "schemas/contracts/v1/events/resource-lease-expiring.schema.json",
+        CloudEvent<events::ResourceLeaseChanged>
+    );
+    document!(
+        "schemas/contracts/v1/events/resource-lease-expired.schema.json",
+        CloudEvent<events::ResourceLeaseChanged>
+    );
+    document!(
         "schemas/contracts/v1/events/agent-run-completed.schema.json",
         CloudEvent<events::AgentRunEvent>
     );

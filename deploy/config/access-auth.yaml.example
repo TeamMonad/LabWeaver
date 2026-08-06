@@ -47,6 +47,10 @@ secrets:
     "secret://evaluation-gateway/ca": "/etc/labweaver/secrets/mtls-ca.pem"
     "secret://access-service/evaluation-client-cert": "/etc/labweaver/secrets/tls.crt"
     "secret://access-service/evaluation-client-key": "/etc/labweaver/secrets/tls.key"
+    "secret://resource-gateway/ca": "/etc/labweaver/secrets/mtls-ca.pem"
+    "secret://access-service/resource-client-cert": "/etc/labweaver/secrets/tls.crt"
+    "secret://access-service/resource-client-key": "/etc/labweaver/secrets/tls.key"
+    "secret://resource-gateway/delegation-key": "/etc/labweaver/secrets/resource-delegation-key"
 internal_mtls:
   bind_addr: "0.0.0.0:9443"
   server_certificate_file: "/etc/labweaver/secrets/tls.crt"
@@ -98,7 +102,12 @@ evaluation_gateway:
   max_request_bytes: 1048576
   max_response_bytes: 8388608
 resource_gateway:
-  base_uri: "http://resource-service:8087/"
+  base_uri: "https://resource-service:9448/"
+  ca_certificate_locator: "secret://resource-gateway/ca"
+  client_certificate_locator: "secret://access-service/resource-client-cert"
+  client_private_key_locator: "secret://access-service/resource-client-key"
+  delegation_key_locator: "secret://resource-gateway/delegation-key"
+  allowed_server_sans: ["resource-service"]
   timeout_milliseconds: 5000
   max_request_bytes: 1048576
   max_response_bytes: 8388608

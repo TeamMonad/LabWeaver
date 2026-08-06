@@ -228,6 +228,7 @@ workloads:
     kubernetesApi: true
     env:
       LABWEAVER_BIND_ADDR: 0.0.0.0:8087
+      LABWEAVER_RESOURCE_MTLS_CONFIG_FILE: /etc/labweaver/config/mtls.yaml
       LABWEAVER_RESOURCE_CAPACITY_CONFIG_FILE: /etc/labweaver/config/capacity.json
       LABWEAVER_NATS_CA_PATH: /etc/labweaver/secrets/nats-ca.pem
       LABWEAVER_NATS_CLIENT_CERT_PATH: /etc/labweaver/secrets/nats-client.crt
@@ -239,6 +240,7 @@ workloads:
       LABWEAVER_NATS_SERVER: {key: nats-server}
     ports:
       - {name: health, containerPort: 8087, servicePort: 8087}
+      - {name: mtls, containerPort: 9448, servicePort: 9448}
     readiness: {type: http, port: health, path: /health/ready}
 
 resources:

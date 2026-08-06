@@ -23,12 +23,14 @@ spec:
   policyTypes: [Ingress, Egress]
   ingress:
     {{- if eq $name "resource-service" }}
-    # Resource accepts browser authority assertions only from Access Service.
+    # Resource accepts the signed Access delegation only over its mTLS API port;
+    # the health port remains exposed for the platform probe path.
     - from:
         - podSelector:
             matchLabels: {app.kubernetes.io/name: access-service}
       ports:
         - {protocol: TCP, port: 8087}
+        - {protocol: TCP, port: 9448}
     {{- else }}
     - from:
         - podSelector:

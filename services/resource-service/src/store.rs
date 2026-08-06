@@ -9,7 +9,9 @@ use contracts::environment::{
     EnvironmentLeaseAuthorization, EnvironmentLeaseState, EnvironmentLeaseVerificationRequest,
     EnvironmentLeaseVerificationResponse,
 };
-use contracts::events::{CloudEvent, ResourceRequestChanged, subjects};
+use contracts::events::{
+    CloudEvent, EVENT_CONTRACTS, ResourceLeaseChanged, ResourceRequestChanged, subjects,
+};
 use contracts::http::IdempotencyKey;
 use contracts::resource::{
     CapacityClaim, CapacityClaimState, ResourceApproval, ResourceLease, ResourceLeaseState,
@@ -26,6 +28,14 @@ use crate::{ApprovalPolicy, LifecycleError, ResourceLifecycle};
 
 const REQUEST_SUBMITTED_SUBJECT: &str = subjects::RESOURCE_REQUEST_SUBMITTED;
 const REQUEST_APPROVED_SUBJECT: &str = subjects::RESOURCE_REQUEST_APPROVED;
+const REQUEST_REJECTED_SUBJECT: &str = subjects::RESOURCE_REQUEST_REJECTED;
+const REQUEST_CANCELLED_SUBJECT: &str = subjects::RESOURCE_REQUEST_CANCELLED;
+const REQUEST_STATE_CHANGED_SUBJECT: &str = subjects::RESOURCE_REQUEST_STATE_CHANGED;
+const LEASE_ACTIVATED_SUBJECT: &str = subjects::RESOURCE_LEASE_ACTIVATED;
+const LEASE_RENEWED_SUBJECT: &str = subjects::RESOURCE_LEASE_RENEWED;
+const LEASE_REVOKED_SUBJECT: &str = subjects::RESOURCE_LEASE_REVOKED;
+const LEASE_EXPIRING_SUBJECT: &str = subjects::RESOURCE_LEASE_EXPIRING;
+const LEASE_EXPIRED_SUBJECT: &str = subjects::RESOURCE_LEASE_EXPIRED;
 
 /// Deterministic capacity plan created before provider side effects are scheduled.
 #[derive(Clone, Debug)]
@@ -438,8 +448,12 @@ impl PgResourceStore {
                     trace_id,
                 )
                 .await?;
-                enqueue_request_event(&mut transaction, &next, REQUEST_SUBMITTED_SUBJECT, trace_id)
-                    .await?;
+                let subject = match terminal {
+                    ResourceRequestState::Rejected => REQUEST_REJECTED_SUBJECT,
+                    ResourceRequestState::Cancelled => REQUEST_CANCELLED_SUBJECT,
+                    _ => unreachable!("terminal state was validated above"),
+                };
+                enqueue_request_event(&mut transaction, &next, subject, trace_id).await?;
                 let value = serde_json::to_value(&next)?;
                 IdempotencyStore::complete(
                     &mut transaction,
@@ -496,8 +510,13 @@ impl PgResourceStore {
                     trace_id,
                 )
                 .await?;
-                enqueue_request_event(&mut transaction, &next, REQUEST_SUBMITTED_SUBJECT, trace_id)
-                    .await?;
+                enqueue_request_event(
+                    &mut transaction,
+                    &next,
+                    REQUEST_STATE_CHANGED_SUBJECT,
+                    trace_id,
+                )
+                .await?;
                 let value = serde_json::to_value(&next)?;
                 IdempotencyStore::complete(
                     &mut transaction,
@@ -531,8 +550,10 @@ impl PgResourceStore {
         lease_id: LeaseId,
         expected_revision: contracts::Revision,
         expires_at: UtcTimestamp,
+        trace_id: &str,
     ) -> Result<ResourceLease, ResourceStoreError> {
         IdempotencyKey::parse(idempotency_key).map_err(|_| ResourceStoreError::IdempotencyKey)?;
+        validate_trace(trace_id)?;
         let mut transaction = self.pool.begin().await?;
         let lease = load_locked_lease(&mut transaction, lease_id).await?;
         let hash = Sha256Digest::of_canonical(&(lease_id, expected_revision, expires_at))?;
@@ -554,7 +575,16 @@ impl PgResourceStore {
                 let now = database_now(&mut transaction).await?;
                 let next =
                     ResourceLifecycle::renew_lease(&lease, expected_revision, expires_at, now)?;
+                let request = load_locked(&mut transaction, lease.request_id).await?;
                 update_lease(&mut transaction, &lease, &next).await?;
+                enqueue_lease_event(
+                    &mut transaction,
+                    &next,
+                    &request,
+                    LEASE_RENEWED_SUBJECT,
+                    trace_id,
+                )
+                .await?;
                 let value = serde_json::to_value(&next)?;
                 IdempotencyStore::complete(
                     &mut transaction,
@@ -579,8 +609,10 @@ impl PgResourceStore {
         expected_revision: contracts::Revision,
         reason: String,
         actor: contracts::ActorId,
+        trace_id: &str,
     ) -> Result<ResourceLease, ResourceStoreError> {
         IdempotencyKey::parse(idempotency_key).map_err(|_| ResourceStoreError::IdempotencyKey)?;
+        validate_trace(trace_id)?;
         let mut transaction = self.pool.begin().await?;
         let lease = load_locked_lease(&mut transaction, lease_id).await?;
         let hash = Sha256Digest::of_canonical(&(lease_id, expected_revision, &reason))?;
@@ -612,7 +644,22 @@ impl PgResourceStore {
                     next_request.revision.get(),
                     Some(request.state),
                     Some(actor),
-                    &format!("resource-lease-revoke-{lease_id}"),
+                    trace_id,
+                )
+                .await?;
+                enqueue_lease_event(
+                    &mut transaction,
+                    &next,
+                    &next_request,
+                    LEASE_REVOKED_SUBJECT,
+                    trace_id,
+                )
+                .await?;
+                enqueue_request_event(
+                    &mut transaction,
+                    &next_request,
+                    REQUEST_STATE_CHANGED_SUBJECT,
+                    trace_id,
                 )
                 .await?;
                 let value = serde_json::to_value(&next)?;
@@ -659,6 +706,21 @@ impl PgResourceStore {
             trace_id,
         )
         .await?;
+        enqueue_lease_event(
+            &mut transaction,
+            &next,
+            &next_request,
+            LEASE_ACTIVATED_SUBJECT,
+            trace_id,
+        )
+        .await?;
+        enqueue_request_event(
+            &mut transaction,
+            &next_request,
+            REQUEST_STATE_CHANGED_SUBJECT,
+            trace_id,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(next)
     }
@@ -690,6 +752,21 @@ impl PgResourceStore {
             trace_id,
         )
         .await?;
+        enqueue_lease_event(
+            &mut transaction,
+            &next,
+            &next_request,
+            LEASE_EXPIRING_SUBJECT,
+            trace_id,
+        )
+        .await?;
+        enqueue_request_event(
+            &mut transaction,
+            &next_request,
+            REQUEST_STATE_CHANGED_SUBJECT,
+            trace_id,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(next)
     }
@@ -717,6 +794,21 @@ impl PgResourceStore {
             next_request.revision.get(),
             Some(ResourceRequestState::Expiring),
             Some(actor),
+            trace_id,
+        )
+        .await?;
+        enqueue_lease_event(
+            &mut transaction,
+            &next,
+            &next_request,
+            LEASE_EXPIRED_SUBJECT,
+            trace_id,
+        )
+        .await?;
+        enqueue_request_event(
+            &mut transaction,
+            &next_request,
+            REQUEST_STATE_CHANGED_SUBJECT,
             trace_id,
         )
         .await?;
@@ -945,6 +1037,22 @@ impl PgResourceStore {
                 &format!("resource-lease-expire-{}", lease.id),
             )
             .await?;
+            let trace_id = format!("resource-lease-expire-{}", lease.id);
+            enqueue_lease_event(
+                &mut transaction,
+                &next,
+                &next_request,
+                LEASE_EXPIRING_SUBJECT,
+                &trace_id,
+            )
+            .await?;
+            enqueue_request_event(
+                &mut transaction,
+                &next_request,
+                REQUEST_STATE_CHANGED_SUBJECT,
+                &trace_id,
+            )
+            .await?;
             next
         } else {
             lease
@@ -987,7 +1095,9 @@ impl PgResourceStore {
         lease_id: LeaseId,
         expected_lease_revision: contracts::Revision,
         actor: contracts::ActorId,
+        trace_id: &str,
     ) -> Result<ResourceLease, ResourceStoreError> {
+        validate_trace(trace_id)?;
         let mut transaction = self.pool.begin().await?;
         let claim = load_locked_claim(&mut transaction, claim_id).await?;
         let lease = load_locked_lease(&mut transaction, lease_id).await?;
@@ -1019,7 +1129,22 @@ impl PgResourceStore {
             next_request.revision.get(),
             Some(request.state),
             Some(actor),
-            &format!("resource-capacity-release-{claim_id}"),
+            trace_id,
+        )
+        .await?;
+        enqueue_lease_event(
+            &mut transaction,
+            &next_lease,
+            &next_request,
+            LEASE_EXPIRED_SUBJECT,
+            trace_id,
+        )
+        .await?;
+        enqueue_request_event(
+            &mut transaction,
+            &next_request,
+            REQUEST_STATE_CHANGED_SUBJECT,
+            trace_id,
         )
         .await?;
         transaction.commit().await?;
@@ -1393,24 +1518,17 @@ async fn enqueue_request_event(
     subject: &str,
     trace_id: &str,
 ) -> Result<(), ResourceStoreError> {
+    let contract = event_contract(subject)?;
     let event_id = EventId::new();
     let payload = serde_json::to_value(CloudEvent {
         specversion: contracts::events::SPEC_VERSION.into(),
         id: event_id,
-        source: "urn:labweaver:resource-service".into(),
-        event_type: subject.into(),
-        subject: subject.into(),
+        source: contract.source().into(),
+        event_type: contract.event_type.into(),
+        subject: contract.subject.into(),
         time: request.updated_at,
         datacontenttype: "application/json".into(),
-        dataschema: format!(
-            "{}/{}.schema.json",
-            contracts::events::DATA_SCHEMA_BASE,
-            if subject == REQUEST_SUBMITTED_SUBJECT {
-                "resource-request-submitted"
-            } else {
-                "resource-request-approved"
-            }
-        ),
+        dataschema: contract.data_schema(),
         course_id: request.course_id,
         aggregate_revision: request.revision,
         aggregate_sequence: Sequence(request.revision.get()),
@@ -1433,6 +1551,57 @@ async fn enqueue_request_event(
     )
     .await?;
     Ok(())
+}
+
+async fn enqueue_lease_event(
+    transaction: &mut Transaction<'_, Postgres>,
+    lease: &ResourceLease,
+    request: &ResourceRequest,
+    subject: &str,
+    trace_id: &str,
+) -> Result<(), ResourceStoreError> {
+    let contract = event_contract(subject)?;
+    let event_id = EventId::new();
+    let payload = serde_json::to_value(CloudEvent {
+        specversion: contracts::events::SPEC_VERSION.into(),
+        id: event_id,
+        source: contract.source().into(),
+        event_type: contract.event_type.into(),
+        subject: contract.subject.into(),
+        time: lease.updated_at,
+        datacontenttype: "application/json".into(),
+        dataschema: contract.data_schema(),
+        course_id: request.course_id,
+        aggregate_revision: lease.revision,
+        aggregate_sequence: Sequence(lease.revision.get()),
+        trace_id: trace_id.into(),
+        data: ResourceLeaseChanged {
+            lease: lease.clone(),
+            request: request.clone(),
+        },
+    })?;
+    let hash = Sha256Digest::of_canonical(&payload)?;
+    OutboxStore::enqueue(
+        transaction,
+        Domain::Resource,
+        event_id.as_uuid(),
+        contract.subject,
+        contract.event_type,
+        lease.id.as_uuid(),
+        lease.revision.get(),
+        &payload,
+        hash,
+    )
+    .await?;
+    Ok(())
+}
+
+fn event_contract(subject: &str) -> Result<contracts::events::EventContract, ResourceStoreError> {
+    EVENT_CONTRACTS
+        .iter()
+        .copied()
+        .find(|contract| contract.subject == subject)
+        .ok_or(ResourceStoreError::EventContractInvalid)
 }
 
 async fn database_now(
@@ -1541,6 +1710,8 @@ pub enum ResourceStoreError {
     Trace,
     #[error("LW_RESOURCE_WIRE_INVALID")]
     Wire,
+    #[error("LW_RESOURCE_EVENT_CONTRACT_INVALID")]
+    EventContractInvalid,
     #[error("LW_RESOURCE_NUMERIC_OVERFLOW")]
     Numeric(#[from] std::num::TryFromIntError),
     #[error("LW_RESOURCE_CONTRACT_INVALID: {0}")]

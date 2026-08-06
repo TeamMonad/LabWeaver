@@ -255,10 +255,77 @@ async fn resource_store_commits_request_approval_claim_lease_and_renewal_as_fenc
             active.id,
             active.revision,
             renewed_expires,
+            "resource-renew-trace",
         )
         .await?;
     assert!(renewed.expires_at > active.expires_at);
     assert_eq!(store.load_lease(active.id).await?, renewed);
+
+    let request_subjects: Vec<String> = sqlx::query_scalar(
+        "SELECT subject FROM resource.outbox_events WHERE aggregate_id=$1 ORDER BY aggregate_sequence",
+    )
+    .bind(request.id.as_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert!(
+        request_subjects
+            .iter()
+            .any(|subject| { subject == contracts::events::subjects::RESOURCE_REQUEST_SUBMITTED })
+    );
+    assert!(
+        request_subjects
+            .iter()
+            .any(|subject| { subject == contracts::events::subjects::RESOURCE_REQUEST_APPROVED })
+    );
+    assert!(
+        request_subjects.iter().any(|subject| {
+            subject == contracts::events::subjects::RESOURCE_REQUEST_STATE_CHANGED
+        })
+    );
+
+    let lease_subjects: Vec<String> = sqlx::query_scalar(
+        "SELECT subject FROM resource.outbox_events WHERE aggregate_id=$1 ORDER BY aggregate_sequence",
+    )
+    .bind(active.id.as_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert!(
+        lease_subjects
+            .iter()
+            .any(|subject| subject == contracts::events::subjects::RESOURCE_LEASE_ACTIVATED)
+    );
+    assert!(
+        lease_subjects
+            .iter()
+            .any(|subject| subject == contracts::events::subjects::RESOURCE_LEASE_RENEWED)
+    );
+
+    let before_failed_renewal: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM resource.outbox_events WHERE aggregate_id=$1")
+            .bind(active.id.as_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert!(
+        store
+            .renew_lease(
+                "resource-renew-invalid-revision",
+                active.id,
+                Revision::new(1)?,
+                renewed_expires,
+                "resource-renew-invalid-trace",
+            )
+            .await
+            .is_err()
+    );
+    let after_failed_renewal: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM resource.outbox_events WHERE aggregate_id=$1")
+            .bind(active.id.as_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        before_failed_renewal, after_failed_renewal,
+        "a failed fenced transition must not leave an outbox row"
+    );
     Ok(())
 }
 

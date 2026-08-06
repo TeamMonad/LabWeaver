@@ -242,6 +242,10 @@ fn internal_router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "startup wiring keeps authority and secret locator validation in one auditable sequence"
+)]
 async fn build_app_state(
     deployment: AccessAuthFile,
     metrics: telemetry::PrometheusHandle,
@@ -321,7 +325,30 @@ async fn build_app_state(
     let control_proxy = build_control_proxy(&deployment)?;
     let environment_proxy = build_service_proxy(&deployment, &deployment.environment_gateway)?;
     let evaluation_proxy = build_service_proxy(&deployment, &deployment.evaluation_gateway)?;
-    let resource_proxy = proxy::ResourceGatewayProxy::new(&deployment.resource_gateway)?;
+    let resource_ca = resolver_secret(
+        &deployment,
+        &deployment.resource_gateway.ca_certificate_locator,
+    )?;
+    let resource_certificate = resolver_secret(
+        &deployment,
+        &deployment.resource_gateway.client_certificate_locator,
+    )?;
+    let resource_key = resolver_secret(
+        &deployment,
+        &deployment.resource_gateway.client_private_key_locator,
+    )?;
+    let resource_delegation_key = resolver_secret(
+        &deployment,
+        &deployment.resource_gateway.delegation_key_locator,
+    )?;
+    let resource_proxy = proxy::ResourceGatewayProxy::new(
+        &deployment.resource_gateway,
+        &resource_ca,
+        &resource_certificate,
+        &resource_key,
+        &resource_delegation_key,
+        deployment.transport_security,
+    )?;
     let runtime_proxy = proxy::RuntimeGatewayProxy::new(&deployment.environment_gateway)?;
     let nats = grants::connect_nats(&deployment.nats).await?;
     Ok(Arc::new(AppState {

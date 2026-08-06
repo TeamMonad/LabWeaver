@@ -1,11 +1,10 @@
 //! Access-BFF authenticated Resource request and Lease HTTP boundary.
 
-use std::str::FromStr;
-
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, Request, State},
     http::{HeaderMap, StatusCode, header},
+    middleware::Next,
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -16,6 +15,7 @@ use contracts::http::{
 use contracts::resource::{ResourceRequest, ResourceRequestState, ResourceTarget};
 use contracts::{ActorId, LeaseId, ResourceRequestId, Revision, UtcTimestamp};
 use serde::Deserialize;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::ApprovalPolicy;
@@ -23,7 +23,20 @@ use crate::store::{PendingAllocation, PgResourceStore, ResourceStoreError};
 use contracts::Sha256Digest;
 
 const ACCESS_CALLER_SAN: &str = "spiffe://labweaver/access-service";
-const ROLES_HEADER: &str = "x-labweaver-platform-roles";
+const DELEGATION_HEADER: &str = "x-labweaver-resource-delegation";
+
+/// Identity extracted from a CA-verified client certificate by the Resource TLS boundary.
+///
+/// This type is intentionally not constructible from HTTP headers. The only production
+/// constructor is the mTLS accept loop below, which verifies the certificate chain and exact
+/// URI SAN before injecting this extension into the Axum request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResourceCallerPrincipal {
+    san_uri: String,
+    actor_id: ActorId,
+    roles: Vec<contracts::PlatformRole>,
+    session_id: contracts::BffSessionId,
+}
 
 #[derive(Clone)]
 pub struct ResourceApiState {
@@ -75,6 +88,131 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
         .with_state(state)
 }
 
+/// Serves Resource API routes only over a CA-verified client-certificate connection.
+///
+/// The health listener is intentionally separate and is started by the shared service runtime;
+/// no Resource mutation route is mounted on the cleartext health port.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the TLS accept loop keeps certificate verification and delegation injection in one auditable boundary"
+)]
+pub async fn serve_mtls(
+    listener: tokio::net::TcpListener,
+    router: Router,
+    mtls: auth::MtlsServerConfig,
+    delegation_key: Arc<Vec<u8>>,
+) -> Result<(), std::io::Error> {
+    use auth::extract_mtls_principal;
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use hyper_util::server::conn::auto::Builder as HyperBuilder;
+    use hyper_util::service::TowerToHyperService;
+
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::clone(&mtls.server_config));
+    loop {
+        let (stream, peer_address) = listener.accept().await?;
+        let acceptor = acceptor.clone();
+        let router = router.clone();
+        let allowed = mtls.allowed_san_uris.clone();
+        let delegation_key = Arc::clone(&delegation_key);
+        tokio::spawn(async move {
+            let tls = match acceptor.accept(stream).await {
+                Ok(tls) => tls,
+                Err(error) => {
+                    tracing::warn!(
+                        event = "resource.mtls.handshake_denied",
+                        diagnostic_code = "LW_AUTH_SERVICE_IDENTITY_DENIED",
+                        %peer_address,
+                        error = %error
+                    );
+                    return;
+                }
+            };
+            let Some(peer) = tls
+                .get_ref()
+                .1
+                .peer_certificates()
+                .and_then(|certificates| certificates.first())
+            else {
+                tracing::warn!(
+                    event = "resource.mtls.peer_denied",
+                    diagnostic_code = "LW_AUTH_SERVICE_IDENTITY_DENIED",
+                    %peer_address
+                );
+                return;
+            };
+            let san_uri = match extract_mtls_principal(peer, &allowed) {
+                Ok(san_uri) if san_uri == ACCESS_CALLER_SAN => san_uri,
+                Ok(_) | Err(_) => {
+                    tracing::warn!(
+                        event = "resource.mtls.peer_denied",
+                        diagnostic_code = "LW_AUTH_SERVICE_IDENTITY_DENIED",
+                        %peer_address
+                    );
+                    return;
+                }
+            };
+            let service = router.layer(axum::middleware::from_fn(
+                move |mut request: Request, next: Next| {
+                    let delegation_key = Arc::clone(&delegation_key);
+                    let san_uri = san_uri.clone();
+                    async move {
+                        let Some(token) = request
+                            .headers()
+                            .get(DELEGATION_HEADER)
+                            .and_then(|value| value.to_str().ok())
+                        else {
+                            return (
+                                StatusCode::FORBIDDEN,
+                                "LW_AUTH_RESOURCE_DELEGATION_REQUIRED",
+                            )
+                                .into_response();
+                        };
+                        let delegation = match auth::decode_resource_delegation(
+                            delegation_key.as_slice(),
+                            token,
+                        ) {
+                            Ok(delegation) => delegation,
+                            Err(error) => {
+                                tracing::warn!(
+                                    event = "resource.delegation.denied",
+                                    diagnostic_code = %error,
+                                    %peer_address
+                                );
+                                return (
+                                    StatusCode::FORBIDDEN,
+                                    "LW_AUTH_RESOURCE_DELEGATION_INVALID",
+                                )
+                                    .into_response();
+                            }
+                        };
+                        request.extensions_mut().insert(ResourceCallerPrincipal {
+                            san_uri,
+                            actor_id: delegation.actor_id,
+                            roles: delegation.roles,
+                            session_id: delegation.session_id,
+                        });
+                        next.run(request).await
+                    }
+                },
+            ));
+            if let Err(error) = HyperBuilder::new(TokioExecutor::new())
+                .serve_connection_with_upgrades(
+                    TokioIo::new(tls),
+                    TowerToHyperService::new(service),
+                )
+                .await
+            {
+                tracing::warn!(
+                    event = "resource.mtls.connection_failed",
+                    diagnostic_code = "LW_RESOURCE_CONNECTION_FAILED",
+                    %peer_address,
+                    error = %error
+                );
+            }
+        });
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ResourceListQuery {
     course_id: contracts::CourseId,
@@ -82,12 +220,12 @@ struct ResourceListQuery {
 
 async fn list_requests(
     State(state): State<ResourceApiState>,
-    headers: HeaderMap,
+    Extension(principal): Extension<ResourceCallerPrincipal>,
     Query(query): Query<ResourceListQuery>,
 ) -> Result<Json<Vec<ResourceRequest>>, ResourceApiError> {
-    authorize(&headers)?;
-    let actor = actor(&headers)?;
-    let requests = if is_admin(&headers)? {
+    authorize(&principal)?;
+    let actor = principal.actor_id;
+    let requests = if is_admin(&principal)? {
         state.store.list_for_course(query.course_id).await?
     } else {
         state.store.list_owned(actor, query.course_id).await?
@@ -97,11 +235,12 @@ async fn list_requests(
 
 async fn create_request(
     State(state): State<ResourceApiState>,
+    Extension(principal): Extension<ResourceCallerPrincipal>,
     headers: HeaderMap,
     Json(input): Json<CreateResourceRequest>,
 ) -> Result<Response, ResourceApiError> {
-    authorize(&headers)?;
-    let actor = actor(&headers)?;
+    authorize(&principal)?;
+    let actor = principal.actor_id;
     let idempotency = required_header(&headers, "idempotency-key")?;
     let now = state.store.current_time().await?;
     let request = ResourceRequest {
@@ -140,25 +279,26 @@ async fn create_request(
 
 async fn get_request(
     State(state): State<ResourceApiState>,
-    headers: HeaderMap,
+    Extension(principal): Extension<ResourceCallerPrincipal>,
     Path(request_id): Path<ResourceRequestId>,
 ) -> Result<Response, ResourceApiError> {
-    authorize(&headers)?;
+    authorize(&principal)?;
     let request = state.store.load(request_id).await?;
-    scoped_or_admin(&headers, request.requester_id)?;
+    scoped_or_admin(&principal, request.requester_id)?;
     let revision = request.revision;
     with_etag(Json(request), revision)
 }
 
 async fn approve_request(
     State(state): State<ResourceApiState>,
+    Extension(principal): Extension<ResourceCallerPrincipal>,
     headers: HeaderMap,
     Path(request_id): Path<ResourceRequestId>,
     Json(input): Json<ApproveResourceRequest>,
 ) -> Result<Response, ResourceApiError> {
-    authorize(&headers)?;
-    require_admin(&headers)?;
-    let approver = actor(&headers)?;
+    authorize(&principal)?;
+    require_admin(&principal)?;
+    let approver = principal.actor_id;
     let idempotency = required_header(&headers, "idempotency-key")?;
     let request = state.store.load(request_id).await?;
     if request.revision != input.expected_revision {
@@ -229,12 +369,14 @@ async fn approve_request(
 
 async fn cancel_request(
     State(state): State<ResourceApiState>,
+    Extension(principal): Extension<ResourceCallerPrincipal>,
     headers: HeaderMap,
     Path(request_id): Path<ResourceRequestId>,
     Json(input): Json<contracts::http::ResourceRequestMutation>,
 ) -> Result<Response, ResourceApiError> {
     terminal_request(
         state,
+        principal,
         headers,
         request_id,
         input,
@@ -245,13 +387,16 @@ async fn cancel_request(
 
 async fn reject_request(
     State(state): State<ResourceApiState>,
+    Extension(principal): Extension<ResourceCallerPrincipal>,
     headers: HeaderMap,
     Path(request_id): Path<ResourceRequestId>,
     Json(input): Json<contracts::http::ResourceRequestMutation>,
 ) -> Result<Response, ResourceApiError> {
-    require_admin(&headers)?;
+    authorize(&principal)?;
+    require_admin(&principal)?;
     terminal_request(
         state,
+        principal,
         headers,
         request_id,
         input,
@@ -262,13 +407,14 @@ async fn reject_request(
 
 async fn retry_request(
     State(state): State<ResourceApiState>,
+    Extension(principal): Extension<ResourceCallerPrincipal>,
     headers: HeaderMap,
     Path(request_id): Path<ResourceRequestId>,
     Json(input): Json<contracts::http::ResourceRequestMutation>,
 ) -> Result<Response, ResourceApiError> {
-    authorize(&headers)?;
-    require_admin(&headers)?;
-    let actor = actor(&headers)?;
+    authorize(&principal)?;
+    require_admin(&principal)?;
+    let actor = principal.actor_id;
     let key = required_header(&headers, "idempotency-key")?;
     let result = state
         .store
@@ -291,16 +437,17 @@ async fn retry_request(
 
 async fn terminal_request(
     state: ResourceApiState,
+    principal: ResourceCallerPrincipal,
     headers: HeaderMap,
     request_id: ResourceRequestId,
     input: contracts::http::ResourceRequestMutation,
     terminal: ResourceRequestState,
 ) -> Result<Response, ResourceApiError> {
-    authorize(&headers)?;
+    authorize(&principal)?;
     if input.reason.trim().is_empty() || input.reason.chars().count() > 500 {
         return Err(ResourceApiError::Invalid);
     }
-    let actor = actor(&headers)?;
+    let actor = principal.actor_id;
     let key = required_header(&headers, "idempotency-key")?;
     let request = state.store.load(request_id).await?;
     if request.requester_id != actor && terminal == ResourceRequestState::Cancelled {
@@ -328,25 +475,25 @@ async fn terminal_request(
 
 async fn get_lease(
     State(state): State<ResourceApiState>,
-    headers: HeaderMap,
+    Extension(principal): Extension<ResourceCallerPrincipal>,
     Path(lease_id): Path<LeaseId>,
 ) -> Result<Response, ResourceApiError> {
-    authorize(&headers)?;
+    authorize(&principal)?;
     let lease = state.store.load_lease(lease_id).await?;
     let request = state.store.load(lease.request_id).await?;
-    scoped_or_admin(&headers, request.requester_id)?;
+    scoped_or_admin(&principal, request.requester_id)?;
     let revision = lease.revision;
     with_etag(Json(lease), revision)
 }
 
 async fn list_leases(
     State(state): State<ResourceApiState>,
-    headers: HeaderMap,
+    Extension(principal): Extension<ResourceCallerPrincipal>,
     Query(query): Query<ResourceListQuery>,
 ) -> Result<Json<Vec<contracts::resource::ResourceLease>>, ResourceApiError> {
-    authorize(&headers)?;
-    let actor = actor(&headers)?;
-    let leases = if is_admin(&headers)? {
+    authorize(&principal)?;
+    let actor = principal.actor_id;
+    let leases = if is_admin(&principal)? {
         state.store.list_leases_for_course(query.course_id).await?
     } else {
         state
@@ -359,12 +506,13 @@ async fn list_leases(
 
 async fn renew_lease(
     State(state): State<ResourceApiState>,
+    Extension(principal): Extension<ResourceCallerPrincipal>,
     headers: HeaderMap,
     Path(lease_id): Path<LeaseId>,
     Json(input): Json<RenewResourceLease>,
 ) -> Result<Response, ResourceApiError> {
-    authorize(&headers)?;
-    require_admin(&headers)?;
+    authorize(&principal)?;
+    require_admin(&principal)?;
     let key = required_header(&headers, "idempotency-key")?;
     let now = state.store.current_time().await?;
     let expires = UtcTimestamp::from_utc(
@@ -376,7 +524,13 @@ async fn renew_lease(
     .map_err(|_| ResourceApiError::Invalid)?;
     let lease = state
         .store
-        .renew_lease(&key, lease_id, input.expected_revision, expires)
+        .renew_lease(
+            &key,
+            lease_id,
+            input.expected_revision,
+            expires,
+            &trace_id(),
+        )
         .await?;
     let revision = lease.revision;
     with_etag(Json(lease), revision)
@@ -384,80 +538,81 @@ async fn renew_lease(
 
 async fn revoke_lease(
     State(state): State<ResourceApiState>,
+    Extension(principal): Extension<ResourceCallerPrincipal>,
     headers: HeaderMap,
     Path(lease_id): Path<LeaseId>,
     Json(input): Json<contracts::http::ResourceRequestMutation>,
 ) -> Result<Response, ResourceApiError> {
-    authorize(&headers)?;
-    require_admin(&headers)?;
-    let actor = actor(&headers)?;
+    authorize(&principal)?;
+    require_admin(&principal)?;
+    let actor = principal.actor_id;
     if input.reason.trim().is_empty() || input.reason.chars().count() > 500 {
         return Err(ResourceApiError::Invalid);
     }
     let key = required_header(&headers, "idempotency-key")?;
     let lease = state
         .store
-        .revoke_lease(&key, lease_id, input.expected_revision, input.reason, actor)
+        .revoke_lease(
+            &key,
+            lease_id,
+            input.expected_revision,
+            input.reason,
+            actor,
+            &trace_id(),
+        )
         .await?;
     let revision = lease.revision;
     with_etag(Json(lease), revision)
 }
 
-fn authorize(headers: &HeaderMap) -> Result<(), ResourceApiError> {
-    if headers
-        .get("x-labweaver-caller-san")
-        .and_then(|v| v.to_str().ok())
-        != Some(ACCESS_CALLER_SAN)
-    {
+fn authorize(principal: &ResourceCallerPrincipal) -> Result<(), ResourceApiError> {
+    tracing::debug!(
+        event = "resource.request.authorized",
+        actor_id = %principal.actor_id,
+        session_id = %principal.session_id,
+        san_uri = %principal.san_uri,
+    );
+    if principal.san_uri != ACCESS_CALLER_SAN {
         return Err(ResourceApiError::CallerDenied);
     }
     Ok(())
 }
-fn scoped(headers: &HeaderMap, expected: ActorId) -> Result<(), ResourceApiError> {
-    if actor(headers)? == expected {
+fn scoped(principal: &ResourceCallerPrincipal, expected: ActorId) -> Result<(), ResourceApiError> {
+    if principal.actor_id == expected {
         Ok(())
     } else {
         Err(ResourceApiError::ScopeDenied)
     }
 }
 
-fn scoped_or_admin(headers: &HeaderMap, expected: ActorId) -> Result<(), ResourceApiError> {
-    if is_admin(headers)? {
+fn scoped_or_admin(
+    principal: &ResourceCallerPrincipal,
+    expected: ActorId,
+) -> Result<(), ResourceApiError> {
+    if is_admin(principal)? {
         Ok(())
     } else {
-        scoped(headers, expected)
+        scoped(principal, expected)
     }
 }
 
-fn require_admin(headers: &HeaderMap) -> Result<(), ResourceApiError> {
-    if is_admin(headers)? {
+fn require_admin(principal: &ResourceCallerPrincipal) -> Result<(), ResourceApiError> {
+    if is_admin(principal)? {
         Ok(())
     } else {
         Err(ResourceApiError::ScopeDenied)
     }
 }
 
-fn is_admin(headers: &HeaderMap) -> Result<bool, ResourceApiError> {
-    let roles = required_header(headers, ROLES_HEADER)?;
-    let mut parsed = roles.split(',').map(str::trim);
-    let mut any = false;
-    let mut admin = false;
-    for role in &mut parsed {
-        any = true;
-        match role {
-            "platform_admin" => admin = true,
-            "teacher" | "student" => {}
-            _ => return Err(ResourceApiError::CallerDenied),
-        }
-    }
-    if !any {
+fn is_admin(principal: &ResourceCallerPrincipal) -> Result<bool, ResourceApiError> {
+    authorize(principal)?;
+    if principal.roles.is_empty() {
         return Err(ResourceApiError::CallerDenied);
     }
-    Ok(admin)
-}
-fn actor(headers: &HeaderMap) -> Result<ActorId, ResourceApiError> {
-    required_header(headers, "x-labweaver-actor-id")
-        .and_then(|v| ActorId::from_str(&v).map_err(|_| ResourceApiError::IdentityInvalid))
+    Ok(principal
+        .roles
+        .iter()
+        .any(|role| *role == contracts::PlatformRole::PlatformAdmin))
 }
 fn required_header(headers: &HeaderMap, name: &'static str) -> Result<String, ResourceApiError> {
     headers
@@ -518,56 +673,53 @@ impl IntoResponse for ResourceApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::HeaderValue;
 
     #[test]
-    fn caller_must_be_the_access_service_principal() {
-        let mut headers = HeaderMap::new();
+    fn caller_must_be_the_verified_access_service_principal() {
+        let principal = ResourceCallerPrincipal {
+            san_uri: "spiffe://labweaver/untrusted".to_owned(),
+            actor_id: ActorId::new(),
+            roles: vec![contracts::PlatformRole::Teacher],
+            session_id: contracts::BffSessionId::new(),
+        };
         assert!(matches!(
-            authorize(&headers),
+            authorize(&principal),
             Err(ResourceApiError::CallerDenied)
         ));
-        headers.insert(
-            "x-labweaver-caller-san",
-            HeaderValue::from_static(ACCESS_CALLER_SAN),
-        );
-        assert!(authorize(&headers).is_ok());
+        let principal = ResourceCallerPrincipal {
+            san_uri: ACCESS_CALLER_SAN.to_owned(),
+            actor_id: ActorId::new(),
+            roles: vec![contracts::PlatformRole::Teacher],
+            session_id: contracts::BffSessionId::new(),
+        };
+        assert!(authorize(&principal).is_ok());
     }
 
     #[test]
-    fn actor_header_is_required_and_must_be_a_typed_id() {
-        let headers = HeaderMap::new();
+    fn delegated_identity_is_not_read_from_http_headers() {
+        let principal = ResourceCallerPrincipal {
+            san_uri: ACCESS_CALLER_SAN.to_owned(),
+            actor_id: ActorId::new(),
+            roles: vec![contracts::PlatformRole::Teacher],
+            session_id: contracts::BffSessionId::new(),
+        };
+        let forged_actor = ActorId::new();
+        assert_ne!(principal.actor_id, forged_actor);
         assert!(matches!(
-            actor(&headers),
-            Err(ResourceApiError::IdentityInvalid)
+            scoped(&principal, forged_actor),
+            Err(ResourceApiError::ScopeDenied)
         ));
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-labweaver-actor-id",
-            HeaderValue::from_static("not-an-actor"),
-        );
-        assert!(matches!(
-            actor(&headers),
-            Err(ResourceApiError::IdentityInvalid)
-        ));
+        assert!(is_admin(&principal).is_ok_and(|is_admin| !is_admin));
     }
 
     #[test]
     fn administrator_role_is_explicit_and_unknown_roles_fail_closed() {
-        let mut headers = HeaderMap::new();
-        assert!(matches!(
-            is_admin(&headers),
-            Err(ResourceApiError::IdentityInvalid)
-        ));
-        headers.insert(
-            ROLES_HEADER,
-            HeaderValue::from_static("teacher,platform_admin"),
-        );
-        assert!(is_admin(&headers).is_ok_and(|value| value));
-        headers.insert(ROLES_HEADER, HeaderValue::from_static("teacher,root"));
-        assert!(matches!(
-            is_admin(&headers),
-            Err(ResourceApiError::CallerDenied)
-        ));
+        let principal = ResourceCallerPrincipal {
+            san_uri: ACCESS_CALLER_SAN.to_owned(),
+            actor_id: ActorId::new(),
+            roles: vec![contracts::PlatformRole::PlatformAdmin],
+            session_id: contracts::BffSessionId::new(),
+        };
+        assert!(is_admin(&principal).is_ok_and(|value| value));
     }
 }
