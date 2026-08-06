@@ -365,12 +365,15 @@
       externalURL: "https://{{ harbor_hostname }}"
       expose:
         type: clusterIP
-        # Client TLS terminates at the cilium Gateway. With nginx-level TLS
-        # enabled, the plaintext listener 301-redirects every request to the
-        # external HTTPS URL and loops behind the Gateway; the behind-LB form
-        # keeps externalURL HTTPS and serves plaintext internally.
+        # Harbor nginx terminates client TLS itself. The Sprint 2 Harbor route
+        # adoption switches the Gateway to TLS passthrough and routes directly
+        # to this HTTPS listener; the chart-generated harbor-nginx secret owns
+        # the public registry CA consumed by BuildKit bundles.
         tls:
-          enabled: false
+          enabled: true
+          certSource: auto
+          auto:
+            commonName: "{{ harbor_hostname }}"
       harborAdminPassword: "{{ harbor_admin_password }}"
       persistence:
         persistentVolumeClaim:
@@ -640,14 +643,14 @@
   ansible.builtin.command:
     argv:
       - "{{ harbor_kubectl_path }}"
-      - --kubeconfig
+      - "--kubeconfig"
       - "{{ harbor_kubeconfig_path }}"
-      - -n
+      - "-n"
       - "{{ harbor_namespace }}"
       - get
       - gateway
       - "{{ harbor_gateway_name }}"
-      - -o
+      - "-o"
       - "jsonpath={.status.conditions[?(@.type=='Programmed')].status}"
   changed_when: false
   register: harbor_gateway_programmed
@@ -655,68 +658,9 @@
   retries: 30
   delay: 10
 
-- name: Read the managed Harbor system project before guaranteeing its policy
-  ansible.builtin.uri:
-    url: "https://{{ harbor_hostname }}/api/v2.0/projects?name={{ harbor_project_name | urlencode }}"
-    method: GET
-    user: admin
-    password: "{{ harbor_admin_password }}"
-    force_basic_auth: true
-    validate_certs: true
-    status_code: 200
-    return_content: true
-  delegate_to: "{{ groups['control_plane'][0] }}"
-  become: false
-  check_mode: false
-  no_log: true
-  register: harbor_system_project_probe
-  until: harbor_system_project_probe.status == 200
-  retries: 24
-  delay: 10
-
-- name: Create the Harbor system project with the locked policy when missing
-  ansible.builtin.uri:
-    url: "https://{{ harbor_hostname }}/api/v2.0/projects"
-    method: POST
-    user: admin
-    password: "{{ harbor_admin_password }}"
-    force_basic_auth: true
-    validate_certs: true
-    status_code: 201
-    body_format: json
-    body:
-      project_name: "{{ harbor_project_name }}"
-      metadata: { public: "false", auto_scan: "true" }
-  delegate_to: "{{ groups['control_plane'][0] }}"
-  become: false
-  check_mode: false
-  no_log: true
-  when: harbor_system_project_probe.json | length == 0
-
-- name: Verify the managed Harbor system project policy
-  ansible.builtin.uri:
-    url: "https://{{ harbor_hostname }}/api/v2.0/projects?name={{ harbor_project_name | urlencode }}"
-    method: GET
-    user: admin
-    password: "{{ harbor_admin_password }}"
-    force_basic_auth: true
-    validate_certs: true
-    status_code: 200
-    return_content: true
-  delegate_to: "{{ groups['control_plane'][0] }}"
-  become: false
-  check_mode: false
-  no_log: true
-  register: harbor_system_project
-
-- name: Reject a missing or non-private Harbor system project
-  ansible.builtin.assert:
-    that:
-      - harbor_system_project.json | length == 1
-      - harbor_system_project.json[0].name == harbor_project_name
-      - harbor_system_project.json[0].metadata.public == 'false'
-      - harbor_system_project.json[0].metadata.auto_scan == 'true'
-    fail_msg: HARBOR_SYSTEM_PROJECT_POLICY_DRIFT
+# The labweaver-system project policy is enforced by the Sprint 2 Harbor route
+# adoption after the Gateway switches to TLS passthrough; with nginx-level TLS
+# enabled the intermediate Terminate form 301-loops and cannot serve the API.
 
 - name: Render the sanitized Harbor policy manifest
   ansible.builtin.template:
