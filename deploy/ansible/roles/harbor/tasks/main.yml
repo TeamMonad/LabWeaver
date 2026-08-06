@@ -365,11 +365,12 @@
       externalURL: "https://{{ harbor_hostname }}"
       expose:
         type: clusterIP
+        # Client TLS terminates at the cilium Gateway. With nginx-level TLS
+        # enabled, the plaintext listener 301-redirects every request to the
+        # external HTTPS URL and loops behind the Gateway; the behind-LB form
+        # keeps externalURL HTTPS and serves plaintext internally.
         tls:
-          enabled: true
-          certSource: auto
-          auto:
-            commonName: "{{ harbor_hostname }}"
+          enabled: false
       harborAdminPassword: "{{ harbor_admin_password }}"
       persistence:
         persistentVolumeClaim:
