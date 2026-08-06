@@ -280,6 +280,6 @@
           'source_commit': foundation_clean_redeploy_source_commit,
           'cluster_uid': foundation_clean_redeploy_cluster_uid.stdout | trim,
           'destroyed_namespaces': foundation_clean_redeploy_namespaces | sort,
-          'destroyed_at': now(utc=true).timestamp() | int | strftime('%Y-%m-%dT%H:%M:%SZ'),
+          'destroyed_at': now(utc=true).strftime('%Y-%m-%dT%H:%M:%SZ'),
           'release_eligible': false,
           'report_sha256': 'sha256:' + foundation_clean_redeploy_pre_destruction_hash.stat.checksum} | to_nice_json }}

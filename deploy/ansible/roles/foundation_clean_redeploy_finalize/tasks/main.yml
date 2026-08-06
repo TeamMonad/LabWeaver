@@ -212,6 +212,6 @@
           'source_commit': foundation_clean_redeploy_finalize_source_commit,
           'cluster_uid': foundation_clean_redeploy_finalize_cluster_uid.stdout | trim,
           'destroyed_namespaces': foundation_clean_redeploy_finalize_namespaces | sort,
-          'destroyed_at': now(utc=true).timestamp() | int | strftime('%Y-%m-%dT%H:%M:%SZ'),
+          'destroyed_at': now(utc=true).strftime('%Y-%m-%dT%H:%M:%SZ'),
           'reclaimed_persistent_volumes': foundation_clean_redeploy_finalize_residual_pvs,
           'release_eligible': false} | to_nice_json }}
