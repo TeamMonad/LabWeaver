@@ -6,6 +6,10 @@ on:
     paths:
       - access-gateway/**
       - containers/**
+      - crates/**
+      - services/**
+      - Cargo.toml
+      - Cargo.lock
       - deploy/helm/**
       - deploy/versions.lock.yml
       - schemas/results/platform-image-*.json
@@ -17,6 +21,10 @@ on:
     paths:
       - access-gateway/**
       - containers/**
+      - crates/**
+      - services/**
+      - Cargo.toml
+      - Cargo.lock
       - deploy/helm/**
       - deploy/versions.lock.yml
       - schemas/results/platform-image-*.json
@@ -84,6 +92,7 @@ jobs:
           - evaluation-service
           - oj-cpp17-runner
           - openssh-gateway
+          - resource-service
           - web
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683

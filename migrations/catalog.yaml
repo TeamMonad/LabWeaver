@@ -3,7 +3,7 @@ toolVersion: 0.1.0
 bootstrap:
   id: 1
   file: bootstrap/0001_roles_and_schemas.sql
-  sha256: fb7ac1590f394b6fb5c1e9fe1b84024b8c8f87d6bf272f57e3fba29fc15ed6e5
+  sha256: 2ca384486f796bff98f090a6227e1f34626a5d22814f831de1ff3f1cb1f8181e
 domains:
   - name: control
     migrations:
@@ -24,10 +24,13 @@ domains:
     migrations:
       - id: 1
         file: agent/0001_sprint2_baseline.sql
-        sha256: 96f87d22cad7b0638aa48151c91fd8ae2ad46b786610a8979902ec51fd899b9e
+        sha256: c98cefba2529109d7ac833f93a192cab1315889e86da811339fe1ada2af0f3b2
       - id: 2
         file: agent/0002_allow_content_addressed_image_reuse.sql
         sha256: e1d86262aa597e0b61b7731ac39671a77ad7e9c0eb8b19279e4082d54c5e9b00
+      - id: 3
+        file: agent/0003_work_agent_run_class.sql
+        sha256: da55512193a801d0a95dee51af4ca87701eba5da8bee696f9efdb07e636b7646
   - name: evaluation
     migrations:
       - id: 1
@@ -38,3 +41,18 @@ domains:
       - id: 1
         file: resource/0001_sprint2_baseline.sql
         sha256: 54b2f428109fb3e819da9db23802b58ecd760858f39404e7ef4d028cfa508e79
+      - id: 2
+        file: resource/0002_resource_request_capacity_lease.sql
+        sha256: 80ddbe36cf0bbf19758294388458c9763007042c967bc7b423f6f99bf9d3fda3
+      - id: 3
+        file: resource/0003_resource_contract_snapshots.sql
+        sha256: e09698481c921602f5cdd184ba8b1601468813e8b6b934bb60dcc65f41eac680
+      - id: 4
+        file: resource/0004_resource_claim_quota_resources.sql
+        sha256: ba5a536c2c77b152b70bc62456ae83ebde49707f81b4c9b7cd4048537d9b8701
+      - id: 5
+        file: resource/0005_resource_lease_pending_terminal_states.sql
+        sha256: 867a1d60608ab7d1ae8e4bfac918e6b93d4ccf0959aed6b5d91c1c0faf3778df
+      - id: 6
+        file: resource/0006_resource_lease_reconciliation.sql
+        sha256: 950a925790a01e80600454e7aee30a8f63889f0a53669738eb38c0d079acf03f

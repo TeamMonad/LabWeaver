@@ -4915,12 +4915,30 @@ dependencies = [
 name = "resource-service"
 version = "0.1.0"
 dependencies = [
+ "async-nats",
+ "auth",
  "axum 0.8.9",
  "contracts",
+ "futures-util",
+ "hyper-util",
+ "persistence-sqlx",
+ "reqwest",
+ "rustls 0.23.42",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "sqlx",
  "telemetry",
+ "testcontainers",
+ "testcontainers-modules",
  "thiserror 2.0.18",
+ "time",
  "tokio",
+ "tokio-rustls 0.26.4",
  "tracing",
+ "url",
+ "uuid",
 ]
 
 [[package]]

@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::authoring::{EnvironmentClass, RuntimeKind};
 use crate::{
-    ActorId, CourseId, DiagnosticCode, EndpointId, EnvironmentId, LeaseId, OperationId, ProjectId,
-    ReleaseId, Revision, StreamSequence, UtcTimestamp,
+    ActorId, CapacityClaimId, CourseId, DiagnosticCode, EndpointId, EnvironmentId, LeaseId,
+    OperationId, ProjectId, ReleaseId, ResourceRequestId, Revision, Sha256Digest, StreamSequence,
+    UtcTimestamp,
 };
 
 /// Requested steady state.
@@ -139,6 +140,138 @@ pub struct EnvironmentLeaseVerificationResponse {
     pub version: u8,
     pub state: EnvironmentLeaseState,
     pub authorization: Option<EnvironmentLeaseAuthorization>,
+}
+
+/// Resource-to-Environment command to create one Work aggregate from an already-approved
+/// Lease and capacity shell. Environment resolves the release projection locally.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResourceWorkHandoff {
+    pub version: u8,
+    pub request_id: ResourceRequestId,
+    pub request_revision: Revision,
+    pub lease_id: LeaseId,
+    pub lease_revision: Revision,
+    pub claim_id: CapacityClaimId,
+    pub claim_revision: Revision,
+    pub environment_id: EnvironmentId,
+    pub course_id: CourseId,
+    pub owner_actor_id: ActorId,
+    pub display_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<ProjectId>,
+    pub release_id: ReleaseId,
+    pub release_version: u64,
+    pub release_sha256: Sha256Digest,
+    pub provider_binding: String,
+    pub capacity_binding: String,
+    pub trace_id: String,
+}
+
+impl ResourceWorkHandoff {
+    pub fn validate(&self) -> Result<(), EnvironmentError> {
+        if self.version != 1
+            || self.request_revision.get() == 0
+            || self.lease_revision.get() == 0
+            || self.claim_revision.get() == 0
+            || self.release_version == 0
+            || self.display_label.trim().is_empty()
+            || self.display_label.chars().count() > 120
+            || self.provider_binding.is_empty()
+            || self.provider_binding.len() > 120
+            || self.capacity_binding.is_empty()
+            || self.capacity_binding.len() > 120
+            || self.trace_id.is_empty()
+            || self.trace_id.len() > 128
+            || self.trace_id.chars().any(char::is_control)
+        {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        Ok(())
+    }
+}
+
+/// Resource-authoritative Lease update for an existing Work aggregate.
+///
+/// Environment accepts this only from the Resource service mTLS identity after
+/// independently resolving the exact active Lease. It extends eligibility but
+/// cannot change the immutable release, Provider, owner, course, or capacity
+/// binding selected by the original handoff.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResourceWorkLeaseUpdate {
+    pub version: u8,
+    pub lease_id: LeaseId,
+    pub lease_revision: Revision,
+    pub environment_id: EnvironmentId,
+    pub course_id: CourseId,
+    pub owner_actor_id: ActorId,
+    pub capacity_binding: String,
+    pub expires_at: UtcTimestamp,
+    pub trace_id: String,
+}
+
+impl ResourceWorkLeaseUpdate {
+    pub fn validate(&self) -> Result<(), EnvironmentError> {
+        if self.version != 1
+            || self.lease_revision.get() == 0
+            || self.capacity_binding.is_empty()
+            || self.capacity_binding.len() > 120
+            || self.trace_id.is_empty()
+            || self.trace_id.len() > 128
+            || self.trace_id.chars().any(char::is_control)
+        {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        Ok(())
+    }
+}
+
+/// Resource-authoritative request to revoke access and delete one Work
+/// environment before releasing its exact capacity claim.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResourceWorkCleanup {
+    pub version: u8,
+    pub lease_id: LeaseId,
+    pub lease_revision: Revision,
+    pub environment_id: EnvironmentId,
+    pub course_id: CourseId,
+    pub owner_actor_id: ActorId,
+    pub capacity_binding: String,
+    pub reason_code: String,
+    pub trace_id: String,
+}
+
+impl ResourceWorkCleanup {
+    pub fn validate(&self) -> Result<(), EnvironmentError> {
+        if self.version != 1
+            || self.lease_revision.get() == 0
+            || self.capacity_binding.is_empty()
+            || self.capacity_binding.len() > 120
+            || crate::DiagnosticCode::parse(&self.reason_code).is_err()
+            || self.trace_id.is_empty()
+            || self.trace_id.len() > 128
+            || self.trace_id.chars().any(char::is_control)
+        {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        Ok(())
+    }
+}
+
+/// Minimal Resource-visible cleanup readback. Provider handles, endpoints and
+/// user content never cross this boundary.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResourceWorkCleanupStatus {
+    pub version: u8,
+    pub environment_id: EnvironmentId,
+    pub revision: Revision,
+    pub observed_state: ObservedEnvironmentState,
+    pub cleanup_complete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic_code: Option<String>,
 }
 
 /// Revision-checked lifecycle intent consumed by the Environment state owner.
@@ -707,6 +840,8 @@ pub enum EnvironmentError {
     LeaseAuthorizationRequired,
     #[error("Resource Lease authorization does not match the Environment scope")]
     LeaseAuthorizationInvalid,
+    #[error("Resource Work handoff is incomplete or unsafe")]
+    InvalidResourceHandoff,
     #[error("illegal environment transition: {from:?} -> {to:?}")]
     InvalidTransition {
         from: ObservedEnvironmentState,
@@ -908,10 +1043,18 @@ impl EnvironmentOwnerResolverClientConfig {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
+    use std::str::FromStr;
+
     use super::{
         EnvironmentInstance, EnvironmentOperationKind, EnvironmentOwnerResolverClientConfig,
-        ObservedEnvironmentState,
+        ObservedEnvironmentState, ResourceWorkCleanup, ResourceWorkHandoff,
+        ResourceWorkLeaseUpdate,
+    };
+    use crate::{
+        ActorId, CapacityClaimId, CourseId, EnvironmentId, LeaseId, ReleaseId, ResourceRequestId,
+        Revision, Sha256Digest, UtcTimestamp,
     };
 
     const STATES: [ObservedEnvironmentState; 12] = [
@@ -1092,5 +1235,66 @@ mod tests {
         config.resolver_uri = "https://environment-service.internal".to_owned();
         config.allowed_server_sans = vec!["*.internal".to_owned()];
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn resource_work_handoff_requires_all_fences_and_a_safe_display_label() {
+        let mut handoff = ResourceWorkHandoff {
+            version: 1,
+            request_id: ResourceRequestId::new(),
+            request_revision: Revision::new(2).expect("revision"),
+            lease_id: LeaseId::new(),
+            lease_revision: Revision::new(2).expect("revision"),
+            claim_id: CapacityClaimId::new(),
+            claim_revision: Revision::new(3).expect("revision"),
+            environment_id: EnvironmentId::new(),
+            course_id: CourseId::new(),
+            owner_actor_id: ActorId::new(),
+            display_label: "workbench".to_owned(),
+            project_id: None,
+            release_id: ReleaseId::new(),
+            release_version: 1,
+            release_sha256: Sha256Digest::of_bytes(b"release"),
+            provider_binding: "kubernetes-standard".to_owned(),
+            capacity_binding: "claim-123".to_owned(),
+            trace_id: "resource-handoff-123".to_owned(),
+        };
+        assert!(handoff.validate().is_ok());
+        handoff.trace_id = "\n".to_owned();
+        assert!(handoff.validate().is_err());
+    }
+
+    #[test]
+    fn resource_work_lease_update_and_cleanup_are_exact_and_bounded() {
+        let lease_id = LeaseId::new();
+        let environment_id = EnvironmentId::new();
+        let course_id = CourseId::new();
+        let owner_actor_id = ActorId::new();
+        let update = ResourceWorkLeaseUpdate {
+            version: 1,
+            lease_id,
+            lease_revision: Revision::new(4).expect("revision"),
+            environment_id,
+            course_id,
+            owner_actor_id,
+            capacity_binding: "capacity-claim".into(),
+            expires_at: UtcTimestamp::from_str("2026-08-01T00:00:00.000Z").expect("timestamp"),
+            trace_id: "resource-lease-sync".into(),
+        };
+        assert!(update.validate().is_ok());
+        let mut cleanup = ResourceWorkCleanup {
+            version: 1,
+            lease_id,
+            lease_revision: update.lease_revision,
+            environment_id,
+            course_id,
+            owner_actor_id,
+            capacity_binding: update.capacity_binding,
+            reason_code: "LW_RESOURCE_LEASE_EXPIRED".into(),
+            trace_id: "resource-work-cleanup".into(),
+        };
+        assert!(cleanup.validate().is_ok());
+        cleanup.reason_code = "expired".into();
+        assert!(cleanup.validate().is_err());
     }
 }

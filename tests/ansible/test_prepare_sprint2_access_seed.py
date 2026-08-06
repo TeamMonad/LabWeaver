@@ -28,6 +28,7 @@ def test_seed_binds_keycloak_subjects_without_persisting_raw_subjects() -> None:
         "users": [
             {"id": "teacher-subject", "username": "teacher", "realmRoles": ["teacher"]},
             {"id": "student-subject", "username": "student", "realmRoles": ["student"]},
+            {"id": "admin-subject", "username": "admin", "realmRoles": ["platform_admin"]},
         ]
     }
     seed = MODULE.build_seed(
@@ -36,13 +37,15 @@ def test_seed_binds_keycloak_subjects_without_persisting_raw_subjects() -> None:
         "00000000-0000-7000-8000-000000000301",
         "teacher",
         "student",
+        "admin",
     )
     encoded = json.dumps(seed, sort_keys=True)
     assert "teacher-subject" not in encoded
     assert "student-subject" not in encoded
+    assert "admin-subject" not in encoded
     memberships = seed["courseMemberships"]
-    assert [item["role"] for item in memberships] == ["teacher", "student"]
-    assert len({item["actorId"] for item in memberships}) == 2
+    assert [item["role"] for item in memberships] == ["teacher", "student", "platform_admin"]
+    assert len({item["actorId"] for item in memberships}) == 3
     assert all(uuid.UUID(item["actorId"]).version == 7 for item in memberships)
 
 
@@ -67,6 +70,7 @@ def test_seed_rejects_non_v7_course_identifier() -> None:
         "users": [
             {"id": "teacher-subject", "username": "teacher", "realmRoles": ["teacher"]},
             {"id": "student-subject", "username": "student", "realmRoles": ["student"]},
+            {"id": "admin-subject", "username": "admin", "realmRoles": ["platform_admin"]},
         ]
     }
     try:
@@ -76,6 +80,7 @@ def test_seed_rejects_non_v7_course_identifier() -> None:
             "00000000-0000-4000-8000-000000000301",
             "teacher",
             "student",
+            "admin",
         )
     except MODULE.AccessSeedError as error:
         assert str(error) == "LW_SPRINT2_ACCESS_SEED_COURSE_INVALID"

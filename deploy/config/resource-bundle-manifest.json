@@ -1,0 +1,21 @@
+{
+  "apiVersion": "deploy.labweaver.io/resource-bundle-manifest/v1",
+  "namespace": "labweaver-system",
+  "configMaps": {
+    "resource-service-config": ["capacity.json", "mtls.yaml"]
+  },
+  "secrets": {
+    "resource-service-secrets": [
+      "database-url",
+      "nats-server",
+      "nats-ca.pem",
+      "nats-client.crt",
+      "nats-client.key",
+      "nats.creds",
+      "mtls-ca.pem",
+      "tls.crt",
+      "tls.key",
+      "resource-delegation-key"
+    ]
+  }
+}

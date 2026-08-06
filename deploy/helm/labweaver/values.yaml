@@ -6,6 +6,7 @@ images:
   evaluation_service: ""
   web: ""
   openssh_gateway: ""
+  resource_service: ""
 
 imagePullSecrets: []
 
@@ -32,6 +33,7 @@ objectStoreRoute:
   enabled: false
   namespace: ""
   serviceName: minio
+  serviceNamespace: labweaver-data
   servicePort: 9000
   pathPrefix: ""
   backendHostname: ""
@@ -120,7 +122,7 @@ workloads:
       LABWEAVER_OWNER_RESOLVER_CLIENT_CA_PATH: /etc/labweaver/secrets/mtls-ca.pem
       LABWEAVER_OWNER_RESOLVER_SERVER_CERT_PATH: /etc/labweaver/secrets/tls.crt
       LABWEAVER_OWNER_RESOLVER_SERVER_KEY_PATH: /etc/labweaver/secrets/tls.key
-      LABWEAVER_OWNER_RESOLVER_ALLOWED_CALLER_SANS: spiffe://labweaver/access-service,spiffe://labweaver/evaluation-service
+      LABWEAVER_OWNER_RESOLVER_ALLOWED_CALLER_SANS: spiffe://labweaver/access-service,spiffe://labweaver/evaluation-service,spiffe://labweaver/resource-service
       LABWEAVER_NATS_CA_PATH: /etc/labweaver/secrets/nats-ca.pem
       LABWEAVER_NATS_CLIENT_CERT_PATH: /etc/labweaver/secrets/nats-client.crt
       LABWEAVER_NATS_CLIENT_KEY_PATH: /etc/labweaver/secrets/nats-client.key
@@ -218,12 +220,38 @@ workloads:
     readiness: {type: tcp, port: mtls}
   resource-service:
     enabled: false
+    imageKey: resource_service
+    args: []
+    configMap: resource-service-config
+    secret: resource-service-secrets
+    rbacProfile: resource
+    kubernetesApi: true
+    env:
+      LABWEAVER_BIND_ADDR: 0.0.0.0:8087
+      LABWEAVER_RESOURCE_MTLS_CONFIG_FILE: /etc/labweaver/config/mtls.yaml
+      LABWEAVER_RESOURCE_CAPACITY_CONFIG_FILE: /etc/labweaver/config/capacity.json
+      LABWEAVER_NATS_CA_PATH: /etc/labweaver/secrets/nats-ca.pem
+      LABWEAVER_NATS_CLIENT_CERT_PATH: /etc/labweaver/secrets/nats-client.crt
+      LABWEAVER_NATS_CLIENT_KEY_PATH: /etc/labweaver/secrets/nats-client.key
+      LABWEAVER_NATS_CREDENTIALS_PATH: /etc/labweaver/secrets/nats.creds
+      LABWEAVER_RESOURCE_LEASE_VERIFICATION_SUBJECT: labweaver.resource.lease.verify.v1
+    secretEnv:
+      LABWEAVER_DATABASE_URL: {key: database-url}
+      LABWEAVER_NATS_SERVER: {key: nats-server}
+    ports:
+      - {name: health, containerPort: 8087, servicePort: 8087}
+      - {name: mtls, containerPort: 9448, servicePort: 9448}
+    readiness: {type: http, port: health, path: /health/ready}
 
 resources:
   requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 64Mi}
   limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 256Mi}
 
 network:
+  defaultDenyEnabled: true
+  cdiCloneSourcePolicyEnabled: true
+  ciliumIngressPolicyEnabled: true
+  resourceKubernetesApiCiliumPolicyEnabled: false
   infrastructureNamespaceSelector:
     matchLabels: {labweaver.io/infrastructure: "true"}
   edgeNamespaceSelector:

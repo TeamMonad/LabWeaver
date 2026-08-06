@@ -406,15 +406,19 @@ impl Worker {
                 self.track_lease,
             )?;
             let outcome = service
-                .execute(ExecuteAgentRun {
-                    course_id: lease.run.course_id,
-                    request: &lease.request,
-                    idempotency_key: &lease.idempotency_key,
-                    input,
-                    cancellation: RunCancellation::new(),
-                    now,
-                    trace_id: &lease.trace_id,
-                })
+                .execute_reserved(
+                    ExecuteAgentRun {
+                        course_id: lease.run.course_id,
+                        request: &lease.request,
+                        expected_environment_class: lease.expected_environment_class,
+                        idempotency_key: &lease.idempotency_key,
+                        input,
+                        cancellation: RunCancellation::new(),
+                        now,
+                        trace_id: &lease.trace_id,
+                    },
+                    lease.run.clone(),
+                )
                 .await?;
             tracing::info!(event = "agent.dispatch.completed", run_id = %lease.run.id, outcome = ?outcome);
         }

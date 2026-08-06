@@ -65,6 +65,7 @@ CREATE TABLE agent_run_dispatches (
     dispatch_sha256 text NOT NULL CHECK (dispatch_sha256 ~ '^[0-9a-f]{64}$'),
     idempotency_key text NOT NULL,
     request jsonb NOT NULL CHECK (jsonb_typeof(request) = 'object'),
+    expected_environment_class text NOT NULL CHECK (expected_environment_class IN ('experiment', 'work')),
     package jsonb NOT NULL CHECK (jsonb_typeof(package) = 'object'),
     object_locators jsonb NOT NULL CHECK (jsonb_typeof(object_locators) = 'object'),
     policy jsonb NOT NULL CHECK (jsonb_typeof(policy) = 'object'),

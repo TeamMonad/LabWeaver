@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://labweaver.invalid/schemas/results/local-connected-non-release.v1.schema.json",
+  "title": "LabWeaver Local Connected Non-Release Preflight",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "mode", "releaseEligible", "sourceCommit", "runId", "dockerContext", "kubernetesContext", "nodeCount", "readyNodeCount", "storageClasses", "capabilities", "capabilityGaps", "blockers", "identity"],
+  "properties": {
+    "schemaVersion": {"const": "local-connected-non-release.v1"},
+    "mode": {"const": "local-hostpath"},
+    "releaseEligible": {"const": false},
+    "sourceCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "runId": {"type": "string", "format": "uuid"},
+    "dockerContext": {"type": "string"},
+    "kubernetesContext": {"type": "string"},
+    "nodeCount": {"type": ["integer", "null"], "minimum": 0},
+    "readyNodeCount": {"type": ["integer", "null"], "minimum": 0},
+    "storageClasses": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["singleReadyNode", "hostpath", "nfsRwx", "kubevirt", "cdi", "ecnuApiKey"],
+      "properties": {
+        "singleReadyNode": {"type": "boolean"},
+        "hostpath": {"type": "boolean"},
+        "nfsRwx": {"type": "boolean"},
+        "kubevirt": {"type": "boolean"},
+        "cdi": {"type": "boolean"},
+        "ecnuApiKey": {"type": "boolean"}
+      }
+    },
+    "capabilityGaps": {"type": "array", "items": {"type": "string", "pattern": "^LW_[A-Z0-9_]+$"}, "uniqueItems": true},
+    "blockers": {"type": "array", "items": {"type": "string", "pattern": "^LW_[A-Z0-9_]+$"}, "uniqueItems": true},
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "sourceCommit", "runId"],
+      "properties": {
+        "kind": {"enum": ["local-preflight", "resource-replay-plan"]},
+        "sourceCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "runId": {"type": "string", "format": "uuid"},
+        "profile": {"$ref": "#/$defs/locator"},
+        "authentication": {"$ref": "#/$defs/locator"},
+        "deploymentManifest": {"$ref": "#/$defs/locator"},
+        "packageManifest": {"$ref": "#/$defs/locator"},
+        "resourceImage": {"type": "string", "pattern": "^[^@\\s]+/[^@\\s]+@sha256:[0-9a-f]{64}$"},
+        "configurationBundleSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"kind": {"const": "resource-replay-plan"}}, "required": ["kind"]},
+          "then": {"required": ["profile", "authentication", "deploymentManifest", "packageManifest", "resourceImage", "configurationBundleSha256"]}
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "locator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\r\\n]+$"},
+        "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    }
+  }
+}

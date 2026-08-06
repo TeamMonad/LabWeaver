@@ -146,7 +146,7 @@ impl NatsResourceLeaseVerifier {
         })
     }
 
-    async fn verify(
+    pub(crate) async fn verify(
         &self,
         request: EnvironmentLeaseVerificationRequest,
         authority_now: contracts::UtcTimestamp,

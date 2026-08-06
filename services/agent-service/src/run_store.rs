@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use contracts::authoring::{
     AgentAttempt, AgentAttemptState, AgentRun, AgentRunState, AgentTrack, AgentTrackKind,
-    CourseLlmEgressPolicy, EnvironmentCandidate, EvaluationCandidate, LlmUsage, ProblemPackage,
+    CourseLlmEgressPolicy, EnvironmentCandidate, EnvironmentClass, EvaluationCandidate, LlmUsage,
+    ProblemPackage,
 };
 use contracts::diagnostic;
 use contracts::events::{
@@ -58,6 +59,8 @@ pub struct AgentRunDispatchLease {
     pub run: AgentRun,
     /// Immutable public create request.
     pub request: CreateAgentRunRequest,
+    /// Control-authoritative class required for the Environment track.
+    pub expected_environment_class: EnvironmentClass,
     /// Control-verified package contract.
     pub package: ProblemPackage,
     /// Opaque object keys indexed by package artifact identity.
@@ -187,6 +190,7 @@ impl PostgresAgentRunStore {
         &self,
         course_id: CourseId,
         request: &CreateAgentRunRequest,
+        expected_environment_class: EnvironmentClass,
         package: &ProblemPackage,
         object_locators: &BTreeMap<ArtifactId, String>,
         policy: &CourseLlmEgressPolicy,
@@ -227,10 +231,12 @@ impl PostgresAgentRunStore {
         let request_hash = Sha256Digest::of_canonical(&serde_json::json!({
             "courseId": course_id,
             "request": request,
+            "expectedEnvironmentClass": expected_environment_class,
         }))
         .map_err(|_| AgentRunStoreError::InvalidContract)?;
         let dispatch_sha256 = Sha256Digest::of_canonical(&serde_json::json!({
             "request": request,
+            "expectedEnvironmentClass": expected_environment_class,
             "package": package,
             "objectLocators": object_locators,
             "policy": policy,
@@ -281,11 +287,12 @@ impl PostgresAgentRunStore {
                 .execute(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
         }
         sqlx::query(
-            "INSERT INTO agent.agent_run_dispatches (run_id,dispatch_sha256,idempotency_key,request,package,object_locators,policy,trace_id,state) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending')",
+            "INSERT INTO agent.agent_run_dispatches (run_id,dispatch_sha256,idempotency_key,request,expected_environment_class,package,object_locators,policy,trace_id,state) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending')",
         )
         .bind(run.id.as_uuid()).bind(dispatch_sha256.to_string()).bind(idempotency_key.as_str())
         .bind(serde_json::to_value(request).map_err(|_| AgentRunStoreError::InvalidContract)?)
+        .bind(environment_class_name(expected_environment_class))
         .bind(serde_json::to_value(package).map_err(|_| AgentRunStoreError::InvalidContract)?)
         .bind(
             serde_json::to_value(object_locators)
@@ -337,7 +344,7 @@ impl PostgresAgentRunStore {
             .await
             .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
         let row = sqlx::query(
-            "SELECT run_id,dispatch_sha256,idempotency_key,request,package,object_locators,policy,trace_id \
+            "SELECT run_id,dispatch_sha256,idempotency_key,request,expected_environment_class,package,object_locators,policy,trace_id \
              FROM agent.agent_run_dispatches \
              WHERE (state IN ('pending','prepared') OR (state='preparing' AND lease_expires_at <= now())) \
                AND EXISTS (SELECT 1 FROM agent.agent_track_work_items work \
@@ -372,6 +379,11 @@ impl PostgresAgentRunStore {
                 row.try_get("request")
                     .map_err(|_| AgentRunStoreError::InvalidContract)?,
             )
+            .map_err(|_| AgentRunStoreError::InvalidContract)?,
+            expected_environment_class: serde_json::from_value(Value::String(
+                row.try_get("expected_environment_class")
+                    .map_err(|_| AgentRunStoreError::InvalidContract)?,
+            ))
             .map_err(|_| AgentRunStoreError::InvalidContract)?,
             package: serde_json::from_value(
                 row.try_get("package")
@@ -1203,6 +1215,8 @@ pub struct ExecuteAgentRun<'a> {
     pub course_id: CourseId,
     /// Immutable public create request.
     pub request: &'a CreateAgentRunRequest,
+    /// Control-authoritative class required for the Environment candidate.
+    pub expected_environment_class: EnvironmentClass,
     /// Validated HTTP idempotency key.
     pub idempotency_key: &'a IdempotencyKey,
     /// Verified and classified immutable egress input.
@@ -1272,6 +1286,28 @@ impl AgentRunService {
         let run = match reservation {
             AgentRunReservation::Created(run) | AgentRunReservation::Replayed(run) => run,
         };
+        self.execute_reserved(command, run).await
+    }
+
+    /// Executes a dispatch whose durable run was already reserved by the Control-facing
+    /// dispatch boundary.
+    ///
+    /// `reserve_dispatch` and `reserve` intentionally use different request hashes: the
+    /// former binds the Control-verified package, policy and required environment class, while
+    /// the latter is the public `AgentRun` reservation path. Calling `execute` from the background
+    /// dispatch worker therefore attempts to reserve the same idempotency key a second time and
+    /// turns every valid Work dispatch into `LW_IDEMPOTENCY_CONFLICT`. The worker must execute
+    /// the already reserved run through this method instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns the stable runtime-state, contract or persistence failure from the reserved run.
+    pub async fn execute_reserved(
+        &self,
+        command: ExecuteAgentRun<'_>,
+        run: AgentRun,
+    ) -> Result<AgentRunDispatch, AgentRunStoreError> {
+        validate_reserved_run(&command, &run)?;
         let input_sha256 = command.input.sha256();
         let environment = self
             .store
@@ -1299,6 +1335,7 @@ impl AgentRunService {
             command.cancellation.clone(),
             command.now,
             command.trace_id,
+            command.expected_environment_class,
         );
         let evaluation_execution = self.execute_track(
             evaluation,
@@ -1306,6 +1343,7 @@ impl AgentRunService {
             command.cancellation,
             command.now,
             command.trace_id,
+            command.expected_environment_class,
         );
         let (environment_executed, evaluation_executed) =
             tokio::join!(environment_execution, evaluation_execution);
@@ -1337,6 +1375,7 @@ impl AgentRunService {
         cancellation: RunCancellation,
         now: UtcTimestamp,
         trace_id: &str,
+        expected_environment_class: EnvironmentClass,
     ) -> Result<bool, AgentRunStoreError> {
         let Some(lease) = lease else {
             return Ok(false);
@@ -1344,9 +1383,12 @@ impl AgentRunService {
         if lease.cancellation_requested {
             cancellation.cancel();
         }
-        let generation = self
-            .runtime
-            .generate(lease.track, input, cancellation.clone());
+        let generation = self.runtime.generate_for_class(
+            lease.track,
+            input,
+            cancellation.clone(),
+            expected_environment_class,
+        );
         tokio::pin!(generation);
         let heartbeat_period = self
             .lease_duration
@@ -1493,6 +1535,29 @@ fn validate_reservation(command: &ReserveAgentRun<'_>) -> Result<(), AgentRunSto
         .map_err(|_| AgentRunStoreError::IdentityMismatch)
 }
 
+fn validate_reserved_run(
+    command: &ExecuteAgentRun<'_>,
+    run: &AgentRun,
+) -> Result<(), AgentRunStoreError> {
+    if run.course_id != command.course_id
+        || run.package_id != command.request.package_id
+        || run.policy_id != command.request.policy_id
+        || run.state == AgentRunState::Failed
+        || run.state == AgentRunState::Cancelled
+    {
+        return Err(AgentRunStoreError::IdentityMismatch);
+    }
+    if command.trace_id.trim().is_empty()
+        || command.input.course_id() != command.course_id
+        || command.input.package_id() != command.request.package_id
+        || command.input.package_revision() != command.request.package_revision
+        || command.input.package_manifest_sha256() != command.request.package_sha256
+    {
+        return Err(AgentRunStoreError::IdentityMismatch);
+    }
+    Ok(())
+}
+
 fn requested_run(
     request: &CreateAgentRunRequest,
     course_id: CourseId,
@@ -1522,6 +1587,13 @@ fn requested_run(
     run.validate()
         .map_err(|_| AgentRunStoreError::InvalidContract)?;
     Ok(run)
+}
+
+const fn environment_class_name(value: EnvironmentClass) -> &'static str {
+    match value {
+        EnvironmentClass::Experiment => "experiment",
+        EnvironmentClass::Work => "work",
+    }
 }
 
 async fn load_run_for_update(

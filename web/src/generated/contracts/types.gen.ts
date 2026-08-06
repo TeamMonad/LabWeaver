@@ -1452,6 +1452,42 @@ export type FrozenSubmissionSchemaSha256Digest = string;
 export type FrozenSubmissionSchemaUtcTimestamp = string;
 
 /**
+ * ApproveResourceRequest
+ *
+ * Administrator approval or resize decision. The selected Provider is always explicit.
+ */
+export type ApproveResourceRequestSchema = {
+    durationSeconds: number;
+    expectedRevision: ApproveResourceRequestSchemaRevision;
+    providerBinding: string;
+    reason: string;
+    resources: WorkloadResources;
+};
+
+/**
+ * A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.
+ */
+export type GpuRequest = {
+    class: string;
+    count: number;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type ApproveResourceRequestSchemaRevision = number;
+
+/**
+ * Requested or approved workload resources, independent of Kubernetes quantity syntax.
+ */
+export type WorkloadResources = {
+    cpuMillicores: number;
+    gpu?: GpuRequest | null;
+    memoryBytes: number;
+    storageBytes: number;
+};
+
+/**
  * CandidateDecisionRequest
  */
 export type CandidateDecisionRequestSchema = {
@@ -1646,11 +1682,122 @@ export type CreateProblemPackageUploadRequestSchemaRevision = number;
 export type CreateProblemPackageUploadRequestSchemaSha256Digest = string;
 
 /**
+ * CreateResourceRequest
+ *
+ * Browser request for a new Work-environment capacity reservation.
+ */
+export type CreateResourceRequestSchema = {
+    courseId: CreateResourceRequestSchemaCourseId;
+    durationSeconds: number;
+    /**
+     * Preallocated Work aggregate identity. Resource never allocates this implicitly.
+     */
+    environmentId: CreateResourceRequestSchemaEnvironmentId;
+    /**
+     * Required project scope. Work capacity is never allocated at an
+     * unscoped course-wide boundary.
+     */
+    projectId: CreateResourceRequestSchemaProjectId;
+    releaseId: CreateResourceRequestSchemaReleaseId;
+    /**
+     * Immutable release document identity expected by Environment at handoff.
+     */
+    releaseSha256: CreateResourceRequestSchemaSha256Digest;
+    releaseVersion: number;
+    requestKey: string;
+    resources: CreateResourceRequestSchemaWorkloadResources;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type CreateResourceRequestSchemaCourseId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `EnvironmentId`.
+ */
+export type CreateResourceRequestSchemaEnvironmentId = string;
+
+/**
+ * A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.
+ */
+export type CreateResourceRequestSchemaGpuRequest = {
+    class: string;
+    count: number;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type CreateResourceRequestSchemaProjectId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ReleaseId`.
+ */
+export type CreateResourceRequestSchemaReleaseId = string;
+
+/**
+ * Canonical lowercase SHA-256 digest.
+ */
+export type CreateResourceRequestSchemaSha256Digest = string;
+
+/**
+ * Requested or approved workload resources, independent of Kubernetes quantity syntax.
+ */
+export type CreateResourceRequestSchemaWorkloadResources = {
+    cpuMillicores: number;
+    gpu?: CreateResourceRequestSchemaGpuRequest | null;
+    memoryBytes: number;
+    storageBytes: number;
+};
+
+/**
  * CreateSshPublicKeyRequest
  */
 export type CreateSshPublicKeyRequestSchema = {
     publicKeyOpenssh: string;
 };
+
+/**
+ * CreateWorkAgentRunRequest
+ *
+ * Public request for an AgentRun whose Environment candidate is explicitly a Resource-managed
+ * Work environment. This is deliberately separate from [`CreateAgentRunRequest`]: the legacy
+ * route always requests an Experiment candidate and must never gain an implicit class default.
+ */
+export type CreateWorkAgentRunRequestSchema = {
+    packageId: CreateWorkAgentRunRequestSchemaProblemPackageId;
+    packageRevision: CreateWorkAgentRunRequestSchemaRevision;
+    packageSha256: CreateWorkAgentRunRequestSchemaSha256Digest;
+    policyId: CreateWorkAgentRunRequestSchemaPolicyId;
+    policyRevision: CreateWorkAgentRunRequestSchemaRevision;
+    requestedRuntime: CreateWorkAgentRunRequestSchemaRuntimeKind;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `PolicyId`.
+ */
+export type CreateWorkAgentRunRequestSchemaPolicyId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProblemPackageId`.
+ */
+export type CreateWorkAgentRunRequestSchemaProblemPackageId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type CreateWorkAgentRunRequestSchemaRevision = number;
+
+/**
+ * Runtime kind shared by candidates, releases, and instances.
+ */
+export type CreateWorkAgentRunRequestSchemaRuntimeKind = 'container' | 'virtual_machine';
+
+/**
+ * Canonical lowercase SHA-256 digest.
+ */
+export type CreateWorkAgentRunRequestSchemaSha256Digest = string;
 
 /**
  * SnapshotPage
@@ -3912,6 +4059,10 @@ export type InternalCreateAgentRunRequestSchema = {
      */
     courseId: InternalCreateAgentRunRequestSchemaCourseId;
     /**
+     * Explicit class that the Environment candidate must retain through Agent execution.
+     */
+    expectedEnvironmentClass: InternalCreateAgentRunRequestSchemaEnvironmentClass;
+    /**
      * Internal artifact ID to opaque object-key mapping; keys never contain original paths.
      */
     objectLocators: {
@@ -4032,6 +4183,11 @@ export type CreateAgentRunRequest = {
  * Non-overridable content classifications at the LLM boundary.
  */
 export type InternalCreateAgentRunRequestSchemaDeniedDataClass = 'secret' | 'token' | 'private_key' | 'personally_identifiable_information' | 'unallowlisted_student_submission';
+
+/**
+ * Environment business class retained from the v2.1 architecture.
+ */
+export type InternalCreateAgentRunRequestSchemaEnvironmentClass = 'experiment' | 'work';
 
 /**
  * Per-attempt bounded LLM budget.
@@ -4365,6 +4521,64 @@ export type RenewAccessGrantRequestSchemaAccessGrantId = string;
 export type RenewAccessGrantRequestSchemaUtcTimestamp = string;
 
 /**
+ * RenewResourceLease
+ *
+ * Revision-fenced Lease renewal. Resources and Provider binding are immutable after approval.
+ */
+export type RenewResourceLeaseSchema = {
+    durationSeconds: number;
+    expectedRevision: RenewResourceLeaseSchemaRevision;
+    reason: string;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type RenewResourceLeaseSchemaRevision = number;
+
+/**
+ * ResourceOperationAccepted
+ *
+ * Stable response returned when Resource accepts an asynchronous allocation mutation.
+ */
+export type ResourceOperationAcceptedSchema = {
+    leaseId?: ResourceOperationAcceptedSchemaLeaseId | null;
+    requestId: ResourceRequestId;
+    revision: ResourceOperationAcceptedSchemaRevision;
+    statusUrl: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `LeaseId`.
+ */
+export type ResourceOperationAcceptedSchemaLeaseId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ResourceRequestId`.
+ */
+export type ResourceRequestId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type ResourceOperationAcceptedSchemaRevision = number;
+
+/**
+ * ResourceRequestMutation
+ *
+ * Revision-fenced reason-bearing Resource mutation.
+ */
+export type ResourceRequestMutationSchema = {
+    expectedRevision: ResourceRequestMutationSchemaRevision;
+    reason: string;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type ResourceRequestMutationSchemaRevision = number;
+
+/**
  * RevokeAccessGrantRequest
  */
 export type RevokeAccessGrantRequestSchema = {
@@ -4518,6 +4732,154 @@ export type ProblemPackageSchemaSha256Digest = string;
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
  */
 export type ProblemPackageSchemaUtcTimestamp = string;
+
+/**
+ * ResourceLease
+ *
+ * PostgreSQL-authoritative Lease projection. Its authorization is valid only while Active.
+ */
+export type ResourceLeaseSchema = {
+    activeFrom?: ResourceLeaseSchemaUtcTimestamp | null;
+    claimId: CapacityClaimId;
+    createdAt: ResourceLeaseSchemaUtcTimestamp;
+    expiresAt?: ResourceLeaseSchemaUtcTimestamp | null;
+    id: ResourceLeaseSchemaLeaseId;
+    requestId: ResourceLeaseSchemaResourceRequestId;
+    revision: ResourceLeaseSchemaRevision;
+    revokeReasonCode?: string | null;
+    state: ResourceLeaseState;
+    updatedAt: ResourceLeaseSchemaUtcTimestamp;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `CapacityClaimId`.
+ */
+export type CapacityClaimId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `LeaseId`.
+ */
+export type ResourceLeaseSchemaLeaseId = string;
+
+/**
+ * Closed Lease state consumed by other service boundaries.
+ */
+export type ResourceLeaseState = 'allocating' | 'active' | 'expiring' | 'expired' | 'revoked';
+
+/**
+ * Strongly typed UUIDv7 identifier for `ResourceRequestId`.
+ */
+export type ResourceLeaseSchemaResourceRequestId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type ResourceLeaseSchemaRevision = number;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type ResourceLeaseSchemaUtcTimestamp = string;
+
+/**
+ * ResourceRequest
+ *
+ * PostgreSQL-authoritative request projection without provider internals.
+ */
+export type ResourceRequestSchema = {
+    courseId: ResourceRequestSchemaCourseId;
+    createdAt: ResourceRequestSchemaUtcTimestamp;
+    diagnosticCode?: string | null;
+    generation: number;
+    id: ResourceRequestSchemaResourceRequestId;
+    projectId?: ResourceRequestSchemaProjectId | null;
+    requestKey: string;
+    requestedDurationSeconds: number;
+    requestedResources: ResourceRequestSchemaWorkloadResources;
+    requesterId: ResourceRequestSchemaActorId;
+    revision: ResourceRequestSchemaRevision;
+    state: ResourceRequestState;
+    target: ResourceTarget;
+    updatedAt: ResourceRequestSchemaUtcTimestamp;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type ResourceRequestSchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type ResourceRequestSchemaCourseId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `EnvironmentId`.
+ */
+export type ResourceRequestSchemaEnvironmentId = string;
+
+/**
+ * A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.
+ */
+export type ResourceRequestSchemaGpuRequest = {
+    class: string;
+    count: number;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type ResourceRequestSchemaProjectId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ReleaseId`.
+ */
+export type ResourceRequestSchemaReleaseId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ResourceRequestId`.
+ */
+export type ResourceRequestSchemaResourceRequestId = string;
+
+/**
+ * Request lifecycle owned by Resource Service.
+ */
+export type ResourceRequestState = 'reviewing' | 'allocating' | 'active' | 'expiring' | 'expired' | 'rejected' | 'cancelled';
+
+/**
+ * Immutable identity of a Resource request's target Work environment.
+ */
+export type ResourceTarget = {
+    environmentId: ResourceRequestSchemaEnvironmentId;
+    releaseId: ResourceRequestSchemaReleaseId;
+    releaseSha256: ResourceRequestSchemaSha256Digest;
+    releaseVersion: number;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type ResourceRequestSchemaRevision = number;
+
+/**
+ * Canonical lowercase SHA-256 digest.
+ */
+export type ResourceRequestSchemaSha256Digest = string;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type ResourceRequestSchemaUtcTimestamp = string;
+
+/**
+ * Requested or approved workload resources, independent of Kubernetes quantity syntax.
+ */
+export type ResourceRequestSchemaWorkloadResources = {
+    cpuMillicores: number;
+    gpu?: ResourceRequestSchemaGpuRequest | null;
+    memoryBytes: number;
+    storageBytes: number;
+};
 
 /**
  * SshPublicKey
@@ -6129,6 +6491,76 @@ export type GetProblemPackageResponses = {
 
 export type GetProblemPackageResponse = GetProblemPackageResponses[keyof GetProblemPackageResponses];
 
+export type CreateWorkAgentRunData = {
+    body: CreateWorkAgentRunRequestSchema;
+    headers: {
+        'Idempotency-Key': string;
+    };
+    path: {
+        courseId: string;
+    };
+    query?: never;
+    url: '/api/v1/courses/{courseId}/work-agent-runs';
+};
+
+export type CreateWorkAgentRunErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type CreateWorkAgentRunError = CreateWorkAgentRunErrors[keyof CreateWorkAgentRunErrors];
+
+export type CreateWorkAgentRunResponses = {
+    /**
+     * Successful response
+     */
+    202: AgentRunSchema;
+};
+
+export type CreateWorkAgentRunResponse = CreateWorkAgentRunResponses[keyof CreateWorkAgentRunResponses];
+
 export type ListEnvironmentsData = {
     body?: never;
     path?: never;
@@ -7629,6 +8061,867 @@ export type DeleteSshPublicKeyResponses = {
 };
 
 export type DeleteSshPublicKeyResponse = DeleteSshPublicKeyResponses[keyof DeleteSshPublicKeyResponses];
+
+export type ListResourceLeasesData = {
+    body?: never;
+    headers: {
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path?: never;
+    query?: never;
+    url: '/api/v1/resource-leases';
+};
+
+export type ListResourceLeasesErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ListResourceLeasesError = ListResourceLeasesErrors[keyof ListResourceLeasesErrors];
+
+export type ListResourceLeasesResponses = {
+    /**
+     * Successful response
+     */
+    200: Array<ResourceLeaseSchema>;
+};
+
+export type ListResourceLeasesResponse = ListResourceLeasesResponses[keyof ListResourceLeasesResponses];
+
+export type GetResourceLeaseData = {
+    body?: never;
+    headers: {
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        leaseId: string;
+    };
+    query?: never;
+    url: '/api/v1/resource-leases/{leaseId}';
+};
+
+export type GetResourceLeaseErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetResourceLeaseError = GetResourceLeaseErrors[keyof GetResourceLeaseErrors];
+
+export type GetResourceLeaseResponses = {
+    /**
+     * Successful response
+     */
+    200: ResourceLeaseSchema;
+};
+
+export type GetResourceLeaseResponse = GetResourceLeaseResponses[keyof GetResourceLeaseResponses];
+
+export type RenewResourceLeaseData = {
+    body: RenewResourceLeaseSchema;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        leaseId: string;
+    };
+    query?: never;
+    url: '/api/v1/resource-leases/{leaseId}/renew';
+};
+
+export type RenewResourceLeaseErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type RenewResourceLeaseError = RenewResourceLeaseErrors[keyof RenewResourceLeaseErrors];
+
+export type RenewResourceLeaseResponses = {
+    /**
+     * Successful response
+     */
+    200: ResourceLeaseSchema;
+};
+
+export type RenewResourceLeaseResponse = RenewResourceLeaseResponses[keyof RenewResourceLeaseResponses];
+
+export type RevokeResourceLeaseData = {
+    body: ResourceRequestMutationSchema;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        leaseId: string;
+    };
+    query?: never;
+    url: '/api/v1/resource-leases/{leaseId}/revoke';
+};
+
+export type RevokeResourceLeaseErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type RevokeResourceLeaseError = RevokeResourceLeaseErrors[keyof RevokeResourceLeaseErrors];
+
+export type RevokeResourceLeaseResponses = {
+    /**
+     * Successful response
+     */
+    200: ResourceLeaseSchema;
+};
+
+export type RevokeResourceLeaseResponse = RevokeResourceLeaseResponses[keyof RevokeResourceLeaseResponses];
+
+export type ListResourceRequestsData = {
+    body?: never;
+    headers: {
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path?: never;
+    query?: never;
+    url: '/api/v1/resource-requests';
+};
+
+export type ListResourceRequestsErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ListResourceRequestsError = ListResourceRequestsErrors[keyof ListResourceRequestsErrors];
+
+export type ListResourceRequestsResponses = {
+    /**
+     * Successful response
+     */
+    200: Array<ResourceRequestSchema>;
+};
+
+export type ListResourceRequestsResponse = ListResourceRequestsResponses[keyof ListResourceRequestsResponses];
+
+export type CreateResourceRequestData = {
+    body: CreateResourceRequestSchema;
+    headers: {
+        'Idempotency-Key': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path?: never;
+    query?: never;
+    url: '/api/v1/resource-requests';
+};
+
+export type CreateResourceRequestErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type CreateResourceRequestError = CreateResourceRequestErrors[keyof CreateResourceRequestErrors];
+
+export type CreateResourceRequestResponses = {
+    /**
+     * Successful response
+     */
+    202: ResourceOperationAcceptedSchema;
+};
+
+export type CreateResourceRequestResponse = CreateResourceRequestResponses[keyof CreateResourceRequestResponses];
+
+export type GetResourceRequestData = {
+    body?: never;
+    headers: {
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        requestId: string;
+    };
+    query?: never;
+    url: '/api/v1/resource-requests/{requestId}';
+};
+
+export type GetResourceRequestErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetResourceRequestError = GetResourceRequestErrors[keyof GetResourceRequestErrors];
+
+export type GetResourceRequestResponses = {
+    /**
+     * Successful response
+     */
+    200: ResourceRequestSchema;
+};
+
+export type GetResourceRequestResponse = GetResourceRequestResponses[keyof GetResourceRequestResponses];
+
+export type ApproveResourceRequestData = {
+    body: ApproveResourceRequestSchema;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        requestId: string;
+    };
+    query?: never;
+    url: '/api/v1/resource-requests/{requestId}/approve';
+};
+
+export type ApproveResourceRequestErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ApproveResourceRequestError = ApproveResourceRequestErrors[keyof ApproveResourceRequestErrors];
+
+export type ApproveResourceRequestResponses = {
+    /**
+     * Successful response
+     */
+    202: ResourceOperationAcceptedSchema;
+};
+
+export type ApproveResourceRequestResponse = ApproveResourceRequestResponses[keyof ApproveResourceRequestResponses];
+
+export type CancelResourceRequestData = {
+    body: ResourceRequestMutationSchema;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        requestId: string;
+    };
+    query?: never;
+    url: '/api/v1/resource-requests/{requestId}/cancel';
+};
+
+export type CancelResourceRequestErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type CancelResourceRequestError = CancelResourceRequestErrors[keyof CancelResourceRequestErrors];
+
+export type CancelResourceRequestResponses = {
+    /**
+     * Successful response
+     */
+    202: ResourceOperationAcceptedSchema;
+};
+
+export type CancelResourceRequestResponse = CancelResourceRequestResponses[keyof CancelResourceRequestResponses];
+
+export type RejectResourceRequestData = {
+    body: ResourceRequestMutationSchema;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        requestId: string;
+    };
+    query?: never;
+    url: '/api/v1/resource-requests/{requestId}/reject';
+};
+
+export type RejectResourceRequestErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type RejectResourceRequestError = RejectResourceRequestErrors[keyof RejectResourceRequestErrors];
+
+export type RejectResourceRequestResponses = {
+    /**
+     * Successful response
+     */
+    202: ResourceOperationAcceptedSchema;
+};
+
+export type RejectResourceRequestResponse = RejectResourceRequestResponses[keyof RejectResourceRequestResponses];
+
+export type ResizeAndApproveResourceRequestData = {
+    body: ApproveResourceRequestSchema;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        requestId: string;
+    };
+    query?: never;
+    url: '/api/v1/resource-requests/{requestId}/resize-and-approve';
+};
+
+export type ResizeAndApproveResourceRequestErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ResizeAndApproveResourceRequestError = ResizeAndApproveResourceRequestErrors[keyof ResizeAndApproveResourceRequestErrors];
+
+export type ResizeAndApproveResourceRequestResponses = {
+    /**
+     * Successful response
+     */
+    202: ResourceOperationAcceptedSchema;
+};
+
+export type ResizeAndApproveResourceRequestResponse = ResizeAndApproveResourceRequestResponses[keyof ResizeAndApproveResourceRequestResponses];
+
+export type RetryResourceRequestData = {
+    body: ResourceRequestMutationSchema;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        requestId: string;
+    };
+    query?: never;
+    url: '/api/v1/resource-requests/{requestId}/retry';
+};
+
+export type RetryResourceRequestErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type RetryResourceRequestError = RetryResourceRequestErrors[keyof RetryResourceRequestErrors];
+
+export type RetryResourceRequestResponses = {
+    /**
+     * Successful response
+     */
+    202: ResourceOperationAcceptedSchema;
+};
+
+export type RetryResourceRequestResponse = RetryResourceRequestResponses[keyof RetryResourceRequestResponses];
 
 export type ConsumeOidcBackchannelLogoutData = {
     body: {

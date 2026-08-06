@@ -50,6 +50,9 @@ commands:
   package_validate: "cargo xtask package-validate"
   release_gate: "cargo xtask release-gate"
   deploy_demo: "cargo xtask deploy --env demo"
+  local_preflight: "cargo xtask local preflight --profile local-hostpath"
+  local_stack_plan: "ansible-playbook deploy/ansible/playbooks/local-hostpath-stack-plan.yml"
+  resource_local_replay: "cargo xtask resource replay --mode local --preflight --env demo --profile <private-profile> --authentication <private-auth> --deployment-manifest <manifest> --package-manifest <manifest>"
   adopt_sprint2_application: "cargo xtask sprint2-application --infra --env demo --package-manifest <manifest> --yes"
   deploy_verify: "cargo xtask verify --env demo"
   demo_replay: "cargo xtask demo replay"
@@ -60,6 +63,30 @@ status:
   coverage_matrix: "docs/testing/coverage-matrix.md"
   release_report_schema: "schemas/results/release-gate-report.schema.json"
 ```
+
+### 受控签发源与凭据 locator
+
+- NATS JWT、NATS mTLS、平台 service mTLS 与 Collector SSH CA 必须由
+  `deploy/ansible/playbooks/96-nats-authority-rotation.yml` 统一签发和轮换。
+  禁止从任务记录、日志、Git 历史或已部署 Secret 反向恢复私钥。
+- 服务器上的签发源使用 root-only locator
+  `/var/lib/labweaver/.private/nats-authority-rotation-<run-id>`；可部署派生物使用
+  `/var/lib/labweaver/.private/nats-authority-deploy-<run-id>`。两类目录及私钥、
+  credential、bundle 固定为 `root:root 0600`，目录固定为 `0700`。
+- `application-bundle.yaml`、`resource-bundle.yaml` 和 `nats-admin/` 是部署输入；
+  `authority/`、`platform-authority/`、`ssh-authority/` 与 `nsc/` 是签发源。
+  Inventory 只记录这些受控 locator，不复制 Secret 内容。
+- 部署控制器维护一个 root-only credential registry：其 `current/` 只包含指向当前
+  签发源、部署 bundle、Resource profile、replay authentication locator 和 controller
+  identity 的受控链接，`current.sha256` 仅记录相对 locator 与内容 hash。registry
+  目录必须为 `0700`，hash manifest 必须为 `0600`；它用于维护交接和漂移检测，
+  不替代签发源，也不得被工作负载或 Git 直接读取。
+- 每次 rotation、bundle adoption 或显式凭据同步后，必须原子更新该 registry 并重算
+  manifest；验证链接目标存在、权限不放宽、manifest 可重算。报告只可写记录计数和
+  manifest hash，禁止写入链接的绝对控制器路径或任何 Secret 内容。
+- 丢失任一签发私钥时，舍弃受影响的旧 credentials，生成新的 Run ID，重新签发
+  全部受影响 identity，并通过 Ansible 原地 reconcile。验证必须覆盖证书链、
+  JWT permission、bundle hash、所有 workload rollout 和 connected NATS 探针。
 
 上述目录和命令是目标仓库契约。仓库初始化阶段尚未创建的入口必须显式记为 `planned` 或 `blocked`；在对应文件和命令真实存在且验证通过前，不得声称可用，也不得用静默跳过或空成功脚本代替。
 
@@ -143,6 +170,40 @@ status:
 ### 8.1 Sprint 结束集群证据边界
 
 普通 Issue/PR 不得为了合并、Review 或 Verify 在共享集群中启动部署、replay、connected E2E 或 Release Gate。每个 Sprint 只由一个明确范围的 Sprint 结束验收 Issue 执行集群证据验证；该 Issue 冻结 commit、deployment manifest、Migration catalog、镜像 digest 集合和 Run ID，并集中承载真实 Container/KubeVirt、connected Playwright、Ansible Verify 与 Release Gate 证据。部署尝试预算、attempt ledger、停止条件和人工接管规则只在该 Sprint 验收 Issue 内适用。
+
+### 8.2 Connected 执行账本与部署收敛
+
+涉及 package、Ansible/Kubernetes reconcile、Resource replay、Playwright 或
+Release Gate 的 connected 操作必须先取得候选身份和执行账本租约。租约按
+`operation + environment` 串行化，并将 source commit、package/deployment
+manifest hash、Run ID、testflight Run ID、尝试次数、终态和稳定 diagnostic
+写入控制器的私有账本；账本只保存 hash、locator 和状态，不保存 Secret、JWT、私钥
+或用户内容。
+
+- `LABWEAVER_EXECUTION_LEDGER_ROOT` 必须指向控制器上的 root-only（`0700`）目录；
+  未提供该 locator 时，connected 写操作直接以
+  `LW_EXECUTION_LEDGER_ROOT_MISSING` 阻断。
+- 同一环境同一 operation 同时只能有一个租约；发现运行中的锁、损坏账本或无法确认
+  的旧进程时，只能只读检查并转为 `Blocked`，不得启动第二个实例。
+- Resource replay 每个候选最多 1 次，且同一 `operation + environment` 的所有候选
+  合计最多 3 次；应用 reconcile 每个候选最多 2 次（首次和幂等重放），同一
+  `operation + environment` 的所有候选合计也最多 3 次。package 使用稳定的
+  operation 名称，release label 只进入候选配置 hash，避免改名 release 无限绕过总预算。
+  相同 diagnostic 只有在有新观测和根因修复、且通过低成本回归检查后才能重试一次；
+  不得用新 commit、Run ID、release label、旧 package 或改名报告绕过预算。
+- operation-wide 预算耗尽时必须返回 `LW_EXECUTION_OPERATION_BUDGET_EXHAUSTED`，
+  保留账本和现场并转为 `Blocked`；不得删除账本、切换 ledger root 或通过新环境变量
+  静默开启第四次 connected cycle。只有 Owner 在独立维护窗口完成只读审计后，才能
+  创建带原因、影响和回滚说明的后续 Issue/新验收环境。
+- package/deploy/replay 超时后必须先确认原进程终态和集群状态；无法确认时按
+  `unknown`/`Blocked` 处理。账本终态写入失败同样阻断后续写操作。
+- 开发期可以复用经验证的组件/层缓存，但不得改变 connected 验收身份；Release
+  Gate 仍必须 pin 完整 source commit、deployment manifest、migration catalog、
+  immutable image digest 集合和 Run ID。任何影响运行时、契约、部署、测试或证据生成
+  的改动都会创建新候选；纯文档改动应批量提交后再决定是否需要重放。
+
+详细的账本格式、停止条件和排障步骤见
+[`docs/deployment/connected-execution-governance.md`](docs/deployment/connected-execution-governance.md)。
 
 ## 9. 测试与证据
 
@@ -832,3 +893,67 @@ deploy/ansible/AGENTS.md
 - 安全与数据边界；
 - API、事件或 Schema 兼容要求；
 - 必须请求人工确认的条件。
+
+## Resource NATS identity issuance and debugging
+
+Resource Service uses a dedicated NATS user identity. Its permissions are bounded to
+`labweaver.resource.lease.verify.v1` plus request/reply inbox subjects; do not reuse
+another service's `.creds` file. The private issuance record is kept on the deployment
+controller under the operator-owned private locator
+`LABWEAVER_RESOURCE_NATS_ISSUANCE_RECORD` and is never committed to this repository.
+
+The record contains only non-secret metadata: source bundle locator, issuance run ID,
+public identity names, subject/permission summary, file owner/mode, and validation
+results. JWTs, NATS seeds, private keys, `.creds` contents, and secret hashes must not
+be printed, copied into Git, or included in logs. Debugging must use the existing
+root-owned bundle and the allowlisted Ansible foundation/application entrypoints;
+inspect permissions and stable diagnostics, not credential contents.
+
+Historical audit sources for the current signing decision are
+`019f5c40-3c06-7fd2-a521-b4526bcb45d2` and
+`019f61a6-88ac-78a1-8bf5-efd67b8d3a48`. They document Harbor/Private Sigstore
+signing material, not a NATS operator/account signing key; do not treat them
+as a usable NATS signing source.
+
+The former active operator seed was not recoverable and is retired; historical
+operator public IDs must not be treated as signing authority. The reviewed
+`sprint2-foundation-547d8fea` source is retained only for the existing
+`WORKLOADS` account seed. Authority recovery therefore means a forward rotation:
+create a new operator and SYS account, import the retained `WORKLOADS` account
+key, reissue every NATS JWT and mTLS client, then reconcile NATS and all affected
+workloads through `deploy/ansible/playbooks/96-nats-authority-rotation.yml`.
+Preserving the account public key preserves the JetStream account and retained
+stream/consumer state; reusing any old user credential is forbidden.
+
+Resolve all private locators through
+`LABWEAVER_NATS_ROTATION_AUTHORITY_ROOT`, `LABWEAVER_NATS_ROTATION_OUTPUT`,
+`LABWEAVER_NATS_WORKLOADS_SEED_FILE`,
+`LABWEAVER_NATS_SOURCE_FOUNDATION_BUNDLE`,
+`LABWEAVER_NATS_SOURCE_APPLICATION_BUNDLE`, and
+`LABWEAVER_NATS_SOURCE_RESOURCE_BUNDLE`; never hard-code a controller path in
+Git. The rotation output is the canonical root-only record for the new
+operator/SYS/WORKLOADS public identities, the ten JWT/mTLS identities
+(`control-service`, `access-service`, `agent-service`, `build-executor`,
+`environment-service`, `evaluation-service`, `container-executor`,
+`kubevirt-executor`, `resource-service`, and `sprint2-admin`), rollback objects,
+and deployment verification. Run the playbook twice and require stable public
+identity, JetStream state, workload readiness, and a successful Resource
+request/approval/Lease verification flow before declaring adoption complete.
+
+The controlled locator layout is stable and must be used instead of searching
+chat history or copying credentials between services:
+
+| Identity set | Canonical private locator | Live Kubernetes object |
+| --- | --- | --- |
+| Operator, SYS and retained WORKLOADS signing authority | `${LABWEAVER_NATS_ROTATION_AUTHORITY_ROOT}` | `labweaver-data/nats-config` and `labweaver-data/nats-server-secrets` |
+| Control, Access, Agent, Build, Environment, Evaluation and both runtime executors | `${LABWEAVER_NATS_ROTATION_OUTPUT}/application-bundle.yaml` | matching `labweaver-system/*-secrets` object |
+| Resource Service | `${LABWEAVER_NATS_ROTATION_OUTPUT}/resource-bundle.yaml` | `labweaver-system/resource-service-secrets` |
+| Controller-side NATS administrator | `${LABWEAVER_NATS_ROTATION_OUTPUT}/nats-admin/` | not copied into a workload Secret |
+| Public identity and connected verification records | `${LABWEAVER_NATS_ROTATION_OUTPUT}/rotation-record.json`, `rotation-deployment-record.json`, and `rotation-connected-verification.json` | not applicable |
+| Pre-rotation rollback material | `${LABWEAVER_NATS_ROTATION_OUTPUT}/rollback/` | not applicable |
+
+Each workload Secret uses the fixed keys `nats.creds`, `nats-ca.pem`,
+`nats-client.crt`, and `nats-client.key`. The Environment identity must publish
+`labweaver.resource.lease.verify.v1`; Resource must subscribe to that subject
+and may publish only one reply. Validate this request/reply path after every
+rotation, in addition to decoding public JWT claims.

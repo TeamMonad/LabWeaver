@@ -40,26 +40,79 @@ Sprint-end acceptance Issue.
 
 ## Current identity
 
-- Draft PR: #121, branch `release/sprint2`, target `develop`
-- Source commit: `748c2470ad0f3fba848761f0113853a6870576d6`
-- Cluster UID: `171e3e6b-1e8b-4666-9936-b5f8a514132e`
-- Package manifest:
-  `sha256:6fa824800ac83e51c826242128687b4734622bdcf348969fed8dae4c89cc63d9`
-- Configuration bundle:
-  `sha256:564cf33c34b8d851c349f8e45bf10da34665ea9ad05d21e4fe49199292fe6518`
-- Migration catalog:
-  `sha256:0c9d5dbac9c9f7855147f35f21ea492a8ec1a5f7d4a1fff49e9b413c1e0ef1c3`
-- Non-destructive application runs: `deploy-748c2470` and
-  `deploy-748c2470-repeat`
-- Release Gate Run:
-  `a2835d47-7f9b-48a3-b8a0-60d22f57d5e2`
+- PR #147: Ready for review / release-blocked, branch
+  `feature/142-resource-lease`, target `develop`
+- Source identity: every candidate report and package must record the full Git
+  `HEAD`; a dirty tree is never release evidence.
+- Connected cluster identity: not present in this checkout
+- Resource package/deployment/replay identity: not generated for this source
+- Local Resource replay identity envelope: implemented; it records only
+  repository-relative locators, SHA-256 hashes, immutable Resource image and
+  configuration-bundle identity; no private values are emitted
+- Formal Release Gate v2: owned by Sprint-end acceptance Issue #126; not a per-PR deployment gate
 
-The second application reconcile completed at Helm revision 265. All ten
-declared Deployments read back one ready replica and use immutable Harbor
-digests. Kubernetes, KubeVirt, PostgreSQL, NATS, MinIO, Harbor and Keycloak
-were retained; no infrastructure reset was used.
+The Docker Desktop local validation profile is deliberately separate from the
+formal gate. It records a `local-connected-non-release` preflight report and
+must never be described as Kubernetes/KubeVirt connected evidence.
 
-## Sprint 1 and Sprint 2 connected result
+The native Docker Desktop preflight was run against context `docker-desktop`
+and recorded under the ignored `artifacts/local-replay/` locator. It correctly
+failed closed with four blockers: missing `nfs-rwx`, KubeVirt, CDI and
+`ECNU_API_KEY`; the report is `releaseEligible: false` and is bound only to
+the exact `sourceCommit` embedded in that report.
+
+### Approved-environment read-only preflight (2026-08-05)
+
+The approved cluster was inspected through the controlled SSH entry points only;
+no Kubernetes, Ansible, package, credential or filesystem write was performed.
+The three-node cluster is reachable and all nodes are `Ready`; KubeVirt is
+`Deployed`, CDI is healthy, and both `nfs-rwx` (immediate) and `local-path`
+storage classes are present. PostgreSQL, NATS, MinIO, BuildKit, Harbor and
+Keycloak foundation workloads are ready. No LabWeaver application Deployment,
+Resource Service Pod, environment Namespace or VirtualMachine is currently
+running.
+
+The only remote source checkout found for the earlier Resource validation is a
+detached, stale identity and has no package or deployment manifest for the
+current `feature/142-resource-lease` HEAD. Its latest replay log returns
+`LW_EXECUTION_ATTEMPT_BUDGET_EXHAUSTED`; no replay process is active, and the
+existing clean-validation lock and root-only logs are retained unchanged. The
+connected operation budget therefore prevents starting another package,
+application reconcile or replay cycle without an explicitly recorded Owner
+validation window.
+
+The Resource NATS issuance record is also fail-closed with
+`LW_RESOURCE_NATS_SIGNING_SOURCE_UNAVAILABLE`: no operator/account signing key
+store was found, although existing service-credential locators were detected.
+No service credential, JWT, private key or signing material was read. Node
+allocatable resources expose no `nvidia.com/gpu` device-plugin capacity or
+mdev extension resource, so GPU capacity remains an explicit negative
+capability for this environment. These observations are diagnostic only and
+cannot satisfy the same-identity connected Resource replay or Release Gate v2.
+
+### Development-cluster redeploy feasibility (2026-08-05)
+
+The latest recorded read-only preflight shows that the LabWeaver application
+surface is already absent while the shared foundation is retained. A second
+"thorough clean" followed by deployment is therefore not currently eligible
+from #142/#147: the connected operation budget is exhausted, the remote checkout
+has no package/deployment identity for this source, the Resource NATS signing
+source is unavailable, and the cluster publishes no GPU or mdev capacity.
+
+No ledger deletion, ledger-root rotation, stale-package reuse or fourth
+connected cycle is allowed. A future clean redeploy requires an Owner-approved
+acceptance window under #126 (or the separate v1 deployment project #148), a
+fresh source/package/deployment identity, a reviewed private bundle including
+the NATS signing source, and a new read-only capacity/credential preflight.
+Until those conditions are recorded, only local/CI and read-only preflight are
+permitted; this assessment is not deployment or Release Gate evidence.
+
+## Legacy Sprint 1 and Sprint 2 connected result (superseded)
+
+The table below is retained only as historical context for the previous
+connected validation. Its reports, Run IDs and source identities are legacy
+evidence and cannot be reused for the current `feature/142-resource-lease`
+candidate, local Docker report, or formal Resource Gate v2.
 
 | Capability | State | Current evidence and boundary |
 | --- | --- | --- |
@@ -77,7 +130,7 @@ were retained; no infrastructure reset was used.
 | Application adoption and idempotence | verified | Two non-destructive application reconciles retained the same package, configuration, migration and seven-image identities. |
 | Rollback drill | verified | Helm rollback from revision 260 to 259 created revision 261; all workloads recovered. The current source deployment was then restored and verified at revision 265. |
 | Cleanup readback | verified | No namespace labeled `labweaver.io/environment=true` remained after the final cleanup; all ten platform Deployments remained ready. |
-| Machine-readable Release Gate | verified | `cargo xtask release-gate` produced a schema-valid passing report for Run `a2835d47-7f9b-48a3-b8a0-60d22f57d5e2`. Evidence remains private/ignored and contains no Secret. |
+| Machine-readable Release Gate | legacy | Earlier source identity produced a schema-valid report for Run `a2835d47-7f9b-48a3-b8a0-60d22f57d5e2`; it is invalid for current #142. Evidence remains private/ignored and contains no Secret. |
 | Full `cargo xtask demo replay` | not run | The authoritative gate was run directly after connected checks. The wrapper's repeated infrastructure Verify and Playwright execution was intentionally skipped; this is not represented as a replay pass. |
 
 ## Issue #140 local implementation
@@ -98,6 +151,182 @@ compiler image, cgroup outcomes, NetworkPolicy, cancellation or cleanup.
 Accordingly Issue #140 is not `done`, is not a release-gate pass and does not
 change the connected Sprint 2 identity above.
 
+## Issue #142 Resource request and Lease authority
+
+The `feature/142-resource-lease` worktree contains the Resource-owned request,
+approval, capacity-claim and Lease contracts; versioned schemas; PostgreSQL
+migrations; request fact Outbox dispatch; exact NATS Lease verification; and a
+fenced Kubernetes ResourceQuota-shell provider. A ready shell activates only
+after provider readback, then performs an mTLS Resource-to-Environment Work
+handoff bound to request, claim, Lease, Release hash and Provider binding.
+Handoff is idempotent at Environment and becomes `handed_off` only after its
+acceptance; three failed handoffs become an auditable `blocked` claim.
+
+The Work publication boundary and empty-deployment bootstrap are implemented
+locally but not yet connected-verified. `POST /api/v1/courses/{courseId}/work-agent-runs`
+uses a distinct request contract and persists `EnvironmentClass::Work` through
+the Agent dispatch. An experiment, absent or conflicting Environment class is
+rejected with `LW_LLM_ENVIRONMENT_CLASS_MISMATCH`; the existing AgentRun route
+continues to bind `experiment`. A private Resource acceptance profile is
+cross-checked against the Access seed and requires UUIDv7 course/actor IDs plus
+exact teacher, student and platform-admin memberships. It cannot seed
+candidates, approvals, releases, requests or leases directly.
+
+Release Gate v2 requires a Resource deployment manifest, immutable
+`resource-service` identity and `resource-lease` connected evidence. v1 reports
+remain legacy and cannot close #142. The connected replay, real Container/VM
+evidence and Release Gate are owned exclusively by Sprint-end acceptance Issue
+#126; ordinary development PRs must stop at local and CI evidence. #142 remains
+implemented locally and cannot be marked Done or release-ready until #126
+supplies the connected evidence.
+
+### Authorized destructive clean-validation reset (2026-08-04)
+
+The user explicitly authorized destruction of LabWeaver application state and
+legacy credentials so the next validation can start from a clean environment.
+Run `resource142-clean-20260804T032949Z` completed on `edge-router`. Its
+sanitized root-only manifest is retained at the controlled locator
+`remote://edge-router/var/lib/labweaver/cleanup/resource142-clean/resource142-clean-20260804T032949Z/manifest.sha256`
+with digest
+`sha256:c8ae79fa2acf114726f06dbb097e0b5c7284800fde460f1fccbc0032abf4ea33`;
+33 recorded files all verified `OK`.
+
+The reset removed the LabWeaver application namespace and auxiliary runtime
+namespaces, truncated all six business schemas while preserving migration
+tables, removed NATS state and application credentials, removed the Workloads
+Keycloak realm and the LabWeaver Harbor project, and removed the old private
+bundle, credential registry, package kubeconfig and execution ledger. PostgreSQL,
+MinIO, Harbor, Keycloak, Kubernetes/KubeVirt and their foundation storage were
+retained. No Secret values, JWTs, private keys or user material are included in
+the manifest. Previous connected reports and attempt-ledger conclusions are
+therefore invalid for the next candidate; only evidence produced in the
+Sprint-end acceptance window owned by #126, after the new package, deployment
+and Resource replay, may close #142.
+
+The retained Harbor Trivy deployment had a real NFS `root_squash`/kubelet
+`applyFSGroup` blocker. The Harbor Ansible role now applies
+`fsGroupChangePolicy: OnRootMismatch` with `fsGroup: 10000` before readiness;
+the live StatefulSet was reconciled and read back `1/1 Ready`. This repair is
+part of the source-of-truth role and is covered by the Ansible fixture test.
+The sanitized repair readback is retained at
+`remote://edge-router/var/lib/labweaver/cleanup/resource142-clean/resource142-trivy-fsgroup-repair-20260804T040500Z/manifest.sha256`
+with readback digest
+`sha256:23a10e75f622577d29a04872e869a397d56b5d2c7431d666046e28ffc8d821f`.
+
+The source identity for each checkout is recorded by its package and report.
+Earlier source identities and retained connected deployment evidence are legacy
+and cannot be reused. The next connected candidate must be built from the clean
+state above and produce a new package, deployment, Resource replay and Gate
+identity.
+
+The attempt counts and `LW_EXECUTION_OPERATION_BUDGET_EXHAUSTED` diagnostic
+below are historical pre-reset observations only. The user explicitly
+authorized their destruction as part of the clean-validation reset; they are
+retained here as a bounded explanation of the prior failure, not as an active
+ledger or permission to reuse old evidence.
+
+Before the reset, `resource-application-repair --infra` had
+consumed its 3/3 operation attempts, `resource replay repair` had consumed 2/3,
+and `package-resource` had consumed 2/3. The build-gate repair is therefore
+locally verified but intentionally has not been sent through a fourth
+application cycle or an unpaired replay; doing so would bypass the shared
+environment convergence policy.
+
+`cargo xtask resource replay` is implemented locally as the only replay entry.
+It accepts private profile/authentication/deployment/package locators, validates
+their identity chain, performs the Work AgentRun and Resource public API flow,
+and emits a root-only sanitized report. `cargo xtask demo replay` now requires
+and invokes it before live Playwright and Gate evaluation. The clean reset
+removed all previous private profile, authentication, Resource deployment
+manifest, package locator and replay report inputs; a new controlled bundle
+must be provisioned before connected execution. This path remains `implemented;
+ready for human review`; connected verification is delegated to Sprint-end
+acceptance Issue #126. No local or stale report is treated as connected
+evidence.
+
+The replay driver now waits on the public Control candidate view until a
+Container candidate's authoritative build projection is `succeeded` and its
+artifact/policy evidence is present before publishing the Work release. A
+failed or cancelled projection returns its stable diagnostic, and a missing,
+invalid or timed-out projection blocks without attempting release publication.
+This removes the approval-to-build race observed by the previous connected
+attempts; it has not yet been connected-verified under the remaining execution
+ledger budget.
+
+The Resource public HTTP surface is now implemented locally: owner-scoped list
+and get, create, approve/resize-approve, cancel, reject, retry, Lease renew and
+Lease revoke all use explicit actor/caller checks, idempotency keys and revision
+fences backed by the PostgreSQL store. Migration 0006 adds a durable
+Lease-revision acknowledgement fence. Renewal is synchronized over the
+Resource mTLS boundary and may only extend the exact Work aggregate. The
+Resource listener now requires a CA-verified client certificate with the exact
+`spiffe://labweaver/access-service` URI SAN. Access supplies actor, session and
+roles only through a short-lived signed delegation bound to the BFF session;
+the Resource API does not trust caller, actor or role HTTP headers. Revocation
+and database-clock expiry now share one persistent saga: Environment revokes
+Access before deletion, Resource waits for the Environment tombstone and exact
+namespace-absence readback, then and only then marks the capacity claim and
+Lease terminal. Cleanup failures remain `expiring`/`releasing`, retain a stable
+diagnostic and append a bounded attempt record instead of releasing capacity.
+The Resource quota shell uses the same deterministic `lw-env-*` namespace that
+Environment adopts, so the approved quota governs the actual workload. Namespace
+deletion is fenced by the observed claim labels/annotations, UID and
+`resourceVersion`; a same-name or conflicting object is rejected. Every request
+terminal transition and Lease activation, renewal, revocation, expiry and
+capacity-release transition enqueues its versioned v1 event in the same SQL
+transaction as the state change. Rejected and cancelled requests use distinct
+event subjects rather than the submitted subject.
+
+### PR #147 review remediation (local, not connected-verified)
+
+The current working tree contains the fixes requested by D's review: the
+Resource mTLS/delegation boundary, claim-fenced namespace cleanup with
+collision tests, lifecycle Outbox atomicity, and corrected request event
+semantics. Local Rust, contract/schema, and Ansible fixture checks pass. A
+same-identity package, connected replay, Release Gate v2 and B/D human review
+remain outstanding and are not claimed by this local status.
+
+The retained application deployment at source `46d22482` remains connected on
+the demo cluster: Resource is digest-pinned and Ready, migrations 0001-0005
+have an audited ledger, and a real create/approve flow produced a read-back
+ResourceQuota shell and active Lease. Migration 0006 and the renewal/cleanup
+saga are implemented and locally verified but require a new same-identity
+package, deployment and connected replay before they are marked verified.
+The current source identity cannot reuse this retained evidence. The
+operation-wide connected ledger now stops additional blind candidates after
+its budget; a new package/deployment/replay requires an explicitly audited
+validation window rather than ledger deletion or a second controller root.
+
+The former NATS operator seed was not recovered and is retired. A controlled
+forward rotation preserved only the reviewed `WORKLOADS` account key, created a
+new operator/SYS authority, and reissued all ten JWT/mTLS identities. Two
+independent playbook runs retained seven streams and five consumers, rejected
+the immediately preceding credentials, observed zero pending Resource Outbox
+rows, and left all nine NATS-bearing Deployments Ready. The Environment identity
+can publish `labweaver.resource.lease.verify.v1`; the bounded Resource
+request/reply path returned the exact active Lease. Root-only authority,
+deployment, connected-verification and rollback records use the controlled
+locators documented in `AGENTS.md`; no credential value or secret hash is a
+committed artifact.
+
+Stale provisioning recovery preserves its authoritative failed phase, and the
+Resource process exits when its background runtime fails so Kubernetes can
+restart it. A deliberately invalid fixture handoff produced three auditable
+`retry`, `retry`, `failed` attempt rows without taking Resource down.
+The prior Environment handoff blocker remains historical evidence only: the
+retained catalog at that identity contained no approved `work` release. The
+current implementation must create an approved Work release through the
+teacher/Agent/approval path; no database shortcut or invalid fixture counts as
+positive handoff evidence.
+
+Local evidence includes Resource unit tests covering mTLS/delegation identity,
+claim-fenced cleanup and lifecycle fencing, sixteen Environment unit tests,
+strict all-target/all-feature Clippy for affected crates, contract and generated
+Web SDK drift checks, migration catalog validation, migration/store test
+compilation, Ansible fixture tests, Web lint/typecheck, format and diff checks.
+Docker-backed PostgreSQL execution is unavailable on the local Windows host; the
+new PostgreSQL migration and saga still require connected execution.
+
 ## Accepted Sprint 2 security exceptions
 
 - Rootless BuildKit may use the documented namespace-scoped
@@ -115,14 +344,15 @@ change the connected Sprint 2 identity above.
 
 ## Release decision
 
-The implementation and connected technical gate for Sprint 1+2 are verified
-for the identity above. PR #121 remains **blocked from merge** because it is a
-Draft high-risk PR and still requires:
+Issue #142 is **implemented locally; ready for human review**. Its ordinary
+development gate is local integration, contract, Ansible/Helm render, targeted
+tests and CI evidence. Shared-cluster deployment, Resource replay, real
+Container/KubeVirt evidence, connected Playwright and Release Gate v2 are
+delegated to Sprint-end acceptance Issue #126 and must not be duplicated from
+PR #147. #142 cannot be marked Done or release-ready until #126 completes its
+frozen-identity acceptance window.
 
-1. B human review and approval for core/security changes;
-2. C human review for Web changes;
-3. D connected Verify and acceptance;
-4. resolution of any resulting review threads and a final green CI readback.
-
-The author must not approve or merge the PR. No Tag, formal release or `main`
-merge is included.
+PR #147 still requires the appropriate human core/security review and resolved
+review threads; it is not a connected acceptance or release pass. The author
+must not approve or merge the PR. No Tag, formal release or `main` merge is
+included.

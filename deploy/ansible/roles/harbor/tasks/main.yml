@@ -426,6 +426,37 @@
   environment:
     PATH: /usr/local/bin:/usr/bin:/bin
 
+- name: Wait for the Harbor Trivy StatefulSet object before applying the NFS policy
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ harbor_kubeconfig_path }}"
+    api_version: apps/v1
+    kind: StatefulSet
+    namespace: "{{ harbor_namespace }}"
+    name: harbor-trivy
+  register: harbor_trivy_statefulset
+  until: harbor_trivy_statefulset.resources | length == 1
+  retries: 30
+  delay: 2
+  changed_when: false
+
+- name: Reconcile the Harbor Trivy NFS fsGroup policy before readiness
+  kubernetes.core.k8s:
+    kubeconfig: "{{ harbor_kubeconfig_path }}"
+    api_version: apps/v1
+    kind: StatefulSet
+    namespace: "{{ harbor_namespace }}"
+    name: harbor-trivy
+    state: present
+    merge_type: merge
+    definition:
+      spec:
+        template:
+          spec:
+            securityContext:
+              fsGroup: 10000
+              fsGroupChangePolicy: OnRootMismatch
+  when: not ansible_check_mode
+
 - name: Read the Harbor Trivy PVC binding
   ansible.builtin.command:
     argv:

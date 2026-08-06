@@ -13,6 +13,7 @@ deployment for every PR.
 | Container environment | create, Ready, protected endpoint, stop/start, freeze, delete | RBAC denial, public route, stale generation, withdrawn release, partial cleanup | no residual namespace resources after freeze/delete |
 | KubeVirt environment | CDI disk, VM/VMI Ready, host key, SSH, stop/start, freeze, delete | wrong base disk, guest/host-key mismatch, forwarding, stale generation, failed cleanup | real VM preserves disk across stop/start and leaves no residual resource |
 | Access | key registration, Grant activation, one endpoint, session lifecycle | weak key, alias injection, cross-course access, expiry, revoke, token replay, dependency outage | new access fails closed and active session closes within 60 seconds |
+| Resource request and Lease authority (#142) | private UUIDv7 course bootstrap, Work-only AgentRun, independent candidate approval/release, owner-scoped request list/get/create, approve/resize-approve, cancel, reject, retry, Lease renew/revoke; revision/idempotency fences; exact Environment Lease sync; Access-first expiry cleanup; capacity absence readback | profile/Access membership mismatch, experiment/missing Work candidate, missing/invalid caller, cross-owner read/cancel/retry, duplicate/conflicting idempotency, stale revision, expired approval, zero/unsupported GPU, Lease renewal/revoke replay, Environment cleanup failure, capacity residue | connected PostgreSQL/NATS/Kubernetes quota-shell adoption, approved Work handoff, renewal, revoke/expiry and residue-free release on one deployment identity, bound into Release Gate v2 |
 | ConsoleCapability contract | AccessGrant-scoped xterm/noVNC discovery and 30-second one-time issuance | duplicate kind, stale Grant/Environment/Lease fence, Work without Lease, Experiment with Lease, malformed locator, subprotocol mismatch, consumed/expired handoff | E2 Schema/OpenAPI/Web SDK and cross-consumer checks only; #131/#124/#126 own runtime E3/E4 |
 | Submission freeze | PVC and certificate-bound SFTP sources, exact object version/hash | traversal, symlink, over-limit, changed-between-reads, missing required file, partial publish | both runtime sources create immutable FrozenSubmission records |
 | C++17 OJ execution (#140) | approved digest-pinned compiler, exact/token checker, deterministic case aggregation, hash-bound evidence receipt | mutable image, High/Critical finding, invalid limits/path/profile, oversized label, missing namespace default-deny, compile error, wrong answer, TLE, MLE, OLE, self-SIGKILL, daemon/process-group escape, PID exhaustion, duplicate/missing/forged evidence, egress, cancellation, replacement race and cleanup residue | #123-owned attempt runs a real isolated Job and publishes immutable evidence without private payload |
@@ -23,3 +24,12 @@ WorkConfig, Resource approval, Tailnet, OpenAI Runtime,
 multi-provider routing, Sigstore, Kyverno and Packer are outside this matrix.
 The #140 row is planned connected coverage; its current evidence is local E1
 and remains blocked by #123 and D Verify.
+The #142 row has connected deployment/readiness, PostgreSQL request/approval,
+Kubernetes ResourceQuota-shell and NATS Lease request/reply evidence for the
+earlier identity. Forward rotation reissued ten JWT/mTLS identities, rejected
+the preceding credentials, retained seven streams and five consumers, and
+drained the Resource Outbox. The same-namespace quota adoption and
+renewal/revoke/expiry saga are implemented locally; approved Work handoff and
+terminal cleanup remain delegated to Sprint-end acceptance Issue #126 until the
+new package and migration are deployed and replayed. The #142 development PR
+does not launch that connected path.

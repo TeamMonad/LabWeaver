@@ -24,6 +24,9 @@ Cluster deployment, connected Playwright, Ansible Verify and Release Gate are
 not ordinary Issue/PR merge gates. One dedicated Sprint-end acceptance Issue
 freezes the release identity and owns those connected checks. Local, Fixture and
 static evidence must never be promoted to the Sprint-end cluster conclusion.
+For the current Sprint, Issue #126 is that sole acceptance owner; development
+Issues and PRs, including #142/#147, must not start shared-cluster deployment,
+Resource replay, connected E2E or Release Gate commands.
 
 Tests are grouped by the boundary they actually exercise. Reports must name the
 source identity and must not promote Fixture or static evidence to a connected
@@ -81,6 +84,27 @@ baseline migration to a disposable PostgreSQL instance.
 - invalid state transitions, duplicate IDs, illegal paths, over-limit content,
   timeout, cancellation and dependency failure return stable diagnostics;
 - LLM output cannot approve, execute, publish or score a candidate.
+- The Work authoring route is separate from the Experiment route: Control binds
+  `EnvironmentClass::Work` before dispatch and Agent rejects an experiment,
+  absent or contradictory candidate class without conversion.
+- Empty deployment bootstrap reads only a private Resource acceptance profile
+  and Access membership seed. Both must agree on UUIDv7 course/actor identities,
+  issuer and exactly teacher, student and platform-admin roles; no SQL may
+  create candidates, approvals, releases, requests or leases.
+- Release Gate v2 requires the Resource deployment manifest, immutable
+  `resource-service` identity and same-identity `resource-lease` evidence.
+- `cargo xtask resource replay` must run from an allowlisted Linux controller
+  using private profile/authentication/deployment/package locators. It must
+  demonstrate Work AgentRun through the public API; SQL, direct service mTLS
+  and Secret values are prohibited replay inputs.
+- `cargo xtask resource auth --infra --env demo --yes` is the only supported
+  controller entry for producing those browser-session locators. It invokes
+  `deploy/ansible/playbooks/94-resource-replay-auth.yml`, obtains fresh
+  teacher, student and platform-admin BFF sessions through the real OIDC form
+  flow with a configured private CA, and writes each state and locator with
+  mode `0600`. OIDC or trust failures block replay; cached or copied session
+  material is not a substitute. This authentication setup is separate from
+  the required browser Playwright evidence.
 
 ## Issue #140 C++17 OJ gate
 
@@ -140,6 +164,28 @@ UID/resourceVersion precondition produces an identity conflict.
   rollout, and contains no namespace, schema, stream, bucket, project, realm,
   trust-plane, CRD, PVC or image deletion step.
 
+## Docker Desktop local preflight
+
+The native Windows Docker Desktop path is read-only during ordinary Issue/PR
+work. Run `cargo xtask local preflight --profile local-hostpath` or invoke
+`tools/docker_controller.py` with an explicit kubeconfig and private `.env`
+locator. The command records a sanitized
+`local-connected-non-release` report and fails with stable blockers for missing
+KubeVirt/CDI, `nfs-rwx`, a ready single node, or `ECNU_API_KEY`.
+The report also binds its source/run identity; Resource local replay adds
+repository-relative, hashed input locators and the immutable Resource image
+reference without exposing authentication material.
+
+The local overlay may render a Container-only hostpath adapter, but it cannot
+prove RWX semantics, VM lifecycle, GPU capacity, or the formal Resource Gate.
+It must not apply namespaces, PVCs, Secrets, streams, buckets, realms or
+workloads as part of a normal PR check.
+
+The companion `local-hostpath-stack-plan.yml` validates the dependency overlay,
+renders the application Helm chart against isolated local namespace names and
+prints a teardown order only. It is deliberately not an install or cleanup
+playbook; no Kubernetes write operation is permitted in this local phase.
+
 ## Connected Sprint 2 verification
 
 The adopted-cluster run uses one commit, deployment manifest, migration
@@ -150,8 +196,9 @@ catalog, image digest set and Run ID. It must execute:
 3. invalid, expired, revoked and cross-course AccessGrant cases;
 4. a second idempotent Ansible deploy;
 5. real teacher and student Playwright projects without fixed sleeps;
-6. `cargo xtask demo replay` twice, each time using the exact connected package
-   through the non-destructive `sprint2-application` adoption path;
+6. `cargo xtask demo replay` twice, each time using the exact connected package,
+   Resource profile/authentication/deployment/package inputs and the
+   non-destructive `sprint2-application` adoption path;
 7. `cargo xtask release-gate` and report-schema validation.
 
 Failed browser runs retain Trace, screenshot and video. Failed deployment or

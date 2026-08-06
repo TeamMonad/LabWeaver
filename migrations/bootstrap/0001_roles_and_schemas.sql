@@ -33,6 +33,26 @@ BEGIN
 END
 $bootstrap$;
 
+-- The deployment identity is deliberately bounded: it is not a superuser,
+-- but it must be able to SET ROLE to each domain owner while applying the
+-- reviewed baseline.  Foundation creates this LOGIN role before this script
+-- runs; granting only the owner roles keeps runtime identities unchanged.
+DO $deployment_admin$
+DECLARE
+    owner_role text;
+BEGIN
+    IF current_user = 'postgres-admin' THEN
+        FOREACH owner_role IN ARRAY ARRAY[
+            'lw_release_coordinator', 'lw_audit_projection',
+            'lw_control_owner', 'lw_access_owner', 'lw_environment_owner',
+            'lw_agent_owner', 'lw_evaluation_owner', 'lw_resource_owner'
+        ] LOOP
+            EXECUTE format('GRANT %I TO %I', owner_role, current_user);
+        END LOOP;
+    END IF;
+END
+$deployment_admin$;
+
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
 
 CREATE SCHEMA IF NOT EXISTS platform_meta AUTHORIZATION lw_release_coordinator;

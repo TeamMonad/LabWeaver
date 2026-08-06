@@ -134,6 +134,42 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::environment::EnvironmentLeaseVerificationResponse
     );
     document!(
+        "schemas/contracts/v1/resource-work-handoff.schema.json",
+        crate::environment::ResourceWorkHandoff
+    );
+    document!(
+        "schemas/contracts/v1/resource-work-lease-update.schema.json",
+        crate::environment::ResourceWorkLeaseUpdate
+    );
+    document!(
+        "schemas/contracts/v1/resource-work-cleanup.schema.json",
+        crate::environment::ResourceWorkCleanup
+    );
+    document!(
+        "schemas/contracts/v1/resource-work-cleanup-status.schema.json",
+        crate::environment::ResourceWorkCleanupStatus
+    );
+    document!(
+        "schemas/contracts/v1/resource-request.schema.json",
+        crate::resource::ResourceRequest
+    );
+    document!(
+        "schemas/contracts/v1/resource-approval.schema.json",
+        crate::resource::ResourceApproval
+    );
+    document!(
+        "schemas/contracts/v1/capacity-claim.schema.json",
+        crate::resource::CapacityClaim
+    );
+    document!(
+        "schemas/contracts/v1/resource-lease.schema.json",
+        crate::resource::ResourceLease
+    );
+    document!(
+        "schemas/contracts/v1/resource-lease-authorization.schema.json",
+        crate::resource::ResourceLeaseAuthorization
+    );
+    document!(
         "schemas/contracts/v1/environment-endpoint.schema.json",
         crate::environment::EnvironmentEndpoint
     );
@@ -286,6 +322,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::http::CreateAgentRunRequest
     );
     document!(
+        "schemas/contracts/v1/http/create-work-agent-run-request.schema.json",
+        crate::http::CreateWorkAgentRunRequest
+    );
+    document!(
         "schemas/contracts/v1/http/candidate-decision-request.schema.json",
         crate::http::CandidateDecisionRequest
     );
@@ -308,6 +348,26 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/http/create-environment-request.schema.json",
         crate::http::CreateEnvironmentRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/create-resource-request.schema.json",
+        crate::http::CreateResourceRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/approve-resource-request.schema.json",
+        crate::http::ApproveResourceRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/resource-request-mutation.schema.json",
+        crate::http::ResourceRequestMutation
+    );
+    document!(
+        "schemas/contracts/v1/http/renew-resource-lease.schema.json",
+        crate::http::RenewResourceLease
+    );
+    document!(
+        "schemas/contracts/v1/http/resource-operation-accepted.schema.json",
+        crate::http::ResourceOperationAccepted
     );
     document!(
         "schemas/contracts/v1/http/environment-operation-accepted.schema.json",
@@ -357,6 +417,46 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/events/agent-run-requested.schema.json",
         CloudEvent<events::AgentRunEvent>
+    );
+    document!(
+        "schemas/contracts/v1/events/resource-request-submitted.schema.json",
+        CloudEvent<events::ResourceRequestChanged>
+    );
+    document!(
+        "schemas/contracts/v1/events/resource-request-approved.schema.json",
+        CloudEvent<events::ResourceRequestChanged>
+    );
+    document!(
+        "schemas/contracts/v1/events/resource-request-rejected.schema.json",
+        CloudEvent<events::ResourceRequestChanged>
+    );
+    document!(
+        "schemas/contracts/v1/events/resource-request-cancelled.schema.json",
+        CloudEvent<events::ResourceRequestChanged>
+    );
+    document!(
+        "schemas/contracts/v1/events/resource-request-state-changed.schema.json",
+        CloudEvent<events::ResourceRequestChanged>
+    );
+    document!(
+        "schemas/contracts/v1/events/resource-lease-activated.schema.json",
+        CloudEvent<events::ResourceLeaseChanged>
+    );
+    document!(
+        "schemas/contracts/v1/events/resource-lease-renewed.schema.json",
+        CloudEvent<events::ResourceLeaseChanged>
+    );
+    document!(
+        "schemas/contracts/v1/events/resource-lease-revoked.schema.json",
+        CloudEvent<events::ResourceLeaseChanged>
+    );
+    document!(
+        "schemas/contracts/v1/events/resource-lease-expiring.schema.json",
+        CloudEvent<events::ResourceLeaseChanged>
+    );
+    document!(
+        "schemas/contracts/v1/events/resource-lease-expired.schema.json",
+        CloudEvent<events::ResourceLeaseChanged>
     );
     document!(
         "schemas/contracts/v1/events/agent-run-completed.schema.json",
@@ -868,6 +968,7 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "completeProblemPackageUpload" => "http/complete-problem-package-upload-request",
         "createCourseLlmPolicy" => "course-llm-egress-policy",
         "createAgentRun" => "http/create-agent-run-request",
+        "createWorkAgentRun" => "http/create-work-agent-run-request",
         "appendEnvironmentCandidateDecision" | "appendEvaluationCandidateDecision" => {
             "http/candidate-decision-request"
         }
@@ -876,6 +977,15 @@ fn request_schema(operation_id: &str) -> Option<Value> {
             "http/withdraw-environment-template-release-request"
         }
         "createEnvironment" => "http/create-environment-request",
+        "createResourceRequest" => "http/create-resource-request",
+        "approveResourceRequest" | "resizeAndApproveResourceRequest" => {
+            "http/approve-resource-request"
+        }
+        "cancelResourceRequest"
+        | "rejectResourceRequest"
+        | "retryResourceRequest"
+        | "revokeResourceLease" => "http/resource-request-mutation",
+        "renewResourceLease" => "http/renew-resource-lease",
         "freezeSubmission" => "http/freeze-submission-request",
         "createSshPublicKey" => "http/create-ssh-public-key-request",
         "createAccessGrant" => "http/create-access-grant-request",
@@ -900,9 +1010,8 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "createCourseLlmPolicy" | "getActiveCourseLlmPolicy" => {
             contract_ref("course-llm-egress-policy")
         }
-        "createAgentRun" | "getAgentRun" | "cancelAgentRun" | "retryAgentRunTrack" => {
-            contract_ref("agent-run")
-        }
+        "createAgentRun" | "createWorkAgentRun" | "getAgentRun" | "cancelAgentRun"
+        | "retryAgentRunTrack" => contract_ref("agent-run"),
         "getEnvironmentCandidate" => contract_ref("http/environment-candidate-view"),
         "getEvaluationCandidate" => contract_ref("http/evaluation-candidate-view"),
         "appendEnvironmentCandidateDecision" | "appendEvaluationCandidateDecision" => {
@@ -913,6 +1022,16 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             json!({"type":"object","required":["items"],"properties":{"items":{"type":"array","items":contract_ref("http/environment-template-release-view")},"nextCursor":{"type":["string","null"]}}})
         }
         "getEnvironment" => contract_ref("environment-instance"),
+        "getResourceRequest" => contract_ref("resource-request"),
+        "listResourceRequests" => {
+            json!({"type":"array","items":contract_ref("resource-request")})
+        }
+        "getResourceLease" | "renewResourceLease" | "revokeResourceLease" => {
+            contract_ref("resource-lease")
+        }
+        "listResourceLeases" => {
+            json!({"type":"array","items":contract_ref("resource-lease")})
+        }
         "listEnvironments" => contract_ref("http/environment-summary-page"),
         "getEnvironmentOperation" => contract_ref("environment-operation-snapshot"),
         "listEnvironmentOperations" => contract_ref("http/environment-operation-page"),
@@ -947,6 +1066,12 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             "recoverEnvironment",
             "deleteEnvironment",
             "freezeSubmission",
+            "createResourceRequest",
+            "approveResourceRequest",
+            "resizeAndApproveResourceRequest",
+            "cancelResourceRequest",
+            "rejectResourceRequest",
+            "retryResourceRequest",
             "revokeAccessGrant",
             "renewAccessGrant",
         ]
@@ -966,6 +1091,17 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             .contains(&id)
             {
                 contract_ref("http/environment-operation-accepted")
+            } else if [
+                "createResourceRequest",
+                "approveResourceRequest",
+                "resizeAndApproveResourceRequest",
+                "cancelResourceRequest",
+                "rejectResourceRequest",
+                "retryResourceRequest",
+            ]
+            .contains(&id)
+            {
+                contract_ref("http/resource-operation-accepted")
             } else {
                 json!({"$ref":"#/components/schemas/OperationAccepted"})
             }

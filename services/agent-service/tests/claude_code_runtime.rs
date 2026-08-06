@@ -19,8 +19,8 @@ use agent_service::run_store::{
 };
 use async_trait::async_trait;
 use contracts::authoring::{
-    AgentRunState, AgentTrackKind, CourseLlmEgressPolicy, DeniedDataClass, EnvironmentSpec,
-    PackageFile, ProblemPackage, RuntimeKind,
+    AgentRunState, AgentTrackKind, CourseLlmEgressPolicy, DeniedDataClass, EnvironmentClass,
+    EnvironmentSpec, PackageFile, ProblemPackage, RuntimeKind,
 };
 use contracts::evaluation::EvaluationSpec;
 use contracts::http::{CreateAgentRunRequest, IdempotencyKey};
@@ -655,6 +655,7 @@ async fn known_runtime_failures_are_classified_without_leaking_stderr() -> Resul
 
 #[tokio::test]
 #[ignore = "requires LABWEAVER_TEST_DATABASE_URL or a real PostgreSQL Docker container"]
+#[allow(clippy::large_futures)]
 async fn postgres_run_is_atomic_and_exact_replay_is_not_billed_twice() -> Result<(), Box<dyn Error>>
 {
     let mut container = None;
@@ -676,6 +677,7 @@ async fn postgres_run_is_atomic_and_exact_replay_is_not_billed_twice() -> Result
     assert_exact_replay(&store, &pool, now).await?;
     assert_track_recovery(&store, now).await?;
     assert_dispatch_does_not_replay_live_tracks(&store, now).await?;
+    assert_reserved_dispatch_executes_without_second_reservation(&store, now).await?;
     assert_durable_cancellation(&store, now).await?;
     assert_concurrent_idempotency(&store, now).await?;
 
@@ -712,6 +714,7 @@ async fn assert_dispatch_does_not_replay_live_tracks(
         .reserve_dispatch(
             policy.course_id,
             &request,
+            EnvironmentClass::Experiment,
             &package,
             &locators,
             &policy,
@@ -757,6 +760,79 @@ async fn assert_dispatch_does_not_replay_live_tracks(
     Ok(())
 }
 
+async fn assert_reserved_dispatch_executes_without_second_reservation(
+    store: &PostgresAgentRunStore,
+    now: UtcTimestamp,
+) -> Result<(), Box<dyn Error>> {
+    let (runtime, process, policy) = runtime(FakeMode::FullSuccess)?;
+    let bytes = b"reserved dispatch must execute exactly once".to_vec();
+    let package = package(policy.course_id, &bytes)?;
+    let gate = ProblemPackageEgressGate::new(
+        Arc::new(StaticPackageReader { bytes }),
+        Arc::new(StaticClassifier {
+            revision: Revision::new(1)?,
+            denied: BTreeSet::new(),
+        }),
+    );
+    let prepared = gate.prepare(&package, &policy).await?;
+    let request = run_request(&prepared, &policy);
+    let object = package
+        .files
+        .first()
+        .ok_or("package file missing")?
+        .object
+        .clone();
+    let locators = BTreeMap::from([(object.artifact_id, "problem-packages/reserved".to_owned())]);
+    let key = IdempotencyKey::parse("agent-dispatch-reserved-exec-0001")?;
+    store
+        .reserve_dispatch(
+            policy.course_id,
+            &request,
+            EnvironmentClass::Experiment,
+            &package,
+            &locators,
+            &policy,
+            &key,
+            now,
+            "trace-agent-dispatch-reserved-exec",
+        )
+        .await?;
+    let dispatch = store
+        .claim_dispatch(Duration::from_secs(1))
+        .await?
+        .ok_or("reserved dispatch was not claimable")?;
+    store
+        .bind_prepared_dispatch(&dispatch, prepared.sha256())
+        .await?;
+    let service = AgentRunService::new(
+        store.clone(),
+        runtime,
+        "dispatch-reserved-worker".to_owned(),
+        Duration::from_secs(30),
+    )?;
+    let result = service
+        .execute_reserved(
+            ExecuteAgentRun {
+                course_id: policy.course_id,
+                expected_environment_class: EnvironmentClass::Experiment,
+                request: &request,
+                idempotency_key: &key,
+                input: prepared,
+                cancellation: RunCancellation::new(),
+                now,
+                trace_id: "trace-agent-dispatch-reserved-exec",
+            },
+            dispatch.run,
+        )
+        .await?;
+    let AgentRunDispatch::Executed(run) = result else {
+        return Err("reserved dispatch was replayed instead of executed".into());
+    };
+    assert_eq!(run.run.state, AgentRunState::Succeeded);
+    assert_eq!(process.commands().len(), 2);
+    Ok(())
+}
+
 async fn assert_exact_replay(
     store: &PostgresAgentRunStore,
     pool: &PgPool,
@@ -776,6 +852,7 @@ async fn assert_exact_replay(
     let first = service
         .execute(ExecuteAgentRun {
             course_id: policy.course_id,
+            expected_environment_class: EnvironmentClass::Experiment,
             request: &request,
             idempotency_key: &idempotency_key,
             input: initial_input,
@@ -799,6 +876,7 @@ async fn assert_exact_replay(
     let second = service
         .execute(ExecuteAgentRun {
             course_id: policy.course_id,
+            expected_environment_class: EnvironmentClass::Experiment,
             request: &request,
             idempotency_key: &idempotency_key,
             input: replay_input,
@@ -1033,6 +1111,7 @@ async fn assert_concurrent_idempotency(
             service
                 .execute(ExecuteAgentRun {
                     course_id,
+                    expected_environment_class: EnvironmentClass::Experiment,
                     request: &request,
                     idempotency_key: &key,
                     input,
@@ -1072,6 +1151,7 @@ async fn assert_distinct_runs(
             service
                 .execute(ExecuteAgentRun {
                     course_id,
+                    expected_environment_class: EnvironmentClass::Experiment,
                     request: &request,
                     idempotency_key: &key,
                     input,
@@ -1260,6 +1340,25 @@ async fn successful_invocation_is_shell_free_hardened_and_hash_audited()
     let debug = format!("{command:?}");
     assert!(!debug.contains("ignore all previous instructions"));
     assert!(!debug.contains("Generate exactly one"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn work_intent_rejects_an_experiment_candidate_without_defaulting()
+-> Result<(), Box<dyn Error>> {
+    let (runtime, _process, policy) = runtime(FakeMode::Success)?;
+    let failure = expected_failure(
+        runtime
+            .generate_for_class(
+                AgentTrackKind::Environment,
+                input(&policy).await?,
+                RunCancellation::new(),
+                EnvironmentClass::Work,
+            )
+            .await,
+        "experiment output unexpectedly satisfied a Work request",
+    )?;
+    assert_diagnostic(&failure, "LW_LLM_ENVIRONMENT_CLASS_MISMATCH");
     Ok(())
 }
 

@@ -95,6 +95,9 @@ typed_id!(PolicyId);
 typed_id!(ProblemPackageId);
 typed_id!(ProjectId);
 typed_id!(ReleaseId);
+typed_id!(ResourceApprovalId);
+typed_id!(ResourceRequestId);
+typed_id!(CapacityClaimId);
 typed_id!(SshPublicKeyId);
 typed_id!(UploadSessionId);
 

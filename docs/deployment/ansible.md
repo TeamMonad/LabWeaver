@@ -22,6 +22,37 @@ another Linux host is rejected before Ansible starts. Missing, malformed, or
 unreadable identity/dependency inputs fail before Ansible starts; the bundle
 does not infer a dependency directory from its temporary extraction path.
 
+## Docker Desktop local controller (read-only)
+
+For local #142 development, `tools/docker_controller.py` runs the pinned
+`containers/Containerfile.controller` image without SSH or WSL. It mounts the
+Docker Desktop kubeconfig and the explicit private `.env` locator read-only and
+invokes only `cargo xtask local preflight`. The image must not receive a broad
+host environment or a writable repository mount; generated reports are written
+only under ignored `artifacts/`.
+
+The `local-hostpath` overlay is a Container-only compatibility profile. It
+declares Docker Desktop `hostpath`, single-node scheduling and
+`releaseEligible: false`; it does not change the production `nfs-rwx` contract,
+enable KubeVirt, or authorize any Kubernetes write. Missing KubeVirt/CDI,
+`nfs-rwx`, or ECNU private input is reported as a stable blocker.
+
+The equivalent Ansible entry point is
+`deploy/ansible/playbooks/local-hostpath-preflight.yml`. It uses only
+`ansible.builtin.command` probes with `changed_when: false` and assertion
+diagnostics; it contains no Kubernetes apply module or delete operation. The
+Docker controller may invoke the Rust preflight instead, but both paths share
+the same read-only boundary and `local-connected-non-release` report contract.
+
+The dependency-stack overlay at
+`deploy/config/local-hostpath-stack.overlay.json` names isolated Docker Desktop
+namespaces for PostgreSQL, NATS, MinIO, Keycloak, Harbor, BuildKit and
+LabWeaver. `deploy/ansible/playbooks/local-hostpath-stack-plan.yml` validates
+the overlay and renders the LabWeaver chart, then prints a plan-only teardown
+order. It contains no Kubernetes apply/delete, Helm install/upgrade/uninstall,
+or namespace/PVC/Secret mutation; applying the stack requires separate
+deployment authorization.
+
 The retained data-service CiliumNetworkPolicy admits credentialed administration probes only from
 Cilium's `host` and `remote-node` reserved identities, and only on PostgreSQL 5432, NATS 4222 and
 MinIO 9000. Cilium represents node-originated traffic with those identities rather than a source
@@ -186,6 +217,53 @@ is absent, then reads back its stream, durable name, explicit-ack policy and
 complete subject filter set. A retained consumer with conflicting semantics
 blocks as `SPRINT2_APPLICATION_CONSUMER_CONFLICT`; the role never deletes or
 silently replaces retained JetStream state.
+
+### NATS authority forward rotation
+
+If the active operator seed is unavailable, do not recover it from logs,
+Kubernetes Secrets, chat history, or raw disk fragments and do not reuse a
+different historical operator. Preserve only the reviewed `WORKLOADS` account
+seed, then use `96-nats-authority-rotation.yml` to create a new operator/SYS
+authority and reissue all workload and administrator JWT/mTLS identities:
+
+```sh
+ansible-playbook -i deploy/ansible/inventories/demo/hosts.yml \
+  deploy/ansible/playbooks/96-nats-authority-rotation.yml
+```
+
+The controller supplies all source/output locations through the
+`LABWEAVER_NATS_ROTATION_*`, `LABWEAVER_NATS_SOURCE_*`,
+`LABWEAVER_NATS_WORKLOADS_SEED_FILE`, `LABWEAVER_KUBECONFIG`, and
+`LABWEAVER_NATS_SERVER` environment variables. The rotation never changes
+application image identity: it applies only the reviewed NATS-bearing
+ConfigMap/Secret objects and binds the replacement operator public ID to the
+affected Pod templates.
+Every private input and generated file is root-owned mode `0600`, while
+directories are mode `0700`.
+
+Before mutation the playbook stores the current NATS ConfigMap and all affected
+Secrets in its root-only rollback directory. It then reconciles the retained
+NATS StatefulSet, the ten Sprint 2 deployments, and Resource Service. PostgreSQL,
+MinIO, PVCs, namespaces, JetStream streams/consumers, Harbor, and Keycloak are
+not deleted or recreated. Per-workload configuration hashes ensure an NATS-only
+rotation does not restart PostgreSQL or MinIO. A second run must preserve the
+operator/WORKLOADS public identities and the existing JetStream inventory.
+
+The non-secret `rotation-record.json` and
+`rotation-deployment-record.json` are the handoff records. They contain public
+identity names, permission summaries, controlled locators, run/commit identity,
+and readiness counts only. Seeds, JWTs, `.creds`, TLS private keys, Secret
+payloads, or their hashes must never be copied to Git or deployment logs.
+`rotation-connected-verification.json` is written only after the replacement
+credentials are live. It must prove all ten public identities, rejection of the
+immediately preceding credentials, retained streams and consumers, zero pending
+Resource Outbox rows, and readiness of every NATS-bearing Deployment.
+
+The Environment user is the requester in the Resource Lease request/reply
+protocol. Its publish allowlist must include
+`labweaver.resource.lease.verify.v1`; Resource subscribes to that exact subject
+and receives a one-reply permission. A rotation that validates only Resource's
+subscription but not Environment's publish authority is incomplete.
 Before applying the private configuration bundle, the application role decodes
 only the public claims in the mounted Control user JWT and verifies that its
 publish allowlist covers both configured quarantine subjects. The validator
@@ -348,8 +426,9 @@ required Secrets in `labweaver-system`. The role rejects extra kinds, names or
 namespaces, applies the bundle only after namespace recreation, and records only
 its SHA-256. Secrets remain in Vault or root-owned controller files and are never
 copied into the report. A private Access seed is derived from the reviewed
-Keycloak realm so the OIDC `sub` hashes, durable Actor IDs and teacher/student
-course memberships are bound before either browser session is created:
+Keycloak realm so the OIDC `sub` hashes, durable Actor IDs and
+teacher/student/platform-admin course memberships are bound before any browser
+session is created:
 
 ```sh
 python3 tools/prepare_sprint2_access_seed.py \
@@ -358,6 +437,7 @@ python3 tools/prepare_sprint2_access_seed.py \
   --course-id 00000000-0000-7000-8000-000000000301 \
   --teacher-username teacher \
   --student-username student \
+  --admin-username platform-admin \
   --output .private/sprint2-access-seed.json
 ```
 

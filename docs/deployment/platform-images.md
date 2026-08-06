@@ -24,8 +24,19 @@ export LABWEAVER_PLATFORM_REGISTRY=harbor.example.internal
 export LABWEAVER_TRIVY_DATABASE_REFERENCE=harbor.example.internal/cache/trivy-db@sha256:<digest>
 export LABWEAVER_TRIVY_DATABASE_DIGEST=sha256:<digest>
 export LABWEAVER_KUBECONFIG="$HOME/.config/labweaver/package/kubeconfig"
+export LABWEAVER_EXECUTION_LEDGER_ROOT=/var/lib/labweaver/execution-ledger
 cargo xtask package --env demo --release sprint2 --yes
 ```
+
+The connected controller reserves one package attempt for the exact
+`source_commit + component-lock + migration-catalog + profile + release` identity.
+The ledger operation is stable across release labels and also enforces a total
+three-candidate package budget for the environment. A failed or completed
+package cannot be started again with the same identity, and a fourth candidate
+is blocked instead of extending the test cycle indefinitely. Use BuildKit cache
+for development iterations; after the operation budget is exhausted, inspect
+the ledger and open an explicitly approved new validation window rather than
+deleting the ledger or changing its root.
 
 Before packaging, run the non-destructive `sprint2-buildkit` adoption with
 `sprint2_buildkit_controller_enabled=true`, an exact router-local kubeconfig source, and explicit
@@ -103,3 +114,8 @@ cargo xtask rollback --env demo --revision <helm-revision> --yes
 ```
 
 Package, connected validation, deployment, rollback, and real runtime verification are distinct evidence boundaries. A static manifest or successful image build is not evidence that Container or KubeVirt flows work in the cluster.
+
+The Docker Desktop `local-hostpath` profile has a separate render-only stack
+overlay and plan-only teardown order. It must not invoke the connected rollback
+command, delete local namespaces, or promote its report; local evidence remains
+`releaseEligible: false`.

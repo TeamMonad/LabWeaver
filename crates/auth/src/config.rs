@@ -61,6 +61,9 @@ pub struct AccessAuthFile {
     pub environment_gateway: ControlGatewayFileConfig,
     /// Authenticated browser gateway for the freeze-only Evaluation API.
     pub evaluation_gateway: ControlGatewayFileConfig,
+    /// Access-only in-cluster gateway for the Resource public API. Kubernetes
+    /// `NetworkPolicy` restricts this cleartext hop to Access Service.
+    pub resource_gateway: ResourceGatewayFileConfig,
     /// `AccessGrant`, worker, and one-time authorization limits.
     pub grants: GrantRuntimeFileConfig,
     /// Mandatory mTLS `JetStream` connection.
@@ -161,6 +164,9 @@ pub struct MtlsFileConfig {
     pub client_ca_file: String,
     pub allowed_san_uris: BTreeSet<String>,
     pub required_eku: String,
+    /// Optional service-specific delegation key. Only Resource requires it.
+    #[serde(default)]
+    pub delegation_key_file: Option<String>,
 }
 
 /// Secret locators which are resolved only by the deployment runtime.
@@ -210,6 +216,24 @@ pub struct ControlGatewayFileConfig {
     pub ca_certificate_locator: String,
     pub client_certificate_locator: String,
     pub client_private_key_locator: String,
+    pub allowed_server_sans: Vec<String>,
+    pub timeout_milliseconds: u64,
+    pub max_request_bytes: usize,
+    pub max_response_bytes: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[allow(
+    missing_docs,
+    reason = "YAML keys are documented by deploy/config/access-auth.yaml.example"
+)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceGatewayFileConfig {
+    pub base_uri: String,
+    pub ca_certificate_locator: String,
+    pub client_certificate_locator: String,
+    pub client_private_key_locator: String,
+    pub delegation_key_locator: String,
     pub allowed_server_sans: Vec<String>,
     pub timeout_milliseconds: u64,
     pub max_request_bytes: usize,
@@ -316,6 +340,7 @@ impl AccessAuthFile {
             || !parsed.service_gateway_is_valid(&parsed.control_gateway)
             || !parsed.service_gateway_is_valid(&parsed.environment_gateway)
             || !parsed.service_gateway_is_valid(&parsed.evaluation_gateway)
+            || !parsed.resource_gateway_is_valid()
             || !parsed.access_runtime_is_valid()
             || required_resolver_locators.iter().any(|locator| {
                 parsed
@@ -411,6 +436,37 @@ impl AccessAuthFile {
             })
     }
 
+    fn resource_gateway_is_valid(&self) -> bool {
+        let Ok(uri) = Url::parse(&self.resource_gateway.base_uri) else {
+            return false;
+        };
+        let locators = [
+            self.resource_gateway.ca_certificate_locator.as_str(),
+            self.resource_gateway.client_certificate_locator.as_str(),
+            self.resource_gateway.client_private_key_locator.as_str(),
+            self.resource_gateway.delegation_key_locator.as_str(),
+        ];
+        uri.scheme() == "https"
+            && uri.host_str().is_some()
+            && uri.path() == "/"
+            && uri.query().is_none()
+            && uri.fragment().is_none()
+            && self
+                .resource_gateway
+                .allowed_server_sans
+                .iter()
+                .any(|san| Some(san.as_str()) == uri.host_str())
+            && (100..=30_000).contains(&self.resource_gateway.timeout_milliseconds)
+            && (1..=16 * 1024 * 1024).contains(&self.resource_gateway.max_request_bytes)
+            && (1..=32 * 1024 * 1024).contains(&self.resource_gateway.max_response_bytes)
+            && locators.iter().all(|locator| {
+                self.secrets
+                    .file_bindings
+                    .get(*locator)
+                    .is_some_and(|path| !invalid_secret_file_path(path))
+            })
+    }
+
     fn insecure_mode_is_loopback_only(&self) -> bool {
         let browser_bind = self.browser.bind_addr.parse::<std::net::SocketAddr>();
         let internal_bind = self.internal_mtls.bind_addr.parse::<std::net::SocketAddr>();
@@ -418,12 +474,14 @@ impl AccessAuthFile {
         let control = Url::parse(&self.control_gateway.base_uri);
         let environment = Url::parse(&self.environment_gateway.base_uri);
         let evaluation = Url::parse(&self.evaluation_gateway.base_uri);
+        let resource = Url::parse(&self.resource_gateway.base_uri);
         browser_bind.is_ok_and(|address| address.ip().is_loopback())
             && internal_bind.is_ok_and(|address| address.ip().is_loopback())
             && resolver.is_ok_and(|url| url_host_is_loopback(&url))
             && control.is_ok_and(|url| url_host_is_loopback(&url))
             && environment.is_ok_and(|url| url_host_is_loopback(&url))
             && evaluation.is_ok_and(|url| url_host_is_loopback(&url))
+            && resource.is_ok_and(|url| url_host_is_loopback(&url))
     }
 }
 
@@ -716,6 +774,10 @@ secrets:
     "secret://control-gateway/ca": control-ca
     "secret://access-service/control-client-cert": control-cert
     "secret://access-service/control-client-key": control-key
+    "secret://resource-gateway/ca": resource-ca
+    "secret://access-service/resource-client-cert": resource-cert
+    "secret://access-service/resource-client-key": resource-key
+    "secret://resource-gateway/delegation-key": resource-delegation-key
 internal_mtls:
   bind_addr: 127.0.0.1:9443
   server_certificate_file: server-cert
@@ -757,6 +819,16 @@ evaluation_gateway:
   client_certificate_locator: secret://access-service/control-client-cert
   client_private_key_locator: secret://access-service/control-client-key
   allowed_server_sans: [evaluation-service.example.test]
+  timeout_milliseconds: 5000
+  max_request_bytes: 1048576
+  max_response_bytes: 8388608
+resource_gateway:
+  base_uri: https://127.0.0.1:9448/
+  ca_certificate_locator: secret://resource-gateway/ca
+  client_certificate_locator: secret://access-service/resource-client-cert
+  client_private_key_locator: secret://access-service/resource-client-key
+  delegation_key_locator: secret://resource-gateway/delegation-key
+  allowed_server_sans: [127.0.0.1]
   timeout_milliseconds: 5000
   max_request_bytes: 1048576
   max_response_bytes: 8388608
@@ -805,6 +877,13 @@ nats:
     #[test]
     fn checked_in_deployment_example_is_a_valid_contract() {
         let example = include_str!("../../../deploy/config/access-auth.yaml.example");
-        assert!(AccessAuthFile::parse_yaml(example).is_ok());
+        let parsed = AccessAuthFile::parse_yaml(example);
+        assert!(parsed.is_ok());
+        assert_eq!(
+            parsed
+                .ok()
+                .and_then(|value| value.oidc.role_mappings.get("platform_admin").cloned()),
+            Some("platform_admin".to_owned())
+        );
     }
 }

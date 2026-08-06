@@ -76,6 +76,7 @@ def build_seed(
     course_id: str,
     teacher_username: str,
     student_username: str,
+    admin_username: str,
 ) -> dict[str, object]:
     issuer = validate_issuer(issuer)
     try:
@@ -85,7 +86,11 @@ def build_seed(
     if parsed_course_id.version != 7:
         raise AccessSeedError("LW_SPRINT2_ACCESS_SEED_COURSE_INVALID")
     memberships: list[dict[str, str]] = []
-    for username, role in ((teacher_username, "teacher"), (student_username, "student")):
+    for username, role in (
+        (teacher_username, "teacher"),
+        (student_username, "student"),
+        (admin_username, "platform_admin"),
+    ):
         subject = find_user(realm, username, role)
         actor_id = uuid7()
         memberships.append(
@@ -110,6 +115,7 @@ def main() -> int:
     parser.add_argument("--course-id", required=True)
     parser.add_argument("--teacher-username", required=True)
     parser.add_argument("--student-username", required=True)
+    parser.add_argument("--admin-username", required=True)
     parser.add_argument("--output", type=Path, required=True)
     arguments = parser.parse_args()
     try:
@@ -123,6 +129,7 @@ def main() -> int:
             arguments.course_id,
             arguments.teacher_username,
             arguments.student_username,
+            arguments.admin_username,
         )
         descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, stat.S_IRUSR | stat.S_IWUSR)
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:

@@ -1,0 +1,10 @@
+# Resource Service internal API. The API listener is mTLS-only; the shared
+# LABWEAVER_BIND_ADDR listener is reserved for health endpoints.
+bind_addr: "0.0.0.0:9448"
+server_certificate_file: "/etc/labweaver/secrets/tls.crt"
+server_key_file: "/etc/labweaver/secrets/tls.key"
+client_ca_file: "/etc/labweaver/secrets/mtls-ca.pem"
+delegation_key_file: "/etc/labweaver/secrets/resource-delegation-key"
+allowed_san_uris:
+  - "spiffe://labweaver/access-service"
+required_eku: "clientAuth"

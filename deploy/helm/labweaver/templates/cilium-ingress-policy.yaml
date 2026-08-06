@@ -1,3 +1,4 @@
+{{- if .Values.network.ciliumIngressPolicyEnabled }}
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
@@ -36,3 +37,4 @@ specs:
               {{- range $port := .Values.network.kubernetesApiPorts }}
               - {port: {{ $port | quote }}, protocol: TCP}
               {{- end }}
+{{- end }}

@@ -77,6 +77,10 @@ class AnsibleFixtureTests(unittest.TestCase):
             ROOT / "docs/deployment/ansible.md"
         ).read_text(encoding="utf-8"))
         self.assertIn("SPRINT2_FOUNDATION_BUNDLE_KEYS_INVALID", tasks)
+        self.assertIn("sprint2_foundation_postgres_admin_role", tasks)
+        self.assertIn("kubernetes.core.k8s_exec", tasks)
+        self.assertIn("SPRINT2_FOUNDATION_POSTGRES_ADMIN_ROLE_INVALID", tasks)
+        self.assertIn("sprint2_foundation_postgres_database", tasks)
         self.assertIn("Delete exact pod blocked on a superseded failed revision", tasks)
         self.assertIn("item.status.currentRevision != item.status.updateRevision", tasks)
         self.assertIn("kind: StatefulSet", workloads)
@@ -91,7 +95,9 @@ class AnsibleFixtureTests(unittest.TestCase):
             "{{ sprint2_foundation_lock.postgresql.image }}": "registry.invalid/postgres@sha256:" + "a" * 64,
             "{{ sprint2_foundation_lock.sprint2_foundation.nats }}": "registry.invalid/nats@sha256:" + "b" * 64,
             "{{ sprint2_foundation_lock.sprint2_foundation.minio }}": "registry.invalid/minio@sha256:" + "c" * 64,
-            "{{ sprint2_foundation_bundle_sha256 }}": "d" * 64,
+            "{{ sprint2_foundation_workload_configuration_sha256.postgres }}": "d" * 64,
+            "{{ sprint2_foundation_workload_configuration_sha256.nats }}": "e" * 64,
+            "{{ sprint2_foundation_workload_configuration_sha256.minio }}": "f" * 64,
         }
         rendered = workloads
         for source, value in replacements.items():
@@ -99,12 +105,17 @@ class AnsibleFixtureTests(unittest.TestCase):
         documents = list(yaml.safe_load_all(rendered))
         self.assertEqual(len(documents), 9)
         self.assertEqual(sum(document["kind"] == "StatefulSet" for document in documents), 3)
+        expected_hashes = {
+            "postgres": "d" * 64,
+            "nats": "e" * 64,
+            "minio": "f" * 64,
+        }
         for document in documents:
             if document["kind"] == "StatefulSet":
                 self.assertEqual(
                     document["spec"]["template"]["metadata"]["annotations"]
                     ["labweaver.io/configuration-sha256"],
-                    "d" * 64,
+                    expected_hashes[document["metadata"]["name"]],
                 )
         minio = next(
             document for document in documents
@@ -131,6 +142,43 @@ class AnsibleFixtureTests(unittest.TestCase):
         reset_namespaces = reset.split("sprint2_reset_domains:", maxsplit=1)[0]
         self.assertNotIn("labweaver-data", reset_namespaces)
         self.assertNotIn("labweaver-build", reset_namespaces)
+
+    def test_nats_authority_rotation_is_bounded_and_recoverable(self) -> None:
+        playbook = (
+            ROOT / "deploy/ansible/playbooks/96-nats-authority-rotation.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("--workloads-seed-file", playbook)
+        self.assertIn("NATS_AUTHORITY_ROTATION_ROLLBACK_SURFACE_INCOMPLETE", playbook)
+        self.assertIn("rollback/kubernetes-objects.yaml", playbook)
+        self.assertIn("- import_playbook: 92-sprint2-foundation.yml", playbook)
+        self.assertIn("Apply only reviewed NATS-bearing application objects", playbook)
+        self.assertIn("--force-conflicts", playbook)
+        self.assertIn("Roll every affected workload to the replacement authority", playbook)
+        self.assertIn("resource-service", playbook)
+        self.assertIn("nats_rotation_record.identities | length == 10", playbook)
+        self.assertIn("Verify replacement administrator JWT and mutual TLS", playbook)
+        self.assertIn("Wait for replacement NATS administrator transport", playbook)
+        self.assertIn("LABWEAVER_RESOURCE", playbook)
+        self.assertIn("NATS_AUTHORITY_ROTATION_RESOURCE_STREAM_INVALID", playbook)
+        self.assertNotIn("ansible.builtin.shell", playbook)
+        self.assertNotRegex(playbook, r"\bkubectl\s+delete\b")
+        self.assertNotRegex(playbook, r"\bDROP\s+(?:DATABASE|SCHEMA)\b")
+
+    def test_object_store_proxy_has_a_minio_only_transport_rule(self) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        marker = "Browser uploads terminate at the Web nginx object-store proxy."
+        self.assertIn(marker, tasks)
+        scoped_rule = tasks.split(marker, maxsplit=1)[1].split(
+            "- name: Inspect the retained CDI clone source network policy",
+            maxsplit=1,
+        )[0]
+        self.assertIn("app.kubernetes.io/name: web", scoped_rule)
+        self.assertIn('port: "9000"', scoped_rule)
+        self.assertNotIn('port: "5432"', scoped_rule)
+        self.assertNotIn('port: "4222"', scoped_rule)
 
     def test_sprint2_buildkit_is_rootless_isolated_and_explicitly_exception_bound(self) -> None:
         playbook = (ROOT / "deploy/ansible/playbooks/92-sprint2-buildkit.yml").read_text(
@@ -193,7 +241,10 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("cargo xtask deploy --infra", docs)
         self.assertIn("ansible-rs", docs)
         self.assertNotIn("tools/ansible.py", docs)
-        self.assertIn("approved_controller_ids: edge-router,wsl-a-controller", controller_lock)
+        self.assertIn(
+            "approved_controller_ids: edge-router,wsl-a-controller,docker-desktop-controller",
+            controller_lock,
+        )
         self.assertIn("python_kubernetes_version: 34.1.0", controller_lock)
         self.assertIn("require_python_module_version", xtask)
         self.assertIn("inventory_identity_hash(&inventory_root)", xtask)
@@ -335,6 +386,30 @@ class AnsibleFixtureTests(unittest.TestCase):
             "'component', 'equalto', 'evaluation-service'",
             tasks,
         )
+
+    def test_sprint2_application_requires_canonical_oidc_platform_admin_mapping(self) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("sprint2_application_access_configuration", tasks)
+        self.assertIn("| from_yaml_all", tasks)
+        self.assertLess(
+            tasks.index("Parse immutable package and private configuration"),
+            tasks.index("Parse Access Service role configuration from the reviewed bundle"),
+        )
+        self.assertNotIn(
+            "sprint2_application_configuration_objects\n         | selectattr('kind'",
+            tasks.split("Parse Access Service role configuration from the reviewed bundle", 1)[0],
+        )
+        self.assertIn(
+            "sprint2_application_access_configuration.oidc.role_mappings.platform_admin == 'platform_admin'",
+            tasks,
+        )
+        self.assertIn(
+            "sprint2_application_access_configuration.oidc.role_mappings['platform-admin'] == 'platform_admin'",
+            tasks,
+        )
+        self.assertIn("SPRINT2_APPLICATION_OIDC_ROLE_MAPPING_INVALID", tasks)
         self.assertIn(
             "'workerImage':\n                              sprint2_application_evaluation_worker_image",
             tasks,
@@ -342,6 +417,32 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn(
             "when: item.metadata.name != 'evaluation-service-config'",
             tasks,
+        )
+
+    def test_sprint2_application_rejects_stale_nats_ca_and_incomplete_evaluation_binding(self) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Select reviewed NATS and Evaluation configuration objects", tasks)
+        self.assertIn("sprint2_application_bundle_nats_ca_sha256", tasks)
+        self.assertIn("sprint2_application_remote_nats_ca_sha256", tasks)
+        self.assertIn(
+            "selectattr('item', 'equalto', sprint2_application_nats_ca_file)",
+            tasks,
+        )
+        self.assertIn("map(attribute='stat.checksum')", tasks)
+        self.assertIn(
+            "sprint2_application_bundle_nats_ca_sha256 == sprint2_application_remote_nats_ca_sha256",
+            tasks,
+        )
+        self.assertIn(
+            "sprint2_application_evaluation_configuration.coordinator.workerRegistryPullConfigFile",
+            tasks,
+        )
+        self.assertIn("SPRINT2_APPLICATION_CONFIGURATION_BINDING_INVALID", tasks)
+        self.assertLess(
+            tasks.index("Require reviewed configuration bindings before any cluster mutation"),
+            tasks.index("Atomically deploy the immutable Sprint 2 profile"),
         )
 
     def test_sprint2_application_preinstalls_evaluation_runner_default_deny(
@@ -367,6 +468,14 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("policyTypes: [Ingress, Egress]", policy)
         self.assertIn("ingress: []", policy)
         self.assertIn("egress: []", policy)
+        self.assertIn(
+            "spec.ingress | default([]) == []",
+            policy,
+        )
+        self.assertIn(
+            "spec.egress | default([]) == []",
+            policy,
+        )
         self.assertIn(
             "SPRINT2_APPLICATION_EVALUATION_DEFAULT_DENY_INVALID",
             policy,
@@ -405,6 +514,15 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertNotIn("kind: BackendTLSPolicy", backend)
         self.assertNotIn("kind: CiliumNetworkPolicy", backend)
         self.assertIn("- name: web", route)
+        self.assertEqual(route.count("kind: ReferenceGrant"), 1)
+        object_store_rule = route.split("value: {{ required \"objectStoreRoute.pathPrefix is required\"", 1)[1]
+        self.assertIn("- name: web", object_store_rule)
+        self.assertIn("namespace: {{ .Release.Namespace }}", object_store_rule)
+        self.assertIn("port: 8080", object_store_rule)
+        self.assertNotIn("objectStoreRoute.serviceName", object_store_rule)
+        self.assertIn("name: web", route)
+        self.assertIn("object-store", route)
+        self.assertNotIn("name: minio\n      namespace:", route)
         self.assertNotIn("-object-store\n", route)
         self.assertIn("include /etc/nginx/labweaver-conf.d/*.conf;", nginx)
 
@@ -417,6 +535,59 @@ class AnsibleFixtureTests(unittest.TestCase):
             policy,
         )
         self.assertIn("toEntities: [kube-apiserver]", policy)
+
+    def test_resource_release_owns_only_its_kubernetes_api_egress(self) -> None:
+        policy = (
+            ROOT
+            / "deploy/helm/labweaver/templates/resource-kube-api-egress.yaml"
+        ).read_text(encoding="utf-8")
+        tasks = (
+            ROOT / "deploy/ansible/roles/resource_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("name: resource-kube-api-egress", policy)
+        self.assertIn('(index .Values.workloads "resource-service").enabled', policy)
+        self.assertIn("app.kubernetes.io/name: resource-service", policy)
+        self.assertIn("toEntities: [kube-apiserver]", policy)
+        self.assertIn(
+            "network.resourceKubernetesApiCiliumPolicyEnabled=true", tasks
+        )
+        self.assertIn("resource_application_run_id is match('^[0-9a-f]{8}", tasks)
+        self.assertIn("Apply or verify Resource Access bootstrap", tasks)
+        self.assertIn("labweaver_postgres_apply:", tasks)
+        postgres_apply = (
+            ROOT / "deploy/ansible/library/labweaver_postgres_apply.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("PGSERVICEFILE", postgres_apply)
+        self.assertIn("port-forward", postgres_apply)
+        seed = (
+            ROOT
+            / "deploy/ansible/roles/resource_application/templates/access-seed-adopt.sql.j2"
+        ).read_text(encoding="utf-8")
+        self.assertIn("LW_RESOURCE_ACCEPTANCE_PROFILE_ACCESS_SEED_CONFLICT", seed)
+        self.assertIn("LW_RESOURCE_ACCEPTANCE_PROFILE_ACCESS_ROLE_CONFLICT", seed)
+        self.assertNotIn("resource_requests", seed)
+        self.assertNotIn("environment_template_releases", seed)
+
+    def test_resource_api_uses_mtls_and_signed_access_delegation(self) -> None:
+        values = (ROOT / "deploy/helm/labweaver/values.yaml").read_text(encoding="utf-8")
+        access_config = (
+            ROOT / "deploy/config/access-auth.yaml.example"
+        ).read_text(encoding="utf-8")
+        resource_config = (
+            ROOT / "deploy/config/resource-service.yaml.example"
+        ).read_text(encoding="utf-8")
+        network_policy = (
+            ROOT / "deploy/helm/labweaver/templates/network-policy.yaml"
+        ).read_text(encoding="utf-8")
+        resource_values = values.split("  resource-service:", maxsplit=1)[1].split(
+            "resources:", maxsplit=1
+        )[0]
+        self.assertIn("LABWEAVER_RESOURCE_MTLS_CONFIG_FILE", resource_values)
+        self.assertIn("containerPort: 9448", resource_values)
+        self.assertIn("delegation_key_locator", access_config)
+        self.assertIn("delegation_key_file", resource_config)
+        self.assertIn("port: 9448", network_policy)
 
     def test_sprint2_application_reads_kubernetes_items_as_a_mapping_key(self) -> None:
         tasks = (
@@ -467,6 +638,29 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertNotIn("count(*) FROM {{ domain }}.schema_migrations) <> 1", adoption)
         self.assertIn("SPRINT2_APPLICATION_RETAINED_BASELINE_IDENTITY_INVALID", tasks)
         self.assertIn("sprint2_application_retained_baseline_sha256", defaults)
+
+    def test_sprint2_application_owns_a_reconnectable_postgres_port_forward(self) -> None:
+        defaults = (
+            ROOT / "deploy/ansible/roles/sprint2_application/defaults/main.yml"
+        ).read_text(encoding="utf-8")
+        tasks = (
+            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        handlers = (
+            ROOT / "deploy/ansible/roles/sprint2_application/handlers/main.yml"
+        ).read_text(encoding="utf-8")
+        service = (
+            ROOT
+            / "deploy/ansible/roles/sprint2_application/templates/postgres-port-forward.service.j2"
+        ).read_text(encoding="utf-8")
+        self.assertIn("sprint2_application_postgres_forward_enabled", defaults)
+        self.assertIn("sprint2_application_postgres_forward_service_name is match", tasks)
+        self.assertIn("Restart=on-failure", service)
+        self.assertIn("service/{{ sprint2_application_postgres_forward_kubernetes_service }}", service)
+        self.assertIn("Apply the PostgreSQL port-forward before database adoption", tasks)
+        self.assertIn("Require the adopted PostgreSQL port-forward endpoint", tasks)
+        self.assertIn("Restart the adopted PostgreSQL port-forward", handlers)
+        self.assertIn("sprint2_application_postgres_forward_service_name", handlers)
 
     def test_sprint2_application_preflight_does_not_requalify_retained_hosts(self) -> None:
         application = (
@@ -566,7 +760,21 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertNotIn("groups['edge_router']", defaults)
         self.assertIn("--server {{ sprint2_buildkit_controller_api_server }}", unit)
         self.assertIn("ProtectSystem=strict", unit)
+        tunnel_tasks = tasks.split(
+            "- name: Ensure the router-owned BuildKit tunnel is enabled and started",
+            maxsplit=1,
+        )[1].split("- name: Require the router-owned BuildKit endpoint", maxsplit=1)[0]
+        self.assertIn("enabled: true", tunnel_tasks)
+        self.assertIn("state: started", tunnel_tasks)
+        self.assertIn("daemon_reload: true", tunnel_tasks)
         self.assertNotIn("state: absent", tasks)
+
+    def test_cluster_addons_use_the_control_plane_kubeconfig(self) -> None:
+        tasks = (ROOT / "deploy/ansible/roles/cluster_addons/tasks/main.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(tasks.count("kubeconfig: /etc/kubernetes/admin.conf"), 3)
+        self.assertEqual(tasks.count("KUBECONFIG: /etc/kubernetes/admin.conf"), 2)
 
     def test_sprint2_application_adopts_portal_route_and_shared_ssh_service(self) -> None:
         tasks = (
@@ -943,6 +1151,9 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("HARBOR_CHART_ARCHIVE_IDENTITY_INVALID", harbor)
         self.assertIn("database_permissions", harbor)
         self.assertIn("harbor_component_resources", harbor)
+        self.assertIn("Wait for the Harbor Trivy StatefulSet object before applying the NFS policy", harbor)
+        self.assertIn("fsGroupChangePolicy: OnRootMismatch", harbor)
+        self.assertIn("Reconcile the Harbor Trivy NFS fsGroup policy before readiness", harbor)
         self.assertIn("chart_archive_sha256", lock)
         self.assertNotIn("busybox:1.36", lock)
 
@@ -978,6 +1189,8 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("replicas: {{ identity_keycloak_replicas }}", workloads)
         self.assertIn("standardFlowEnabled=false", provision_job)
         self.assertIn("directAccessGrantsEnabled=false", provision_job)
+        self.assertIn('get "realms/{{ identity_realm }}"', provision_job)
+        self.assertIn('create realms', provision_job)
         self.assertIn("keycloak: docker.io/keycloak/keycloak:26.7.0@sha256:", lock)
         self.assertIn("postgres: docker.io/library/postgres:17.6-alpine@sha256:", lock)
         self.assertIn("python_kubernetes_rpm: python3-kubernetes-34.1.0-2.el10_2", lock)
@@ -998,6 +1211,8 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("resources: [jobs, cronjobs]", operator_rbac)
         self.assertNotIn("private-sigstore", operator_rbac)
         self.assertIn("name: labweaver-devops-admin", operator_rbac)
+        self.assertNotIn("'labweaver-demo'", operator_rbac)
+        self.assertIn("[identity_namespace, 'harbor']", operator_rbac)
         self.assertNotIn("sigstore-system", operator_rbac)
         self.assertNotIn("resources: [secrets", operator_rbac)
         self.assertNotIn(":latest", workloads)
@@ -1085,6 +1300,11 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("DROP SCHEMA IF EXISTS", baseline)
         self.assertIn("0001_sprint2_baseline.sql", baseline)
         self.assertEqual(baseline.count("0001_roles_and_schemas.sql"), 2)
+        bootstrap = (ROOT / "migrations/bootstrap/0001_roles_and_schemas.sql").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("current_user = 'postgres-admin'", bootstrap)
+        self.assertIn("GRANT %I TO %I", bootstrap)
         self.assertIn("SET ROLE lw_{{ domain }}_owner", baseline)
         self.assertIn("schema_migrations", baseline)
         self.assertIn("catalog_sha256", baseline)

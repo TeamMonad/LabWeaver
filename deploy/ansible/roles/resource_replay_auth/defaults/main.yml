@@ -1,0 +1,26 @@
+---
+# This role produces short-lived browser BFF sessions for the public Resource
+# replay.  Every locator is controller-owned and private; no password, cookie,
+# bearer token or browser state is copied into a report or the repository.
+resource_replay_auth_root: /var/lib/labweaver/.private/resource-replay-auth
+resource_replay_auth_base_url: "{{ lookup('ansible.builtin.env', 'LABWEAVER_BASE_URL') }}"
+resource_replay_auth_trusted_ca_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_REPLAY_TRUSTED_CA_FILE') }}"
+resource_replay_auth_keycloak_ca_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_REPLAY_KEYCLOAK_CA_FILE') }}"
+resource_replay_auth_driver: "{{ playbook_dir }}/../../../tools/create_resource_replay_auth.py"
+resource_replay_auth_identity_seed_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_REPLAY_IDENTITY_SEED_FILE') }}"
+resource_replay_auth_keycloak_server: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_REPLAY_KEYCLOAK_SERVER') }}"
+resource_replay_auth_keycloak_hostname: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_REPLAY_KEYCLOAK_HOSTNAME') }}"
+resource_replay_auth_keycloak_endpoint_address: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_REPLAY_KEYCLOAK_ENDPOINT_ADDRESS') }}"
+resource_replay_auth_keycloak_admin_username_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_REPLAY_KEYCLOAK_ADMIN_USERNAME_FILE') }}"
+resource_replay_auth_keycloak_admin_password_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_REPLAY_KEYCLOAK_ADMIN_PASSWORD_FILE') }}"
+resource_replay_auth_keycloak_truststore_password_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_REPLAY_KEYCLOAK_TRUSTSTORE_PASSWORD_FILE') }}"
+resource_replay_auth_keycloak_realm: workloads
+resource_replay_auth_keycloak_admin_realm: master
+resource_replay_auth_kcadm: /usr/local/bin/kcadm.sh
+resource_replay_auth_keytool: /usr/bin/keytool
+resource_replay_auth_required_users: [sprint2-teacher, sprint2-student, sprint2-admin]
+resource_replay_auth_locator: "{{ resource_replay_auth_root }}/resource-replay-auth.json"
+resource_replay_auth_keycloak_config: "{{ resource_replay_auth_root }}/kcadm.config"
+resource_replay_auth_keycloak_hosts: "{{ resource_replay_auth_root }}/keycloak.hosts"
+resource_replay_auth_keycloak_truststore: "{{ resource_replay_auth_root }}/keycloak-truststore.p12"
+resource_replay_auth_keycloak_truststore_staged: "{{ resource_replay_auth_keycloak_truststore }}.new"

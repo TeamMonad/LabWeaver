@@ -1,0 +1,33 @@
+{
+  "$defs": {
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Revision-fenced Lease renewal. Resources and Provider binding are immutable after approval.",
+  "properties": {
+    "durationSeconds": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "expectedRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "reason": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "expectedRevision",
+    "durationSeconds",
+    "reason"
+  ],
+  "title": "RenewResourceLease",
+  "type": "object"
+}

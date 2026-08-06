@@ -342,6 +342,7 @@ impl EnvironmentProcessRuntime {
             self.store.clone(),
             self.release_store.clone(),
             self.access_revoker.clone(),
+            self.lease_verifier.clone(),
             self.freeze_bindings.clone(),
         )
     }

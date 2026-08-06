@@ -178,6 +178,14 @@
       ],
       "type": "string"
     },
+    "EnvironmentClass": {
+      "description": "Environment business class retained from the v2.1 architecture.",
+      "enum": [
+        "experiment",
+        "work"
+      ],
+      "type": "string"
+    },
     "LlmBudget": {
       "additionalProperties": false,
       "description": "Per-attempt bounded LLM budget.",
@@ -390,6 +398,10 @@
       "$ref": "#/$defs/CourseId",
       "description": "Authoritative route course."
     },
+    "expectedEnvironmentClass": {
+      "$ref": "#/$defs/EnvironmentClass",
+      "description": "Explicit class that the Environment candidate must retain through Agent execution."
+    },
     "objectLocators": {
       "additionalProperties": {
         "type": "string"
@@ -413,6 +425,7 @@
   "required": [
     "courseId",
     "request",
+    "expectedEnvironmentClass",
     "package",
     "objectLocators",
     "policy"

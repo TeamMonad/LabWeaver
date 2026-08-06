@@ -50,13 +50,25 @@ pub async fn run_with_readiness(
     service: &'static str,
     readiness: Arc<AtomicBool>,
 ) -> Result<(), StartupError> {
+    run_with_router(service, readiness, Router::new()).await
+}
+
+/// Starts a service with an application router mounted alongside the health endpoints.
+pub async fn run_with_router(
+    service: &'static str,
+    readiness: Arc<AtomicBool>,
+    application: Router,
+) -> Result<(), StartupError> {
     telemetry::init(service)?;
     let address = required_bind_address()?;
     let listener = tokio::net::TcpListener::bind(address).await?;
     tracing::info!(event = "service.started", service, %address);
-    axum::serve(listener, health_router(service, readiness))
-        .with_graceful_shutdown(shutdown_signal(service))
-        .await?;
+    axum::serve(
+        listener,
+        health_router(service, readiness).merge(application),
+    )
+    .with_graceful_shutdown(shutdown_signal(service))
+    .await?;
     tracing::info!(event = "service.stopped", service);
     Ok(())
 }

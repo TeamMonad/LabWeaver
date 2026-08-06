@@ -79,7 +79,15 @@ rules:
   - apiGroups: [cert-manager.io, cilium.io]
     resources: ['*']
     verbs: [get, list, watch]
-{% for namespace in ['labweaver-demo', identity_namespace, 'harbor'] %}
+{#
+  The identity foundation must be bootstrappable after a clean validation reset.
+  labweaver-demo is an application-era namespace and is intentionally absent
+  until the application adoption role creates its owned namespace. Binding a
+  RoleBinding to it here makes the foundation depend on deleted state and
+  fails before Keycloak can be reconciled. Application-scoped permissions are
+  applied by the owning application role after its namespace exists.
+#}
+{% for namespace in [identity_namespace, 'harbor'] %}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

@@ -198,6 +198,69 @@ impl PgEnvironmentStore {
         decode_contract(row.try_get("contract")?)
     }
 
+    /// Refreshes only the Resource-owned Lease fence of an existing Work
+    /// aggregate. Immutable workload bindings and lifecycle intent are
+    /// preserved; stale revisions and non-extending updates fail closed.
+    pub async fn refresh_work_lease(
+        &self,
+        environment_id: EnvironmentId,
+        authorization: contracts::environment::EnvironmentLeaseAuthorization,
+    ) -> Result<EnvironmentInstance, EnvironmentStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT contract FROM environment.environment_instances \
+             WHERE environment_id=$1 FOR UPDATE",
+        )
+        .bind(environment_id.as_uuid())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(EnvironmentStoreError::EnvironmentNotFound)?;
+        let current = decode_contract(row.try_get("contract")?)?;
+        if current
+            .operation
+            .lease_authorization
+            .as_ref()
+            .is_some_and(|value| {
+                value.lease_id == authorization.lease_id
+                    && value.lease_revision == authorization.lease_revision
+                    && value.expires_at == authorization.expires_at
+            })
+        {
+            transaction.commit().await?;
+            return Ok(current);
+        }
+        if current.class != contracts::authoring::EnvironmentClass::Work
+            || current.lease_id != Some(authorization.lease_id)
+            || current.course_id != authorization.course_id
+            || current.owner_id != authorization.owner_actor_id
+            || current.capacity_binding.as_deref() != Some(authorization.capacity_binding.as_str())
+            || authorization.lease_revision
+                <= current
+                    .operation
+                    .lease_authorization
+                    .as_ref()
+                    .map_or(contracts::Revision::new(1)?, |value| value.lease_revision)
+            || authorization.expires_at <= current.eligibility_expires_at
+        {
+            return Err(EnvironmentStoreError::LeaseAuthorizationInvalid);
+        }
+        let mut updated = current.clone();
+        updated.revision = contracts::Revision::new(current.revision.get().checked_add(1).ok_or(
+            EnvironmentStoreError::NumericOverflow("lease refresh revision"),
+        )?)?;
+        updated.eligibility_expires_at = authorization.expires_at;
+        updated.operation.lease_authorization = Some(authorization);
+        update_instance(&mut transaction, &current, &updated).await?;
+        enqueue_environment_event(
+            &mut transaction,
+            &updated,
+            subjects::ENVIRONMENT_STATE_CHANGED,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(updated)
+    }
+
     /// Loads an aggregate and the `PostgreSQL` authority clock from the same statement snapshot.
     pub async fn load_for_owner_resolution(
         &self,

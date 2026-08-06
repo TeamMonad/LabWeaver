@@ -132,19 +132,35 @@ pub struct VirtualMachineBasePolicy {
 impl ControlConfig {
     /// Rejects unsafe or unbounded configuration.
     pub fn validate(&self) -> Result<(), ControlError> {
-        if self.package_object_prefix.trim_matches('/').is_empty()
-            || self.upload_ttl_seconds == 0
-            || self.upload_ttl_seconds > 3_600
-            || self.completion_lease_seconds < 30
-            || self.completion_lease_seconds > 3_600
-            || self.max_package_files == 0
-            || self.max_package_files > 10_000
-            || self.max_package_bytes == 0
-            || self.retention_seconds == 0
-            || self.sse_retention_seconds == 0
-            || !self.container_build.validate()
-            || !self.virtual_machine_base.validate()
+        let package_prefix_valid = !self.package_object_prefix.trim_matches('/').is_empty();
+        let upload_ttl_valid = (1..=3_600).contains(&self.upload_ttl_seconds);
+        let completion_lease_valid = (30..=3_600).contains(&self.completion_lease_seconds);
+        let package_files_valid = (1..=10_000).contains(&self.max_package_files);
+        let package_bytes_valid = self.max_package_bytes != 0;
+        let retention_valid = self.retention_seconds != 0 && self.sse_retention_seconds != 0;
+        let container_build_valid = self.container_build.validate();
+        let virtual_machine_base_valid = self.virtual_machine_base.validate();
+        if !(package_prefix_valid
+            && upload_ttl_valid
+            && completion_lease_valid
+            && package_files_valid
+            && package_bytes_valid
+            && retention_valid
+            && container_build_valid
+            && virtual_machine_base_valid)
         {
+            tracing::error!(
+                event = "control.configuration_invalid",
+                package_prefix_valid,
+                upload_ttl_valid,
+                completion_lease_valid,
+                package_files_valid,
+                package_bytes_valid,
+                retention_valid,
+                container_build_valid,
+                virtual_machine_base_valid,
+                "deployment-owned Control policy failed validation"
+            );
             return Err(ControlError::ConfigurationInvalid);
         }
         Ok(())

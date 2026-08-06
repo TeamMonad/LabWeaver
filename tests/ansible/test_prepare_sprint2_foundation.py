@@ -53,6 +53,7 @@ class FoundationAuthoringTests(unittest.TestCase):
                 "evaluation-service",
                 "container-executor",
                 "kubevirt-executor",
+                "resource-service",
             },
         )
         for publish, subscribe, _ in FOUNDATION.NATS_USERS.values():
@@ -62,7 +63,10 @@ class FoundationAuthoringTests(unittest.TestCase):
             self.assertNotIn("*", subscribe)
 
         self.assertEqual(FOUNDATION.NATS_ADMIN_TLS_IDENTITY, "sprint2-admin")
+        self.assertEqual(FOUNDATION.NATS_ADMIN_USER, "sprint2-admin")
         self.assertNotIn(FOUNDATION.NATS_ADMIN_TLS_IDENTITY, FOUNDATION.NATS_USERS)
+        self.assertEqual(FOUNDATION.NATS_ADMIN_PUBLISH, ("$JS.API.>", "$JS.ACK.>"))
+        self.assertEqual(FOUNDATION.NATS_ADMIN_SUBSCRIBE, ("_INBOX.>",))
 
         control_publish, _, _ = FOUNDATION.NATS_USERS["control-service"]
         self.assertIn("labweaver.agent.quarantine.>", control_publish)
@@ -75,6 +79,7 @@ class FoundationAuthoringTests(unittest.TestCase):
 
         environment_publish, _, _ = FOUNDATION.NATS_USERS["environment-service"]
         self.assertIn("labweaver.service.access.revoke.v1", environment_publish)
+        self.assertIn("labweaver.resource.lease.verify.v1", environment_publish)
 
         for consumer in (
             "control-service",
@@ -91,6 +96,53 @@ class FoundationAuthoringTests(unittest.TestCase):
         ):
             publish, _, _ = FOUNDATION.NATS_USERS[non_consumer]
             self.assertNotIn("$JS.ACK.>", publish)
+
+        resource_publish, resource_subscribe, resource_response = FOUNDATION.NATS_USERS[
+            "resource-service"
+        ]
+        self.assertEqual(
+            resource_publish,
+            (
+                "$JS.API.>",
+                "$JS.ACK.>",
+                "labweaver.resource.request.submitted.v1",
+                "labweaver.resource.request.approved.v1",
+            ),
+        )
+        self.assertEqual(resource_subscribe, ("_INBOX.>", "labweaver.resource.lease.verify.v1"))
+        self.assertTrue(resource_response)
+
+    def test_reused_workloads_seed_requires_private_account_key_locator(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            public_key = "A" + "A" * 55
+            source = root / f"{public_key}.nk"
+            source.write_text("test-only", encoding="utf-8")
+            source.chmod(0o600)
+            resolved, observed_public_key = FOUNDATION._workloads_seed_source(
+                source.resolve()
+            )
+            self.assertEqual(resolved, source.resolve())
+            self.assertEqual(observed_public_key, public_key)
+
+            if FOUNDATION.os.name != "nt":
+                source.chmod(0o640)
+                with self.assertRaisesRegex(
+                    FOUNDATION.FoundationError,
+                    "LW_SPRINT2_FOUNDATION_WORKLOADS_SEED_INVALID",
+                ):
+                    FOUNDATION._workloads_seed_source(source.resolve())
+
+    def test_reused_workloads_seed_must_be_account_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / f"O{'A' * 55}.nk"
+            source.write_text("test-only", encoding="utf-8")
+            source.chmod(0o600)
+            with self.assertRaisesRegex(
+                FOUNDATION.FoundationError,
+                "LW_SPRINT2_FOUNDATION_WORKLOADS_SEED_INVALID",
+            ):
+                FOUNDATION._workloads_seed_source(source.resolve())
 
     def test_workloads_account_has_bounded_jetstream_limits(self) -> None:
         limits = FOUNDATION.NATS_ACCOUNT_JETSTREAM_LIMITS
@@ -120,12 +172,15 @@ class FoundationAuthoringTests(unittest.TestCase):
                 "agent-service",
                 "environment-service",
                 "evaluation-service",
+                "resource-service",
                 "openssh-gateway",
             },
         )
         self.assertEqual(identities["openssh-gateway"][1], "clientAuth")
         self.assertIn("URI:spiffe://labweaver/access-service", identities["access-service"][0])
         self.assertIn("URI:spiffe://labweaver/control-service", identities["control-service"][0])
+        self.assertIn("URI:spiffe://labweaver/agent-service", identities["agent-service"][0])
+        self.assertEqual(identities["agent-service"][1], "serverAuth,clientAuth")
 
     def test_certificate_authoring_activates_san_extension_section(self) -> None:
         source = inspect.getsource(FOUNDATION._certificate)

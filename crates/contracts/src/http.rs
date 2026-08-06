@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AccessGrantId, ActorId, ApprovalId, BuildRequestId, CandidateId, CourseId, DiagnosticCode,
-    EndpointId, EnvironmentId, EventId, ImageArtifactId, OperationId, PlatformRole,
-    ProblemPackageId, ProjectId, ReleaseId, Revision, Sha256Digest, StreamSequence,
-    UploadSessionId, UtcTimestamp,
+    EndpointId, EnvironmentId, EventId, ImageArtifactId, LeaseId, OperationId, PlatformRole,
+    ProblemPackageId, ProjectId, ReleaseId, ResourceRequestId, Revision, Sha256Digest,
+    StreamSequence, UploadSessionId, UtcTimestamp,
 };
 
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -34,6 +34,64 @@ pub struct EnvironmentOperationAccepted {
     pub revision: Revision,
     pub status_url: String,
     pub environment_id: EnvironmentId,
+}
+
+/// Browser request for a new Work-environment capacity reservation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateResourceRequest {
+    pub course_id: CourseId,
+    /// Required project scope. Work capacity is never allocated at an
+    /// unscoped course-wide boundary.
+    pub project_id: ProjectId,
+    pub request_key: String,
+    /// Preallocated Work aggregate identity. Resource never allocates this implicitly.
+    pub environment_id: EnvironmentId,
+    pub release_id: ReleaseId,
+    pub release_version: u64,
+    /// Immutable release document identity expected by Environment at handoff.
+    pub release_sha256: Sha256Digest,
+    pub resources: crate::resource::WorkloadResources,
+    pub duration_seconds: u64,
+}
+
+/// Administrator approval or resize decision. The selected Provider is always explicit.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApproveResourceRequest {
+    pub expected_revision: Revision,
+    pub provider_binding: String,
+    pub resources: crate::resource::WorkloadResources,
+    pub duration_seconds: u64,
+    pub reason: String,
+}
+
+/// Revision-fenced reason-bearing Resource mutation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResourceRequestMutation {
+    pub expected_revision: Revision,
+    pub reason: String,
+}
+
+/// Revision-fenced Lease renewal. Resources and Provider binding are immutable after approval.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RenewResourceLease {
+    pub expected_revision: Revision,
+    pub duration_seconds: u64,
+    pub reason: String,
+}
+
+/// Stable response returned when Resource accepts an asynchronous allocation mutation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResourceOperationAccepted {
+    pub request_id: ResourceRequestId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_id: Option<LeaseId>,
+    pub revision: Revision,
+    pub status_url: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -88,6 +146,33 @@ pub struct CreateAgentRunRequest {
     pub policy_id: crate::PolicyId,
     pub policy_revision: Revision,
     pub requested_runtime: crate::authoring::RuntimeKind,
+}
+
+/// Public request for an AgentRun whose Environment candidate is explicitly a Resource-managed
+/// Work environment. This is deliberately separate from [`CreateAgentRunRequest`]: the legacy
+/// route always requests an Experiment candidate and must never gain an implicit class default.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateWorkAgentRunRequest {
+    pub package_id: ProblemPackageId,
+    pub package_revision: Revision,
+    pub package_sha256: Sha256Digest,
+    pub policy_id: crate::PolicyId,
+    pub policy_revision: Revision,
+    pub requested_runtime: crate::authoring::RuntimeKind,
+}
+
+impl From<CreateWorkAgentRunRequest> for CreateAgentRunRequest {
+    fn from(value: CreateWorkAgentRunRequest) -> Self {
+        Self {
+            package_id: value.package_id,
+            package_revision: value.package_revision,
+            package_sha256: value.package_sha256,
+            policy_id: value.policy_id,
+            policy_revision: value.policy_revision,
+            requested_runtime: value.requested_runtime,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -169,6 +254,8 @@ pub struct InternalCreateAgentRunRequest {
     pub course_id: CourseId,
     /// Public immutable request whose idempotency key remains an HTTP header.
     pub request: CreateAgentRunRequest,
+    /// Explicit class that the Environment candidate must retain through Agent execution.
+    pub expected_environment_class: crate::authoring::EnvironmentClass,
     /// Completed Control-owned package; Agent re-reads and re-hashes every object.
     pub package: crate::authoring::ProblemPackage,
     /// Internal artifact ID to opaque object-key mapping; keys never contain original paths.
@@ -666,11 +753,76 @@ pub struct OperationAuthorization {
 const TEACHER: &[PlatformRole] = &[PlatformRole::Teacher];
 const TEACHER_OR_STUDENT: &[PlatformRole] = &[PlatformRole::Teacher, PlatformRole::Student];
 const PLATFORM_ADMIN: &[PlatformRole] = &[PlatformRole::PlatformAdmin];
+const ALL_ROLES: &[PlatformRole] = &[
+    PlatformRole::Teacher,
+    PlatformRole::Student,
+    PlatformRole::PlatformAdmin,
+];
 
 /// Authorization policy for every public and gateway operation. This table is
 /// intentionally separate from route implementations so generated contracts,
 /// Gateway requests, and service middleware share one semantic source.
 pub const OPERATION_AUTHORIZATIONS: &[OperationAuthorization] = &[
+    OperationAuthorization {
+        operation_id: "createResourceRequest",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "listResourceRequests",
+        allowed_roles: ALL_ROLES,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "getResourceRequest",
+        allowed_roles: ALL_ROLES,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "cancelResourceRequest",
+        allowed_roles: TEACHER_OR_STUDENT,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "approveResourceRequest",
+        allowed_roles: PLATFORM_ADMIN,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "resizeAndApproveResourceRequest",
+        allowed_roles: PLATFORM_ADMIN,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "rejectResourceRequest",
+        allowed_roles: PLATFORM_ADMIN,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "retryResourceRequest",
+        allowed_roles: PLATFORM_ADMIN,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "getResourceLease",
+        allowed_roles: ALL_ROLES,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "listResourceLeases",
+        allowed_roles: ALL_ROLES,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "renewResourceLease",
+        allowed_roles: PLATFORM_ADMIN,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "revokeResourceLease",
+        allowed_roles: PLATFORM_ADMIN,
+        scope: OperationScopeKind::Course,
+    },
     OperationAuthorization {
         operation_id: "createProblemPackageUpload",
         allowed_roles: TEACHER,
@@ -698,6 +850,11 @@ pub const OPERATION_AUTHORIZATIONS: &[OperationAuthorization] = &[
     },
     OperationAuthorization {
         operation_id: "createAgentRun",
+        allowed_roles: TEACHER,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "createWorkAgentRun",
         allowed_roles: TEACHER,
         scope: OperationScopeKind::Course,
     },
@@ -968,6 +1125,150 @@ pub const OPERATIONS: &[OperationContract] = &[
     op!(
         Public,
         Post,
+        "/api/v1/resource-requests",
+        "createResourceRequest",
+        "resource_request:write",
+        BffSession,
+        IdempotentCreate,
+        202,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/resource-requests/{requestId}/resize-and-approve",
+        "resizeAndApproveResourceRequest",
+        "resource_request:approve",
+        BffSession,
+        IdempotentRevisioned,
+        202,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/resource-requests",
+        "listResourceRequests",
+        "resource_request:read",
+        BffSession,
+        None,
+        200,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/resource-requests/{requestId}",
+        "getResourceRequest",
+        "resource_request:read",
+        BffSession,
+        None,
+        200,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/resource-requests/{requestId}/cancel",
+        "cancelResourceRequest",
+        "resource_request:cancel",
+        BffSession,
+        IdempotentRevisioned,
+        202,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/resource-requests/{requestId}/approve",
+        "approveResourceRequest",
+        "resource_request:approve",
+        BffSession,
+        IdempotentRevisioned,
+        202,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/resource-requests/{requestId}/reject",
+        "rejectResourceRequest",
+        "resource_request:approve",
+        BffSession,
+        IdempotentRevisioned,
+        202,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/resource-requests/{requestId}/retry",
+        "retryResourceRequest",
+        "resource_request:retry",
+        BffSession,
+        IdempotentRevisioned,
+        202,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/resource-leases",
+        "listResourceLeases",
+        "resource_lease:read",
+        BffSession,
+        None,
+        200,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/resource-leases/{leaseId}",
+        "getResourceLease",
+        "resource_lease:read",
+        BffSession,
+        None,
+        200,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/resource-leases/{leaseId}/renew",
+        "renewResourceLease",
+        "resource_lease:renew",
+        BffSession,
+        IdempotentRevisioned,
+        200,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/resource-leases/{leaseId}/revoke",
+        "revokeResourceLease",
+        "resource_lease:revoke",
+        BffSession,
+        IdempotentRevisioned,
+        200,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Post,
         "/api/v1/courses/{courseId}/problem-package-uploads",
         "createProblemPackageUpload",
         "problem_package:write",
@@ -1054,6 +1355,18 @@ pub const OPERATIONS: &[OperationContract] = &[
         Post,
         "/api/v1/courses/{courseId}/agent-runs",
         "createAgentRun",
+        "agent_run:write",
+        Oidc,
+        IdempotentCreate,
+        202,
+        true,
+        true
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/courses/{courseId}/work-agent-runs",
+        "createWorkAgentRun",
         "agent_run:write",
         Oidc,
         IdempotentCreate,

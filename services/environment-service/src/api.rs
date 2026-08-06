@@ -15,9 +15,10 @@ use contracts::{
     authoring::{EnvironmentClass, EnvironmentRuntimeSpec},
     environment::{
         EndpointHealth, EnvironmentAccessEligibilityState, EnvironmentAccessEligibilitySummary,
-        EnvironmentCreateSpec, EnvironmentInstance, EnvironmentLifecycleCommand,
-        EnvironmentOperationKind, EnvironmentOwnerRelation, EnvironmentOwnerSummary,
-        EnvironmentSummary,
+        EnvironmentCreateSpec, EnvironmentInstance, EnvironmentLeaseVerificationRequest,
+        EnvironmentLifecycleCommand, EnvironmentOperationKind, EnvironmentOwnerRelation,
+        EnvironmentOwnerSummary, EnvironmentSummary, ResourceWorkCleanup,
+        ResourceWorkCleanupStatus, ResourceWorkHandoff, ResourceWorkLeaseUpdate,
     },
     http::{
         CreateEnvironmentRequest, DEFAULT_PAGE_LIMIT, EnvironmentInventoryQuery,
@@ -29,12 +30,13 @@ use uuid::Uuid;
 
 use crate::{
     ContainerReleaseResolver, EnvironmentStoreError, FreezeBindingError, FreezeBindingService,
-    NatsAccessRevoker, NatsMessagingError, PgEnvironmentStore, PgReleaseProjectionStore,
-    ReleaseProjectionError, VerifiedCallerIdentity,
+    NatsAccessRevoker, NatsMessagingError, NatsResourceLeaseVerifier, PgEnvironmentStore,
+    PgReleaseProjectionStore, ReleaseProjectionError, VerifiedCallerIdentity,
 };
 
 const ACCESS_SERVICE_SAN: &str = "spiffe://labweaver/access-service";
 const EVALUATION_SERVICE_SAN: &str = "spiffe://labweaver/evaluation-service";
+const RESOURCE_SERVICE_SAN: &str = "spiffe://labweaver/resource-service";
 const ACTOR_HEADER: &str = "x-labweaver-actor-id";
 const SESSION_HEADER: &str = "x-labweaver-session-id";
 const OPERATION_DEADLINE: Duration = Duration::from_secs(15 * 60);
@@ -45,6 +47,7 @@ pub struct EnvironmentApiState {
     store: PgEnvironmentStore,
     releases: PgReleaseProjectionStore,
     access_revoker: NatsAccessRevoker,
+    lease_verifier: NatsResourceLeaseVerifier,
     freeze_bindings: FreezeBindingService,
 }
 
@@ -54,12 +57,14 @@ impl EnvironmentApiState {
         store: PgEnvironmentStore,
         releases: PgReleaseProjectionStore,
         access_revoker: NatsAccessRevoker,
+        lease_verifier: NatsResourceLeaseVerifier,
         freeze_bindings: FreezeBindingService,
     ) -> Self {
         Self {
             store,
             releases,
             access_revoker,
+            lease_verifier,
             freeze_bindings,
         }
     }
@@ -104,7 +109,256 @@ pub fn environment_api_router(state: EnvironmentApiState) -> Router {
             "/internal/v1/environments/{environment_id}/freeze-binding",
             post(resolve_freeze_binding),
         )
+        .route(
+            "/internal/v1/resource/work-handoffs",
+            post(accept_resource_work_handoff),
+        )
+        .route(
+            "/internal/v1/resource/work-lease-updates",
+            post(accept_resource_work_lease_update),
+        )
+        .route(
+            "/internal/v1/resource/work-cleanups",
+            post(accept_resource_work_cleanup),
+        )
+        .route(
+            "/internal/v1/resource/work-cleanups/{environment_id}",
+            get(read_resource_work_cleanup),
+        )
         .with_state(state)
+}
+
+async fn accept_resource_work_lease_update(
+    State(state): State<EnvironmentApiState>,
+    caller: Option<Extension<VerifiedCallerIdentity>>,
+    body: Bytes,
+) -> Result<Json<EnvironmentInstance>, EnvironmentApiError> {
+    require_resource_service(caller)?;
+    let update = contracts::parse_strict_json::<ResourceWorkLeaseUpdate>(&body)
+        .map_err(|_| EnvironmentApiError::RequestInvalid)?;
+    update
+        .validate()
+        .map_err(|_| EnvironmentApiError::RequestInvalid)?;
+    let now = state.store.current_time().await?;
+    let authorization = state
+        .lease_verifier
+        .verify(
+            EnvironmentLeaseVerificationRequest {
+                version: 1,
+                lease_id: update.lease_id,
+                environment_id: update.environment_id,
+                course_id: update.course_id,
+                owner_actor_id: update.owner_actor_id,
+                capacity_binding: update.capacity_binding,
+            },
+            now,
+        )
+        .await?;
+    if authorization.lease_revision != update.lease_revision
+        || authorization.expires_at != update.expires_at
+    {
+        return Err(EnvironmentApiError::LeaseFenceInvalid);
+    }
+    Ok(Json(
+        state
+            .store
+            .refresh_work_lease(update.environment_id, authorization)
+            .await?,
+    ))
+}
+
+async fn accept_resource_work_cleanup(
+    State(state): State<EnvironmentApiState>,
+    caller: Option<Extension<VerifiedCallerIdentity>>,
+    body: Bytes,
+) -> Result<(StatusCode, Json<EnvironmentOperationAccepted>), EnvironmentApiError> {
+    require_resource_service(caller)?;
+    let cleanup = contracts::parse_strict_json::<ResourceWorkCleanup>(&body)
+        .map_err(|_| EnvironmentApiError::RequestInvalid)?;
+    cleanup
+        .validate()
+        .map_err(|_| EnvironmentApiError::RequestInvalid)?;
+    let instance = state.store.load(cleanup.environment_id).await?;
+    if instance.class != EnvironmentClass::Work
+        || instance.lease_id != Some(cleanup.lease_id)
+        || instance.course_id != cleanup.course_id
+        || instance.owner_id != cleanup.owner_actor_id
+        || instance.capacity_binding.as_deref() != Some(cleanup.capacity_binding.as_str())
+    {
+        return Err(EnvironmentApiError::LeaseFenceInvalid);
+    }
+    if instance.observed_state == contracts::environment::ObservedEnvironmentState::Deleted
+        || matches!(
+            instance.operation.kind,
+            EnvironmentOperationKind::Expire
+                | EnvironmentOperationKind::Delete
+                | EnvironmentOperationKind::Cleanup
+        )
+    {
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(EnvironmentOperationAccepted {
+                environment_id: instance.id,
+                operation_id: instance.operation.id,
+                revision: instance.operation.accepted_revision,
+                status_url: format!(
+                    "/api/v1/environments/{}/operations/{}",
+                    instance.id, instance.operation.id
+                ),
+            }),
+        ));
+    }
+    let access_revocation_revision = state
+        .access_revoker
+        .revoke(&instance, "environment_expired")
+        .await?;
+    let accepted_at = state.store.current_time().await?;
+    let command = EnvironmentLifecycleCommand {
+        environment_id: instance.id,
+        kind: EnvironmentOperationKind::Expire,
+        expected_revision: instance.revision,
+        actor_id: instance.owner_id,
+        trace_id: cleanup.trace_id,
+        accepted_at,
+        deadline_at: add_duration(accepted_at, OPERATION_DEADLINE)?,
+        access_revocation_revision: Some(access_revocation_revision),
+        preserve_mutable_disk: false,
+        max_attempts: 3,
+        reset_target: None,
+    };
+    let accepted = state
+        .store
+        .accept_api_command(
+            &format!(
+                "resource-work-cleanup-{}-{}",
+                cleanup.lease_id,
+                cleanup.lease_revision.get()
+            ),
+            &command,
+            None,
+            instance.course_id,
+        )
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(accepted)))
+}
+
+async fn read_resource_work_cleanup(
+    State(state): State<EnvironmentApiState>,
+    caller: Option<Extension<VerifiedCallerIdentity>>,
+    Path(environment_id): Path<EnvironmentId>,
+) -> Result<Json<ResourceWorkCleanupStatus>, EnvironmentApiError> {
+    require_resource_service(caller)?;
+    let instance = state.store.load(environment_id).await?;
+    Ok(Json(ResourceWorkCleanupStatus {
+        version: 1,
+        environment_id,
+        revision: instance.revision,
+        observed_state: instance.observed_state,
+        cleanup_complete: instance.observed_state
+            == contracts::environment::ObservedEnvironmentState::Deleted,
+        diagnostic_code: instance.last_diagnostic_code,
+    }))
+}
+
+fn require_resource_service(
+    caller: Option<Extension<VerifiedCallerIdentity>>,
+) -> Result<(), EnvironmentApiError> {
+    if caller.is_some_and(|Extension(identity)| identity.contains_san(RESOURCE_SERVICE_SAN)) {
+        Ok(())
+    } else {
+        Err(EnvironmentApiError::CallerDenied)
+    }
+}
+
+async fn accept_resource_work_handoff(
+    State(state): State<EnvironmentApiState>,
+    caller: Option<Extension<VerifiedCallerIdentity>>,
+    body: Bytes,
+) -> Result<(StatusCode, Json<EnvironmentOperationAccepted>), EnvironmentApiError> {
+    if !caller.is_some_and(|Extension(identity)| identity.contains_san(RESOURCE_SERVICE_SAN)) {
+        return Err(EnvironmentApiError::CallerDenied);
+    }
+    let handoff = contracts::parse_strict_json::<ResourceWorkHandoff>(&body)
+        .map_err(|_| EnvironmentApiError::RequestInvalid)?;
+    handoff
+        .validate()
+        .map_err(|_| EnvironmentApiError::RequestInvalid)?;
+    let release = state
+        .releases
+        .resolve(handoff.release_id, handoff.release_version)
+        .await?;
+    if release.withdrawn_at.is_some()
+        || release.projection.release.course_id != handoff.course_id
+        || release.projection.release.environment_spec_sha256 != handoff.release_sha256
+        || release.projection.environment_spec.class != EnvironmentClass::Work
+    {
+        return Err(EnvironmentApiError::ReleaseDenied);
+    }
+    let provider_binding = match &release.projection.environment_spec.runtime {
+        EnvironmentRuntimeSpec::Container {
+            provider_binding, ..
+        }
+        | EnvironmentRuntimeSpec::VirtualMachine {
+            provider_binding, ..
+        } => provider_binding,
+    };
+    if provider_binding != &handoff.provider_binding {
+        return Err(EnvironmentApiError::ReleaseDenied);
+    }
+    let now = state.store.current_time().await?;
+    let authorization = state
+        .lease_verifier
+        .verify(
+            EnvironmentLeaseVerificationRequest {
+                version: 1,
+                lease_id: handoff.lease_id,
+                environment_id: handoff.environment_id,
+                course_id: handoff.course_id,
+                owner_actor_id: handoff.owner_actor_id,
+                capacity_binding: handoff.capacity_binding.clone(),
+            },
+            now,
+        )
+        .await?;
+    if authorization.lease_revision != handoff.lease_revision {
+        return Err(EnvironmentApiError::LeaseFenceInvalid);
+    }
+    let command = EnvironmentLifecycleCommand {
+        environment_id: handoff.environment_id,
+        kind: EnvironmentOperationKind::Create,
+        expected_revision: Revision::new(1).map_err(|_| EnvironmentApiError::RequestInvalid)?,
+        actor_id: handoff.owner_actor_id,
+        trace_id: handoff.trace_id.clone(),
+        accepted_at: now,
+        deadline_at: add_duration(now, OPERATION_DEADLINE)?,
+        access_revocation_revision: None,
+        preserve_mutable_disk: false,
+        max_attempts: 3,
+        reset_target: None,
+    };
+    let create = EnvironmentCreateSpec {
+        course_id: handoff.course_id,
+        owner_actor_id: handoff.owner_actor_id,
+        display_label: handoff.display_label,
+        class: EnvironmentClass::Work,
+        runtime_kind: release.projection.release.runtime_kind,
+        release_id: handoff.release_id,
+        release_version: handoff.release_version,
+        provider_binding: handoff.provider_binding,
+        lease_id: Some(handoff.lease_id),
+        capacity_binding: Some(handoff.capacity_binding),
+        eligibility_expires_at: release.projection.environment_spec.retention.retain_until,
+    };
+    let idempotency_key = format!(
+        "resource-work-{}-{}",
+        handoff.request_id,
+        handoff.request_revision.get()
+    );
+    let accepted = state
+        .store
+        .accept_api_command(&idempotency_key, &command, Some(&create), handoff.course_id)
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(accepted)))
 }
 
 async fn resolve_freeze_binding(
@@ -534,6 +788,8 @@ pub enum EnvironmentApiError {
     RevisionConflict,
     #[error("LW_ENVIRONMENT_RELEASE_DENIED")]
     ReleaseDenied,
+    #[error("LW_ENVIRONMENT_RESOURCE_LEASE_FENCE_INVALID")]
+    LeaseFenceInvalid,
     #[error("LW_ENVIRONMENT_CLOCK_INVALID")]
     ClockInvalid,
     #[error("LW_ENVIRONMENT_RESPONSE_INVALID")]
@@ -560,7 +816,7 @@ impl IntoResponse for EnvironmentApiError {
             | Self::IdempotencyInvalid
             | Self::InventoryFilterUnsupported => StatusCode::BAD_REQUEST,
             Self::RevisionRequired => StatusCode::PRECONDITION_REQUIRED,
-            Self::RevisionConflict => StatusCode::PRECONDITION_FAILED,
+            Self::RevisionConflict | Self::LeaseFenceInvalid => StatusCode::PRECONDITION_FAILED,
             Self::ReleaseDenied => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Store(EnvironmentStoreError::EnvironmentNotFound)
             | Self::Release(ReleaseProjectionError::NotFound) => StatusCode::NOT_FOUND,

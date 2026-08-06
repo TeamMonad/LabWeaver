@@ -1,0 +1,72 @@
+---
+# Issue the Resource NATS client and platform mTLS identities from reviewed CAs.
+- name: Issue Resource TLS identities
+  hosts: resource_identity_controller
+  gather_facts: false
+  become: false
+  vars:
+    resource_tls_python: "{{ lookup('ansible.builtin.env', 'LABWEAVER_PYTHON') | default('python3', true) }}"
+    resource_tls_script: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_TLS_SCRIPT') }}"
+    resource_tls_authority: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_TLS_AUTHORITY') }}"
+    resource_tls_platform_authority: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_TLS_PLATFORM_AUTHORITY') }}"
+    resource_tls_openssl: "{{ lookup('ansible.builtin.env', 'LABWEAVER_OPENSSL') }}"
+    resource_tls_output: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_TLS_OUTPUT') }}"
+  tasks:
+    - name: Require explicit private TLS issuance inputs
+      ansible.builtin.assert:
+        that:
+          - resource_tls_script | length > 0
+          - resource_tls_authority | length > 0
+          - resource_tls_platform_authority | length > 0
+          - resource_tls_openssl | length > 0
+          - resource_tls_output | length > 0
+          - "'.private' in resource_tls_authority or '/private/' in resource_tls_authority"
+          - "'.private' in resource_tls_platform_authority or '/private/' in resource_tls_platform_authority"
+          - "'.private' in resource_tls_output or '/private/' in resource_tls_output"
+        fail_msg: RESOURCE_TLS_ISSUANCE_INPUT_INVALID
+
+    - name: Inspect TLS signing inputs without reading secret contents
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ resource_tls_script }}"
+        - "{{ resource_tls_authority }}"
+        - "{{ resource_tls_platform_authority }}"
+        - "{{ resource_tls_openssl }}"
+      register: resource_tls_inputs
+      no_log: true
+
+    - name: Reject missing TLS signing inputs
+      ansible.builtin.assert:
+        that:
+          - resource_tls_inputs.results | map(attribute='stat.exists') | min
+          - resource_tls_inputs.results[0].stat.mode | default('') in ['0700', '0750', '0755']
+          - resource_tls_inputs.results[3].stat.mode | default('') in ['0700', '0750', '0755']
+        fail_msg: RESOURCE_TLS_SIGNING_SOURCE_UNAVAILABLE
+      no_log: true
+
+    - name: Issue Resource TLS identities with bounded permissions
+      ansible.builtin.command:
+        argv:
+          - "{{ resource_tls_python }}"
+          - "{{ resource_tls_script }}"
+          - --authority
+          - "{{ resource_tls_authority }}"
+          - --platform-authority
+          - "{{ resource_tls_platform_authority }}"
+          - --openssl
+          - "{{ resource_tls_openssl }}"
+          - --output
+          - "{{ resource_tls_output }}"
+      register: resource_tls_issuance
+      changed_when: true
+      no_log: true
+
+    - name: Require machine-readable TLS issuance success
+      ansible.builtin.assert:
+        that:
+          - resource_tls_issuance.rc == 0
+          - "'resource-service' in resource_tls_issuance.stdout"
+          - "'issued' in resource_tls_issuance.stdout"
+        fail_msg: RESOURCE_TLS_ISSUANCE_FAILED
+      no_log: true

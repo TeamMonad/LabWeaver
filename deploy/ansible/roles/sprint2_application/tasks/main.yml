@@ -4,6 +4,20 @@
     sprint2_application_lock: >-
       {{ lookup('ansible.builtin.file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml }}
 
+- name: Load the reviewed private application variable locator
+  ansible.builtin.include_vars:
+    file: "{{ sprint2_application_vars_file }}"
+    name: sprint2_application_reviewed_vars
+  when: sprint2_application_vars_file | length > 0
+  no_log: true
+
+- name: Apply reviewed private application variables
+  ansible.builtin.set_fact:
+    "{{ item.key }}": "{{ item.value }}"
+  loop: "{{ sprint2_application_reviewed_vars | default({}) | dict2items }}"
+  when: sprint2_application_reviewed_vars is defined
+  no_log: true
+
 - name: Validate non-destructive application inputs
   ansible.builtin.assert:
     that:
@@ -11,6 +25,8 @@
       - sprint2_application_source_commit is match('^[0-9a-f]{40,64}$')
       - sprint2_application_package_manifest | length > 0
       - sprint2_application_postgres_service_file | length > 0
+      - sprint2_application_postgres_client_certificate_file | length > 0
+      - sprint2_application_postgres_client_private_key_file | length > 0
       - sprint2_application_postgres_database is match('^[a-z][a-z0-9_]{0,62}$')
       - sprint2_application_nats_server | length > 0
       - sprint2_application_nats_credentials_file | length > 0
@@ -80,6 +96,7 @@
 - name: Validate remote application tools and credentials
   ansible.builtin.stat:
     path: "{{ item }}"
+    checksum_algorithm: sha256
   loop:
     - "{{ sprint2_application_kubeconfig }}"
     - "{{ sprint2_application_kubectl }}"
@@ -90,6 +107,8 @@
     - "{{ sprint2_application_kcadm }}"
     - "{{ sprint2_application_keytool }}"
     - "{{ sprint2_application_postgres_service_file }}"
+    - "{{ sprint2_application_postgres_client_certificate_file }}"
+    - "{{ sprint2_application_postgres_client_private_key_file }}"
     - "{{ sprint2_application_nats_credentials_file }}"
     - "{{ sprint2_application_nats_ca_file }}"
     - "{{ sprint2_application_nats_client_certificate_file }}"
@@ -99,6 +118,45 @@
     - "{{ sprint2_application_minio_ca_file }}"
     - "{{ sprint2_application_harbor_ca_file }}"
   register: sprint2_application_remote_inputs
+
+- name: Report missing remote application locators before blocking
+  ansible.builtin.debug:
+    msg: "SPRINT2_APPLICATION_MISSING_REMOTE_LOCATOR={{ item.item }}"
+  loop: "{{ sprint2_application_remote_inputs.results }}"
+  when: not item.stat.exists
+
+- name: Validate the PostgreSQL port-forward contract
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_postgres_forward_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - sprint2_application_postgres_forward_kubernetes_service is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - sprint2_application_postgres_forward_service_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?\\.service$')
+      - sprint2_application_postgres_forward_port | int > 1024
+      - sprint2_application_postgres_forward_port | int < 65536
+    fail_msg: SPRINT2_APPLICATION_POSTGRES_FORWARD_INPUT_INVALID
+  when: sprint2_application_postgres_forward_enabled | bool
+
+- name: Install the persistent PostgreSQL port-forward
+  ansible.builtin.template:
+    src: postgres-port-forward.service.j2
+    dest: /etc/systemd/system/{{ sprint2_application_postgres_forward_service_name }}
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart the adopted PostgreSQL port-forward
+  when: sprint2_application_postgres_forward_enabled | bool
+
+- name: Apply the PostgreSQL port-forward before database adoption
+  ansible.builtin.meta: flush_handlers
+  when: sprint2_application_postgres_forward_enabled | bool
+
+- name: Require the adopted PostgreSQL port-forward endpoint
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ sprint2_application_postgres_forward_port }}"
+    state: started
+    timeout: 30
+  when: sprint2_application_postgres_forward_enabled | bool
 
 - name: Validate controller-owned reviewed inputs
   ansible.builtin.stat:
@@ -140,6 +198,60 @@
       {{ lookup('ansible.builtin.file', sprint2_application_access_seed_file) | from_json }}
     sprint2_application_configuration_bundle_sha256: >-
       sha256:{{ sprint2_application_controller_inputs.results[4].stat.checksum }}
+  no_log: true
+
+- name: Parse Access Service role configuration from the reviewed bundle
+  ansible.builtin.set_fact:
+    sprint2_application_access_configuration: >-
+      {{ (
+        sprint2_application_configuration_objects
+        | selectattr('kind', 'equalto', 'ConfigMap')
+        | selectattr('metadata.name', 'equalto', 'access-service-config')
+        | first
+      ).data['config.yaml']
+         | from_yaml_all
+         | selectattr('oidc', 'defined')
+         | first }}
+  no_log: true
+
+- name: Select reviewed NATS and Evaluation configuration objects
+  ansible.builtin.set_fact:
+    sprint2_application_control_secret_objects: >-
+      {{ sprint2_application_configuration_objects
+         | selectattr('kind', 'equalto', 'Secret')
+         | selectattr('metadata.name', 'equalto', 'control-service-secrets')
+         | list }}
+    sprint2_application_evaluation_config_objects: >-
+      {{ sprint2_application_configuration_objects
+         | selectattr('kind', 'equalto', 'ConfigMap')
+         | selectattr('metadata.name', 'equalto', 'evaluation-service-config')
+         | list }}
+  no_log: true
+
+- name: Parse reviewed Evaluation configuration and NATS CA binding
+  ansible.builtin.set_fact:
+    sprint2_application_evaluation_configuration: >-
+      {{ (sprint2_application_evaluation_config_objects | first).data['config.yaml']
+         | from_yaml }}
+    sprint2_application_bundle_nats_ca_sha256: >-
+      {{ ((sprint2_application_control_secret_objects | first).data['nats-ca.pem']
+          | b64decode) | hash('sha256') }}
+    sprint2_application_remote_nats_ca_sha256: >-
+      {{ (sprint2_application_remote_inputs.results
+          | selectattr('item', 'equalto', sprint2_application_nats_ca_file)
+          | map(attribute='stat.checksum')
+          | first) }}
+  no_log: true
+
+- name: Require reviewed configuration bindings before any cluster mutation
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_control_secret_objects | length == 1
+      - sprint2_application_evaluation_config_objects | length == 1
+      - sprint2_application_bundle_nats_ca_sha256 == sprint2_application_remote_nats_ca_sha256
+      - sprint2_application_evaluation_configuration.coordinator.workerRegistryPullConfigFile is string
+      - sprint2_application_evaluation_configuration.coordinator.workerRegistryPullConfigFile is match('^/etc/labweaver/secrets/[^/]+$')
+    fail_msg: SPRINT2_APPLICATION_CONFIGURATION_BINDING_INVALID
   no_log: true
 
 - name: Validate immutable package identity
@@ -198,6 +310,15 @@
       - sprint2_application_configuration_manifest_value.configMaps.keys() | sort == sprint2_application_required_configmaps | sort
       - sprint2_application_configuration_manifest_value.secrets.keys() | sort == sprint2_application_required_secrets | sort
     fail_msg: SPRINT2_APPLICATION_CONFIGURATION_INVALID
+  no_log: true
+
+- name: Require canonical platform administrator role binding
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_access_configuration.oidc.role_claim_path == ['realm_access', 'roles']
+      - sprint2_application_access_configuration.oidc.role_mappings.platform_admin == 'platform_admin'
+      - sprint2_application_access_configuration.oidc.role_mappings['platform-admin'] == 'platform_admin'
+    fail_msg: SPRINT2_APPLICATION_OIDC_ROLE_MAPPING_INVALID
   no_log: true
 
 - name: Validate every private configuration key
@@ -424,6 +545,16 @@
   no_log: true
 
 - name: Probe retained PostgreSQL database identity
+  ansible.builtin.slurp:
+    src: "{{ sprint2_application_postgres_service_file }}"
+  register: sprint2_application_postgres_service_source
+  no_log: true
+
+- name: Bind effective PostgreSQL service identity
+  ansible.builtin.set_fact:
+    sprint2_application_postgres_effective_service_file: "{{ sprint2_application_postgres_service_file }}"
+
+- name: Probe retained PostgreSQL database identity
   ansible.builtin.command:
     argv:
       - "{{ sprint2_application_psql }}"
@@ -433,7 +564,9 @@
       - --command
       - SELECT current_database()
   environment:
-    PGSERVICEFILE: "{{ sprint2_application_postgres_service_file }}"
+    PGSERVICEFILE: "{{ sprint2_application_postgres_effective_service_file }}"
+    PGSSLCERT: "{{ sprint2_application_postgres_client_certificate_file }}"
+    PGSSLKEY: "{{ sprint2_application_postgres_client_private_key_file }}"
   register: sprint2_application_postgres_identity
   changed_when: false
   retries: 6
@@ -470,7 +603,9 @@
       - --file
       - "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/baseline-adopt.sql"
   environment:
-    PGSERVICEFILE: "{{ sprint2_application_postgres_service_file }}"
+    PGSERVICEFILE: "{{ sprint2_application_postgres_effective_service_file }}"
+    PGSSLCERT: "{{ sprint2_application_postgres_client_certificate_file }}"
+    PGSSLKEY: "{{ sprint2_application_postgres_client_private_key_file }}"
   changed_when: true
   register: sprint2_application_baseline_apply
   retries: 6
@@ -496,7 +631,9 @@
       - --file
       - "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/access-seed-adopt.sql"
   environment:
-    PGSERVICEFILE: "{{ sprint2_application_postgres_service_file }}"
+    PGSERVICEFILE: "{{ sprint2_application_postgres_effective_service_file }}"
+    PGSSLCERT: "{{ sprint2_application_postgres_client_certificate_file }}"
+    PGSSLKEY: "{{ sprint2_application_postgres_client_private_key_file }}"
   changed_when: true
   register: sprint2_application_access_seed_apply
   retries: 6
@@ -504,12 +641,19 @@
   until: sprint2_application_access_seed_apply.rc == 0
   no_log: true
 
+- name: Bind controller NATS probe endpoint
+  ansible.builtin.set_fact:
+    sprint2_application_nats_probe_server: >-
+      {{ ('tls://nats.labweaver-data.svc:' ~ sprint2_application_nats_controller_port)
+         if sprint2_application_nats_controller_address | length > 0
+         else sprint2_application_nats_server }}
+
 - name: Probe retained JetStream
   ansible.builtin.command:
     argv:
       - "{{ sprint2_application_nats }}"
       - --server
-      - "{{ sprint2_application_nats_server }}"
+      - "{{ sprint2_application_nats_probe_server }}"
       - --creds
       - "{{ sprint2_application_nats_credentials_file }}"
       - --tlsca
@@ -527,7 +671,7 @@
     argv:
       - "{{ sprint2_application_nats }}"
       - --server
-      - "{{ sprint2_application_nats_server }}"
+      - "{{ sprint2_application_nats_probe_server }}"
       - --creds
       - "{{ sprint2_application_nats_credentials_file }}"
       - --tlsca
@@ -550,7 +694,7 @@
     argv:
       - "{{ sprint2_application_nats }}"
       - --server
-      - "{{ sprint2_application_nats_server }}"
+      - "{{ sprint2_application_nats_probe_server }}"
       - --creds
       - "{{ sprint2_application_nats_credentials_file }}"
       - --tlsca
@@ -582,7 +726,7 @@
     argv:
       - "{{ sprint2_application_nats }}"
       - --server
-      - "{{ sprint2_application_nats_server }}"
+      - "{{ sprint2_application_nats_probe_server }}"
       - --creds
       - "{{ sprint2_application_nats_credentials_file }}"
       - --tlsca
@@ -609,7 +753,7 @@
     argv:
       - "{{ sprint2_application_nats }}"
       - --server
-      - "{{ sprint2_application_nats_server }}"
+      - "{{ sprint2_application_nats_probe_server }}"
       - --creds
       - "{{ sprint2_application_nats_credentials_file }}"
       - --tlsca
@@ -643,7 +787,7 @@
     argv:
       - "{{ sprint2_application_nats }}"
       - --server
-      - "{{ sprint2_application_nats_server }}"
+      - "{{ sprint2_application_nats_probe_server }}"
       - --creds
       - "{{ sprint2_application_nats_credentials_file }}"
       - --tlsca
@@ -666,7 +810,7 @@
   ansible.builtin.command:
     argv: >-
       {{ [sprint2_application_nats,
-          '--server', sprint2_application_nats_server,
+          '--server', sprint2_application_nats_probe_server,
           '--creds', sprint2_application_nats_credentials_file,
           '--tlsca', sprint2_application_nats_ca_file,
           '--tlscert', sprint2_application_nats_client_certificate_file,
@@ -684,7 +828,7 @@
     argv:
       - "{{ sprint2_application_nats }}"
       - --server
-      - "{{ sprint2_application_nats_server }}"
+      - "{{ sprint2_application_nats_probe_server }}"
       - --creds
       - "{{ sprint2_application_nats_credentials_file }}"
       - --tlsca
@@ -718,6 +862,20 @@
   loop: "{{ sprint2_application_consumer_info_after.results }}"
   no_log: true
 
+- name: Inspect the immutable artifact bucket without mutation
+  ansible.builtin.command:
+    argv:
+      - "{{ sprint2_application_mc }}"
+      - ls
+      - "{{ sprint2_application_minio_alias }}/{{ sprint2_application_minio_bucket }}"
+  register: sprint2_application_minio_bucket_before
+  changed_when: false
+  failed_when: false
+  environment:
+    MC_CONFIG_DIR: "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/mc"
+    SSL_CERT_FILE: "{{ sprint2_application_minio_ca_file }}"
+  no_log: true
+
 - name: Create the immutable artifact bucket only when missing
   ansible.builtin.command:
     argv:
@@ -726,10 +884,12 @@
       - --ignore-existing
       - "{{ sprint2_application_minio_alias }}/{{ sprint2_application_minio_bucket }}"
   changed_when: false
+  register: sprint2_application_minio_bucket_create
+  when: sprint2_application_minio_bucket_before.rc != 0
   environment:
     MC_CONFIG_DIR: "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/mc"
     SSL_CERT_FILE: "{{ sprint2_application_minio_ca_file }}"
-  no_log: true
+  no_log: false
 
 - name: Enable versioning without removing existing objects
   ansible.builtin.command:
@@ -762,20 +922,64 @@
     (sprint2_application_minio_version.stdout | from_json).status != 'success' or
     (sprint2_application_minio_version.stdout | from_json).versioning.status != 'Enabled'
 
-- name: Verify retained private Harbor project
+- name: Load the retained Harbor project-admin credential locator
+  ansible.builtin.slurp:
+    src: "{{ sprint2_application_harbor_admin_password_file }}"
+  register: sprint2_application_harbor_admin_password_raw
+  changed_when: false
+  no_log: true
+
+- name: Validate the retained Harbor project-admin credential
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_harbor_admin_password_file | length > 0
+      - sprint2_application_harbor_admin_password_raw.content | length > 0
+    fail_msg: LW_HARBOR_PROJECT_ADMIN_CREDENTIAL_MISSING
+
+- name: Inspect the adopted Harbor project without mutation
   ansible.builtin.uri:
     url: "{{ sprint2_application_harbor_api }}/api/v2.0/projects?name={{ sprint2_application_harbor_project | urlencode }}"
-    user: "{{ sprint2_application_harbor_username }}"
-    password: "{{ sprint2_application_harbor_password }}"
+    user: "{{ sprint2_application_harbor_admin_username }}"
+    password: "{{ sprint2_application_harbor_admin_password_raw.content | b64decode | trim }}"
     force_basic_auth: true
     validate_certs: true
     ca_path: "{{ sprint2_application_harbor_ca_file }}"
     return_content: true
   register: sprint2_application_harbor_project_info
+  failed_when: sprint2_application_harbor_project_info.status != 200 or sprint2_application_harbor_project_info.json | length > 1
+  no_log: true
+
+- name: Create the adopted Harbor project only when missing
+  ansible.builtin.uri:
+    url: "{{ sprint2_application_harbor_api }}/api/v2.0/projects"
+    method: POST
+    user: "{{ sprint2_application_harbor_admin_username }}"
+    password: "{{ sprint2_application_harbor_admin_password_raw.content | b64decode | trim }}"
+    force_basic_auth: true
+    validate_certs: true
+    ca_path: "{{ sprint2_application_harbor_ca_file }}"
+    body_format: json
+    body:
+      project_name: "{{ sprint2_application_harbor_project }}"
+      public: false
+    status_code: [201, 409]
+  when: sprint2_application_harbor_project_info.json | length == 0
+  no_log: true
+
+- name: Verify adopted private Harbor project identity
+  ansible.builtin.uri:
+    url: "{{ sprint2_application_harbor_api }}/api/v2.0/projects?name={{ sprint2_application_harbor_project | urlencode }}"
+    user: "{{ sprint2_application_harbor_admin_username }}"
+    password: "{{ sprint2_application_harbor_admin_password_raw.content | b64decode | trim }}"
+    force_basic_auth: true
+    validate_certs: true
+    ca_path: "{{ sprint2_application_harbor_ca_file }}"
+    return_content: true
+  register: sprint2_application_harbor_project_verified
   failed_when: >-
-    sprint2_application_harbor_project_info.status != 200 or
-    sprint2_application_harbor_project_info.json | length != 1 or
-    sprint2_application_harbor_project_info.json[0].name != sprint2_application_harbor_project
+    sprint2_application_harbor_project_verified.status != 200 or
+    sprint2_application_harbor_project_verified.json | length != 1 or
+    sprint2_application_harbor_project_verified.json[0].name != sprint2_application_harbor_project
   no_log: true
 
 - name: Load the adopted Harbor CA for Kubernetes nodes
@@ -854,9 +1058,19 @@
       - -file
       - "{{ sprint2_application_keycloak_ca_file }}"
       - -keystore
-      - "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak-truststore.p12"
+      - "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak-truststore.p12.tmp"
       - -storepass
       - "{{ sprint2_application_keycloak_truststore_password }}"
+  changed_when: true
+  no_log: true
+
+- name: Atomically publish the Keycloak administration truststore
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/mv
+      - -f
+      - "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak-truststore.p12.tmp"
+      - "{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/keycloak-truststore.p12"
   changed_when: true
   no_log: true
 
@@ -1770,8 +1984,8 @@
       - sprint2_application_evaluation_default_deny.resources | length == 1
       - sprint2_application_evaluation_default_deny.resources[0].spec.podSelector == {}
       - sprint2_application_evaluation_default_deny.resources[0].spec.policyTypes | sort == ['Egress', 'Ingress']
-      - sprint2_application_evaluation_default_deny.resources[0].spec.ingress == []
-      - sprint2_application_evaluation_default_deny.resources[0].spec.egress == []
+      - sprint2_application_evaluation_default_deny.resources[0].spec.ingress | default([]) == []
+      - sprint2_application_evaluation_default_deny.resources[0].spec.egress | default([]) == []
     fail_msg: SPRINT2_APPLICATION_EVALUATION_DEFAULT_DENY_INVALID
 
 - name: Require the evaluation worker to use the platform image pull identity
@@ -1867,6 +2081,17 @@
                     protocol: TCP
                   - port: "4222"
                     protocol: TCP
+                  - port: "9000"
+                    protocol: TCP
+          # Browser uploads terminate at the Web nginx object-store proxy. Give
+          # that exact workload access only to MinIO rather than adding it to
+          # the broader owner-service transport rule above.
+          - fromEndpoints:
+              - matchLabels:
+                  k8s:io.kubernetes.pod.namespace: "{{ sprint2_application_namespace }}"
+                  app.kubernetes.io/name: web
+            toPorts:
+              - ports:
                   - port: "9000"
                     protocol: TCP
 

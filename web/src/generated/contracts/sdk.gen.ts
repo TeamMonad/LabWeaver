@@ -2,7 +2,7 @@
 
 import { type Client, type ClientMeta, type Options as Options2, type RequestResult, type ServerSentEventsResult, type TDataShape, urlSearchParamsBodySerializer } from './client';
 import { client } from './client.gen';
-import type { AppendEnvironmentCandidateDecisionData, AppendEnvironmentCandidateDecisionErrors, AppendEnvironmentCandidateDecisionResponses, AppendEvaluationCandidateDecisionData, AppendEvaluationCandidateDecisionErrors, AppendEvaluationCandidateDecisionResponses, BeginOidcLoginData, BeginOidcLoginErrors, CancelAgentRunData, CancelAgentRunErrors, CancelAgentRunResponses, CancelEnvironmentOperationData, CancelEnvironmentOperationErrors, CancelEnvironmentOperationResponses, CompleteOidcLoginData, CompleteOidcLoginErrors, CompleteProblemPackageUploadData, CompleteProblemPackageUploadErrors, CompleteProblemPackageUploadResponses, ConsumeOidcBackchannelLogoutData, ConsumeOidcBackchannelLogoutErrors, ConsumeOidcBackchannelLogoutResponses, CreateAccessGrantData, CreateAccessGrantErrors, CreateAccessGrantResponses, CreateAgentRunData, CreateAgentRunErrors, CreateAgentRunResponses, CreateCourseLlmPolicyData, CreateCourseLlmPolicyErrors, CreateCourseLlmPolicyResponses, CreateEnvironmentData, CreateEnvironmentErrors, CreateEnvironmentResponses, CreateEnvironmentTemplateReleaseData, CreateEnvironmentTemplateReleaseErrors, CreateEnvironmentTemplateReleaseResponses, CreateProblemPackageUploadData, CreateProblemPackageUploadErrors, CreateProblemPackageUploadResponses, CreateSshPublicKeyData, CreateSshPublicKeyErrors, CreateSshPublicKeyResponses, DeleteEnvironmentData, DeleteEnvironmentErrors, DeleteEnvironmentResponses, DeleteSshPublicKeyData, DeleteSshPublicKeyErrors, DeleteSshPublicKeyResponses, FreezeSubmissionData, FreezeSubmissionErrors, FreezeSubmissionResponses, GetAccessGrantData, GetAccessGrantErrors, GetAccessGrantResponses, GetActiveCourseLlmPolicyData, GetActiveCourseLlmPolicyErrors, GetActiveCourseLlmPolicyResponses, GetAgentRunData, GetAgentRunErrors, GetAgentRunResponses, GetAuthSessionData, GetAuthSessionErrors, GetAuthSessionResponses, GetEnvironmentCandidateData, GetEnvironmentCandidateErrors, GetEnvironmentCandidateResponses, GetEnvironmentData, GetEnvironmentErrors, GetEnvironmentOperationData, GetEnvironmentOperationErrors, GetEnvironmentOperationResponses, GetEnvironmentResponses, GetEnvironmentTemplateReleaseData, GetEnvironmentTemplateReleaseErrors, GetEnvironmentTemplateReleaseResponses, GetEvaluationCandidateData, GetEvaluationCandidateErrors, GetEvaluationCandidateResponses, GetFrozenSubmissionData, GetFrozenSubmissionErrors, GetFrozenSubmissionResponses, GetProblemPackageData, GetProblemPackageErrors, GetProblemPackageResponses, IssueConsoleCapabilityData, IssueConsoleCapabilityErrors, IssueConsoleCapabilityResponses, IssueCsrfTokenData, IssueCsrfTokenErrors, IssueCsrfTokenResponses, ListConsoleCapabilitiesData, ListConsoleCapabilitiesErrors, ListConsoleCapabilitiesResponses, ListEnvironmentAccessGrantsData, ListEnvironmentAccessGrantsErrors, ListEnvironmentAccessGrantsResponses, ListEnvironmentEndpointsData, ListEnvironmentEndpointsErrors, ListEnvironmentEndpointsResponses, ListEnvironmentOperationsData, ListEnvironmentOperationsErrors, ListEnvironmentOperationsResponses, ListEnvironmentsData, ListEnvironmentsErrors, ListEnvironmentsResponses, ListEnvironmentTemplateReleasesData, ListEnvironmentTemplateReleasesErrors, ListEnvironmentTemplateReleasesResponses, ListSshPublicKeysData, ListSshPublicKeysErrors, ListSshPublicKeysResponses, LogoutBrowserSessionData, LogoutBrowserSessionErrors, RecoverEnvironmentData, RecoverEnvironmentErrors, RecoverEnvironmentResponses, RenewAccessGrantData, RenewAccessGrantErrors, RenewAccessGrantResponses, ResetEnvironmentData, ResetEnvironmentErrors, ResetEnvironmentResponses, RestartEnvironmentData, RestartEnvironmentErrors, RestartEnvironmentResponses, RetryAgentRunTrackData, RetryAgentRunTrackErrors, RetryAgentRunTrackResponses, RetryEnvironmentData, RetryEnvironmentErrors, RetryEnvironmentResponses, RevokeAccessGrantData, RevokeAccessGrantErrors, RevokeAccessGrantResponses, StartEnvironmentData, StartEnvironmentErrors, StartEnvironmentResponses, StopEnvironmentData, StopEnvironmentErrors, StopEnvironmentResponses, StreamCourseEventsData, StreamCourseEventsErrors, StreamCourseEventsResponse, StreamCourseEventsResponses, WithdrawEnvironmentTemplateReleaseData, WithdrawEnvironmentTemplateReleaseErrors, WithdrawEnvironmentTemplateReleaseResponses } from './types.gen';
+import type { AppendEnvironmentCandidateDecisionData, AppendEnvironmentCandidateDecisionErrors, AppendEnvironmentCandidateDecisionResponses, AppendEvaluationCandidateDecisionData, AppendEvaluationCandidateDecisionErrors, AppendEvaluationCandidateDecisionResponses, ApproveResourceRequestData, ApproveResourceRequestErrors, ApproveResourceRequestResponses, BeginOidcLoginData, BeginOidcLoginErrors, CancelAgentRunData, CancelAgentRunErrors, CancelAgentRunResponses, CancelEnvironmentOperationData, CancelEnvironmentOperationErrors, CancelEnvironmentOperationResponses, CancelResourceRequestData, CancelResourceRequestErrors, CancelResourceRequestResponses, CompleteOidcLoginData, CompleteOidcLoginErrors, CompleteProblemPackageUploadData, CompleteProblemPackageUploadErrors, CompleteProblemPackageUploadResponses, ConsumeOidcBackchannelLogoutData, ConsumeOidcBackchannelLogoutErrors, ConsumeOidcBackchannelLogoutResponses, CreateAccessGrantData, CreateAccessGrantErrors, CreateAccessGrantResponses, CreateAgentRunData, CreateAgentRunErrors, CreateAgentRunResponses, CreateCourseLlmPolicyData, CreateCourseLlmPolicyErrors, CreateCourseLlmPolicyResponses, CreateEnvironmentData, CreateEnvironmentErrors, CreateEnvironmentResponses, CreateEnvironmentTemplateReleaseData, CreateEnvironmentTemplateReleaseErrors, CreateEnvironmentTemplateReleaseResponses, CreateProblemPackageUploadData, CreateProblemPackageUploadErrors, CreateProblemPackageUploadResponses, CreateResourceRequestData, CreateResourceRequestErrors, CreateResourceRequestResponses, CreateSshPublicKeyData, CreateSshPublicKeyErrors, CreateSshPublicKeyResponses, CreateWorkAgentRunData, CreateWorkAgentRunErrors, CreateWorkAgentRunResponses, DeleteEnvironmentData, DeleteEnvironmentErrors, DeleteEnvironmentResponses, DeleteSshPublicKeyData, DeleteSshPublicKeyErrors, DeleteSshPublicKeyResponses, FreezeSubmissionData, FreezeSubmissionErrors, FreezeSubmissionResponses, GetAccessGrantData, GetAccessGrantErrors, GetAccessGrantResponses, GetActiveCourseLlmPolicyData, GetActiveCourseLlmPolicyErrors, GetActiveCourseLlmPolicyResponses, GetAgentRunData, GetAgentRunErrors, GetAgentRunResponses, GetAuthSessionData, GetAuthSessionErrors, GetAuthSessionResponses, GetEnvironmentCandidateData, GetEnvironmentCandidateErrors, GetEnvironmentCandidateResponses, GetEnvironmentData, GetEnvironmentErrors, GetEnvironmentOperationData, GetEnvironmentOperationErrors, GetEnvironmentOperationResponses, GetEnvironmentResponses, GetEnvironmentTemplateReleaseData, GetEnvironmentTemplateReleaseErrors, GetEnvironmentTemplateReleaseResponses, GetEvaluationCandidateData, GetEvaluationCandidateErrors, GetEvaluationCandidateResponses, GetFrozenSubmissionData, GetFrozenSubmissionErrors, GetFrozenSubmissionResponses, GetProblemPackageData, GetProblemPackageErrors, GetProblemPackageResponses, GetResourceLeaseData, GetResourceLeaseErrors, GetResourceLeaseResponses, GetResourceRequestData, GetResourceRequestErrors, GetResourceRequestResponses, IssueConsoleCapabilityData, IssueConsoleCapabilityErrors, IssueConsoleCapabilityResponses, IssueCsrfTokenData, IssueCsrfTokenErrors, IssueCsrfTokenResponses, ListConsoleCapabilitiesData, ListConsoleCapabilitiesErrors, ListConsoleCapabilitiesResponses, ListEnvironmentAccessGrantsData, ListEnvironmentAccessGrantsErrors, ListEnvironmentAccessGrantsResponses, ListEnvironmentEndpointsData, ListEnvironmentEndpointsErrors, ListEnvironmentEndpointsResponses, ListEnvironmentOperationsData, ListEnvironmentOperationsErrors, ListEnvironmentOperationsResponses, ListEnvironmentsData, ListEnvironmentsErrors, ListEnvironmentsResponses, ListEnvironmentTemplateReleasesData, ListEnvironmentTemplateReleasesErrors, ListEnvironmentTemplateReleasesResponses, ListResourceLeasesData, ListResourceLeasesErrors, ListResourceLeasesResponses, ListResourceRequestsData, ListResourceRequestsErrors, ListResourceRequestsResponses, ListSshPublicKeysData, ListSshPublicKeysErrors, ListSshPublicKeysResponses, LogoutBrowserSessionData, LogoutBrowserSessionErrors, RecoverEnvironmentData, RecoverEnvironmentErrors, RecoverEnvironmentResponses, RejectResourceRequestData, RejectResourceRequestErrors, RejectResourceRequestResponses, RenewAccessGrantData, RenewAccessGrantErrors, RenewAccessGrantResponses, RenewResourceLeaseData, RenewResourceLeaseErrors, RenewResourceLeaseResponses, ResetEnvironmentData, ResetEnvironmentErrors, ResetEnvironmentResponses, ResizeAndApproveResourceRequestData, ResizeAndApproveResourceRequestErrors, ResizeAndApproveResourceRequestResponses, RestartEnvironmentData, RestartEnvironmentErrors, RestartEnvironmentResponses, RetryAgentRunTrackData, RetryAgentRunTrackErrors, RetryAgentRunTrackResponses, RetryEnvironmentData, RetryEnvironmentErrors, RetryEnvironmentResponses, RetryResourceRequestData, RetryResourceRequestErrors, RetryResourceRequestResponses, RevokeAccessGrantData, RevokeAccessGrantErrors, RevokeAccessGrantResponses, RevokeResourceLeaseData, RevokeResourceLeaseErrors, RevokeResourceLeaseResponses, StartEnvironmentData, StartEnvironmentErrors, StartEnvironmentResponses, StopEnvironmentData, StopEnvironmentErrors, StopEnvironmentResponses, StreamCourseEventsData, StreamCourseEventsErrors, StreamCourseEventsResponse, StreamCourseEventsResponses, WithdrawEnvironmentTemplateReleaseData, WithdrawEnvironmentTemplateReleaseErrors, WithdrawEnvironmentTemplateReleaseResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -446,6 +446,26 @@ export const getProblemPackage = <ThrowOnError extends boolean = false>(options:
 });
 
 /**
+ * createWorkAgentRun
+ *
+ * Permission: agent_run:write. Timeout: 30000 ms. Cancellable: true. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const createWorkAgentRun = <ThrowOnError extends boolean = false>(options: Options<CreateWorkAgentRunData, ThrowOnError>): RequestResult<CreateWorkAgentRunResponses, CreateWorkAgentRunErrors, ThrowOnError> => (options.client ?? client).post<CreateWorkAgentRunResponses, CreateWorkAgentRunErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/courses/{courseId}/work-agent-runs',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
  * listEnvironments
  *
  * Permission: environment:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
@@ -810,6 +830,230 @@ export const deleteSshPublicKey = <ThrowOnError extends boolean = false>(options
         }],
     url: '/api/v1/me/ssh-public-keys/{keyId}',
     ...options
+});
+
+/**
+ * listResourceLeases
+ *
+ * Permission: resource_lease:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const listResourceLeases = <ThrowOnError extends boolean = false>(options: Options<ListResourceLeasesData, ThrowOnError>): RequestResult<ListResourceLeasesResponses, ListResourceLeasesErrors, ThrowOnError> => (options.client ?? client).get<ListResourceLeasesResponses, ListResourceLeasesErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            in: 'cookie',
+            name: '__Host-labweaver_session',
+            type: 'apiKey'
+        }],
+    url: '/api/v1/resource-leases',
+    ...options
+});
+
+/**
+ * getResourceLease
+ *
+ * Permission: resource_lease:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const getResourceLease = <ThrowOnError extends boolean = false>(options: Options<GetResourceLeaseData, ThrowOnError>): RequestResult<GetResourceLeaseResponses, GetResourceLeaseErrors, ThrowOnError> => (options.client ?? client).get<GetResourceLeaseResponses, GetResourceLeaseErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            in: 'cookie',
+            name: '__Host-labweaver_session',
+            type: 'apiKey'
+        }],
+    url: '/api/v1/resource-leases/{leaseId}',
+    ...options
+});
+
+/**
+ * renewResourceLease
+ *
+ * Permission: resource_lease:renew. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const renewResourceLease = <ThrowOnError extends boolean = false>(options: Options<RenewResourceLeaseData, ThrowOnError>): RequestResult<RenewResourceLeaseResponses, RenewResourceLeaseErrors, ThrowOnError> => (options.client ?? client).post<RenewResourceLeaseResponses, RenewResourceLeaseErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            in: 'cookie',
+            name: '__Host-labweaver_session',
+            type: 'apiKey'
+        }],
+    url: '/api/v1/resource-leases/{leaseId}/renew',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * revokeResourceLease
+ *
+ * Permission: resource_lease:revoke. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const revokeResourceLease = <ThrowOnError extends boolean = false>(options: Options<RevokeResourceLeaseData, ThrowOnError>): RequestResult<RevokeResourceLeaseResponses, RevokeResourceLeaseErrors, ThrowOnError> => (options.client ?? client).post<RevokeResourceLeaseResponses, RevokeResourceLeaseErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            in: 'cookie',
+            name: '__Host-labweaver_session',
+            type: 'apiKey'
+        }],
+    url: '/api/v1/resource-leases/{leaseId}/revoke',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * listResourceRequests
+ *
+ * Permission: resource_request:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const listResourceRequests = <ThrowOnError extends boolean = false>(options: Options<ListResourceRequestsData, ThrowOnError>): RequestResult<ListResourceRequestsResponses, ListResourceRequestsErrors, ThrowOnError> => (options.client ?? client).get<ListResourceRequestsResponses, ListResourceRequestsErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            in: 'cookie',
+            name: '__Host-labweaver_session',
+            type: 'apiKey'
+        }],
+    url: '/api/v1/resource-requests',
+    ...options
+});
+
+/**
+ * createResourceRequest
+ *
+ * Permission: resource_request:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const createResourceRequest = <ThrowOnError extends boolean = false>(options: Options<CreateResourceRequestData, ThrowOnError>): RequestResult<CreateResourceRequestResponses, CreateResourceRequestErrors, ThrowOnError> => (options.client ?? client).post<CreateResourceRequestResponses, CreateResourceRequestErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            in: 'cookie',
+            name: '__Host-labweaver_session',
+            type: 'apiKey'
+        }],
+    url: '/api/v1/resource-requests',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * getResourceRequest
+ *
+ * Permission: resource_request:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const getResourceRequest = <ThrowOnError extends boolean = false>(options: Options<GetResourceRequestData, ThrowOnError>): RequestResult<GetResourceRequestResponses, GetResourceRequestErrors, ThrowOnError> => (options.client ?? client).get<GetResourceRequestResponses, GetResourceRequestErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            in: 'cookie',
+            name: '__Host-labweaver_session',
+            type: 'apiKey'
+        }],
+    url: '/api/v1/resource-requests/{requestId}',
+    ...options
+});
+
+/**
+ * approveResourceRequest
+ *
+ * Permission: resource_request:approve. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const approveResourceRequest = <ThrowOnError extends boolean = false>(options: Options<ApproveResourceRequestData, ThrowOnError>): RequestResult<ApproveResourceRequestResponses, ApproveResourceRequestErrors, ThrowOnError> => (options.client ?? client).post<ApproveResourceRequestResponses, ApproveResourceRequestErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            in: 'cookie',
+            name: '__Host-labweaver_session',
+            type: 'apiKey'
+        }],
+    url: '/api/v1/resource-requests/{requestId}/approve',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * cancelResourceRequest
+ *
+ * Permission: resource_request:cancel. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const cancelResourceRequest = <ThrowOnError extends boolean = false>(options: Options<CancelResourceRequestData, ThrowOnError>): RequestResult<CancelResourceRequestResponses, CancelResourceRequestErrors, ThrowOnError> => (options.client ?? client).post<CancelResourceRequestResponses, CancelResourceRequestErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            in: 'cookie',
+            name: '__Host-labweaver_session',
+            type: 'apiKey'
+        }],
+    url: '/api/v1/resource-requests/{requestId}/cancel',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * rejectResourceRequest
+ *
+ * Permission: resource_request:approve. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const rejectResourceRequest = <ThrowOnError extends boolean = false>(options: Options<RejectResourceRequestData, ThrowOnError>): RequestResult<RejectResourceRequestResponses, RejectResourceRequestErrors, ThrowOnError> => (options.client ?? client).post<RejectResourceRequestResponses, RejectResourceRequestErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            in: 'cookie',
+            name: '__Host-labweaver_session',
+            type: 'apiKey'
+        }],
+    url: '/api/v1/resource-requests/{requestId}/reject',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * resizeAndApproveResourceRequest
+ *
+ * Permission: resource_request:approve. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const resizeAndApproveResourceRequest = <ThrowOnError extends boolean = false>(options: Options<ResizeAndApproveResourceRequestData, ThrowOnError>): RequestResult<ResizeAndApproveResourceRequestResponses, ResizeAndApproveResourceRequestErrors, ThrowOnError> => (options.client ?? client).post<ResizeAndApproveResourceRequestResponses, ResizeAndApproveResourceRequestErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            in: 'cookie',
+            name: '__Host-labweaver_session',
+            type: 'apiKey'
+        }],
+    url: '/api/v1/resource-requests/{requestId}/resize-and-approve',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * retryResourceRequest
+ *
+ * Permission: resource_request:retry. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const retryResourceRequest = <ThrowOnError extends boolean = false>(options: Options<RetryResourceRequestData, ThrowOnError>): RequestResult<RetryResourceRequestResponses, RetryResourceRequestErrors, ThrowOnError> => (options.client ?? client).post<RetryResourceRequestResponses, RetryResourceRequestErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            in: 'cookie',
+            name: '__Host-labweaver_session',
+            type: 'apiKey'
+        }],
+    url: '/api/v1/resource-requests/{requestId}/retry',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
 });
 
 /**

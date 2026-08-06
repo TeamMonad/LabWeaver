@@ -17,10 +17,10 @@ spec:
   to:
     - group: ""
       kind: Service
-      name: web
+      name: access-service
     - group: ""
       kind: Service
-      name: access-service
+      name: web
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
@@ -42,6 +42,10 @@ spec:
             type: PathPrefix
             value: {{ required "objectStoreRoute.pathPrefix is required" .Values.objectStoreRoute.pathPrefix | quote }}
       backendRefs:
+        # Route uploads through the existing Web Nginx object-store proxy.
+        # The retained Cilium Gateway controller does not reconcile
+        # BackendTLSPolicy, so sending the request directly to MinIO would
+        # make the Gateway speak plaintext to MinIO's TLS port and return 503.
         - name: web
           namespace: {{ .Release.Namespace }}
           port: 8080

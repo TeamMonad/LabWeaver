@@ -25,12 +25,14 @@ pub mod oidc;
 pub mod owner_resolver;
 pub mod provider;
 pub mod repository;
+/// Short-lived signed identity delegation from Access to Resource.
+pub mod resource_delegation;
 pub mod roles;
 
 pub use authorization::{AuthorizationContext, AuthorizationError, authorize};
 pub use config::{
     AccessAuthFile, AuthConfig, AuthConfigError, ControlGatewayFileConfig, GrantRuntimeFileConfig,
-    MtlsFileConfig, NatsFileConfig, TransportSecurityMode,
+    MtlsFileConfig, NatsFileConfig, ResourceGatewayFileConfig, TransportSecurityMode,
 };
 pub use crypto::{CryptoError, EncryptedValue, KeyRing};
 pub use csrf::{CsrfError, CsrfToken, verify_csrf_token};
@@ -50,6 +52,10 @@ pub use repository::{
     consume_oidc_transaction, create_bff_session, load_bff_session, load_logout_hint,
     load_membership_snapshot, require_service_identity, revoke_bff_session,
     revoke_bff_sessions_by_sid, upsert_actor,
+};
+pub use resource_delegation::{
+    ResourceDelegation, ResourceDelegationError, decode_resource_delegation,
+    encode_resource_delegation,
 };
 pub use roles::{RoleClaimError, RoleMappings, extract_platform_roles};
 

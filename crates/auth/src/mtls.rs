@@ -26,6 +26,9 @@ pub struct MtlsServerConfig {
 
 /// Reads server credentials and builds a fail-closed client-auth verifier.
 pub fn load_mtls_server_config(config: &MtlsFileConfig) -> Result<MtlsServerConfig, MtlsError> {
+    if config.required_eku != "clientAuth" {
+        return Err(MtlsError::ClientCa);
+    }
     install_crypto_provider()?;
     let certificates = read_certificates(&config.server_certificate_file)?;
     let private_key = read_private_key(&config.server_key_file)?;
@@ -177,6 +180,7 @@ mod tests {
             client_ca_file: client_ca_file.to_string_lossy().into_owned(),
             allowed_san_uris: BTreeSet::from([allowed_uri.to_owned()]),
             required_eku: "clientAuth".to_owned(),
+            delegation_key_file: None,
         };
         let loaded = load_mtls_server_config(&config)?;
         assert_eq!(

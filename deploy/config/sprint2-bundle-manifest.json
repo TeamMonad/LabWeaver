@@ -23,6 +23,7 @@
       "nats.creds",
       "oidc-ca.pem",
       "oidc-client-secret",
+      "resource-delegation-key",
       "session-keyring.json",
       "tls.crt",
       "tls.key"

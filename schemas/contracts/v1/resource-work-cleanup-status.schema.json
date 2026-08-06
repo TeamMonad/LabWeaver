@@ -1,0 +1,70 @@
+{
+  "$defs": {
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "ObservedEnvironmentState": {
+      "description": "Authoritative observed lifecycle state.",
+      "enum": [
+        "requested",
+        "validating",
+        "building",
+        "provisioning",
+        "ready",
+        "stopping",
+        "stopped",
+        "updating",
+        "expiring",
+        "deleting",
+        "deleted",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Minimal Resource-visible cleanup readback. Provider handles, endpoints and\nuser content never cross this boundary.",
+  "properties": {
+    "cleanupComplete": {
+      "type": "boolean"
+    },
+    "diagnosticCode": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "environmentId": {
+      "$ref": "#/$defs/EnvironmentId"
+    },
+    "observedState": {
+      "$ref": "#/$defs/ObservedEnvironmentState"
+    },
+    "revision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "version": {
+      "format": "uint8",
+      "maximum": 255,
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "environmentId",
+    "revision",
+    "observedState",
+    "cleanupComplete"
+  ],
+  "title": "ResourceWorkCleanupStatus",
+  "type": "object"
+}

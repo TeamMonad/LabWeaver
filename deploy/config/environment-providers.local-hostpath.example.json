@@ -1,0 +1,18 @@
+{
+  "apiVersion": "deploy.labweaver.io/environment-providers/v1",
+  "mode": "local-hostpath",
+  "releaseEligible": false,
+  "singleNode": true,
+  "container": {
+    "binding": "kubernetes-work-local-hostpath",
+    "subject": "labweaver.provider.kubernetes.container.v1",
+    "providerKind": "container",
+    "workspaceStorageClassName": "hostpath",
+    "workspaceAccessMode": "ReadWriteOnce",
+    "networkMode": "allow_all"
+  },
+  "kubevirt": {
+    "enabled": false,
+    "reason": "Docker Desktop local mode has no KubeVirt or CDI capability"
+  }
+}
