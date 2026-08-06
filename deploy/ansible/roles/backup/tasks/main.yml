@@ -44,10 +44,33 @@
   failed_when: false
   register: backup_harbor_namespace
 
+- name: Detect an existing Harbor Helm release before taking a Harbor reconcile backup
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/kubectl
+      - --kubeconfig
+      - /etc/kubernetes/admin.conf
+      - get
+      - secret
+      - -n
+      - harbor
+      - --field-selector
+      - type=helm.sh/release.v1
+      - -o
+      - name
+  changed_when: false
+  failed_when: false
+  register: backup_harbor_release
+
 - name: Bind the externally retained Harbor data backup locator
   ansible.builtin.set_fact:
     backup_harbor_data_locator: "{{ lookup('env', 'LABWEAVER_HARBOR_DATA_BACKUP_LOCATOR') }}"
-    backup_existing_harbor: "{{ backup_harbor_namespace.rc == 0 }}"
+    # A labelled-but release-less harbor namespace is the fresh-install state
+    # created mid-cycle by the harbor role itself; only an actual Helm release
+    # carries business data that must be backed up before reconciliation.
+    backup_existing_harbor: >-
+      {{ backup_harbor_namespace.rc == 0
+         and backup_harbor_release.stdout_lines | length > 0 }}
 
 - name: Require a data backup locator before reconciling an existing Harbor release
   ansible.builtin.assert:

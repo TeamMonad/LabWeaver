@@ -623,6 +623,76 @@
   changed_when: false
   register: harbor_cluster_uid
 
+- name: Publish the current Harbor internal CA to the control-plane trust store
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    {{ harbor_kubectl_path }} --kubeconfig {{ harbor_kubeconfig_path }}
+    -n {{ harbor_namespace }} get secret harbor-internal-ca
+    -o jsonpath='{.data.ca\.crt}' | base64 -d
+    > /etc/pki/ca-trust/source/anchors/labweaver-harbor-internal-ca.crt
+    && update-ca-trust extract
+  args:
+    executable: /bin/bash
+  become: true
+  changed_when: true
+
+- name: Wait for the Harbor Gateway to be programmed
+  ansible.builtin.command:
+    argv:
+      - "{{ harbor_kubectl_path }}"
+      - --kubeconfig
+      - "{{ harbor_kubeconfig_path }}"
+      - -n
+      - "{{ harbor_namespace }}"
+      - get
+      - gateway
+      - "{{ harbor_gateway_name }}"
+      - -o
+      - "jsonpath={.status.conditions[?(@.type=='Programmed')].status}"
+  changed_when: false
+  register: harbor_gateway_programmed
+  until: harbor_gateway_programmed.stdout == 'True'
+  retries: 30
+  delay: 10
+
+- name: Read the managed Harbor system project before guaranteeing its policy
+  ansible.builtin.uri:
+    url: "https://{{ harbor_hostname }}/api/v2.0/projects?name={{ harbor_project_name | urlencode }}"
+    method: GET
+    user: admin
+    password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    validate_certs: true
+    status_code: 200
+    return_content: true
+  delegate_to: "{{ groups['control_plane'][0] }}"
+  become: false
+  check_mode: false
+  no_log: true
+  register: harbor_system_project_probe
+  until: harbor_system_project_probe.status == 200
+  retries: 24
+  delay: 10
+
+- name: Create the Harbor system project with the locked policy when missing
+  ansible.builtin.uri:
+    url: "https://{{ harbor_hostname }}/api/v2.0/projects"
+    method: POST
+    user: admin
+    password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    validate_certs: true
+    status_code: 201
+    body_format: json
+    body:
+      project_name: "{{ harbor_project_name }}"
+      metadata: { public: "false", auto_scan: "true" }
+  delegate_to: "{{ groups['control_plane'][0] }}"
+  become: false
+  check_mode: false
+  no_log: true
+  when: harbor_system_project_probe.json | length == 0
+
 - name: Verify the managed Harbor system project policy
   ansible.builtin.uri:
     url: "https://{{ harbor_hostname }}/api/v2.0/projects?name={{ harbor_project_name | urlencode }}"
