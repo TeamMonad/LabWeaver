@@ -169,7 +169,9 @@
 
 - name: Probe the old Harbor credential and require rejection
   ansible.builtin.uri:
-    url: "{{ foundation_rotation_verify_old_harbor_api }}/api/v2.0/systeminfo"
+    # /api/v2.0/systeminfo is anonymous; /api/v2.0/users is auth-gated so a
+    # rejected old credential surfaces as 401/403 instead of a false 200.
+    url: "{{ foundation_rotation_verify_old_harbor_api }}/api/v2.0/users"
     user: "{{ foundation_rotation_verify_old_harbor_username }}"
     password: "{{ foundation_rotation_verify_old_harbor_password }}"
     force_basic_auth: true
