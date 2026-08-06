@@ -82,6 +82,8 @@ spec:
     - backendRefs:
         # Harbor's nginx service owns the complete external routing contract.
         # Routing /v2 directly to core bypasses registry authentication and
-        # breaks the HEAD requests required by BuildKit.
+        # breaks the HEAD requests required by BuildKit. The backend uses the
+        # nginx TLS listener: its plaintext listener 301-redirects to the
+        # external HTTPS URL, which loops behind a TLS-terminating Gateway.
         - name: {{ harbor_release_name }}
-          port: 80
+          port: 443
