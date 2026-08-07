@@ -56,23 +56,23 @@
   failed_when: false
 
 - name: Kill surviving old-cluster container processes (control plane, Cilium,
-    KubeVirt, etcd, conmon) - CRI-O stop/purge alone does not kill them
-  ansible.builtin.shell: "{{ item }} 2>/dev/null || true"
+    KubeVirt, etcd, conmon) - CRI-O stop/purge alone does not kill them.
+    Bracket patterns avoid pkill matching the task's own wrapper shell.
+  ansible.builtin.shell: "{{ item }} || true"
   changed_when: false
   loop:
-    - "pkill -9 -f '/usr/libexec/crio/conmon'"
-    - "pkill -9 -f 'kube-apiserver'"
-    - "pkill -9 -f 'kube-controller'"
-    - "pkill -9 -f 'kube-scheduler'"
-    - "pkill -9 -f 'kube-proxy'"
-    - "pkill -9 -f 'cilium-agent'"
-    - "pkill -9 -f 'cilium-envoy'"
-    - "pkill -9 -f 'cilium-health'"
-    - "pkill -9 -f 'virt-operator'"
-    - "pkill -9 -f 'virt-api'"
-    - "pkill -9 -f 'virt-controller'"
-    - "pkill -9 -f 'bin/etcd'"
-  no_log: true
+    - "pkill -9 -f '[c]onmon'"
+    - "pkill -9 -f '[k]ube-apiserver'"
+    - "pkill -9 -f '[k]ube-controller'"
+    - "pkill -9 -f '[k]ube-scheduler'"
+    - "pkill -9 -f '[k]ube-proxy'"
+    - "pkill -9 -f '[c]ilium-agent'"
+    - "pkill -9 -f '[c]ilium-envoy'"
+    - "pkill -9 -f '[c]ilium-health'"
+    - "pkill -9 -f '[v]irt-operator'"
+    - "pkill -9 -f '[v]irt-api'"
+    - "pkill -9 -f '[v]irt-controller'"
+    - "pkill -9 -f '[b]in/etcd'"
 
 - name: Wait for processes to exit
   ansible.builtin.pause:
