@@ -124,3 +124,23 @@
     enabled: true
     state: started
   loop: [crio, kubelet]
+
+- name: Configure CRI-O proxy environment (optional, when the node cannot reach
+    public image registries directly; e.g. campus-network egress restrictions)
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/crio.service.d/99-proxy.conf
+    mode: '0644'
+    content: |
+      [Service]
+      Environment=HTTP_PROXY={{ crio_http_proxy }}
+      Environment=HTTPS_PROXY={{ crio_https_proxy }}
+      Environment=NO_PROXY={{ crio_no_proxy }}
+  when: crio_http_proxy | default('') != '' or crio_https_proxy | default('') != ''
+  register: crio_proxy_conf
+
+- name: Reload CRI-O when proxy configuration changed
+  ansible.builtin.systemd_service:
+    name: crio
+    daemon_reload: true
+    state: restarted
+  when: crio_proxy_conf is defined and crio_proxy_conf.changed

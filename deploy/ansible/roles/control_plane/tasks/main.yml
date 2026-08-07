@@ -7,6 +7,7 @@
 - name: Initialize control plane exactly once
   ansible.builtin.command: >-
     kubeadm init
+    --kubernetes-version={{ kubernetes_patch }}
     --apiserver-advertise-address={{ kubernetes_api_advertise_address }}
     --control-plane-endpoint={{ kubernetes_api_endpoint }}
     --pod-network-cidr={{ kubernetes_pod_cidr }}
