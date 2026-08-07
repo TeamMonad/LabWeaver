@@ -45,11 +45,9 @@
     replace: '# \1'
 
 - name: Disable swap image on Ubuntu (dase uses /swap.img)
-  ansible.builtin.systemd_service:
-    name: dphys-swapfile
-    enabled: false
-    state: stopped
-  ignore_errors: true
+  ansible.builtin.command: swapoff -a
+  changed_when: false
+  when: ansible_swaptotal_mb | default(0) | int > 0
 
 - name: Configure Kubernetes kernel modules
   ansible.builtin.copy:

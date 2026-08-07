@@ -80,6 +80,7 @@
     name: [kubeadm, kubelet, kubectl, cri-o, cri-o-runc, cri-tools]
     state: absent
     purge: true
+    allow_change_held_packages: true
   ignore_errors: true
 
 - name: Verify residue is gone
