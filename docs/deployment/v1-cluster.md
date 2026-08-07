@@ -146,3 +146,78 @@ python .private/v1/scripts/drift_check.py \
   根目录（NATS authority rotation、部署 bundle 的 locator 根）。
 - 破坏性操作（旧残留清理、kubeadm reset、格式化）必须显式确认 + 验收窗口，
   与 #148「deployment window boundary」一致。
+
+## 9. 部署执行记录（2026-08-07，分支 feature/148-v1-ubuntu-cluster）
+
+> 本记录只登记已完成事实与受控 locator；**未完成的阶段不表述为已完成**。
+> 控制器：63 root-only `/var/lib/labweaver/v1-controller`（git HEAD 见每次
+> playbook 运行的 commit），Ansible venv `/opt/labweaver/venv`（ansible-core
+> 2.18.6 + kubernetes 34.1.0 + jsonschema 4.24.0，与 controller.lock.yml 一致）。
+
+### 9.1 已完成的部署阶段
+
+| 阶段 | 内容 | 证据/状态 |
+| --- | --- | --- |
+| 0 | inventory/凭据 preflight | 00-preflight.yml failed=0；凭据 DRIFT_OK（见 §9.4） |
+| 1 | Ubuntu 节点准备（唯一 hostname、swap off、sysctl、模块） | 15-v1-node-prepare.yml（此前已完成） |
+| 1b | 97/158 旧残留审计+清理 | 15b-v1-residue-cleanup.yml；root-only 审计记录在 63 `/var/lib/labweaver/.private/v1/residue-audit-*.json` |
+| 2 | CRI-O 1.35.5 + K8s v1.35.6（pkgs.k8s.io deb 源，精确版本 pin） | 20-install-crio-k8s.yml failed=0；三节点 `kubelet/kubeadm v1.35.6`、`crio 1.35.5` |
+| 2c | 63 控制面（kubeadm init v1.35.6，skip kube-proxy） | 30-bootstrap-control-plane.yml；`/etc/kubernetes/admin.conf` |
+| 2d | 97/158 加入（定向 reset 手动并发控制面后重新 join） | 40-join-workers.yml changed=2；三节点 Ready |
+| 3 | Cilium 1.19.5（kube-proxy replacement + Gateway API + Hubble）、MetalLB 0.16.1（IPPool 10.99.0.100-200） | 50-install-network.yml failed=0；ds cilium 3/3；`gatewayclass cilium` Accepted |
+| 3s | local-path（directory 模式）+ NFS CSI（nfs-rwx，158 导出 `/srv/nfs/k8s`） | 60-install-storage.yml failed=0；`local-path (default)` + `nfs-rwx` StorageClass |
+| 4 | KubeVirt 1.8.4 + CDI 1.65.0（useEmulation: false，KVM 设备 kvm/tun/vhost） | 70-install-kubevirt.yml failed=0；`kv/kubevirt Deployed`；真实 VM 生命周期验证通过（见 §9.2） |
+| 5a | cert-manager 1.21.0 + ClusterIssuer dev-selfsigned | 80-install-addons.yml failed=0 |
+| 5b | 内部 Gateway（cilium 类，MetalLB 10.99.0.100）+ labweaver 命名空间 | 80-install-addons.yml；`gateway/public-gateway Programmed=True` |
+
+### 9.2 真实 KubeVirt VM 生命周期验证（本记录唯一运行证据）
+
+- 位置：63 root-only `/var/tmp/kvm-probe-vm.yml`（后已删除）；namespace
+  `labweaver-verify-baseline`（验证后已删除，零残留）。
+- 流程：DataVolume 导入 cirros（`source.http` 指向 63 本地 HTTP 8899，因
+  CDI importer 直连 quay.io 被校园网阻断；cirros qcow2 走代理下载后提供）→
+  `virtctl start` → VMI Running（节点 v1-worker-158，真实 KVM）→ console 连接
+  rc=0 → `virtctl stop` → VMI 删除 → `virtctl start` → VMI 再 Running →
+  delete → VMI/VM/pod/PVC 零残留。
+- **待办**：V100 GPU passthrough（97）、P40 mdev（158 `0000:3b:00.0`，
+  GRID P40 类型已确认）尚未配置 KubeVirt `permittedHostDevices`，属下一轮
+  #148 阶段 4 收尾；不做任何 GPU 伪证据。
+
+### 9.3 本部署发现的缺陷与修复（全部在 feature/148-v1-ubuntu-cluster 分支提交）
+
+- `kubernetes_packages`：Ubuntu 分支无 `startswith` Jinja test → 用 `match`；
+  apt 候选随通道演进（1.35.7/1.35.6）→ 改为精确版本 pin + madison 断言；
+  CRI-O 代理 drop-in（校园网 egress）+ 清理残留 7891 drop-in。
+- `control_plane`：kubeadm init 补 `--kubernetes-version`（防 fallback 漂移）。
+- `cluster_network`：Gateway API 从 v1.6.0 standard 降级 **v1.4.1 experimental**
+  （Cilium 1.19 需要 TLSRoute v1alpha2 served；v1.6 standard 移除之）；
+  本地 CRD 文件；helm/k8s 模块代理环境变量（仅 helm 走代理，k8s API 客户端不走）。
+- `storage_nodes/controllers`：v1 directory 模式（跳过 device/SELinux）；本地
+  local-path manifest；NFS CSI helm 代理。
+- `kubevirt`/`cluster_addons`：本地 manifest 文件（GitHub raw 校园网不可达）。
+- 并发控制面清理：20:31 手动 init 的 97 控制面（dase 从 172.20.153.109，
+  aliyun 镜像源）与 158 的 join 状态按用户决策 reset，重新 join 63。
+
+### 9.4 凭据与漂移复查（部署完成后 2026-08-07）
+
+- `drift_check.py`（`.private/v1/scripts/`）：三节点 `[OK]`，`DRIFT_OK`。
+  维护账户 uid/sudoers/sshd hash、authorized_keys 指纹、`.private` 0700、
+  host key、GPU 拓扑（63 双 3090 / 97 V100 / 158 P40+mdev）全部与 2026-08-07
+  基线一致；**本次部署未触碰任何签发源/私钥/凭据**。
+- 控制器密钥指纹（63 `/root/.ssh/controller-key` = 本机
+  `.private/v1-deploy/controller-key`）：`SHA256:Vz0P2tiX…tSm0`。
+- 新增 bundle（root-only，63 `/var/lib/labweaver/bundle/`）：gateway-api
+  experimental v1.4.1、local-path v0.0.36、kubevirt/cdi operator+cr、
+  cert-manager v1.21.0、cirros qcow2（验证用，已停 HTTP 服务）。
+
+### 9.5 遗留与下一轮（不冒充已完成）
+
+- **V100 GPU passthrough（97）与 P40 mdev（158）**：KubeVirt
+  `permittedHostDevices`/`mediatedDevicesConfiguration` 未配置；97 上 ollama
+  `qwen3.6:35b` 仍占用 V100，需先停用再绑定（§5.4 决策项）。
+- **Sprint 组件（阶段 5/6）**：Ollama→Agent 绑定、PostgreSQL/NATS/MinIO/Harbor/
+  Trivy/BuildKit/Keycloak、平台十工作负载未部署。
+- **正式 verify/release-gate**：90-verify 依赖 TestFlight 身份与 Harbor/backup
+  证据链，属 Sprint 结束验收窗口（A+B 批准 + D connected Verify），本记录
+  不替代。Playwright `demo replay` 同样未执行。
+- 97/158 上 ollama 是否保留、63 ollama 与 KubeVirt CPU 调度共存策略待 A 决策。
