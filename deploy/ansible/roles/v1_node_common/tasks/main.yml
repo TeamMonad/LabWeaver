@@ -1,0 +1,103 @@
+---
+# Ubuntu 22.04 node preparation for LabWeaver v1 cluster.
+# Replaces the Rocky-specific rocky_common role for Debian-family nodes.
+- name: Install Ubuntu Kubernetes node prerequisites
+  ansible.builtin.apt:
+    name:
+      - curl
+      - jq
+      - tar
+      - conntrack
+      - socat
+      - ethtool
+      - qemu-guest-agent
+      - nfs-common
+      - lvm2
+      - chrony
+      - iproute2
+      - ca-certificates
+      - gnupg
+    state: present
+    update_cache: true
+
+- name: Enable time sync and guest agent
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop: [chrony, qemu-guest-agent]
+
+- name: Disable UFW if present
+  ansible.builtin.systemd_service:
+    name: ufw
+    enabled: false
+    state: stopped
+  ignore_errors: true
+
+- name: Disable swap immediately
+  ansible.builtin.command: swapoff -a
+  changed_when: false
+
+- name: Comment swap entries in fstab
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^(?!#)(.*\s+swap\s+.*)$'
+    replace: '# \1'
+
+- name: Disable swap image on Ubuntu (dase uses /swap.img)
+  ansible.builtin.systemd_service:
+    name: dphys-swapfile
+    enabled: false
+    state: stopped
+  ignore_errors: true
+
+- name: Configure Kubernetes kernel modules
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/k8s.conf
+    mode: '0644'
+    content: "overlay\nbr_netfilter\n"
+
+- name: Load Kubernetes kernel modules
+  ansible.builtin.command: modprobe {{ item }}
+  changed_when: false
+  loop: [overlay, br_netfilter]
+
+- name: Configure Kubernetes sysctls
+  ansible.posix.sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    state: present
+    reload: true
+  loop:
+    - { name: net.bridge.bridge-nf-call-iptables, value: '1' }
+    - { name: net.bridge.bridge-nf-call-ip6tables, value: '1' }
+    - { name: net.ipv4.ip_forward, value: '1' }
+    - { name: fs.inotify.max_user_instances, value: '8192' }
+    - { name: fs.inotify.max_user_watches, value: '1048576' }
+
+- name: Set unique Kubernetes node hostname
+  ansible.builtin.hostname:
+    name: "{{ inventory_hostname }}"
+  when: ansible_hostname != inventory_hostname
+
+- name: Manage 127.0.1.1 entry to match the node hostname
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.1\.1\s+.*$'
+    line: "127.0.1.1 {{ inventory_hostname }}"
+    state: present
+
+- name: Manage the LabWeaver v1 node /etc/hosts block
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# BEGIN labweaver-v1 nodes"
+    block: |
+      {% for node in groups['k8s_cluster'] %}
+      {{ hostvars[node].ansible_host }} {{ node }}
+      {% endfor %}
+    state: present
+
+- name: Verify node hostname
+  ansible.builtin.command: hostname
+  changed_when: false
+  register: v1_hostname

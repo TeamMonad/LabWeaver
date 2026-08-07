@@ -1,0 +1,6 @@
+---
+# LabWeaver v1 node preparation: Ubuntu packages, sysctls, unique hostnames.
+- name: Prepare v1 Ubuntu nodes
+  hosts: k8s_cluster
+  gather_facts: true
+  roles: [v1_node_common]

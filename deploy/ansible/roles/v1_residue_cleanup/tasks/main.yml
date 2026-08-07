@@ -1,0 +1,94 @@
+---
+# One-shot audit + cleanup of old-cluster residue on v1 workers (97/158).
+# The audit record is written BEFORE any destructive action and the playbook
+# refuses to clean unless labweaver_v1_cleanup_old_cluster=true is supplied.
+# Approved destructive operation under issue #148 (2026-08-07).
+- name: Inventorize old-cluster residue
+  ansible.builtin.shell: "{{ item }}"
+  changed_when: false
+  failed_when: false
+  register: v1_residue_inventory
+  loop:
+    - "kubeadm version 2>/dev/null || true"
+    - "systemctl is-active kubelet crio 2>/dev/null || true"
+    - "ls -la /etc/kubernetes 2>/dev/null || true"
+    - "ls /etc/kubernetes/manifests 2>/dev/null || true"
+    - "ip -br link 2>/dev/null | grep -E 'cilium|lxc|docker' || true"
+    - "ls -la /etc/cni/net.d 2>/dev/null || true"
+    - "command -v lxc >/dev/null && lxc list --format json 2>/dev/null || echo 'no-lxc-cli'"
+
+- name: Record residue audit (root-owned, before cleanup)
+  ansible.builtin.copy:
+    dest: "/var/lib/labweaver/.private/v1/residue-audit-{{ ansible_date_time.iso8601_basic_short }}-{{ inventory_hostname }}.json"
+    mode: '0600'
+    owner: root
+    group: root
+    content: "{{ v1_residue_inventory.results | to_nice_json }}"
+
+- name: Refuse to clean without explicit approval
+  ansible.builtin.assert:
+    that: labweaver_v1_cleanup_old_cluster | default(false) | bool
+    fail_msg: >-
+      V1_RESIDUE_CLEANUP_NOT_APPROVED: audit recorded, no destructive action.
+      Re-run with -e labweaver_v1_cleanup_old_cluster=true after confirming
+      the audited residue (LXD containers are inventoried, never removed).
+
+- name: Stop old kubelet and CRI-O
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+  ignore_errors: true
+  loop: [kubelet, crio]
+
+- name: Reset old kubeadm state
+  ansible.builtin.command: >-
+    kubeadm reset -f --cri-socket unix:///var/run/crio/crio.sock
+  changed_when: false
+  failed_when: false
+
+- name: Remove old cluster directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/kubernetes
+    - /var/lib/kubelet
+    - /var/lib/crio
+    - /etc/cni/net.d
+    - /var/lib/cni
+    - /var/lib/etcd
+    - /var/lib/kube-proxy
+    - /etc/containers
+
+- name: Remove leftover Cilium / docker interfaces
+  ansible.builtin.command: "ip link del {{ item }}"
+  changed_when: false
+  failed_when: false
+  loop: [cilium_net, cilium_host, cilium_vxlan, cilium_health, docker0]
+
+- name: Purge old Kubernetes/CRI-O packages for a fresh pinned install
+  ansible.builtin.apt:
+    name: [kubeadm, kubelet, kubectl, cri-o, cri-o-runc, cri-tools]
+    state: absent
+    purge: true
+  ignore_errors: true
+
+- name: Verify residue is gone
+  ansible.builtin.shell: "{{ item }}"
+  changed_when: false
+  failed_when: false
+  register: v1_residue_after
+  loop:
+    - "systemctl is-active kubelet crio 2>/dev/null || true"
+    - "ls /etc/kubernetes 2>/dev/null || echo gone"
+    - "ls /var/lib/kubelet 2>/dev/null || echo gone"
+    - "ip -br link 2>/dev/null | grep -E 'cilium|lxc|docker' || echo none"
+
+- name: Record cleanup result
+  ansible.builtin.copy:
+    dest: "/var/lib/labweaver/.private/v1/residue-cleanup-{{ ansible_date_time.iso8601_basic_short }}-{{ inventory_hostname }}.json"
+    mode: '0600'
+    owner: root
+    group: root
+    content: "{{ v1_residue_after.results | to_nice_json }}"
