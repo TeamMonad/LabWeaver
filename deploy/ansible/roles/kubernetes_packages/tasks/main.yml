@@ -87,10 +87,10 @@
     update_cache: true
   when: ansible_facts.os_family == 'Debian'
 
-- name: Assert the exact pinned candidate versions are available (Ubuntu)
-  ansible.builtin.shell: "apt-cache policy {{ item.pkg }} | awk '/Candidate/{print $2}'"
+- name: Assert the exact pinned versions are available in the configured sources (Ubuntu)
+  ansible.builtin.shell: "apt-cache madison {{ item.pkg }} | awk '{print $2}' | grep -Fx '{{ item.version }}-1.1'"
   changed_when: false
-  register: v1_candidate
+  register: v1_pinned
   loop:
     - { pkg: kubeadm, version: "{{ kubernetes_patch | regex_replace('^v', '') }}" }
     - { pkg: kubelet, version: "{{ kubernetes_patch | regex_replace('^v', '') }}" }
@@ -98,19 +98,23 @@
     - { pkg: cri-o, version: "{{ crio_version }}" }
   when: ansible_facts.os_family == 'Debian'
 
-- name: Reject version drift from the lock file (Ubuntu)
+- name: Reject pinned versions missing from the configured sources (Ubuntu)
   ansible.builtin.assert:
-    that: item.stdout | trim is match(item.item.version)
+    that: item.stdout | trim == "{{ item.item.version }}-1.1"
     fail_msg: >-
-      KUBERNETES_PACKAGE_VERSION_DRIFT: {{ item.item.pkg }} candidate
-      {{ item.stdout | trim }} does not match locked
-      {{ item.item.version }}
-  loop: "{{ v1_candidate.results }}"
+      KUBERNETES_PACKAGE_VERSION_UNAVAILABLE: {{ item.item.pkg }} pinned
+      {{ item.item.version }}-1.1 is not available in the configured sources
+      (source channel may have moved on; update versions.lock.yml deliberately)
+  loop: "{{ v1_pinned.results }}"
   when: ansible_facts.os_family == 'Debian'
 
 - name: Install pinned Kubernetes and CRI-O packages (Ubuntu)
   ansible.builtin.apt:
-    name: [cri-o, kubelet, kubeadm, kubectl]
+    name:
+      - "kubeadm={{ kubernetes_patch | regex_replace('^v', '') }}-1.1"
+      - "kubelet={{ kubernetes_patch | regex_replace('^v', '') }}-1.1"
+      - "kubectl={{ kubernetes_patch | regex_replace('^v', '') }}-1.1"
+      - "cri-o={{ crio_version }}-1.1"
     state: present
   when: ansible_facts.os_family == 'Debian'
 
