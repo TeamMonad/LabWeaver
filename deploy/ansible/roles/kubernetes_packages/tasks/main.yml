@@ -125,6 +125,18 @@
     state: started
   loop: [crio, kubelet]
 
+- name: Remove stale CRI-O proxy drop-ins from previous manual setups (they
+    lexically override 99-proxy.conf and point at dead local proxies)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/systemd/system/crio.service.d/http-proxy.conf
+    - /etc/systemd/system/crio.service.d/proxy.conf
+    - /etc/systemd/system/crio.service.d/10-proxy.conf
+    - /etc/systemd/system/crio.service.d/50-proxy.conf
+  when: crio_http_proxy | default('') != '' or crio_https_proxy | default('') != ''
+
 - name: Ensure the CRI-O systemd drop-in directory exists (proxy config)
   ansible.builtin.file:
     path: /etc/systemd/system/crio.service.d
