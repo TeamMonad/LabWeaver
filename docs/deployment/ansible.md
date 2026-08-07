@@ -466,3 +466,64 @@ all rollouts, and writes a sanitized report conforming to
 The reset report is deployment evidence, not Sprint 2 acceptance. Real Container,
 KubeVirt, Gateway, Keycloak Playwright, freeze/cleanup and Release Gate checks
 must still close under the same source/deployment identity.
+
+## Issue #152 dedicated-infrastructure clean redeploy
+
+`94-foundation-clean-redeploy.yml` is the one-shot entry for the
+`releaseEligible=false` credential rotation and clean rebuild of the
+LabWeaver-dedicated foundation: PostgreSQL, NATS, MinIO, Harbor, Keycloak and
+BuildKit workloads plus their PVCs, Secrets and business data. Shared
+infrastructure is never touched: Kubernetes itself, KubeVirt, CDI, Cilium,
+MetalLB, KubeSphere and monitoring stay intact.
+
+The execution budget is fixed: one read-only preflight, one cleanup cycle, one
+infrastructure install cycle, two idempotent reconciles and one verification
+replay. The second occurrence of the same stable diagnostic stops the run as
+`Blocked`; there is no fourth connected deployment cycle.
+
+1. Read-only preflight. The `preflight` scope `foundation-clean-redeploy`
+   validates the inventory boundary, and the `foundation_ownership_preflight`
+   role proves ownership before destruction: every candidate namespace carries
+   a LabWeaver ownership label, `keycloak-system` ownership is confirmed
+   object-level (identity CA bundle) plus an explicit operator confirmation,
+   no Helm operation is pending anywhere, no unknown Helm release lives inside
+   a dedicated namespace, and every protected shared namespace exists. The
+   role records external workload namespaces and storage facts in a sanitized
+   `ownership-inventory.json`; it never reads Secret data.
+2. Cleanup cycle. `foundation_clean_redeploy` requires a confirmation string
+   bound to the cluster UID and run ID
+   (`destroy-labweaver-foundation:<cluster-uid>:<run-id>`), refuses to run
+   without the same-run ownership evidence, uninstalls the application
+   release, deletes exactly the dedicated namespaces, reads back that every
+   dedicated namespace, PVC and claim reference is gone while every protected
+   namespace is intact, and writes `pre-destruction-inventory.json`,
+   `report.json` and `tombstone.json`.
+3. Install cycle and idempotent reconciles. Run the existing install
+   playbooks with their own inventories and private bundles: foundation,
+   Harbor, identity foundation and BuildKit, then reconcile the foundation a
+   second time.
+4. Verification replay. `96-foundation-rotation-verify.yml` proves the
+   reinstalled foundation StatefulSets are ready, requires every old
+   credential probe (PostgreSQL, NATS, MinIO, optional Harbor robot) to be
+   rejected, and freezes the sanitized registry in the remote root-only
+   registry. Any successful old credential exits with
+   `FOUNDATION_OLD_CREDENTIAL_ACCEPTED`.
+
+New credentials are authored into a fresh private directory with
+`tools/prepare_sprint2_foundation.py`; the sanitized registry is rendered with
+`tools/render_credential_registry.py --input .private/<rotation-dir> --output
+.private/<rotation-dir>/credential-registry.json --run-id <run-id>
+--source-commit <commit>`. The registry records only locators, modes, sizes,
+SHA-256 hashes and run identity, never values. Issues and reports reference
+only that sanitized locator/hash set.
+
+Every report in this flow is `clean-rebuild-non-release` evidence with
+`releaseEligible: false`. It cannot close #142 or #148 and is not a Release
+Gate; formal acceptance still requires the GPU/mdev target environment.
+
+Provider configuration for the Agent worker uses only the three generic
+Anthropic fields (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`,
+`ANTHROPIC_MODEL`) mounted from reviewed ConfigMap and Secret files. The
+operator-specific `ECNU_API_KEY` name is no longer read anywhere; operator
+environment files must be replaced with the three generic fields before any
+connected step, and there is no compatibility alias or fallback.

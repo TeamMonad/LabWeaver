@@ -80,8 +80,10 @@ spec:
     - {{ harbor_hostname }}
   rules:
     - backendRefs:
-        # Harbor's nginx service owns the complete external routing contract.
-        # Routing /v2 directly to core bypasses registry authentication and
-        # breaks the HEAD requests required by BuildKit.
+        # Transitional bootstrap form: the Gateway terminates client TLS and
+        # reaches nginx's plaintext listener until the Sprint 2 Harbor route
+        # adoption converts this Gateway to TLS passthrough and routes to the
+        # HTTPS listener. The adoption leaves this HTTPRoute in place but
+        # detached from the TLS-only listener.
         - name: {{ harbor_release_name }}
           port: 80

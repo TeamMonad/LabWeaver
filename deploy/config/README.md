@@ -35,6 +35,7 @@ Copy and specialize the examples as follows:
 - `access-auth.yaml.example` → `access-service-config/config.yaml`
 - `agent-control-plane.yaml.example` → `agent-service-config/config.yaml`
 - `anthropic-base-url` → `agent-service-config/anthropic-base-url` (copy exactly)
+- `anthropic-model` → `agent-service-config/anthropic-model` (copy exactly)
 - `build-executor.yaml.example` → `build-executor-config/config.yaml`
 - `environment-providers.json.example` → `environment-service-config/providers.json`
 - `runtime-executor.yaml.example` → both runtime executor `config.yaml` files
@@ -47,12 +48,14 @@ the key is a root-owned `0600` input and is never written to this repository, a 
 Resource accepts only the CA-verified Access SPIFFE URI SAN and a short-lived signed delegation;
 actor and role HTTP headers are not an identity mechanism.
 
-Sprint 2 binds the pinned Claude Code CLI to ECNU's Anthropic-compatible endpoint. Put the
-operator-provided `ECNU_API_KEY` value in
+Sprint 2 binds the pinned Claude Code CLI to the reviewed Anthropic-compatible endpoint using
+only the three generic provider fields. Put the operator-provided auth token value in
 `secrets/agent-service-secrets/anthropic-auth-token` with mode `0600`; never put it in YAML, a
-command argument, a log or a report. The Agent process receives only
-`ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` from the two mounted files. There is no ambient
-credential fallback or alternate provider route.
+command argument, a log or a report. The Agent process receives exactly
+`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_MODEL` from the three mounted
+files. Operator-specific variable names are not read, and there is no compatibility alias,
+ambient credential fallback or alternate provider route; startup fails closed when the
+mounted set differs from these three fields.
 
 Environment-specific Helm values must explicitly bind adopted infrastructure names and VIPs. This
 includes reviewed `hostAliases`, matching `/32` entries under

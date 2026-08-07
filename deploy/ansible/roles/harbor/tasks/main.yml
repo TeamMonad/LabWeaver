@@ -365,6 +365,10 @@
       externalURL: "https://{{ harbor_hostname }}"
       expose:
         type: clusterIP
+        # Harbor nginx terminates client TLS itself. The Sprint 2 Harbor route
+        # adoption switches the Gateway to TLS passthrough and routes directly
+        # to this HTTPS listener; the chart-generated harbor-nginx secret owns
+        # the public registry CA consumed by BuildKit bundles.
         tls:
           enabled: true
           certSource: auto
@@ -622,30 +626,41 @@
   changed_when: false
   register: harbor_cluster_uid
 
-- name: Verify the managed Harbor system project policy
-  ansible.builtin.uri:
-    url: "https://{{ harbor_hostname }}/api/v2.0/projects?name={{ harbor_project_name | urlencode }}"
-    method: GET
-    user: admin
-    password: "{{ harbor_admin_password }}"
-    force_basic_auth: true
-    validate_certs: true
-    status_code: 200
-    return_content: true
-  delegate_to: "{{ groups['control_plane'][0] }}"
-  become: false
-  check_mode: false
-  no_log: true
-  register: harbor_system_project
+- name: Publish the current Harbor internal CA to the control-plane trust store
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    {{ harbor_kubectl_path }} --kubeconfig {{ harbor_kubeconfig_path }}
+    -n {{ harbor_namespace }} get secret harbor-internal-ca
+    -o jsonpath='{.data.ca\.crt}' | base64 -d
+    > /etc/pki/ca-trust/source/anchors/labweaver-harbor-internal-ca.crt
+    && update-ca-trust extract
+  args:
+    executable: /bin/bash
+  become: true
+  changed_when: true
 
-- name: Reject a missing or non-private Harbor system project
-  ansible.builtin.assert:
-    that:
-      - harbor_system_project.json | length == 1
-      - harbor_system_project.json[0].name == harbor_project_name
-      - harbor_system_project.json[0].metadata.public == 'false'
-      - harbor_system_project.json[0].metadata.auto_scan == 'true'
-    fail_msg: HARBOR_SYSTEM_PROJECT_POLICY_DRIFT
+- name: Wait for the Harbor Gateway to be programmed
+  ansible.builtin.command:
+    argv:
+      - "{{ harbor_kubectl_path }}"
+      - "--kubeconfig"
+      - "{{ harbor_kubeconfig_path }}"
+      - "-n"
+      - "{{ harbor_namespace }}"
+      - get
+      - gateway
+      - "{{ harbor_gateway_name }}"
+      - "-o"
+      - "jsonpath={.status.conditions[?(@.type=='Programmed')].status}"
+  changed_when: false
+  register: harbor_gateway_programmed
+  until: harbor_gateway_programmed.stdout == 'True'
+  retries: 30
+  delay: 10
+
+# The labweaver-system project policy is enforced by the Sprint 2 Harbor route
+# adoption after the Gateway switches to TLS passthrough; with nginx-level TLS
+# enabled the intermediate Terminate form 301-loops and cannot serve the API.
 
 - name: Render the sanitized Harbor policy manifest
   ansible.builtin.template:

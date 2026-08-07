@@ -5,7 +5,8 @@
       (labweaver_preflight_scope | default('cluster')) in
       ['cluster', 'identity-foundation', 'sprint2-foundation',
        'sprint2-buildkit', 'sprint2-harbor-route', 'sprint2-application', 'sprint2-reset',
-       'resource-application', 'resource-replay', 'resource-replay-auth']
+       'resource-application', 'resource-replay', 'resource-replay-auth',
+       'foundation-clean-redeploy', 'foundation-rotation-verify']
     fail_msg: PREFLIGHT_SCOPE_INVALID
   run_once: true
   delegate_to: localhost
@@ -24,7 +25,8 @@
     (labweaver_preflight_scope | default('cluster')) in
     ['cluster', 'sprint2-foundation', 'sprint2-buildkit',
      'sprint2-harbor-route', 'sprint2-application', 'sprint2-reset',
-     'resource-application', 'resource-replay', 'resource-replay-auth']
+     'resource-application', 'resource-replay', 'resource-replay-auth',
+     'foundation-clean-redeploy', 'foundation-rotation-verify']
 
 - name: Assert the minimal identity-foundation inventory boundary
   ansible.builtin.assert:
@@ -37,7 +39,22 @@
     fail_msg: IDENTITY_INVENTORY_SCOPE_INVALID
   run_once: true
   delegate_to: localhost
-  when: (labweaver_preflight_scope | default('cluster')) == 'identity-foundation'
+  when:
+    - (labweaver_preflight_scope | default('cluster')) == 'identity-foundation'
+    - not (labweaver_preflight_identity_adopted | default(false) | bool)
+
+- name: Assert the adopted-cluster identity-foundation inventory boundary
+  ansible.builtin.assert:
+    that:
+      - (groups.get('routers', []) | sort) == ['edge-router']
+      - (groups.get('control_plane', []) | sort) == ['k8s-cp1']
+      - "'k8s-cp1' in groups.get('k8s_cluster', [])"
+    fail_msg: IDENTITY_INVENTORY_SCOPE_INVALID
+  run_once: true
+  delegate_to: localhost
+  when:
+    - (labweaver_preflight_scope | default('cluster')) == 'identity-foundation'
+    - labweaver_preflight_identity_adopted | default(false) | bool
 
 - name: Reject unresolved configuration placeholders
   ansible.builtin.assert:

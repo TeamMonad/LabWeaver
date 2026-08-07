@@ -1,0 +1,246 @@
+---
+# Credential rotation verification for Issue #152. Runs only after the clean
+# redeploy destroyed the old foundation and the install playbooks reinstalled
+# it with rotated credentials. Old credential probes must fail; new foundation
+# readiness and the sanitized registry must be proven.
+- name: Validate rotation verification inputs
+  ansible.builtin.assert:
+    that:
+      - foundation_rotation_verify_run_id is match('^[a-z0-9][a-z0-9-]{2,62}$')
+      - foundation_rotation_verify_source_commit is match('^[0-9a-f]{40,64}$')
+      - foundation_rotation_verify_old_postgres_service_file | length > 0
+      - foundation_rotation_verify_old_nats_server | length > 0
+      - foundation_rotation_verify_old_nats_credentials_file | length > 0
+      - foundation_rotation_verify_old_minio_alias | length > 0
+      - foundation_rotation_verify_credential_registry_file | length > 0
+    fail_msg: FOUNDATION_ROTATION_INPUT_INVALID
+
+- name: Stat rotation verification remote tools and old credential locators
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ foundation_rotation_verify_kubeconfig }}"
+    - "{{ foundation_rotation_verify_kubectl }}"
+    - "{{ foundation_rotation_verify_psql }}"
+    - "{{ foundation_rotation_verify_nats }}"
+    - "{{ foundation_rotation_verify_mc }}"
+    - "{{ foundation_rotation_verify_old_postgres_service_file }}"
+    - "{{ foundation_rotation_verify_old_nats_credentials_file }}"
+  register: foundation_rotation_verify_remote_paths
+
+- name: Stat the controller-owned credential registry
+  ansible.builtin.stat:
+    path: "{{ foundation_rotation_verify_credential_registry_file }}"
+  register: foundation_rotation_verify_registry_stat
+  delegate_to: localhost
+  become: false
+
+- name: Reject missing rotation verification inputs
+  ansible.builtin.assert:
+    that:
+      - foundation_rotation_verify_remote_paths.results | map(attribute='stat.exists') | min
+      - foundation_rotation_verify_registry_stat.stat.exists
+    fail_msg: FOUNDATION_ROTATION_INPUT_MISSING
+
+- name: Read target cluster UID
+  ansible.builtin.command:
+    argv:
+      - "{{ foundation_rotation_verify_kubectl }}"
+      - --kubeconfig
+      - "{{ foundation_rotation_verify_kubeconfig }}"
+      - get
+      - namespace
+      - kube-system
+      - -o
+      - jsonpath={.metadata.uid}
+  register: foundation_rotation_verify_cluster_uid
+  changed_when: false
+
+- name: Require same-run clean redeploy evidence
+  ansible.builtin.stat:
+    path: >-
+      {{ foundation_rotation_verify_report_root }}/{{ foundation_rotation_verify_run_id }}/report.json
+  register: foundation_rotation_verify_clean_report_stat
+
+- name: Reject rotation verification without clean redeploy evidence
+  ansible.builtin.assert:
+    that: foundation_rotation_verify_clean_report_stat.stat.exists
+    fail_msg: FOUNDATION_CLEAN_REPORT_MISSING
+
+- name: Read the clean redeploy evidence
+  ansible.builtin.slurp:
+    src: >-
+      {{ foundation_rotation_verify_report_root }}/{{ foundation_rotation_verify_run_id }}/report.json
+  register: foundation_rotation_verify_clean_report_raw
+
+- name: Verify the clean redeploy evidence matches this cluster, run and commit
+  ansible.builtin.assert:
+    that:
+      - foundation_rotation_verify_clean_report.schema_version == 'labweaver.foundation-clean-redeploy-report.v1'
+      - foundation_rotation_verify_clean_report.run_id == foundation_rotation_verify_run_id
+      - foundation_rotation_verify_clean_report.source_commit == foundation_rotation_verify_source_commit
+      - foundation_rotation_verify_clean_report.cluster_uid == foundation_rotation_verify_cluster_uid.stdout | trim
+      - foundation_rotation_verify_clean_report.release_eligible == false
+    fail_msg: FOUNDATION_CLEAN_REPORT_MISMATCH
+  vars:
+    foundation_rotation_verify_clean_report: >-
+      {{ foundation_rotation_verify_clean_report_raw.content | b64decode | from_json }}
+
+- name: Read the reinstalled foundation StatefulSets
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ foundation_rotation_verify_kubeconfig }}"
+    api_version: apps/v1
+    kind: StatefulSet
+    namespace: "{{ foundation_rotation_verify_foundation_namespace }}"
+  register: foundation_rotation_verify_statefulsets
+  until: >-
+    foundation_rotation_verify_statefulsets.resources | length == 3 and
+    foundation_rotation_verify_statefulsets.resources
+    | map(attribute='status.readyReplicas') | map('default', 0, true) | map('int') | min >= 1
+  retries: "{{ foundation_rotation_verify_rollout_retries }}"
+  delay: "{{ foundation_rotation_verify_rollout_delay }}"
+
+- name: Require the exact reinstalled foundation workload set
+  ansible.builtin.assert:
+    that:
+      - foundation_rotation_verify_statefulsets.resources
+        | map(attribute='metadata.name') | sort
+        == foundation_rotation_verify_foundation_workloads | sort
+    fail_msg: FOUNDATION_ROTATION_READBACK_INVALID
+
+- name: Probe the old PostgreSQL credential and require rejection
+  ansible.builtin.command:
+    argv:
+      - "{{ foundation_rotation_verify_psql }}"
+      - service={{ foundation_rotation_verify_old_postgres_service }}
+      - --no-psqlrc
+      - --tuples-only
+      - --command
+      - SELECT 1
+  environment:
+    PGSERVICEFILE: "{{ foundation_rotation_verify_old_postgres_service_file }}"
+  register: foundation_rotation_verify_old_postgres
+  failed_when: false
+  changed_when: false
+  no_log: true
+
+- name: Require the old PostgreSQL credential to fail closed
+  ansible.builtin.assert:
+    that: foundation_rotation_verify_old_postgres.rc != 0
+    fail_msg: FOUNDATION_OLD_CREDENTIAL_ACCEPTED
+
+- name: Probe the old NATS credential and require rejection
+  ansible.builtin.command:
+    argv:
+      - "{{ foundation_rotation_verify_nats }}"
+      - --server
+      - "{{ foundation_rotation_verify_old_nats_server }}"
+      - --creds
+      - "{{ foundation_rotation_verify_old_nats_credentials_file }}"
+      - account
+      - info
+      - --json
+  register: foundation_rotation_verify_old_nats
+  failed_when: false
+  changed_when: false
+  no_log: true
+
+- name: Require the old NATS credential to fail closed
+  ansible.builtin.assert:
+    that: foundation_rotation_verify_old_nats.rc != 0
+    fail_msg: FOUNDATION_OLD_CREDENTIAL_ACCEPTED
+
+- name: Probe the old MinIO credential and require rejection
+  ansible.builtin.command:
+    argv:
+      - "{{ foundation_rotation_verify_mc }}"
+      - ls
+      - "{{ foundation_rotation_verify_old_minio_alias }}"
+      - --json
+  register: foundation_rotation_verify_old_minio
+  failed_when: false
+  changed_when: false
+  no_log: true
+
+- name: Require the old MinIO credential to fail closed
+  ansible.builtin.assert:
+    that: foundation_rotation_verify_old_minio.rc != 0
+    fail_msg: FOUNDATION_OLD_CREDENTIAL_ACCEPTED
+
+- name: Probe the old Harbor credential and require rejection
+  ansible.builtin.uri:
+    # /api/v2.0/systeminfo is anonymous; /api/v2.0/users is auth-gated so a
+    # rejected old credential surfaces as 401/403 instead of a false 200.
+    url: "{{ foundation_rotation_verify_old_harbor_api }}/api/v2.0/users"
+    user: "{{ foundation_rotation_verify_old_harbor_username }}"
+    password: "{{ foundation_rotation_verify_old_harbor_password }}"
+    force_basic_auth: true
+    status_code: [401, 403]
+    return_content: false
+  when: foundation_rotation_verify_old_harbor_username | length > 0
+  register: foundation_rotation_verify_old_harbor
+  no_log: true
+
+- name: Parse the sanitized credential registry without secret values
+  ansible.builtin.set_fact:
+    foundation_rotation_verify_registry: >-
+      {{ lookup('ansible.builtin.file', foundation_rotation_verify_credential_registry_file)
+         | from_json }}
+  no_log: true
+
+- name: Validate the credential registry boundary
+  ansible.builtin.assert:
+    that:
+      - foundation_rotation_verify_registry.schema_version == 'deploy.labweaver.io/credential-registry/v1'
+      - foundation_rotation_verify_registry.run_id == foundation_rotation_verify_run_id
+      - foundation_rotation_verify_registry.source_commit == foundation_rotation_verify_source_commit
+      - foundation_rotation_verify_registry.entries | length > 0
+      - foundation_rotation_verify_registry.entry_count == foundation_rotation_verify_registry.entries | length
+      - foundation_rotation_verify_registry.entries
+        | map(attribute='sha256') | select('match', '^[0-9a-f]{64}$') | list
+        | length == foundation_rotation_verify_registry.entries | length
+      - foundation_rotation_verify_registry.keys() | sort ==
+        ['entries', 'entry_count', 'generated_at', 'run_id', 'schema_version',
+         'source_commit', 'total_bytes'] | sort
+      - foundation_rotation_verify_registry.entries
+        | map('dict2items')
+        | map('map', attribute='key')
+        | map('sort')
+        | map('join', ',')
+        | unique | list == ['mode,path,sha256,size']
+    fail_msg: FOUNDATION_CREDENTIAL_REGISTRY_INVALID
+  no_log: true
+
+- name: Create the remote root-only credential registry directory
+  ansible.builtin.file:
+    path: "{{ foundation_rotation_verify_registry_root }}/{{ foundation_rotation_verify_run_id }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Freeze the sanitized credential registry on the remote registry
+  ansible.builtin.copy:
+    src: "{{ foundation_rotation_verify_credential_registry_file }}"
+    dest: >-
+      {{ foundation_rotation_verify_registry_root }}/{{ foundation_rotation_verify_run_id }}/credential-registry.json
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Hash the frozen credential registry
+  ansible.builtin.stat:
+    path: >-
+      {{ foundation_rotation_verify_registry_root }}/{{ foundation_rotation_verify_run_id }}/credential-registry.json
+    checksum_algorithm: sha256
+  register: foundation_rotation_verify_registry_hash
+
+- name: Persist the sanitized rotation verification report
+  ansible.builtin.template:
+    src: rotation-verify-report.json.j2
+    dest: >-
+      {{ foundation_rotation_verify_report_root }}/{{ foundation_rotation_verify_run_id }}/rotation-verify-report.json
+    owner: root
+    group: root
+    mode: "0600"
