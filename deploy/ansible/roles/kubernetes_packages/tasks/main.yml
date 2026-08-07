@@ -125,12 +125,18 @@
     state: started
   loop: [crio, kubelet]
 
+- name: Ensure the CRI-O systemd drop-in directory exists (proxy config)
+  ansible.builtin.file:
+    path: /etc/systemd/system/crio.service.d
+    state: directory
+    mode: '0755'
+  when: crio_http_proxy | default('') != '' or crio_https_proxy | default('') != ''
+
 - name: Configure CRI-O proxy environment (optional, when the node cannot reach
     public image registries directly; e.g. campus-network egress restrictions)
   ansible.builtin.copy:
     dest: /etc/systemd/system/crio.service.d/99-proxy.conf
     mode: '0644'
-    create_parents: true
     content: |
       [Service]
       Environment=HTTP_PROXY={{ crio_http_proxy }}
