@@ -21,6 +21,28 @@ result does not close a connected blocker.
 
 These blockers keep Issue #140 below E3 and outside the Release Gate.
 
+## Issue #141 read-only Ansible Probe execution
+
+- Issue #123 must provide the authoritative EvaluationRun, StepRun, attempt,
+  Outbox, persistence and immutable artifact integration before the probe runs
+  as a public Step.
+- The dedicated runner image must build reproducibly and pass the digest-bound
+  High/Critical/secret scan in CI; its Trivy JSON must remain attached to the
+  same workflow identity.
+- D must run the same source/image identity on a connected cluster with a real
+  KubeVirt VM and verify the positive Nginx path plus the stopped-service and
+  site-mismatch negative paths, preinstalled `ansible-probe-default-deny`,
+  attempt egress limited to the VM address on TCP/22, stale-certificate,
+  unreachable-host, host-key-mismatch, timeout, output-overflow and
+  malformed-fact negatives, cancel/retry and preconditioned exact cleanup.
+- TCP/80 and HTTP checks stay outside the frozen v1 module allowlist; widening
+  requires a separate reviewed decision and must not be smuggled into this
+  runner.
+- A+B human review is required for Runner, security and scoring semantics;
+  auto-merge is forbidden.
+
+These blockers keep Issue #141 below E3 and outside the Release Gate.
+
 ## ConsoleCapability downstream delivery
 
 ADR 0012 and Issue #122 freeze the xterm/noVNC Contract at E2 only. The

@@ -21,6 +21,11 @@ async fn run() -> Result<(), MainError> {
             write_termination_receipt(&receipt)?;
             return Ok(());
         }
+        [mode, value] if mode == "--mode" && value == "ansible-probe-worker" => {
+            let receipt = evaluation_service::run_ansible_probe_worker().await?;
+            write_termination_receipt(&receipt)?;
+            return Ok(());
+        }
         [mode, value] if mode == "--mode" && value == "oj-compile-exec" => {
             evaluation_service::run_oj_compile_exec()?;
             return Ok(());
@@ -70,9 +75,7 @@ fn write_termination_diagnostic(diagnostic: &'static str) {
     }
 }
 
-fn write_termination_receipt(
-    receipt: &evaluation_service::oj::OjEvidenceReceipt,
-) -> Result<(), MainError> {
+fn write_termination_receipt(receipt: &impl serde::Serialize) -> Result<(), MainError> {
     const TERMINATION_LOG: &str = "/dev/termination-log";
     const MAX_TERMINATION_MESSAGE_BYTES: usize = 4096;
     let bytes = serde_json::to_vec(receipt).map_err(|_| MainError::Receipt)?;
@@ -91,6 +94,8 @@ enum MainError {
     #[error(transparent)]
     OjWorker(#[from] evaluation_service::OjWorkerError),
     #[error(transparent)]
+    AnsibleProbeWorker(#[from] evaluation_service::AnsibleProbeWorkerError),
+    #[error(transparent)]
     Process(#[from] evaluation_service::EvaluationProcessError),
     #[error("LW_OJ_RECEIPT_WRITE_FAILED")]
     Receipt,
@@ -102,6 +107,7 @@ impl MainError {
             Self::Arguments => "LW_EVALUATION_MODE_INVALID",
             Self::Worker(error) => error.diagnostic_code(),
             Self::OjWorker(error) => error.diagnostic_code(),
+            Self::AnsibleProbeWorker(error) => error.diagnostic_code(),
             Self::Process(_) => "LW_EVALUATION_PROCESS_FAILED",
             Self::Receipt => "LW_OJ_RECEIPT_WRITE_FAILED",
         }

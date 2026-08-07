@@ -1988,6 +1988,46 @@
       - sprint2_application_evaluation_default_deny.resources[0].spec.egress | default([]) == []
     fail_msg: SPRINT2_APPLICATION_EVALUATION_DEFAULT_DENY_INVALID
 
+- name: Reconcile the permanent ansible probe namespace default deny
+  kubernetes.core.k8s:
+    kubeconfig: "{{ sprint2_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: ansible-probe-default-deny
+        namespace: "{{ sprint2_application_evaluation_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver
+          app.kubernetes.io/managed-by: ansible
+          labweaver.io/sprint: sprint2
+      spec:
+        podSelector: {}
+        policyTypes: [Ingress, Egress]
+        ingress: []
+        egress: []
+
+- name: Read back the permanent ansible probe namespace default deny
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ sprint2_application_kubeconfig }}"
+    api_version: networking.k8s.io/v1
+    kind: NetworkPolicy
+    namespace: "{{ sprint2_application_evaluation_namespace }}"
+    name: ansible-probe-default-deny
+  register: sprint2_application_probe_default_deny
+
+- name: Require the permanent ansible probe namespace default deny
+  ansible.builtin.assert:
+    that:
+      - sprint2_application_probe_default_deny.resources | length == 1
+      - sprint2_application_probe_default_deny.resources[0].spec.podSelector == {}
+      - sprint2_application_probe_default_deny.resources[0].spec.policyTypes | sort == ['Egress', 'Ingress']
+      - sprint2_application_probe_default_deny.resources[0].spec.ingress | default([]) == []
+      - sprint2_application_probe_default_deny.resources[0].spec.egress | default([]) == []
+    fail_msg: SPRINT2_APPLICATION_PROBE_DEFAULT_DENY_INVALID
+
 - name: Require the evaluation worker to use the platform image pull identity
   ansible.builtin.assert:
     that:

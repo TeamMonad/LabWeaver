@@ -1,5 +1,9 @@
 //! Evaluation-owned immutable submission collection.
 
+pub mod ansible_probe;
+pub mod ansible_probe_executor;
+pub mod ansible_probe_job;
+pub mod ansible_probe_worker;
 pub mod api;
 pub mod collector;
 pub mod command_store;
@@ -16,6 +20,7 @@ pub mod process;
 pub mod ssh_source;
 pub mod worker;
 
+pub use ansible_probe_worker::{AnsibleProbeWorkerError, run_ansible_probe_worker};
 pub use api::{EvaluationApiState, evaluation_api_router, serve_evaluation_mtls};
 pub use collector::{
     CollectError, CollectorLimits, FrozenArchive, PreflightReport, PvcSnapshotSource,

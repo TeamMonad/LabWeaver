@@ -1,0 +1,57 @@
+ARG RUST_BUILDER="docker.io/library/rust:1.85.1-bookworm@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4"
+
+FROM ${RUST_BUILDER} AS builder
+ARG RUST_TOOLCHAIN=1.85.1
+ARG SOURCE_DATE_EPOCH
+ARG SOURCE_COMMIT
+ENV CARGO_INCREMENTAL=0 \
+    CARGO_NET_GIT_FETCH_WITH_CLI=false \
+    RUSTUP_TOOLCHAIN=${RUST_TOOLCHAIN} \
+    SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY rust-toolchain.toml rustfmt.toml ./
+COPY .cargo .cargo
+COPY crates crates
+COPY services services
+COPY access-gateway access-gateway
+COPY xtask xtask
+COPY migrations migrations
+COPY vendor vendor
+RUN --mount=type=cache,id=labweaver-probe-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=labweaver-probe-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    cargo fetch --locked
+RUN --network=none \
+    --mount=type=cache,id=labweaver-probe-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=labweaver-probe-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=labweaver-probe-cargo-target,target=/src/target,sharing=locked \
+    test -n "${SOURCE_DATE_EPOCH}" && test -n "${SOURCE_COMMIT}" && \
+    cargo build --release --locked --package evaluation-service && \
+    install -D -m 0555 target/release/evaluation-service /out/labweaver-service
+
+FROM ${RUST_BUILDER} AS runtime
+ARG SOURCE_COMMIT
+LABEL org.opencontainers.image.source="https://github.com/TeamMonad/LabWeaver" \
+      org.opencontainers.image.revision="${SOURCE_COMMIT}" \
+      org.opencontainers.image.title="LabWeaver approved read-only Ansible probe runner" \
+      io.labweaver.playbook-profile="linux-nginx-probe-v1"
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes \
+       ca-certificates openssh-client python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m pip install --break-system-packages --no-cache-dir \
+       ansible-core==2.18.6 \
+    && install -d -m 0755 /opt/labweaver/probe/bin \
+    && ln -s /usr/local/bin/ansible-playbook /opt/labweaver/probe/bin/ansible-playbook
+COPY --from=builder --chown=65532:65532 /out/labweaver-service /usr/local/bin/labweaver-service
+COPY containers/ansible-probe/linux-nginx-probe-v1/playbook.yml \
+     /opt/labweaver/probe/linux-nginx-probe-v1/playbook.yml
+ENV ANSIBLE_NOCOWS=1 \
+    ANSIBLE_LOCALHOST_WARNING=false \
+    ANSIBLE_HOME=/work/ansible \
+    ANSIBLE_LOCAL_TEMP=/work/ansible/tmp \
+    ANSIBLE_REMOTE_TEMP=/work/ansible-remote/tmp \
+    HOME=/work \
+    PYTHONDONTWRITEBYTECODE=1
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/labweaver-service"]

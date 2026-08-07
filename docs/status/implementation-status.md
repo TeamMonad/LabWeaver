@@ -178,6 +178,27 @@ compiler image, cgroup outcomes, NetworkPolicy, cancellation or cleanup.
 Accordingly Issue #140 is not `done`, is not a release-gate pass and does not
 change the connected Sprint 2 identity above.
 
+## Issue #141 read-only Ansible Probe local implementation
+
+The `feature/141-linux-nginx-probe` worktree adds the internal read-only
+Ansible probe request, bounded typed facts, deterministic assertion
+evaluation, evidence/receipt validation, the Kubernetes resource plan and
+executor, the pinned-profile worker mode, the dedicated digest-pinned image
+(`ansible-core 2.18.6` plus the approved `linux-nginx-probe-v1` playbook) and
+focused tests. The executor requires an Ansible-provisioned
+`ansible-probe-default-deny` namespace policy before Job creation, allows
+attempt egress only to the target VM on TCP/22, pins the SSH host key by
+SHA-256 and binds deletion to UID/resourceVersion preconditions.
+
+Its current evidence is **E1 only**. The implementation is not connected to a
+public EvaluationRun or StepRun because Issue #123's authoritative lifecycle,
+Outbox and persistence contract is not present on the current `develop`
+baseline. No real runner image, Kubernetes scheduling, NetworkPolicy
+enforcement, real KubeVirt VM path, certificate issuance or cleanup has been
+verified yet; the positive and negative real-VM paths remain connected
+evidence owed to D Verify. Accordingly Issue #141 is not `done`, is not a
+release-gate pass and does not change the connected Sprint 2 identity above.
+
 ## Issue #142 Resource request and Lease authority
 
 The `feature/142-resource-lease` worktree contains the Resource-owned request,

@@ -173,6 +173,36 @@ descendant may survive into the next case. D must also replace an attempt
 resource between GET and DELETE and verify the
 UID/resourceVersion precondition produces an identity conflict.
 
+## Issue #141 read-only Ansible Probe gate
+
+The local gate proves only strict semantics and resource construction:
+
+```sh
+cargo test -p evaluation-service --lib --test ansible_probe
+cargo clippy -p evaluation-service --all-targets --all-features -- -D warnings
+docker buildx build --file containers/Containerfile.ansible-probe \
+  --platform linux/amd64 \
+  --build-arg SOURCE_COMMIT="$(git rev-parse HEAD)" \
+  --build-arg SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)" \
+  --provenance=false .
+```
+
+The image command requires a working BuildKit daemon. A skipped or unavailable
+build remains a blocker rather than a pass. CI must build the image twice,
+compare OCI archive identities, reject High/Critical vulnerabilities and
+secrets for the probe image, and retain the Trivy JSON artifact.
+
+After #123 supplies the authoritative attempt path, connected D Verify must use
+one immutable VM, certificate and image identity to exercise the positive
+Nginx path (service active, default site and document root observed) and the
+stopped-service and site-mismatch negative paths. It must also prove the
+preinstalled `ansible-probe-default-deny`, attempt egress limited to the VM
+address on TCP/22, no service-account token, read-only SSH Secret mounts,
+stale-certificate, unreachable-host, host-key-mismatch, timeout,
+output-overflow and malformed-fact negatives, cancel/retry fencing, exact
+terminal cleanup and the absence of file contents, command output and raw
+logs from evidence, receipt and machine-readable report.
+
 ## Integration behavior
 
 - PostgreSQL transaction, idempotency, lease recovery and clean-baseline tests;
