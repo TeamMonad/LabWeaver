@@ -1,0 +1,33 @@
+---
+# LabWeaver v1 three-node GPU cluster inventory (example).
+# Copy to ignored inventories/v1/hosts.yml and replace every REPLACE_* value.
+# Nodes: 49.52.27.63 control plane (2xRTX3090 + ollama), 49.52.27.97 worker
+# (V100), 49.52.27.158 worker (P40 mdev + NFS). Maintenance account
+# labweaver-deploy (key-only SSH, NOPASSWD sudo) is the ansible user.
+all:
+  vars:
+    ansible_user: labweaver-deploy
+    ansible_become: true
+    ansible_ssh_private_key_file: "{{ vault_ansible_ssh_private_key_file }}"
+    ansible_ssh_common_args: "{{ vault_ansible_ssh_common_args | default('') }}"
+  children:
+    routers:
+      hosts:
+        v1-cp-63:
+          ansible_host: 49.52.27.63
+    control_plane:
+      hosts:
+        v1-cp-63: {}
+    workers:
+      hosts:
+        v1-worker-97:
+          ansible_host: 49.52.27.97
+        v1-worker-158:
+          ansible_host: 49.52.27.158
+    nfs_servers:
+      hosts:
+        v1-worker-158: {}
+    k8s_cluster:
+      children:
+        control_plane: {}
+        workers: {}
