@@ -6,7 +6,9 @@
     --expected-size-bytes {{ storage_device_size_bytes | quote }}
   changed_when: false
   register: storage_safety
-  when: storage_allow_format | bool
+  when:
+    - storage_allow_format | bool
+    - local_path_mode != 'directory'
 
 - name: Reject storage without the expected filesystem when formatting is disabled
   ansible.builtin.command: "lsblk --noheadings --output FSTYPE {{ local_path_device }}"
@@ -15,6 +17,7 @@
   failed_when: >-
     (local_device_fs.stdout | trim != storage_expected_filesystem)
     and not (storage_allow_format | bool)
+    and (local_path_mode != 'directory')
 
 - name: Format only an explicitly approved, stable, unused disk
   community.general.filesystem:
@@ -23,6 +26,7 @@
     force: false
   when:
     - storage_allow_format | bool
+    - local_path_mode != 'directory'
     - storage_safety.rc == 0
 
 - name: Read local storage UUID on the managed host
@@ -30,6 +34,7 @@
   changed_when: false
   register: local_device_uuid
   failed_when: local_device_uuid.stdout | trim == ''
+  when: local_path_mode != 'directory'
 
 - name: Mount local storage by UUID
   ansible.posix.mount:
@@ -38,13 +43,25 @@
     fstype: "{{ storage_expected_filesystem }}"
     opts: defaults,noatime
     state: mounted
+  when: local_path_mode != 'directory'
 
 - name: Persist SELinux container label for Local Path
   community.general.sefcontext:
     target: "{{ local_path_mount }}(/.*)?"
     setype: container_file_t
     state: present
+  when: local_path_mode != 'directory'
 
 - name: Apply Local Path SELinux context
   ansible.builtin.command: "restorecon -RFv {{ local_path_mount }}"
   changed_when: false
+  when: local_path_mode != 'directory'
+
+- name: Create the local-path storage directory (directory mode, v1 Ubuntu)
+  ansible.builtin.file:
+    path: "{{ local_path_mount }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: local_path_mode == 'directory'
