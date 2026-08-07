@@ -7,6 +7,7 @@
   kubernetes.core.k8s:
     state: present
     src: "https://github.com/kubernetes-sigs/gateway-api/releases/download/{{ gateway_api_version }}/standard-install.yaml"
+  environment: "{{ labweaver_controller_proxy_env | default({}) }}"
 
 - name: Add pinned Helm repositories
   kubernetes.core.helm_repository:
@@ -15,6 +16,7 @@
   loop:
     - { name: cilium, url: https://helm.cilium.io/ }
     - { name: metallb, url: https://metallb.github.io/metallb }
+  environment: "{{ labweaver_controller_proxy_env | default({}) }}"
 
 - name: Install Cilium with kube-proxy replacement and Gateway API
   kubernetes.core.helm:
@@ -34,6 +36,7 @@
           enabled: true
       gatewayAPI:
         enabled: true
+  environment: "{{ labweaver_controller_proxy_env | default({}) }}"
 
 - name: Install MetalLB
   kubernetes.core.helm:
@@ -42,6 +45,7 @@
     chart_version: "{{ metallb_chart_version }}"
     release_namespace: metallb-system
     create_namespace: true
+  environment: "{{ labweaver_controller_proxy_env | default({}) }}"
 
 - name: Apply MetalLB address pool and L2 advertisement
   kubernetes.core.k8s:
