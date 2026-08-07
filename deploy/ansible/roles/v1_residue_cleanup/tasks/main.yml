@@ -17,6 +17,14 @@
     - "ls -la /etc/cni/net.d 2>/dev/null || true"
     - "command -v lxc >/dev/null && lxc list --format json 2>/dev/null || echo 'no-lxc-cli'"
 
+- name: Ensure the root-owned v1 audit directory exists
+  ansible.builtin.file:
+    path: /var/lib/labweaver/.private/v1
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
 - name: Record residue audit (root-owned, before cleanup)
   ansible.builtin.copy:
     dest: "/var/lib/labweaver/.private/v1/residue-audit-{{ ansible_date_time.iso8601_basic_short }}-{{ inventory_hostname }}.json"
