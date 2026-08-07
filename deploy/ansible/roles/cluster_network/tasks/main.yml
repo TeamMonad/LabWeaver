@@ -7,7 +7,6 @@
   kubernetes.core.k8s:
     state: present
     src: "https://github.com/kubernetes-sigs/gateway-api/releases/download/{{ gateway_api_version }}/standard-install.yaml"
-  environment: "{{ labweaver_controller_proxy_env | default({}) }}"
 
 - name: Add pinned Helm repositories
   kubernetes.core.helm_repository:
