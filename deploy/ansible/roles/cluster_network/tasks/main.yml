@@ -6,7 +6,7 @@
 - name: Install pinned Gateway API Standard CRDs before enabling Gateway API
   kubernetes.core.k8s:
     state: present
-    src: "https://github.com/kubernetes-sigs/gateway-api/releases/download/{{ gateway_api_version }}/experimental-install.yaml"
+    src: "{{ gateway_api_crd_file | default('https://github.com/kubernetes-sigs/gateway-api/releases/download/' ~ gateway_api_version ~ '/experimental-install.yaml') }}"
 
 - name: Add pinned Helm repositories
   kubernetes.core.helm_repository:
