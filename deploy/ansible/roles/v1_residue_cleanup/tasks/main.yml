@@ -55,6 +55,50 @@
   changed_when: false
   failed_when: false
 
+- name: Kill surviving old-cluster container processes (control plane, Cilium,
+    KubeVirt, etcd, conmon) - CRI-O stop/purge alone does not kill them
+  ansible.builtin.shell: "{{ item }} 2>/dev/null || true"
+  changed_when: false
+  loop:
+    - "pkill -9 -f '/usr/libexec/crio/conmon'"
+    - "pkill -9 -f 'kube-apiserver'"
+    - "pkill -9 -f 'kube-controller'"
+    - "pkill -9 -f 'kube-scheduler'"
+    - "pkill -9 -f 'kube-proxy'"
+    - "pkill -9 -f 'cilium-agent'"
+    - "pkill -9 -f 'cilium-envoy'"
+    - "pkill -9 -f 'cilium-health'"
+    - "pkill -9 -f 'virt-operator'"
+    - "pkill -9 -f 'virt-api'"
+    - "pkill -9 -f 'virt-controller'"
+    - "pkill -9 -f 'bin/etcd'"
+  no_log: true
+
+- name: Wait for processes to exit
+  ansible.builtin.pause:
+    seconds: 3
+
+- name: Unmount old container runtime mounts (shm / cilium cgroup)
+  ansible.builtin.shell: >-
+    for m in $(mount 2>/dev/null | grep -E 'overlay-containers|run/cilium'
+    | awk '{print $3}'); do umount -l "$m" 2>/dev/null || true; done
+  changed_when: false
+
+- name: Remove old pod logs, cilium runtime dir and stale container run dirs
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /var/log/pods
+    - /run/cilium
+    - /run/containers/storage/overlay-containers
+
+- name: Remove leftover network namespaces
+  ansible.builtin.shell: >-
+    for ns in /var/run/netns/*; do [ -e "$ns" ] &&
+    ip netns del "$(basename $ns)" 2>/dev/null || true; done
+  changed_when: false
+
 - name: Remove old cluster directories
   ansible.builtin.file:
     path: "{{ item }}"
@@ -79,6 +123,15 @@
   changed_when: false
   register: v1_cilium_after
   failed_when: (v1_cilium_after.stdout | trim | int) != 0
+  loop: [once]
+
+- name: Fail closed if old-cluster processes survive
+  ansible.builtin.shell: >-
+    ps aux | grep -E 'kube-apiserver|cilium-agent|virt-controller|bin/etcd'
+    | grep -v grep | wc -l
+  changed_when: false
+  register: v1_procs_after
+  failed_when: (v1_procs_after.stdout | trim | int) != 0
   loop: [once]
 
 - name: Purge old Kubernetes/CRI-O packages for a fresh pinned install
