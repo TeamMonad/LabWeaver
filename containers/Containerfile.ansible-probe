@@ -1,5 +1,5 @@
 ARG RUST_BUILDER="docker.io/library/rust:1.85.1-bookworm@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4"
-ARG ANSIBLE_PROBE_RUNTIME="docker.io/library/python:3.12-slim-bookworm@sha256:4766d8b510c428e595d74b9cc5bbb2fae8e26316fffb4adc89908d79aacd58a2"
+ARG ANSIBLE_PROBE_RUNTIME="docker.io/library/python:3.12-slim-trixie@sha256:646fb0bca3dd3ea1bcc6feb72c17ed16eed6e10cffc732fcc1478bd3e7f02d7b"
 
 FROM ${RUST_BUILDER} AS builder
 ARG RUST_TOOLCHAIN=1.85.1
@@ -39,7 +39,9 @@ LABEL org.opencontainers.image.source="https://github.com/TeamMonad/LabWeaver" \
 RUN apt-get update \
     && apt-get install --no-install-recommends --yes \
        ca-certificates openssh-client \
+    && apt-get upgrade --no-install-recommends --yes \
     && rm -rf /var/lib/apt/lists/* \
+    && python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel \
     && python3 -m pip install --no-cache-dir \
        ansible-core==2.18.6 \
     && install -d -m 0755 /opt/labweaver/probe/bin \
