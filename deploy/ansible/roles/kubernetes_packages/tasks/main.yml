@@ -130,6 +130,7 @@
   ansible.builtin.copy:
     dest: /etc/systemd/system/crio.service.d/99-proxy.conf
     mode: '0644'
+    create_parents: true
     content: |
       [Service]
       Environment=HTTP_PROXY={{ crio_http_proxy }}
