@@ -100,7 +100,7 @@
 
 - name: Reject version drift from the lock file (Ubuntu)
   ansible.builtin.assert:
-    that: item.stdout | trim is startswith(item.item.version)
+    that: item.stdout | trim is match(item.item.version)
     fail_msg: >-
       KUBERNETES_PACKAGE_VERSION_DRIFT: {{ item.item.pkg }} candidate
       {{ item.stdout | trim }} does not match locked
