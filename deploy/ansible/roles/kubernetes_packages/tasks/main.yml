@@ -40,6 +40,20 @@
     mode: '0755'
   when: ansible_facts.os_family == 'Debian'
 
+- name: Remove stale Kubernetes/CRI-O apt sources and keyrings (old cluster,
+    previous pkgs.k8s.io addons channel) before configuring fresh ones
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/apt/sources.list.d/kubernetes.list
+    - /etc/apt/sources.list.d/cri-o.list
+    - /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    - /etc/apt/keyrings/kubernetes-apt-keyring.asc
+    - /etc/apt/keyrings/cri-o-apt-keyring.gpg
+    - /etc/apt/keyrings/cri-o-apt-keyring.asc
+  when: ansible_facts.os_family == 'Debian'
+
 - name: Configure Kubernetes APT keyring (Ubuntu)
   ansible.builtin.get_url:
     url: "https://pkgs.k8s.io/core:/stable:/{{ kubernetes_minor }}/deb/Release.key"
@@ -56,14 +70,14 @@
 
 - name: Configure CRI-O APT keyring (Ubuntu)
   ansible.builtin.get_url:
-    url: "https://pkgs.k8s.io/addons:/cri-o:/stable:/{{ kubernetes_minor }}/deb/Release.key"
+    url: "https://download.opensuse.org/repositories/isv:/cri-o:/stable:/{{ kubernetes_minor }}/deb/Release.key"
     dest: /etc/apt/keyrings/cri-o-apt-keyring.asc
     mode: '0644'
   when: ansible_facts.os_family == 'Debian'
 
 - name: Configure CRI-O APT repository (Ubuntu)
   ansible.builtin.apt_repository:
-    repo: "deb [signed-by=/etc/apt/keyrings/cri-o-apt-keyring.asc] https://pkgs.k8s.io/addons:/cri-o:/stable:/{{ kubernetes_minor }}/deb/ /"
+    repo: "deb [signed-by=/etc/apt/keyrings/cri-o-apt-keyring.asc] https://download.opensuse.org/repositories/isv:/cri-o:/stable:/{{ kubernetes_minor }}/deb/ /"
     filename: cri-o
     state: present
   when: ansible_facts.os_family == 'Debian'
