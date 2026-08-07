@@ -62,6 +62,30 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
             .map_err(|error| GenerationError::Contract(error.to_string()))?,
     )?);
     document!(
+        "schemas/contracts/v1/evaluation-release.schema.json",
+        crate::evaluation::EvaluationRelease
+    );
+    document!(
+        "schemas/contracts/v1/evaluation-run.schema.json",
+        crate::evaluation::EvaluationRun
+    );
+    document!(
+        "schemas/contracts/v1/evaluation-step-run.schema.json",
+        crate::evaluation::EvaluationStepRun
+    );
+    document!(
+        "schemas/contracts/v1/evaluation-runtime-identity.schema.json",
+        crate::evaluation::EvaluationRuntimeIdentity
+    );
+    document!(
+        "schemas/contracts/v1/evaluation-run-identity.schema.json",
+        crate::evaluation::EvaluationRunIdentity
+    );
+    document!(
+        "schemas/contracts/v1/evaluation-step-completion.schema.json",
+        crate::evaluation::EvaluationStepCompletion
+    );
+    document!(
         "schemas/contracts/v1/submission-manifest.schema.json",
         crate::submission::SubmissionManifest
     );
@@ -300,6 +324,22 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/http/internal-image-artifact-resolution.schema.json",
         crate::http::InternalImageArtifactResolution
+    );
+    document!(
+        "schemas/contracts/v1/http/internal-publish-evaluation-release-request.schema.json",
+        crate::http::InternalPublishEvaluationReleaseRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/internal-create-evaluation-run-request.schema.json",
+        crate::http::InternalCreateEvaluationRunRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/internal-evaluation-run-mutation-request.schema.json",
+        crate::http::InternalEvaluationRunMutationRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/internal-complete-evaluation-step-request.schema.json",
+        crate::http::InternalCompleteEvaluationStepRequest
     );
     document!(
         "schemas/contracts/v1/problem-details.schema.json",
@@ -551,6 +591,22 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         CloudEvent<events::SubmissionFrozen>
     );
     document!(
+        "schemas/contracts/v1/events/evaluation-release-published.schema.json",
+        CloudEvent<events::EvaluationReleasePublished>
+    );
+    document!(
+        "schemas/contracts/v1/events/evaluation-run-requested.schema.json",
+        CloudEvent<events::EvaluationRunEvent>
+    );
+    document!(
+        "schemas/contracts/v1/events/evaluation-run-state-changed.schema.json",
+        CloudEvent<events::EvaluationRunEvent>
+    );
+    document!(
+        "schemas/contracts/v1/events/evaluation-step-run-state-changed.schema.json",
+        CloudEvent<events::EvaluationStepRunEvent>
+    );
+    document!(
         "schemas/contracts/v1/events/lab-release-approved.schema.json",
         CloudEvent<events::LabReleaseApproved>
     );
@@ -754,6 +810,12 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 ,"InternalAgentBuildStatusQuery": contract_ref("http/internal-agent-build-status-query")
                 ,"InternalAgentRunOutcome": contract_ref("http/internal-agent-run-outcome")
                 ,"InternalImageArtifactResolution": contract_ref("http/internal-image-artifact-resolution")
+                ,"EvaluationRelease": contract_ref("evaluation-release")
+                ,"EvaluationRun": contract_ref("evaluation-run")
+                ,"InternalPublishEvaluationReleaseRequest": contract_ref("http/internal-publish-evaluation-release-request")
+                ,"InternalCreateEvaluationRunRequest": contract_ref("http/internal-create-evaluation-run-request")
+                ,"InternalEvaluationRunMutationRequest": contract_ref("http/internal-evaluation-run-mutation-request")
+                ,"InternalCompleteEvaluationStepRequest": contract_ref("http/internal-complete-evaluation-step-request")
             },
             "responses": {"Problem": {"description":"RFC 9457 problem detail","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}}}
         }
@@ -826,6 +888,38 @@ fn add_auth_paths(surface: ApiSurface, paths: &mut BTreeMap<String, Value>) {
             paths.insert(
                 "/internal/v1/image-artifacts/{artifactId}".to_owned(),
                 json!({"get":{"operationId":"resolveInternalImageArtifact","summary":"Resolve one Agent-owned verified artifact identity","security":[{"serviceMtls":[]}],"parameters":[{"name":"artifactId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Authoritative artifact resolution","content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalImageArtifactResolution"}}}},"404":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+            );
+            paths.insert(
+                "/internal/v1/evaluation-releases".to_owned(),
+                json!({"post":{"operationId":"publishInternalEvaluationRelease","summary":"Publish one Control-approved immutable EvaluationSpec release","security":[{"serviceMtls":[]}],"parameters":[{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalPublishEvaluationReleaseRequest"}}}},"responses":{"202":{"description":"EvaluationRelease accepted","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRelease"}}}},"409":{"$ref":"#/components/responses/Problem"},"422":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+            );
+            paths.insert(
+                "/internal/v1/evaluation-releases/{releaseId}".to_owned(),
+                json!({"get":{"operationId":"getInternalEvaluationRelease","summary":"Read one authoritative Evaluation release","security":[{"serviceMtls":[]}],"parameters":[{"name":"releaseId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Authoritative EvaluationRelease","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRelease"}}}},"404":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+            );
+            paths.insert(
+                "/internal/v1/evaluation-runs".to_owned(),
+                json!({"post":{"operationId":"createInternalEvaluationRun","summary":"Reserve one EvaluationRun from an active release and immutable FrozenSubmission","security":[{"serviceMtls":[]}],"parameters":[{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalCreateEvaluationRunRequest"}}}},"responses":{"202":{"description":"EvaluationRun accepted","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRun"}}}},"409":{"$ref":"#/components/responses/Problem"},"422":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+            );
+            paths.insert(
+                "/internal/v1/evaluation-runs/{runId}".to_owned(),
+                json!({"get":{"operationId":"getInternalEvaluationRun","summary":"Read one authoritative EvaluationRun","security":[{"serviceMtls":[]}],"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Authoritative EvaluationRun","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRun"}}}},"404":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+            );
+            paths.insert(
+                "/internal/v1/evaluation-runs/{runId}/cancel".to_owned(),
+                json!({"post":{"operationId":"cancelInternalEvaluationRun","summary":"Request cancellation at an exact EvaluationRun revision","security":[{"serviceMtls":[]}],"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalEvaluationRunMutationRequest"}}}},"responses":{"200":{"description":"Updated authoritative EvaluationRun","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRun"}}}},"409":{"$ref":"#/components/responses/Problem"},"422":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+            );
+            paths.insert(
+                "/internal/v1/evaluation-runs/{runId}/steps/{stepRunId}/retry".to_owned(),
+                json!({"post":{"operationId":"retryInternalEvaluationStep","summary":"Retry one failed or cancelled StepRun at an exact EvaluationRun revision","security":[{"serviceMtls":[]}],"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"stepRunId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalEvaluationRunMutationRequest"}}}},"responses":{"200":{"description":"Updated authoritative EvaluationRun","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRun"}}}},"409":{"$ref":"#/components/responses/Problem"},"422":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+            );
+            paths.insert(
+                "/internal/v1/evaluation-runs/{runId}/steps/{stepRunId}/cleanup".to_owned(),
+                json!({"post":{"operationId":"verifyInternalEvaluationStepCleanup","summary":"Verify cleanup for one failed or cancelled StepRun at an exact EvaluationRun revision","security":[{"serviceMtls":[]}],"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"stepRunId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalEvaluationRunMutationRequest"}}}},"responses":{"200":{"description":"Updated authoritative EvaluationRun","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRun"}}}},"409":{"$ref":"#/components/responses/Problem"},"422":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+            );
+            paths.insert(
+                "/internal/v1/evaluation-runs/{runId}/steps/{stepRunId}/complete".to_owned(),
+                json!({"post":{"operationId":"completeInternalEvaluationStep","summary":"Complete one fenced StepRun attempt with hash-only evidence","security":[{"serviceMtls":[]}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalCompleteEvaluationStepRequest"}}}},"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"stepRunId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Updated authoritative EvaluationRun","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRun"}}}},"409":{"$ref":"#/components/responses/Problem"},"422":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
         }
     }

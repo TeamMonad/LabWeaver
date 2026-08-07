@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AccessGrantId, ActorId, ApprovalId, BuildRequestId, CandidateId, CourseId, DiagnosticCode,
-    EndpointId, EnvironmentId, EventId, ImageArtifactId, LeaseId, OperationId, PlatformRole,
-    ProblemPackageId, ProjectId, ReleaseId, ResourceRequestId, Revision, Sha256Digest,
-    StreamSequence, UploadSessionId, UtcTimestamp,
+    EndpointId, EnvironmentId, EvaluationReleaseId, EvaluationRunId, EvaluationStepRunId, EventId,
+    ImageArtifactId, LeaseId, OperationId, PlatformRole, ProblemPackageId, ProjectId, ReleaseId,
+    ResourceRequestId, Revision, Sha256Digest, StreamSequence, UploadSessionId, UtcTimestamp,
 };
 
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -369,6 +369,87 @@ pub struct InternalImageArtifactResolution {
     pub artifact: crate::supply_chain::ImageArtifact,
     pub policy_evaluation: crate::supply_chain::ImagePolicyEvaluation,
     pub resolution_sha256: Sha256Digest,
+}
+
+/// Control-to-Evaluation command that publishes one approved immutable `EvaluationSpec`.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InternalPublishEvaluationReleaseRequest {
+    pub course_id: CourseId,
+    pub candidate_id: CandidateId,
+    pub candidate_revision: Revision,
+    pub candidate_sha256: Sha256Digest,
+    pub approval_id: ApprovalId,
+    pub approval_revision: Revision,
+    pub approval_sha256: Sha256Digest,
+    pub evaluation_spec: crate::evaluation::EvaluationSpec,
+    pub runtime_identity: crate::evaluation::EvaluationRuntimeIdentity,
+    pub published_by: ActorId,
+}
+
+impl InternalPublishEvaluationReleaseRequest {
+    /// Validates the immutable release command before persistence.
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        self.evaluation_spec
+            .validate()
+            .map_err(|_| HttpContractError::InvalidEvaluationControl)?;
+        self.runtime_identity
+            .validate()
+            .map_err(|_| HttpContractError::InvalidEvaluationControl)
+    }
+}
+
+/// Control-to-Evaluation command that starts one run from a release and frozen submission.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InternalCreateEvaluationRunRequest {
+    pub course_id: CourseId,
+    pub release_id: EvaluationReleaseId,
+    pub release_revision: Revision,
+    pub frozen_submission_id: crate::FrozenSubmissionId,
+    pub actor_id: ActorId,
+    pub identity: crate::evaluation::EvaluationRunIdentity,
+}
+
+impl InternalCreateEvaluationRunRequest {
+    /// Validates the immutable run command before persistence.
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        self.identity
+            .validate()
+            .map_err(|_| HttpContractError::InvalidEvaluationControl)
+    }
+}
+
+/// Revision precondition for Control-to-Evaluation run mutations.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InternalEvaluationRunMutationRequest {
+    pub course_id: CourseId,
+    pub expected_revision: Revision,
+    pub actor_id: ActorId,
+}
+
+/// Worker-to-Evaluation terminal result fenced by a StepRun attempt.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InternalCompleteEvaluationStepRequest {
+    pub course_id: CourseId,
+    pub run_id: EvaluationRunId,
+    pub step_run_id: EvaluationStepRunId,
+    pub attempt: u32,
+    pub worker_id: String,
+    pub runtime_identity: crate::evaluation::EvaluationRuntimeIdentity,
+    pub lease_token: String,
+    pub completion: crate::evaluation::EvaluationStepCompletion,
+}
+
+impl InternalCompleteEvaluationStepRequest {
+    /// Validates the worker-supplied runtime binding before persistence fencing.
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        self.runtime_identity
+            .validate()
+            .map_err(|_| HttpContractError::InvalidEvaluationControl)
+    }
 }
 
 impl InternalImageArtifactResolution {
@@ -1941,6 +2022,8 @@ pub enum HttpContractError {
     InvalidInternalIdentity,
     #[error("console capability request or availability is invalid")]
     InvalidConsoleCapability,
+    #[error("evaluation control request is invalid")]
+    InvalidEvaluationControl,
 }
 
 #[must_use]

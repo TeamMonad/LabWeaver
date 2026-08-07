@@ -25,6 +25,12 @@
       "CsrfTokenResponse": {
         "$ref": "../contracts/v1/csrf-token-response.schema.json"
       },
+      "EvaluationRelease": {
+        "$ref": "../contracts/v1/evaluation-release.schema.json"
+      },
+      "EvaluationRun": {
+        "$ref": "../contracts/v1/evaluation-run.schema.json"
+      },
       "InternalAgentBuildCancellationRequest": {
         "$ref": "../contracts/v1/http/internal-agent-build-cancellation-request.schema.json"
       },
@@ -40,11 +46,23 @@
       "InternalAgentRunOutcome": {
         "$ref": "../contracts/v1/http/internal-agent-run-outcome.schema.json"
       },
+      "InternalCompleteEvaluationStepRequest": {
+        "$ref": "../contracts/v1/http/internal-complete-evaluation-step-request.schema.json"
+      },
       "InternalCreateAgentRunRequest": {
         "$ref": "../contracts/v1/http/internal-create-agent-run-request.schema.json"
       },
+      "InternalCreateEvaluationRunRequest": {
+        "$ref": "../contracts/v1/http/internal-create-evaluation-run-request.schema.json"
+      },
+      "InternalEvaluationRunMutationRequest": {
+        "$ref": "../contracts/v1/http/internal-evaluation-run-mutation-request.schema.json"
+      },
       "InternalImageArtifactResolution": {
         "$ref": "../contracts/v1/http/internal-image-artifact-resolution.schema.json"
+      },
+      "InternalPublishEvaluationReleaseRequest": {
+        "$ref": "../contracts/v1/http/internal-publish-evaluation-release-request.schema.json"
       },
       "OperationAccepted": {
         "additionalProperties": false,

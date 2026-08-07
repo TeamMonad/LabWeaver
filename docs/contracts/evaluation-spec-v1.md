@@ -60,6 +60,27 @@ per finding, and bounded UTF-8 byte lengths. A consumer handling an Advisory Ste
 `GoalReview::from_json_against` or `GoalReview::validate_against` with that step's validated
 `include`; intrinsic deserialization alone cannot supply step context.
 
+## Evaluation control plane
+
+`EvaluationSpec` remains immutable input. Runtime state is represented by
+`EvaluationRelease`, `EvaluationRun` and `EvaluationStepRun` contracts generated
+from `crates/contracts/src/evaluation/control.rs`. A release binds the approved
+spec to source, package, configuration, migration catalog, digest-pinned runner
+image and runtime artifact identities. A run additionally binds the release
+identity, immutable FrozenSubmission content hash, source identity and trace ID.
+
+Evaluation Service owns the PostgreSQL-authoritative lifecycle. The internal
+mTLS API accepts release publication, run creation, readback, cancellation,
+StepRun retry, cleanup verification and worker completion. Worker completion is
+fenced by `(stepRunId, attempt, workerId, leaseToken)` and accepts only hash-only
+evidence. Failed or cancelled StepRuns may remain pending cleanup; the aggregate
+Run is completed only after cleanup is explicitly verified.
+
+Outbox events are payload-safe projections. They carry release, run or step-run
+identity, revision, state, diagnostics, evidence hashes and cleanup flags, but
+not submissions, raw logs, private evaluator inputs, object locators or numeric
+score payloads.
+
 ## Fail-fast validation
 
 | Diagnostic                           | Meaning                                                              |

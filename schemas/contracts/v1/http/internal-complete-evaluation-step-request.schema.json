@@ -1,0 +1,163 @@
+{
+  "$defs": {
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "DiagnosticCode": {
+      "description": "Stable machine-readable diagnostic code.\n\nConsumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so\nadditive diagnostics do not force a wire-version change.",
+      "type": "string"
+    },
+    "EvaluationRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `EvaluationRunId`.",
+      "type": "string"
+    },
+    "EvaluationRuntimeIdentity": {
+      "additionalProperties": false,
+      "description": "Immutable build and deployment identity that must match every run using the release.",
+      "properties": {
+        "configurationSha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Effective non-secret runtime configuration identity."
+        },
+        "migrationCatalogSha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Checked-in Migration catalog identity."
+        },
+        "packageSha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Approved problem package identity."
+        },
+        "providerBinding": {
+          "description": "Explicit runtime provider binding chosen by Control and enforced by Evaluation.",
+          "type": "string"
+        },
+        "runnerImage": {
+          "description": "Digest-pinned runner image reference.",
+          "type": "string"
+        },
+        "runtimeArtifactSha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Runtime artifact identity, such as the worker binary or image manifest digest."
+        },
+        "sourceSha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Clean source tree or source bundle identity."
+        }
+      },
+      "required": [
+        "sourceSha256",
+        "providerBinding",
+        "packageSha256",
+        "configurationSha256",
+        "migrationCatalogSha256",
+        "runnerImage",
+        "runtimeArtifactSha256"
+      ],
+      "type": "object"
+    },
+    "EvaluationStepCompletion": {
+      "additionalProperties": false,
+      "description": "Terminal worker result accepted by the Evaluation authority.",
+      "properties": {
+        "awardedScore": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "cleanupVerified": {
+          "type": "boolean"
+        },
+        "diagnosticCode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DiagnosticCode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidenceSha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "state": {
+          "$ref": "#/$defs/EvaluationStepRunState"
+        }
+      },
+      "required": [
+        "state",
+        "evidenceSha256",
+        "cleanupVerified"
+      ],
+      "type": "object"
+    },
+    "EvaluationStepRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `EvaluationStepRunId`.",
+      "type": "string"
+    },
+    "EvaluationStepRunState": {
+      "description": "Public step lifecycle.",
+      "enum": [
+        "pending",
+        "running",
+        "retryable",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "skipped"
+      ],
+      "type": "string"
+    },
+    "Sha256Digest": {
+      "description": "Canonical lowercase SHA-256 digest.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Worker-to-Evaluation terminal result fenced by a StepRun attempt.",
+  "properties": {
+    "attempt": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "completion": {
+      "$ref": "#/$defs/EvaluationStepCompletion"
+    },
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    },
+    "leaseToken": {
+      "type": "string"
+    },
+    "runId": {
+      "$ref": "#/$defs/EvaluationRunId"
+    },
+    "runtimeIdentity": {
+      "$ref": "#/$defs/EvaluationRuntimeIdentity"
+    },
+    "stepRunId": {
+      "$ref": "#/$defs/EvaluationStepRunId"
+    },
+    "workerId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "courseId",
+    "runId",
+    "stepRunId",
+    "attempt",
+    "workerId",
+    "runtimeIdentity",
+    "leaseToken",
+    "completion"
+  ],
+  "title": "InternalCompleteEvaluationStepRequest",
+  "type": "object"
+}

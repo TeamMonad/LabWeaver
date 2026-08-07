@@ -25,6 +25,12 @@
       "CsrfTokenResponse": {
         "$ref": "../contracts/v1/csrf-token-response.schema.json"
       },
+      "EvaluationRelease": {
+        "$ref": "../contracts/v1/evaluation-release.schema.json"
+      },
+      "EvaluationRun": {
+        "$ref": "../contracts/v1/evaluation-run.schema.json"
+      },
       "InternalAgentBuildCancellationRequest": {
         "$ref": "../contracts/v1/http/internal-agent-build-cancellation-request.schema.json"
       },
@@ -40,11 +46,23 @@
       "InternalAgentRunOutcome": {
         "$ref": "../contracts/v1/http/internal-agent-run-outcome.schema.json"
       },
+      "InternalCompleteEvaluationStepRequest": {
+        "$ref": "../contracts/v1/http/internal-complete-evaluation-step-request.schema.json"
+      },
       "InternalCreateAgentRunRequest": {
         "$ref": "../contracts/v1/http/internal-create-agent-run-request.schema.json"
       },
+      "InternalCreateEvaluationRunRequest": {
+        "$ref": "../contracts/v1/http/internal-create-evaluation-run-request.schema.json"
+      },
+      "InternalEvaluationRunMutationRequest": {
+        "$ref": "../contracts/v1/http/internal-evaluation-run-mutation-request.schema.json"
+      },
       "InternalImageArtifactResolution": {
         "$ref": "../contracts/v1/http/internal-image-artifact-resolution.schema.json"
+      },
+      "InternalPublishEvaluationReleaseRequest": {
+        "$ref": "../contracts/v1/http/internal-publish-evaluation-release-request.schema.json"
       },
       "OperationAccepted": {
         "additionalProperties": false,
@@ -788,6 +806,463 @@
         "x-labweaver-retryable": true,
         "x-labweaver-scope": "service",
         "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/internal/v1/evaluation-releases": {
+      "post": {
+        "operationId": "publishInternalEvaluationRelease",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 16,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InternalPublishEvaluationReleaseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluationRelease"
+                }
+              }
+            },
+            "description": "EvaluationRelease accepted"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceMtls": []
+          }
+        ],
+        "summary": "Publish one Control-approved immutable EvaluationSpec release"
+      }
+    },
+    "/internal/v1/evaluation-releases/{releaseId}": {
+      "get": {
+        "operationId": "getInternalEvaluationRelease",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "releaseId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluationRelease"
+                }
+              }
+            },
+            "description": "Authoritative EvaluationRelease"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceMtls": []
+          }
+        ],
+        "summary": "Read one authoritative Evaluation release"
+      }
+    },
+    "/internal/v1/evaluation-runs": {
+      "post": {
+        "operationId": "createInternalEvaluationRun",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 16,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InternalCreateEvaluationRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluationRun"
+                }
+              }
+            },
+            "description": "EvaluationRun accepted"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceMtls": []
+          }
+        ],
+        "summary": "Reserve one EvaluationRun from an active release and immutable FrozenSubmission"
+      }
+    },
+    "/internal/v1/evaluation-runs/{runId}": {
+      "get": {
+        "operationId": "getInternalEvaluationRun",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "runId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluationRun"
+                }
+              }
+            },
+            "description": "Authoritative EvaluationRun"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceMtls": []
+          }
+        ],
+        "summary": "Read one authoritative EvaluationRun"
+      }
+    },
+    "/internal/v1/evaluation-runs/{runId}/cancel": {
+      "post": {
+        "operationId": "cancelInternalEvaluationRun",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "runId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 16,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InternalEvaluationRunMutationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluationRun"
+                }
+              }
+            },
+            "description": "Updated authoritative EvaluationRun"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceMtls": []
+          }
+        ],
+        "summary": "Request cancellation at an exact EvaluationRun revision"
+      }
+    },
+    "/internal/v1/evaluation-runs/{runId}/steps/{stepRunId}/cleanup": {
+      "post": {
+        "operationId": "verifyInternalEvaluationStepCleanup",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "runId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "stepRunId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 16,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InternalEvaluationRunMutationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluationRun"
+                }
+              }
+            },
+            "description": "Updated authoritative EvaluationRun"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceMtls": []
+          }
+        ],
+        "summary": "Verify cleanup for one failed or cancelled StepRun at an exact EvaluationRun revision"
+      }
+    },
+    "/internal/v1/evaluation-runs/{runId}/steps/{stepRunId}/complete": {
+      "post": {
+        "operationId": "completeInternalEvaluationStep",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "runId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "stepRunId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InternalCompleteEvaluationStepRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluationRun"
+                }
+              }
+            },
+            "description": "Updated authoritative EvaluationRun"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceMtls": []
+          }
+        ],
+        "summary": "Complete one fenced StepRun attempt with hash-only evidence"
+      }
+    },
+    "/internal/v1/evaluation-runs/{runId}/steps/{stepRunId}/retry": {
+      "post": {
+        "operationId": "retryInternalEvaluationStep",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "runId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "stepRunId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 16,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InternalEvaluationRunMutationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluationRun"
+                }
+              }
+            },
+            "description": "Updated authoritative EvaluationRun"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceMtls": []
+          }
+        ],
+        "summary": "Retry one failed or cancelled StepRun at an exact EvaluationRun revision"
       }
     },
     "/internal/v1/image-artifacts/{artifactId}": {

@@ -3,6 +3,7 @@
 pub mod api;
 pub mod collector;
 pub mod command_store;
+pub mod control_plane;
 pub mod coordinator;
 pub mod freeze;
 pub mod freeze_store;
@@ -22,6 +23,10 @@ pub use collector::{
 };
 pub use command_store::{
     FreezeCommandAccept, FreezeCommandStoreError, PgFreezeCommandStore, SubmissionFreezeCommand,
+};
+pub use control_plane::{
+    EvaluationControlStoreError, EvaluationReleaseReservation, EvaluationRunReservation,
+    EvaluationStepLease, PgEvaluationControlStore,
 };
 pub use coordinator::{FreezeCoordinator, FreezeCoordinatorConfiguration, FreezeCoordinatorError};
 pub use freeze::{FreezeRequest, FreezeService, FreezeServiceError};

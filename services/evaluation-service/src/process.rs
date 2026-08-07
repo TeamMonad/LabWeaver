@@ -19,8 +19,8 @@ use sqlx::postgres::PgPoolOptions;
 
 use crate::{
     EvaluationApiState, EvaluationOutboxDispatcher, EvaluationOutboxError, FreezeCoordinator,
-    FreezeCoordinatorConfiguration, FreezeCoordinatorError, PgFreezeCommandStore, PgFreezeStore,
-    evaluation_api_router, serve_evaluation_mtls,
+    FreezeCoordinatorConfiguration, FreezeCoordinatorError, PgEvaluationControlStore,
+    PgFreezeCommandStore, PgFreezeStore, evaluation_api_router, serve_evaluation_mtls,
 };
 
 const CONFIG_PATH: &str = "LABWEAVER_EVALUATION_CONFIG_FILE";
@@ -67,6 +67,7 @@ pub async fn run_evaluation_service() -> Result<(), EvaluationProcessError> {
     let api = evaluation_api_router(EvaluationApiState::new(
         command_store.clone(),
         PgFreezeStore::new(pool.clone()),
+        PgEvaluationControlStore::new(pool.clone()),
     ));
     let coordinator = FreezeCoordinator::new(configuration.coordinator, command_store)?;
     let dispatcher = EvaluationOutboxDispatcher::new(
@@ -209,7 +210,10 @@ fn read_mounted_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, EvaluationP
 async fn require_schema(pool: &sqlx::PgPool) -> Result<(), EvaluationProcessError> {
     let ready: bool = sqlx::query_scalar(
         "SELECT to_regclass('evaluation.submission_freeze_commands') IS NOT NULL \
-         AND to_regclass('evaluation.outbox_events') IS NOT NULL",
+         AND to_regclass('evaluation.outbox_events') IS NOT NULL \
+         AND to_regclass('evaluation.evaluation_releases') IS NOT NULL \
+         AND to_regclass('evaluation.evaluation_runs') IS NOT NULL \
+         AND to_regclass('evaluation.evaluation_step_runs') IS NOT NULL",
     )
     .fetch_one(pool)
     .await?;

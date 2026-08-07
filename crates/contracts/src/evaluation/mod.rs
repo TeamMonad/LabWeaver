@@ -1,9 +1,16 @@
 //! Stable deterministic evaluation and advisory review contracts.
 
+mod control;
 mod review;
 mod spec;
 mod validation;
 
+pub use control::{
+    EVALUATION_RELEASE_SCHEMA_VERSION, EVALUATION_RUN_SCHEMA_VERSION,
+    EvaluationControlContractError, EvaluationRelease, EvaluationReleaseState, EvaluationRun,
+    EvaluationRunIdentity, EvaluationRunState, EvaluationRuntimeIdentity, EvaluationStepCompletion,
+    EvaluationStepFailurePolicy, EvaluationStepRole, EvaluationStepRun, EvaluationStepRunState,
+};
 pub use review::{
     EvidenceLocation, FindingResult, GoalAssessment, GoalFinding, GoalReview, GoalReviewError,
 };

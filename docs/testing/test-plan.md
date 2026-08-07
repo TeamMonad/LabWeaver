@@ -106,6 +106,33 @@ baseline migration to a disposable PostgreSQL instance.
   material is not a substitute. This authentication setup is separate from
   the required browser Playwright evidence.
 
+## Issue #123 Evaluation control-plane gate
+
+The local gate proves the authoritative PostgreSQL lifecycle and schema
+surface, but not a connected runner/provider deployment:
+
+```sh
+cargo test -p contracts --all-targets --all-features
+DOCKER_HOST=unix:///Users/zeyi2/.colima/default/docker.sock \
+  cargo test -p evaluation-service --test control_plane -- --nocapture
+cargo check -p evaluation-service --all-targets --all-features
+cargo xtask contracts check
+```
+
+The `control_plane` integration test applies both evaluation migrations to a
+disposable PostgreSQL instance and checks idempotent EvaluationRelease and
+EvaluationRun creation, closed hash/runtime/frozen-submission identity,
+duplicate replay, lease-token fencing, cancel before claim, failed StepRun
+retry, expired lease recovery and cleanup verification before completed
+failure.
+
+D connected Verify must additionally prove the same source, migration catalog,
+configuration, runner image digest, frozen submission, provider binding and
+trace identity through the real Control-to-Evaluation caller and real
+Evaluation worker path. Missing binding, permission, image digest, provider or
+environment conditions must fail closed with the same diagnostic family and
+must not be represented by this local test.
+
 ## Issue #140 C++17 OJ gate
 
 The local gate proves only strict semantics and resource construction:
@@ -128,7 +155,7 @@ build remains a blocker rather than a pass. CI must build the image twice,
 compare OCI archive identities, reject High/Critical vulnerabilities and
 secrets for the OJ image, and retain the Trivy JSON artifact.
 
-After #123 supplies the authoritative attempt path, connected D Verify must use
+After #123 is merged and deployed, connected D Verify must use
 one immutable submission, evaluator and image identity to exercise accepted,
 compile error, wrong answer, time limit, memory limit and output limit. It must
 also prove zero egress, no service-account token, readonly private inputs,

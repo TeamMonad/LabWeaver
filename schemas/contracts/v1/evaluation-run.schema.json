@@ -1,0 +1,384 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "DiagnosticCode": {
+      "description": "Stable machine-readable diagnostic code.\n\nConsumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so\nadditive diagnostics do not force a wire-version change.",
+      "type": "string"
+    },
+    "EvaluationReleaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `EvaluationReleaseId`.",
+      "type": "string"
+    },
+    "EvaluationRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `EvaluationRunId`.",
+      "type": "string"
+    },
+    "EvaluationRunIdentity": {
+      "additionalProperties": false,
+      "description": "Immutable run identity joining release, frozen submission and trace evidence.",
+      "properties": {
+        "evaluationSpecSha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "frozenSubmissionSha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "releaseIdentitySha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "runtimeIdentity": {
+          "$ref": "#/$defs/EvaluationRuntimeIdentity"
+        },
+        "sourceIdentitySha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "traceId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "releaseIdentitySha256",
+        "evaluationSpecSha256",
+        "frozenSubmissionSha256",
+        "sourceIdentitySha256",
+        "runtimeIdentity",
+        "traceId"
+      ],
+      "type": "object"
+    },
+    "EvaluationRunState": {
+      "description": "Public run lifecycle.",
+      "enum": [
+        "queued",
+        "running",
+        "cancelling",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "EvaluationRuntimeIdentity": {
+      "additionalProperties": false,
+      "description": "Immutable build and deployment identity that must match every run using the release.",
+      "properties": {
+        "configurationSha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Effective non-secret runtime configuration identity."
+        },
+        "migrationCatalogSha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Checked-in Migration catalog identity."
+        },
+        "packageSha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Approved problem package identity."
+        },
+        "providerBinding": {
+          "description": "Explicit runtime provider binding chosen by Control and enforced by Evaluation.",
+          "type": "string"
+        },
+        "runnerImage": {
+          "description": "Digest-pinned runner image reference.",
+          "type": "string"
+        },
+        "runtimeArtifactSha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Runtime artifact identity, such as the worker binary or image manifest digest."
+        },
+        "sourceSha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Clean source tree or source bundle identity."
+        }
+      },
+      "required": [
+        "sourceSha256",
+        "providerBinding",
+        "packageSha256",
+        "configurationSha256",
+        "migrationCatalogSha256",
+        "runnerImage",
+        "runtimeArtifactSha256"
+      ],
+      "type": "object"
+    },
+    "EvaluationStepFailurePolicy": {
+      "description": "Stable failure behavior copied from the immutable `EvaluationSpec` step.",
+      "enum": [
+        "stop",
+        "continue",
+        "continue_advisory"
+      ],
+      "type": "string"
+    },
+    "EvaluationStepRole": {
+      "description": "Stable role copied from the immutable `EvaluationSpec` step.",
+      "enum": [
+        "gate",
+        "score",
+        "advisory"
+      ],
+      "type": "string"
+    },
+    "EvaluationStepRun": {
+      "additionalProperties": false,
+      "description": "PostgreSQL-authoritative state for one declared evaluation step.",
+      "properties": {
+        "awardedScore": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "cleanupVerified": {
+          "type": "boolean"
+        },
+        "completedAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "currentAttempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "dependsOn": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "diagnosticCode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DiagnosticCode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidenceSha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256Digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "failurePolicy": {
+          "$ref": "#/$defs/EvaluationStepFailurePolicy"
+        },
+        "id": {
+          "$ref": "#/$defs/EvaluationStepRunId"
+        },
+        "maxScore": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "position": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "role": {
+          "$ref": "#/$defs/EvaluationStepRole"
+        },
+        "runId": {
+          "$ref": "#/$defs/EvaluationRunId"
+        },
+        "startedAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/EvaluationStepRunState"
+        },
+        "stepId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "runId",
+        "stepId",
+        "position",
+        "role",
+        "failurePolicy",
+        "dependsOn",
+        "state",
+        "revision",
+        "currentAttempt",
+        "maxScore",
+        "cleanupVerified"
+      ],
+      "type": "object"
+    },
+    "EvaluationStepRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `EvaluationStepRunId`.",
+      "type": "string"
+    },
+    "EvaluationStepRunState": {
+      "description": "Public step lifecycle.",
+      "enum": [
+        "pending",
+        "running",
+        "retryable",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "skipped"
+      ],
+      "type": "string"
+    },
+    "FrozenSubmissionId": {
+      "description": "Strongly typed UUIDv7 identifier for `FrozenSubmissionId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "Sha256Digest": {
+      "description": "Canonical lowercase SHA-256 digest.",
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "PostgreSQL-authoritative state for one evaluation run.",
+  "properties": {
+    "actorId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "awardedScore": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "cancellationRequested": {
+      "type": "boolean"
+    },
+    "cleanupVerified": {
+      "type": "boolean"
+    },
+    "completedAt": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    },
+    "createdAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "diagnosticCode": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DiagnosticCode"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "frozenSubmissionId": {
+      "$ref": "#/$defs/FrozenSubmissionId"
+    },
+    "id": {
+      "$ref": "#/$defs/EvaluationRunId"
+    },
+    "identity": {
+      "$ref": "#/$defs/EvaluationRunIdentity"
+    },
+    "maxScore": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "releaseId": {
+      "$ref": "#/$defs/EvaluationReleaseId"
+    },
+    "releaseRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "revision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "schemaVersion": {
+      "type": "string"
+    },
+    "state": {
+      "$ref": "#/$defs/EvaluationRunState"
+    },
+    "steps": {
+      "items": {
+        "$ref": "#/$defs/EvaluationStepRun"
+      },
+      "type": "array"
+    },
+    "updatedAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "id",
+    "courseId",
+    "releaseId",
+    "releaseRevision",
+    "frozenSubmissionId",
+    "actorId",
+    "state",
+    "revision",
+    "identity",
+    "maxScore",
+    "awardedScore",
+    "steps",
+    "cancellationRequested",
+    "cleanupVerified",
+    "createdAt",
+    "updatedAt"
+  ],
+  "title": "EvaluationRun",
+  "type": "object"
+}

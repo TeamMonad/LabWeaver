@@ -10,9 +10,9 @@ use crate::resource::{ResourceLease, ResourceRequest};
 use crate::submission::FrozenSubmission;
 use crate::supply_chain::{BuildRequest, EnvironmentTemplateRelease};
 use crate::{
-    AccessGrantId, ActorId, AgentRunId, BuildRequestId, CourseId, EnvironmentId, EventId,
-    FrozenSubmissionId, GatewaySessionId, ReleaseId, Revision, Sequence, Sha256Digest,
-    SshPublicKeyId, UtcTimestamp,
+    AccessGrantId, ActorId, AgentRunId, BuildRequestId, CourseId, EnvironmentId,
+    EvaluationReleaseId, EvaluationRunId, EvaluationStepRunId, EventId, FrozenSubmissionId,
+    GatewaySessionId, ReleaseId, Revision, Sequence, Sha256Digest, SshPublicKeyId, UtcTimestamp,
 };
 
 pub const SPEC_VERSION: &str = "1.0";
@@ -50,6 +50,11 @@ pub mod subjects {
     pub const SUBMISSION_FREEZE_REQUESTED: &str =
         "labweaver.evaluation.submission.freeze_requested.v1";
     pub const SUBMISSION_FROZEN: &str = "labweaver.evaluation.submission.frozen.v1";
+    pub const EVALUATION_RELEASE_PUBLISHED: &str = "labweaver.evaluation.release.published.v1";
+    pub const EVALUATION_RUN_REQUESTED: &str = "labweaver.evaluation.run.requested.v1";
+    pub const EVALUATION_RUN_STATE_CHANGED: &str = "labweaver.evaluation.run.state_changed.v1";
+    pub const EVALUATION_STEP_RUN_STATE_CHANGED: &str =
+        "labweaver.evaluation.step_run.state_changed.v1";
     pub const LAB_RELEASE_APPROVED: &str = "labweaver.control.lab_release.approved.v1";
     pub const ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED: &str =
         "labweaver.control.environment_template_release.published.v1";
@@ -328,6 +333,26 @@ pub const EVENT_CONTRACTS: &[EventContract] = &[
         schema_name: "submission-frozen",
     },
     EventContract {
+        subject: subjects::EVALUATION_RELEASE_PUBLISHED,
+        event_type: subjects::EVALUATION_RELEASE_PUBLISHED,
+        schema_name: "evaluation-release-published",
+    },
+    EventContract {
+        subject: subjects::EVALUATION_RUN_REQUESTED,
+        event_type: subjects::EVALUATION_RUN_REQUESTED,
+        schema_name: "evaluation-run-requested",
+    },
+    EventContract {
+        subject: subjects::EVALUATION_RUN_STATE_CHANGED,
+        event_type: subjects::EVALUATION_RUN_STATE_CHANGED,
+        schema_name: "evaluation-run-state-changed",
+    },
+    EventContract {
+        subject: subjects::EVALUATION_STEP_RUN_STATE_CHANGED,
+        event_type: subjects::EVALUATION_STEP_RUN_STATE_CHANGED,
+        schema_name: "evaluation-step-run-state-changed",
+    },
+    EventContract {
         subject: subjects::LAB_RELEASE_APPROVED,
         event_type: subjects::LAB_RELEASE_APPROVED,
         schema_name: "lab-release-approved",
@@ -506,6 +531,74 @@ impl SubmissionFrozen {
             .map_err(|_| EventError::PayloadIdentityMismatch)
     }
 }
+
+/// Payload-safe publication event for an immutable Evaluation release.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EvaluationReleasePublished {
+    pub release_id: EvaluationReleaseId,
+    pub revision: Revision,
+    pub evaluation_spec_sha256: Sha256Digest,
+    pub release_identity_sha256: Sha256Digest,
+    pub published_by: ActorId,
+}
+
+/// Payload-safe run state event. Detailed scoring remains in the authoritative read model.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EvaluationRunEvent {
+    pub run_id: EvaluationRunId,
+    pub release_id: EvaluationReleaseId,
+    pub revision: Revision,
+    pub state: String,
+    pub diagnostic_code: Option<String>,
+    pub operator_actor_id: Option<ActorId>,
+}
+
+impl EvaluationRunEvent {
+    pub fn validate(&self) -> Result<(), EventError> {
+        validate_event_state(&self.state)?;
+        if let Some(diagnostic) = &self.diagnostic_code {
+            crate::DiagnosticCode::parse(diagnostic)
+                .map_err(|_| EventError::PayloadIdentityMismatch)?;
+        }
+        Ok(())
+    }
+}
+
+/// Payload-safe step state event. Evidence is hash-only and must be read from the authority.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EvaluationStepRunEvent {
+    pub run_id: EvaluationRunId,
+    pub step_run_id: EvaluationStepRunId,
+    pub step_id: String,
+    pub revision: Revision,
+    pub state: String,
+    pub attempt: u32,
+    pub diagnostic_code: Option<String>,
+    pub evidence_sha256: Option<Sha256Digest>,
+    pub cleanup_verified: Option<bool>,
+    pub operator_actor_id: Option<ActorId>,
+}
+
+impl EvaluationStepRunEvent {
+    pub fn validate(&self) -> Result<(), EventError> {
+        validate_event_state(&self.state)?;
+        if self.step_id.trim().is_empty()
+            || (matches!(self.state.as_str(), "running" | "succeeded" | "failed")
+                && self.attempt == 0)
+        {
+            return Err(EventError::PayloadIdentityMismatch);
+        }
+        if let Some(diagnostic) = &self.diagnostic_code {
+            crate::DiagnosticCode::parse(diagnostic)
+                .map_err(|_| EventError::PayloadIdentityMismatch)?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LabReleaseApproved {
@@ -606,6 +699,18 @@ fn protected_event_key(key: &str) -> bool {
             normalized.as_ref(),
             "authorization" | "score" | "pointsawarded"
         )
+}
+
+fn validate_event_state(state: &str) -> Result<(), EventError> {
+    if state.trim().is_empty()
+        || state.len() > 64
+        || !state
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+    {
+        return Err(EventError::PayloadIdentityMismatch);
+    }
+    Ok(())
 }
 
 pub fn validate_delivery(previous: Option<Sequence>, current: Sequence) -> Result<(), EventError> {
