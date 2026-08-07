@@ -87,6 +87,7 @@ jobs:
         component:
           - access-service
           - agent-service
+          - ansible-probe-runner
           - control-service
           - environment-service
           - evaluation-service
@@ -112,6 +113,9 @@ jobs:
           service_args=(--build-arg "SERVICE=$COMPONENT" --target runtime)
           if [[ "$COMPONENT" == web ]]; then
             file=containers/Containerfile.web
+            service_args=()
+          elif [[ "$COMPONENT" == ansible-probe-runner ]]; then
+            file=containers/Containerfile.ansible-probe
             service_args=()
           elif [[ "$COMPONENT" == oj-cpp17-runner ]]; then
             file=containers/Containerfile.oj-cpp17

@@ -1,0 +1,40 @@
+{
+  "plays": [
+    {
+      "play": { "id": "0a1b2c3d-0000-4000-8000-000000000010", "name": "linux nginx read-only probe" },
+      "tasks": [
+        {
+          "hosts": {
+            "192.168.56.10": {
+              "action": "ansible.builtin.debug",
+              "changed": false,
+              "labweaver_probe_facts": { "host.reachable": true }
+            }
+          },
+          "task": { "id": "0a1b2c3d-0000-4000-8000-000000000011", "name": "labweaver_probe_facts" }
+        },
+        {
+          "hosts": {
+            "192.168.56.10": {
+              "action": "ansible.builtin.debug",
+              "changed": false,
+              "labweaver_probe_facts": { "service.nginx.active": true }
+            }
+          },
+          "task": { "id": "0a1b2c3d-0000-4000-8000-000000000012", "name": "labweaver_probe_facts" }
+        }
+      ]
+    }
+  ],
+  "stats": {
+    "192.168.56.10": {
+      "changed": 0,
+      "failures": 0,
+      "ignored": 0,
+      "ok": 2,
+      "rescued": 0,
+      "skipped": 0,
+      "unreachable": 0
+    }
+  }
+}

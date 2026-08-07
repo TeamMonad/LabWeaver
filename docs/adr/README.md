@@ -41,3 +41,7 @@ No ADR is accepted in ARC-01a; this directory establishes the review process wit
 - [ADR 0013: Isolated C++17 OJ Runner](0013-isolated-cpp17-oj-runner.md)
   defines the digest-bound, network-denied C++17 Job, deterministic checker and
   aggregator, payload-free evidence boundary and exact cleanup for Issue #140.
+- [ADR 0014: Read-only Ansible Probe Runner for Linux Nginx](0014-read-only-ansible-probe-runner.md)
+  defines the allowlisted read-only VM probe Job, bounded typed facts,
+  deterministic assertion evaluation, payload-free evidence boundary and exact
+  cleanup for Issue #141.
