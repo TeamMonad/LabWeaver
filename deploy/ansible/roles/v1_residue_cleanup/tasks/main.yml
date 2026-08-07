@@ -70,10 +70,16 @@
     - /etc/containers
 
 - name: Remove leftover Cilium / docker interfaces
-  ansible.builtin.command: "ip link del {{ item }}"
+  ansible.builtin.shell: "ip link del {{ item }} 2>/dev/null || true"
   changed_when: false
-  failed_when: false
   loop: [cilium_net, cilium_host, cilium_vxlan, cilium_health, docker0]
+
+- name: Fail closed if any Cilium interface survives
+  ansible.builtin.shell: "ip -br link 2>/dev/null | grep -cE 'cilium' || true"
+  changed_when: false
+  register: v1_cilium_after
+  failed_when: (v1_cilium_after.stdout | trim | int) != 0
+  loop: [once]
 
 - name: Purge old Kubernetes/CRI-O packages for a fresh pinned install
   ansible.builtin.apt:
