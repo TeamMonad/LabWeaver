@@ -100,7 +100,7 @@
 
 - name: Reject pinned versions missing from the configured sources (Ubuntu)
   ansible.builtin.assert:
-    that: item.stdout | trim == "{{ item.item.version }}-1.1"
+    that: item.stdout | trim == item.item.version ~ '-1.1'
     fail_msg: >-
       KUBERNETES_PACKAGE_VERSION_UNAVAILABLE: {{ item.item.pkg }} pinned
       {{ item.item.version }}-1.1 is not available in the configured sources
