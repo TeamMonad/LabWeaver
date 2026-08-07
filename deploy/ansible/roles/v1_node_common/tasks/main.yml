@@ -20,12 +20,12 @@
     state: present
     update_cache: true
 
-- name: Enable time sync and guest agent
+- name: Enable time sync (chrony); qemu-guest-agent stays installed but is not
+    started on bare-metal v1 nodes (no virtio channel, service dependency fails)
   ansible.builtin.systemd_service:
-    name: "{{ item }}"
+    name: chrony
     enabled: true
     state: started
-  loop: [chrony, qemu-guest-agent]
 
 - name: Disable UFW if present
   ansible.builtin.systemd_service:
