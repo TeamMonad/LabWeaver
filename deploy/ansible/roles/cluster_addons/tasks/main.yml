@@ -3,7 +3,7 @@
   kubernetes.core.k8s:
     kubeconfig: /etc/kubernetes/admin.conf
     state: present
-    src: "https://github.com/cert-manager/cert-manager/releases/download/{{ cert_manager_version }}/cert-manager.yaml"
+    src: "{{ cert_manager_manifest_file | default('https://github.com/cert-manager/cert-manager/releases/download/' ~ cert_manager_version ~ '/cert-manager.yaml') }}"
 
 - name: Wait for cert-manager controllers
   ansible.builtin.command: "kubectl -n cert-manager wait deployment/{{ item }} --for=condition=Available --timeout=5m"
