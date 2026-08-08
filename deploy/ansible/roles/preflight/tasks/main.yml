@@ -46,9 +46,9 @@
 - name: Assert the adopted-cluster identity-foundation inventory boundary
   ansible.builtin.assert:
     that:
-      - (groups.get('routers', []) | sort) == ['edge-router']
-      - (groups.get('control_plane', []) | sort) == ['k8s-cp1']
-      - "'k8s-cp1' in groups.get('k8s_cluster', [])"
+      - (groups.get('routers', []) | sort) == [identity_preflight_router]
+      - (groups.get('control_plane', []) | sort) == [identity_preflight_control_plane]
+      - "'{{ identity_preflight_control_plane }}' in groups.get('k8s_cluster', [])"
     fail_msg: IDENTITY_INVENTORY_SCOPE_INVALID
   run_once: true
   delegate_to: localhost
