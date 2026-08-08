@@ -186,3 +186,8 @@ platform_application_components:
   - evaluation-service
   - openssh-gateway
   - web
+
+# CA trust store layout differs between RHEL-family (/etc/pki/ca-trust) and
+# Debian-family (/usr/local/share/ca-certificates) routers and nodes.
+labweaver_ca_trust_anchors_dir: /etc/pki/ca-trust/source/anchors
+labweaver_ca_trust_refresh_command: update-ca-trust extract

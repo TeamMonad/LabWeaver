@@ -1,11 +1,9 @@
 ---
 - name: Refresh control-plane system trust after a Harbor CA change
-  ansible.builtin.command:
-    argv: [/usr/bin/update-ca-trust, extract]
+  ansible.builtin.command: "{{ labweaver_ca_trust_refresh_command }}"
   changed_when: true
 
 - name: Refresh router system trust after a Harbor CA change
-  ansible.builtin.command:
-    argv: [/usr/bin/update-ca-trust, extract]
+  ansible.builtin.command: "{{ labweaver_ca_trust_refresh_command }}"
   delegate_to: "{{ groups['routers'][0] }}"
   changed_when: true

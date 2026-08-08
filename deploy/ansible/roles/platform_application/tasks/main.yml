@@ -999,13 +999,13 @@
   delegate_to: "{{ item.0 }}"
   loop: >-
     {{ groups['k8s_cluster']
-       | product(['/etc/pki/ca-trust/source/anchors',
+       | product([labweaver_ca_trust_anchors_dir,
                   '/etc/containers/certs.d/' + platform_application_harbor_registry])
        | list }}
 
 - name: Install the adopted Harbor CA in every Kubernetes node system trust
   ansible.builtin.copy:
-    dest: /etc/pki/ca-trust/source/anchors/labweaver-harbor.crt
+    dest: "{{ labweaver_ca_trust_anchors_dir }}/labweaver-harbor.crt"
     owner: root
     group: root
     mode: "0644"
@@ -1712,7 +1712,7 @@
 - name: Install the Sprint 2 portal authority on the retained router
   ansible.builtin.copy:
     src: "{{ platform_application_portal_tls_ca_file }}"
-    dest: /etc/pki/ca-trust/source/anchors/labweaver-platform-portal.crt
+    dest: "{{ labweaver_ca_trust_anchors_dir }}/labweaver-platform-portal.crt"
     owner: root
     group: root
     mode: "0644"

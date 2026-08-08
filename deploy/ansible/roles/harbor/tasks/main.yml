@@ -635,8 +635,8 @@
     {{ harbor_kubectl_path }} --kubeconfig {{ harbor_kubeconfig_path }}
     -n {{ harbor_namespace }} get secret harbor-internal-ca
     -o jsonpath='{.data.ca\.crt}' | base64 -d
-    > /etc/pki/ca-trust/source/anchors/labweaver-harbor-internal-ca.crt
-    && update-ca-trust extract
+    > {{ labweaver_ca_trust_anchors_dir }}/labweaver-harbor-internal-ca.crt
+    && {{ labweaver_ca_trust_refresh_command }}
   args:
     executable: /bin/bash
   become: true

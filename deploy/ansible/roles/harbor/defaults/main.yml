@@ -17,3 +17,8 @@ harbor_component_resources:
   database_permissions: { requests: { cpu: 50m, memory: 64Mi }, limits: { cpu: 250m, memory: 256Mi } }
   redis: { requests: { cpu: 100m, memory: 128Mi }, limits: { cpu: 500m, memory: 512Mi } }
   exporter: { requests: { cpu: 50m, memory: 64Mi }, limits: { cpu: 250m, memory: 256Mi } }
+
+# CA trust store layout differs between RHEL-family (/etc/pki/ca-trust) and
+# Debian-family (/usr/local/share/ca-certificates) control planes.
+labweaver_ca_trust_anchors_dir: /etc/pki/ca-trust/source/anchors
+labweaver_ca_trust_refresh_command: update-ca-trust extract
