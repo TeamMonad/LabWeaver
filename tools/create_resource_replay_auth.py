@@ -13,9 +13,9 @@ class Form(html.parser.HTMLParser):
         if tag == "input" and a.get("name"): self.fields[a["name"]]=a.get("value", "")
 
 IDENTITIES = {
-    "teacher": "sprint2-teacher",
-    "student": "sprint2-student",
-    "platform-admin": "sprint2-admin",
+    "teacher": "platform-teacher",
+    "student": "platform-student",
+    "platform-admin": "platform-admin",
 }
 
 

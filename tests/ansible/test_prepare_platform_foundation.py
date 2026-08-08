@@ -11,8 +11,8 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "tools/prepare_sprint2_foundation.py"
-SPEC = importlib.util.spec_from_file_location("prepare_sprint2_foundation", SCRIPT)
+SCRIPT = ROOT / "tools/prepare_platform_foundation.py"
+SPEC = importlib.util.spec_from_file_location("prepare_platform_foundation", SCRIPT)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError("foundation authoring module could not be loaded")
 FOUNDATION = importlib.util.module_from_spec(SPEC)
@@ -26,7 +26,7 @@ class FoundationAuthoringTests(unittest.TestCase):
             root = Path(temporary)
             with self.assertRaisesRegex(
                 FOUNDATION.FoundationError,
-                "LW_SPRINT2_FOUNDATION_PRIVATE_PATH_REQUIRED",
+                "LW_PLATFORM_FOUNDATION_PRIVATE_PATH_REQUIRED",
             ):
                 FOUNDATION._private_output(root / "foundation")
 
@@ -37,7 +37,7 @@ class FoundationAuthoringTests(unittest.TestCase):
             output.mkdir()
             with self.assertRaisesRegex(
                 FOUNDATION.FoundationError,
-                "LW_SPRINT2_FOUNDATION_OUTPUT_EXISTS",
+                "LW_PLATFORM_FOUNDATION_OUTPUT_EXISTS",
             ):
                 FOUNDATION._private_output(output)
 
@@ -62,8 +62,8 @@ class FoundationAuthoringTests(unittest.TestCase):
             self.assertNotIn("*", publish)
             self.assertNotIn("*", subscribe)
 
-        self.assertEqual(FOUNDATION.NATS_ADMIN_TLS_IDENTITY, "sprint2-admin")
-        self.assertEqual(FOUNDATION.NATS_ADMIN_USER, "sprint2-admin")
+        self.assertEqual(FOUNDATION.NATS_ADMIN_TLS_IDENTITY, "platform-admin")
+        self.assertEqual(FOUNDATION.NATS_ADMIN_USER, "platform-admin")
         self.assertNotIn(FOUNDATION.NATS_ADMIN_TLS_IDENTITY, FOUNDATION.NATS_USERS)
         self.assertEqual(FOUNDATION.NATS_ADMIN_PUBLISH, ("$JS.API.>", "$JS.ACK.>"))
         self.assertEqual(FOUNDATION.NATS_ADMIN_SUBSCRIBE, ("_INBOX.>",))
@@ -136,7 +136,7 @@ class FoundationAuthoringTests(unittest.TestCase):
                 source.chmod(0o640)
                 with self.assertRaisesRegex(
                     FOUNDATION.FoundationError,
-                    "LW_SPRINT2_FOUNDATION_WORKLOADS_SEED_INVALID",
+                    "LW_PLATFORM_FOUNDATION_WORKLOADS_SEED_INVALID",
                 ):
                     FOUNDATION._workloads_seed_source(source.resolve())
 
@@ -147,7 +147,7 @@ class FoundationAuthoringTests(unittest.TestCase):
             source.chmod(0o600)
             with self.assertRaisesRegex(
                 FOUNDATION.FoundationError,
-                "LW_SPRINT2_FOUNDATION_WORKLOADS_SEED_INVALID",
+                "LW_PLATFORM_FOUNDATION_WORKLOADS_SEED_INVALID",
             ):
                 FOUNDATION._workloads_seed_source(source.resolve())
 

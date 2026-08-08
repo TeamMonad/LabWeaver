@@ -22,9 +22,9 @@ class AccessSeedError(Exception):
 def private_output(path: Path) -> Path:
     resolved = path.resolve()
     if not any(part in {".private", "private"} for part in resolved.parts):
-        raise AccessSeedError("LW_SPRINT2_ACCESS_SEED_PRIVATE_PATH_REQUIRED")
+        raise AccessSeedError("LW_PLATFORM_ACCESS_SEED_PRIVATE_PATH_REQUIRED")
     if resolved.exists() or not resolved.parent.is_dir():
-        raise AccessSeedError("LW_SPRINT2_ACCESS_SEED_OUTPUT_INVALID")
+        raise AccessSeedError("LW_PLATFORM_ACCESS_SEED_OUTPUT_INVALID")
     return resolved
 
 
@@ -38,22 +38,22 @@ def validate_issuer(value: str) -> str:
         or parsed.username
         or parsed.password
     ):
-        raise AccessSeedError("LW_SPRINT2_ACCESS_SEED_ISSUER_INVALID")
+        raise AccessSeedError("LW_PLATFORM_ACCESS_SEED_ISSUER_INVALID")
     return value.rstrip("/")
 
 
 def find_user(realm: dict[str, object], username: str, role: str) -> str:
     users = realm.get("users")
     if not isinstance(users, list):
-        raise AccessSeedError("LW_SPRINT2_ACCESS_SEED_REALM_INVALID")
+        raise AccessSeedError("LW_PLATFORM_ACCESS_SEED_REALM_INVALID")
     matches = [user for user in users if isinstance(user, dict) and user.get("username") == username]
     if len(matches) != 1:
-        raise AccessSeedError("LW_SPRINT2_ACCESS_SEED_USER_INVALID")
+        raise AccessSeedError("LW_PLATFORM_ACCESS_SEED_USER_INVALID")
     user = matches[0]
     subject = user.get("id")
     roles = user.get("realmRoles")
     if not isinstance(subject, str) or not subject or not isinstance(roles, list) or role not in roles:
-        raise AccessSeedError("LW_SPRINT2_ACCESS_SEED_USER_INVALID")
+        raise AccessSeedError("LW_PLATFORM_ACCESS_SEED_USER_INVALID")
     return subject
 
 
@@ -61,7 +61,7 @@ def uuid7() -> uuid.UUID:
     """Generate an RFC 9562 UUIDv7 without relying on Python 3.14's uuid.uuid7."""
     unix_milliseconds = time.time_ns() // 1_000_000
     if not 0 <= unix_milliseconds < 1 << 48:
-        raise AccessSeedError("LW_SPRINT2_ACCESS_SEED_CLOCK_INVALID")
+        raise AccessSeedError("LW_PLATFORM_ACCESS_SEED_CLOCK_INVALID")
     value = unix_milliseconds << 80
     value |= 0x7 << 76
     value |= secrets.randbits(12) << 64
@@ -82,9 +82,9 @@ def build_seed(
     try:
         parsed_course_id = uuid.UUID(course_id)
     except ValueError as error:
-        raise AccessSeedError("LW_SPRINT2_ACCESS_SEED_COURSE_INVALID") from error
+        raise AccessSeedError("LW_PLATFORM_ACCESS_SEED_COURSE_INVALID") from error
     if parsed_course_id.version != 7:
-        raise AccessSeedError("LW_SPRINT2_ACCESS_SEED_COURSE_INVALID")
+        raise AccessSeedError("LW_PLATFORM_ACCESS_SEED_COURSE_INVALID")
     memberships: list[dict[str, str]] = []
     for username, role in (
         (teacher_username, "teacher"),
@@ -103,7 +103,7 @@ def build_seed(
             }
         )
     return {
-        "apiVersion": "deploy.labweaver.io/sprint2-access-seed/v1",
+        "apiVersion": "deploy.labweaver.io/platform-access-seed/v1",
         "courseMemberships": memberships,
     }
 
@@ -121,7 +121,7 @@ def main() -> int:
     try:
         realm = json.loads(arguments.realm_file.read_text(encoding="utf-8"))
         if not isinstance(realm, dict):
-            raise AccessSeedError("LW_SPRINT2_ACCESS_SEED_REALM_INVALID")
+            raise AccessSeedError("LW_PLATFORM_ACCESS_SEED_REALM_INVALID")
         output = private_output(arguments.output)
         seed = build_seed(
             realm,
@@ -136,7 +136,7 @@ def main() -> int:
             json.dump(seed, handle, indent=2, sort_keys=True)
             handle.write("\n")
     except (OSError, json.JSONDecodeError) as error:
-        raise AccessSeedError("LW_SPRINT2_ACCESS_SEED_IO_FAILED") from error
+        raise AccessSeedError("LW_PLATFORM_ACCESS_SEED_IO_FAILED") from error
     return 0
 
 

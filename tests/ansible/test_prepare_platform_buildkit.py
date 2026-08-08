@@ -10,8 +10,8 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "tools/prepare_sprint2_buildkit.py"
-SPEC = importlib.util.spec_from_file_location("prepare_sprint2_buildkit", SCRIPT)
+SCRIPT = ROOT / "tools/prepare_platform_buildkit.py"
+SPEC = importlib.util.spec_from_file_location("prepare_platform_buildkit", SCRIPT)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError("BuildKit authoring module could not be loaded")
 BUILDKIT = importlib.util.module_from_spec(SPEC)
@@ -25,7 +25,7 @@ class BuildkitAuthoringTests(unittest.TestCase):
             root = Path(temporary)
             with self.assertRaisesRegex(
                 BUILDKIT.BuildkitAuthoringError,
-                "LW_SPRINT2_BUILDKIT_PRIVATE_PATH_REQUIRED",
+                "LW_PLATFORM_BUILDKIT_PRIVATE_PATH_REQUIRED",
             ):
                 BUILDKIT._private_output(root / "buildkit")
 
@@ -36,7 +36,7 @@ class BuildkitAuthoringTests(unittest.TestCase):
             output.mkdir()
             with self.assertRaisesRegex(
                 BUILDKIT.BuildkitAuthoringError,
-                "LW_SPRINT2_BUILDKIT_OUTPUT_EXISTS",
+                "LW_PLATFORM_BUILDKIT_OUTPUT_EXISTS",
             ):
                 BUILDKIT._private_output(output)
 
@@ -47,7 +47,7 @@ class BuildkitAuthoringTests(unittest.TestCase):
                 (root / name).mkdir()
             with self.assertRaisesRegex(
                 BUILDKIT.BuildkitAuthoringError,
-                "LW_SPRINT2_BUILDKIT_VALIDITY_INVALID",
+                "LW_PLATFORM_BUILDKIT_VALIDITY_INVALID",
             ):
                 BUILDKIT.prepare(
                     root,
@@ -63,7 +63,7 @@ class BuildkitAuthoringTests(unittest.TestCase):
             root = Path(temporary)
             with self.assertRaisesRegex(
                 BUILDKIT.BuildkitAuthoringError,
-                "LW_SPRINT2_BUILDKIT_REGISTRY_HOST_INVALID",
+                "LW_PLATFORM_BUILDKIT_REGISTRY_HOST_INVALID",
             ):
                 BUILDKIT.prepare(
                     root,
@@ -79,7 +79,7 @@ class BuildkitAuthoringTests(unittest.TestCase):
             root = Path(temporary)
             with self.assertRaisesRegex(
                 BUILDKIT.BuildkitAuthoringError,
-                "LW_SPRINT2_BUILDKIT_DNS_NAMESERVER_INVALID",
+                "LW_PLATFORM_BUILDKIT_DNS_NAMESERVER_INVALID",
             ):
                 BUILDKIT.prepare(
                     root,

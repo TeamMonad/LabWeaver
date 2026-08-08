@@ -35,7 +35,7 @@ browser:
 secrets:
   oidc_client_secret_file: "/etc/labweaver/secrets/oidc-client-secret"
   session_keyring_file: "/etc/labweaver/secrets/session-keyring.json"
-  active_session_key_id: "sprint2-primary"
+  active_session_key_id: "platform-primary"
   access_runtime_url_file: "/etc/labweaver/secrets/database-url"
   file_bindings:
     "secret://environment-owner-resolver/ca": "/etc/labweaver/secrets/mtls-ca.pem"

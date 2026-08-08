@@ -45,13 +45,13 @@ enum Command {
     /// Reconcile or verify the private Keycloak identity foundation.
     IdentityFoundation(IdentityFoundationArgs),
     /// Reconcile the persistent `PostgreSQL`, NATS, and `MinIO` Sprint 2 foundation.
-    Sprint2Foundation(EnvironmentArgs),
+    PlatformFoundation(EnvironmentArgs),
     /// Reconcile the dedicated rootless `BuildKit` Sprint 2 foundation.
-    Sprint2Buildkit(EnvironmentArgs),
+    PlatformBuildkit(EnvironmentArgs),
     /// Adopt the existing Harbor Gateway route without reconciling Harbor state.
-    Sprint2HarborRoute(EnvironmentArgs),
+    PlatformHarborRoute(EnvironmentArgs),
     /// Adopt existing data services and atomically deploy the Sprint 2 application profile.
-    Sprint2Application(EnvironmentArgs),
+    PlatformApplication(EnvironmentArgs),
     /// Deploy the independently reviewed Resource authority profile.
     ResourceApplication(EnvironmentArgs),
     /// Execute the identity-bound public Resource Lease acceptance replay.
@@ -168,7 +168,7 @@ struct PackageArgs {
     env: String,
     #[arg(long)]
     release: String,
-    #[arg(long, value_enum, default_value_t = PackageProfile::Sprint2)]
+    #[arg(long, value_enum, default_value_t = PackageProfile::Platform)]
     profile: PackageProfile,
     #[arg(long)]
     yes: bool,
@@ -176,7 +176,7 @@ struct PackageArgs {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum PackageProfile {
-    Sprint2,
+    Platform,
     Resource,
 }
 
@@ -510,10 +510,10 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::Verify(args) => verify(&args),
         Command::Backup(args) => backup(&args),
         Command::IdentityFoundation(args) => identity_foundation(&args),
-        Command::Sprint2Foundation(args) => sprint2_foundation(&args),
-        Command::Sprint2Buildkit(args) => sprint2_buildkit(&args),
-        Command::Sprint2HarborRoute(args) => sprint2_harbor_route(&args),
-        Command::Sprint2Application(args) => sprint2_application(&args),
+        Command::PlatformFoundation(args) => platform_foundation(&args),
+        Command::PlatformBuildkit(args) => platform_buildkit(&args),
+        Command::PlatformHarborRoute(args) => platform_harbor_route(&args),
+        Command::PlatformApplication(args) => platform_application(&args),
         Command::ResourceApplication(args) => resource_application(&args),
         Command::Resource(ResourceCommand::Auth(args)) => resource_replay_auth(&args),
         Command::Resource(ResourceCommand::Replay(args)) => resource_replay(&args),
@@ -533,7 +533,7 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::Demo(command) => match command {
             DemoCommand::Seed(args) => not_implemented(format!("demo seed --env {}", args.env)),
             DemoCommand::Replay => demo_replay(),
-            DemoCommand::Reset(args) => sprint2_reset(&args),
+            DemoCommand::Reset(args) => platform_reset(&args),
         },
         Command::Playwright(PlaywrightCommand::Install) => not_implemented("playwright install"),
         Command::Docs(DocsCommand::Serve) => not_implemented("docs serve"),
@@ -630,7 +630,7 @@ fn git_output<const N: usize>(root: &Path, arguments: [&str; N]) -> Result<Strin
 
 fn package_command(args: &PackageArgs) -> Result<(), AppError> {
     let profile = match args.profile {
-        PackageProfile::Sprint2 => "sprint2",
+        PackageProfile::Platform => "platform",
         PackageProfile::Resource => "resource",
     };
     if !args.yes {
@@ -837,13 +837,13 @@ fn identity_foundation(args: &IdentityFoundationArgs) -> Result<(), AppError> {
     )
 }
 
-fn sprint2_foundation(args: &EnvironmentArgs) -> Result<(), AppError> {
+fn platform_foundation(args: &EnvironmentArgs) -> Result<(), AppError> {
     if !args.yes {
         return Err(AppError::ConfirmationRequired {
-            command: "sprint2-foundation",
+            command: "platform-foundation",
         });
     }
-    require_infrastructure(args, "sprint2-foundation --infra")?;
+    require_infrastructure(args, "platform-foundation --infra")?;
     if args.package_manifest.is_some() {
         return Err(AppError::InvalidArgument {
             role: "Sprint 2 foundation does not accept --package-manifest",
@@ -851,18 +851,18 @@ fn sprint2_foundation(args: &EnvironmentArgs) -> Result<(), AppError> {
     }
     run_infrastructure(
         &args.env,
-        "92-sprint2-foundation.yml",
-        "sprint2-foundation --infra",
+        "92-platform-foundation.yml",
+        "platform-foundation --infra",
     )
 }
 
-fn sprint2_buildkit(args: &EnvironmentArgs) -> Result<(), AppError> {
+fn platform_buildkit(args: &EnvironmentArgs) -> Result<(), AppError> {
     if !args.yes {
         return Err(AppError::ConfirmationRequired {
-            command: "sprint2-buildkit",
+            command: "platform-buildkit",
         });
     }
-    require_infrastructure(args, "sprint2-buildkit --infra")?;
+    require_infrastructure(args, "platform-buildkit --infra")?;
     if args.package_manifest.is_some() {
         return Err(AppError::InvalidArgument {
             role: "Sprint 2 BuildKit does not accept --package-manifest",
@@ -870,18 +870,18 @@ fn sprint2_buildkit(args: &EnvironmentArgs) -> Result<(), AppError> {
     }
     run_infrastructure(
         &args.env,
-        "92-sprint2-buildkit.yml",
-        "sprint2-buildkit --infra",
+        "92-platform-buildkit.yml",
+        "platform-buildkit --infra",
     )
 }
 
-fn sprint2_harbor_route(args: &EnvironmentArgs) -> Result<(), AppError> {
+fn platform_harbor_route(args: &EnvironmentArgs) -> Result<(), AppError> {
     if !args.yes {
         return Err(AppError::ConfirmationRequired {
-            command: "sprint2-harbor-route",
+            command: "platform-harbor-route",
         });
     }
-    require_infrastructure(args, "sprint2-harbor-route --infra")?;
+    require_infrastructure(args, "platform-harbor-route --infra")?;
     if args.package_manifest.is_some() {
         return Err(AppError::InvalidArgument {
             role: "Sprint 2 Harbor route adoption does not accept --package-manifest",
@@ -889,18 +889,18 @@ fn sprint2_harbor_route(args: &EnvironmentArgs) -> Result<(), AppError> {
     }
     run_infrastructure(
         &args.env,
-        "92-sprint2-harbor-route.yml",
-        "sprint2-harbor-route --infra",
+        "92-platform-harbor-route.yml",
+        "platform-harbor-route --infra",
     )
 }
 
-fn sprint2_application(args: &EnvironmentArgs) -> Result<(), AppError> {
+fn platform_application(args: &EnvironmentArgs) -> Result<(), AppError> {
     if !args.yes {
         return Err(AppError::ConfirmationRequired {
-            command: "sprint2-application",
+            command: "platform-application",
         });
     }
-    require_infrastructure(args, "sprint2-application --infra")?;
+    require_infrastructure(args, "platform-application --infra")?;
     let package_manifest = args
         .package_manifest
         .as_deref()
@@ -916,8 +916,8 @@ fn sprint2_application(args: &EnvironmentArgs) -> Result<(), AppError> {
     platform_images::validate(&package_manifest, false, None, &repository_root())?;
     run_infrastructure_with_package(
         &args.env,
-        "93-sprint2-application.yml",
-        "sprint2-application --infra",
+        "93-platform-application.yml",
+        "platform-application --infra",
         Some(&package_manifest),
         &[],
     )
@@ -1281,7 +1281,7 @@ fn demo_replay() -> Result<(), AppError> {
     // infrastructure-install commit and would require an unrelated Harbor data
     // backup/reconciliation. Reconcile and verify the current application
     // package through the allowlisted non-destructive adoption path instead.
-    sprint2_application(&EnvironmentArgs {
+    platform_application(&EnvironmentArgs {
         env: environment,
         infra: true,
         yes: true,
@@ -1339,7 +1339,7 @@ fn required_environment_path(name: &'static str) -> Result<PathBuf, AppError> {
     Ok(PathBuf::from(value))
 }
 
-fn sprint2_reset(args: &EnvironmentArgs) -> Result<(), AppError> {
+fn platform_reset(args: &EnvironmentArgs) -> Result<(), AppError> {
     if !args.yes {
         return Err(AppError::ConfirmationRequired {
             command: "demo reset",
@@ -1351,7 +1351,7 @@ fn sprint2_reset(args: &EnvironmentArgs) -> Result<(), AppError> {
             role: "Sprint 2 reset does not accept --package-manifest",
         });
     }
-    run_infrastructure(&args.env, "93-sprint2-reset.yml", "demo reset --infra")
+    run_infrastructure(&args.env, "93-platform-reset.yml", "demo reset --infra")
 }
 
 #[cfg(target_os = "linux")]
@@ -1436,8 +1436,8 @@ fn run_infrastructure_with_package(
             package_manifest.map_or_else(String::new, infrastructure_path),
         )
         .add_env(
-            "LABWEAVER_SPRINT2_RESET_CONFIRMATION",
-            std::env::var("LABWEAVER_SPRINT2_RESET_CONFIRMATION").unwrap_or_default(),
+            "LABWEAVER_PLATFORM_RESET_CONFIRMATION",
+            std::env::var("LABWEAVER_PLATFORM_RESET_CONFIRMATION").unwrap_or_default(),
         )
         .add_env("LABWEAVER_IDENTITY_SECRET_LOCATOR", identity_secret_locator)
         .set_inventory(&inventory);
@@ -1486,9 +1486,9 @@ fn execution_budget(command: &str) -> Option<(u32, u32)> {
     } else if command.contains("application") {
         Some((2, 3))
     } else if command.contains("identity-foundation-deploy")
-        || command.contains("sprint2-foundation")
-        || command.contains("sprint2-buildkit")
-        || command.contains("sprint2-harbor-route")
+        || command.contains("platform-foundation")
+        || command.contains("platform-buildkit")
+        || command.contains("platform-harbor-route")
         || command.contains("backup")
         || command.contains("deploy")
         || command.contains("reset")
@@ -2102,8 +2102,8 @@ mod tests {
     use super::is_uuid_v7_run_id;
     use super::{
         EnvironmentArgs, IdentityFoundationAction, IdentityFoundationArgs, deploy,
-        identity_foundation, sprint2_application, sprint2_buildkit, sprint2_foundation,
-        sprint2_harbor_route,
+        identity_foundation, platform_application, platform_buildkit, platform_foundation,
+        platform_harbor_route,
     };
 
     #[cfg(target_os = "linux")]
@@ -2250,8 +2250,8 @@ mod tests {
     }
 
     #[test]
-    fn sprint2_foundation_requires_confirmation() -> Result<(), String> {
-        let Err(error) = sprint2_foundation(&EnvironmentArgs {
+    fn platform_foundation_requires_confirmation() -> Result<(), String> {
+        let Err(error) = platform_foundation(&EnvironmentArgs {
             env: "demo".into(),
             infra: true,
             yes: false,
@@ -2264,8 +2264,8 @@ mod tests {
     }
 
     #[test]
-    fn sprint2_buildkit_requires_confirmation() -> Result<(), String> {
-        let Err(error) = sprint2_buildkit(&EnvironmentArgs {
+    fn platform_buildkit_requires_confirmation() -> Result<(), String> {
+        let Err(error) = platform_buildkit(&EnvironmentArgs {
             env: "demo".into(),
             infra: true,
             yes: false,
@@ -2278,8 +2278,8 @@ mod tests {
     }
 
     #[test]
-    fn sprint2_harbor_route_requires_confirmation() -> Result<(), String> {
-        let Err(error) = sprint2_harbor_route(&EnvironmentArgs {
+    fn platform_harbor_route_requires_confirmation() -> Result<(), String> {
+        let Err(error) = platform_harbor_route(&EnvironmentArgs {
             env: "demo".into(),
             infra: true,
             yes: false,
@@ -2292,8 +2292,8 @@ mod tests {
     }
 
     #[test]
-    fn sprint2_application_requires_confirmation() -> Result<(), String> {
-        let Err(error) = sprint2_application(&EnvironmentArgs {
+    fn platform_application_requires_confirmation() -> Result<(), String> {
+        let Err(error) = platform_application(&EnvironmentArgs {
             env: "demo".into(),
             infra: true,
             yes: false,

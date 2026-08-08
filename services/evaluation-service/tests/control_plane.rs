@@ -604,7 +604,7 @@ impl TestContext {
             .await?;
         let migrations = format!(
             "CREATE SCHEMA evaluation; SET search_path TO evaluation;\n{}\n{}",
-            include_str!("../../../migrations/evaluation/0001_sprint2_baseline.sql"),
+            include_str!("../../../migrations/evaluation/0001_platform_baseline.sql"),
             include_str!("../../../migrations/evaluation/0002_evaluation_control_plane.sql")
         );
         sqlx::raw_sql(&migrations).execute(&pool).await?;

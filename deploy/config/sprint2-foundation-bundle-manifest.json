@@ -1,5 +1,5 @@
 {
-  "apiVersion": "deploy.labweaver.io/sprint2-bundle-manifest/v1",
+  "apiVersion": "deploy.labweaver.io/platform-bundle-manifest/v1",
   "namespace": "labweaver-data",
   "configMaps": {
     "nats-config": ["nats-server.conf"]

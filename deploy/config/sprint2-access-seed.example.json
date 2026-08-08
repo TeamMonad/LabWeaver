@@ -1,5 +1,5 @@
 {
-  "apiVersion": "deploy.labweaver.io/sprint2-access-seed/v1",
+  "apiVersion": "deploy.labweaver.io/platform-access-seed/v1",
   "courseMemberships": [
     {
       "actorId": "00000000-0000-7000-8000-000000000201",

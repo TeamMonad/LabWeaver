@@ -1275,8 +1275,8 @@ fn load_images(root: &Path) -> Result<BTreeMap<String, String>, AppError> {
     let mut images = BTreeMap::new();
     for (name, path) in [
         ("postgres", &["postgresql", "image"][..]),
-        ("nats", &["sprint2_foundation", "nats"][..]),
-        ("minio", &["sprint2_foundation", "minio"][..]),
+        ("nats", &["platform_foundation", "nats"][..]),
+        ("minio", &["platform_foundation", "minio"][..]),
         (
             "keycloak",
             &["identity_foundation", "images", "keycloak"][..],

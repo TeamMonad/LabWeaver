@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 use super::AppError;
 
-const SPRINT2_COMPONENTS: [&str; 7] = [
+const PLATFORM_COMPONENTS: [&str; 7] = [
     "access-service",
     "agent-service",
     "control-service",
@@ -25,7 +25,7 @@ const SPRINT2_COMPONENTS: [&str; 7] = [
 ];
 const RESOURCE_COMPONENTS: [&str; 1] = ["resource-service"];
 const PACKAGE_SCHEMA: &str = "platform-image-package-manifest.v1";
-const SPRINT2_PROFILE: &str = "sprint2";
+const PLATFORM_PROFILE: &str = "platform";
 const RESOURCE_PROFILE: &str = "resource";
 #[cfg(target_os = "linux")]
 const DEPLOYMENT_SCHEMA: &str = "platform-image-deployment-manifest.v1";
@@ -34,12 +34,12 @@ const DEPLOYMENT_SCHEMA: &str = "platform-image-deployment-manifest.v1";
 #[derive(Debug, Deserialize)]
 struct VersionLock {
     platform_images: PlatformImageLock,
-    sprint2_foundation: Sprint2FoundationLock,
+    platform_foundation: PlatformFoundationLock,
 }
 
 #[cfg(target_os = "linux")]
 #[derive(Debug, Deserialize)]
-struct Sprint2FoundationLock {
+struct PlatformFoundationLock {
     buildkit_rootless: String,
 }
 
@@ -94,12 +94,12 @@ pub(crate) struct PackageManifest {
 }
 
 fn default_package_profile() -> String {
-    SPRINT2_PROFILE.to_owned()
+    PLATFORM_PROFILE.to_owned()
 }
 
 fn components_for_profile(profile: &str) -> Option<&'static [&'static str]> {
     match profile {
-        SPRINT2_PROFILE => Some(&SPRINT2_COMPONENTS),
+        PLATFORM_PROFILE => Some(&PLATFORM_COMPONENTS),
         RESOURCE_PROFILE => Some(&RESOURCE_COMPONENTS),
         _ => None,
     }
@@ -1033,7 +1033,7 @@ fn verify_tools(lock: &VersionLock) -> Result<(), AppError> {
         return Ok(());
     }
 
-    verify_remote_buildkit_deployment(&lock.sprint2_foundation.buildkit_rootless)
+    verify_remote_buildkit_deployment(&lock.platform_foundation.buildkit_rootless)
 }
 
 #[cfg(target_os = "linux")]
@@ -1343,7 +1343,7 @@ mod tests {
     fn valid_manifest() -> PackageManifest {
         PackageManifest {
             schema_version: PACKAGE_SCHEMA.to_owned(),
-            profile: SPRINT2_PROFILE.to_owned(),
+            profile: PLATFORM_PROFILE.to_owned(),
             run_id: "pkg-test-0001".to_owned(),
             release_id: "test-0001".to_owned(),
             source_commit: "a".repeat(40),
@@ -1357,7 +1357,7 @@ mod tests {
                 buildkit: "v0.31.1".to_owned(),
                 buildx: "v0.35.0".to_owned(),
             },
-            images: SPRINT2_COMPONENTS
+            images: PLATFORM_COMPONENTS
                 .iter()
                 .enumerate()
                 .map(|(index, component)| {

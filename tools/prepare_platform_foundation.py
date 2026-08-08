@@ -164,8 +164,8 @@ PLATFORM_IDENTITIES: dict[str, tuple[tuple[str, ...], str]] = {
     "openssh-gateway": (("URI:spiffe://labweaver/openssh-gateway",), "clientAuth"),
 }
 
-NATS_ADMIN_TLS_IDENTITY = "sprint2-admin"
-NATS_ADMIN_USER = "sprint2-admin"
+NATS_ADMIN_TLS_IDENTITY = "platform-admin"
+NATS_ADMIN_USER = "platform-admin"
 NATS_ADMIN_PUBLISH = ("$JS.API.>", "$JS.ACK.>")
 NATS_ADMIN_SUBSCRIBE = ("_INBOX.>",)
 NATS_ACCOUNT_PUBLIC_PATTERN = re.compile(r"^A[A-Z2-7]{55}$")
@@ -187,24 +187,24 @@ NATS_ACCOUNT_JETSTREAM_LIMITS = (
 def _private_output(path: Path) -> Path:
     resolved = path.resolve()
     if not any(part in {".private", "private"} for part in resolved.parts):
-        raise FoundationError("LW_SPRINT2_FOUNDATION_PRIVATE_PATH_REQUIRED")
+        raise FoundationError("LW_PLATFORM_FOUNDATION_PRIVATE_PATH_REQUIRED")
     if resolved.exists():
-        raise FoundationError("LW_SPRINT2_FOUNDATION_OUTPUT_EXISTS")
+        raise FoundationError("LW_PLATFORM_FOUNDATION_OUTPUT_EXISTS")
     if not resolved.parent.is_dir():
-        raise FoundationError("LW_SPRINT2_FOUNDATION_PARENT_MISSING")
+        raise FoundationError("LW_PLATFORM_FOUNDATION_PARENT_MISSING")
     return resolved
 
 
 def _trusted_binary(path: Path, expected_name: str) -> Path:
     if not path.is_absolute():
-        raise FoundationError("LW_SPRINT2_FOUNDATION_TOOL_INVALID")
+        raise FoundationError("LW_PLATFORM_FOUNDATION_TOOL_INVALID")
     try:
         resolved = path.resolve(strict=True)
         mode = resolved.stat().st_mode
     except OSError as error:
-        raise FoundationError("LW_SPRINT2_FOUNDATION_TOOL_INVALID") from error
+        raise FoundationError("LW_PLATFORM_FOUNDATION_TOOL_INVALID") from error
     if not resolved.is_file() or resolved.name != expected_name or mode & (stat.S_IWGRP | stat.S_IWOTH):
-        raise FoundationError("LW_SPRINT2_FOUNDATION_TOOL_INVALID")
+        raise FoundationError("LW_PLATFORM_FOUNDATION_TOOL_INVALID")
     return resolved
 
 
@@ -232,7 +232,7 @@ def _run(binary: Path, arguments: list[str], private_home: Path) -> None:
             if token and len(token) <= 32 and token.replace("-", "").isalnum()
         )
         suffix = f":{binary.name}:{operation}" if operation else f":{binary.name}"
-        raise FoundationError(f"LW_SPRINT2_FOUNDATION_TOOL_FAILED{suffix}") from error
+        raise FoundationError(f"LW_PLATFORM_FOUNDATION_TOOL_FAILED{suffix}") from error
 
 
 def _write(path: Path, payload: bytes, mode: int = 0o600) -> None:
@@ -295,12 +295,12 @@ def _copy(source: Path, destination: Path) -> None:
 
 def _workloads_seed_source(path: Path) -> tuple[Path, str]:
     if not path.is_absolute():
-        raise FoundationError("LW_SPRINT2_FOUNDATION_WORKLOADS_SEED_INVALID")
+        raise FoundationError("LW_PLATFORM_FOUNDATION_WORKLOADS_SEED_INVALID")
     try:
         resolved = path.resolve(strict=True)
         metadata = resolved.stat()
     except OSError as error:
-        raise FoundationError("LW_SPRINT2_FOUNDATION_WORKLOADS_SEED_INVALID") from error
+        raise FoundationError("LW_PLATFORM_FOUNDATION_WORKLOADS_SEED_INVALID") from error
     public_key = resolved.stem
     if (
         not resolved.is_file()
@@ -310,7 +310,7 @@ def _workloads_seed_source(path: Path) -> tuple[Path, str]:
             and metadata.st_mode & (stat.S_IRWXG | stat.S_IRWXO)
         )
     ):
-        raise FoundationError("LW_SPRINT2_FOUNDATION_WORKLOADS_SEED_INVALID")
+        raise FoundationError("LW_PLATFORM_FOUNDATION_WORKLOADS_SEED_INVALID")
     return resolved, public_key
 
 
@@ -327,7 +327,7 @@ def prepare(
     workloads_seed_file: Path | None = None,
 ) -> dict[str, object]:
     if not 30 <= days <= 825:
-        raise FoundationError("LW_SPRINT2_FOUNDATION_VALIDITY_INVALID")
+        raise FoundationError("LW_PLATFORM_FOUNDATION_VALIDITY_INVALID")
     private_home = output / "home"
     authority = output / "authority"
     nsc_store = output / "nsc"
@@ -593,7 +593,7 @@ def prepare(
         private_home,
     )
     nats_config = generated_config.read_text(encoding="utf-8") + """
-server_name: sprint2-nats
+server_name: platform-nats
 listen: 0.0.0.0:4222
 http: 0.0.0.0:8222
 jetstream {
@@ -653,7 +653,7 @@ def main() -> int:
     except (FoundationError, OSError, UnicodeError) as error:
         if output is not None and output.is_dir():
             shutil.rmtree(output)
-        diagnostic = str(error) if isinstance(error, FoundationError) else "LW_SPRINT2_FOUNDATION_AUTHORING_FAILED"
+        diagnostic = str(error) if isinstance(error, FoundationError) else "LW_PLATFORM_FOUNDATION_AUTHORING_FAILED"
         print(diagnostic, file=sys.stderr)
         return 1
     print(json.dumps(result, sort_keys=True))

@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://labweaver.invalid/schemas/results/sprint2-release-gate-input.v3.schema.json",
-  "title": "Sprint2ReleaseGateInputV3",
+  "$id": "https://labweaver.invalid/schemas/results/platform-release-gate-input.v3.schema.json",
+  "title": "PlatformReleaseGateInputV3",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "sourceCommit", "runId", "deploymentManifest", "resourceDeploymentManifest", "migrationCatalog", "platformImages", "resourceImages", "runtimeArtifacts", "checks"],
   "properties": {
-    "schemaVersion": {"const": "sprint2-release-gate-input.v3"},
+    "schemaVersion": {"const": "platform-release-gate-input.v3"},
     "sourceCommit": {"$ref": "#/$defs/commit"},
     "runId": {"$ref": "#/$defs/uuid"},
     "deploymentManifest": {"$ref": "#/$defs/evidence"},

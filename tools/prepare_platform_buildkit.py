@@ -23,24 +23,24 @@ class BuildkitAuthoringError(Exception):
 def _private_output(path: Path) -> Path:
     resolved = path.resolve()
     if not any(part in {".private", "private"} for part in resolved.parts):
-        raise BuildkitAuthoringError("LW_SPRINT2_BUILDKIT_PRIVATE_PATH_REQUIRED")
+        raise BuildkitAuthoringError("LW_PLATFORM_BUILDKIT_PRIVATE_PATH_REQUIRED")
     if resolved.exists():
-        raise BuildkitAuthoringError("LW_SPRINT2_BUILDKIT_OUTPUT_EXISTS")
+        raise BuildkitAuthoringError("LW_PLATFORM_BUILDKIT_OUTPUT_EXISTS")
     if not resolved.parent.is_dir():
-        raise BuildkitAuthoringError("LW_SPRINT2_BUILDKIT_PARENT_MISSING")
+        raise BuildkitAuthoringError("LW_PLATFORM_BUILDKIT_PARENT_MISSING")
     return resolved
 
 
 def _trusted_openssl(path: Path) -> Path:
     if not path.is_absolute():
-        raise BuildkitAuthoringError("LW_SPRINT2_BUILDKIT_OPENSSL_INVALID")
+        raise BuildkitAuthoringError("LW_PLATFORM_BUILDKIT_OPENSSL_INVALID")
     try:
         resolved = path.resolve(strict=True)
         mode = resolved.stat().st_mode
     except OSError as error:
-        raise BuildkitAuthoringError("LW_SPRINT2_BUILDKIT_OPENSSL_INVALID") from error
+        raise BuildkitAuthoringError("LW_PLATFORM_BUILDKIT_OPENSSL_INVALID") from error
     if not resolved.is_file() or resolved.name != "openssl" or mode & (stat.S_IWGRP | stat.S_IWOTH):
-        raise BuildkitAuthoringError("LW_SPRINT2_BUILDKIT_OPENSSL_INVALID")
+        raise BuildkitAuthoringError("LW_PLATFORM_BUILDKIT_OPENSSL_INVALID")
     return resolved
 
 
@@ -71,7 +71,7 @@ def _run(openssl: Path, arguments: list[str], private_home: Path) -> None:
             timeout=60,
         )
     except (OSError, subprocess.SubprocessError) as error:
-        raise BuildkitAuthoringError("LW_SPRINT2_BUILDKIT_OPENSSL_FAILED") from error
+        raise BuildkitAuthoringError("LW_PLATFORM_BUILDKIT_OPENSSL_FAILED") from error
 
 
 def _copy(source: Path, destination: Path) -> None:
@@ -125,19 +125,19 @@ def prepare(
     registry_ca: Path,
 ) -> dict[str, object]:
     if not 30 <= days <= 825:
-        raise BuildkitAuthoringError("LW_SPRINT2_BUILDKIT_VALIDITY_INVALID")
+        raise BuildkitAuthoringError("LW_PLATFORM_BUILDKIT_VALIDITY_INVALID")
     if not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", registry_host):
-        raise BuildkitAuthoringError("LW_SPRINT2_BUILDKIT_REGISTRY_HOST_INVALID")
+        raise BuildkitAuthoringError("LW_PLATFORM_BUILDKIT_REGISTRY_HOST_INVALID")
     try:
         nameserver = str(ipaddress.ip_address(dns_nameserver))
     except ValueError as error:
-        raise BuildkitAuthoringError("LW_SPRINT2_BUILDKIT_DNS_NAMESERVER_INVALID") from error
+        raise BuildkitAuthoringError("LW_PLATFORM_BUILDKIT_DNS_NAMESERVER_INVALID") from error
     try:
         registry_ca = registry_ca.resolve(strict=True)
     except OSError as error:
-        raise BuildkitAuthoringError("LW_SPRINT2_BUILDKIT_REGISTRY_CA_INVALID") from error
+        raise BuildkitAuthoringError("LW_PLATFORM_BUILDKIT_REGISTRY_CA_INVALID") from error
     if not registry_ca.is_file() or registry_ca.stat().st_size > 1024 * 1024:
-        raise BuildkitAuthoringError("LW_SPRINT2_BUILDKIT_REGISTRY_CA_INVALID")
+        raise BuildkitAuthoringError("LW_PLATFORM_BUILDKIT_REGISTRY_CA_INVALID")
     home = output / "home"
     authority = output / "authority"
     render_input = output / "render-input"
@@ -247,7 +247,7 @@ def main() -> int:
     except (BuildkitAuthoringError, OSError) as error:
         if output is not None and output.is_dir():
             shutil.rmtree(output)
-        diagnostic = str(error) if isinstance(error, BuildkitAuthoringError) else "LW_SPRINT2_BUILDKIT_AUTHORING_FAILED"
+        diagnostic = str(error) if isinstance(error, BuildkitAuthoringError) else "LW_PLATFORM_BUILDKIT_AUTHORING_FAILED"
         print(diagnostic, file=sys.stderr)
         return 1
     print(json.dumps(result, sort_keys=True))

@@ -6,14 +6,14 @@ import unittest
 from pathlib import Path
 
 
-MODULE_PATH = Path(__file__).parents[2] / "tools" / "render_sprint2_bundle.py"
-SPEC = importlib.util.spec_from_file_location("render_sprint2_bundle", MODULE_PATH)
+MODULE_PATH = Path(__file__).parents[2] / "tools" / "render_platform_bundle.py"
+SPEC = importlib.util.spec_from_file_location("render_platform_bundle", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
-class Sprint2BundleTests(unittest.TestCase):
+class PlatformBundleTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
@@ -52,7 +52,7 @@ class Sprint2BundleTests(unittest.TestCase):
         extra = self.root / "input" / "secrets" / "service-secrets" / "unexpected"
         extra.write_text("value", encoding="utf-8")
 
-        with self.assertRaisesRegex(MODULE.BundleError, "LW_SPRINT2_BUNDLE_INPUT_INCOMPLETE"):
+        with self.assertRaisesRegex(MODULE.BundleError, "LW_PLATFORM_BUNDLE_INPUT_INCOMPLETE"):
             MODULE.render_bundle(self.manifest, self.root / "input")
 
     def test_output_is_exclusive(self) -> None:
@@ -64,7 +64,7 @@ class Sprint2BundleTests(unittest.TestCase):
         self.assertEqual(output.read_bytes(), b"first")
 
     def test_checked_in_manifest_declares_the_reset_object_set(self) -> None:
-        manifest_path = MODULE_PATH.parents[1] / "deploy" / "config" / "sprint2-bundle-manifest.json"
+        manifest_path = MODULE_PATH.parents[1] / "deploy" / "config" / "platform-bundle-manifest.json"
         manifest = MODULE._load_manifest(manifest_path)
 
         self.assertEqual(len(manifest["configMaps"]), 10)
@@ -84,7 +84,7 @@ class Sprint2BundleTests(unittest.TestCase):
             MODULE_PATH.parents[1]
             / "deploy"
             / "config"
-            / "sprint2-foundation-bundle-manifest.json"
+            / "platform-foundation-bundle-manifest.json"
         )
         foundation = MODULE._load_manifest(foundation_path)
         self.assertEqual(set(foundation["configMaps"]), {"nats-config"})
@@ -95,7 +95,7 @@ class Sprint2BundleTests(unittest.TestCase):
         self.assertEqual(foundation["namespace"], "labweaver-data")
 
     def test_public_output_path_is_rejected(self) -> None:
-        with self.assertRaisesRegex(MODULE.BundleError, "LW_SPRINT2_BUNDLE_PRIVATE_PATH_REQUIRED"):
+        with self.assertRaisesRegex(MODULE.BundleError, "LW_PLATFORM_BUNDLE_PRIVATE_PATH_REQUIRED"):
             MODULE._require_private_path(self.root / "bundle.yaml")
 
         MODULE._require_private_path(self.root / ".private" / "bundle.yaml")
@@ -114,7 +114,7 @@ class Sprint2BundleTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             MODULE.BundleError,
-            "LW_SPRINT2_NATS_ACK_PERMISSION_REQUIRED",
+            "LW_PLATFORM_NATS_ACK_PERMISSION_REQUIRED",
         ):
             MODULE._validate_jetstream_ack_permission("control-service-secrets", secret)
 

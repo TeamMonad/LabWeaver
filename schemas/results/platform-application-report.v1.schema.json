@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.labweaver.io/results/sprint2-application-report.v1.schema.json",
-  "title": "Sprint2ApplicationReport",
+  "$id": "https://schemas.labweaver.io/results/platform-application-report.v1.schema.json",
+  "title": "PlatformApplicationReport",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "run_id", "source_commit", "cluster_uid", "package_manifest_sha256", "migration_catalog_sha256", "configuration_manifest_sha256", "configuration_bundle_sha256", "destructive_reset", "retained", "adopted", "deployment"],
   "properties": {
-    "schema_version": {"const": "labweaver.sprint2-application-report.v1"},
+    "schema_version": {"const": "labweaver.platform-application-report.v1"},
     "run_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,62}$"},
     "source_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "cluster_uid": {"type": "string", "minLength": 1},

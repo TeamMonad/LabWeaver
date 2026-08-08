@@ -62,7 +62,7 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
         .await?;
     let baseline = format!(
         "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
-        include_str!("../../../migrations/environment/0001_sprint2_baseline.sql")
+        include_str!("../../../migrations/environment/0001_platform_baseline.sql")
     );
     sqlx::raw_sql(&baseline).execute(&pool).await?;
 
@@ -613,7 +613,7 @@ async fn persistent_timeout_and_ready_cancel_cleanup_are_bounded()
         .await?;
     let migrations = format!(
         "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
-        include_str!("../../../migrations/environment/0001_sprint2_baseline.sql")
+        include_str!("../../../migrations/environment/0001_platform_baseline.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;
     let store = PgEnvironmentStore::new(pool);
@@ -732,7 +732,7 @@ async fn release_withdrawal_is_projected_in_aggregate_order()
         .await?;
     let migrations = format!(
         "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
-        include_str!("../../../migrations/environment/0001_sprint2_baseline.sql")
+        include_str!("../../../migrations/environment/0001_platform_baseline.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;
 
@@ -884,7 +884,7 @@ async fn container_executor_persists_generation_and_permanent_delete_tombstone()
         .await?;
     let migrations = format!(
         "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
-        include_str!("../../../migrations/environment/0001_sprint2_baseline.sql")
+        include_str!("../../../migrations/environment/0001_platform_baseline.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;
     let authority_now = container_database_now(&pool).await?;
@@ -1161,7 +1161,7 @@ async fn kubevirt_executor_replays_and_permanently_tombstones_cleanup()
         .await?;
     sqlx::raw_sql(&format!(
         "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
-        include_str!("../../../migrations/environment/0001_sprint2_baseline.sql")
+        include_str!("../../../migrations/environment/0001_platform_baseline.sql")
     ))
     .execute(&pool)
     .await?;
@@ -1320,7 +1320,7 @@ async fn kubevirt_observation_identity_is_durable_fenced_and_tombstoned()
         .await?;
     let migration = format!(
         "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
-        include_str!("../../../migrations/environment/0001_sprint2_baseline.sql")
+        include_str!("../../../migrations/environment/0001_platform_baseline.sql")
     );
     sqlx::raw_sql(&migration).execute(&pool).await?;
     let store = PgKubeVirtObservationStore::new(pool.clone());

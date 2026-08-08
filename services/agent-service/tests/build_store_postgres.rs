@@ -157,7 +157,7 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
         .await?;
     let baseline = format!(
         "CREATE SCHEMA agent; SET search_path TO agent;\n{}\n{}",
-        include_str!("../../../migrations/agent/0001_sprint2_baseline.sql"),
+        include_str!("../../../migrations/agent/0001_platform_baseline.sql"),
         include_str!("../../../migrations/agent/0002_allow_content_addressed_image_reuse.sql")
     );
     sqlx::raw_sql(&baseline).execute(&pool).await?;
@@ -460,7 +460,7 @@ async fn executor_fence_survives_restart_and_cleanup_dominates_its_generation()
         .await?;
     let migrations = format!(
         "CREATE SCHEMA agent; SET search_path TO agent;\n{}\n{}",
-        include_str!("../../../migrations/agent/0001_sprint2_baseline.sql"),
+        include_str!("../../../migrations/agent/0001_platform_baseline.sql"),
         include_str!("../../../migrations/agent/0002_allow_content_addressed_image_reuse.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;

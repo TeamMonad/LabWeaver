@@ -1,7 +1,7 @@
 {
   "schema_version": "platform-image-package-manifest.v1",
   "run_id": "pkg-fixture-0001",
-  "release_id": "sprint2-fixture",
+  "release_id": "platform-fixture",
   "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "source_date_epoch": 1784304000,
   "component_lock_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",

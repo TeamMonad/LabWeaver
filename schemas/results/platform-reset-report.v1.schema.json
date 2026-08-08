@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://labweaver.local/schemas/results/sprint2-reset-report.v1.schema.json",
+  "$id": "https://labweaver.local/schemas/results/platform-reset-report.v1.schema.json",
   "title": "Sprint 2 Reset Report v1",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "run_id", "source_commit", "cluster_uid", "migration_catalog_sha256", "configuration_bundle_sha256", "inventory_sha256", "destructive_reset", "removed", "deployment", "readback"],
   "properties": {
-    "schema_version": {"const": "labweaver.sprint2-reset-report.v1"},
+    "schema_version": {"const": "labweaver.platform-reset-report.v1"},
     "run_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,62}$"},
     "source_commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
     "cluster_uid": {"type": "string", "minLength": 1},
