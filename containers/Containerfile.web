@@ -21,7 +21,7 @@ LABEL org.opencontainers.image.source="https://github.com/TeamMonad/LabWeaver" \
       org.opencontainers.image.title="web"
 USER root
 RUN rm -f /sbin/apk && rm -rf /etc/apk
-COPY containers/nginx.conf /etc/nginx/nginx.conf
+COPY --chown=101:101 --chmod=0644 containers/nginx.conf /etc/nginx/nginx.conf
 COPY --from=builder --chown=101:101 /src/web/dist /usr/share/nginx/html
 USER 101:101
 EXPOSE 8080

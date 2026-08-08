@@ -525,23 +525,21 @@
     mode: "0700"
 
 - name: Authenticate retained MinIO administration
-  ansible.builtin.command:
-    argv:
-      - "{{ platform_application_mc }}"
-      - alias
-      - set
-      - "{{ platform_application_minio_alias }}"
-      - "{{ platform_application_minio_endpoint }}"
-      - "{{ platform_application_minio_username }}"
-      - "{{ platform_application_minio_password }}"
-      - --api
-      - S3v4
-      - --path
-      - "on"
-  environment:
-    MC_CONFIG_DIR: "{{ platform_application_report_root }}/{{ platform_application_run_id }}/mc"
-    SSL_CERT_FILE: "{{ platform_application_minio_ca_file }}"
-  changed_when: false
+  # mc parses any argument starting with '-' as a flag, which breaks aliases
+  # whose secret key begins with '-' (generated credentials may do so). Pre-seed
+  # the isolated mc config instead of passing the key through the CLI.
+  ansible.builtin.copy:
+    dest: "{{ platform_application_report_root }}/{{ platform_application_run_id }}/mc/config.json"
+    owner: root
+    group: root
+    mode: "0600"
+    content: >-
+      {{ {'version': '10', 'aliases': {platform_application_minio_alias: {
+           'url': platform_application_minio_endpoint,
+           'accessKey': platform_application_minio_username,
+           'secretKey': platform_application_minio_password,
+           'api': 'S3v4',
+           'path': 'on'}}} | to_nice_json }}
   no_log: true
 
 - name: Probe retained PostgreSQL database identity
