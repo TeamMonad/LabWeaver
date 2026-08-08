@@ -90,7 +90,7 @@
     that:
       - "'rootless = true' in platform_buildkit_configuration"
       - "'noProcessSandbox = true' in platform_buildkit_configuration"
-      - "'tcp4://0.0.0.0:1234' in platform_buildkit_configuration"
+      - "'tcp://0.0.0.0:1234' in platform_buildkit_configuration"
       - "'/etc/buildkit/tls/ca.crt' in platform_buildkit_configuration"
       - "'/etc/buildkit/tls/registry-ca.crt' in platform_buildkit_configuration"
       - >-
