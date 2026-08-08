@@ -65,6 +65,12 @@ for (const theme of themes) {
       await page.emulateMedia({ colorScheme: theme })
       await page.setViewportSize({ width: viewport.width, height: viewport.height })
       await createEnvAndGrant(page, '容器')
+      if (viewport.name === 'mobile') {
+        // Native scrollbar allocation differs between headed Windows and the
+        // Linux CI container. Freeze the component width before xterm's first
+        // fit so the golden tests terminal layout rather than host chrome.
+        await page.addStyleTag({ content: '.console-panel { width: 300px !important; }' })
+      }
       await page.locator('button:has-text("打开终端")').click()
       await expect(page.locator('.xterm-host')).toContainText('LabWeaver fixture console', { timeout: 10000 })
 
