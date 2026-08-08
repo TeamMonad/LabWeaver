@@ -15,13 +15,13 @@ That contract does not create another gate or weaken the v3 JSON shapes.
 ## Inputs
 
 The deployment controller writes a private, ignored JSON input conforming to
-`schemas/results/sprint2-release-gate-input.v3.schema.json` and exports its
+`schemas/results/platform-release-gate-input.v3.schema.json` and exports its
 project-relative locator:
 
 ```sh
 export LABWEAVER_RELEASE_GATE_INPUT=artifacts/release-gate/input.json
 export LABWEAVER_DEMO_ENV=demo
-export LABWEAVER_DEMO_PACKAGE_MANIFEST=artifacts/package/pkg-demo-sprint2/PlatformImagePackageManifest.json
+export LABWEAVER_DEMO_PACKAGE_MANIFEST=artifacts/package/pkg-demo-platform/PlatformImagePackageManifest.json
 export LABWEAVER_RESOURCE_REPLAY_PROFILE=.private/resource-acceptance-profile.json
 export LABWEAVER_RESOURCE_REPLAY_AUTHENTICATION=.private/resource-replay-auth.json
 export LABWEAVER_RESOURCE_DEPLOYMENT_MANIFEST=.private/resource-deployment-manifest.json

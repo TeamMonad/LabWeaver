@@ -288,7 +288,7 @@ catalog, image digest set and Run ID. It must execute:
 5. real teacher and student Playwright projects without fixed sleeps;
 6. `cargo xtask demo replay` twice, each time using the exact connected package,
    Resource profile/authentication/deployment/package inputs and the
-   non-destructive `sprint2-application` adoption path;
+   non-destructive `platform-application` adoption path;
 7. `cargo xtask release-gate` and report-schema validation.
 
 Failed browser runs retain Trace, screenshot and video. Failed deployment or

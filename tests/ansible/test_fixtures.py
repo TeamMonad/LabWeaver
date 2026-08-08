@@ -259,7 +259,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("name: {{ harbor_release_name }}\n          port: 80", gateway)
         self.assertNotIn("{{ harbor_release_name }}-core", gateway)
         self.assertNotIn("{{ harbor_release_name }}-portal", gateway)
-        self.assertIn("LABWEAVER SPRINT2 HARBOR", platform_route)
+        self.assertIn("LABWEAVER PLATFORM HARBOR", platform_route)
         self.assertIn("PLATFORM_HARBOR_ROUTER_RESOLUTION_INVALID", platform_route)
         self.assertIn("Refresh router system trust", platform_route)
 

@@ -35,7 +35,7 @@ export LABWEAVER_TRIVY_DATABASE_REFERENCE=harbor.example.internal/cache/trivy-db
 export LABWEAVER_TRIVY_DATABASE_DIGEST=sha256:<digest>
 export LABWEAVER_KUBECONFIG="$HOME/.config/labweaver/package/kubeconfig"
 export LABWEAVER_EXECUTION_LEDGER_ROOT=/var/lib/labweaver/execution-ledger
-cargo xtask package --env demo --release sprint2 --yes
+cargo xtask package --env demo --release platform --yes
 ```
 
 The connected controller reserves one package attempt for the exact
@@ -48,8 +48,8 @@ for development iterations; after the operation budget is exhausted, inspect
 the ledger and open an explicitly approved new validation window rather than
 deleting the ledger or changing its root.
 
-Before packaging, run the non-destructive `sprint2-buildkit` adoption with
-`sprint2_buildkit_controller_enabled=true`, an exact router-local kubeconfig source, and explicit
+Before packaging, run the non-destructive `platform-buildkit` adoption with
+`platform_buildkit_controller_enabled=true`, an exact router-local kubeconfig source, and explicit
 control-plane API URL and address bindings. The role installs a persistent,
 loopback-only `kubectl port-forward` and the reviewed BuildKit mTLS identity on the retained edge
 router. The role creates the `labweaver-package` buildx context only when it is absent, and always

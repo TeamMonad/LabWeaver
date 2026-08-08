@@ -672,7 +672,7 @@ fn provider_with_state(
             ContainerReleasePolicy::new(image_policy_id, image_policy_revision, trust_revision)
                 .expect("release policy"),
             "harbor.internal/labweaver-system".to_owned(),
-            "labweaver-sprint2".to_owned(),
+            "labweaver-platform".to_owned(),
             "access-service".to_owned(),
             "harbor-course-pull".to_owned(),
             "nfs-rwx".to_owned(),

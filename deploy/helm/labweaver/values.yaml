@@ -24,7 +24,7 @@ hostAliases: []
 portalRoute:
   enabled: false
   namespace: ""
-  name: labweaver-sprint2
+  name: labweaver-platform
   hostname: ""
   gatewayName: ""
   gatewaySectionName: http
@@ -136,7 +136,7 @@ workloads:
       LABWEAVER_ENVIRONMENT_PROVIDER_BINDINGS_PATH: /etc/labweaver/config/providers.json
       LABWEAVER_ACCESS_REVOCATION_SUBJECT: labweaver.service.access.revoke.v1
       LABWEAVER_RESOURCE_LEASE_VERIFICATION_SUBJECT: labweaver.resource.lease.verify.v1
-      LABWEAVER_ENVIRONMENT_WORKER_ID: environment-service-sprint2
+      LABWEAVER_ENVIRONMENT_WORKER_ID: environment-service-platform
       LABWEAVER_CONTAINER_TERMINAL_EXECUTOR_URI: wss://container-executor:9450/internal/v1/container-terminal
       LABWEAVER_CONTAINER_TERMINAL_EXECUTOR_CA_PATH: /etc/labweaver/secrets/mtls-ca.pem
       LABWEAVER_CONTAINER_TERMINAL_EXECUTOR_CERT_PATH: /etc/labweaver/secrets/tls.crt
