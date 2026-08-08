@@ -1,5 +1,6 @@
 use std::{collections::BTreeSet, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
 
+use async_nats::jetstream::consumer::PullConsumer;
 use async_nats::jetstream::message::PublishMessage;
 use auth::NatsFileConfig;
 use axum::{
@@ -9,8 +10,8 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
 };
 use contracts::{
-    AccessGrantId, ActorId, CourseId, EndpointGrantId, EndpointId, EnvironmentId, EventId,
-    GatewaySessionId, PlatformRole, Revision, Sequence, Sha256Digest, SshPublicKeyId,
+    AccessGrantId, ActorId, ConsoleSessionId, CourseId, EndpointGrantId, EndpointId, EnvironmentId,
+    EventId, GatewaySessionId, PlatformRole, Revision, Sequence, Sha256Digest, SshPublicKeyId,
     StreamSequence, UtcTimestamp,
     access::{
         AccessGrant, AccessGrantSnapshot, AccessGrantState, AuthorizationDecision,
@@ -43,7 +44,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::{
-    ApiError, AppState, MtlsPrincipal, authenticated_identity, authenticated_session,
+    ApiError, AppState, MtlsPrincipal, authenticated_identity, authenticated_session, console,
     cookie_session_id, require_browser_origin, utc_timestamp,
 };
 
@@ -111,7 +112,7 @@ async fn require_mutation_auth(state: &AppState, headers: &HeaderMap) -> Result<
     Ok(())
 }
 
-fn idempotency_key(headers: &HeaderMap) -> Result<IdempotencyKey, ApiError> {
+pub(super) fn idempotency_key(headers: &HeaderMap) -> Result<IdempotencyKey, ApiError> {
     let value = headers
         .get("Idempotency-Key")
         .and_then(|value| value.to_str().ok())
@@ -119,7 +120,7 @@ fn idempotency_key(headers: &HeaderMap) -> Result<IdempotencyKey, ApiError> {
     IdempotencyKey::parse(value).map_err(|_| ApiError::bad_request("LW_IDEMPOTENCY_INVALID"))
 }
 
-fn if_match(headers: &HeaderMap) -> Result<Revision, ApiError> {
+pub(super) fn if_match(headers: &HeaderMap) -> Result<Revision, ApiError> {
     let value = headers
         .get(header::IF_MATCH)
         .and_then(|value| value.to_str().ok())
@@ -129,13 +130,13 @@ fn if_match(headers: &HeaderMap) -> Result<Revision, ApiError> {
         .map_err(|_| ApiError::precondition("LW_REVISION_CONFLICT"))
 }
 
-fn request_hash<T: Serialize>(request: &T) -> Result<String, ApiError> {
+pub(super) fn request_hash<T: Serialize>(request: &T) -> Result<String, ApiError> {
     let bytes = serde_jcs::to_vec(request)
         .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
     Ok(Sha256Digest::of_bytes(&bytes).to_string())
 }
 
-async fn reserve_idempotency(
+pub(super) async fn reserve_idempotency(
     tx: &mut Transaction<'_, Postgres>,
     operation: &str,
     scope_id: &str,
@@ -175,7 +176,7 @@ async fn reserve_idempotency(
     Ok(Some(row.get("result")))
 }
 
-async fn complete_idempotency(
+pub(super) async fn complete_idempotency(
     tx: &mut Transaction<'_, Postgres>,
     operation: &str,
     scope_id: &str,
@@ -200,7 +201,7 @@ async fn complete_idempotency(
     Ok(())
 }
 
-fn actor_idempotency_scope(actor_id: ActorId) -> String {
+pub(super) fn actor_idempotency_scope(actor_id: ActorId) -> String {
     format!("actor:{actor_id}")
 }
 
@@ -742,6 +743,7 @@ pub async fn revoke_access_grant(
     tx.commit()
         .await
         .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
+    state.console_registry.cancel_grant(grant_id).await;
     Ok((StatusCode::ACCEPTED, Json(grant)))
 }
 
@@ -1375,6 +1377,10 @@ pub async fn environment_revocation_loop(state: Arc<AppState>) -> Result<(), Gra
             }
         };
         let access_revocation_revision = revoke_environment_grants(&state.pool, &request).await?;
+        state
+            .console_registry
+            .cancel_environment(request.environment_id)
+            .await;
         let response = EnvironmentAccessRevocationResponse {
             version: 1,
             environment_id: request.environment_id,
@@ -1396,6 +1402,133 @@ pub async fn environment_revocation_loop(state: Arc<AppState>) -> Result<(), Gra
         );
     }
     Err(GrantRuntimeError::NatsSubscribe)
+}
+
+/// Consumes Environment state changes durably. A new authority revision makes
+/// every console session frozen against the prior revision ineligible.
+pub async fn environment_state_loop(state: Arc<AppState>) -> Result<(), GrantRuntimeError> {
+    let context = async_nats::jetstream::new(state.nats.clone());
+    let stream = context
+        .get_stream(&state.deployment.grants.environment_state_stream)
+        .await
+        .map_err(|_| GrantRuntimeError::NatsSubscribe)?;
+    let consumer: PullConsumer = stream
+        .get_consumer(&state.deployment.grants.environment_state_consumer)
+        .await
+        .map_err(|_| GrantRuntimeError::NatsSubscribe)?;
+    let mut messages = consumer
+        .messages()
+        .await
+        .map_err(|_| GrantRuntimeError::NatsSubscribe)?;
+    while let Some(message) = messages.next().await {
+        let message = message.map_err(|_| GrantRuntimeError::NatsSubscribe)?;
+        let event =
+            contracts::parse_strict_json::<CloudEvent<contracts::events::EnvironmentEvent>>(
+                &message.payload,
+            )
+            .map_err(|_| GrantRuntimeError::Contract)?;
+        let contract = contracts::events::EVENT_CONTRACTS
+            .iter()
+            .copied()
+            .find(|item| item.subject == subjects::ENVIRONMENT_STATE_CHANGED)
+            .ok_or(GrantRuntimeError::Contract)?;
+        event
+            .validate(contract)
+            .map_err(|_| GrantRuntimeError::Contract)?;
+        if event.aggregate_revision.get() != event.aggregate_sequence.0 {
+            return Err(GrantRuntimeError::Contract);
+        }
+        let sessions = apply_environment_state_event(&state, &event, &message.payload).await?;
+        for session_id in sessions {
+            state.console_registry.cancel_session(session_id).await;
+        }
+        message
+            .double_ack()
+            .await
+            .map_err(|_| GrantRuntimeError::NatsSubscribe)?;
+    }
+    Err(GrantRuntimeError::NatsSubscribe)
+}
+
+async fn apply_environment_state_event(
+    state: &AppState,
+    event: &CloudEvent<contracts::events::EnvironmentEvent>,
+    payload: &[u8],
+) -> Result<Vec<ConsoleSessionId>, GrantRuntimeError> {
+    let environment_id = event.data.environment_id;
+    let sequence =
+        i64::try_from(event.aggregate_sequence.0).map_err(|_| GrantRuntimeError::Contract)?;
+    let mut tx = state.pool.begin().await?;
+    let previous = sqlx::query_scalar::<_, i64>(
+        "SELECT last_sequence FROM access.inbox_watermarks WHERE consumer=$1 AND aggregate_id=$2 FOR UPDATE",
+    )
+    .bind(&state.deployment.grants.environment_state_consumer)
+    .bind(environment_id.as_uuid())
+    .fetch_optional(&mut *tx)
+    .await?;
+    match classify_environment_sequence(previous, sequence) {
+        EnvironmentSequence::Replay => {
+            tx.rollback().await?;
+            return Ok(Vec::new());
+        }
+        EnvironmentSequence::Apply => {}
+    }
+    let now = OffsetDateTime::now_utc();
+    let terminate_by = now + time::Duration::seconds(TERMINATION_SECONDS);
+    let sessions = sqlx::query("UPDATE access.console_sessions SET state='terminating',termination_requested_at=$3,terminate_by=$4,revision=revision+1,diagnostic_code='LW_CONSOLE_ENVIRONMENT_REVISION_DRIFT' WHERE environment_id=$1 AND environment_revision<$2 AND state IN ('opening','active') RETURNING session_id")
+        .bind(environment_id.as_uuid())
+        .bind(sequence)
+        .bind(now)
+        .bind(terminate_by)
+        .fetch_all(&mut *tx)
+        .await?;
+    let mut session_ids = Vec::with_capacity(sessions.len());
+    for row in sessions {
+        let session_id = typed_id::<ConsoleSessionId>(row.get("session_id"))
+            .map_err(|_| GrantRuntimeError::Contract)?;
+        console::enqueue_console_event(
+            &mut tx,
+            session_id,
+            contracts::access::ConsoleSessionState::Terminating,
+            Some("LW_CONSOLE_ENVIRONMENT_REVISION_DRIFT"),
+            now,
+        )
+        .await
+        .map_err(|_| GrantRuntimeError::Contract)?;
+        session_ids.push(session_id);
+    }
+    let inserted = sqlx::query("INSERT INTO access.inbox_events (consumer,event_id,aggregate_id,aggregate_sequence,payload_sha256) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (consumer,event_id) DO NOTHING")
+        .bind(&state.deployment.grants.environment_state_consumer)
+        .bind(event.id.as_uuid())
+        .bind(environment_id.as_uuid())
+        .bind(sequence)
+        .bind(Sha256Digest::of_bytes(payload).to_string())
+        .execute(&mut *tx)
+        .await?;
+    if inserted.rows_affected() != 1 {
+        return Err(GrantRuntimeError::Contract);
+    }
+    sqlx::query("INSERT INTO access.inbox_watermarks (consumer,aggregate_id,last_sequence) VALUES ($1,$2,$3) ON CONFLICT (consumer,aggregate_id) DO UPDATE SET last_sequence=EXCLUDED.last_sequence,updated_at=clock_timestamp()")
+        .bind(&state.deployment.grants.environment_state_consumer)
+        .bind(environment_id.as_uuid())
+        .bind(sequence)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(session_ids)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EnvironmentSequence {
+    Apply,
+    Replay,
+}
+
+fn classify_environment_sequence(previous: Option<i64>, sequence: i64) -> EnvironmentSequence {
+    match previous {
+        Some(value) if sequence <= value => EnvironmentSequence::Replay,
+        Some(_) | None => EnvironmentSequence::Apply,
+    }
 }
 
 fn valid_environment_revocation_request(request: &EnvironmentAccessRevocationRequest) -> bool {
@@ -1470,10 +1603,27 @@ pub async fn maintenance_loop(state: Arc<AppState>) -> Result<(), GrantRuntimeEr
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         ticker.tick().await;
-        expire_grants(&state.pool).await?;
+        expire_grants(&state).await?;
+        console::reconcile_ineligible_bff_sessions(&state)
+            .await
+            .map_err(|_| GrantRuntimeError::AccessMutation)?;
         mark_overdue(&state.pool).await?;
+        cancel_owned_terminating_sessions(&state).await?;
         cleanup_authorizations(&state.pool).await?;
     }
+}
+
+async fn cancel_owned_terminating_sessions(state: &AppState) -> Result<(), GrantRuntimeError> {
+    let rows = sqlx::query("SELECT session_id FROM access.console_sessions WHERE proxy_owner=$1 AND state IN ('terminating','termination_overdue')")
+        .bind(&state.console_proxy_owner)
+        .fetch_all(&state.pool)
+        .await?;
+    for row in rows {
+        let session_id = typed_id::<ConsoleSessionId>(row.get("session_id"))
+            .map_err(|_| GrantRuntimeError::Contract)?;
+        state.console_registry.cancel_session(session_id).await;
+    }
+    Ok(())
 }
 
 pub async fn outbox_loop(state: Arc<AppState>) -> Result<(), GrantRuntimeError> {
@@ -1505,7 +1655,7 @@ pub async fn outbox_loop(state: Arc<AppState>) -> Result<(), GrantRuntimeError> 
     }
 }
 
-async fn active_membership(
+pub(super) async fn active_membership(
     pool: &PgPool,
     course_id: CourseId,
     actor_id: Uuid,
@@ -1532,9 +1682,9 @@ async fn active_membership(
     Err(ApiError::forbidden("LW_AUTH_SCOPE_DENIED"))
 }
 
-struct Membership {
-    role: PlatformRole,
-    expires_at: Option<OffsetDateTime>,
+pub(super) struct Membership {
+    pub(super) role: PlatformRole,
+    pub(super) expires_at: Option<OffsetDateTime>,
 }
 
 async fn load_grant(
@@ -1845,14 +1995,28 @@ async fn terminate_sessions_for_grant(
         )
         .await?;
     }
+    let console_rows = sqlx::query("UPDATE access.console_sessions SET state='terminating',termination_requested_at=$2,terminate_by=$3,revision=revision+1,diagnostic_code='LW_ACCESS_GRANT_REVOKED' WHERE access_grant_id=$1 AND state IN ('opening','active') RETURNING session_id")
+        .bind(grant_id.as_uuid()).bind(now).bind(terminate_by).fetch_all(&mut **tx).await
+        .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
+    for row in console_rows {
+        let session_id = typed_id::<ConsoleSessionId>(row.get("session_id"))?;
+        console::enqueue_console_event(
+            tx,
+            session_id,
+            contracts::access::ConsoleSessionState::Terminating,
+            Some("LW_ACCESS_GRANT_REVOKED"),
+            now,
+        )
+        .await?;
+    }
     Ok(())
 }
 
-async fn expire_grants(pool: &PgPool) -> Result<(), GrantRuntimeError> {
+async fn expire_grants(state: &AppState) -> Result<(), GrantRuntimeError> {
     loop {
         let now = OffsetDateTime::now_utc();
         let terminate_by = now + time::Duration::seconds(TERMINATION_SECONDS);
-        let mut tx = pool.begin().await?;
+        let mut tx = state.pool.begin().await?;
         let row=sqlx::query("SELECT grant_id FROM access.access_grants WHERE state='active' AND expires_at<= $1 ORDER BY expires_at,grant_id FOR UPDATE SKIP LOCKED LIMIT 1")
           .bind(now).fetch_optional(&mut *tx).await?;
         let Some(row) = row else {
@@ -1869,6 +2033,7 @@ async fn expire_grants(pool: &PgPool) -> Result<(), GrantRuntimeError> {
         let grant = load_grant_tx_runtime(&mut tx, grant_id).await?;
         enqueue_grant_event_runtime(&mut tx, &grant, subjects::ACCESS_GRANT_EXPIRED, now).await?;
         tx.commit().await?;
+        state.console_registry.cancel_grant(grant_id).await;
     }
     Ok(())
 }
@@ -1894,6 +2059,31 @@ async fn mark_overdue(pool: &PgPool) -> Result<(), GrantRuntimeError> {
         )
         .await?;
     }
+    let console_rows = sqlx::query("UPDATE access.console_sessions SET state='termination_overdue',revision=revision+1,diagnostic_code='LW_CONSOLE_TERMINATION_OVERDUE' WHERE state='terminating' AND terminate_by<$1 RETURNING session_id")
+        .bind(now).fetch_all(&mut *tx).await?;
+    let console_count = u64::try_from(console_rows.len()).unwrap_or(u64::MAX);
+    for row in console_rows {
+        let session_id = typed_id::<ConsoleSessionId>(row.get("session_id"))
+            .map_err(|_| GrantRuntimeError::Contract)?;
+        console::enqueue_console_event(
+            &mut tx,
+            session_id,
+            contracts::access::ConsoleSessionState::TerminationOverdue,
+            Some("LW_CONSOLE_TERMINATION_OVERDUE"),
+            now,
+        )
+        .await
+        .map_err(|_| GrantRuntimeError::Contract)?;
+    }
+    if console_count > 0 {
+        tracing::error!(
+            event = "access.console.termination_overdue",
+            diagnostic = "LW_CONSOLE_TERMINATION_OVERDUE",
+            count = console_count
+        );
+        metrics::counter!("labweaver_console_sessions", "event" => "termination_overdue")
+            .increment(console_count);
+    }
     tx.commit().await?;
     if count > 0 {
         metrics::counter!("labweaver_access_session_termination_overdue")
@@ -1904,6 +2094,9 @@ async fn mark_overdue(pool: &PgPool) -> Result<(), GrantRuntimeError> {
 
 async fn cleanup_authorizations(pool: &PgPool) -> Result<(), GrantRuntimeError> {
     sqlx::query("DELETE FROM access.ssh_authorizations WHERE expires_at<now()-interval '1 hour'")
+        .execute(pool)
+        .await?;
+    sqlx::query("UPDATE access.console_capabilities SET encrypted_handoff_secret='\\x'::bytea,secret_scrubbed_at=clock_timestamp() WHERE expires_at<=clock_timestamp() AND secret_scrubbed_at IS NULL")
         .execute(pool)
         .await?;
     Ok(())
@@ -2022,7 +2215,7 @@ async fn enqueue_session_event_runtime(
         .map_err(|_| GrantRuntimeError::Contract)
 }
 
-async fn enqueue_event_value(
+pub(super) async fn enqueue_event_value(
     tx: &mut Transaction<'_, Postgres>,
     subject: &str,
     course_id: CourseId,
@@ -2260,6 +2453,32 @@ mod tests {
                 br#"{"version":1,"environmentId":"00000000-0000-7000-8000-000000000101","environmentRevision":4,"reason":"environment_deleted","extra":true}"#,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn environment_state_sequence_accepts_newer_filtered_events_and_replays_old_ones() {
+        assert_eq!(
+            classify_environment_sequence(None, 7),
+            EnvironmentSequence::Apply
+        );
+        assert_eq!(
+            classify_environment_sequence(Some(7), 8),
+            EnvironmentSequence::Apply
+        );
+        assert_eq!(
+            classify_environment_sequence(Some(7), 7),
+            EnvironmentSequence::Replay
+        );
+        assert_eq!(
+            classify_environment_sequence(Some(7), 6),
+            EnvironmentSequence::Replay
+        );
+        // This consumer filters state-changed subjects, so other Environment
+        // events may legitimately occupy intervening aggregate revisions.
+        assert_eq!(
+            classify_environment_sequence(Some(7), 9),
+            EnvironmentSequence::Apply
         );
     }
 }

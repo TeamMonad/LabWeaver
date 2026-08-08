@@ -81,6 +81,7 @@ typed_id!(BuildRequestId);
 typed_id!(BffSessionId);
 typed_id!(CandidateId);
 typed_id!(ConsoleCapabilityId);
+typed_id!(ConsoleSessionId);
 typed_id!(CourseId);
 typed_id!(EndpointGrantId);
 typed_id!(EndpointId);

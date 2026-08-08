@@ -43,6 +43,8 @@ export function createWebSocketConsoleSocket(
 ): ConsoleSocket {
   const url = toWebSocketUrl(locator)
   const ws = new WebSocket(url, subprotocol)
+  ws.binaryType = 'arraybuffer'
+  const encoder = new TextEncoder()
 
   ws.addEventListener('open', () => handlers.onStateChange('open'))
   ws.addEventListener('message', (event) => {
@@ -56,7 +58,9 @@ export function createWebSocketConsoleSocket(
 
   return {
     send(data) {
-      if (ws.readyState === WebSocket.OPEN) ws.send(data)
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(typeof data === 'string' ? encoder.encode(data) : data)
+      }
     },
     sendResize(cols, rows) {
       if (ws.readyState === WebSocket.OPEN) {

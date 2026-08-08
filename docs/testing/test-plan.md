@@ -65,6 +65,13 @@ baseline migration to a disposable PostgreSQL instance.
   Outbox/durable JetStream lifecycle delivery, never authorization polling.
   Loss of control delivery closes sessions; #131/#124/#126 provide the
   persistence, real stream and E4 evidence.
+- #131 local verification covers PostgreSQL one-time consumption and rollback,
+  Environment SAN/revision/Lease/`TerminalSpec` admission, unique Ready Pod
+  selection, binary/control frame contracts, bounded resize/output and abort
+  behavior, RBAC/NetworkPolicy/Helm rendering, and Sprint 3 Web
+  state/visual/a11y reuse. A real Kubernetes PTY is not local evidence.
+  It deliberately does not deploy to the shared cluster; #126 owns connected
+  Container PTY, revoke/expiry/control-channel-loss and Release Gate evidence.
 - one current v1 REST/event/schema representation;
 - no Sigstore, Kyverno, SBOM, provenance or attestation field in the active
   product contract;

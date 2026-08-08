@@ -78,6 +78,7 @@
               ref="xtermRef"
               :send="session.send"
               :send-resize="session.sendResize"
+              @diagnostic="onXtermDiagnostic"
             />
             <NoVncConsole
               v-else-if="kind === 'novnc' && vncCapability"
@@ -143,14 +144,7 @@ session.onData((data) => {
 
 async function openConsole() {
   issueError.value = null
-  const leaseFence =
-    props.environment.class === 'work' && props.environment.leaseId
-      ? { leaseId: props.environment.leaseId, leaseRevision: props.environment.revision, expiresAt: props.environment.eligibilityExpiresAt }
-      : null
-  const result = await capability.issue(props.kind, {
-    environmentRevision: props.environment.revision,
-    leaseFence,
-  })
+  const result = await capability.issue(props.kind)
   if (!result.ok || !result.capability) {
     issueError.value = result.diagnostic ?? null
     return
@@ -163,6 +157,14 @@ async function openConsole() {
     // session socket, or the second consumption is rejected by the proxy.
     vncStatus.value = 'connecting'
     vncCapability.value = result.capability
+  }
+}
+
+function onXtermDiagnostic(code: string) {
+  session.diagnostic = {
+    code,
+    message: '终端布局尚未就绪，无法安全发送窗口尺寸。',
+    retryable: true,
   }
 }
 

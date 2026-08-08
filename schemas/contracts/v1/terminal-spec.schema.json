@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Bounded direct-exec terminal owned by an immutable Container release.",
+  "properties": {
+    "args": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "executable": {
+      "type": "string"
+    },
+    "workingDirectory": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "executable",
+    "workingDirectory"
+  ],
+  "title": "TerminalSpec",
+  "type": "object"
+}

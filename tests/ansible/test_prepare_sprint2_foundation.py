@@ -50,8 +50,8 @@ class FoundationAuthoringTests(unittest.TestCase):
                 "agent-service",
                 "build-executor",
                 "environment-service",
-                "evaluation-service",
                 "container-executor",
+                "evaluation-service",
                 "kubevirt-executor",
                 "resource-service",
             },
@@ -73,7 +73,14 @@ class FoundationAuthoringTests(unittest.TestCase):
 
         access_publish, access_subscribe, access_response = FOUNDATION.NATS_USERS["access-service"]
         self.assertEqual(access_publish, ("$JS.API.>", "$JS.ACK.>", "labweaver.access.>"))
-        self.assertEqual(access_subscribe, ("_INBOX.>", "labweaver.service.access.revoke.v1"))
+        self.assertEqual(
+            access_subscribe,
+            (
+                "_INBOX.>",
+                "labweaver.service.access.revoke.v1",
+                "labweaver.environment.instance.state_changed.v1",
+            ),
+        )
         self.assertTrue(access_response)
         self.assertFalse(access_subscribe[0].startswith("labweaver.access."))
 
@@ -171,6 +178,7 @@ class FoundationAuthoringTests(unittest.TestCase):
                 "access-service",
                 "agent-service",
                 "environment-service",
+                "container-executor",
                 "evaluation-service",
                 "resource-service",
                 "openssh-gateway",
@@ -181,6 +189,20 @@ class FoundationAuthoringTests(unittest.TestCase):
         self.assertIn("URI:spiffe://labweaver/control-service", identities["control-service"][0])
         self.assertIn("URI:spiffe://labweaver/agent-service", identities["agent-service"][0])
         self.assertEqual(identities["agent-service"][1], "serverAuth,clientAuth")
+        self.assertIn(
+            "URI:spiffe://labweaver/environment-service",
+            identities["environment-service"][0],
+        )
+        self.assertEqual(
+            identities["environment-service"][1], "serverAuth,clientAuth"
+        )
+        self.assertIn(
+            "DNS:container-executor.labweaver-system.svc",
+            identities["container-executor"][0],
+        )
+        self.assertEqual(
+            identities["container-executor"][1], "serverAuth,clientAuth"
+        )
 
     def test_certificate_authoring_activates_san_extension_section(self) -> None:
         source = inspect.getsource(FOUNDATION._certificate)

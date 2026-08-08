@@ -734,6 +734,16 @@
               "maximum": 65535,
               "minimum": 0,
               "type": "integer"
+            },
+            "terminal": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TerminalSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -1491,6 +1501,30 @@
       "required": [
         "collector",
         "llmReadable"
+      ],
+      "type": "object"
+    },
+    "TerminalSpec": {
+      "additionalProperties": false,
+      "description": "Bounded direct-exec terminal owned by an immutable Container release.",
+      "properties": {
+        "args": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "executable": {
+          "type": "string"
+        },
+        "workingDirectory": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "executable",
+        "workingDirectory"
       ],
       "type": "object"
     },

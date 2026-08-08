@@ -22,8 +22,9 @@ async fn access_schema_enforces_unique_keys_single_live_grant_and_hashed_tokens(
         .connect(&url)
         .await?;
     let migrations = format!(
-        "CREATE SCHEMA access; SET search_path TO access;\n{}",
-        include_str!("../../../migrations/access/0001_sprint2_baseline.sql")
+        "CREATE SCHEMA access; SET search_path TO access;\n{}\n{}",
+        include_str!("../../../migrations/access/0001_sprint2_baseline.sql"),
+        include_str!("../../../migrations/access/0002_console_capabilities_and_sessions.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;
 
@@ -122,6 +123,49 @@ async fn access_schema_enforces_unique_keys_single_live_grant_and_hashed_tokens(
     let authorized: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM access.access_grants g JOIN access.course_memberships cm ON cm.course_id=g.course_id AND cm.actor_id=g.actor_id WHERE g.grant_id=$1 AND g.state='active' AND cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>now()) AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END)")
         .bind(grant_id).fetch_one(&pool).await?;
     assert!(authorized);
+
+    let bff_session_id = Uuid::now_v7();
+    sqlx::query("INSERT INTO access.bff_sessions (session_id,actor_id,platform_roles,authorization_revision,expires_at,idle_expires_at,encrypted_csrf_token,csrf_encryption_key_id) VALUES ($1,$2,ARRAY['student'],1,now()+interval '30 minutes',now()+interval '15 minutes',$3,'test-key')")
+        .bind(bff_session_id).bind(actor).bind(vec![7_u8; 32]).execute(&pool).await?;
+    let capability_id = Uuid::now_v7();
+    sqlx::query("INSERT INTO access.console_capabilities (capability_id,kind,access_grant_id,access_grant_revision,actor_id,bff_session_id,course_id,environment_id,environment_class,environment_revision,issued_at,expires_at,authorization_expires_at,locator_sha256,handoff_secret_sha256,encrypted_handoff_secret,encryption_key_id,idempotency_scope,idempotency_key_sha256) VALUES ($1,'xterm',$2,1,$3,$4,$5,$6,'experiment',1,now(),now()+interval '30 seconds',now()+interval '15 minutes',$7,$8,$9,'test-key','actor:test',$10)")
+        .bind(capability_id).bind(grant_id).bind(actor).bind(bff_session_id).bind(course).bind(environment)
+        .bind("f".repeat(64)).bind("a".repeat(64)).bind(vec![9_u8; 32]).bind("d".repeat(64)).execute(&pool).await?;
+    assert!(sqlx::query("INSERT INTO access.console_capabilities (capability_id,kind,access_grant_id,access_grant_revision,actor_id,bff_session_id,course_id,environment_id,environment_class,environment_revision,issued_at,expires_at,authorization_expires_at,locator_sha256,handoff_secret_sha256,encrypted_handoff_secret,encryption_key_id,idempotency_scope,idempotency_key_sha256) VALUES ($1,'xterm',$2,1,$3,$4,$5,$6,'experiment',1,now(),now()+interval '31 seconds',now()+interval '15 minutes',$7,$8,$9,'test-key','actor:test',$10)")
+        .bind(Uuid::now_v7()).bind(grant_id).bind(actor).bind(bff_session_id).bind(course).bind(environment)
+        .bind("b".repeat(64)).bind("c".repeat(64)).bind(vec![9_u8; 32]).bind("e".repeat(64)).execute(&pool).await.is_err());
+    let console_session_id = Uuid::now_v7();
+    sqlx::query("INSERT INTO access.console_sessions (session_id,capability_id,kind,bff_session_id,access_grant_id,access_grant_revision,actor_id,course_id,environment_id,environment_revision,proxy_owner,state,opened_at,authorization_expires_at) VALUES ($1,$2,'xterm',$3,$4,1,$5,$6,$7,1,'test-proxy','opening',now(),now()+interval '15 minutes')")
+        .bind(console_session_id).bind(capability_id).bind(bff_session_id).bind(grant_id).bind(actor).bind(course).bind(environment).execute(&pool).await?;
+    let consumed = sqlx::query("UPDATE access.console_capabilities SET consumed_at=now(),session_id=$2,secret_scrubbed_at=now(),encrypted_handoff_secret='\\x'::bytea WHERE capability_id=$1 AND consumed_at IS NULL")
+        .bind(capability_id).bind(console_session_id).execute(&pool).await?.rows_affected();
+    let replay = sqlx::query("UPDATE access.console_capabilities SET consumed_at=now() WHERE capability_id=$1 AND consumed_at IS NULL")
+        .bind(capability_id).execute(&pool).await?.rows_affected();
+    assert_eq!((consumed, replay), (1, 0));
+    let work_capability_id = Uuid::now_v7();
+    let work_lease_id = Uuid::now_v7();
+    sqlx::query("INSERT INTO access.console_capabilities (capability_id,kind,access_grant_id,access_grant_revision,actor_id,bff_session_id,course_id,environment_id,environment_class,environment_revision,lease_id,lease_revision,lease_expires_at,issued_at,expires_at,authorization_expires_at,locator_sha256,handoff_secret_sha256,encrypted_handoff_secret,encryption_key_id,idempotency_scope,idempotency_key_sha256) VALUES ($1,'xterm',$2,1,$3,$4,$5,$6,'work',1,$7,3,now()+interval '20 minutes',now(),now()+interval '30 seconds',now()+interval '15 minutes',$8,$9,$10,'test-key','actor:work',$11)")
+        .bind(work_capability_id).bind(grant_id).bind(actor).bind(bff_session_id).bind(course).bind(environment).bind(work_lease_id)
+        .bind("1".repeat(64)).bind("2".repeat(64)).bind(vec![9_u8; 32]).bind("3".repeat(64)).execute(&pool).await?;
+    sqlx::query("INSERT INTO access.console_sessions (session_id,capability_id,kind,bff_session_id,access_grant_id,access_grant_revision,actor_id,course_id,environment_id,environment_revision,lease_id,lease_revision,lease_expires_at,proxy_owner,state,opened_at,authorization_expires_at) VALUES ($1,$2,'xterm',$3,$4,1,$5,$6,$7,1,$8,3,now()+interval '20 minutes','test-proxy','opening',now(),now()+interval '15 minutes')")
+        .bind(Uuid::now_v7()).bind(work_capability_id).bind(bff_session_id).bind(grant_id).bind(actor).bind(course).bind(environment).bind(work_lease_id).execute(&pool).await?;
+    let console_columns: Vec<String> = sqlx::query_scalar("SELECT column_name FROM information_schema.columns WHERE table_schema='access' AND table_name IN ('console_capabilities','console_sessions')")
+        .fetch_all(&pool).await?;
+    for forbidden in [
+        "terminal_input",
+        "terminal_output",
+        "transcript",
+        "cookie",
+        "kubernetes_target",
+        "credential",
+    ] {
+        assert!(
+            !console_columns
+                .iter()
+                .any(|column| column.contains(forbidden))
+        );
+    }
+
     sqlx::query("UPDATE access.course_memberships SET state='revoked',revision=revision+1 WHERE course_id=$1 AND actor_id=$2")
         .bind(course).bind(actor).execute(&pool).await?;
     let authorized_after_revocation: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM access.access_grants g JOIN access.course_memberships cm ON cm.course_id=g.course_id AND cm.actor_id=g.actor_id WHERE g.grant_id=$1 AND g.state='active' AND cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>now()) AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END)")

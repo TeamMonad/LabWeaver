@@ -49,8 +49,8 @@ ADR 0012 and Issue #122 freeze the xterm/noVNC Contract at E2 only. The
 following remain release blockers and cannot be represented by generated
 schemas, Fixture, historical PR #138 or mixed-source demonstrations:
 
-- #131 must be reopened and reimplemented from the merged ConsoleCapability
-  contract; the closed PR #138 is design reference only.
+- #131 implements the Container xterm path from the merged Sprint 3 contract;
+  its evidence remains local until #126 runs the frozen connected candidate.
 - #124 must implement the Access proxy, Environment mTLS bridge and
   least-privilege KubeVirt VMI `/vnc` stream without guest VNC passwords or
   public websockify.

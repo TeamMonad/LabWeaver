@@ -58,6 +58,14 @@ deployment manifest and Release Gate both bind the SHA-256 of
 `migrations/catalog.yaml`; reports from another catalog, commit or Run ID are
 invalid.
 
+The first additive Access forward migration is
+`access/0002_console_capabilities_and_sessions.sql`. It creates only
+metadata/authority tables, binds capability redemption to one session, keeps
+the 30-second invariant in SQL, and never stores console payloads. Forward
+recovery disables issuance, terminates live proxy sessions, repairs the cause,
+and reapplies the unchanged catalog identity; startup never repairs or drops a
+partially applied migration. An applied hash mismatch remains a blocker.
+
 Future post-v1 data evolution must introduce a new ADR and forward migrations.
 It must not restore the deleted pre-release v1/v2 compatibility machinery or
 reinterpret first-install baseline evidence as production upgrade evidence.

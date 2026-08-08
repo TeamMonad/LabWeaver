@@ -34,7 +34,11 @@ NATS_USERS: dict[str, tuple[tuple[str, ...], tuple[str, ...], bool]] = {
     ),
     "access-service": (
         ("$JS.API.>", "$JS.ACK.>", "labweaver.access.>"),
-        ("_INBOX.>", "labweaver.service.access.revoke.v1"),
+        (
+            "_INBOX.>",
+            "labweaver.service.access.revoke.v1",
+            "labweaver.environment.instance.state_changed.v1",
+        ),
         True,
     ),
     "agent-service": (
@@ -126,8 +130,20 @@ PLATFORM_IDENTITIES: dict[str, tuple[tuple[str, ...], str]] = {
         "serverAuth,clientAuth",
     ),
     "environment-service": (
-        ("DNS:environment-service", "DNS:environment-service.labweaver-system.svc"),
-        "serverAuth",
+        (
+            "DNS:environment-service",
+            "DNS:environment-service.labweaver-system.svc",
+            "URI:spiffe://labweaver/environment-service",
+        ),
+        "serverAuth,clientAuth",
+    ),
+    "container-executor": (
+        (
+            "DNS:container-executor",
+            "DNS:container-executor.labweaver-system.svc",
+            "URI:spiffe://labweaver/container-executor",
+        ),
+        "serverAuth,clientAuth",
     ),
     "evaluation-service": (
         (

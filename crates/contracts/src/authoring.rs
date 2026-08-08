@@ -293,6 +293,51 @@ pub enum PublicExposurePolicy {
     Deny,
 }
 
+/// Bounded direct-exec terminal owned by an immutable Container release.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TerminalSpec {
+    pub executable: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub working_directory: String,
+}
+
+impl TerminalSpec {
+    /// Validates a shell-free invocation rooted in the platform workspace.
+    pub fn validate(&self) -> Result<(), AuthoringError> {
+        if !normalized_absolute_posix_path(&self.executable) || self.executable.len() > 256 {
+            return Err(AuthoringError::InvalidEnvironmentSpec(
+                "terminal executable must be a normalized absolute POSIX path".to_owned(),
+            ));
+        }
+        if self.args.len() > 32
+            || self.args.iter().any(|argument| {
+                argument.len() > 1024 || argument.bytes().any(|byte| byte.is_ascii_control())
+            })
+        {
+            return Err(AuthoringError::InvalidEnvironmentSpec(
+                "terminal arguments exceed the bounded direct-exec contract".to_owned(),
+            ));
+        }
+        if self.working_directory != "/workspace" {
+            return Err(AuthoringError::InvalidEnvironmentSpec(
+                "terminal workingDirectory must be /workspace".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn normalized_absolute_posix_path(path: &str) -> bool {
+    path.starts_with('/')
+        && path.len() > 1
+        && !path.ends_with('/')
+        && !path.contains("//")
+        && !path.split('/').any(|segment| matches!(segment, "." | ".."))
+        && !path.bytes().any(|byte| byte.is_ascii_control())
+}
+
 /// Strict runtime-specific environment shape.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -302,6 +347,8 @@ pub enum EnvironmentRuntimeSpec {
         build_context: ArtifactRef,
         base_image_digest: String,
         service_port: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminal: Option<Box<TerminalSpec>>,
     },
     VirtualMachine {
         provider_binding: String,
@@ -423,6 +470,7 @@ impl EnvironmentSpec {
                 build_context,
                 base_image_digest,
                 service_port,
+                terminal,
             } => {
                 if provider_binding.trim().is_empty()
                     || base_image_digest.trim().is_empty()
@@ -439,6 +487,9 @@ impl EnvironmentSpec {
                     ));
                 }
                 validate_artifact_ref(build_context)?;
+                if let Some(terminal) = terminal {
+                    terminal.validate()?;
+                }
             }
             EnvironmentRuntimeSpec::VirtualMachine {
                 provider_binding,
@@ -862,5 +913,28 @@ impl AuthoringError {
                 diagnostic::CONTRACT_DOCUMENT_INVALID
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::TerminalSpec;
+
+    #[test]
+    fn terminal_spec_is_shell_free_normalized_and_bounded() {
+        let valid = TerminalSpec {
+            executable: "/bin/bash".to_owned(),
+            args: vec!["--noprofile".to_owned(), "--norc".to_owned()],
+            working_directory: "/workspace".to_owned(),
+        };
+        assert!(valid.validate().is_ok());
+        for executable in ["bash", "/bin/../bash", "/bin//bash"] {
+            let mut invalid = valid.clone();
+            invalid.executable = executable.to_owned();
+            assert!(invalid.validate().is_err());
+        }
+        let mut wrong_directory = valid.clone();
+        wrong_directory.working_directory = "/tmp".to_owned();
+        assert!(wrong_directory.validate().is_err());
     }
 }

@@ -35,10 +35,10 @@ function makeCapability() {
     environmentId: 'env-1',
     environmentRevision: 5,
     kind: 'xterm',
-    connectionLocator: '/api/v1/console-sessions/session-1',
+    connectionLocator: '/connect/console/session-1',
     websocketSubprotocol: 'labweaver.console.xterm.v1',
     issuedAt: '2026-07-16T08:00:00.000Z',
-    expiresAt: '2026-07-16T09:00:00.000Z',
+    expiresAt: '2026-07-16T08:00:30.000Z',
     leaseFence: null,
   }
 }
@@ -74,12 +74,20 @@ describe('useConsoleCapability', () => {
   })
 
   it('issues a capability with expected revisions', async () => {
-    vi.mocked(listConsoleCapabilities).mockResolvedValue({ data: makeAvailability(), error: undefined as never })
+    const leaseFence = {
+      leaseId: '0198c88e-8b53-7000-8000-000000000001',
+      leaseRevision: 7,
+      expiresAt: '2026-07-16T09:00:00.000Z',
+    }
+    vi.mocked(listConsoleCapabilities).mockResolvedValue({
+      data: makeAvailability({ environmentClass: 'work', leaseFence }),
+      error: undefined as never,
+    })
     vi.mocked(issueConsoleCapability).mockResolvedValue({ data: makeCapability(), error: undefined as never })
     const grantId = ref('grant-1')
     const capability = useConsoleCapability(grantId)
     await capability.load()
-    const result = await capability.issue('xterm', { environmentRevision: 5, leaseFence: null })
+    const result = await capability.issue('xterm')
     expect(result.ok).toBe(true)
     expect(issueConsoleCapability).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -87,6 +95,7 @@ describe('useConsoleCapability', () => {
           kind: 'xterm',
           expectedAccessGrantRevision: 3,
           expectedEnvironmentRevision: 5,
+          expectedLeaseFence: leaseFence,
         }),
       }),
     )
@@ -101,7 +110,7 @@ describe('useConsoleCapability', () => {
     const grantId = ref('grant-1')
     const capability = useConsoleCapability(grantId)
     await capability.load()
-    const result = await capability.issue('xterm', { environmentRevision: 5, leaseFence: null })
+    const result = await capability.issue('xterm')
     expect(result.ok).toBe(false)
     expect(result.diagnostic?.code).toBe('REVISION_CONFLICT')
   })
@@ -109,7 +118,7 @@ describe('useConsoleCapability', () => {
   it('rejects issue when availability not ready', async () => {
     const grantId = ref('grant-1')
     const capability = useConsoleCapability(grantId)
-    const result = await capability.issue('xterm', { environmentRevision: 5, leaseFence: null })
+    const result = await capability.issue('xterm')
     expect(result.ok).toBe(false)
     expect(result.diagnostic?.code).toBe('CONSOLE_CAPABILITY_NOT_READY')
   })

@@ -35,7 +35,6 @@ export function useConsoleCapability(grantId: Ref<string | undefined>) {
 
   async function issue(
     kind: ConsoleKind,
-    context: { environmentRevision: number; leaseFence?: IssueConsoleCapabilityRequestSchema['expectedLeaseFence'] },
   ): Promise<{ ok: boolean; capability?: ConsoleCapabilitySchema; diagnostic?: ReturnType<typeof makeDiagnostic> }> {
     const id = grantId.value
     if (!id || availability.value.kind !== 'success') {
@@ -44,14 +43,17 @@ export function useConsoleCapability(grantId: Ref<string | undefined>) {
     issuing.value = true
     try {
       const grantRevision = availability.value.data.accessGrantRevision
+      const environmentRevision = availability.value.data.environmentRevision
+      const leaseFence: IssueConsoleCapabilityRequestSchema['expectedLeaseFence'] =
+        availability.value.data.leaseFence ?? null
       const result = await issueConsoleCapability({
         path: { grantId: id },
         headers: { 'Idempotency-Key': idempotencyKey(), 'If-Match': ifMatch(grantRevision) },
         body: {
           kind,
           expectedAccessGrantRevision: grantRevision,
-          expectedEnvironmentRevision: context.environmentRevision,
-          expectedLeaseFence: context.leaseFence ?? null,
+          expectedEnvironmentRevision: environmentRevision,
+          expectedLeaseFence: leaseFence,
         },
       })
       if (result.error) {

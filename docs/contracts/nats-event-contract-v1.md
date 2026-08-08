@@ -55,6 +55,7 @@ messages carry only their locator, hash, type, size and safe summary.
 | `labweaver.access.grant.*.v1` | grant decision, activation, expiry and revocation |
 | `labweaver.access.ssh_key.revoked.v1` | key revocation without key body |
 | `labweaver.access.session.*.v1` | termination request, close receipt and overdue failure |
+| `labweaver.access.console_session.state_changed.v1` | metadata-only console open, active, termination, overdue and close lifecycle |
 | `labweaver.evaluation.submission.*.v1` | freeze request and immutable FrozenSubmission fact; no evaluation is scheduled |
 
 The exact subjects and schemas are generated from `EVENT_CONTRACTS`; this table

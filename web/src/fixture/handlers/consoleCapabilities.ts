@@ -37,15 +37,14 @@ export const listConsoleCapabilities: FixtureHandler = (req) => {
   if (roleCheck !== true) return roleCheck
   if (grant.state !== 'active') return problem(409, 'ACCESS_GRANT_NOT_ACTIVE', '授权已撤销或过期，无法发现控制台能力', false)
   if (environment.observedState !== 'ready') return problem(409, 'ENVIRONMENT_NOT_READY', '环境未就绪，无法发现控制台能力', false)
+  if (environment.class === 'work') return problem(409, 'LW_CONSOLE_LEASE_REQUIRED', 'Work 环境缺少 Resource-authoritative Lease fence', false)
 
   const availability = availabilityFor(
     grant.id,
     grant.revision,
     environment,
     kindsFor(environment),
-    environment.class === 'work' && environment.leaseId
-      ? { leaseId: environment.leaseId, leaseRevision: environment.revision, expiresAt: environment.eligibilityExpiresAt }
-      : null,
+    null,
   )
   return { status: 200, data: availability }
 }
@@ -71,6 +70,7 @@ export const issueConsoleCapability: FixtureHandler = (req) => {
 
   if (grant.state !== 'active') return problem(409, 'ACCESS_GRANT_NOT_ACTIVE', '授权已撤销或过期，无法签发控制台能力', false)
   if (environment.observedState !== 'ready') return problem(409, 'ENVIRONMENT_NOT_READY', '环境未就绪，无法签发控制台能力', false)
+  if (environment.class === 'work') return problem(409, 'LW_CONSOLE_LEASE_REQUIRED', 'Work 环境缺少 Resource-authoritative Lease fence', false)
   if (body.expectedAccessGrantRevision !== grant.revision) return conflict('AccessGrant revision 已变化，请刷新后重试')
   if (body.expectedEnvironmentRevision !== environment.revision) return conflict('环境 revision 已变化，请刷新后重试')
 
@@ -83,17 +83,12 @@ export const issueConsoleCapability: FixtureHandler = (req) => {
     return problem(503, 'CONSOLE_UPSTREAM_UNAVAILABLE', '控制台上游不可用（fixture 确定性场景）', true)
   }
 
-  const leaseFence =
-    environment.class === 'work' && environment.leaseId
-      ? { leaseId: environment.leaseId, leaseRevision: environment.revision, expiresAt: environment.eligibilityExpiresAt }
-      : null
-
   const capability = issueCapability(
     grant.id,
     grant.revision,
     environment,
     body.kind as ConsoleKind,
-    leaseFence,
+    null,
   )
   return { status: 201, data: capability }
 }

@@ -1,0 +1,156 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "ConsoleLeaseFence": {
+      "additionalProperties": false,
+      "description": "Resource-owned Lease identity that fences a Work console capability.",
+      "properties": {
+        "expiresAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "leaseId": {
+          "$ref": "#/$defs/LeaseId"
+        },
+        "leaseRevision": {
+          "$ref": "#/$defs/Revision"
+        }
+      },
+      "required": [
+        "leaseId",
+        "leaseRevision",
+        "expiresAt"
+      ],
+      "type": "object"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "EnvironmentClass": {
+      "description": "Environment business class retained from the v2.1 architecture.",
+      "enum": [
+        "experiment",
+        "work"
+      ],
+      "type": "string"
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "LeaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
+      "type": "string"
+    },
+    "ReleaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `ReleaseId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "RuntimeKind": {
+      "description": "Runtime kind shared by candidates, releases, and instances.",
+      "enum": [
+        "container",
+        "virtual_machine"
+      ],
+      "type": "string"
+    },
+    "TerminalSpec": {
+      "additionalProperties": false,
+      "description": "Bounded direct-exec terminal owned by an immutable Container release.",
+      "properties": {
+        "args": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "executable": {
+          "type": "string"
+        },
+        "workingDirectory": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "executable",
+        "workingDirectory"
+      ],
+      "type": "object"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Environment-authoritative, credential-free console admission facts.",
+  "properties": {
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    },
+    "eligibilityExpiresAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "environmentClass": {
+      "$ref": "#/$defs/EnvironmentClass"
+    },
+    "environmentId": {
+      "$ref": "#/$defs/EnvironmentId"
+    },
+    "environmentRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "leaseFence": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ConsoleLeaseFence"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "ownerActorId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "releaseId": {
+      "$ref": "#/$defs/ReleaseId"
+    },
+    "releaseVersion": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "runtimeKind": {
+      "$ref": "#/$defs/RuntimeKind"
+    },
+    "terminal": {
+      "$ref": "#/$defs/TerminalSpec"
+    }
+  },
+  "required": [
+    "environmentId",
+    "courseId",
+    "ownerActorId",
+    "environmentClass",
+    "runtimeKind",
+    "environmentRevision",
+    "releaseId",
+    "releaseVersion",
+    "eligibilityExpiresAt",
+    "terminal"
+  ],
+  "title": "EnvironmentConsoleEligibility",
+  "type": "object"
+}

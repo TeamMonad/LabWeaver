@@ -31,6 +31,27 @@ spec:
       ports:
         - {protocol: TCP, port: 8087}
         - {protocol: TCP, port: 9448}
+    {{- else if eq $name "environment-service" }}
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: [access-service, evaluation-service, resource-service]
+      ports: [{protocol: TCP, port: 9446}]
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/part-of: labweaver}
+      ports: [{protocol: TCP, port: 8083}]
+    {{- else if eq $name "container-executor" }}
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: environment-service}
+      ports: [{protocol: TCP, port: 9450}]
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/part-of: labweaver}
+      ports: [{protocol: TCP, port: 8085}]
     {{- else }}
     - from:
         - podSelector:
@@ -138,7 +159,15 @@ spec:
     - to:
         - namespaceSelector:
             {{- toYaml $root.Values.network.environmentNamespaceSelector | nindent 12 }}
-      ports: [{protocol: TCP, port: 8080}]
+      ports:
+        - {protocol: TCP, port: 8080}
+        - {protocol: TCP, port: 9446}
+    {{- end }}
+    {{- if eq $name "environment-service" }}
+    - to:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: container-executor}
+      ports: [{protocol: TCP, port: 9450}]
     {{- end }}
 {{- end }}
 {{- end }}
