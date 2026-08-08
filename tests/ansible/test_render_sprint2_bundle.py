@@ -67,8 +67,16 @@ class Sprint2BundleTests(unittest.TestCase):
         manifest_path = MODULE_PATH.parents[1] / "deploy" / "config" / "sprint2-bundle-manifest.json"
         manifest = MODULE._load_manifest(manifest_path)
 
-        self.assertEqual(len(manifest["configMaps"]), 9)
-        self.assertEqual(len(manifest["secrets"]), 9)
+        self.assertEqual(len(manifest["configMaps"]), 10)
+        self.assertEqual(len(manifest["secrets"]), 10)
+        self.assertEqual(
+            manifest["configMaps"]["kubevirt-console-executor-config"],
+            ["config.yaml"],
+        )
+        self.assertIn(
+            "tls.crt",
+            manifest["secrets"]["kubevirt-console-executor-secrets"],
+        )
         self.assertIn("buildkit-client.crt", manifest["secrets"]["build-executor-secrets"])
         self.assertEqual(manifest["namespace"], "labweaver-system")
 

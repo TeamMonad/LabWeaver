@@ -1,6 +1,6 @@
 # ADR 0012: Unified Console Capability and noVNC Boundary
 
-Status: Accepted; Container xterm implemented locally, connected verification pending
+Status: Accepted; Container xterm and KubeVirt noVNC implemented locally, connected verification pending
 
 Date: 2026-07-29
 
@@ -12,8 +12,8 @@ KubeVirt noVNC need one Access-owned admission model without exposing a runtime
 endpoint, VNC password, Kubernetes credential, terminal bytes, or VNC frames to
 the browser or ordinary observability systems.
 
-Issue #122 froze the public contract. Issue #131 adds the Container xterm
-implementation while preserving that wire shape; #124 still owns noVNC and
+Issue #122 froze the public contract. Issue #131 added the Container xterm
+implementation, and #124 adds KubeVirt noVNC while preserving that wire shape.
 #126 owns connected verification and Release Gate evidence.
 
 ## Decision
@@ -59,6 +59,22 @@ KubeVirt VNC is connected by a service-side least-privilege identity to the VMI
 websockify/noVNC endpoint, Guacamole, new microservice, or browser-visible
 Kubernetes credential.
 
+Environment returns an internal tagged `EnvironmentConsoleBinding`: Container
+binds `xterm` plus the immutable `TerminalSpec`, while KubeVirt binds `novnc`
+without a browser-visible VMI locator. The Environment bridge revalidates the
+running instance, revision, Work Lease and release/runtime binding for every
+connection. Its `kubevirt-console-executor` process mode then locks the accepted
+running observation to canonical namespace `lw-env-{environmentId}`, fixed VMI
+name `runtime`, VMI UID and identity labels before opening the official VNC
+subresource with `plain.kubevirt.io`.
+
+The executor receives a dedicated ServiceAccount. Its only Kubernetes API
+permissions are `get` on the fixed-name `runtime` VMI and `get` on
+`virtualmachineinstances/vnc`; it cannot read Secrets, mutate VM lifecycle or
+access Pods. Network policy permits only Environment mTLS ingress and
+Kubernetes API egress. VNC binary, ping, pong and close frames are relayed with
+a bounded frame size and backpressure and are never parsed, cached or logged.
+
 ## Session and Failure Semantics
 
 An established session uses its known expiry as a local deadline and receives
@@ -89,7 +105,7 @@ handoff secret until atomic redemption and then scrubs the ciphertext. It does
 not store terminal input/output, transcripts, cookies, Kubernetes targets or
 credentials. #124 implements noVNC/KubeVirt; #126 provides connected evidence.
 
-Environment Service and Container executor receive distinct platform mTLS
+Environment Service, Container executor and KubeVirt console executor receive distinct platform mTLS
 identities from the unified authority workflow. Rotation replaces their
 `mtls-ca.pem`, `tls.crt` and `tls.key` bundle entries together with NATS
 credentials, and the credential registry binds the resulting application
@@ -104,5 +120,8 @@ and RBAC while retaining compatible readers and additive persistence.
 Issue #131 locally verifies the Access capability/session transaction,
 Environment-authoritative eligibility, mTLS bridge, fixed Container PTY exec,
 binary/control framing, bounded resize/output and Web reconnect behavior.
+#124 locally verifies runtime-tagged discovery and issuance, kind-safe atomic
+consumption, authoritative VMI identity fencing, bounded RFB relay and the
+dedicated deployment security boundary.
 Fixture, historical PR #138 and mixed-source demonstrations remain
 non-connected evidence; #126 must close the shared-cluster obligation.

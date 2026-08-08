@@ -145,6 +145,14 @@ PLATFORM_IDENTITIES: dict[str, tuple[tuple[str, ...], str]] = {
         ),
         "serverAuth,clientAuth",
     ),
+    "kubevirt-console-executor": (
+        (
+            "DNS:kubevirt-console-executor",
+            "DNS:kubevirt-console-executor.labweaver-system.svc",
+            "URI:spiffe://labweaver/kubevirt-console-executor",
+        ),
+        "serverAuth",
+    ),
     "evaluation-service": (
         (
             "DNS:evaluation-service",

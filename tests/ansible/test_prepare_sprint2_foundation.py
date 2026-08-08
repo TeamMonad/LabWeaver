@@ -179,6 +179,7 @@ class FoundationAuthoringTests(unittest.TestCase):
                 "agent-service",
                 "environment-service",
                 "container-executor",
+                "kubevirt-console-executor",
                 "evaluation-service",
                 "resource-service",
                 "openssh-gateway",
@@ -202,6 +203,13 @@ class FoundationAuthoringTests(unittest.TestCase):
         )
         self.assertEqual(
             identities["container-executor"][1], "serverAuth,clientAuth"
+        )
+        self.assertIn(
+            "DNS:kubevirt-console-executor.labweaver-system.svc",
+            identities["kubevirt-console-executor"][0],
+        )
+        self.assertEqual(
+            identities["kubevirt-console-executor"][1], "serverAuth"
         )
 
     def test_certificate_authoring_activates_san_extension_section(self) -> None:

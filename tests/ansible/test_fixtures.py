@@ -531,7 +531,7 @@ class AnsibleFixtureTests(unittest.TestCase):
             ROOT / "deploy/helm/labweaver/templates/cilium-ingress-policy.yaml"
         ).read_text(encoding="utf-8")
         self.assertIn(
-            "values: [container-executor, evaluation-service, kubevirt-executor]",
+            "values: [container-executor, evaluation-service, kubevirt-executor, kubevirt-console-executor]",
             policy,
         )
         self.assertIn("toEntities: [kube-apiserver]", policy)
@@ -1110,6 +1110,36 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn('resources: ["datavolumes/source"]', service_account)
         self.assertIn("name: {{ $name }}-datasource", service_account)
         self.assertIn("kind: RoleBinding", service_account)
+
+    def test_kubevirt_console_executor_has_only_fixed_runtime_read_access(self) -> None:
+        service_account = (
+            ROOT / "deploy/helm/labweaver/templates/service-account.yaml"
+        ).read_text(encoding="utf-8")
+        profile = service_account.split(
+            '{{- else if eq $configuration.rbacProfile "kubevirt-console" }}',
+            maxsplit=1,
+        )[1].split(
+            '{{- else if eq $configuration.rbacProfile "evaluation" }}',
+            maxsplit=1,
+        )[0]
+        self.assertIn('resources: ["virtualmachineinstances"]', profile)
+        self.assertIn('resources: ["virtualmachineinstances/vnc"]', profile)
+        self.assertEqual(profile.count('resourceNames: ["runtime"]'), 2)
+        self.assertEqual(profile.count('verbs: ["get"]'), 2)
+        self.assertNotIn("secrets", profile)
+        self.assertNotIn("pods", profile)
+        self.assertNotIn("virtualmachines/start", profile)
+
+        network_policy = (
+            ROOT / "deploy/helm/labweaver/templates/network-policy.yaml"
+        ).read_text(encoding="utf-8")
+        console_policy = network_policy.split(
+            '{{- else if eq $name "kubevirt-console-executor" }}',
+            maxsplit=1,
+        )[1].split('{{- else }}', maxsplit=1)[0]
+        self.assertIn("app.kubernetes.io/name: environment-service", console_policy)
+        self.assertIn("port: 9451", console_policy)
+        self.assertNotIn("port: 8089", console_policy)
 
     def test_cdi_clone_network_is_bounded_to_dns_and_upload_server(self) -> None:
         network_policy = (

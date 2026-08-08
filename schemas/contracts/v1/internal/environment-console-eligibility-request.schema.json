@@ -4,14 +4,6 @@
       "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
       "type": "string"
     },
-    "ConsoleKind": {
-      "description": "Browser interaction transport selected by an approved environment release.",
-      "enum": [
-        "xterm",
-        "novnc"
-      ],
-      "type": "string"
-    },
     "CourseId": {
       "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
       "type": "string"
@@ -50,9 +42,6 @@
     "expectedRevision": {
       "$ref": "#/$defs/Revision"
     },
-    "kind": {
-      "$ref": "#/$defs/ConsoleKind"
-    },
     "subjectKind": {
       "$ref": "#/$defs/EnvironmentAccessSubjectKind"
     }
@@ -62,8 +51,7 @@
     "courseId",
     "actorId",
     "subjectKind",
-    "expectedRevision",
-    "kind"
+    "expectedRevision"
   ],
   "title": "EnvironmentConsoleEligibilityRequest",
   "type": "object"

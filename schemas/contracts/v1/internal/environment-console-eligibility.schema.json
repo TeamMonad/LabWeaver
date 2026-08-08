@@ -37,6 +37,41 @@
       ],
       "type": "string"
     },
+    "EnvironmentConsoleBinding": {
+      "description": "Runtime-specific console binding selected by Environment Service.\n\nThe KubeVirt binding intentionally carries no VMI locator, Kubernetes\ncredential, or guest password. The executor resolves the exact authoritative\nVMI again when the one-time capability is consumed.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "xterm",
+              "type": "string"
+            },
+            "terminal": {
+              "$ref": "#/$defs/TerminalSpec"
+            }
+          },
+          "required": [
+            "kind",
+            "terminal"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "novnc",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "EnvironmentId": {
       "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
       "type": "string"
@@ -96,6 +131,9 @@
   "additionalProperties": false,
   "description": "Environment-authoritative, credential-free console admission facts.",
   "properties": {
+    "binding": {
+      "$ref": "#/$defs/EnvironmentConsoleBinding"
+    },
     "courseId": {
       "$ref": "#/$defs/CourseId"
     },
@@ -134,9 +172,6 @@
     },
     "runtimeKind": {
       "$ref": "#/$defs/RuntimeKind"
-    },
-    "terminal": {
-      "$ref": "#/$defs/TerminalSpec"
     }
   },
   "required": [
@@ -149,7 +184,7 @@
     "releaseId",
     "releaseVersion",
     "eligibilityExpiresAt",
-    "terminal"
+    "binding"
   ],
   "title": "EnvironmentConsoleEligibility",
   "type": "object"

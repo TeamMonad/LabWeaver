@@ -132,6 +132,7 @@ sprint2_application_required_configmaps:
   - evaluation-service-config
   - container-executor-config
   - kubevirt-executor-config
+  - kubevirt-console-executor-config
   - web-config
 sprint2_application_required_secrets:
   - control-service-secrets
@@ -142,6 +143,7 @@ sprint2_application_required_secrets:
   - evaluation-service-secrets
   - container-executor-secrets
   - kubevirt-executor-secrets
+  - kubevirt-console-executor-secrets
   - openssh-gateway-secrets
 sprint2_application_release_name: labweaver
 sprint2_application_namespace: labweaver-system
@@ -173,6 +175,7 @@ sprint2_application_workloads:
   - evaluation-service
   - container-executor
   - kubevirt-executor
+  - kubevirt-console-executor
   - openssh-gateway
   - web
 sprint2_application_components:

@@ -58,6 +58,13 @@ is the only browser JSON text control. Environment resolves the immutable
 `TerminalSpec` and runtime Pod itself and never accepts a browser/Access
 supplied command, Pod address or Kubernetes credential.
 
+The internal Environment eligibility response is a tagged
+`EnvironmentConsoleBinding`. A Container instance returns `xterm` with its
+validated `TerminalSpec`; a KubeVirt instance returns `novnc` without a VMI
+namespace, UID, endpoint or credential. Runtime/binding mismatches are rejected,
+and Access issues and consumes only the returned kind. A subprotocol mismatch
+is checked before the one-time handoff is consumed.
+
 ## Generation and compatibility
 
 ```sh

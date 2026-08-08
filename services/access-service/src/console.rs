@@ -156,7 +156,8 @@ impl ConsoleGateway {
         let headers = request.headers_mut();
         headers.insert(
             header::SEC_WEBSOCKET_PROTOCOL,
-            ConsoleKind::Xterm
+            session
+                .kind
                 .websocket_subprotocol()
                 .parse()
                 .map_err(|_| ApiError::internal("LW_ACCESS_CONSOLE_CONFIG_INVALID"))?,
@@ -324,22 +325,12 @@ pub(super) async fn connect(
     upgrade: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
     require_browser_origin(&state, &headers)?;
-    if !headers
-        .get(header::SEC_WEBSOCKET_PROTOCOL)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|value| {
-            value
-                .split(',')
-                .any(|item| item.trim() == ConsoleKind::Xterm.websocket_subprotocol())
-        })
-    {
-        return Err(ApiError::bad_request("LW_CONSOLE_SUBPROTOCOL_MISMATCH"));
-    }
+    let requested_kind = requested_console_kind(&headers)?;
     let session = authenticated_session(&state, &headers).await?;
     let secret = handoff_secret(&headers)?;
-    let consumed = consume_capability(&state, &opaque, &secret, &session).await?;
+    let consumed = consume_capability(&state, &opaque, &secret, &session, requested_kind).await?;
     Ok(upgrade
-        .protocols([ConsoleKind::Xterm.websocket_subprotocol()])
+        .protocols([requested_kind.websocket_subprotocol()])
         .max_frame_size(MAX_FRAME_BYTES)
         .on_upgrade(move |socket| bridge(state, consumed, socket)))
 }
@@ -387,7 +378,6 @@ async fn resolve_availability(
             EnvironmentAccessSubjectKind::Owner
         },
         expected_revision: environment_revision,
-        kind: ConsoleKind::Xterm,
     };
     let eligibility = state
         .owner_resolver
@@ -421,7 +411,7 @@ async fn resolve_availability(
         environment_revision,
         expires_at: utc_timestamp(deadline)?,
         lease_fence: eligibility.lease_fence,
-        kinds: vec![ConsoleKind::Xterm],
+        kinds: vec![eligibility.binding.kind()],
     };
     availability
         .validate()
@@ -452,7 +442,7 @@ async fn insert_capability(
            AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END
            AND (cm.expires_at IS NULL OR cm.expires_at>clock_timestamp())",
     )
-    .bind(capability.id.as_uuid()).bind("xterm").bind(capability.access_grant_id.as_uuid())
+    .bind(capability.id.as_uuid()).bind(console_kind_db(capability.kind)).bind(capability.access_grant_id.as_uuid())
     .bind(i64_revision(capability.access_grant_revision)?).bind(session.session_id).bind(session.actor_id)
     .bind(capability.environment_id.as_uuid()).bind(match capability.environment_class { contracts::authoring::EnvironmentClass::Experiment => "experiment", contracts::authoring::EnvironmentClass::Work => "work" })
     .bind(i64_revision(capability.environment_revision)?).bind(lease.map(|f| f.lease_id.as_uuid()))
@@ -533,6 +523,7 @@ fn handoff_secret(headers: &HeaderMap) -> Result<Vec<u8>, ApiError> {
 
 struct ConsumedCapability {
     session_id: ConsoleSessionId,
+    kind: ConsoleKind,
     access_grant_id: AccessGrantId,
     access_grant_revision: Revision,
     environment_id: EnvironmentId,
@@ -548,6 +539,7 @@ async fn consume_capability(
     opaque: &str,
     secret: &[u8],
     session: &BffSession,
+    requested_kind: ConsoleKind,
 ) -> Result<ConsumedCapability, ApiError> {
     if opaque.is_empty()
         || opaque.len() > 128
@@ -573,7 +565,7 @@ async fn consume_capability(
         return Err(ApiError::unavailable("LW_CONSOLE_CAPACITY_EXHAUSTED"));
     }
     let row = sqlx::query(
-        "SELECT c.capability_id,c.access_grant_id,c.access_grant_revision,c.actor_id,c.course_id,c.environment_id,c.environment_revision,c.lease_id,c.lease_revision,c.lease_expires_at,c.handoff_secret_sha256,c.expires_at,c.authorization_expires_at,c.consumed_at,g.state,g.revision AS current_grant_revision,g.environment_revision AS current_environment_revision,g.expires_at AS grant_expires_at,s.revoked_at,s.expires_at AS bff_expires_at,s.idle_expires_at,EXISTS (SELECT 1 FROM access.course_memberships cm WHERE cm.course_id=c.course_id AND cm.actor_id=c.actor_id AND cm.state='active' AND cm.role=ANY(s.platform_roles) AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END AND (cm.expires_at IS NULL OR cm.expires_at > clock_timestamp())) AS membership_active \
+        "SELECT c.capability_id,c.kind,c.access_grant_id,c.access_grant_revision,c.actor_id,c.course_id,c.environment_id,c.environment_revision,c.lease_id,c.lease_revision,c.lease_expires_at,c.handoff_secret_sha256,c.expires_at,c.authorization_expires_at,c.consumed_at,g.state,g.revision AS current_grant_revision,g.environment_revision AS current_environment_revision,g.expires_at AS grant_expires_at,s.revoked_at,s.expires_at AS bff_expires_at,s.idle_expires_at,EXISTS (SELECT 1 FROM access.course_memberships cm WHERE cm.course_id=c.course_id AND cm.actor_id=c.actor_id AND cm.state='active' AND cm.role=ANY(s.platform_roles) AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END AND (cm.expires_at IS NULL OR cm.expires_at > clock_timestamp())) AS membership_active \
          FROM access.console_capabilities c JOIN access.access_grants g ON g.grant_id=c.access_grant_id JOIN access.bff_sessions s ON s.session_id=c.bff_session_id \
          WHERE c.locator_sha256=$1 FOR UPDATE OF c",
     ).bind(Sha256Digest::of_bytes(locator.as_bytes()).to_string()).fetch_optional(&mut *tx).await
@@ -587,6 +579,10 @@ async fn consume_capability(
     }
     if row.get::<OffsetDateTime, _>("expires_at") <= now {
         return Err(ApiError::forbidden("LW_CONSOLE_CAPABILITY_EXPIRED"));
+    }
+    let kind = parse_console_kind(&row.get::<String, _>("kind"))?;
+    if kind != requested_kind {
+        return Err(ApiError::bad_request("LW_CONSOLE_SUBPROTOCOL_MISMATCH"));
     }
     if row.get::<Uuid, _>("actor_id") != session.actor_id
         || row.get::<Option<OffsetDateTime>, _>("revoked_at").is_some()
@@ -664,6 +660,7 @@ async fn consume_capability(
         .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
     Ok(ConsumedCapability {
         session_id,
+        kind,
         access_grant_id: grant_id,
         access_grant_revision: grant_revision,
         environment_id,
@@ -848,7 +845,7 @@ async fn bridge_inner(
         .headers()
         .get(header::SEC_WEBSOCKET_PROTOCOL)
         .and_then(|v| v.to_str().ok())
-        != Some(ConsoleKind::Xterm.websocket_subprotocol())
+        != Some(session.kind.websocket_subprotocol())
     {
         return Err("LW_CONSOLE_SUBPROTOCOL_MISMATCH");
     }
@@ -890,7 +887,7 @@ async fn bridge_inner(
                 let message = message.map_err(|_| "LW_CONSOLE_BROWSER_IO_FAILED")?;
                 let forwarded = match message {
                     Message::Binary(value) if value.len() <= MAX_FRAME_BYTES => UpstreamMessage::Binary(value),
-                    Message::Text(value) if value.len() <= 1024 => { let control: contracts::access::ConsoleClientControl = contracts::parse_strict_json(value.as_bytes()).map_err(|_| "LW_CONSOLE_CONTROL_INVALID")?; control.validate().map_err(|_| "LW_CONSOLE_CONTROL_INVALID")?; UpstreamMessage::Text(value.to_string().into()) },
+                    Message::Text(value) if session.kind == ConsoleKind::Xterm && value.len() <= 1024 => { let control: contracts::access::ConsoleClientControl = contracts::parse_strict_json(value.as_bytes()).map_err(|_| "LW_CONSOLE_CONTROL_INVALID")?; control.validate().map_err(|_| "LW_CONSOLE_CONTROL_INVALID")?; UpstreamMessage::Text(value.to_string().into()) },
                     Message::Ping(value) => UpstreamMessage::Ping(value), Message::Pong(value) => UpstreamMessage::Pong(value), Message::Close(_) => return Ok(()), _ => return Err("LW_CONSOLE_FRAME_INVALID"),
                 }; upstream_tx.send(forwarded).await.map_err(|_| "LW_CONSOLE_UPSTREAM_IO_FAILED")?;
             }
@@ -928,6 +925,43 @@ fn i64_revision(value: Revision) -> Result<i64, ApiError> {
     i64::try_from(value.get()).map_err(|_| ApiError::internal("LW_ACCESS_CONSOLE_RECORD_INVALID"))
 }
 
+const fn console_kind_db(kind: ConsoleKind) -> &'static str {
+    match kind {
+        ConsoleKind::Xterm => "xterm",
+        ConsoleKind::Novnc => "novnc",
+    }
+}
+
+fn parse_console_kind(value: &str) -> Result<ConsoleKind, ApiError> {
+    match value {
+        "xterm" => Ok(ConsoleKind::Xterm),
+        "novnc" => Ok(ConsoleKind::Novnc),
+        _ => Err(ApiError::internal("LW_ACCESS_CONSOLE_RECORD_INVALID")),
+    }
+}
+
+fn requested_console_kind(headers: &HeaderMap) -> Result<ConsoleKind, ApiError> {
+    let protocols = headers
+        .get(header::SEC_WEBSOCKET_PROTOCOL)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| ApiError::bad_request("LW_CONSOLE_SUBPROTOCOL_MISMATCH"))?;
+    let mut selected = None;
+    for protocol in protocols.split(',').map(str::trim) {
+        let kind = match protocol {
+            value if value == ConsoleKind::Xterm.websocket_subprotocol() => ConsoleKind::Xterm,
+            value if value == ConsoleKind::Novnc.websocket_subprotocol() => ConsoleKind::Novnc,
+            _ => continue,
+        };
+        if selected
+            .replace(kind)
+            .is_some_and(|previous| previous != kind)
+        {
+            return Err(ApiError::bad_request("LW_CONSOLE_SUBPROTOCOL_MISMATCH"));
+        }
+    }
+    selected.ok_or_else(|| ApiError::bad_request("LW_CONSOLE_SUBPROTOCOL_MISMATCH"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -944,5 +978,29 @@ mod tests {
         assert!(value.ends_with("; Secure; HttpOnly; SameSite=Strict"));
         assert!(!value.contains("Domain="));
         Ok(())
+    }
+
+    #[test]
+    fn console_protocol_selection_rejects_missing_unknown_and_ambiguous_offers() {
+        let mut headers = HeaderMap::new();
+        assert!(requested_console_kind(&headers).is_err());
+        headers.insert(
+            header::SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_static("unknown.v1"),
+        );
+        assert!(requested_console_kind(&headers).is_err());
+        headers.insert(
+            header::SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_static("labweaver.console.novnc.v1"),
+        );
+        assert_eq!(
+            requested_console_kind(&headers).ok(),
+            Some(ConsoleKind::Novnc)
+        );
+        headers.insert(
+            header::SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_static("labweaver.console.xterm.v1, labweaver.console.novnc.v1"),
+        );
+        assert!(requested_console_kind(&headers).is_err());
     }
 }

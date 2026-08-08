@@ -7,13 +7,23 @@ Sprint 2 packages the enabled platform workloads into Harbor and deploys only im
 - `control-service`
 - `access-service`
 - `agent-service` (also runs `build-executor`)
-- `environment-service` (also runs separate `container-executor` and
-  `kubevirt-executor` processes with independent identities)
+- `environment-service` (also runs separate `container-executor`,
+  `kubevirt-executor` and `kubevirt-console-executor` processes with independent
+  identities)
 - `evaluation-service` (Sprint 2 immutable submission freeze coordination only)
 - `openssh-gateway`
 - `web`
 
 Resource remains a separate code domain but is not packaged or deployed by the Sprint 2 profile.
+
+The KubeVirt console executor is an Environment image process mode, not a new
+domain service. It listens only on the internal mTLS service port, accepts the
+exact Environment Service URI SAN and uses its dedicated ServiceAccount. Its
+ClusterRole can only `get` the fixed-name `runtime` VMI and its `/vnc`
+subresource. NetworkPolicy permits cluster DNS for the configured API endpoint
+and the adopted Kubernetes API CIDR/port only; no Ingress, NodePort,
+LoadBalancer or public websockify endpoint is created. Missing database, API,
+CA, token or mTLS configuration blocks startup.
 
 ## Package gate
 

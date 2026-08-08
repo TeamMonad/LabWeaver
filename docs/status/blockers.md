@@ -51,9 +51,9 @@ schemas, Fixture, historical PR #138 or mixed-source demonstrations:
 
 - #131 implements the Container xterm path from the merged Sprint 3 contract;
   its evidence remains local until #126 runs the frozen connected candidate.
-- #124 must implement the Access proxy, Environment mTLS bridge and
-  least-privilege KubeVirt VMI `/vnc` stream without guest VNC passwords or
-  public websockify.
+- #124 implements the Access proxy, Environment mTLS bridge and least-privilege
+  fixed-VMI `/vnc` executor without guest VNC passwords or public websockify;
+  its evidence is local and cannot satisfy the connected gate.
 - #126 must demonstrate same-identity shared-cluster multi-role E4, negative
   revocation/expiry/control-channel-loss behavior and Release Gate evidence.
 

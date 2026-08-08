@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use artifact_store::{S3Credential, S3ImmutableObjectStore, S3StoreConfig};
 use environment_service::{
-    FencedContainerExecutor, FencedKubeVirtExecutor, KubernetesContainerExecutor,
+    FencedContainerExecutor, FencedKubeVirtExecutor, KubeVirtConsoleExecutorServerConfig,
+    KubeVirtConsoleKubernetesConfiguration, KubernetesContainerExecutor,
     NatsContainerExecutorServer, NatsKubeVirtExecutorServer, PgContainerExecutorFenceStore,
     PgKubeVirtExecutorFenceStore, RuntimeExecutorConfiguration, TerminalExecutorServerConfig,
     connect_nats_mtls,
@@ -41,6 +42,15 @@ struct RuntimeExecutorNats {
     kubevirt_request_subject: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct KubeVirtConsoleDeployment {
+    database_url_file: String,
+    database_max_connections: u32,
+    kubernetes: KubeVirtConsoleKubernetesConfiguration,
+    server: KubeVirtConsoleExecutorServerConfig,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), MainError> {
     let mut arguments = std::env::args().skip(1);
@@ -51,8 +61,53 @@ async fn main() -> Result<(), MainError> {
         Some("environment-service") => run_environment_service().await,
         Some("container-executor") => run_runtime_executor(RuntimeKind::Container).await,
         Some("kubevirt-executor") => run_runtime_executor(RuntimeKind::KubeVirt).await,
+        Some("kubevirt-console-executor") => run_kubevirt_console_executor().await,
         _ => Err(MainError::Configuration),
     }
+}
+
+async fn run_kubevirt_console_executor() -> Result<(), MainError> {
+    let path = std::env::var("LABWEAVER_KUBEVIRT_CONSOLE_CONFIG_FILE")
+        .map_err(|_| MainError::Configuration)?;
+    let deployment: KubeVirtConsoleDeployment =
+        serde_yaml::from_str(&std::fs::read_to_string(path)?)
+            .map_err(|_| MainError::Configuration)?;
+    if deployment.database_max_connections == 0 || deployment.database_max_connections > 8 {
+        return Err(MainError::Configuration);
+    }
+    let pool = PgPoolOptions::new()
+        .max_connections(deployment.database_max_connections)
+        .connect(&read_secret(&deployment.database_url_file)?)
+        .await?;
+    let schema_ready: bool = sqlx::query_scalar(
+        "SELECT to_regclass('environment.environment_instances') IS NOT NULL \
+         AND to_regclass('environment.kubevirt_runtime_observations') IS NOT NULL",
+    )
+    .fetch_one(&pool)
+    .await?;
+    if !schema_ready {
+        return Err(MainError::SchemaUnavailable);
+    }
+    let server = environment_service::KubeVirtConsoleExecutorServer::new(
+        &deployment.server,
+        &deployment.kubernetes,
+        pool,
+    )
+    .await?;
+    tokio::try_join!(
+        async {
+            server
+                .serve()
+                .await
+                .map_err(MainError::KubeVirtConsoleExecutor)
+        },
+        async {
+            service_runtime::run("kubevirt-console-executor")
+                .await
+                .map_err(MainError::Service)
+        }
+    )?;
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -213,6 +268,8 @@ enum MainError {
     #[error(transparent)]
     TerminalExecutor(#[from] environment_service::TerminalExecutorServerError),
     #[error(transparent)]
+    KubeVirtConsoleExecutor(#[from] environment_service::KubeVirtConsoleExecutorServerError),
+    #[error(transparent)]
     Store(#[from] artifact_store::ObjectStoreError),
     #[error(transparent)]
     Database(#[from] sqlx::Error),
@@ -223,7 +280,7 @@ enum MainError {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::case_sensitive_file_extension_comparisons)]
 mod deployment_contract_tests {
-    use super::RuntimeExecutorDeployment;
+    use super::{KubeVirtConsoleDeployment, RuntimeExecutorDeployment};
 
     #[test]
     fn checked_in_runtime_executor_example_matches_the_v1_contract() {
@@ -235,5 +292,19 @@ mod deployment_contract_tests {
         assert!(deployment.nats.server.starts_with("tls://"));
         assert!(deployment.nats.container_request_subject.ends_with(".v1"));
         assert!(deployment.nats.kubevirt_request_subject.ends_with(".v1"));
+    }
+
+    #[test]
+    fn checked_in_kubevirt_console_example_matches_the_v1_contract() {
+        let example = include_str!("../../../deploy/config/kubevirt-console-executor.yaml.example");
+        let deployment: KubeVirtConsoleDeployment = serde_yaml::from_str(example)
+            .expect("KubeVirt console deployment example must deserialize");
+
+        assert!(deployment.database_url_file.starts_with('/'));
+        assert_eq!(
+            deployment.server.allowed_caller_san,
+            "spiffe://labweaver/environment-service"
+        );
+        assert_eq!(deployment.server.bind_addr, "0.0.0.0:9451");
     }
 }
