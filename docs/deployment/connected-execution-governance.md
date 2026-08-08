@@ -101,3 +101,24 @@ replay 预算。这样已知的身份错配和陈旧浏览器会话不会把昂�
 失败候选都有已证实且已修复的不同根因”时使用一次；同一根因的重复尝试仍然被候选
 预算拒绝。Release Gate 不消费 repair operation 之外的旧证据，最终发布身份必须以
 同一候选完整闭合 package、application、replay 与 report。
+
+## #126 console 验收窗口
+
+Container xterm 与 KubeVirt noVNC 只能在 #126 的同一冻结候选和 Run 中执行。A
+负责候选冻结、账本租约和 connected 操作，D 保留独立 Verify；B 审查 console
+安全边界和 Release Gate v3。开始任何写操作前，Owner 必须先记录只读维护审计，
+明确授权新的验收环境和剩余预算。旧账本不得删除、改 root 或通过新 operation 名称
+绕过。
+
+验收需要六个隔离环境/每种 runtime，使用公开 API 创建专用 AccessGrant；expiry
+case 创建短时 Grant，不能通过 renew 反向缩短。control-channel-loss 只能运行
+`98-connected-console-control-loss.yml`：输入必须绑定隔离 namespace、Run label、
+精确 Access Service Pod UID、configuration bundle hash 和两个 case environment ID。临时 Cilium policy 只拒绝
+TCP 4222，并在 `always` 中删除和 readback；浏览器观察、策略应用、策略恢复均使用
+私有 coordination marker，不进入报告。
+
+Release Gate v3 只接受两个 `connected-console-evidence.v1` 文件。报告记录每个 case
+的 Environment/Pod 或 VMI、Grant/Lease/capability/session revision、稳定 diagnostic、
+artifact hash 与清理计数；不得记录 locator、Cookie、token、PTY transcript、VNC
+frame 或控制器绝对路径。任一超时、未知旧进程、账本终态失败、身份漂移或清理残留
+都保持 `Blocked`，不得生成 `passed` 文件。

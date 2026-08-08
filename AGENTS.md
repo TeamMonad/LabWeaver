@@ -49,6 +49,7 @@ commands:
   package: "cargo xtask package"
   package_validate: "cargo xtask package-validate"
   release_gate: "cargo xtask release-gate"
+  console_evidence_validate: "cargo xtask console-evidence validate-report --report <path>"
   deploy_demo: "cargo xtask deploy --env demo"
   local_preflight: "cargo xtask local preflight --profile local-hostpath"
   local_stack_plan: "ansible-playbook deploy/ansible/playbooks/local-hostpath-stack-plan.yml"
@@ -61,7 +62,7 @@ status:
   source_of_truth: "docs/status/implementation-status.md"
   test_matrix: "docs/testing/test-plan.md"
   coverage_matrix: "docs/testing/coverage-matrix.md"
-  release_report_schema: "schemas/results/release-gate-report.schema.json"
+  release_report_schema: "schemas/results/release-gate-report.v3.schema.json"
 ```
 
 ### 受控签发源与凭据 locator

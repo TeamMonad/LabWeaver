@@ -27,14 +27,14 @@
       "labReleaseIdentity": "required-at-live-e4", "evaluationReleaseIdentity": "required-at-live-e4", "environmentTemplateReleaseIdentity": "required-at-live-e4",
       "imageDigest": "required-at-live-e4", "specHash": "required-at-live-e4", "artifactHash": "required-at-live-e4", "runId": "required-at-live-e4", "stepRunId": "required-at-live-e4", "attemptId": "required-at-live-e4", "resourceIdentity": "required-at-live-e4", "accessIdentity": "required-at-live-e4", "traceId": "required-at-live-e4",
       "preconditions": ["approved digest-only container release", "authenticated course membership", "real Environment Resource and Access providers"],
-      "actions": ["request clone", "wait for authoritative readiness", "use authorized endpoint", "submit extracted artifact"],
-      "expectedTransitions": ["environment provisioning-ready", "AccessGrant active-revoked", "evaluation input bound to clone"],
+      "actions": ["request clone", "wait for authoritative readiness", "connect to the real xterm PTY", "verify resize fullscreen input output and manual reconnect", "exercise revoke short expiry stop delete and control-channel loss with a fresh capability per phase", "submit extracted artifact"],
+      "expectedTransitions": ["environment provisioning-ready", "AccessGrant active-revoked or expired", "console active-closed within 60 seconds", "evaluation input bound to clone"],
       "expectedDiagnostics": ["LW_ACCEPTANCE_E4_PASS", "provider and access outage diagnostics"],
-      "expectedEvidence": ["clone provider and image digest", "Resource Lease and AccessGrant identity", "release-bound evaluation input"],
+      "expectedEvidence": ["clone provider image digest unique Ready Pod UID and fixed runtime container", "Resource Lease AccessGrant capability and session revisions", "real PTY synthetic probe without transcript retention", "consumed locator denial and temporary fault policy cleanup", "release-bound evaluation input"],
       "failureEvidence": ["provider outage fails closed", "expired access creates no connection", "withdrawn release creates no new clone"],
       "cleanup": ["delete run-scoped clone", "revoke access", "verify no residual resource"],
       "rollback": ["withdraw release blocks new clones", "existing identity remains auditable"],
-      "e4SuccessConditions": ["real container clone", "real Resource and Access", "no local fake container", "cleanup verified"]
+      "e4SuccessConditions": ["real container clone and PTY", "real Resource and Access", "all six console cases pass", "no local fake container", "cleanup verified"]
     },
     {
       "id": "kubevirt-linux-clone-real-e4", "userValue": "A student receives and uses an authorized real KubeVirt VM clone through the product path.",
@@ -44,14 +44,14 @@
       "labReleaseIdentity": "required-at-live-e4", "evaluationReleaseIdentity": "required-at-live-e4", "environmentTemplateReleaseIdentity": "required-at-live-e4",
       "imageDigest": "required-at-live-e4", "specHash": "required-at-live-e4", "artifactHash": "required-at-live-e4", "runId": "required-at-live-e4", "stepRunId": "required-at-live-e4", "attemptId": "required-at-live-e4", "resourceIdentity": "required-at-live-e4", "accessIdentity": "required-at-live-e4", "traceId": "required-at-live-e4",
       "preconditions": ["approved VM release and disk identity", "hardware KVM readiness", "real KubeVirt Resource and Access providers"],
-      "actions": ["request VM clone", "wait for VM readiness", "connect through approved SSH entrypoint", "submit extracted artifact"],
-      "expectedTransitions": ["VM clone provisioning-ready", "AccessGrant active-expired", "evaluation input bound to VM"],
+      "actions": ["request VM clone", "wait for VM readiness", "connect through the private noVNC RFB path without a password", "exercise revoke short expiry stop delete and control-channel loss with a fresh capability per phase", "submit extracted artifact"],
+      "expectedTransitions": ["VM clone provisioning-ready", "AccessGrant active-revoked or expired", "RFB session active-closed within 60 seconds", "evaluation input bound to VM"],
       "expectedDiagnostics": ["LW_ACCEPTANCE_E4_PASS", "KubeVirt Resource and Access failure diagnostics"],
-      "expectedEvidence": ["VM UID disk identity and provider revision", "real Resource Lease and AccessGrant", "revoke and expiry readback"],
+      "expectedEvidence": ["VM VMI UID disk identity provider revision and private vnc subresource chain", "real Resource Lease AccessGrant capability and session revisions", "visible RFB handshake without frame retention", "consumed locator denial and temporary fault policy cleanup", "revoke and expiry readback"],
       "failureEvidence": ["no container fallback", "provider outage fails closed", "revoked access creates no connection"],
       "cleanup": ["delete run-scoped VM and disk", "revoke access", "verify no residual resource"],
       "rollback": ["withdraw release blocks new VM clones", "existing VM identity remains auditable"],
-      "e4SuccessConditions": ["real KubeVirt clone", "real Resource and Access", "formal access entrypoint", "cleanup verified"]
+      "e4SuccessConditions": ["real KubeVirt clone and RFB session", "real Resource and Access", "all six console cases pass", "no public VMI endpoint or VNC password", "cleanup verified"]
     }
   ],
   "samples": [
@@ -155,8 +155,8 @@
   "frontendAcceptance": [
     {"id":"teacher-oj-release","scenarioId":"oj-real-e4","actor":"teacher","route":"/teacher/evaluations","action":"approve immutable OJ release","observableOutcome":"release identity is visible before student submission","failureDiagnostic":"LW_FRONTEND_RELEASE_NOT_READY","currentStatus":"planned","futureEvidenceLevel":"E4","fixtureMaySatisfy":false,"requiresAuthentication":true,"requiresAuthorization":true,"requiresBackendReadback":true,"requiresCleanup":true},
     {"id":"student-oj-submit","scenarioId":"oj-real-e4","actor":"student","route":"/student/results","action":"submit and read authoritative result","observableOutcome":"same run and release identity reaches a terminal result","failureDiagnostic":"LW_FRONTEND_EVALUATION_INCOMPLETE","currentStatus":"planned","futureEvidenceLevel":"E4","fixtureMaySatisfy":false,"requiresAuthentication":true,"requiresAuthorization":true,"requiresBackendReadback":true,"requiresCleanup":true},
-    {"id":"student-container-clone","scenarioId":"container-linux-clone-real-e4","actor":"student","route":"/student/environments","action":"create use revoke and delete a container clone","observableOutcome":"real clone Resource and Access identities are read back","failureDiagnostic":"LW_FRONTEND_CONTAINER_CLONE_INCOMPLETE","currentStatus":"planned","futureEvidenceLevel":"E4","fixtureMaySatisfy":false,"requiresAuthentication":true,"requiresAuthorization":true,"requiresBackendReadback":true,"requiresCleanup":true},
-    {"id":"student-kubevirt-clone","scenarioId":"kubevirt-linux-clone-real-e4","actor":"student","route":"/student/environments","action":"create use revoke and delete a KubeVirt VM clone","observableOutcome":"real VM disk Resource and Access identities are read back","failureDiagnostic":"LW_FRONTEND_KUBEVIRT_CLONE_INCOMPLETE","currentStatus":"planned","futureEvidenceLevel":"E4","fixtureMaySatisfy":false,"requiresAuthentication":true,"requiresAuthorization":true,"requiresBackendReadback":true,"requiresCleanup":true},
+    {"id":"student-container-clone","scenarioId":"container-linux-clone-real-e4","actor":"student","route":"/student/environments","action":"create use and terminate a real container xterm across the six connected lifecycle cases","observableOutcome":"real Pod PTY Resource Access capability and session identities are read back with zero residue","failureDiagnostic":"LW_FRONTEND_CONTAINER_CLONE_INCOMPLETE","currentStatus":"planned","futureEvidenceLevel":"E4","fixtureMaySatisfy":false,"requiresAuthentication":true,"requiresAuthorization":true,"requiresBackendReadback":true,"requiresCleanup":true},
+    {"id":"student-kubevirt-clone","scenarioId":"kubevirt-linux-clone-real-e4","actor":"student","route":"/student/environments","action":"create use and terminate a real noVNC RFB session across the six connected lifecycle cases","observableOutcome":"real VMI Resource Access capability and session identities are read back with zero residue and no public endpoint","failureDiagnostic":"LW_FRONTEND_KUBEVIRT_CLONE_INCOMPLETE","currentStatus":"planned","futureEvidenceLevel":"E4","fixtureMaySatisfy":false,"requiresAuthentication":true,"requiresAuthorization":true,"requiresBackendReadback":true,"requiresCleanup":true},
     {"id":"teacher-evaluation-readback","scenarioId":"oj-real-e4","actor":"teacher","route":"/teacher/evaluations","action":"read case facts and deterministic aggregate","observableOutcome":"teacher view binds the student run without evaluator-owned totals","failureDiagnostic":"LW_FRONTEND_EVALUATION_READBACK_MISMATCH","currentStatus":"planned","futureEvidenceLevel":"E4","fixtureMaySatisfy":false,"requiresAuthentication":true,"requiresAuthorization":true,"requiresBackendReadback":true,"requiresCleanup":true},
     {"id":"admin-audit-readback","scenarioId":"kubevirt-linux-clone-real-e4","actor":"admin","route":"/admin/audit","action":"read identity-bound lifecycle audit","observableOutcome":"create access revoke cleanup and diagnostics share one trace","failureDiagnostic":"LW_FRONTEND_AUDIT_IDENTITY_MISMATCH","currentStatus":"planned","futureEvidenceLevel":"E4","fixtureMaySatisfy":false,"requiresAuthentication":true,"requiresAuthorization":true,"requiresBackendReadback":true,"requiresCleanup":true}
   ],

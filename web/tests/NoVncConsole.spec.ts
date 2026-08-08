@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
+import { nextTick } from 'vue'
 import NoVncConsole from '@/components/console/NoVncConsole.vue'
 import type { ConsoleCapabilitySchema } from '@/generated/contracts'
 
@@ -58,14 +59,21 @@ describe('NoVncConsole', () => {
     vi.useRealTimers()
   })
 
-  it('uses only the one-time locator and protocol, then requires manual reissuance after disconnect', () => {
+  it('uses only the one-time locator and protocol, then requires manual reissuance after disconnect', async () => {
     const wrapper = mount(NoVncConsole, { props: { capability: capability() } })
     expect(rfbState.instances).toHaveLength(1)
     const instance = rfbState.instances[0]
     expect(instance.url).toBe('ws://localhost:3000/connect/console/opaque-locator')
     expect(instance.options).toEqual({ wsProtocols: ['labweaver.console.novnc.v1'] })
+    expect(wrapper.get('[data-testid="novnc-connection-state"]').text()).toBe('图形控制台正在连接')
+
+    instance.dispatch('connect', {})
+    await nextTick()
+    expect(wrapper.get('[data-testid="novnc-connection-state"]').text()).toBe('图形控制台已连接')
 
     instance.dispatch('disconnect', { clean: false })
+    await nextTick()
+    expect(wrapper.get('[data-testid="novnc-connection-state"]').text()).toBe('图形控制台已断开')
     vi.advanceTimersByTime(30_000)
     expect(rfbState.instances).toHaveLength(1)
     expect(wrapper.emitted('stateChange')).toContainEqual([
@@ -76,14 +84,16 @@ describe('NoVncConsole', () => {
     expect(instance.disconnect).toHaveBeenCalledOnce()
   })
 
-  it('surfaces security denial without requesting a VNC credential or retrying', () => {
+  it('surfaces security denial without requesting a VNC credential or retrying', async () => {
     const wrapper = mount(NoVncConsole, { props: { capability: capability() } })
     const instance = rfbState.instances[0]
     instance.dispatch('securityfailure', { reason: 1 })
+    await nextTick()
     vi.advanceTimersByTime(30_000)
 
     expect(rfbState.instances).toHaveLength(1)
     expect(instance.options).not.toHaveProperty('credentials')
+    expect(wrapper.get('[data-testid="novnc-connection-state"]').text()).toBe('图形控制台连接失败')
     expect(wrapper.emitted('stateChange')).toContainEqual(['error', 'CONSOLE_DENIED'])
     expect(wrapper.emitted('stateChange')?.filter(([state]) => state === 'error')).toHaveLength(1)
   })

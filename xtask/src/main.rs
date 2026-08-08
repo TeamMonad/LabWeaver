@@ -10,6 +10,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use sha2::{Digest, Sha256};
 
 mod acceptance_assets;
+mod console_evidence;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod execution_ledger;
 mod integration;
@@ -76,6 +77,8 @@ enum Command {
     Package(PackageArgs),
     PackageValidate(PackageValidateArgs),
     ReleaseGate,
+    /// Validate a sanitized connected xterm/noVNC evidence report without executing a provider.
+    ConsoleEvidence(ConsoleEvidenceArgs),
     /// Validate frozen Sprint 3 acceptance assets without executing a provider.
     AcceptanceAssets(AcceptanceAssetsArgs),
     #[command(subcommand)]
@@ -86,6 +89,20 @@ enum Command {
 struct AcceptanceAssetsArgs {
     #[command(subcommand)]
     action: AcceptanceAssetsAction,
+}
+
+#[derive(Debug, Args)]
+struct ConsoleEvidenceArgs {
+    #[command(subcommand)]
+    action: ConsoleEvidenceAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum ConsoleEvidenceAction {
+    ValidateReport {
+        #[arg(long)]
+        report: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -532,6 +549,11 @@ fn run(cli: Cli) -> Result<(), AppError> {
             &repository_root(),
         ),
         Command::ReleaseGate => release_gate::run(&repository_root()),
+        Command::ConsoleEvidence(args) => match args.action {
+            ConsoleEvidenceAction::ValidateReport { report } => {
+                console_evidence::validate_report(&repository_root(), &report)
+            }
+        },
         Command::Contracts(ContractsCommand::Generate) => contracts_generate(),
         Command::Contracts(ContractsCommand::Check) => contracts_check(),
     }

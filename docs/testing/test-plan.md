@@ -28,6 +28,25 @@ For the current Sprint, Issue #126 is that sole acceptance owner; development
 Issues and PRs, including #142/#147, must not start shared-cluster deployment,
 Resource replay, connected E2E or Release Gate commands.
 
+### Issue #126 connected console matrix
+
+The Container xterm and KubeVirt noVNC checks reuse
+`container-linux-clone-real-e4` and `kubevirt-linux-clone-real-e4`; they do not
+create a fourth acceptance model. Each runtime uses six isolated environment
+IDs for positive, revoke, short AccessGrant expiry, stop, delete and
+control-channel-loss. Every destructive phase reissues a capability and must
+reject the already consumed locator. Browser waits are tied to API state,
+WebSocket closure or controller coordination markers, never a fixed sleep.
+
+Control-channel loss is injected only by
+`deploy/ansible/playbooks/98-connected-console-control-loss.yml`. The playbook
+requires an isolated namespace, Run label and exact Access Service Pod UID,
+denies only TCP 4222, removes the Cilium policy in an `always` block, and reads
+back its absence before allowing the browser to reconnect. Reports conforming
+to `connected-console-evidence.v1` contain identities, counts, diagnostics and
+hashes only; locator, Cookie, token, PTY transcript, VNC frame and absolute path
+fields are forbidden.
+
 Tests are grouped by the boundary they actually exercise. Reports must name the
 source identity and must not promote Fixture or static evidence to a connected
 runtime claim.
@@ -105,7 +124,7 @@ baseline migration to a disposable PostgreSQL instance.
   and Access membership seed. Both must agree on UUIDv7 course/actor identities,
   issuer and exactly teacher, student and platform-admin roles; no SQL may
   create candidates, approvals, releases, requests or leases.
-- Release Gate v2 requires the Resource deployment manifest, immutable
+- Release Gate v3 requires the Resource deployment manifest, immutable
   `resource-service` identity and same-identity `resource-lease` evidence.
 - `cargo xtask resource replay` must run from an allowlisted Linux controller
   using private profile/authentication/deployment/package locators. It must

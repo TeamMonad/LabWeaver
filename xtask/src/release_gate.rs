@@ -8,8 +8,8 @@ use sha2::{Digest, Sha256};
 
 use super::AppError;
 
-const INPUT_SCHEMA: &str = "schemas/results/sprint2-release-gate-input.v2.schema.json";
-const REPORT_SCHEMA: &str = "schemas/results/release-gate-report.v2.schema.json";
+const INPUT_SCHEMA: &str = "schemas/results/sprint2-release-gate-input.v3.schema.json";
+const REPORT_SCHEMA: &str = "schemas/results/release-gate-report.v3.schema.json";
 const DEPLOYMENT_SCHEMA: &str = "schemas/results/platform-image-deployment-manifest.v1.schema.json";
 const RESOURCE_DEPLOYMENT_SCHEMA: &str =
     "schemas/results/resource-deployment-manifest.v1.schema.json";
@@ -23,7 +23,7 @@ const PLATFORM_COMPONENTS: [&str; 7] = [
     "web",
 ];
 const RUNTIME_ARTIFACTS: [&str; 2] = ["container-runtime", "kubevirt-runtime"];
-const REQUIRED_CHECKS: [&str; 11] = [
+const REQUIRED_CHECKS: [&str; 13] = [
     "teacher-agent-approval",
     "build-supply-chain",
     "container-lifecycle",
@@ -35,6 +35,8 @@ const REQUIRED_CHECKS: [&str; 11] = [
     "ansible-idempotent",
     "rollback-drill",
     "resource-lease",
+    "container-xterm-console",
+    "kubevirt-novnc-console",
 ];
 const RESOURCE_COMPONENTS: [&str; 1] = ["resource-service"];
 
@@ -126,7 +128,7 @@ fn run_with_locator(root: &Path, input_locator: &str) -> Result<(), AppError> {
     validate_input(root, &input)?;
 
     let report = GateReport {
-        schema_version: "sprint2-release-gate-report.v2",
+        schema_version: "sprint2-release-gate-report.v3",
         status: "passed",
         source_commit: input.source_commit,
         run_id: input.run_id,
@@ -167,7 +169,7 @@ fn run_with_locator(root: &Path, input_locator: &str) -> Result<(), AppError> {
     reason = "the gate keeps every fail-closed identity and evidence check visible in one ordered boundary"
 )]
 fn validate_input(root: &Path, input: &GateInput) -> Result<(), AppError> {
-    if input.schema_version != "sprint2-release-gate-input.v2" {
+    if input.schema_version != "sprint2-release-gate-input.v3" {
         return Err(gate(
             "LW_RELEASE_GATE_INPUT_SCHEMA_INVALID",
             "unexpected schemaVersion",
@@ -296,9 +298,85 @@ fn validate_input(root: &Path, input: &GateInput) -> Result<(), AppError> {
         }
         verify_evidence(root, &check.evidence)?;
     }
-    validate_deployment_manifest(root, input)?;
+    let package_identity = validate_deployment_manifest(root, input)?;
     validate_resource_deployment_manifest(root, input)?;
+    validate_console_evidence(root, input, &package_identity)?;
     Ok(())
+}
+
+fn validate_console_evidence(
+    root: &Path,
+    input: &GateInput,
+    package_identity: &str,
+) -> Result<(), AppError> {
+    let access_image = component_digest(&input.platform_images, "access-service")?;
+    let environment_image = component_digest(&input.platform_images, "environment-service")?;
+    for (check_name, runtime_kind, console_kind, artifact_name) in [
+        (
+            "container-xterm-console",
+            "container",
+            "xterm",
+            "container-runtime",
+        ),
+        (
+            "kubevirt-novnc-console",
+            "kubevirt",
+            "novnc",
+            "kubevirt-runtime",
+        ),
+    ] {
+        let check = input
+            .checks
+            .iter()
+            .find(|check| check.name == check_name)
+            .ok_or_else(|| {
+                gate(
+                    "LW_RELEASE_GATE_CONSOLE_EVIDENCE_MISSING",
+                    &format!("{check_name} is required"),
+                )
+            })?;
+        let runtime_artifact = input
+            .runtime_artifacts
+            .iter()
+            .find(|artifact| artifact.name == artifact_name)
+            .map(|artifact| artifact.digest.as_str())
+            .ok_or_else(|| {
+                gate(
+                    "LW_RELEASE_GATE_RUNTIME_IDENTITY_INVALID",
+                    &format!("{artifact_name} is required"),
+                )
+            })?;
+        super::console_evidence::validate_for_gate(
+            root,
+            Path::new(&check.evidence.path),
+            super::console_evidence::GateIdentity {
+                source_commit: &input.source_commit,
+                run_id: input.run_id,
+                package_identity,
+                deployment_identity: &input.deployment_manifest.sha256,
+                migration_catalog_sha256: &input.migration_catalog.sha256,
+                access_service_image: access_image,
+                environment_service_image: environment_image,
+                runtime_artifact,
+                runtime_kind,
+                console_kind,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn component_digest<'a>(images: &'a [ImageIdentity], component: &str) -> Result<&'a str, AppError> {
+    images
+        .iter()
+        .find(|image| image.component == component)
+        .and_then(|image| image.reference.rsplit_once('@').map(|(_, digest)| digest))
+        .ok_or_else(|| {
+            gate(
+                "LW_RELEASE_GATE_IMAGE_IDENTITY_INVALID",
+                &format!("{component} immutable image is missing"),
+            )
+        })
 }
 
 fn validate_resource_deployment_manifest(root: &Path, input: &GateInput) -> Result<(), AppError> {
@@ -350,7 +428,7 @@ fn validate_resource_deployment_manifest(root: &Path, input: &GateInput) -> Resu
     Ok(())
 }
 
-fn validate_deployment_manifest(root: &Path, input: &GateInput) -> Result<(), AppError> {
+fn validate_deployment_manifest(root: &Path, input: &GateInput) -> Result<String, AppError> {
     let path = secure_file(root, &input.deployment_manifest.path)?;
     let bytes = fs::read(path).map_err(|error| {
         gate(
@@ -414,7 +492,16 @@ fn validate_deployment_manifest(root: &Path, input: &GateInput) -> Result<(), Ap
             "deployment image set differs from the gate input",
         ));
     }
-    Ok(())
+    value
+        .get("package_manifest_sha256")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            gate(
+                "LW_RELEASE_GATE_DEPLOYMENT_MANIFEST_INVALID",
+                "package manifest identity is missing",
+            )
+        })
 }
 
 fn validate_schema(
@@ -570,16 +657,18 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
-    use serde_json::json;
+    use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
     use tempfile::tempdir;
 
     use super::{REQUIRED_CHECKS, run_with_locator};
 
     const INPUT_SCHEMA: &str =
-        include_str!("../../schemas/results/sprint2-release-gate-input.v2.schema.json");
+        include_str!("../../schemas/results/sprint2-release-gate-input.v3.schema.json");
     const REPORT_SCHEMA: &str =
-        include_str!("../../schemas/results/release-gate-report.v2.schema.json");
+        include_str!("../../schemas/results/release-gate-report.v3.schema.json");
+    const CONSOLE_SCHEMA: &str =
+        include_str!("../../schemas/results/connected-console-evidence.v1.schema.json");
     const DEPLOYMENT_SCHEMA: &str =
         include_str!("../../schemas/results/platform-image-deployment-manifest.v1.schema.json");
     const RESOURCE_DEPLOYMENT_SCHEMA: &str =
@@ -596,13 +685,18 @@ mod tests {
         let root = temporary.path();
         write(
             root,
-            "schemas/results/sprint2-release-gate-input.v2.schema.json",
+            "schemas/results/sprint2-release-gate-input.v3.schema.json",
             INPUT_SCHEMA,
         )?;
         write(
             root,
-            "schemas/results/release-gate-report.v2.schema.json",
+            "schemas/results/release-gate-report.v3.schema.json",
             REPORT_SCHEMA,
+        )?;
+        write(
+            root,
+            "schemas/results/connected-console-evidence.v1.schema.json",
+            CONSOLE_SCHEMA,
         )?;
         write(
             root,
@@ -625,21 +719,6 @@ mod tests {
         git(root, &["commit", "-m", "fixture"])?;
         let commit = git(root, &["rev-parse", "HEAD"])?;
         let run_id = uuid::Uuid::now_v7();
-        for name in REQUIRED_CHECKS {
-            write(root, &format!("artifacts/evidence/{name}.json"), "{}\n")?;
-        }
-        let mut checks = Vec::new();
-        for name in REQUIRED_CHECKS {
-            let path = format!("artifacts/evidence/{name}.json");
-            checks.push(json!({
-                "name": name,
-                "status": "passed",
-                "mode": "connected",
-                "sourceCommit": commit,
-                "runId": run_id,
-                "evidence": {"path": path, "sha256": file_hash(root, &path)?}
-            }));
-        }
         let images = ["control-service", "access-service", "agent-service", "environment-service", "evaluation-service", "openssh-gateway", "web"]
             .into_iter()
             .enumerate()
@@ -666,6 +745,7 @@ mod tests {
             "artifacts/evidence/deployment.json",
             &serde_json::to_string_pretty(&deployment)?,
         )?;
+        let deployment_hash = file_hash(root, "artifacts/evidence/deployment.json")?;
         let resource_images = vec![json!({
             "component": "resource-service",
             "reference": format!("harbor.invalid/labweaver/resource-service@sha256:{}", "d".repeat(64))
@@ -683,11 +763,47 @@ mod tests {
             "artifacts/evidence/resource-deployment.json",
             &serde_json::to_string_pretty(&resource_deployment)?,
         )?;
+        let mut checks = Vec::new();
+        for name in REQUIRED_CHECKS {
+            let path = format!("artifacts/evidence/{name}.json");
+            let evidence = match name {
+                "container-xterm-console" => console_report(
+                    "container",
+                    "xterm",
+                    &commit,
+                    run_id,
+                    &deployment_hash,
+                    &migration_hash,
+                    &images,
+                    &format!("sha256:{}", "a".repeat(64)),
+                ),
+                "kubevirt-novnc-console" => console_report(
+                    "kubevirt",
+                    "novnc",
+                    &commit,
+                    run_id,
+                    &deployment_hash,
+                    &migration_hash,
+                    &images,
+                    &format!("sha256:{}", "b".repeat(64)),
+                ),
+                _ => json!({}),
+            };
+            write(root, &path, &serde_json::to_string_pretty(&evidence)?)?;
+            checks.push(json!({
+                "name": name,
+                "status": "passed",
+                "mode": "connected",
+                "sourceCommit": commit,
+                "runId": run_id,
+                "evidence": {"path": path, "sha256": file_hash(root, &path)?}
+            }));
+        }
         let input = json!({
-            "schemaVersion": "sprint2-release-gate-input.v2",
+            "schemaVersion": "sprint2-release-gate-input.v3",
             "sourceCommit": commit,
             "runId": run_id,
-            "deploymentManifest": {"path": "artifacts/evidence/deployment.json", "sha256": file_hash(root, "artifacts/evidence/deployment.json")?},
+            "deploymentManifest": {"path": "artifacts/evidence/deployment.json", "sha256": deployment_hash},
             "resourceDeploymentManifest": {"path": "artifacts/evidence/resource-deployment.json", "sha256": file_hash(root, "artifacts/evidence/resource-deployment.json")?},
             "migrationCatalog": {"path": "migrations/catalog.yaml", "sha256": migration_hash},
             "platformImages": images,
@@ -722,7 +838,99 @@ mod tests {
             error.diagnostic_code(),
             "LW_RELEASE_GATE_EVIDENCE_HASH_MISMATCH"
         );
+
+        write(root, "artifacts/evidence/access-negative.json", "{}")?;
+        let mut missing_console = input.clone();
+        missing_console["checks"]
+            .as_array_mut()
+            .ok_or("checks fixture is not an array")?
+            .retain(|check| check["name"] != "container-xterm-console");
+        write(
+            root,
+            "artifacts/gate-input-missing-console.json",
+            &serde_json::to_string_pretty(&missing_console)?,
+        )?;
+        let error = match run_with_locator(root, "artifacts/gate-input-missing-console.json") {
+            Ok(()) => return Err("missing console check unexpectedly passed".into()),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.diagnostic_code(),
+            "LW_RELEASE_GATE_INPUT_SCHEMA_INVALID"
+        );
+
+        let mut fixture_mode = input.clone();
+        fixture_mode["checks"][0]["mode"] = Value::String("fixture".to_owned());
+        write(
+            root,
+            "artifacts/gate-input-fixture.json",
+            &serde_json::to_string_pretty(&fixture_mode)?,
+        )?;
+        let error = match run_with_locator(root, "artifacts/gate-input-fixture.json") {
+            Ok(()) => return Err("Fixture check unexpectedly passed".into()),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.diagnostic_code(),
+            "LW_RELEASE_GATE_INPUT_SCHEMA_INVALID"
+        );
+
+        let mut cross_run = input.clone();
+        cross_run["checks"][0]["runId"] =
+            Value::String("01999999-9999-7999-8999-999999999998".to_owned());
+        write(
+            root,
+            "artifacts/gate-input-cross-run.json",
+            &serde_json::to_string_pretty(&cross_run)?,
+        )?;
+        let error = match run_with_locator(root, "artifacts/gate-input-cross-run.json") {
+            Ok(()) => return Err("cross-Run check unexpectedly passed".into()),
+            Err(error) => error,
+        };
+        assert_eq!(error.diagnostic_code(), "LW_RELEASE_GATE_CHECK_FAILED");
         Ok(())
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::expect_used,
+        reason = "the test helper exposes every frozen identity and rejects malformed fixture images"
+    )]
+    fn console_report(
+        runtime: &str,
+        console: &str,
+        commit: &str,
+        run_id: uuid::Uuid,
+        deployment_hash: &str,
+        migration_hash: &str,
+        images: &[Value],
+        runtime_artifact: &str,
+    ) -> Value {
+        let mut report = crate::console_evidence::tests::valid_report(runtime, console);
+        report["sourceCommit"] = Value::String(commit.to_owned());
+        report["runId"] = Value::String(run_id.to_string());
+        report["packageIdentity"] = Value::String(format!("sha256:{}", "c".repeat(64)));
+        report["deploymentIdentity"] = Value::String(deployment_hash.to_owned());
+        report["migrationCatalogSha256"] = Value::String(migration_hash.to_owned());
+        for (component, key) in [
+            ("access-service", "accessService"),
+            ("environment-service", "environmentService"),
+        ] {
+            let reference = images
+                .iter()
+                .find(|image| image["component"] == component)
+                .and_then(|image| image["reference"].as_str())
+                .expect("fixture image");
+            report["images"][key] = Value::String(
+                reference
+                    .rsplit_once('@')
+                    .expect("immutable fixture image")
+                    .1
+                    .to_owned(),
+            );
+        }
+        report["images"]["runtimeArtifact"] = Value::String(runtime_artifact.to_owned());
+        report
     }
 
     fn write(root: &Path, relative: &str, value: &str) -> std::io::Result<()> {
