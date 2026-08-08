@@ -194,7 +194,7 @@ def prepare(
 root = "/home/user/.local/share/buildkit"
 
 [grpc]
-  address = ["tcp://0.0.0.0:1234"]
+  address = ["tcp4://0.0.0.0:1234"]
   [grpc.tls]
     cert = "/etc/buildkit/tls/tls.crt"
     key = "/etc/buildkit/tls/tls.key"
