@@ -516,13 +516,12 @@ fn package_linux(
     let run_dir = root.join("artifacts/package").join(&run_id);
     fs::create_dir_all(&run_dir)
         .map_err(|error| io_error("create package run directory", error))?;
-    // Fast / develop iteration mode (Owner decision, time-boxed window):
-    // skip the build-context secret scan, the per-image trivy scan and the
+    // Develop iteration mode (Owner decision, time-boxed window): skip the
+    // build-context secret scan, the per-image trivy scan and the
     // reproducibility double build. Scan evidence is an explicit skipped
     // placeholder and must NOT be used for a formal Release Gate; a full
     // package must be re-run for acceptance.
-    let fast = enabled_env("LABWEAVER_PACKAGE_FAST");
-    let iterate = fast || develop;
+    let iterate = develop;
     if !iterate {
         scan_build_context(root, &run_dir)?;
     }
@@ -541,7 +540,6 @@ fn package_linux(
             &database_reference,
             &database_digest,
             &lock.platform_images,
-            fast,
             develop,
             dirty,
         )?);
@@ -659,7 +657,6 @@ fn build_scan(
     database_reference: &str,
     database_digest: &str,
     lock: &PlatformImageLock,
-    fast: bool,
     develop: bool,
     dirty: bool,
 ) -> Result<ImageEvidence, AppError> {
@@ -677,7 +674,7 @@ fn build_scan(
         registry,
         lock,
     )?;
-    if !fast && !develop {
+    if !develop {
         build_image(
             root,
             component,
@@ -691,7 +688,7 @@ fn build_scan(
     let first = inspect_platform_digest(&tag)?;
     let reference = format!("{registry}/labweaver-system/{component}@{first}");
     let digest = first.clone();
-    if !fast && !develop {
+    if !develop {
         let second = inspect_platform_digest(&reproducibility_tag)?;
         if first != second {
             return Err(AppError::PlatformImage {
@@ -700,29 +697,17 @@ fn build_scan(
             });
         }
     }
-    let (scan_bytes, critical, high) = if fast || develop {
-        // Iteration placeholder: no trivy image scan was run. This evidence is
+    let (scan_bytes, critical, high) = if develop {
+        // Develop placeholder: no trivy image scan was run. This evidence is
         // explicitly NOT release-grade; acceptance must re-run a full package.
-        let (scanner, note) = if develop {
-            (
-                "skipped-develop",
-                format!(
-                    "LABWEAVER_PACKAGE_DEVELOP placeholder (dirty worktree={dirty}); full scan required before Release Gate"
-                ),
-            )
-        } else {
-            (
-                "skipped-fast",
-                "LABWEAVER_PACKAGE_FAST placeholder; full scan required before Release Gate"
-                    .to_owned(),
-            )
-        };
         let placeholder = serde_json::json!({
             "schema_version": 1,
-            "scanner": scanner,
+            "scanner": "skipped-develop",
             "component": component,
             "reference": reference,
-            "note": note,
+            "note": format!(
+                "LABWEAVER_PACKAGE_DEVELOP placeholder (dirty worktree={dirty}); full scan required before Release Gate"
+            ),
         });
         let placeholder_bytes =
             serde_json::to_vec(&placeholder).map_err(|error| AppError::Io {
