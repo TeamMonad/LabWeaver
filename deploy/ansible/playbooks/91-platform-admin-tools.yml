@@ -9,7 +9,7 @@
 
 - name: Install locked Sprint 2 execution tools
   hosts: control_plane
-  gather_facts: false
+  gather_facts: true
   become: true
   roles:
     - role: platform_admin_tools

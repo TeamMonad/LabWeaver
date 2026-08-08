@@ -82,7 +82,20 @@
       - "{{ platform_admin_tools_lock.system_packages.postgresql }}"
       - "{{ platform_admin_tools_lock.system_packages.java }}"
     state: present
-  when: platform_admin_tools_profile == 'execution'
+  when:
+    - platform_admin_tools_profile == 'execution'
+    - ansible_facts.os_family == 'RedHat'
+
+- name: Install locked execution package dependencies (Ubuntu)
+  ansible.builtin.apt:
+    name:
+      - postgresql-client
+      - openjdk-21-jre-headless
+    state: present
+    update_cache: true
+  when:
+    - platform_admin_tools_profile == 'execution'
+    - ansible_facts.os_family == 'Debian'
 
 - name: Download locked execution tool archives
   ansible.builtin.get_url:
