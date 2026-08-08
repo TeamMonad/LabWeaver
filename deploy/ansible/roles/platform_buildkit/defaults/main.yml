@@ -28,3 +28,7 @@ platform_buildkit_controller_port: 1234
 # deployment tree instead of the RHEL rocky home.
 platform_buildkit_operator_user: rocky
 platform_buildkit_operator_group: rocky
+
+# Management CIDR allowed to reach the BuildKit gRPC endpoint (1234) from the
+# deployment controller. Empty keeps the ingress build-executor-only.
+platform_buildkit_admin_cidr: ""

@@ -140,6 +140,11 @@ spec:
           podSelector:
             matchLabels: {app.kubernetes.io/name: build-executor}
       ports: [{protocol: TCP, port: 1234}]
+{% if platform_buildkit_admin_cidr %}
+    - from:
+        - ipBlock: {cidr: {{ platform_buildkit_admin_cidr }}}
+      ports: [{protocol: TCP, port: 1234}]
+{% endif %}
   egress:
     - to:
         - namespaceSelector:
