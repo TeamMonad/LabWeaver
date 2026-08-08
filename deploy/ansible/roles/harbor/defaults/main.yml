@@ -1,6 +1,7 @@
 ---
 harbor_project_name: labweaver-system
 harbor_chart_archive: /var/lib/labweaver/bundle/harbor-1.19.1.tgz
+harbor_dnsmasq_enabled: true
 # harbor_approved_controller_id is provided by inventory group_vars (e.g.
 # 'edge-router' for the Rocky controller, 'v1-cp-63' for the v1 cluster).
 # It must match LABWEAVER_CONTROLLER_ID when the controller env is set.
