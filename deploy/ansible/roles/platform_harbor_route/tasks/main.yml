@@ -243,7 +243,9 @@
       field_manager: labweaver-platform-adoption
       force_conflicts: false
     definition:
-      apiVersion: gateway.networking.k8s.io/v1
+      # TLSRoute is still v1alpha2/v1alpha3 in Gateway API v1.4.1
+      # experimental (no v1 yet); Cilium 1.19 consumes v1alpha2.
+      apiVersion: gateway.networking.k8s.io/v1alpha2
       kind: TLSRoute
       metadata:
         name: harbor
@@ -264,7 +266,7 @@
 - name: Read adopted Harbor TLSRoute status
   kubernetes.core.k8s_info:
     kubeconfig: "{{ harbor_kubeconfig_path }}"
-    api_version: gateway.networking.k8s.io/v1
+    api_version: gateway.networking.k8s.io/v1alpha2
     kind: TLSRoute
     namespace: "{{ harbor_namespace }}"
     name: harbor
