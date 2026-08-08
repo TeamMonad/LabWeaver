@@ -336,6 +336,35 @@
   register: platform_harbor_project_read
   no_log: true
 
+- name: Create the adopted Harbor project only when missing
+  ansible.builtin.uri:
+    url: "https://{{ harbor_hostname }}/api/v2.0/projects"
+    method: POST
+    user: admin
+    password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    validate_certs: true
+    body_format: json
+    body:
+      project_name: "{{ harbor_project_name }}"
+      public: false
+    status_code: [201, 409]
+  when: platform_harbor_project_read.json | length == 0
+  no_log: true
+
+- name: Re-read the retained Harbor project after adoption
+  ansible.builtin.uri:
+    url: "https://{{ harbor_hostname }}/api/v2.0/projects?name={{ harbor_project_name | urlencode }}"
+    method: GET
+    user: admin
+    password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    validate_certs: true
+    status_code: 200
+    return_content: true
+  register: platform_harbor_project_read
+  no_log: true
+
 - name: Reject a missing or ambiguous Harbor Sprint 2 project
   ansible.builtin.assert:
     that:
