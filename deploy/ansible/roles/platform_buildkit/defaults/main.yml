@@ -23,3 +23,8 @@ platform_buildkit_controller_api_server: ""
 platform_buildkit_controller_api_address: ""
 platform_buildkit_controller_client_path: /home/rocky/.config/labweaver/package/buildkit
 platform_buildkit_controller_port: 1234
+
+# Debian-family controllers keep the operator mTLS client under the root
+# deployment tree instead of the RHEL rocky home.
+platform_buildkit_operator_user: rocky
+platform_buildkit_operator_group: rocky
