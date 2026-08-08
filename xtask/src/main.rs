@@ -11,8 +11,6 @@ use sha2::{Digest, Sha256};
 
 mod acceptance_assets;
 mod console_evidence;
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-mod execution_ledger;
 mod integration;
 mod local_preflight;
 mod migration_catalog;
@@ -359,10 +357,6 @@ enum AppError {
         detail: String,
     },
     #[allow(dead_code)]
-    ExecutionLedger {
-        code: &'static str,
-        detail: String,
-    },
     InvalidArgument {
         role: &'static str,
     },
@@ -384,7 +378,6 @@ impl AppError {
             Self::AcceptanceAsset { code, .. } => code,
             Self::Integration { code, .. } => code,
             Self::ReleaseGate { code, .. } => code,
-            Self::ExecutionLedger { code, .. } => code,
             Self::InvalidArgument { .. } => "XTASK_INVALID_ARGUMENT",
             #[cfg(not(target_os = "linux"))]
             Self::UnsupportedPlatform { .. } => "XTASK_INFRA_UNSUPPORTED_PLATFORM",
@@ -422,7 +415,6 @@ impl Display for AppError {
             Self::AcceptanceAsset { detail, .. } => write!(formatter, "{detail}"),
             Self::Integration { detail, .. } => write!(formatter, "{detail}"),
             Self::ReleaseGate { detail, .. } => write!(formatter, "{detail}"),
-            Self::ExecutionLedger { detail, .. } => write!(formatter, "{detail}"),
             Self::InvalidArgument { role } => {
                 write!(
                     formatter,
@@ -639,59 +631,7 @@ fn package_command(args: &PackageArgs) -> Result<(), AppError> {
     #[cfg(target_os = "linux")]
     {
         let root = repository_root();
-        let source_commit = git_output(&root, ["rev-parse", "HEAD"])?;
-        let component_lock_hash = file_sha256(&root.join("deploy/versions.lock.yml"))?;
-        let migration_catalog_hash = file_sha256(&root.join("migrations/catalog.yaml"))?;
-        let configuration_sha256 = identity_hash(&[
-            &component_lock_hash,
-            &migration_catalog_hash,
-            profile,
-            &args.release,
-        ]);
-        let run_id = format!(
-            "pkg-{}-{}-{}",
-            args.env,
-            args.release,
-            &source_commit[..source_commit.len().min(12)]
-        );
-        let root_path = std::env::var_os("LABWEAVER_EXECUTION_LEDGER_ROOT")
-            .map(PathBuf::from)
-            .ok_or_else(|| AppError::ExecutionLedger {
-                code: "LW_EXECUTION_LEDGER_ROOT_MISSING",
-                detail: "LABWEAVER_EXECUTION_LEDGER_ROOT is required for connected packaging; provide a private controller directory before starting another package".to_owned(),
-            })?;
-        let lease = execution_ledger::acquire(
-            &root_path,
-            execution_ledger::ExecutionIdentity {
-                // Keep the ledger operation stable across release labels. The
-                // release label participates in configuration_sha256 above, so
-                // distinct packages remain distinct candidates while the
-                // operation-wide cycle budget still prevents endless retries.
-                operation: format!("package-{profile}"),
-                environment: args.env.clone(),
-                source_commit,
-                configuration_sha256: Some(configuration_sha256),
-                package_sha256: None,
-                deployment_sha256: None,
-                run_id,
-                testflight_run_id: None,
-            },
-            1,
-            3,
-        )
-        .map_err(|error| AppError::ExecutionLedger {
-            code: error.diagnostic_code(),
-            detail: "a package with this candidate identity is already active, exhausted, or requires operator inspection; do not start another package".to_owned(),
-        })?;
-        let result = platform_images::package(&args.env, &args.release, profile, args.yes, &root);
-        let diagnostic = result.as_ref().err().map(AppError::diagnostic_code);
-        lease
-            .finish(result.is_ok(), diagnostic)
-            .map_err(|error| AppError::ExecutionLedger {
-                code: error.diagnostic_code(),
-                detail: "could not finalize the package execution ledger; package state must be inspected before another package".to_owned(),
-            })?;
-        result
+        platform_images::package(&args.env, &args.release, profile, args.yes, &root)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -1046,7 +986,7 @@ fn resource_replay_local(
     let deployment_run_id = resource_replay_run_id(deployment)?;
     let root = repository_root();
     let source_commit = git_output_any(&root, ["rev-parse", "HEAD"])?;
-    validate_resource_replay_inputs_before_ledger(
+    validate_resource_replay_inputs(
         &args.profile,
         &args.authentication,
         &args.deployment_manifest,
@@ -1107,12 +1047,12 @@ fn resource_replay_connected(
         if run_id != deployment_run_id {
             return Err(AppError::ReleaseGate {
                 code: "LW_RESOURCE_REPLAY_DEPLOYMENT_IDENTITY_MISMATCH",
-                detail: "LABWEAVER_RUN_ID must match the Resource deployment manifest before the connected ledger is acquired".to_owned(),
+                detail: "LABWEAVER_RUN_ID must match the Resource deployment manifest before a connected replay".to_owned(),
             });
         }
         let root = repository_root();
         let source_commit = git_output(&root, ["rev-parse", "HEAD"])?;
-        validate_resource_replay_inputs_before_ledger(
+        validate_resource_replay_inputs(
             &args.profile,
             &args.authentication,
             &args.deployment_manifest,
@@ -1153,7 +1093,7 @@ fn resource_replay_run_id(deployment: &serde_json::Value) -> Result<&str, AppErr
         })
 }
 
-fn validate_resource_replay_inputs_before_ledger(
+fn validate_resource_replay_inputs(
     profile: &Path,
     authentication: &Path,
     deployment_manifest: &Path,
@@ -1378,7 +1318,7 @@ fn run_infrastructure_with_package(
 fn run_infrastructure_with_package(
     environment: &str,
     playbook_name: &str,
-    command: &'static str,
+    _command: &'static str,
     package_manifest: Option<&Path>,
     extra_environment: &[(&str, String)],
 ) -> Result<(), AppError> {
@@ -1444,17 +1384,6 @@ fn run_infrastructure_with_package(
     for (name, value) in extra_environment {
         runner.add_env(*name, value);
     }
-    let ledger = begin_execution_ledger(
-        environment,
-        command,
-        &commit_sha,
-        &inventory_hash,
-        &component_lock_hash,
-        &run_id,
-        &testflight_run_id,
-        package_manifest,
-        extra_environment,
-    )?;
     // ansible-rs 1.1.0 appends configured arguments twice in `run`; all
     // controller identity and vault inputs therefore travel through the
     // explicit environment contract above.
@@ -1466,102 +1395,12 @@ fn run_infrastructure_with_package(
             code: None,
             detail: Some(format!("ansible-rs returned a non-zero result: {error:?}")),
         });
-    if let Some(ledger) = ledger {
-        let diagnostic = result.as_ref().err().map(AppError::diagnostic_code);
-        ledger
-            .finish(result.is_ok(), diagnostic)
-            .map_err(|error| AppError::ExecutionLedger {
-                code: error.diagnostic_code(),
-                detail: "could not finalize the connected execution ledger; cluster state must be inspected before another write".to_owned(),
-            })?;
-    }
     result
 }
 
 #[cfg(target_os = "linux")]
-fn execution_budget(command: &str) -> Option<(u32, u32)> {
-    let command = command.to_ascii_lowercase();
-    if command.contains("resource replay") {
-        Some((1, 3))
-    } else if command.contains("application") {
-        Some((2, 3))
-    } else if command.contains("identity-foundation-deploy")
-        || command.contains("platform-foundation")
-        || command.contains("platform-buildkit")
-        || command.contains("platform-harbor-route")
-        || command.contains("backup")
-        || command.contains("deploy")
-        || command.contains("reset")
-    {
-        Some((1, 1))
-    } else if command.contains("resource auth") {
-        // Browser BFF sessions are short-lived and must be refreshed immediately
-        // before every replay attempt; keep the per-candidate fence but allow
-        // one refresh per replay slot in the operation budget.
-        Some((1, 3))
-    } else {
-        None
-    }
-}
-
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
-fn begin_execution_ledger(
-    environment: &str,
-    command: &str,
-    source_commit: &str,
-    inventory_hash: &str,
-    component_lock_hash: &str,
-    run_id: &str,
-    testflight_run_id: &str,
-    package_manifest: Option<&Path>,
-    extra_environment: &[(&str, String)],
-) -> Result<Option<execution_ledger::ExecutionLease>, AppError> {
-    let Some((max_attempts, max_operation_attempts)) = execution_budget(command) else {
-        return Ok(None);
-    };
-    let package_sha256 = package_manifest.map(file_sha256).transpose()?;
-    let deployment_sha256 = extra_environment
-        .iter()
-        .find(|(name, _)| *name == "LABWEAVER_RESOURCE_REPLAY_DEPLOYMENT_MANIFEST")
-        .map(|(_, value)| file_sha256(Path::new(value)))
-        .transpose()?;
-    let migration_catalog_sha256 = file_sha256(&repository_root().join("migrations/catalog.yaml"))?;
-    let extra_environment_sha256 = extra_environment_identity(extra_environment)?;
-    let configuration_sha256 = identity_hash(&[
-        inventory_hash,
-        component_lock_hash,
-        &migration_catalog_sha256,
-        &extra_environment_sha256,
-    ]);
-    let root = std::env::var_os("LABWEAVER_EXECUTION_LEDGER_ROOT")
-        .map(PathBuf::from)
-        .ok_or_else(|| AppError::ExecutionLedger {
-            code: "LW_EXECUTION_LEDGER_ROOT_MISSING",
-            detail: "LABWEAVER_EXECUTION_LEDGER_ROOT is required for connected execution; provide a private controller directory before starting another deployment".to_owned(),
-        })?;
-    execution_ledger::acquire(
-        &root,
-        execution_ledger::ExecutionIdentity {
-            operation: command.to_owned(),
-            environment: environment.to_owned(),
-            source_commit: source_commit.to_owned(),
-            configuration_sha256: Some(configuration_sha256),
-            package_sha256,
-            deployment_sha256,
-            run_id: run_id.to_owned(),
-            testflight_run_id: Some(testflight_run_id.to_owned()),
-        },
-        max_attempts,
-        max_operation_attempts,
-    )
-    .map(Some)
-    .map_err(|error| AppError::ExecutionLedger {
-        code: error.diagnostic_code(),
-        detail: "a connected operation with this target or candidate is already active, exhausted, or requires operator inspection; do not start another deployment".to_owned(),
-    })
-}
-
 #[cfg(target_os = "linux")]
 fn identity_hash(fields: &[&str]) -> String {
     let mut hasher = Sha256::new();
@@ -1573,6 +1412,7 @@ fn identity_hash(fields: &[&str]) -> String {
 }
 
 #[cfg(target_os = "linux")]
+#[cfg_attr(not(test), allow(dead_code))]
 fn extra_environment_identity(extra_environment: &[(&str, String)]) -> Result<String, AppError> {
     let mut fields = Vec::with_capacity(extra_environment.len());
     for (name, value) in extra_environment {

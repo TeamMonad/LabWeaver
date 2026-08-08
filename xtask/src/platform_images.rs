@@ -490,7 +490,16 @@ fn package_linux(
     let run_dir = root.join("artifacts/package").join(&run_id);
     fs::create_dir_all(&run_dir)
         .map_err(|error| io_error("create package run directory", error))?;
-    scan_build_context(root, &run_dir)?;
+    // Fast iteration mode (Owner decision, time-boxed window): skip the
+    // build-context secret scan and per-image trivy scan and the
+    // reproducibility double build. Scan evidence is an explicit skipped
+    // placeholder and must NOT be used for a formal Release Gate; a full
+    // package must be re-run for acceptance.
+    let fast = std::env::var("LABWEAVER_PACKAGE_FAST")
+        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE"));
+    if !fast {
+        scan_build_context(root, &run_dir)?;
+    }
     let Some(components) = components_for_profile(profile) else {
         return manifest_invalid("package profile is not supported");
     };
@@ -506,6 +515,7 @@ fn package_linux(
             &database_reference,
             &database_digest,
             &lock.platform_images,
+            fast,
         )?);
     }
     let manifest = PackageManifest {
@@ -621,6 +631,7 @@ fn build_scan(
     database_reference: &str,
     database_digest: &str,
     lock: &PlatformImageLock,
+    fast: bool,
 ) -> Result<ImageEvidence, AppError> {
     let tag = format!(
         "{registry}/labweaver-system/{component}:git-{}",
@@ -646,20 +657,35 @@ fn build_scan(
         lock,
     )?;
     let first = inspect_platform_digest(&tag)?;
-    let second = inspect_platform_digest(&reproducibility_tag)?;
-    if first != second {
-        return Err(AppError::PlatformImage {
-            code: "LW_PACKAGE_BUILD_NOT_REPRODUCIBLE",
-            detail: component.to_owned(),
-        });
-    }
     let reference = format!("{registry}/labweaver-system/{component}@{first}");
-    let (scan_bytes, critical, high) =
-        scan_image(run_dir, component, &reference, database_reference)?;
+    let digest = first.clone();
+    if !fast {
+        let second = inspect_platform_digest(&reproducibility_tag)?;
+        if first != second {
+            return Err(AppError::PlatformImage {
+                code: "LW_PACKAGE_BUILD_NOT_REPRODUCIBLE",
+                detail: component.to_owned(),
+            });
+        }
+    }
+    let (scan_bytes, critical, high) = if fast {
+        // Fast mode placeholder: no trivy image scan was run. This evidence is
+        // explicitly NOT release-grade; acceptance must re-run a full package.
+        let placeholder = serde_json::json!({
+            "schema_version": 1,
+            "scanner": "skipped-fast",
+            "component": component,
+            "reference": reference,
+            "note": "LABWEAVER_PACKAGE_FAST placeholder; full scan required before Release Gate"
+        });
+        (serde_json::to_vec(&placeholder).expect("json"), 0u64, 0u64)
+    } else {
+        scan_image(run_dir, component, &reference, database_reference)?
+    };
     Ok(ImageEvidence {
         component: component.to_owned(),
         reference: reference.clone(),
-        digest: first,
+        digest,
         scan: ScanEvidence {
             scanner: format!("trivy:{}", lock.trivy),
             database_digest: database_digest.to_owned(),
