@@ -5,6 +5,7 @@ use std::time::Duration;
 use contracts::{
     UtcTimestamp,
     environment::{
+        EnvironmentConsoleEligibility, EnvironmentConsoleEligibilityRequest,
         EnvironmentEndpointEligibility, EnvironmentEndpointEligibilityRequest,
         EnvironmentOwnerResolution, EnvironmentOwnerResolutionRequest,
         EnvironmentOwnerResolverClientConfig,
@@ -166,6 +167,52 @@ impl EnvironmentOwnerResolverClient {
         Err(OwnerResolverClientError::Unavailable)
     }
 
+    /// Resolves one exact browser-console admission snapshot.
+    pub async fn resolve_console_eligibility(
+        &self,
+        request: &EnvironmentConsoleEligibilityRequest,
+        now: UtcTimestamp,
+    ) -> Result<EnvironmentConsoleEligibility, OwnerResolverClientError> {
+        let mut endpoint = self.base_uri.clone();
+        endpoint.set_path(&format!(
+            "/internal/v1/environments/{}/console-eligibility:resolve",
+            request.environment_id
+        ));
+        for attempt in 0..=self.max_retries {
+            match self
+                .client
+                .post(endpoint.clone())
+                .json(request)
+                .send()
+                .await
+            {
+                Ok(response) if response.status().is_success() => {
+                    return validate_console_response(response, request, now).await;
+                }
+                Ok(response) if response.status() == StatusCode::FORBIDDEN => {
+                    return Err(OwnerResolverClientError::ScopeDenied);
+                }
+                Ok(response) if response.status() == StatusCode::SERVICE_UNAVAILABLE => {
+                    if attempt == self.max_retries {
+                        return Err(OwnerResolverClientError::Unavailable);
+                    }
+                }
+                Ok(_) => return Err(OwnerResolverClientError::ResponseInvalid),
+                Err(_) if attempt == self.max_retries => {
+                    return Err(OwnerResolverClientError::Unavailable);
+                }
+                Err(_) => {}
+            }
+            let multiplier = 1_u32 << u32::from(attempt);
+            let delay = self
+                .retry_backoff
+                .checked_mul(multiplier)
+                .ok_or(OwnerResolverClientError::Configuration)?;
+            tokio::time::sleep(delay).await;
+        }
+        Err(OwnerResolverClientError::Unavailable)
+    }
+
     async fn resolve_inner(
         &self,
         request: &EnvironmentOwnerResolutionRequest,
@@ -225,6 +272,31 @@ async fn validate_endpoint_response(
         .to_owned();
     let resolution = response
         .json::<EnvironmentEndpointEligibility>()
+        .await
+        .map_err(|_| OwnerResolverClientError::ResponseInvalid)?;
+    let expected_etag = StrongEtag::from_revision(resolution.environment_revision).header_value();
+    resolution
+        .validate_for(request, now)
+        .map_err(|_| OwnerResolverClientError::ResponseInvalid)?;
+    if etag != expected_etag {
+        return Err(OwnerResolverClientError::ResponseInvalid);
+    }
+    Ok(resolution)
+}
+
+async fn validate_console_response(
+    response: reqwest::Response,
+    request: &EnvironmentConsoleEligibilityRequest,
+    now: UtcTimestamp,
+) -> Result<EnvironmentConsoleEligibility, OwnerResolverClientError> {
+    let etag = response
+        .headers()
+        .get(header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(OwnerResolverClientError::ResponseInvalid)?
+        .to_owned();
+    let resolution = response
+        .json::<EnvironmentConsoleEligibility>()
         .await
         .map_err(|_| OwnerResolverClientError::ResponseInvalid)?;
     let expected_etag = StrongEtag::from_revision(resolution.environment_revision).header_value();

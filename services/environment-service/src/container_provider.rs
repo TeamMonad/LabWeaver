@@ -1441,7 +1441,13 @@ where
                         "replicas":1,
                         "selector":{"matchLabels":{"app":app_name}},
                         "template":{
-                            "metadata":{"labels":{"app":app_name,"labweaver.io/environment-id":instance.id.to_string()}},
+                            "metadata":{"labels":{
+                                "app":app_name,
+                                "labweaver.io/environment-id":instance.id.to_string(),
+                                "labweaver.io/course-id":instance.course_id.to_string(),
+                                "labweaver.io/release-id":projection.release.id.to_string(),
+                                "labweaver.io/release-version":projection.release.version.to_string()
+                            }},
                             "spec":{
                                 "serviceAccountName":"runtime","automountServiceAccountToken":false,
                                 // The shared NFS PVC is provisioned with the `nobody` owner.

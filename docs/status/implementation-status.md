@@ -35,7 +35,8 @@ Sprint-end acceptance Issue.
 
 | Capability | State | Current evidence and boundary |
 | --- | --- | --- |
-| Unified xterm/noVNC ConsoleCapability | contract implemented; runtime blocked | ADR 0012 and the AccessGrant-level discovery/issuance contract bind BFF, Origin, CSRF, idempotency, revisions, conditional Work Lease fences, 30-second one-time locator and safe observability. Generated Schema/OpenAPI/Web SDK and cross-consumer validation are required E2 evidence. #131 owns the Container xterm port, #124 owns KubeVirt/noVNC, and #126 owns shared-cluster E4/Release Gate. No Migration, proxy, UI, runtime or connected evidence is claimed here. |
+| Container xterm ConsoleCapability (#131) | implemented; locally verified; connected blocked | Additive capability/session migration, strict BFF/Origin/CSRF/ETag/idempotency issuance, atomic redemption, metadata lifecycle events, cancellation registry, Environment-authoritative `TerminalSpec`/Lease validation, mTLS proxy chain, unique Ready Pod selection, fixed `runtime` PTY, binary I/O, bounded resize/output and Sprint 3 Web reuse are implemented. Contract generation, focused Rust/Web tests, static deployment checks and local integration are merge evidence. No shared-cluster PTY, connected revocation/control-loss or Release Gate evidence is claimed; #126 owns it. |
+| KubeVirt noVNC ConsoleCapability (#124) | planned | Reuses the generic capability/session/proxy foundation, but the VMI `/vnc` adapter and its tests remain #124 scope. |
 | Web console Fixture preview | implemented; Fixture-verified | `pnpm --dir web preview:console:fixture` builds and serves the EX3-derived deterministic browser preview without a backend. It is visibly marked Fixture, renders only Fixture state, and is documented in `docs/testing/fixture-console-preview.md`. It is layout/state-machine evidence only, not Access proxy, Container, KubeVirt, connected-runtime, or Release Gate evidence. |
 
 ## Current identity

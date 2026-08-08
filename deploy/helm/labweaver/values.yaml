@@ -137,6 +137,10 @@ workloads:
       LABWEAVER_ACCESS_REVOCATION_SUBJECT: labweaver.service.access.revoke.v1
       LABWEAVER_RESOURCE_LEASE_VERIFICATION_SUBJECT: labweaver.resource.lease.verify.v1
       LABWEAVER_ENVIRONMENT_WORKER_ID: environment-service-sprint2
+      LABWEAVER_CONTAINER_TERMINAL_EXECUTOR_URI: wss://container-executor:9450/internal/v1/container-terminal
+      LABWEAVER_CONTAINER_TERMINAL_EXECUTOR_CA_PATH: /etc/labweaver/secrets/mtls-ca.pem
+      LABWEAVER_CONTAINER_TERMINAL_EXECUTOR_CERT_PATH: /etc/labweaver/secrets/tls.crt
+      LABWEAVER_CONTAINER_TERMINAL_EXECUTOR_KEY_PATH: /etc/labweaver/secrets/tls.key
     secretEnv:
       LABWEAVER_DATABASE_URL: {key: database-url}
       LABWEAVER_NATS_SERVER: {key: nats-server}
@@ -159,6 +163,7 @@ workloads:
       SSL_CERT_FILE: /etc/labweaver/secrets/minio-ca.pem
     ports:
       - {name: health, containerPort: 8085, servicePort: 8085}
+      - {name: console-mtls, containerPort: 9450, servicePort: 9450}
     readiness: {type: http, port: health, path: /health/ready}
   kubevirt-executor:
     enabled: true

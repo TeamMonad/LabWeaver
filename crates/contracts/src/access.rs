@@ -9,8 +9,9 @@ use ssh_key::{Algorithm, HashAlg, PublicKey, public::KeyData};
 use crate::authoring::EnvironmentClass;
 use crate::environment::{EndpointHealth, EndpointProtocol};
 use crate::{
-    AccessGrantId, ActorId, ConsoleCapabilityId, CourseId, EndpointGrantId, EndpointId,
-    EnvironmentId, GatewaySessionId, LeaseId, Revision, SshPublicKeyId, UtcTimestamp,
+    AccessGrantId, ActorId, BffSessionId, ConsoleCapabilityId, ConsoleSessionId, CourseId,
+    EndpointGrantId, EndpointId, EnvironmentId, GatewaySessionId, LeaseId, Revision,
+    SshPublicKeyId, UtcTimestamp,
 };
 
 /// Public-key algorithm frozen by the v1 Access contract.
@@ -248,6 +249,57 @@ impl ConsoleCapability {
         }
         Ok(())
     }
+}
+
+/// Browser-to-proxy control frames. Terminal input is always a binary frame.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ConsoleClientControl {
+    Resize { cols: u16, rows: u16 },
+}
+
+impl ConsoleClientControl {
+    pub fn validate(self) -> Result<(), AccessError> {
+        let Self::Resize { cols, rows } = self;
+        if cols == 0 || rows == 0 || cols > 500 || rows > 200 {
+            return Err(AccessError::InvalidConsoleControl);
+        }
+        Ok(())
+    }
+}
+
+/// Safe console-session lifecycle persisted by Access Service.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsoleSessionState {
+    Opening,
+    Active,
+    Terminating,
+    TerminationOverdue,
+    Closed,
+}
+
+/// Metadata-only session snapshot. It can never carry terminal bytes or credentials.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConsoleSession {
+    pub id: ConsoleSessionId,
+    pub capability_id: ConsoleCapabilityId,
+    pub kind: ConsoleKind,
+    pub bff_session_id: BffSessionId,
+    pub access_grant_id: AccessGrantId,
+    pub access_grant_revision: Revision,
+    pub environment_id: EnvironmentId,
+    pub environment_revision: Revision,
+    pub lease_fence: Option<ConsoleLeaseFence>,
+    pub revision: Revision,
+    pub state: ConsoleSessionState,
+    pub opened_at: UtcTimestamp,
+    pub authorization_expires_at: UtcTimestamp,
+    pub termination_requested_at: Option<UtcTimestamp>,
+    pub terminate_by: Option<UtcTimestamp>,
+    pub closed_at: Option<UtcTimestamp>,
+    pub diagnostic_code: Option<String>,
 }
 
 fn is_console_connection_locator(value: &str) -> bool {
@@ -748,6 +800,8 @@ pub enum AccessError {
     InvalidGrantSnapshot,
     #[error("ConsoleCapability is internally inconsistent")]
     InvalidConsoleCapability,
+    #[error("console control frame is outside the bounded protocol")]
+    InvalidConsoleControl,
 }
 
 #[cfg(test)]
@@ -1021,5 +1075,36 @@ mod tests {
             availability_past_lease.validate(),
             Err(AccessError::InvalidConsoleCapability)
         );
+    }
+
+    #[test]
+    fn xterm_control_frames_are_resize_only_and_bounded() {
+        assert!(
+            ConsoleClientControl::Resize { cols: 1, rows: 1 }
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            ConsoleClientControl::Resize {
+                cols: 500,
+                rows: 200
+            }
+            .validate()
+            .is_ok()
+        );
+        for invalid in [
+            ConsoleClientControl::Resize { cols: 0, rows: 24 },
+            ConsoleClientControl::Resize { cols: 80, rows: 0 },
+            ConsoleClientControl::Resize {
+                cols: 501,
+                rows: 24,
+            },
+            ConsoleClientControl::Resize {
+                cols: 80,
+                rows: 201,
+            },
+        ] {
+            assert_eq!(invalid.validate(), Err(AccessError::InvalidConsoleControl));
+        }
     }
 }

@@ -7,7 +7,9 @@ use tokio::net::TcpListener;
 
 use crate::{
     EnvironmentApiState, MtlsConfig, MtlsServerError, OwnerResolver, OwnerResolverPolicy,
-    PgEnvironmentStore, environment_api_router, owner_resolver_router, serve_owner_resolver_mtls,
+    PgEnvironmentStore, PgReleaseProjectionStore, TerminalBridgeError, TerminalExecutorGateway,
+    environment_api_router, owner_resolver_router, serve_owner_resolver_mtls,
+    terminal_bridge_router,
 };
 
 const DATABASE_URL: &str = "LABWEAVER_DATABASE_URL";
@@ -62,10 +64,17 @@ impl OwnerResolverRuntime {
         let listener = TcpListener::bind(bind_address)
             .await
             .map_err(OwnerResolverRuntimeError::Bind)?;
-        let resolver = OwnerResolver::new(PgEnvironmentStore::new(pool), policy);
+        let resolver = OwnerResolver::new(
+            PgEnvironmentStore::new(pool.clone()),
+            PgReleaseProjectionStore::new(pool),
+            policy,
+        );
+        let console_gateway = TerminalExecutorGateway::from_env()?;
         Ok(Self {
             listener,
-            router: owner_resolver_router(resolver).merge(environment_api_router(api)),
+            router: owner_resolver_router(resolver)
+                .merge(environment_api_router(api.clone()))
+                .merge(terminal_bridge_router(api, console_gateway)),
             tls,
         })
     }
@@ -141,4 +150,6 @@ pub enum OwnerResolverRuntimeError {
     Bind(#[source] std::io::Error),
     #[error(transparent)]
     Tls(#[from] MtlsServerError),
+    #[error(transparent)]
+    Console(#[from] TerminalBridgeError),
 }

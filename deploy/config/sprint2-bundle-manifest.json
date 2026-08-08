@@ -66,12 +66,15 @@
       "minio-access-key",
       "minio-ca.pem",
       "minio-secret-key",
+      "mtls-ca.pem",
       "nats-ca.pem",
       "nats-client.crt",
       "nats-client.key",
       "nats.creds",
       "postgres-ca.pem",
-      "registry-pull-config.json"
+      "registry-pull-config.json",
+      "tls.crt",
+      "tls.key"
     ],
     "control-service-secrets": [
       "database-url",

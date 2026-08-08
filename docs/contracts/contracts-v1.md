@@ -48,6 +48,16 @@ The Gateway creates, heartbeats and closes sessions through dedicated request ty
 
 Environment exposes a read-only mTLS endpoint-eligibility decision bound to environment/course/subject/revision, eligibility/Lease expiry and the exact requested endpoint protocol, health and revision. The response never contains host, port, credentials or Provider internals, and Access never reads the Environment schema directly.
 
+Container browser terminals use the additive AccessGrant-scoped
+`ConsoleCapability` contract. Discovery returns the Environment-authoritative
+revision, class and exact Resource-verified Work Lease fence. Issuance requires
+BFF session, strict Origin, CSRF, `Idempotency-Key`, strong `If-Match` and exact
+body fences. The 30-second locator is redeemed once with a path-scoped HttpOnly
+cookie. Terminal input and output are binary WebSocket frames; bounded resize
+is the only browser JSON text control. Environment resolves the immutable
+`TerminalSpec` and runtime Pod itself and never accepts a browser/Access
+supplied command, Pod address or Kubernetes credential.
+
 ## Generation and compatibility
 
 ```sh

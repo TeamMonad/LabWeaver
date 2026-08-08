@@ -43,6 +43,15 @@ NATS_SECRET_KEYS = {
     "nats-client.crt": "nats-client.crt",
     "nats-client.key": "nats-client.key",
 }
+PLATFORM_ROTATION_IDENTITIES = {
+    "environment-service": "environment-service-secrets",
+    "container-executor": "container-executor-secrets",
+}
+PLATFORM_SECRET_KEYS = {
+    "mtls-ca.pem": "ca.pem",
+    "tls.crt": "certificate.pem",
+    "tls.key": "key.pem",
+}
 JWT_PATTERN = re.compile(
     rb"-----BEGIN NATS USER JWT-----\s+([A-Za-z0-9._-]+)"
 )
@@ -165,6 +174,18 @@ def _replace_client(
     for data_key, filename in NATS_SECRET_KEYS.items():
         data[data_key] = base64.b64encode(
             _read(client_directory / filename)
+        ).decode("ascii")
+
+
+def _replace_platform_identity(
+    secret: dict[str, Any], identity_directory: Path
+) -> None:
+    data = secret["data"]
+    if not set(PLATFORM_SECRET_KEYS).issubset(data):
+        raise RotationError("LW_NATS_ROTATION_BUNDLE_INVALID")
+    for data_key, filename in PLATFORM_SECRET_KEYS.items():
+        data[data_key] = base64.b64encode(
+            _read(identity_directory / filename)
         ).decode("ascii")
 
 
@@ -316,6 +337,7 @@ def prepare(
         ).decode("ascii")
 
     clients = authority / "nats-clients"
+    platform_identities = authority / "platform-identities"
     identity_records: list[dict[str, Any]] = []
     account_public = None
     for identity, secret_name in APPLICATION_IDENTITIES.items():
@@ -337,6 +359,11 @@ def prepare(
             _object(application_bundle, "Secret", secret_name),
             clients / identity,
         )
+        if identity in PLATFORM_ROTATION_IDENTITIES:
+            _replace_platform_identity(
+                _object(application_bundle, "Secret", secret_name),
+                platform_identities / identity,
+            )
 
     resource_claims = _credential_claims(
         clients / "resource-service" / "nats.creds"

@@ -7,15 +7,21 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
+use contracts::access::ConsoleLeaseFence;
+use contracts::authoring::{EnvironmentClass, EnvironmentRuntimeSpec, RuntimeKind};
 use contracts::environment::{
     DesiredEnvironmentState, EndpointHealth, EnvironmentAccessSubjectKind,
+    EnvironmentConsoleEligibility, EnvironmentConsoleEligibilityRequest,
     EnvironmentEndpointEligibility, EnvironmentEndpointEligibilityRequest, EnvironmentInstance,
     EnvironmentOwnerResolution, EnvironmentOwnerResolutionRequest, ObservedEnvironmentState,
 };
 use contracts::http::StrongEtag;
 use contracts::{DiagnosticCode, EnvironmentId, EventId, ProblemDetails, UtcTimestamp};
 
-use crate::{EnvironmentStoreError, PgEnvironmentStore};
+use crate::{
+    ContainerReleaseResolver, EnvironmentStoreError, PgEnvironmentStore, PgReleaseProjectionStore,
+    ReleaseProjectionError,
+};
 
 /// Peer identity produced only after the serving TLS layer verifies the client certificate.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -77,13 +83,22 @@ impl OwnerResolverPolicy {
 #[derive(Clone)]
 pub struct OwnerResolver {
     store: PgEnvironmentStore,
+    releases: PgReleaseProjectionStore,
     policy: OwnerResolverPolicy,
 }
 
 impl OwnerResolver {
     #[must_use]
-    pub fn new(store: PgEnvironmentStore, policy: OwnerResolverPolicy) -> Self {
-        Self { store, policy }
+    pub fn new(
+        store: PgEnvironmentStore,
+        releases: PgReleaseProjectionStore,
+        policy: OwnerResolverPolicy,
+    ) -> Self {
+        Self {
+            store,
+            releases,
+            policy,
+        }
     }
 
     pub async fn resolve(
@@ -123,6 +138,107 @@ impl OwnerResolver {
             })?;
         authorize_endpoint_eligibility(&instance, request, authority_now)
     }
+
+    pub async fn resolve_console_eligibility(
+        &self,
+        caller: &VerifiedCallerIdentity,
+        request: &EnvironmentConsoleEligibilityRequest,
+    ) -> Result<EnvironmentConsoleEligibility, OwnerResolverError> {
+        if !self.policy.allows(caller) {
+            return Err(OwnerResolverError::CallerUntrusted);
+        }
+        let (instance, authority_now) = self
+            .store
+            .load_for_owner_resolution(request.environment_id)
+            .await
+            .map_err(|error| match error {
+                EnvironmentStoreError::EnvironmentNotFound => OwnerResolverError::ScopeMismatch,
+                other => OwnerResolverError::Unavailable(other),
+            })?;
+        authorize_console_instance(&instance, request, authority_now)?;
+        let release = self
+            .releases
+            .resolve(instance.release_id, instance.release_version)
+            .await
+            .map_err(OwnerResolverError::ReleaseUnavailable)?;
+        if release.withdrawn_at.is_some()
+            || release.projection.release.course_id != instance.course_id
+            || release.projection.release.runtime_kind != RuntimeKind::Container
+            || release.projection.environment_spec.class != instance.class
+        {
+            return Err(OwnerResolverError::EnvironmentUnavailable);
+        }
+        let terminal = match &release.projection.environment_spec.runtime {
+            EnvironmentRuntimeSpec::Container {
+                terminal: Some(terminal),
+                ..
+            } => terminal.as_ref().clone(),
+            _ => return Err(OwnerResolverError::EnvironmentUnavailable),
+        };
+        let lease_fence = match instance.class {
+            EnvironmentClass::Experiment => None,
+            EnvironmentClass::Work => {
+                let authorization = instance
+                    .operation
+                    .lease_authorization
+                    .as_ref()
+                    .ok_or(OwnerResolverError::EnvironmentUnavailable)?;
+                if authorization.expires_at <= authority_now {
+                    return Err(OwnerResolverError::EnvironmentUnavailable);
+                }
+                Some(ConsoleLeaseFence {
+                    lease_id: authorization.lease_id,
+                    lease_revision: authorization.lease_revision,
+                    expires_at: authorization.expires_at,
+                })
+            }
+        };
+        let eligibility_expires_at = lease_fence
+            .as_ref()
+            .map_or(instance.eligibility_expires_at, |fence| {
+                std::cmp::min(instance.eligibility_expires_at, fence.expires_at)
+            });
+        let resolution = EnvironmentConsoleEligibility {
+            environment_id: instance.id,
+            course_id: instance.course_id,
+            owner_actor_id: instance.owner_id,
+            environment_class: instance.class,
+            runtime_kind: instance.runtime_kind,
+            environment_revision: instance.revision,
+            release_id: instance.release_id,
+            release_version: instance.release_version,
+            eligibility_expires_at,
+            lease_fence,
+            terminal,
+        };
+        resolution
+            .validate_for(request, authority_now)
+            .map_err(|_| OwnerResolverError::ResponseInvalid)?;
+        Ok(resolution)
+    }
+}
+
+fn authorize_console_instance(
+    instance: &EnvironmentInstance,
+    request: &EnvironmentConsoleEligibilityRequest,
+    now: UtcTimestamp,
+) -> Result<(), OwnerResolverError> {
+    if instance.id != request.environment_id
+        || instance.course_id != request.course_id
+        || (request.subject_kind == EnvironmentAccessSubjectKind::Owner
+            && instance.owner_id != request.actor_id)
+        || instance.revision != request.expected_revision
+    {
+        return Err(OwnerResolverError::ScopeMismatch);
+    }
+    if instance.desired_state != DesiredEnvironmentState::Running
+        || instance.observed_state != ObservedEnvironmentState::Ready
+        || instance.runtime_kind != RuntimeKind::Container
+        || instance.eligibility_expires_at <= now
+    {
+        return Err(OwnerResolverError::EnvironmentUnavailable);
+    }
+    Ok(())
 }
 
 /// Performs the fail-closed ownership decision against one authoritative aggregate.
@@ -219,7 +335,39 @@ pub fn owner_resolver_router(resolver: OwnerResolver) -> Router {
             "/internal/v1/environments/{environment_id}/endpoint-eligibility:resolve",
             post(resolve_endpoint_eligibility),
         )
+        .route(
+            "/internal/v1/environments/{environment_id}/console-eligibility:resolve",
+            post(resolve_console_eligibility),
+        )
         .with_state(resolver)
+}
+
+async fn resolve_console_eligibility(
+    State(resolver): State<OwnerResolver>,
+    path: Result<Path<EnvironmentId>, PathRejection>,
+    caller: Option<Extension<VerifiedCallerIdentity>>,
+    body: Bytes,
+) -> Result<Response, OwnerResolverError> {
+    let Path(environment_id) = path.map_err(|_| OwnerResolverError::RequestInvalid)?;
+    let request = contracts::parse_strict_json::<EnvironmentConsoleEligibilityRequest>(&body)
+        .map_err(|_| OwnerResolverError::RequestInvalid)?;
+    if request.environment_id != environment_id {
+        return Err(OwnerResolverError::ScopeMismatch);
+    }
+    let Extension(caller) = caller.ok_or(OwnerResolverError::CallerUntrusted)?;
+    let resolution = resolver
+        .resolve_console_eligibility(&caller, &request)
+        .await?;
+    let etag = StrongEtag::from_revision(resolution.environment_revision).header_value();
+    let mut response = Json(resolution).into_response();
+    response.headers_mut().insert(
+        header::ETAG,
+        HeaderValue::from_str(&etag).map_err(|_| OwnerResolverError::ResponseInvalid)?,
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
 }
 
 async fn resolve_endpoint_eligibility(
@@ -327,6 +475,8 @@ pub enum OwnerResolverError {
     EndpointUnavailable,
     #[error("LW_ENV_OWNER_RESOLVER_UNAVAILABLE")]
     Unavailable(EnvironmentStoreError),
+    #[error("LW_ENV_CONSOLE_RELEASE_UNAVAILABLE")]
+    ReleaseUnavailable(ReleaseProjectionError),
     #[error("LW_ENV_OWNER_RESPONSE_INVALID")]
     ResponseInvalid,
 }
@@ -359,6 +509,11 @@ impl OwnerResolverError {
             Self::Unavailable(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "LW_ENV_OWNER_RESOLVER_UNAVAILABLE",
+                true,
+            ),
+            Self::ReleaseUnavailable(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LW_ENV_CONSOLE_RELEASE_UNAVAILABLE",
                 true,
             ),
             Self::ResponseInvalid => (

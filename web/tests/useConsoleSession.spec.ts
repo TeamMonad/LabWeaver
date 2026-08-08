@@ -13,10 +13,10 @@ function makeCapability(overrides: Partial<ConsoleCapabilitySchema> = {}): Conso
     environmentId: 'env-1',
     environmentRevision: 5,
     kind: 'xterm',
-    connectionLocator: '/api/v1/console-sessions/session-1',
+    connectionLocator: '/connect/console/session-1',
     websocketSubprotocol: 'labweaver.console.xterm.v1',
     issuedAt: '2026-07-16T08:00:00.000Z',
-    expiresAt: '2026-07-16T09:00:00.000Z',
+    expiresAt: '2026-07-16T08:00:30.000Z',
     leaseFence: null,
     ...overrides,
   }

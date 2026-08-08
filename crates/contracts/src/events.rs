@@ -10,7 +10,7 @@ use crate::resource::{ResourceLease, ResourceRequest};
 use crate::submission::FrozenSubmission;
 use crate::supply_chain::{BuildRequest, EnvironmentTemplateRelease};
 use crate::{
-    AccessGrantId, ActorId, AgentRunId, BuildRequestId, CourseId, EnvironmentId,
+    AccessGrantId, ActorId, AgentRunId, BuildRequestId, ConsoleSessionId, CourseId, EnvironmentId,
     EvaluationReleaseId, EvaluationRunId, EvaluationStepRunId, EventId, FrozenSubmissionId,
     GatewaySessionId, ReleaseId, Revision, Sequence, Sha256Digest, SshPublicKeyId, UtcTimestamp,
 };
@@ -47,6 +47,8 @@ pub mod subjects {
     pub const ACCESS_SESSION_CLOSED: &str = "labweaver.access.session.closed.v1";
     pub const ACCESS_SESSION_TERMINATION_OVERDUE: &str =
         "labweaver.access.session.termination_overdue.v1";
+    pub const ACCESS_CONSOLE_SESSION_STATE_CHANGED: &str =
+        "labweaver.access.console_session.state_changed.v1";
     pub const SUBMISSION_FREEZE_REQUESTED: &str =
         "labweaver.evaluation.submission.freeze_requested.v1";
     pub const SUBMISSION_FROZEN: &str = "labweaver.evaluation.submission.frozen.v1";
@@ -323,6 +325,11 @@ pub const EVENT_CONTRACTS: &[EventContract] = &[
         schema_name: "access-session-termination-overdue",
     },
     EventContract {
+        subject: subjects::ACCESS_CONSOLE_SESSION_STATE_CHANGED,
+        event_type: subjects::ACCESS_CONSOLE_SESSION_STATE_CHANGED,
+        schema_name: "access-console-session-state-changed",
+    },
+    EventContract {
         subject: subjects::SUBMISSION_FREEZE_REQUESTED,
         event_type: subjects::SUBMISSION_FREEZE_REQUESTED,
         schema_name: "submission-freeze-requested",
@@ -503,6 +510,21 @@ pub struct GatewaySessionChanged {
     pub effective_at: UtcTimestamp,
     pub terminate_by: Option<UtcTimestamp>,
     pub reason_code: String,
+}
+
+/// Metadata-only console lifecycle event. Terminal bytes and credentials are never event data.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConsoleSessionChanged {
+    pub console_session_id: ConsoleSessionId,
+    pub access_grant_id: AccessGrantId,
+    pub access_grant_revision: Revision,
+    pub environment_id: EnvironmentId,
+    pub environment_revision: Revision,
+    pub state: crate::access::ConsoleSessionState,
+    pub effective_at: UtcTimestamp,
+    pub terminate_by: Option<UtcTimestamp>,
+    pub diagnostic_code: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

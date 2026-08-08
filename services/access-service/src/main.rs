@@ -1,5 +1,6 @@
 //! Access Service browser BFF entry points.
 
+mod console;
 mod grants;
 mod proxy;
 
@@ -23,8 +24,8 @@ use axum::{
 };
 use contracts::{
     AuthSession, AuthenticatedActor, AuthorizationDecision, AuthorizationDecisionRequest,
-    AuthorizationScope, CsrfTokenResponse, OperationScopeKind, Revision, UtcTimestamp,
-    environment::EnvironmentOwnerResolutionRequest, operation_authorization,
+    AuthorizationScope, CsrfTokenResponse, OperationScopeKind, Revision, Sha256Digest,
+    UtcTimestamp, environment::EnvironmentOwnerResolutionRequest, operation_authorization,
 };
 use hyper_util::{
     rt::{TokioExecutor, TokioIo},
@@ -48,6 +49,9 @@ struct AppState {
     pool: PgPool,
     key_ring: KeyRing,
     owner_resolver: EnvironmentOwnerResolverClient,
+    console_gateway: console::ConsoleGateway,
+    console_registry: console::ConsoleRegistry,
+    console_proxy_owner: String,
     control_proxy: proxy::ControlGatewayProxy,
     environment_proxy: proxy::ControlGatewayProxy,
     evaluation_proxy: proxy::ControlGatewayProxy,
@@ -77,15 +81,18 @@ async fn main() -> Result<(), StartupError> {
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let internal_listener = tokio::net::TcpListener::bind(internal_bind).await?;
     let mtls = load_mtls_server_config(&state.deployment.internal_mtls)?;
-    tokio::select! {
-        result = axum::serve(listener, router) => result.map_err(StartupError::from)?,
-        result = serve_internal_mtls(internal_listener, internal_router, mtls) => result?,
-        result = auth_cleanup_loop(Arc::clone(&state)) => result?,
-        result = grants::activation_loop(Arc::clone(&state)) => result?,
-        result = grants::maintenance_loop(Arc::clone(&state)) => result?,
-        result = grants::outbox_loop(Arc::clone(&state)) => result?,
-        result = grants::environment_revocation_loop(Arc::clone(&state)) => result?,
-    }
+    let result = tokio::select! {
+        result = axum::serve(listener, router) => result.map_err(StartupError::from),
+        result = serve_internal_mtls(internal_listener, internal_router, mtls) => result,
+        result = auth_cleanup_loop(Arc::clone(&state)) => result,
+        result = grants::activation_loop(Arc::clone(&state)) => result.map_err(StartupError::from),
+        result = grants::maintenance_loop(Arc::clone(&state)) => result.map_err(StartupError::from),
+        result = grants::outbox_loop(Arc::clone(&state)) => result.map_err(StartupError::from),
+        result = grants::environment_revocation_loop(Arc::clone(&state)) => result.map_err(StartupError::from),
+        result = grants::environment_state_loop(Arc::clone(&state)) => result.map_err(StartupError::from),
+    };
+    state.console_registry.cancel_all().await;
+    result?;
     Ok(())
 }
 
@@ -125,6 +132,11 @@ fn browser_router(state: Arc<AppState>) -> Router {
             "/api/v1/access-grants/{grant_id}/revoke",
             post(grants::revoke_access_grant),
         )
+        .route(
+            "/api/v1/access-grants/{grant_id}/console-capabilities",
+            get(console::list_capabilities).post(console::issue_capability),
+        )
+        .route("/connect/console/{opaque}", get(console::connect))
         .route(
             "/api/v1/courses/{*control_path}",
             axum::routing::any(proxy::forward_control),
@@ -322,6 +334,13 @@ async fn build_app_state(
         ),
         deployment.transport_security,
     )?;
+    let console_gateway = console::ConsoleGateway::new(
+        &resolver_config.resolver_uri,
+        &resolver_ca,
+        &resolver_certificate,
+        &resolver_key,
+    )
+    .map_err(|_| StartupError::Config)?;
     let control_proxy = build_control_proxy(&deployment)?;
     let environment_proxy = build_service_proxy(&deployment, &deployment.environment_gateway)?;
     let evaluation_proxy = build_service_proxy(&deployment, &deployment.evaluation_gateway)?;
@@ -362,6 +381,9 @@ async fn build_app_state(
         pool,
         key_ring,
         owner_resolver,
+        console_gateway,
+        console_registry: console::ConsoleRegistry::default(),
+        console_proxy_owner: format!("access-proxy-{}", Uuid::now_v7()),
         control_proxy,
         environment_proxy,
         evaluation_proxy,
@@ -635,6 +657,13 @@ async fn backchannel_logout(
     let now = OffsetDateTime::now_utc();
     let expires_at = OffsetDateTime::from_unix_timestamp(claims.exp)
         .map_err(|_| ApiError::unauthorized("LW_AUTH_TOKEN_INVALID"))?;
+    let session_ids = sqlx::query_scalar::<_, Uuid>(
+        "SELECT session_id FROM access.bff_sessions WHERE oidc_sid_sha256=$1 AND revoked_at IS NULL",
+    )
+    .bind(Sha256Digest::of_bytes(sid.as_bytes()).to_string())
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
     consume_backchannel_logout(
         &state.pool,
         state.config.issuer.as_str(),
@@ -645,6 +674,9 @@ async fn backchannel_logout(
     )
     .await
     .map_err(ApiError::from)?;
+    for session_id in session_ids {
+        console::terminate_bff_sessions(&state, session_id, "LW_AUTH_SESSION_REVOKED").await?;
+    }
     metrics::counter!("labweaver_auth_sessions", "event" => "backchannel_logout").increment(1);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -941,6 +973,7 @@ async fn logout(
     )
     .await
     .map_err(ApiError::from)?;
+    console::terminate_bff_sessions(&state, session_id, "LW_AUTH_SESSION_REVOKED").await?;
     let mut response = Redirect::to(logout_url.as_str()).into_response();
     response
         .headers_mut()

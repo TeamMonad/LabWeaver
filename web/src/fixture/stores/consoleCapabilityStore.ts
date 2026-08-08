@@ -55,6 +55,8 @@ export function issueCapability(
   kind: ConsoleKind,
   leaseFence?: ConsoleCapabilityAvailabilitySchema['leaseFence'],
 ): ConsoleCapabilitySchema {
+  const issuedAt = nowIso()
+  const expiresAt = new Date(Date.parse(issuedAt) + 30_000).toISOString()
   const capability: ConsoleCapabilitySchema = {
     id: nextUuid7('consolecap'),
     accessGrantId: grantId,
@@ -63,10 +65,10 @@ export function issueCapability(
     environmentId: environment.id,
     environmentRevision: environment.revision,
     kind,
-    connectionLocator: `/api/v1/console-sessions/${nextUuid7('session')}`,
+    connectionLocator: `/connect/console/${nextUuid7('session')}`,
     websocketSubprotocol: `labweaver.console.${kind}.v1`,
-    issuedAt: nowIso(),
-    expiresAt: environment.eligibilityExpiresAt,
+    issuedAt,
+    expiresAt,
     leaseFence: leaseFence ?? null,
   }
   const existing = issuedByGrant.get(grantId) ?? []

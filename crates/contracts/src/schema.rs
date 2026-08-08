@@ -214,6 +214,14 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::environment::EnvironmentEndpointEligibility
     );
     document!(
+        "schemas/contracts/v1/internal/environment-console-eligibility-request.schema.json",
+        crate::environment::EnvironmentConsoleEligibilityRequest
+    );
+    document!(
+        "schemas/contracts/v1/internal/environment-console-eligibility.schema.json",
+        crate::environment::EnvironmentConsoleEligibility
+    );
+    document!(
         "schemas/contracts/v1/environment-owner-resolver-client-config.schema.json",
         crate::environment::EnvironmentOwnerResolverClientConfig
     );
@@ -232,6 +240,18 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/console-capability.schema.json",
         crate::access::ConsoleCapability
+    );
+    document!(
+        "schemas/contracts/v1/console-client-control.schema.json",
+        crate::access::ConsoleClientControl
+    );
+    document!(
+        "schemas/contracts/v1/console-session.schema.json",
+        crate::access::ConsoleSession
+    );
+    document!(
+        "schemas/contracts/v1/terminal-spec.schema.json",
+        crate::authoring::TerminalSpec
     );
     document!(
         "schemas/contracts/v1/http/environment-access-grant-page.schema.json",
@@ -581,6 +601,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/events/access-session-termination-overdue.schema.json",
         CloudEvent<events::GatewaySessionChanged>
+    );
+    document!(
+        "schemas/contracts/v1/events/access-console-session-state-changed.schema.json",
+        CloudEvent<events::ConsoleSessionChanged>
     );
     document!(
         "schemas/contracts/v1/events/submission-freeze-requested.schema.json",

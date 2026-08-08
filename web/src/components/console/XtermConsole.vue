@@ -16,6 +16,7 @@ interface Props {
 }
 
 const props = defineProps<Props>()
+const emit = defineEmits<{ diagnostic: [code: string] }>()
 
 const terminalEl = ref<HTMLDivElement | null>(null)
 let terminal: Terminal | null = null
@@ -30,14 +31,21 @@ function handleData(data: string | ArrayBuffer) {
 defineExpose({ handleData })
 
 function fitAndNotify() {
-  if (!terminal || !fitAddon) return
+  if (!terminal || !fitAddon || !terminalEl.value) return
+  if (terminalEl.value.clientWidth <= 0 || terminalEl.value.clientHeight <= 0) {
+    emit('diagnostic', 'CONSOLE_LAYOUT_NOT_READY')
+    return
+  }
   try {
     fitAddon.fit()
-    if (terminal.cols > 0 && terminal.rows > 0) {
-      props.sendResize(terminal.cols, terminal.rows)
-    }
   } catch {
-    // fit() can throw before layout settles; the ResizeObserver will retry.
+    emit('diagnostic', 'CONSOLE_LAYOUT_NOT_READY')
+    return
+  }
+  if (terminal.cols > 0 && terminal.rows > 0) {
+    props.sendResize(terminal.cols, terminal.rows)
+  } else {
+    emit('diagnostic', 'CONSOLE_RESIZE_INVALID')
   }
 }
 

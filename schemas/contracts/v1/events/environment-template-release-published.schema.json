@@ -208,6 +208,16 @@
               "maximum": 65535,
               "minimum": 0,
               "type": "integer"
+            },
+            "terminal": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TerminalSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -736,6 +746,30 @@
     "Sha256Digest": {
       "description": "Canonical lowercase SHA-256 digest.",
       "type": "string"
+    },
+    "TerminalSpec": {
+      "additionalProperties": false,
+      "description": "Bounded direct-exec terminal owned by an immutable Container release.",
+      "properties": {
+        "args": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "executable": {
+          "type": "string"
+        },
+        "workingDirectory": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "executable",
+        "workingDirectory"
+      ],
+      "type": "object"
     },
     "UtcTimestamp": {
       "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",

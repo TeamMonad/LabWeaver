@@ -19,7 +19,7 @@ describe('console locator one-time consumption (ADR 0012)', () => {
 
   it('allows the first consumption and denies the second', async () => {
     const factory = createFixtureConsoleSocketFactory()
-    const locator = '/api/v1/console-sessions/session-1'
+    const locator = '/connect/console/session-1'
 
     const first = connectWith(factory, locator)
     await new Promise((r) => setTimeout(r, 0))
@@ -32,7 +32,7 @@ describe('console locator one-time consumption (ADR 0012)', () => {
   })
 
   it('consumeLocator returns true once and false afterwards', () => {
-    expect(consumeLocator('/api/v1/console-sessions/session-9')).toBe(true)
-    expect(consumeLocator('/api/v1/console-sessions/session-9')).toBe(false)
+    expect(consumeLocator('/connect/console/session-9')).toBe(true)
+    expect(consumeLocator('/connect/console/session-9')).toBe(false)
   })
 })

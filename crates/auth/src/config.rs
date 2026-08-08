@@ -93,6 +93,9 @@ pub struct GrantRuntimeFileConfig {
     pub worker_lease_seconds: u64,
     pub max_keys_per_actor: u16,
     pub max_endpoints_per_grant: u16,
+    pub max_console_sessions: u16,
+    pub environment_state_stream: String,
+    pub environment_state_consumer: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -396,6 +399,9 @@ impl AccessAuthFile {
             && (5..=300).contains(&self.grants.worker_lease_seconds)
             && (1..=100).contains(&self.grants.max_keys_per_actor)
             && (1..=100).contains(&self.grants.max_endpoints_per_grant)
+            && (1..=1_000).contains(&self.grants.max_console_sessions)
+            && self.grants.environment_state_stream == "LABWEAVER_ENVIRONMENT_COMMANDS"
+            && self.grants.environment_state_consumer == "access-environment-state-v1"
             && self.nats.server.starts_with("tls://")
             && [
                 self.nats.ca_certificate_file.as_str(),
@@ -847,6 +853,9 @@ grants:
   worker_lease_seconds: 30
   max_keys_per_actor: 10
   max_endpoints_per_grant: 16
+  max_console_sessions: 128
+  environment_state_stream: LABWEAVER_ENVIRONMENT_COMMANDS
+  environment_state_consumer: access-environment-state-v1
 nats:
   server: tls://nats.example.test:4222
   ca_certificate_file: nats-ca

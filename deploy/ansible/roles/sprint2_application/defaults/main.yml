@@ -76,6 +76,9 @@ sprint2_application_nats_consumers:
   - name: environment-service-v1
     stream: LABWEAVER_ENVIRONMENT_COMMANDS
     filters: [labweaver.environment.instance.lifecycle_requested.v1]
+  - name: access-environment-state-v1
+    stream: LABWEAVER_ENVIRONMENT_COMMANDS
+    filters: [labweaver.environment.instance.state_changed.v1]
   - name: environment-release-v1
     stream: LABWEAVER_RELEASES
     filters:

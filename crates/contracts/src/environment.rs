@@ -5,7 +5,8 @@ use std::collections::BTreeSet;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::authoring::{EnvironmentClass, RuntimeKind};
+use crate::access::{ConsoleKind, ConsoleLeaseFence};
+use crate::authoring::{EnvironmentClass, RuntimeKind, TerminalSpec};
 use crate::{
     ActorId, CapacityClaimId, CourseId, DiagnosticCode, EndpointId, EnvironmentId, LeaseId,
     OperationId, ProjectId, ReleaseId, ResourceRequestId, Revision, Sha256Digest, StreamSequence,
@@ -856,6 +857,8 @@ pub enum EnvironmentError {
     InvalidResolverConfiguration,
     #[error("endpoint eligibility response is incomplete, stale, unhealthy, or scope-mismatched")]
     EndpointEligibilityInvalid,
+    #[error("console eligibility response is incomplete, stale, or scope-mismatched")]
+    ConsoleEligibilityInvalid,
     #[error("environment diagnostic code is not a stable LW_* identity")]
     InvalidDiagnosticCode,
     #[error("public environment operation snapshot is internally inconsistent")]
@@ -931,6 +934,66 @@ pub struct EnvironmentEndpointEligibilityRequest {
     pub subject_kind: EnvironmentAccessSubjectKind,
     pub expected_revision: Revision,
     pub endpoint_ids: Vec<EndpointId>,
+}
+
+/// Access-to-Environment request for one browser-console admission snapshot.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentConsoleEligibilityRequest {
+    pub environment_id: EnvironmentId,
+    pub course_id: CourseId,
+    pub actor_id: ActorId,
+    pub subject_kind: EnvironmentAccessSubjectKind,
+    pub expected_revision: Revision,
+    pub kind: ConsoleKind,
+}
+
+/// Environment-authoritative, credential-free console admission facts.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentConsoleEligibility {
+    pub environment_id: EnvironmentId,
+    pub course_id: CourseId,
+    pub owner_actor_id: ActorId,
+    pub environment_class: EnvironmentClass,
+    pub runtime_kind: RuntimeKind,
+    pub environment_revision: Revision,
+    pub release_id: ReleaseId,
+    pub release_version: u64,
+    pub eligibility_expires_at: UtcTimestamp,
+    pub lease_fence: Option<ConsoleLeaseFence>,
+    pub terminal: TerminalSpec,
+}
+
+impl EnvironmentConsoleEligibility {
+    pub fn validate_for(
+        &self,
+        request: &EnvironmentConsoleEligibilityRequest,
+        now: UtcTimestamp,
+    ) -> Result<(), EnvironmentError> {
+        let lease_valid = match (self.environment_class, &self.lease_fence) {
+            (EnvironmentClass::Experiment, None) => true,
+            (EnvironmentClass::Work, Some(fence)) => {
+                fence.expires_at >= self.eligibility_expires_at
+            }
+            _ => false,
+        };
+        if request.kind != ConsoleKind::Xterm
+            || self.runtime_kind != RuntimeKind::Container
+            || self.environment_id != request.environment_id
+            || self.course_id != request.course_id
+            || (request.subject_kind == EnvironmentAccessSubjectKind::Owner
+                && self.owner_actor_id != request.actor_id)
+            || self.environment_revision != request.expected_revision
+            || self.release_version == 0
+            || self.eligibility_expires_at <= now
+            || !lease_valid
+            || self.terminal.validate().is_err()
+        {
+            return Err(EnvironmentError::ConsoleEligibilityInvalid);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]

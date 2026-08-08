@@ -14,8 +14,8 @@ use contracts::environment::{
 use contracts::{ActorId, CourseId};
 use environment_service::{
     LifecycleCommand, MtlsConfig, MtlsServerError, OwnerResolver, OwnerResolverPolicy,
-    PgEnvironmentStore, authorize_owner_resolution, owner_resolver_router, plan_command,
-    serve_owner_resolver_mtls,
+    PgEnvironmentStore, PgReleaseProjectionStore, authorize_owner_resolution,
+    owner_resolver_router, plan_command, serve_owner_resolver_mtls,
 };
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
@@ -60,6 +60,7 @@ async fn resolver_uses_real_postgres_and_verified_rotatable_mtls_identity()
     let store = PgEnvironmentStore::new(pool.clone());
     let resolver = OwnerResolver::new(
         store.clone(),
+        PgReleaseProjectionStore::new(pool.clone()),
         OwnerResolverPolicy::new([ALLOWED_CALLER_SAN])?,
     );
     let (address, shutdown, server) = start_server(

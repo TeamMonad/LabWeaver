@@ -125,6 +125,7 @@ class NatsAuthorityRotationTests(unittest.TestCase):
             private.mkdir()
             authority = private / "authority"
             clients = authority / "nats-clients"
+            platform_identities = authority / "platform-identities"
             server_config = (
                 authority / "render-input/configmaps/nats-config"
             )
@@ -212,6 +213,14 @@ class NatsAuthorityRotationTests(unittest.TestCase):
                         f"{identity}-{filename}".encode()
                     )
 
+            for identity in ROTATION.PLATFORM_ROTATION_IDENTITIES:
+                directory = platform_identities / identity
+                directory.mkdir(parents=True)
+                for filename in ROTATION.PLATFORM_SECRET_KEYS.values():
+                    (directory / filename).write_bytes(
+                        f"{identity}-{filename}".encode()
+                    )
+
             foundation = private / "foundation.yaml"
             foundation.write_text(
                 yaml.safe_dump_all(
@@ -249,6 +258,10 @@ class NatsAuthorityRotationTests(unittest.TestCase):
                                 **{
                                     key: "old"
                                     for key in ROTATION.NATS_SECRET_KEYS
+                                },
+                                **{
+                                    key: "old-platform"
+                                    for key in ROTATION.PLATFORM_SECRET_KEYS
                                 },
                                 "unrelated": "preserved",
                             },
@@ -312,6 +325,8 @@ class NatsAuthorityRotationTests(unittest.TestCase):
             for document in rendered:
                 self.assertEqual(document["data"]["unrelated"], "preserved")
                 self.assertNotEqual(document["data"]["nats.creds"], "old")
+                if document["metadata"]["name"] in ROTATION.PLATFORM_ROTATION_IDENTITIES.values():
+                    self.assertNotEqual(document["data"]["tls.crt"], "old-platform")
 
     def test_rotation_refuses_non_private_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

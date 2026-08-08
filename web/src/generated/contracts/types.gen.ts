@@ -12,6 +12,10 @@ export type AuthorizationDecisionRequest = AuthorizationDecisionRequestSchema;
 
 export type CsrfTokenResponse = CsrfTokenResponseSchema;
 
+export type EvaluationRelease = EvaluationReleaseSchema;
+
+export type EvaluationRun = EvaluationRunSchema;
+
 export type InternalAgentBuildCancellationRequest = InternalAgentBuildCancellationRequestSchema;
 
 export type InternalAgentBuildCancellationResult = InternalAgentBuildCancellationResultSchema;
@@ -22,9 +26,17 @@ export type InternalAgentRunMutationRequest = InternalAgentRunMutationRequestSch
 
 export type InternalAgentRunOutcome = InternalAgentRunOutcomeSchema;
 
+export type InternalCompleteEvaluationStepRequest = InternalCompleteEvaluationStepRequestSchema;
+
 export type InternalCreateAgentRunRequest = InternalCreateAgentRunRequestSchema;
 
+export type InternalCreateEvaluationRunRequest = InternalCreateEvaluationRunRequestSchema;
+
+export type InternalEvaluationRunMutationRequest = InternalEvaluationRunMutationRequestSchema;
+
 export type InternalImageArtifactResolution = InternalImageArtifactResolutionSchema;
+
+export type InternalPublishEvaluationReleaseRequest = InternalPublishEvaluationReleaseRequestSchema;
 
 export type OperationAccepted = {
     operationId: string;
@@ -1273,6 +1285,586 @@ export type StreamSequence = string;
 export type EnvironmentOperationSnapshotSchemaUtcTimestamp = string;
 
 /**
+ * EvaluationRelease
+ *
+ * Immutable release of one validated `EvaluationSpec`.
+ */
+export type EvaluationReleaseSchema = {
+    approvalId: EvaluationReleaseSchemaApprovalId;
+    approvalRevision: EvaluationReleaseSchemaRevision;
+    approvalSha256: EvaluationReleaseSchemaSha256Digest;
+    candidateId: EvaluationReleaseSchemaCandidateId;
+    candidateRevision: EvaluationReleaseSchemaRevision;
+    candidateSha256: EvaluationReleaseSchemaSha256Digest;
+    courseId: EvaluationReleaseSchemaCourseId;
+    evaluationSpec: EvaluationSpec;
+    evaluationSpecSha256: EvaluationReleaseSchemaSha256Digest;
+    id: EvaluationReleaseId;
+    publishedAt: EvaluationReleaseSchemaUtcTimestamp;
+    publishedBy: EvaluationReleaseSchemaActorId;
+    revision: EvaluationReleaseSchemaRevision;
+    runtimeIdentity: EvaluationRuntimeIdentity;
+    schemaVersion: string;
+    state: EvaluationReleaseState;
+    withdrawalDiagnosticCode?: EvaluationReleaseSchemaDiagnosticCode | null;
+    withdrawnAt?: EvaluationReleaseSchemaUtcTimestamp | null;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type EvaluationReleaseSchemaActorId = string;
+
+/**
+ * Preserve the advisory failure without changing deterministic results.
+ */
+export type AdvisoryFailurePolicy = 'continue_advisory';
+
+/**
+ * Emit a `goal-review/v1` assessment.
+ */
+export type AdvisoryOutputMode = 'goal_assessment';
+
+/**
+ * Reviews allowlisted submission paths without producing a score.
+ */
+export type AdvisoryRunnerSpec = {
+    /**
+     * Submission-relative paths visible to the LLM.
+     */
+    include: Array<string>;
+    kind: 'llm_review';
+    /**
+     * Versioned advisory output shape.
+     */
+    outputMode: AdvisoryOutputMode;
+    /**
+     * Immutable advisory rubric locator.
+     */
+    rubric: string;
+};
+
+/**
+ * Required Gate status used by deterministic aggregation.
+ */
+export type AggregationGate = {
+    requiredStatus: RequiredStatus;
+    step: string;
+};
+
+/**
+ * Checked sum of deterministic Score steps.
+ */
+export type AggregationKind = 'deterministic_sum';
+
+/**
+ * Pure deterministic score aggregation contract.
+ */
+export type AggregationSpec = {
+    gates: Array<AggregationGate>;
+    kind: AggregationKind;
+    maxScore: number;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ApprovalId`.
+ */
+export type EvaluationReleaseSchemaApprovalId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CandidateId`.
+ */
+export type EvaluationReleaseSchemaCandidateId = string;
+
+/**
+ * Deterministic Checker configurations frozen for v1.
+ */
+export type CheckerSpec = {
+    kind: 'exact';
+} | {
+    kind: 'token';
+} | {
+    /**
+     * Required exit code.
+     */
+    expected: number;
+    kind: 'exit_code';
+} | {
+    kind: 'json_schema';
+    /**
+     * Immutable schema locator.
+     */
+    schemaRef: string;
+} | {
+    /**
+     * Required service state.
+     */
+    expected: ExpectedServiceState;
+    kind: 'service_state';
+    /**
+     * Stable service name.
+     */
+    service: string;
+};
+
+/**
+ * Supported P0 submission collectors.
+ */
+export type CollectorSpec = {
+    /**
+     * Excluded submission-relative paths.
+     */
+    exclude?: Array<string>;
+    /**
+     * Included submission-relative paths.
+     */
+    include: Array<string>;
+    kind: 'workspace_snapshot';
+    /**
+     * Maximum collected bytes.
+     */
+    maxBytes: number;
+} | {
+    /**
+     * Named facts to collect.
+     */
+    facts: Array<string>;
+    kind: 'system_facts';
+    /**
+     * Maximum collected bytes.
+     */
+    maxBytes: number;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type EvaluationReleaseSchemaCourseId = string;
+
+/**
+ * Deterministic Runner configurations frozen for P0 OJ and Linux evaluation.
+ */
+export type DeterministicRunnerSpec = {
+    kind: 'file_assertion';
+    /**
+     * Required submission-relative files.
+     */
+    requiredFiles: Array<string>;
+} | {
+    /**
+     * Submission-relative program input.
+     */
+    input: string;
+    kind: 'program';
+    /**
+     * Mandatory execution limits.
+     */
+    limits: ExecutionLimits;
+    /**
+     * Compile or test phase.
+     */
+    phase: ProgramPhase;
+    /**
+     * Deterministic test groups used by the test phase.
+     */
+    testGroups?: Array<TestGroup>;
+    /**
+     * Explicit approved toolchain binding.
+     */
+    toolchainProfile: string;
+} | {
+    /**
+     * Facts expected from the probe.
+     */
+    assertions: Array<FactAssertion>;
+    kind: 'ansible_probe';
+    /**
+     * Modules requested from the frozen P0 allowlist.
+     */
+    moduleAllowlist: Array<string>;
+    /**
+     * Explicit approved playbook binding.
+     */
+    playbookProfile: string;
+    /**
+     * Must remain true in v1.
+     */
+    readOnly: boolean;
+};
+
+/**
+ * Stable machine-readable diagnostic code.
+ *
+ * Consumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so
+ * additive diagnostics do not force a wire-version change.
+ */
+export type EvaluationReleaseSchemaDiagnosticCode = string;
+
+export type EvaluationApiVersion = 'evaluation.labweaver.io/v1';
+
+/**
+ * Submission, step, aggregation, and review decomposition of an evaluation.
+ */
+export type EvaluationBody = {
+    aggregation: AggregationSpec;
+    review: ReviewPolicy;
+    steps: Array<EvaluationStep>;
+    submission: SubmissionSpec;
+};
+
+export type EvaluationKind = 'EvaluationSpec';
+
+/**
+ * Stable name and version of an evaluation definition.
+ */
+export type EvaluationMetadata = {
+    name: string;
+    version: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `EvaluationReleaseId`.
+ */
+export type EvaluationReleaseId = string;
+
+/**
+ * Public release lifecycle.
+ */
+export type EvaluationReleaseState = 'active' | 'withdrawn';
+
+/**
+ * Immutable build and deployment identity that must match every run using the release.
+ */
+export type EvaluationRuntimeIdentity = {
+    /**
+     * Effective non-secret runtime configuration identity.
+     */
+    configurationSha256: EvaluationReleaseSchemaSha256Digest;
+    /**
+     * Checked-in Migration catalog identity.
+     */
+    migrationCatalogSha256: EvaluationReleaseSchemaSha256Digest;
+    /**
+     * Approved problem package identity.
+     */
+    packageSha256: EvaluationReleaseSchemaSha256Digest;
+    /**
+     * Explicit runtime provider binding chosen by Control and enforced by Evaluation.
+     */
+    providerBinding: string;
+    /**
+     * Digest-pinned runner image reference.
+     */
+    runnerImage: string;
+    /**
+     * Runtime artifact identity, such as the worker binary or image manifest digest.
+     */
+    runtimeArtifactSha256: EvaluationReleaseSchemaSha256Digest;
+    /**
+     * Clean source tree or source bundle identity.
+     */
+    sourceSha256: EvaluationReleaseSchemaSha256Digest;
+};
+
+/**
+ * Versioned evaluation definition shared by OJ and Linux system experiments.
+ */
+export type EvaluationSpec = {
+    apiVersion: EvaluationApiVersion;
+    kind: EvaluationKind;
+    metadata: EvaluationMetadata;
+    spec: EvaluationBody;
+};
+
+/**
+ * A role-specific evaluation step.
+ */
+export type EvaluationStep = {
+    checker: CheckerSpec;
+    dependsOn?: Array<string>;
+    failurePolicy: GateFailurePolicy;
+    id: string;
+    role: 'gate';
+    runner: DeterministicRunnerSpec;
+} | {
+    checker: CheckerSpec;
+    dependsOn?: Array<string>;
+    failurePolicy: ScoreFailurePolicy;
+    id: string;
+    role: 'score';
+    runner: DeterministicRunnerSpec;
+    score: ScoreSpec;
+} | {
+    dependsOn?: Array<string>;
+    failurePolicy: AdvisoryFailurePolicy;
+    id: string;
+    role: 'advisory';
+    runner: AdvisoryRunnerSpec;
+};
+
+/**
+ * Resource and output limits for a program Runner.
+ */
+export type ExecutionLimits = {
+    memoryBytes: number;
+    outputBytes: number;
+    wallTimeSeconds: number;
+};
+
+/**
+ * Expected state of a system service.
+ */
+export type ExpectedServiceState = 'active' | 'inactive';
+
+/**
+ * Expected fact emitted by a Linux probe.
+ */
+export type FactAssertion = {
+    fact: string;
+};
+
+/**
+ * Stop downstream deterministic execution.
+ */
+export type GateFailurePolicy = 'stop';
+
+/**
+ * Conditions that force manual teacher review.
+ */
+export type ManualReviewReason = 'infrastructureError' | 'invalidEvidence';
+
+/**
+ * Approved program Runner phase.
+ */
+export type ProgramPhase = 'compile' | 'test';
+
+/**
+ * The Gate must pass.
+ */
+export type RequiredStatus = 'passed';
+
+/**
+ * Mandatory approval and manual-review policy.
+ */
+export type ReviewPolicy = {
+    forceManualWhen: Array<ManualReviewReason>;
+    teacherApprovalRequiredForRelease: true;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type EvaluationReleaseSchemaRevision = number;
+
+/**
+ * Failure behavior for a Score step.
+ */
+export type ScoreFailurePolicy = 'stop' | 'continue';
+
+/**
+ * Maximum contribution of a deterministic Score step.
+ */
+export type ScoreSpec = {
+    max: number;
+};
+
+/**
+ * Canonical lowercase SHA-256 digest.
+ */
+export type EvaluationReleaseSchemaSha256Digest = string;
+
+/**
+ * Submission collection boundary used before evaluation starts.
+ */
+export type SubmissionSpec = {
+    collector: CollectorSpec;
+    llmReadable: Array<string>;
+};
+
+/**
+ * One deterministic program test group.
+ */
+export type TestGroup = {
+    maxPoints: number;
+    name: string;
+    source: string;
+};
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type EvaluationReleaseSchemaUtcTimestamp = string;
+
+/**
+ * EvaluationRun
+ *
+ * PostgreSQL-authoritative state for one evaluation run.
+ */
+export type EvaluationRunSchema = {
+    actorId: EvaluationRunSchemaActorId;
+    awardedScore: number;
+    cancellationRequested: boolean;
+    cleanupVerified: boolean;
+    completedAt?: EvaluationRunSchemaUtcTimestamp | null;
+    courseId: EvaluationRunSchemaCourseId;
+    createdAt: EvaluationRunSchemaUtcTimestamp;
+    diagnosticCode?: EvaluationRunSchemaDiagnosticCode | null;
+    frozenSubmissionId: FrozenSubmissionId;
+    id: EvaluationRunId;
+    identity: EvaluationRunIdentity;
+    maxScore: number;
+    releaseId: EvaluationRunSchemaEvaluationReleaseId;
+    releaseRevision: EvaluationRunSchemaRevision;
+    revision: EvaluationRunSchemaRevision;
+    schemaVersion: string;
+    state: EvaluationRunState;
+    steps: Array<EvaluationStepRun>;
+    updatedAt: EvaluationRunSchemaUtcTimestamp;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type EvaluationRunSchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type EvaluationRunSchemaCourseId = string;
+
+/**
+ * Stable machine-readable diagnostic code.
+ *
+ * Consumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so
+ * additive diagnostics do not force a wire-version change.
+ */
+export type EvaluationRunSchemaDiagnosticCode = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `EvaluationReleaseId`.
+ */
+export type EvaluationRunSchemaEvaluationReleaseId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `EvaluationRunId`.
+ */
+export type EvaluationRunId = string;
+
+/**
+ * Immutable run identity joining release, frozen submission and trace evidence.
+ */
+export type EvaluationRunIdentity = {
+    evaluationSpecSha256: EvaluationRunSchemaSha256Digest;
+    frozenSubmissionSha256: EvaluationRunSchemaSha256Digest;
+    releaseIdentitySha256: EvaluationRunSchemaSha256Digest;
+    runtimeIdentity: EvaluationRunSchemaEvaluationRuntimeIdentity;
+    sourceIdentitySha256: EvaluationRunSchemaSha256Digest;
+    traceId: string;
+};
+
+/**
+ * Public run lifecycle.
+ */
+export type EvaluationRunState = 'queued' | 'running' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled';
+
+/**
+ * Immutable build and deployment identity that must match every run using the release.
+ */
+export type EvaluationRunSchemaEvaluationRuntimeIdentity = {
+    /**
+     * Effective non-secret runtime configuration identity.
+     */
+    configurationSha256: EvaluationRunSchemaSha256Digest;
+    /**
+     * Checked-in Migration catalog identity.
+     */
+    migrationCatalogSha256: EvaluationRunSchemaSha256Digest;
+    /**
+     * Approved problem package identity.
+     */
+    packageSha256: EvaluationRunSchemaSha256Digest;
+    /**
+     * Explicit runtime provider binding chosen by Control and enforced by Evaluation.
+     */
+    providerBinding: string;
+    /**
+     * Digest-pinned runner image reference.
+     */
+    runnerImage: string;
+    /**
+     * Runtime artifact identity, such as the worker binary or image manifest digest.
+     */
+    runtimeArtifactSha256: EvaluationRunSchemaSha256Digest;
+    /**
+     * Clean source tree or source bundle identity.
+     */
+    sourceSha256: EvaluationRunSchemaSha256Digest;
+};
+
+/**
+ * Stable failure behavior copied from the immutable `EvaluationSpec` step.
+ */
+export type EvaluationStepFailurePolicy = 'stop' | 'continue' | 'continue_advisory';
+
+/**
+ * Stable role copied from the immutable `EvaluationSpec` step.
+ */
+export type EvaluationStepRole = 'gate' | 'score' | 'advisory';
+
+/**
+ * PostgreSQL-authoritative state for one declared evaluation step.
+ */
+export type EvaluationStepRun = {
+    awardedScore?: number | null;
+    cleanupVerified: boolean;
+    completedAt?: EvaluationRunSchemaUtcTimestamp | null;
+    currentAttempt: number;
+    dependsOn: Array<string>;
+    diagnosticCode?: EvaluationRunSchemaDiagnosticCode | null;
+    evidenceSha256?: EvaluationRunSchemaSha256Digest | null;
+    failurePolicy: EvaluationStepFailurePolicy;
+    id: EvaluationStepRunId;
+    maxScore: number;
+    position: number;
+    revision: EvaluationRunSchemaRevision;
+    role: EvaluationStepRole;
+    runId: EvaluationRunId;
+    startedAt?: EvaluationRunSchemaUtcTimestamp | null;
+    state: EvaluationStepRunState;
+    stepId: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `EvaluationStepRunId`.
+ */
+export type EvaluationStepRunId = string;
+
+/**
+ * Public step lifecycle.
+ */
+export type EvaluationStepRunState = 'pending' | 'running' | 'retryable' | 'succeeded' | 'failed' | 'cancelled' | 'skipped';
+
+/**
+ * Strongly typed UUIDv7 identifier for `FrozenSubmissionId`.
+ */
+export type FrozenSubmissionId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type EvaluationRunSchemaRevision = number;
+
+/**
+ * Canonical lowercase SHA-256 digest.
+ */
+export type EvaluationRunSchemaSha256Digest = string;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type EvaluationRunSchemaUtcTimestamp = string;
+
+/**
  * FrozenSubmission
  *
  * Manifest-authoritative immutable collection result.
@@ -1286,7 +1878,7 @@ export type FrozenSubmissionSchema = {
     environment: FrozenEnvironmentIdentity;
     files: Array<FrozenFile>;
     frozenAt: FrozenSubmissionSchemaUtcTimestamp;
-    id: FrozenSubmissionId;
+    id: FrozenSubmissionSchemaFrozenSubmissionId;
     manifestRevision: FrozenSubmissionSchemaRevision;
     manifestSha256: FrozenSubmissionSchemaSha256Digest;
     object: FrozenSubmissionSchemaArtifactRef;
@@ -1383,7 +1975,7 @@ export type FrozenFile = {
 /**
  * Strongly typed UUIDv7 identifier for `FrozenSubmissionId`.
  */
-export type FrozenSubmissionId = string;
+export type FrozenSubmissionSchemaFrozenSubmissionId = string;
 
 /**
  * Strongly typed UUIDv7 identifier for `PolicyId`.
@@ -2066,6 +2658,7 @@ export type EnvironmentRuntimeSpec = {
     kind: 'container';
     provider_binding: string;
     service_port: number;
+    terminal?: TerminalSpec | null;
 } | {
     base_disk: VirtualMachineBaseDisk;
     kind: 'virtual_machine';
@@ -2219,6 +2812,15 @@ export type RuntimeUserPolicy = 'non_root_required';
  * Canonical lowercase SHA-256 digest.
  */
 export type EnvironmentCandidateViewSchemaSha256Digest = string;
+
+/**
+ * Bounded direct-exec terminal owned by an immutable Container release.
+ */
+export type TerminalSpec = {
+    args?: Array<string>;
+    executable: string;
+    workingDirectory: string;
+};
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
@@ -2854,17 +3456,17 @@ export type EvaluationCandidateViewSchemaActorId = string;
 /**
  * Preserve the advisory failure without changing deterministic results.
  */
-export type AdvisoryFailurePolicy = 'continue_advisory';
+export type EvaluationCandidateViewSchemaAdvisoryFailurePolicy = 'continue_advisory';
 
 /**
  * Emit a `goal-review/v1` assessment.
  */
-export type AdvisoryOutputMode = 'goal_assessment';
+export type EvaluationCandidateViewSchemaAdvisoryOutputMode = 'goal_assessment';
 
 /**
  * Reviews allowlisted submission paths without producing a score.
  */
-export type AdvisoryRunnerSpec = {
+export type EvaluationCandidateViewSchemaAdvisoryRunnerSpec = {
     /**
      * Submission-relative paths visible to the LLM.
      */
@@ -2873,7 +3475,7 @@ export type AdvisoryRunnerSpec = {
     /**
      * Versioned advisory output shape.
      */
-    outputMode: AdvisoryOutputMode;
+    outputMode: EvaluationCandidateViewSchemaAdvisoryOutputMode;
     /**
      * Immutable advisory rubric locator.
      */
@@ -2888,22 +3490,22 @@ export type EvaluationCandidateViewSchemaAgentRunId = string;
 /**
  * Required Gate status used by deterministic aggregation.
  */
-export type AggregationGate = {
-    requiredStatus: RequiredStatus;
+export type EvaluationCandidateViewSchemaAggregationGate = {
+    requiredStatus: EvaluationCandidateViewSchemaRequiredStatus;
     step: string;
 };
 
 /**
  * Checked sum of deterministic Score steps.
  */
-export type AggregationKind = 'deterministic_sum';
+export type EvaluationCandidateViewSchemaAggregationKind = 'deterministic_sum';
 
 /**
  * Pure deterministic score aggregation contract.
  */
-export type AggregationSpec = {
-    gates: Array<AggregationGate>;
-    kind: AggregationKind;
+export type EvaluationCandidateViewSchemaAggregationSpec = {
+    gates: Array<EvaluationCandidateViewSchemaAggregationGate>;
+    kind: EvaluationCandidateViewSchemaAggregationKind;
     maxScore: number;
 };
 
@@ -2942,7 +3544,7 @@ export type EvaluationCandidateViewSchemaCandidateId = string;
 /**
  * Deterministic Checker configurations frozen for v1.
  */
-export type CheckerSpec = {
+export type EvaluationCandidateViewSchemaCheckerSpec = {
     kind: 'exact';
 } | {
     kind: 'token';
@@ -2962,7 +3564,7 @@ export type CheckerSpec = {
     /**
      * Required service state.
      */
-    expected: ExpectedServiceState;
+    expected: EvaluationCandidateViewSchemaExpectedServiceState;
     kind: 'service_state';
     /**
      * Stable service name.
@@ -2973,7 +3575,7 @@ export type CheckerSpec = {
 /**
  * Supported P0 submission collectors.
  */
-export type CollectorSpec = {
+export type EvaluationCandidateViewSchemaCollectorSpec = {
     /**
      * Excluded submission-relative paths.
      */
@@ -3002,7 +3604,7 @@ export type CollectorSpec = {
 /**
  * Deterministic Runner configurations frozen for P0 OJ and Linux evaluation.
  */
-export type DeterministicRunnerSpec = {
+export type EvaluationCandidateViewSchemaDeterministicRunnerSpec = {
     kind: 'file_assertion';
     /**
      * Required submission-relative files.
@@ -3017,15 +3619,15 @@ export type DeterministicRunnerSpec = {
     /**
      * Mandatory execution limits.
      */
-    limits: ExecutionLimits;
+    limits: EvaluationCandidateViewSchemaExecutionLimits;
     /**
      * Compile or test phase.
      */
-    phase: ProgramPhase;
+    phase: EvaluationCandidateViewSchemaProgramPhase;
     /**
      * Deterministic test groups used by the test phase.
      */
-    testGroups?: Array<TestGroup>;
+    testGroups?: Array<EvaluationCandidateViewSchemaTestGroup>;
     /**
      * Explicit approved toolchain binding.
      */
@@ -3034,7 +3636,7 @@ export type DeterministicRunnerSpec = {
     /**
      * Facts expected from the probe.
      */
-    assertions: Array<FactAssertion>;
+    assertions: Array<EvaluationCandidateViewSchemaFactAssertion>;
     kind: 'ansible_probe';
     /**
      * Modules requested from the frozen P0 allowlist.
@@ -3050,16 +3652,16 @@ export type DeterministicRunnerSpec = {
     readOnly: boolean;
 };
 
-export type EvaluationApiVersion = 'evaluation.labweaver.io/v1';
+export type EvaluationCandidateViewSchemaEvaluationApiVersion = 'evaluation.labweaver.io/v1';
 
 /**
  * Submission, step, aggregation, and review decomposition of an evaluation.
  */
-export type EvaluationBody = {
-    aggregation: AggregationSpec;
-    review: ReviewPolicy;
-    steps: Array<EvaluationStep>;
-    submission: SubmissionSpec;
+export type EvaluationCandidateViewSchemaEvaluationBody = {
+    aggregation: EvaluationCandidateViewSchemaAggregationSpec;
+    review: EvaluationCandidateViewSchemaReviewPolicy;
+    steps: Array<EvaluationCandidateViewSchemaEvaluationStep>;
+    submission: EvaluationCandidateViewSchemaSubmissionSpec;
 };
 
 /**
@@ -3073,16 +3675,16 @@ export type EvaluationCandidate = {
     revision: EvaluationCandidateViewSchemaRevision;
     runId: EvaluationCandidateViewSchemaAgentRunId;
     schemaSha256: EvaluationCandidateViewSchemaSha256Digest;
-    spec: EvaluationSpec;
+    spec: EvaluationCandidateViewSchemaEvaluationSpec;
     specSha256: EvaluationCandidateViewSchemaSha256Digest;
 };
 
-export type EvaluationKind = 'EvaluationSpec';
+export type EvaluationCandidateViewSchemaEvaluationKind = 'EvaluationSpec';
 
 /**
  * Stable name and version of an evaluation definition.
  */
-export type EvaluationMetadata = {
+export type EvaluationCandidateViewSchemaEvaluationMetadata = {
     name: string;
     version: string;
 };
@@ -3090,43 +3692,43 @@ export type EvaluationMetadata = {
 /**
  * Versioned evaluation definition shared by OJ and Linux system experiments.
  */
-export type EvaluationSpec = {
-    apiVersion: EvaluationApiVersion;
-    kind: EvaluationKind;
-    metadata: EvaluationMetadata;
-    spec: EvaluationBody;
+export type EvaluationCandidateViewSchemaEvaluationSpec = {
+    apiVersion: EvaluationCandidateViewSchemaEvaluationApiVersion;
+    kind: EvaluationCandidateViewSchemaEvaluationKind;
+    metadata: EvaluationCandidateViewSchemaEvaluationMetadata;
+    spec: EvaluationCandidateViewSchemaEvaluationBody;
 };
 
 /**
  * A role-specific evaluation step.
  */
-export type EvaluationStep = {
-    checker: CheckerSpec;
+export type EvaluationCandidateViewSchemaEvaluationStep = {
+    checker: EvaluationCandidateViewSchemaCheckerSpec;
     dependsOn?: Array<string>;
-    failurePolicy: GateFailurePolicy;
+    failurePolicy: EvaluationCandidateViewSchemaGateFailurePolicy;
     id: string;
     role: 'gate';
-    runner: DeterministicRunnerSpec;
+    runner: EvaluationCandidateViewSchemaDeterministicRunnerSpec;
 } | {
-    checker: CheckerSpec;
+    checker: EvaluationCandidateViewSchemaCheckerSpec;
     dependsOn?: Array<string>;
-    failurePolicy: ScoreFailurePolicy;
+    failurePolicy: EvaluationCandidateViewSchemaScoreFailurePolicy;
     id: string;
     role: 'score';
-    runner: DeterministicRunnerSpec;
-    score: ScoreSpec;
+    runner: EvaluationCandidateViewSchemaDeterministicRunnerSpec;
+    score: EvaluationCandidateViewSchemaScoreSpec;
 } | {
     dependsOn?: Array<string>;
-    failurePolicy: AdvisoryFailurePolicy;
+    failurePolicy: EvaluationCandidateViewSchemaAdvisoryFailurePolicy;
     id: string;
     role: 'advisory';
-    runner: AdvisoryRunnerSpec;
+    runner: EvaluationCandidateViewSchemaAdvisoryRunnerSpec;
 };
 
 /**
  * Resource and output limits for a program Runner.
  */
-export type ExecutionLimits = {
+export type EvaluationCandidateViewSchemaExecutionLimits = {
     memoryBytes: number;
     outputBytes: number;
     wallTimeSeconds: number;
@@ -3135,40 +3737,40 @@ export type ExecutionLimits = {
 /**
  * Expected state of a system service.
  */
-export type ExpectedServiceState = 'active' | 'inactive';
+export type EvaluationCandidateViewSchemaExpectedServiceState = 'active' | 'inactive';
 
 /**
  * Expected fact emitted by a Linux probe.
  */
-export type FactAssertion = {
+export type EvaluationCandidateViewSchemaFactAssertion = {
     fact: string;
 };
 
 /**
  * Stop downstream deterministic execution.
  */
-export type GateFailurePolicy = 'stop';
+export type EvaluationCandidateViewSchemaGateFailurePolicy = 'stop';
 
 /**
  * Conditions that force manual teacher review.
  */
-export type ManualReviewReason = 'infrastructureError' | 'invalidEvidence';
+export type EvaluationCandidateViewSchemaManualReviewReason = 'infrastructureError' | 'invalidEvidence';
 
 /**
  * Approved program Runner phase.
  */
-export type ProgramPhase = 'compile' | 'test';
+export type EvaluationCandidateViewSchemaProgramPhase = 'compile' | 'test';
 
 /**
  * The Gate must pass.
  */
-export type RequiredStatus = 'passed';
+export type EvaluationCandidateViewSchemaRequiredStatus = 'passed';
 
 /**
  * Mandatory approval and manual-review policy.
  */
-export type ReviewPolicy = {
-    forceManualWhen: Array<ManualReviewReason>;
+export type EvaluationCandidateViewSchemaReviewPolicy = {
+    forceManualWhen: Array<EvaluationCandidateViewSchemaManualReviewReason>;
     teacherApprovalRequiredForRelease: true;
 };
 
@@ -3180,12 +3782,12 @@ export type EvaluationCandidateViewSchemaRevision = number;
 /**
  * Failure behavior for a Score step.
  */
-export type ScoreFailurePolicy = 'stop' | 'continue';
+export type EvaluationCandidateViewSchemaScoreFailurePolicy = 'stop' | 'continue';
 
 /**
  * Maximum contribution of a deterministic Score step.
  */
-export type ScoreSpec = {
+export type EvaluationCandidateViewSchemaScoreSpec = {
     max: number;
 };
 
@@ -3197,15 +3799,15 @@ export type EvaluationCandidateViewSchemaSha256Digest = string;
 /**
  * Submission collection boundary used before evaluation starts.
  */
-export type SubmissionSpec = {
-    collector: CollectorSpec;
+export type EvaluationCandidateViewSchemaSubmissionSpec = {
+    collector: EvaluationCandidateViewSchemaCollectorSpec;
     llmReadable: Array<string>;
 };
 
 /**
  * One deterministic program test group.
  */
-export type TestGroup = {
+export type EvaluationCandidateViewSchemaTestGroup = {
     maxPoints: number;
     name: string;
     source: string;
@@ -3744,6 +4346,7 @@ export type InternalAgentRunOutcomeSchemaEnvironmentRuntimeSpec = {
     kind: 'container';
     provider_binding: string;
     service_port: number;
+    terminal?: InternalAgentRunOutcomeSchemaTerminalSpec | null;
 } | {
     base_disk: InternalAgentRunOutcomeSchemaVirtualMachineBaseDisk;
     kind: 'virtual_machine';
@@ -4022,6 +4625,15 @@ export type InternalAgentRunOutcomeSchemaSubmissionSpec = {
 };
 
 /**
+ * Bounded direct-exec terminal owned by an immutable Container release.
+ */
+export type InternalAgentRunOutcomeSchemaTerminalSpec = {
+    args?: Array<string>;
+    executable: string;
+    workingDirectory: string;
+};
+
+/**
  * One deterministic program test group.
  */
 export type InternalAgentRunOutcomeSchemaTestGroup = {
@@ -4047,6 +4659,100 @@ export type InternalAgentRunOutcomeSchemaVirtualMachineBaseDisk = {
     diskSha256: InternalAgentRunOutcomeSchemaSha256Digest;
     sourceRegistryDigest: string;
 };
+
+/**
+ * InternalCompleteEvaluationStepRequest
+ *
+ * Worker-to-Evaluation terminal result fenced by a StepRun attempt.
+ */
+export type InternalCompleteEvaluationStepRequestSchema = {
+    attempt: number;
+    completion: EvaluationStepCompletion;
+    courseId: InternalCompleteEvaluationStepRequestSchemaCourseId;
+    leaseToken: string;
+    runId: InternalCompleteEvaluationStepRequestSchemaEvaluationRunId;
+    runtimeIdentity: InternalCompleteEvaluationStepRequestSchemaEvaluationRuntimeIdentity;
+    stepRunId: InternalCompleteEvaluationStepRequestSchemaEvaluationStepRunId;
+    workerId: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type InternalCompleteEvaluationStepRequestSchemaCourseId = string;
+
+/**
+ * Stable machine-readable diagnostic code.
+ *
+ * Consumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so
+ * additive diagnostics do not force a wire-version change.
+ */
+export type InternalCompleteEvaluationStepRequestSchemaDiagnosticCode = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `EvaluationRunId`.
+ */
+export type InternalCompleteEvaluationStepRequestSchemaEvaluationRunId = string;
+
+/**
+ * Immutable build and deployment identity that must match every run using the release.
+ */
+export type InternalCompleteEvaluationStepRequestSchemaEvaluationRuntimeIdentity = {
+    /**
+     * Effective non-secret runtime configuration identity.
+     */
+    configurationSha256: InternalCompleteEvaluationStepRequestSchemaSha256Digest;
+    /**
+     * Checked-in Migration catalog identity.
+     */
+    migrationCatalogSha256: InternalCompleteEvaluationStepRequestSchemaSha256Digest;
+    /**
+     * Approved problem package identity.
+     */
+    packageSha256: InternalCompleteEvaluationStepRequestSchemaSha256Digest;
+    /**
+     * Explicit runtime provider binding chosen by Control and enforced by Evaluation.
+     */
+    providerBinding: string;
+    /**
+     * Digest-pinned runner image reference.
+     */
+    runnerImage: string;
+    /**
+     * Runtime artifact identity, such as the worker binary or image manifest digest.
+     */
+    runtimeArtifactSha256: InternalCompleteEvaluationStepRequestSchemaSha256Digest;
+    /**
+     * Clean source tree or source bundle identity.
+     */
+    sourceSha256: InternalCompleteEvaluationStepRequestSchemaSha256Digest;
+};
+
+/**
+ * Terminal worker result accepted by the Evaluation authority.
+ */
+export type EvaluationStepCompletion = {
+    awardedScore?: number | null;
+    cleanupVerified: boolean;
+    diagnosticCode?: InternalCompleteEvaluationStepRequestSchemaDiagnosticCode | null;
+    evidenceSha256: InternalCompleteEvaluationStepRequestSchemaSha256Digest;
+    state: InternalCompleteEvaluationStepRequestSchemaEvaluationStepRunState;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `EvaluationStepRunId`.
+ */
+export type InternalCompleteEvaluationStepRequestSchemaEvaluationStepRunId = string;
+
+/**
+ * Public step lifecycle.
+ */
+export type InternalCompleteEvaluationStepRequestSchemaEvaluationStepRunState = 'pending' | 'running' | 'retryable' | 'succeeded' | 'failed' | 'cancelled' | 'skipped';
+
+/**
+ * Canonical lowercase SHA-256 digest.
+ */
+export type InternalCompleteEvaluationStepRequestSchemaSha256Digest = string;
 
 /**
  * InternalCreateAgentRunRequest
@@ -4301,6 +5007,122 @@ export type InternalCreateAgentRunRequestSchemaStudentContentMode = 'manifest_al
 export type InternalCreateAgentRunRequestSchemaUtcTimestamp = string;
 
 /**
+ * InternalCreateEvaluationRunRequest
+ *
+ * Control-to-Evaluation command that starts one run from a release and frozen submission.
+ */
+export type InternalCreateEvaluationRunRequestSchema = {
+    actorId: InternalCreateEvaluationRunRequestSchemaActorId;
+    courseId: InternalCreateEvaluationRunRequestSchemaCourseId;
+    frozenSubmissionId: InternalCreateEvaluationRunRequestSchemaFrozenSubmissionId;
+    identity: InternalCreateEvaluationRunRequestSchemaEvaluationRunIdentity;
+    releaseId: InternalCreateEvaluationRunRequestSchemaEvaluationReleaseId;
+    releaseRevision: InternalCreateEvaluationRunRequestSchemaRevision;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type InternalCreateEvaluationRunRequestSchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type InternalCreateEvaluationRunRequestSchemaCourseId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `EvaluationReleaseId`.
+ */
+export type InternalCreateEvaluationRunRequestSchemaEvaluationReleaseId = string;
+
+/**
+ * Immutable run identity joining release, frozen submission and trace evidence.
+ */
+export type InternalCreateEvaluationRunRequestSchemaEvaluationRunIdentity = {
+    evaluationSpecSha256: InternalCreateEvaluationRunRequestSchemaSha256Digest;
+    frozenSubmissionSha256: InternalCreateEvaluationRunRequestSchemaSha256Digest;
+    releaseIdentitySha256: InternalCreateEvaluationRunRequestSchemaSha256Digest;
+    runtimeIdentity: InternalCreateEvaluationRunRequestSchemaEvaluationRuntimeIdentity;
+    sourceIdentitySha256: InternalCreateEvaluationRunRequestSchemaSha256Digest;
+    traceId: string;
+};
+
+/**
+ * Immutable build and deployment identity that must match every run using the release.
+ */
+export type InternalCreateEvaluationRunRequestSchemaEvaluationRuntimeIdentity = {
+    /**
+     * Effective non-secret runtime configuration identity.
+     */
+    configurationSha256: InternalCreateEvaluationRunRequestSchemaSha256Digest;
+    /**
+     * Checked-in Migration catalog identity.
+     */
+    migrationCatalogSha256: InternalCreateEvaluationRunRequestSchemaSha256Digest;
+    /**
+     * Approved problem package identity.
+     */
+    packageSha256: InternalCreateEvaluationRunRequestSchemaSha256Digest;
+    /**
+     * Explicit runtime provider binding chosen by Control and enforced by Evaluation.
+     */
+    providerBinding: string;
+    /**
+     * Digest-pinned runner image reference.
+     */
+    runnerImage: string;
+    /**
+     * Runtime artifact identity, such as the worker binary or image manifest digest.
+     */
+    runtimeArtifactSha256: InternalCreateEvaluationRunRequestSchemaSha256Digest;
+    /**
+     * Clean source tree or source bundle identity.
+     */
+    sourceSha256: InternalCreateEvaluationRunRequestSchemaSha256Digest;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `FrozenSubmissionId`.
+ */
+export type InternalCreateEvaluationRunRequestSchemaFrozenSubmissionId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type InternalCreateEvaluationRunRequestSchemaRevision = number;
+
+/**
+ * Canonical lowercase SHA-256 digest.
+ */
+export type InternalCreateEvaluationRunRequestSchemaSha256Digest = string;
+
+/**
+ * InternalEvaluationRunMutationRequest
+ *
+ * Revision precondition for Control-to-Evaluation run mutations.
+ */
+export type InternalEvaluationRunMutationRequestSchema = {
+    actorId: InternalEvaluationRunMutationRequestSchemaActorId;
+    courseId: InternalEvaluationRunMutationRequestSchemaCourseId;
+    expectedRevision: InternalEvaluationRunMutationRequestSchemaRevision;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type InternalEvaluationRunMutationRequestSchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type InternalEvaluationRunMutationRequestSchemaCourseId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type InternalEvaluationRunMutationRequestSchemaRevision = number;
+
+/**
  * InternalImageArtifactResolution
  *
  * Agent-owned artifact and policy evaluation resolved for Control publication.
@@ -4403,6 +5225,386 @@ export type InternalImageArtifactResolutionSchemaVulnerabilitySummary = {
     low: number;
     medium: number;
     unknown: number;
+};
+
+/**
+ * InternalPublishEvaluationReleaseRequest
+ *
+ * Control-to-Evaluation command that publishes one approved immutable `EvaluationSpec`.
+ */
+export type InternalPublishEvaluationReleaseRequestSchema = {
+    approvalId: InternalPublishEvaluationReleaseRequestSchemaApprovalId;
+    approvalRevision: InternalPublishEvaluationReleaseRequestSchemaRevision;
+    approvalSha256: InternalPublishEvaluationReleaseRequestSchemaSha256Digest;
+    candidateId: InternalPublishEvaluationReleaseRequestSchemaCandidateId;
+    candidateRevision: InternalPublishEvaluationReleaseRequestSchemaRevision;
+    candidateSha256: InternalPublishEvaluationReleaseRequestSchemaSha256Digest;
+    courseId: InternalPublishEvaluationReleaseRequestSchemaCourseId;
+    evaluationSpec: InternalPublishEvaluationReleaseRequestSchemaEvaluationSpec;
+    publishedBy: InternalPublishEvaluationReleaseRequestSchemaActorId;
+    runtimeIdentity: InternalPublishEvaluationReleaseRequestSchemaEvaluationRuntimeIdentity;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaActorId = string;
+
+/**
+ * Preserve the advisory failure without changing deterministic results.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaAdvisoryFailurePolicy = 'continue_advisory';
+
+/**
+ * Emit a `goal-review/v1` assessment.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaAdvisoryOutputMode = 'goal_assessment';
+
+/**
+ * Reviews allowlisted submission paths without producing a score.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaAdvisoryRunnerSpec = {
+    /**
+     * Submission-relative paths visible to the LLM.
+     */
+    include: Array<string>;
+    kind: 'llm_review';
+    /**
+     * Versioned advisory output shape.
+     */
+    outputMode: InternalPublishEvaluationReleaseRequestSchemaAdvisoryOutputMode;
+    /**
+     * Immutable advisory rubric locator.
+     */
+    rubric: string;
+};
+
+/**
+ * Required Gate status used by deterministic aggregation.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaAggregationGate = {
+    requiredStatus: InternalPublishEvaluationReleaseRequestSchemaRequiredStatus;
+    step: string;
+};
+
+/**
+ * Checked sum of deterministic Score steps.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaAggregationKind = 'deterministic_sum';
+
+/**
+ * Pure deterministic score aggregation contract.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaAggregationSpec = {
+    gates: Array<InternalPublishEvaluationReleaseRequestSchemaAggregationGate>;
+    kind: InternalPublishEvaluationReleaseRequestSchemaAggregationKind;
+    maxScore: number;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ApprovalId`.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaApprovalId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CandidateId`.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaCandidateId = string;
+
+/**
+ * Deterministic Checker configurations frozen for v1.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaCheckerSpec = {
+    kind: 'exact';
+} | {
+    kind: 'token';
+} | {
+    /**
+     * Required exit code.
+     */
+    expected: number;
+    kind: 'exit_code';
+} | {
+    kind: 'json_schema';
+    /**
+     * Immutable schema locator.
+     */
+    schemaRef: string;
+} | {
+    /**
+     * Required service state.
+     */
+    expected: InternalPublishEvaluationReleaseRequestSchemaExpectedServiceState;
+    kind: 'service_state';
+    /**
+     * Stable service name.
+     */
+    service: string;
+};
+
+/**
+ * Supported P0 submission collectors.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaCollectorSpec = {
+    /**
+     * Excluded submission-relative paths.
+     */
+    exclude?: Array<string>;
+    /**
+     * Included submission-relative paths.
+     */
+    include: Array<string>;
+    kind: 'workspace_snapshot';
+    /**
+     * Maximum collected bytes.
+     */
+    maxBytes: number;
+} | {
+    /**
+     * Named facts to collect.
+     */
+    facts: Array<string>;
+    kind: 'system_facts';
+    /**
+     * Maximum collected bytes.
+     */
+    maxBytes: number;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaCourseId = string;
+
+/**
+ * Deterministic Runner configurations frozen for P0 OJ and Linux evaluation.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaDeterministicRunnerSpec = {
+    kind: 'file_assertion';
+    /**
+     * Required submission-relative files.
+     */
+    requiredFiles: Array<string>;
+} | {
+    /**
+     * Submission-relative program input.
+     */
+    input: string;
+    kind: 'program';
+    /**
+     * Mandatory execution limits.
+     */
+    limits: InternalPublishEvaluationReleaseRequestSchemaExecutionLimits;
+    /**
+     * Compile or test phase.
+     */
+    phase: InternalPublishEvaluationReleaseRequestSchemaProgramPhase;
+    /**
+     * Deterministic test groups used by the test phase.
+     */
+    testGroups?: Array<InternalPublishEvaluationReleaseRequestSchemaTestGroup>;
+    /**
+     * Explicit approved toolchain binding.
+     */
+    toolchainProfile: string;
+} | {
+    /**
+     * Facts expected from the probe.
+     */
+    assertions: Array<InternalPublishEvaluationReleaseRequestSchemaFactAssertion>;
+    kind: 'ansible_probe';
+    /**
+     * Modules requested from the frozen P0 allowlist.
+     */
+    moduleAllowlist: Array<string>;
+    /**
+     * Explicit approved playbook binding.
+     */
+    playbookProfile: string;
+    /**
+     * Must remain true in v1.
+     */
+    readOnly: boolean;
+};
+
+export type InternalPublishEvaluationReleaseRequestSchemaEvaluationApiVersion = 'evaluation.labweaver.io/v1';
+
+/**
+ * Submission, step, aggregation, and review decomposition of an evaluation.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaEvaluationBody = {
+    aggregation: InternalPublishEvaluationReleaseRequestSchemaAggregationSpec;
+    review: InternalPublishEvaluationReleaseRequestSchemaReviewPolicy;
+    steps: Array<InternalPublishEvaluationReleaseRequestSchemaEvaluationStep>;
+    submission: InternalPublishEvaluationReleaseRequestSchemaSubmissionSpec;
+};
+
+export type InternalPublishEvaluationReleaseRequestSchemaEvaluationKind = 'EvaluationSpec';
+
+/**
+ * Stable name and version of an evaluation definition.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaEvaluationMetadata = {
+    name: string;
+    version: string;
+};
+
+/**
+ * Immutable build and deployment identity that must match every run using the release.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaEvaluationRuntimeIdentity = {
+    /**
+     * Effective non-secret runtime configuration identity.
+     */
+    configurationSha256: InternalPublishEvaluationReleaseRequestSchemaSha256Digest;
+    /**
+     * Checked-in Migration catalog identity.
+     */
+    migrationCatalogSha256: InternalPublishEvaluationReleaseRequestSchemaSha256Digest;
+    /**
+     * Approved problem package identity.
+     */
+    packageSha256: InternalPublishEvaluationReleaseRequestSchemaSha256Digest;
+    /**
+     * Explicit runtime provider binding chosen by Control and enforced by Evaluation.
+     */
+    providerBinding: string;
+    /**
+     * Digest-pinned runner image reference.
+     */
+    runnerImage: string;
+    /**
+     * Runtime artifact identity, such as the worker binary or image manifest digest.
+     */
+    runtimeArtifactSha256: InternalPublishEvaluationReleaseRequestSchemaSha256Digest;
+    /**
+     * Clean source tree or source bundle identity.
+     */
+    sourceSha256: InternalPublishEvaluationReleaseRequestSchemaSha256Digest;
+};
+
+/**
+ * Versioned evaluation definition shared by OJ and Linux system experiments.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaEvaluationSpec = {
+    apiVersion: InternalPublishEvaluationReleaseRequestSchemaEvaluationApiVersion;
+    kind: InternalPublishEvaluationReleaseRequestSchemaEvaluationKind;
+    metadata: InternalPublishEvaluationReleaseRequestSchemaEvaluationMetadata;
+    spec: InternalPublishEvaluationReleaseRequestSchemaEvaluationBody;
+};
+
+/**
+ * A role-specific evaluation step.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaEvaluationStep = {
+    checker: InternalPublishEvaluationReleaseRequestSchemaCheckerSpec;
+    dependsOn?: Array<string>;
+    failurePolicy: InternalPublishEvaluationReleaseRequestSchemaGateFailurePolicy;
+    id: string;
+    role: 'gate';
+    runner: InternalPublishEvaluationReleaseRequestSchemaDeterministicRunnerSpec;
+} | {
+    checker: InternalPublishEvaluationReleaseRequestSchemaCheckerSpec;
+    dependsOn?: Array<string>;
+    failurePolicy: InternalPublishEvaluationReleaseRequestSchemaScoreFailurePolicy;
+    id: string;
+    role: 'score';
+    runner: InternalPublishEvaluationReleaseRequestSchemaDeterministicRunnerSpec;
+    score: InternalPublishEvaluationReleaseRequestSchemaScoreSpec;
+} | {
+    dependsOn?: Array<string>;
+    failurePolicy: InternalPublishEvaluationReleaseRequestSchemaAdvisoryFailurePolicy;
+    id: string;
+    role: 'advisory';
+    runner: InternalPublishEvaluationReleaseRequestSchemaAdvisoryRunnerSpec;
+};
+
+/**
+ * Resource and output limits for a program Runner.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaExecutionLimits = {
+    memoryBytes: number;
+    outputBytes: number;
+    wallTimeSeconds: number;
+};
+
+/**
+ * Expected state of a system service.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaExpectedServiceState = 'active' | 'inactive';
+
+/**
+ * Expected fact emitted by a Linux probe.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaFactAssertion = {
+    fact: string;
+};
+
+/**
+ * Stop downstream deterministic execution.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaGateFailurePolicy = 'stop';
+
+/**
+ * Conditions that force manual teacher review.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaManualReviewReason = 'infrastructureError' | 'invalidEvidence';
+
+/**
+ * Approved program Runner phase.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaProgramPhase = 'compile' | 'test';
+
+/**
+ * The Gate must pass.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaRequiredStatus = 'passed';
+
+/**
+ * Mandatory approval and manual-review policy.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaReviewPolicy = {
+    forceManualWhen: Array<InternalPublishEvaluationReleaseRequestSchemaManualReviewReason>;
+    teacherApprovalRequiredForRelease: true;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaRevision = number;
+
+/**
+ * Failure behavior for a Score step.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaScoreFailurePolicy = 'stop' | 'continue';
+
+/**
+ * Maximum contribution of a deterministic Score step.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaScoreSpec = {
+    max: number;
+};
+
+/**
+ * Canonical lowercase SHA-256 digest.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaSha256Digest = string;
+
+/**
+ * Submission collection boundary used before evaluation starts.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaSubmissionSpec = {
+    collector: InternalPublishEvaluationReleaseRequestSchemaCollectorSpec;
+    llmReadable: Array<string>;
+};
+
+/**
+ * One deterministic program test group.
+ */
+export type InternalPublishEvaluationReleaseRequestSchemaTestGroup = {
+    maxPoints: number;
+    name: string;
+    source: string;
 };
 
 /**
