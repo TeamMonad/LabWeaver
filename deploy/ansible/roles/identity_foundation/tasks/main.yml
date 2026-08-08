@@ -18,7 +18,6 @@
       - identity_inventory_hash is match('^sha256:[0-9a-f]{64}$')
       - identity_component_lock_hash is match('^sha256:[0-9a-f]{64}$')
       - identity_hostname == 'keycloak.labweaver.internal'
-      - identity_gateway_vip == '10.20.0.222'
       - identity_realm == 'workloads'
       - identity_workload_client_id == identity_workload_audience
       - identity_secret_locator | length > 0
@@ -33,7 +32,7 @@
     path: "{{ identity_secret_locator }}"
     checksum_algorithm: sha256
   become: true
-  delegate_to: edge-router
+  delegate_to: "{{ groups['routers'][0] }}"
   register: identity_locator_stat
   no_log: true
 
@@ -50,7 +49,7 @@
   ansible.builtin.slurp:
     src: "{{ identity_secret_locator }}"
   become: true
-  delegate_to: edge-router
+  delegate_to: "{{ groups['routers'][0] }}"
   register: identity_locator_raw
   no_log: true
 
@@ -116,6 +115,7 @@
       ansible.builtin.dnf:
         name: "{{ identity_lock.python_kubernetes_rpm }}"
         state: present
+      when: identity_controller_manage_python_kubernetes | bool
 
     - name: Verify the locked Kubernetes Python client identity
       ansible.builtin.command:
@@ -123,6 +123,7 @@
       changed_when: false
       register: identity_python_kubernetes_rpm
       failed_when: identity_python_kubernetes_rpm.stdout != identity_lock.python_kubernetes_rpm
+      when: identity_controller_manage_python_kubernetes | bool
 
     - name: Create the restricted identity namespace
       kubernetes.core.k8s:
@@ -268,11 +269,12 @@
     - name: Read existing Keycloak DNS records
       ansible.builtin.command:
         argv: [grep, -R, --fixed-strings, "{{ identity_hostname }}", /etc/dnsmasq.conf, /etc/dnsmasq.d]
-      delegate_to: edge-router
+      delegate_to: "{{ groups['routers'][0] }}"
       become: true
       changed_when: false
       failed_when: false
       register: identity_dns_records
+      when: identity_dnsmasq_enabled | bool
 
     - name: Reject a Keycloak DNS collision outside the owned fragment
       ansible.builtin.assert:
@@ -280,13 +282,14 @@
           identity_dns_records.rc != 0 or
           (identity_dns_records.stdout_lines | reject('search', identity_dns_fragment_path) | list | length == 0)
         fail_msg: IDENTITY_DNS_CONFLICT
+      when: identity_dnsmasq_enabled | bool
 
     - name: Install the Keycloak-only DNS fragment with rollback
       block:
         - name: Inspect the previous Keycloak DNS fragment
           ansible.builtin.stat:
             path: "{{ identity_dns_fragment_path }}"
-          delegate_to: edge-router
+          delegate_to: "{{ groups['routers'][0] }}"
           become: true
           register: identity_dns_fragment_stat
 
@@ -298,7 +301,7 @@
             owner: root
             group: root
             mode: '0600'
-          delegate_to: edge-router
+          delegate_to: "{{ groups['routers'][0] }}"
           become: true
           when: identity_dns_fragment_stat.stat.exists
 
@@ -309,18 +312,18 @@
             owner: root
             group: root
             mode: '0644'
-          delegate_to: edge-router
+          delegate_to: "{{ groups['routers'][0] }}"
           become: true
 
         - name: Validate dnsmasq before applying Keycloak DNS
           ansible.builtin.command: /usr/sbin/dnsmasq --test
-          delegate_to: edge-router
+          delegate_to: "{{ groups['routers'][0] }}"
           become: true
           changed_when: false
 
         - name: Restart dnsmasq after successful validation
           ansible.builtin.service: {name: dnsmasq, state: restarted}
-          delegate_to: edge-router
+          delegate_to: "{{ groups['routers'][0] }}"
           become: true
       rescue:
         - name: Restore the previous Keycloak DNS fragment
@@ -331,23 +334,24 @@
             owner: root
             group: root
             mode: '0644'
-          delegate_to: edge-router
+          delegate_to: "{{ groups['routers'][0] }}"
           become: true
           when: identity_dns_fragment_stat.stat.exists | default(false)
 
         - name: Remove the newly introduced invalid DNS fragment
           ansible.builtin.file: {path: "{{ identity_dns_fragment_path }}", state: absent}
-          delegate_to: edge-router
+          delegate_to: "{{ groups['routers'][0] }}"
           become: true
           when: not (identity_dns_fragment_stat.stat.exists | default(false))
 
         - name: Restore dnsmasq after rollback
           ansible.builtin.service: {name: dnsmasq, state: restarted}
-          delegate_to: edge-router
+          delegate_to: "{{ groups['routers'][0] }}"
           become: true
 
         - name: Stop after failed Keycloak DNS validation
           ansible.builtin.fail: {msg: IDENTITY_DNS_VALIDATION_FAILED}
+      when: identity_dnsmasq_enabled | bool
 
 - name: Wait for the identity Gateway
   ansible.builtin.command:
