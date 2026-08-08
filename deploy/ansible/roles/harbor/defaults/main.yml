@@ -1,6 +1,7 @@
 ---
 harbor_project_name: labweaver-system
 harbor_chart_archive: /var/lib/labweaver/bundle/harbor-1.19.1.tgz
+harbor_approved_controller_id: "{{ lookup('env', 'LABWEAVER_CONTROLLER_ID') | default('edge-router', true) }}"
 harbor_component_resources:
   nginx: { requests: { cpu: 100m, memory: 128Mi }, limits: { cpu: 500m, memory: 512Mi } }
   portal: { requests: { cpu: 100m, memory: 128Mi }, limits: { cpu: 500m, memory: 512Mi } }

@@ -32,7 +32,7 @@
       - harbor_commit_sha is match('^[0-9a-f]{40,64}$')
       - harbor_inventory_hash is match('^sha256:[0-9a-f]{64}$')
       - harbor_component_lock_hash is match('^sha256:[0-9a-f]{64}$')
-      - harbor_controller_id == 'edge-router'
+      - harbor_controller_id == harbor_approved_controller_id
       - harbor_locked_images | dict2items | length == 10
       - harbor_locked_images | dict2items | map(attribute='value') | select('match', '^sha256:[0-9a-f]{64}$') | list | length == 10
       - harbor_component_resources | dict2items | length == 11
