@@ -1,0 +1,188 @@
+---
+platform_application_run_id: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RUN_ID') }}"
+platform_application_source_commit: "{{ lookup('ansible.builtin.env', 'LABWEAVER_COMMIT_SHA') }}"
+platform_application_package_manifest: "{{ lookup('ansible.builtin.env', 'LABWEAVER_PACKAGE_MANIFEST') }}"
+platform_application_vars_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_APPLICATION_VARS_FILE') }}"
+platform_application_migration_catalog: "{{ playbook_dir }}/../../../migrations/catalog.yaml"
+platform_application_kubeconfig: /etc/kubernetes/admin.conf
+platform_application_kubectl: /usr/bin/kubectl
+platform_application_helm: /usr/local/bin/helm
+platform_application_psql: /usr/bin/psql
+platform_application_nats: /usr/local/bin/nats
+platform_application_mc: /usr/local/bin/mc
+platform_application_kcadm: /usr/local/bin/kcadm.sh
+platform_application_keytool: /usr/bin/keytool
+platform_application_report_root: /var/lib/labweaver/platform-application
+platform_application_domains: [control, access, environment, agent, evaluation, resource]
+# Exact migration-1 identities observed from the retained pre-reset Sprint 2
+# database. They are accepted without rewriting history; new installations
+# still record the catalog hash, and every later migration remains exact-only.
+platform_application_retained_baseline_sha256:
+  access: b57bc3d29605a9986c211df809e6bcc391b987c846f647c66bb7a5d3600780c4
+  agent: 96f87d22cad7b0638aa48151c91fd8ae2ad46b786610a8979902ec51fd899b9e
+  control: d6849ba453cace3cb7806d918b24ac3f923ca93283bbebb6b2a6fccaaf736f4b
+  environment: 925bbcef2003f0f2764ebbb8b4304081b3287218ed5d03e5e803120386e60f69
+  evaluation: 5f1cf9d27b0bf4976d86dc23a7d65adbf8ac107ee6786ccf5db81d664adce884
+  resource: 3096083438fbb06d20c13a012663fbde4ad2f787771449adf1c52ca91696f380
+platform_application_runtime_passwords: {}
+platform_application_postgres_service_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_POSTGRES_SERVICE_FILE') }}"
+platform_application_postgres_client_certificate_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_POSTGRES_CLIENT_CERTIFICATE_FILE') }}"
+platform_application_postgres_client_private_key_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_POSTGRES_CLIENT_PRIVATE_KEY_FILE') }}"
+platform_application_postgres_service: "{{ lookup('ansible.builtin.env', 'LABWEAVER_POSTGRES_SERVICE') | default('platform-admin', true) }}"
+platform_application_postgres_database: labweaver
+platform_application_postgres_forward_enabled: "{{ lookup('ansible.builtin.env', 'LABWEAVER_POSTGRES_FORWARD_ENABLED') | default('false', true) | bool }}"
+platform_application_postgres_forward_service_name: labweaver-postgres-forward.service
+platform_application_postgres_forward_namespace: labweaver-data
+platform_application_postgres_forward_kubernetes_service: postgres
+platform_application_postgres_forward_port: 15432
+platform_application_nats_server: ""
+platform_application_nats_controller_address: ""
+platform_application_nats_controller_port: 4222
+platform_application_nats_credentials_file: ""
+platform_application_nats_ca_file: ""
+platform_application_nats_client_certificate_file: ""
+platform_application_nats_client_private_key_file: ""
+platform_application_nats_streams:
+  - {name: LABWEAVER_AGENT_EVENTS, subjects: ["labweaver.agent.>"], max_age: 24h}
+  - {name: LABWEAVER_CONTROL_COMMANDS, subjects: ["labweaver.control.agent_build.requested.v1"], max_age: 24h}
+  - name: LABWEAVER_ENVIRONMENT_COMMANDS
+    subjects:
+      - labweaver.environment.instance.>
+      - labweaver.environment.command.quarantine.v1
+    adopted_subjects:
+      - labweaver.environment.instance.lifecycle_requested.v1
+    max_age: 24h
+  - name: LABWEAVER_RELEASES
+    subjects:
+      - labweaver.control.environment_template_release.>
+      - labweaver.environment.release.quarantine.v1
+    adopted_subjects:
+      - labweaver.control.environment_template_release.>
+    max_age: 168h
+  - {name: LABWEAVER_ACCESS, subjects: ["labweaver.access.>"], max_age: 24h}
+  - {name: LABWEAVER_SUBMISSION, subjects: ["labweaver.evaluation.submission.>"], max_age: 168h}
+platform_application_nats_consumers:
+  - name: control-agent-run-projection-v1
+    stream: LABWEAVER_AGENT_EVENTS
+    filters: ["labweaver.agent.run.>"]
+  - name: control-agent-build-projection-v1
+    stream: LABWEAVER_AGENT_EVENTS
+    filters:
+      - labweaver.agent.build.completed.v1
+      - labweaver.agent.build.failed.v1
+  - name: agent-build-command-v1
+    stream: LABWEAVER_CONTROL_COMMANDS
+    filters: [labweaver.control.agent_build.requested.v1]
+  - name: environment-service-v1
+    stream: LABWEAVER_ENVIRONMENT_COMMANDS
+    filters: [labweaver.environment.instance.lifecycle_requested.v1]
+  - name: access-environment-state-v1
+    stream: LABWEAVER_ENVIRONMENT_COMMANDS
+    filters: [labweaver.environment.instance.state_changed.v1]
+  - name: environment-release-v1
+    stream: LABWEAVER_RELEASES
+    filters:
+      - labweaver.control.environment_template_release.published.v1
+      - labweaver.control.environment_template_release.withdrawn.v1
+platform_application_minio_alias: ""
+platform_application_minio_endpoint: ""
+platform_application_minio_controller_address: ""
+platform_application_minio_username: ""
+platform_application_minio_password: ""
+platform_application_minio_ca_file: ""
+platform_application_minio_bucket: labweaver-artifacts
+platform_application_harbor_api: ""
+platform_application_harbor_registry: ""
+platform_application_harbor_endpoint_address: ""
+platform_application_harbor_ca_file: ""
+platform_application_harbor_username: ""
+platform_application_harbor_password: ""
+platform_application_harbor_project: labweaver-system
+platform_application_harbor_admin_username: admin
+platform_application_harbor_admin_password_file: ""
+platform_application_image_pull_secret_name: harbor-labweaver-system-pull
+platform_application_data_namespace: labweaver-data
+platform_application_data_services: [postgres, nats, minio]
+platform_application_keycloak_realm: workloads
+platform_application_keycloak_config: ""
+platform_application_keycloak_server: ""
+platform_application_keycloak_admin_realm: master
+platform_application_keycloak_username: ""
+platform_application_keycloak_password: ""
+platform_application_keycloak_realm_file: ""
+platform_application_keycloak_ca_file: ""
+platform_application_keycloak_hostname: ""
+platform_application_keycloak_endpoint_address: ""
+platform_application_keycloak_truststore_password: ""
+platform_application_keycloak_client_id: labweaver-web
+platform_application_keycloak_required_roles: [teacher, student, platform_admin]
+platform_application_keycloak_required_users: [platform-teacher, platform-student, platform-admin]
+platform_application_access_seed_file: ""
+platform_application_chart_source: "{{ playbook_dir }}/../../helm/labweaver"
+platform_application_values_files: []
+platform_application_configuration_bundle: ""
+platform_application_configuration_manifest: "{{ playbook_dir }}/../../config/platform-bundle-manifest.json"
+platform_application_nats_credential_validator: "{{ playbook_dir }}/../../../tools/validate_nats_user_credentials.py"
+platform_application_required_configmaps:
+  - control-service-config
+  - access-service-config
+  - agent-service-config
+  - build-executor-config
+  - environment-service-config
+  - evaluation-service-config
+  - container-executor-config
+  - kubevirt-executor-config
+  - kubevirt-console-executor-config
+  - web-config
+platform_application_required_secrets:
+  - control-service-secrets
+  - access-service-secrets
+  - agent-service-secrets
+  - build-executor-secrets
+  - environment-service-secrets
+  - evaluation-service-secrets
+  - container-executor-secrets
+  - kubevirt-executor-secrets
+  - kubevirt-console-executor-secrets
+  - openssh-gateway-secrets
+platform_application_release_name: labweaver
+platform_application_namespace: labweaver-system
+platform_application_evaluation_namespace: labweaver-evaluation
+platform_application_evaluation_pull_secret_name: harbor-labweaver-system-pull
+platform_application_rollout_timeout: 10m
+platform_application_portal_route_namespace: ""
+platform_application_portal_route_name: ""
+platform_application_portal_gateway_name: ""
+platform_application_portal_gateway_listener_name: https
+platform_application_portal_hostname: ""
+platform_application_portal_tls_secret_name: labweaver-platform-tls
+platform_application_portal_tls_certificate_file: ""
+platform_application_portal_tls_key_file: ""
+platform_application_portal_tls_ca_file: ""
+platform_application_object_store_route_enabled: false
+platform_application_object_store_service_name: minio
+platform_application_object_store_service_port: 9000
+platform_application_object_store_backend_hostname: minio.labweaver-data.svc
+platform_application_object_store_external_cidr: ""
+platform_application_ssh_load_balancer_ip: ""
+platform_application_ssh_shared_ip_key: labweaver-platform-public
+platform_application_workloads:
+  - control-service
+  - access-service
+  - agent-service
+  - build-executor
+  - environment-service
+  - evaluation-service
+  - container-executor
+  - kubevirt-executor
+  - kubevirt-console-executor
+  - openssh-gateway
+  - web
+platform_application_components:
+  - access-service
+  - agent-service
+  - control-service
+  - environment-service
+  - evaluation-service
+  - openssh-gateway
+  - web

@@ -1,0 +1,27 @@
+\set ON_ERROR_STOP on
+{{ lookup('ansible.builtin.file', playbook_dir + '/../../../migrations/bootstrap/0001_roles_and_schemas.sql') }}
+{% for domain in platform_reset_domains %}
+DROP SCHEMA IF EXISTS {{ domain }} CASCADE;
+CREATE SCHEMA {{ domain }} AUTHORIZATION lw_{{ domain }}_owner;
+REVOKE ALL ON SCHEMA {{ domain }} FROM PUBLIC;
+SET ROLE lw_{{ domain }}_owner;
+SET search_path TO {{ domain }};
+{{ lookup('ansible.builtin.file', playbook_dir + '/../../../migrations/' + domain + '/0001_platform_baseline.sql') }}
+RESET ROLE;
+{% endfor %}
+{{ lookup('ansible.builtin.file', playbook_dir + '/../../../migrations/bootstrap/0001_roles_and_schemas.sql') }}
+{% for domain in platform_reset_domains %}
+SET ROLE lw_{{ domain }}_migration;
+INSERT INTO {{ domain }}.schema_migrations (
+    migration_id, filename, sha256, outcome, executor_identity, release_id, catalog_sha256
+) VALUES (
+    1,
+    '0001_platform_baseline.sql',
+    '{{ lookup('ansible.builtin.file', playbook_dir + '/../../../migrations/' + domain + '/0001_platform_baseline.sql') | hash('sha256') }}',
+    'applied',
+    'ansible-platform-reset',
+    '{{ platform_reset_run_id }}',
+    '{{ lookup('ansible.builtin.file', playbook_dir + '/../../../migrations/catalog.yaml') | hash('sha256') }}'
+);
+RESET ROLE;
+{% endfor %}

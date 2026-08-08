@@ -1,0 +1,15 @@
+---
+platform_foundation_enabled: false
+platform_foundation_kubeconfig: /etc/kubernetes/admin.conf
+platform_foundation_namespace: labweaver-data
+platform_foundation_bundle: ""
+platform_foundation_manifest: "{{ playbook_dir }}/../../config/platform-foundation-bundle-manifest.json"
+platform_foundation_storage_class: local-path
+platform_foundation_minio_storage_class: nfs-rwx
+platform_foundation_postgres_storage: 20Gi
+platform_foundation_postgres_database: labweaver
+platform_foundation_postgres_admin_role: postgres-admin
+platform_foundation_nats_storage: 10Gi
+platform_foundation_minio_storage: 100Gi
+platform_foundation_rollout_retries: 60
+platform_foundation_rollout_delay: 5

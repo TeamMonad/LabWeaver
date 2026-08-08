@@ -8,7 +8,7 @@
       - resource_replay_auth_keycloak_endpoint_address is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
       - resource_replay_auth_keycloak_realm == 'workloads'
       - resource_replay_auth_keycloak_admin_realm == 'master'
-      - resource_replay_auth_required_users == ['sprint2-teacher', 'sprint2-student', 'sprint2-admin']
+      - resource_replay_auth_required_users == ['platform-teacher', 'platform-student', 'platform-admin']
     fail_msg: LW_RESOURCE_REPLAY_AUTH_INPUT_INVALID
 
 - name: Inspect Resource replay identity prerequisites

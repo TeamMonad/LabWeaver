@@ -4,9 +4,9 @@
 # Execution budget for the whole clean redeploy, enforced by the run ledger:
 #   1. one read-only preflight        -> this playbook, plays 1-2
 #   2. one cleanup cycle              -> this playbook, play 3
-#   3. one infrastructure install     -> 92-sprint2-foundation.yml, 95-harbor.yml,
-#                                        91-identity-foundation.yml, 92-sprint2-buildkit.yml
-#   4. two idempotent reconciles      -> run 92-sprint2-foundation.yml twice
+#   3. one infrastructure install     -> 92-platform-foundation.yml, 95-harbor.yml,
+#                                        91-identity-foundation.yml, 92-platform-buildkit.yml
+#   4. two idempotent reconciles      -> run 92-platform-foundation.yml twice
 #   5. one verification replay        -> 96-foundation-rotation-verify.yml
 # A second occurrence of the same stable diagnostic stops the run as Blocked;
 # there is no fourth connected deployment cycle.

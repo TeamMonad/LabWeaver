@@ -3,8 +3,8 @@
   ansible.builtin.assert:
     that: >-
       (labweaver_preflight_scope | default('cluster')) in
-      ['cluster', 'identity-foundation', 'sprint2-foundation',
-       'sprint2-buildkit', 'sprint2-harbor-route', 'sprint2-application', 'sprint2-reset',
+      ['cluster', 'identity-foundation', 'platform-foundation',
+       'platform-buildkit', 'platform-harbor-route', 'platform-application', 'platform-reset',
        'resource-application', 'resource-replay', 'resource-replay-auth',
        'foundation-clean-redeploy', 'foundation-rotation-verify']
     fail_msg: PREFLIGHT_SCOPE_INVALID
@@ -23,8 +23,8 @@
   delegate_to: localhost
   when: >-
     (labweaver_preflight_scope | default('cluster')) in
-    ['cluster', 'sprint2-foundation', 'sprint2-buildkit',
-     'sprint2-harbor-route', 'sprint2-application', 'sprint2-reset',
+    ['cluster', 'platform-foundation', 'platform-buildkit',
+     'platform-harbor-route', 'platform-application', 'platform-reset',
      'resource-application', 'resource-replay', 'resource-replay-auth',
      'foundation-clean-redeploy', 'foundation-rotation-verify']
 

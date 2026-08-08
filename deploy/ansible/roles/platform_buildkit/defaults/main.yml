@@ -1,0 +1,25 @@
+---
+platform_buildkit_enabled: false
+platform_buildkit_kubeconfig: /etc/kubernetes/admin.conf
+platform_buildkit_namespace: labweaver-build
+platform_buildkit_bundle: ""
+platform_buildkit_manifest: "{{ playbook_dir }}/../../config/platform-buildkit-bundle-manifest.json"
+platform_buildkit_storage_class: local-path
+platform_buildkit_storage: 40Gi
+platform_buildkit_registry_cidr: ""
+platform_buildkit_dns_nameserver: ""
+platform_buildkit_coredns_namespace: kube-system
+platform_buildkit_coredns_configmap: coredns
+platform_buildkit_harbor_hostname: harbor.lab.lan
+platform_buildkit_harbor_tls_secret: harbor-nginx
+platform_buildkit_operator_client_path: /home/rocky/.config/labweaver/buildkit
+platform_buildkit_rollout_retries: 60
+platform_buildkit_rollout_delay: 5
+platform_buildkit_controller_enabled: false
+platform_buildkit_controller_host: "{{ groups['routers'] | first }}"
+platform_buildkit_controller_kubeconfig_source: ""
+platform_buildkit_controller_kubeconfig: /home/rocky/.config/labweaver/package/kubeconfig
+platform_buildkit_controller_api_server: ""
+platform_buildkit_controller_api_address: ""
+platform_buildkit_controller_client_path: /home/rocky/.config/labweaver/package/buildkit
+platform_buildkit_controller_port: 1234

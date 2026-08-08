@@ -1,5 +1,0 @@
----
-sprint2_admin_tools_profile: execution
-sprint2_admin_tools_cache_root: /var/cache/labweaver/admin-tools
-sprint2_admin_tools_install_root: /opt/labweaver/admin-tools
-sprint2_admin_tools_bin_root: /usr/local/bin
