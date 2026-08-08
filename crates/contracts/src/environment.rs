@@ -945,7 +945,28 @@ pub struct EnvironmentConsoleEligibilityRequest {
     pub actor_id: ActorId,
     pub subject_kind: EnvironmentAccessSubjectKind,
     pub expected_revision: Revision,
-    pub kind: ConsoleKind,
+}
+
+/// Runtime-specific console binding selected by Environment Service.
+///
+/// The KubeVirt binding intentionally carries no VMI locator, Kubernetes
+/// credential, or guest password. The executor resolves the exact authoritative
+/// VMI again when the one-time capability is consumed.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum EnvironmentConsoleBinding {
+    Xterm { terminal: TerminalSpec },
+    Novnc,
+}
+
+impl EnvironmentConsoleBinding {
+    #[must_use]
+    pub const fn kind(&self) -> ConsoleKind {
+        match self {
+            Self::Xterm { .. } => ConsoleKind::Xterm,
+            Self::Novnc => ConsoleKind::Novnc,
+        }
+    }
 }
 
 /// Environment-authoritative, credential-free console admission facts.
@@ -962,7 +983,7 @@ pub struct EnvironmentConsoleEligibility {
     pub release_version: u64,
     pub eligibility_expires_at: UtcTimestamp,
     pub lease_fence: Option<ConsoleLeaseFence>,
-    pub terminal: TerminalSpec,
+    pub binding: EnvironmentConsoleBinding,
 }
 
 impl EnvironmentConsoleEligibility {
@@ -978,8 +999,14 @@ impl EnvironmentConsoleEligibility {
             }
             _ => false,
         };
-        if request.kind != ConsoleKind::Xterm
-            || self.runtime_kind != RuntimeKind::Container
+        let binding_valid = match (&self.binding, self.runtime_kind) {
+            (EnvironmentConsoleBinding::Xterm { terminal }, RuntimeKind::Container) => {
+                terminal.validate().is_ok()
+            }
+            (EnvironmentConsoleBinding::Novnc, RuntimeKind::VirtualMachine) => true,
+            _ => false,
+        };
+        if !binding_valid
             || self.environment_id != request.environment_id
             || self.course_id != request.course_id
             || (request.subject_kind == EnvironmentAccessSubjectKind::Owner
@@ -988,7 +1015,6 @@ impl EnvironmentConsoleEligibility {
             || self.release_version == 0
             || self.eligibility_expires_at <= now
             || !lease_valid
-            || self.terminal.validate().is_err()
         {
             return Err(EnvironmentError::ConsoleEligibilityInvalid);
         }
@@ -1111,10 +1137,12 @@ mod tests {
     use std::str::FromStr;
 
     use super::{
-        EnvironmentInstance, EnvironmentOperationKind, EnvironmentOwnerResolverClientConfig,
-        ObservedEnvironmentState, ResourceWorkCleanup, ResourceWorkHandoff,
-        ResourceWorkLeaseUpdate,
+        EnvironmentAccessSubjectKind, EnvironmentConsoleBinding, EnvironmentConsoleEligibility,
+        EnvironmentConsoleEligibilityRequest, EnvironmentInstance, EnvironmentOperationKind,
+        EnvironmentOwnerResolverClientConfig, ObservedEnvironmentState, ResourceWorkCleanup,
+        ResourceWorkHandoff, ResourceWorkLeaseUpdate,
     };
+    use crate::authoring::{EnvironmentClass, RuntimeKind, TerminalSpec};
     use crate::{
         ActorId, CapacityClaimId, CourseId, EnvironmentId, LeaseId, ReleaseId, ResourceRequestId,
         Revision, Sha256Digest, UtcTimestamp,
@@ -1134,6 +1162,50 @@ mod tests {
         ObservedEnvironmentState::Deleted,
         ObservedEnvironmentState::Failed,
     ];
+
+    #[test]
+    fn console_binding_matches_the_authoritative_runtime_without_exposing_a_vmi_locator() {
+        let environment_id = EnvironmentId::new();
+        let course_id = CourseId::new();
+        let actor_id = ActorId::new();
+        let now = UtcTimestamp::from_str("2026-08-08T00:00:00.000Z").expect("timestamp");
+        let expires = UtcTimestamp::from_str("2026-08-08T00:10:00.000Z").expect("timestamp");
+        let request = EnvironmentConsoleEligibilityRequest {
+            environment_id,
+            course_id,
+            actor_id,
+            subject_kind: EnvironmentAccessSubjectKind::Owner,
+            expected_revision: Revision::new(3).expect("revision"),
+        };
+        let mut eligibility = EnvironmentConsoleEligibility {
+            environment_id,
+            course_id,
+            owner_actor_id: actor_id,
+            environment_class: EnvironmentClass::Experiment,
+            runtime_kind: RuntimeKind::VirtualMachine,
+            environment_revision: Revision::new(3).expect("revision"),
+            release_id: ReleaseId::new(),
+            release_version: 1,
+            eligibility_expires_at: expires,
+            lease_fence: None,
+            binding: EnvironmentConsoleBinding::Novnc,
+        };
+        assert!(eligibility.validate_for(&request, now).is_ok());
+        assert_eq!(
+            eligibility.binding.kind(),
+            crate::access::ConsoleKind::Novnc
+        );
+        eligibility.runtime_kind = RuntimeKind::Container;
+        assert!(eligibility.validate_for(&request, now).is_err());
+        eligibility.binding = EnvironmentConsoleBinding::Xterm {
+            terminal: TerminalSpec {
+                executable: "/bin/sh".to_owned(),
+                args: Vec::new(),
+                working_directory: "/workspace".to_owned(),
+            },
+        };
+        assert!(eligibility.validate_for(&request, now).is_ok());
+    }
     const OPERATIONS: [EnvironmentOperationKind; 12] = [
         EnvironmentOperationKind::Create,
         EnvironmentOperationKind::Start,

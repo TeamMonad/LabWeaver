@@ -11,7 +11,7 @@ use contracts::access::ConsoleLeaseFence;
 use contracts::authoring::{EnvironmentClass, EnvironmentRuntimeSpec, RuntimeKind};
 use contracts::environment::{
     DesiredEnvironmentState, EndpointHealth, EnvironmentAccessSubjectKind,
-    EnvironmentConsoleEligibility, EnvironmentConsoleEligibilityRequest,
+    EnvironmentConsoleBinding, EnvironmentConsoleEligibility, EnvironmentConsoleEligibilityRequest,
     EnvironmentEndpointEligibility, EnvironmentEndpointEligibilityRequest, EnvironmentInstance,
     EnvironmentOwnerResolution, EnvironmentOwnerResolutionRequest, ObservedEnvironmentState,
 };
@@ -163,16 +163,25 @@ impl OwnerResolver {
             .map_err(OwnerResolverError::ReleaseUnavailable)?;
         if release.withdrawn_at.is_some()
             || release.projection.release.course_id != instance.course_id
-            || release.projection.release.runtime_kind != RuntimeKind::Container
+            || release.projection.release.runtime_kind != instance.runtime_kind
             || release.projection.environment_spec.class != instance.class
         {
             return Err(OwnerResolverError::EnvironmentUnavailable);
         }
-        let terminal = match &release.projection.environment_spec.runtime {
+        let binding = match &release.projection.environment_spec.runtime {
             EnvironmentRuntimeSpec::Container {
                 terminal: Some(terminal),
                 ..
-            } => terminal.as_ref().clone(),
+            } if instance.runtime_kind == RuntimeKind::Container => {
+                EnvironmentConsoleBinding::Xterm {
+                    terminal: terminal.as_ref().clone(),
+                }
+            }
+            EnvironmentRuntimeSpec::VirtualMachine { .. }
+                if instance.runtime_kind == RuntimeKind::VirtualMachine =>
+            {
+                EnvironmentConsoleBinding::Novnc
+            }
             _ => return Err(OwnerResolverError::EnvironmentUnavailable),
         };
         let lease_fence = match instance.class {
@@ -209,7 +218,7 @@ impl OwnerResolver {
             release_version: instance.release_version,
             eligibility_expires_at,
             lease_fence,
-            terminal,
+            binding,
         };
         resolution
             .validate_for(request, authority_now)
@@ -233,7 +242,6 @@ fn authorize_console_instance(
     }
     if instance.desired_state != DesiredEnvironmentState::Running
         || instance.observed_state != ObservedEnvironmentState::Ready
-        || instance.runtime_kind != RuntimeKind::Container
         || instance.eligibility_expires_at <= now
     {
         return Err(OwnerResolverError::EnvironmentUnavailable);

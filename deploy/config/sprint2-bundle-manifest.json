@@ -10,6 +10,7 @@
     "environment-service-config": ["providers.json"],
     "evaluation-service-config": ["config.yaml", "worker.yaml"],
     "kubevirt-executor-config": ["config.yaml"],
+    "kubevirt-console-executor-config": ["config.yaml"],
     "web-config": ["deployment.json"]
   },
   "secrets": {
@@ -130,6 +131,13 @@
       "nats.creds",
       "postgres-ca.pem",
       "registry-pull-config.json"
+    ],
+    "kubevirt-console-executor-secrets": [
+      "database-url",
+      "mtls-ca.pem",
+      "postgres-ca.pem",
+      "tls.crt",
+      "tls.key"
     ],
     "openssh-gateway-secrets": [
       "mtls-ca.pem",

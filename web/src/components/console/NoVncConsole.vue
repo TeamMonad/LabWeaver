@@ -35,6 +35,11 @@ function toWebSocketUrl(locator: string): string {
   return base.toString()
 }
 
+function clearConnectTimer() {
+  if (connectTimer) clearTimeout(connectTimer)
+  connectTimer = null
+}
+
 onMounted(() => {
   if (!rfbEl.value) return
   emit('stateChange', 'connecting')
@@ -49,24 +54,27 @@ onMounted(() => {
     })
     rfb.addEventListener('connect', () => {
       connected = true
-      if (connectTimer) clearTimeout(connectTimer)
+      clearConnectTimer()
       emit('stateChange', 'open')
     })
     rfb.addEventListener('disconnect', (e) => {
+      clearConnectTimer()
       const detail = (e as CustomEvent<{ clean?: boolean }>).detail
       emit('stateChange', 'closed', detail?.clean ? undefined : 'CONSOLE_UPSTREAM_UNAVAILABLE')
     })
     rfb.addEventListener('securityfailure', (e) => {
+      clearConnectTimer()
       const detail = (e as CustomEvent<{ reason?: number }>).detail
       emit('stateChange', 'error', detail?.reason === 1 ? 'CONSOLE_DENIED' : 'CONSOLE_UPSTREAM_UNAVAILABLE')
     })
   } catch {
+    clearConnectTimer()
     emit('stateChange', 'error', 'CONSOLE_UPSTREAM_UNAVAILABLE')
   }
 })
 
 onBeforeUnmount(() => {
-  if (connectTimer) clearTimeout(connectTimer)
+  clearConnectTimer()
   rfb?.disconnect()
   rfb = null
 })

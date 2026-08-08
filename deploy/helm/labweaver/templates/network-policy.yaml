@@ -52,6 +52,11 @@ spec:
         - podSelector:
             matchLabels: {app.kubernetes.io/part-of: labweaver}
       ports: [{protocol: TCP, port: 8085}]
+    {{- else if eq $name "kubevirt-console-executor" }}
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: environment-service}
+      ports: [{protocol: TCP, port: 9451}]
     {{- else }}
     - from:
         - podSelector:
@@ -84,6 +89,32 @@ spec:
     {{- end }}
     {{- end }}
   egress:
+    {{- if eq $name "kubevirt-console-executor" }}
+    # Console frames leave only through the Kubernetes VNC subresource. DNS is
+    # limited to cluster DNS so the explicitly configured API endpoint resolves.
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+          podSelector:
+            matchLabels: {k8s-app: kube-dns}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    {{- if empty $root.Values.network.kubernetesApiCidrs }}
+    {{- fail "network.kubernetesApiCidrs must identify the adopted API endpoint when runtime executors are enabled" }}
+    {{- end }}
+    {{- if empty $root.Values.network.kubernetesApiPorts }}
+    {{- fail "network.kubernetesApiPorts must identify the adopted API endpoint ports when runtime executors are enabled" }}
+    {{- end }}
+    {{- range $cidr := $root.Values.network.kubernetesApiCidrs }}
+    - to:
+        - ipBlock: {cidr: {{ $cidr | quote }}}
+      ports:
+        {{- range $port := $root.Values.network.kubernetesApiPorts }}
+        - {protocol: TCP, port: {{ $port }}}
+        {{- end }}
+    {{- end }}
+    {{- else }}
     {{- if eq $name "agent-service" }}
     # Agent candidate generation may reach arbitrary external tools and package
     # authorities. Identity, secrets, budgets and approval remain service-owned.
@@ -168,6 +199,11 @@ spec:
         - podSelector:
             matchLabels: {app.kubernetes.io/name: container-executor}
       ports: [{protocol: TCP, port: 9450}]
+    - to:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: kubevirt-console-executor}
+      ports: [{protocol: TCP, port: 9451}]
+    {{- end }}
     {{- end }}
 {{- end }}
 {{- end }}

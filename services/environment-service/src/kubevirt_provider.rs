@@ -1685,14 +1685,20 @@ where
                     "spec":{
                         "runStrategy":"Always",
                         "template":{
-                            "metadata":{"labels":{"app":"runtime","labweaver.io/environment-id":instance.id.to_string()}},
+                            "metadata":{"labels":{
+                                "app":"runtime",
+                                "labweaver.io/environment-id":instance.id.to_string(),
+                                "labweaver.io/course-id":instance.course_id.to_string(),
+                                "labweaver.io/release-id":projection.release.id.to_string(),
+                                "labweaver.io/release-version":projection.release.version.to_string()
+                            }},
                             "spec":{
                                 "terminationGracePeriodSeconds":30,
                                 "nodeSelector":{KUBEVIRT_NODE_LABEL_KEY:KUBEVIRT_NODE_LABEL_VALUE},
                                 "domain":{
                                     "resources":{"requests":{"cpu":cpu,"memory":memory},"limits":{"cpu":cpu,"memory":vmi_memory_limit}},
                                     "devices":{
-                                        "autoattachGraphicsDevice":false,
+                                        "autoattachGraphicsDevice":true,
                                         "autoattachSerialConsole":true,
                                         "disks":[
                                             {"name":"rootdisk","disk":{"bus":"virtio"},"bootOrder":1},

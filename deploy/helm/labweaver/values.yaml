@@ -141,6 +141,7 @@ workloads:
       LABWEAVER_CONTAINER_TERMINAL_EXECUTOR_CA_PATH: /etc/labweaver/secrets/mtls-ca.pem
       LABWEAVER_CONTAINER_TERMINAL_EXECUTOR_CERT_PATH: /etc/labweaver/secrets/tls.crt
       LABWEAVER_CONTAINER_TERMINAL_EXECUTOR_KEY_PATH: /etc/labweaver/secrets/tls.key
+      LABWEAVER_KUBEVIRT_CONSOLE_EXECUTOR_URI: wss://kubevirt-console-executor:9451/internal/v1/kubevirt-vnc
     secretEnv:
       LABWEAVER_DATABASE_URL: {key: database-url}
       LABWEAVER_NATS_SERVER: {key: nats-server}
@@ -179,6 +180,21 @@ workloads:
       SSL_CERT_FILE: /etc/labweaver/secrets/minio-ca.pem
     ports:
       - {name: health, containerPort: 8086, servicePort: 8086}
+    readiness: {type: http, port: health, path: /health/ready}
+  kubevirt-console-executor:
+    enabled: true
+    imageKey: environment_service
+    args: ["--mode", "kubevirt-console-executor"]
+    configMap: kubevirt-console-executor-config
+    secret: kubevirt-console-executor-secrets
+    rbacProfile: kubevirt-console
+    kubernetesApi: true
+    env:
+      LABWEAVER_KUBEVIRT_CONSOLE_CONFIG_FILE: /etc/labweaver/config/config.yaml
+      LABWEAVER_BIND_ADDR: 0.0.0.0:8089
+    ports:
+      - {name: health, containerPort: 8089, servicePort: 8089}
+      - {name: console-mtls, containerPort: 9451, servicePort: 9451}
     readiness: {type: http, port: health, path: /health/ready}
   openssh-gateway:
     enabled: true

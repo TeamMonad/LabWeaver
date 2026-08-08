@@ -46,6 +46,7 @@ NATS_SECRET_KEYS = {
 PLATFORM_ROTATION_IDENTITIES = {
     "environment-service": "environment-service-secrets",
     "container-executor": "container-executor-secrets",
+    "kubevirt-console-executor": "kubevirt-console-executor-secrets",
 }
 PLATFORM_SECRET_KEYS = {
     "mtls-ca.pem": "ca.pem",
@@ -360,6 +361,13 @@ def prepare(
             clients / identity,
         )
         if identity in PLATFORM_ROTATION_IDENTITIES:
+            _replace_platform_identity(
+                _object(application_bundle, "Secret", secret_name),
+                platform_identities / identity,
+            )
+
+    for identity, secret_name in PLATFORM_ROTATION_IDENTITIES.items():
+        if identity not in APPLICATION_IDENTITIES:
             _replace_platform_identity(
                 _object(application_bundle, "Secret", secret_name),
                 platform_identities / identity,

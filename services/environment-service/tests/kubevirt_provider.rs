@@ -335,8 +335,22 @@ fn plan_is_deterministic_private_and_digest_bound() {
         virtual_machine
             .document
             .pointer("/spec/template/spec/domain/devices/autoattachGraphicsDevice"),
-        Some(&json!(false))
+        Some(&json!(true))
     );
+    for label in [
+        "labweaver.io~1environment-id",
+        "labweaver.io~1course-id",
+        "labweaver.io~1release-id",
+        "labweaver.io~1release-version",
+    ] {
+        assert!(
+            virtual_machine
+                .document
+                .pointer(&format!("/spec/template/metadata/labels/{label}"))
+                .is_some(),
+            "missing authoritative VMI identity label {label}"
+        );
+    }
     assert_eq!(
         virtual_machine
             .document

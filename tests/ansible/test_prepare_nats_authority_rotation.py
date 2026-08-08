@@ -267,6 +267,22 @@ class NatsAuthorityRotationTests(unittest.TestCase):
                             },
                         }
                         for secret_name in ROTATION.APPLICATION_IDENTITIES.values()
+                    ]
+                    + [
+                        {
+                            "apiVersion": "v1",
+                            "kind": "Secret",
+                            "metadata": {"name": secret_name},
+                            "data": {
+                                **{
+                                    key: "old-platform"
+                                    for key in ROTATION.PLATFORM_SECRET_KEYS
+                                },
+                                "unrelated": "preserved",
+                            },
+                        }
+                        for identity, secret_name in ROTATION.PLATFORM_ROTATION_IDENTITIES.items()
+                        if identity not in ROTATION.APPLICATION_IDENTITIES
                     ],
                     explicit_start=True,
                 ),
@@ -324,7 +340,8 @@ class NatsAuthorityRotationTests(unittest.TestCase):
             )
             for document in rendered:
                 self.assertEqual(document["data"]["unrelated"], "preserved")
-                self.assertNotEqual(document["data"]["nats.creds"], "old")
+                if "nats.creds" in document["data"]:
+                    self.assertNotEqual(document["data"]["nats.creds"], "old")
                 if document["metadata"]["name"] in ROTATION.PLATFORM_ROTATION_IDENTITIES.values():
                     self.assertNotEqual(document["data"]["tls.crt"], "old-platform")
 

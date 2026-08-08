@@ -72,6 +72,13 @@ baseline migration to a disposable PostgreSQL instance.
   state/visual/a11y reuse. A real Kubernetes PTY is not local evidence.
   It deliberately does not deploy to the shared cluster; #126 owns connected
   Container PTY, revoke/expiry/control-channel-loss and Release Gate evidence.
+- #124 local verification covers Container-to-xterm and KubeVirt-to-noVNC
+  binding, kind/subprotocol mismatch without handoff consumption, Environment
+  SAN/revision/Lease/runtime fencing, exact VMI namespace/name/UID/label and
+  Running/Ready checks, bounded bidirectional RFB relay, disconnect handling,
+  dedicated RBAC/NetworkPolicy and fail-closed executor configuration. It does
+  not claim a real browser-to-VMI stream or connected revoke/expiry evidence;
+  #126 owns those checks for the frozen candidate.
 - one current v1 REST/event/schema representation;
 - no Sigstore, Kyverno, SBOM, provenance or attestation field in the active
   product contract;
