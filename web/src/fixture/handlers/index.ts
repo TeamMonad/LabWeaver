@@ -13,6 +13,7 @@ import * as events from './events'
 import * as frozenSubmissions from './frozenSubmissions'
 import * as llmPolicy from './llmPolicy'
 import * as problemPackages from './problemPackages'
+import * as resource from './resource'
 import * as sshKeys from './sshKeys'
 import * as templateReleases from './templateReleases'
 
@@ -75,6 +76,20 @@ const routes: RouteEntry[] = [
   // Access grants
   { method: 'GET', match: (url) => /^\/api\/v1\/access-grants\/[^/]+$/.test(url), handler: accessGrants.getAccessGrant },
   { method: 'POST', match: (url) => /^\/api\/v1\/access-grants\/[^/]+\/revoke$/.test(url), handler: accessGrants.revokeAccessGrant },
+
+  // Resource requests and leases
+  { method: 'GET', match: (url) => url === '/api/v1/resource-requests', handler: resource.listResourceRequests },
+  { method: 'POST', match: (url) => url === '/api/v1/resource-requests', handler: resource.createResourceRequest },
+  { method: 'GET', match: (url) => /^\/api\/v1\/resource-requests\/[^/]+$/.test(url), handler: resource.getResourceRequest },
+  { method: 'POST', match: (url) => /^\/api\/v1\/resource-requests\/[^/]+\/approve$/.test(url), handler: resource.approveResourceRequest },
+  { method: 'POST', match: (url) => /^\/api\/v1\/resource-requests\/[^/]+\/resize-and-approve$/.test(url), handler: resource.resizeAndApproveResourceRequest },
+  { method: 'POST', match: (url) => /^\/api\/v1\/resource-requests\/[^/]+\/reject$/.test(url), handler: resource.rejectResourceRequest },
+  { method: 'POST', match: (url) => /^\/api\/v1\/resource-requests\/[^/]+\/cancel$/.test(url), handler: resource.cancelResourceRequest },
+  { method: 'POST', match: (url) => /^\/api\/v1\/resource-requests\/[^/]+\/retry$/.test(url), handler: resource.retryResourceRequest },
+  { method: 'GET', match: (url) => url === '/api/v1/resource-leases', handler: resource.listResourceLeases },
+  { method: 'GET', match: (url) => /^\/api\/v1\/resource-leases\/[^/]+$/.test(url), handler: resource.getResourceLease },
+  { method: 'POST', match: (url) => /^\/api\/v1\/resource-leases\/[^/]+\/renew$/.test(url), handler: resource.renewResourceLease },
+  { method: 'POST', match: (url) => /^\/api\/v1\/resource-leases\/[^/]+\/revoke$/.test(url), handler: resource.revokeResourceLease },
 
   // Console capabilities
   { method: 'GET', match: (url) => /^\/api\/v1\/access-grants\/[^/]+\/console-capabilities$/.test(url), handler: consoleCapabilities.listConsoleCapabilities },

@@ -66,3 +66,15 @@ export function consumeImageGateScenario(): string | null {
   writeFlag('imageGate', null)
   return value
 }
+
+/**
+ * `fixture:resourceRevisionConflict` — one-shot: the next Resource mutation
+ * (request approve/reject/cancel/retry or Lease renew/revoke) first advances
+ * the target revision as if a concurrent writer intervened, so the client's
+ * revision fence fails with a stable 412 PRECONDITION_FAILED.
+ */
+export function consumeResourceRevisionConflict(): boolean {
+  if (readFlag('resourceRevisionConflict') !== '1') return false
+  writeFlag('resourceRevisionConflict', null)
+  return true
+}

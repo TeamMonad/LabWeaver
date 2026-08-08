@@ -9,6 +9,7 @@ import { resetEventLog } from './eventLog'
 import { resetLlmPolicyStore, seedLlmPolicies } from './llmPolicyStore'
 import { resetOperationStore, seedTimedOutOperation } from './operationStore'
 import { resetProblemPackageStore } from './problemPackageStore'
+import { resetResourceStore, seedResources } from './resourceStore'
 import { resetTemplateReleaseStore, seedTemplateReleases } from './templateReleaseStore'
 import { resetConsoleCapabilityStore } from './consoleCapabilityStore'
 
@@ -27,6 +28,7 @@ export function resetFixtureState(): void {
   resetEventLog()
   resetLlmPolicyStore()
   resetProblemPackageStore()
+  resetResourceStore()
   resetSshKeyStore()
   resetTemplateReleaseStore()
   resetConsoleCapabilityStore()
@@ -35,6 +37,7 @@ export function resetFixtureState(): void {
   seedTimedOutOperation(envIds[0])
   seedTemplateReleases(['course-101', 'course-102', 'course-admin'])
   seedLlmPolicies(['course-101', 'course-102', 'course-admin'])
+  seedResources()
 }
 
 export * from './actorStore'
@@ -46,3 +49,4 @@ export * from './eventLog'
 export * from './llmPolicyStore'
 export * from './operationStore'
 export * from './problemPackageStore'
+export * from './resourceStore'
