@@ -1387,21 +1387,18 @@ fn run_infrastructure_with_package(
     // ansible-rs 1.1.0 appends configured arguments twice in `run`; all
     // controller identity and vault inputs therefore travel through the
     // explicit environment contract above.
-    let result = runner
+    runner
         .run(Play::from_file(playbook))
         .map(|_| ())
         .map_err(|error| AppError::ExternalCommand {
             role: "allowlisted infrastructure playbook",
             code: None,
             detail: Some(format!("ansible-rs returned a non-zero result: {error:?}")),
-        });
-    result
+        })
 }
 
 #[cfg(target_os = "linux")]
-#[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
-#[cfg(target_os = "linux")]
 fn identity_hash(fields: &[&str]) -> String {
     let mut hasher = Sha256::new();
     for field in fields {
