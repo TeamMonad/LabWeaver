@@ -35,6 +35,19 @@
     "access-grants:create",
     "access-grants:get",
     "access-grants:revoke",
+    "resource-requests:list",
+    "resource-requests:create",
+    "resource-requests:get",
+    "resource-requests:approve",
+    "resource-requests:resize-and-approve",
+    "resource-requests:reject",
+    "resource-requests:cancel",
+    "resource-requests:retry",
+    "resource-leases:list",
+    "resource-leases:get",
+    "resource-leases:renew",
+    "resource-leases:revoke",
+    "conflict:resource-revision-mismatch",
     "endpoints:list",
     "operations:list",
     "operations:get",
@@ -57,6 +70,7 @@
     "environmentAccessGrants",
     "accessGrants",
     "environmentOperations",
-    "events"
+    "events",
+    "resource"
   ]
 }

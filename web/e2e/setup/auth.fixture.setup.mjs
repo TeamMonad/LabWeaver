@@ -71,6 +71,8 @@ test('prepare fixture auth states', async () => {
       role: 'platform-admin',
       name: 'Fixture Admin',
       email: 'admin@fixture.labweaver.io',
+      // platform-admin 不按课程阻塞：无 course_id 是正常身份而非 blocked 场景。
+      file: 'platform-admin.json',
     },
     // Deterministic blocked actors: no course_id claim and no default course env,
     // so useCourseContext resolves to null and protected pages show the blocked diagnostic.
@@ -87,7 +89,7 @@ test('prepare fixture auth states', async () => {
   ]
 
   for (const state of states) {
-    const fileName = state.courseId === undefined ? `${state.role}-blocked.json` : `${state.role}.json`
+    const fileName = state.file ?? (state.courseId === undefined ? `${state.role}-blocked.json` : `${state.role}.json`)
     fs.writeFileSync(
       path.join(authDir, fileName),
       JSON.stringify(fixtureStorageState(state), null, 2),

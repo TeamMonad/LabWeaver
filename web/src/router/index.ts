@@ -78,6 +78,7 @@ const routes: RouteRecordRaw[] = [
   ]),
   roleRoute('admin', '/admin', '管理工作台', () => import('@/views/AdminView.vue'), [
     { path: 'policies', component: () => import('@/views/admin/PolicyListView.vue'), meta: { title: '策略' } },
+    { path: 'resource-approval', component: () => import('@/views/admin/ResourceApprovalView.vue'), meta: { title: '资源审批' } },
     { path: 'audit', component: () => import('@/views/admin/AuditLogView.vue'), meta: { title: '审计' } },
   ]),
   {

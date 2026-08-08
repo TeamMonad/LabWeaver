@@ -54,6 +54,14 @@ export type FixtureAction =
   | 'ssh_key:write'
   | 'events:read'
   | 'submission:freeze'
+  | 'resource_request:read'
+  | 'resource_request:write'
+  | 'resource_request:approve'
+  | 'resource_request:cancel'
+  | 'resource_request:retry'
+  | 'resource_lease:read'
+  | 'resource_lease:renew'
+  | 'resource_lease:revoke'
 
 export interface FixtureResource {
   courseId?: string
@@ -89,6 +97,10 @@ export function can(role: FixtureRole, action: FixtureAction, resource?: Fixture
           return resource?.actorId === undefined || resource.actorId.startsWith('fixture-actor-teacher')
         case 'events:read':
           return true
+        // 教师可以提交并读取本人的资源申请；审批、取消、重试与 Lease 管理仅 platform-admin。
+        case 'resource_request:read':
+        case 'resource_request:write':
+          return true
         default:
           return false
       }
@@ -108,6 +120,10 @@ export function can(role: FixtureRole, action: FixtureAction, resource?: Fixture
         case 'ssh_key:read':
         case 'ssh_key:write':
           return resource?.actorId === undefined || resource.actorId.startsWith('fixture-actor-student')
+        // 学生可以提交并读取本人的资源申请；审批与 Lease 管理仅 platform-admin。
+        case 'resource_request:read':
+        case 'resource_request:write':
+          return true
         default:
           return false
       }
