@@ -201,6 +201,7 @@ pub struct StudentEvaluationResult {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StudentEvaluationStepResult {
+    #[schemars(extend("minimum" = 1))]
     pub position: u32,
     pub role: EvaluationStepRole,
     pub state: EvaluationStepRunState,
@@ -361,6 +362,7 @@ pub struct EvaluationStepRun {
     pub id: EvaluationStepRunId,
     pub run_id: EvaluationRunId,
     pub step_id: String,
+    #[schemars(extend("minimum" = 1))]
     pub position: u32,
     pub role: EvaluationStepRole,
     pub failure_policy: EvaluationStepFailurePolicy,

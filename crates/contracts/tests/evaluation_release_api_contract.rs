@@ -92,6 +92,10 @@ fn student_projection_schema_excludes_private_evaluation_fields()
         serde_json::json!(["succeeded", "failed", "cancelled"]),
         "student result wire contract must be terminal-only"
     );
+    assert_eq!(
+        document["$defs"]["StudentEvaluationStepResult"]["properties"]["position"]["minimum"], 1,
+        "public step ordinals are one-based"
+    );
     Ok(())
 }
 
