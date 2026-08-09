@@ -2,7 +2,11 @@
 - name: Install Local Path Provisioner
   kubernetes.core.k8s:
     state: present
-    src: "{{ local_path_manifest_file | default('https://raw.githubusercontent.com/rancher/local-path-provisioner/' ~ local_path_provisioner_version ~ '/deploy/local-path-storage.yaml') }}"
+    src: >-
+      {{ local_path_manifest_file
+         | default('https://raw.githubusercontent.com/rancher/local-path-provisioner/'
+                   ~ local_path_provisioner_version
+                   ~ '/deploy/local-path-storage.yaml') }}
 
 - name: Configure Local Path storage
   kubernetes.core.k8s:

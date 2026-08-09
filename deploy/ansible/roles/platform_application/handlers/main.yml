@@ -1,12 +1,12 @@
 ---
 - name: Refresh retained router trust
-  ansible.builtin.command: "{{ labweaver_ca_trust_refresh_command }}"
+  ansible.builtin.command: "{{ platform_application_ca_trust_refresh_command }}"
   changed_when: true
   delegate_to: "{{ groups['routers'] | first }}"
   become: true
 
 - name: Refresh Kubernetes node Harbor trust
-  ansible.builtin.command: "{{ labweaver_ca_trust_refresh_command }}"
+  ansible.builtin.command: "{{ platform_application_ca_trust_refresh_command }}"
   changed_when: true
   delegate_to: "{{ item }}"
   become: true

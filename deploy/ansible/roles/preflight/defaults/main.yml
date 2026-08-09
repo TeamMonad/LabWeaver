@@ -2,5 +2,5 @@
 # Expected inventory identity for the adopted identity-foundation scope.
 # RHEL demo clusters use the edge-router/k8s-cp1 layout; the v1 Ubuntu cluster
 # declares v1-cp-63 for both groups.
-identity_preflight_router: edge-router
-identity_preflight_control_plane: k8s-cp1
+preflight_identity_router: edge-router
+preflight_identity_control_plane: k8s-cp1

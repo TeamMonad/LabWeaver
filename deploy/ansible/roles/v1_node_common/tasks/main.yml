@@ -27,12 +27,15 @@
     enabled: true
     state: started
 
-- name: Disable UFW if present
+- name: Discover installed services before disabling UFW
+  ansible.builtin.service_facts:
+
+- name: Disable UFW when installed
   ansible.builtin.systemd_service:
     name: ufw
     enabled: false
     state: stopped
-  ignore_errors: true
+  when: "'ufw.service' in ansible_facts.services"
 
 - name: Disable swap immediately
   ansible.builtin.command: swapoff -a

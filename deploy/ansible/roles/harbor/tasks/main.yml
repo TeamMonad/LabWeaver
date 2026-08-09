@@ -289,6 +289,7 @@
   when: harbor_dnsmasq_enabled | bool
 
 - name: Install the dedicated Harbor DNS fragment with rollback on validation failure
+  when: harbor_dnsmasq_enabled | bool
   block:
     - name: Record the existing Harbor DNS fragment before replacement
       ansible.builtin.stat:
@@ -352,7 +353,6 @@
     - name: Stop after failed Harbor DNS validation
       ansible.builtin.fail:
         msg: HARBOR_DNS_VALIDATION_FAILED
-  when: harbor_dnsmasq_enabled | bool
 
 - name: Install or reconcile Harbor with pinned chart and internal dependencies
   kubernetes.core.helm:
@@ -635,8 +635,8 @@
     {{ harbor_kubectl_path }} --kubeconfig {{ harbor_kubeconfig_path }}
     -n {{ harbor_namespace }} get secret harbor-internal-ca
     -o jsonpath='{.data.ca\.crt}' | base64 -d
-    > {{ labweaver_ca_trust_anchors_dir }}/labweaver-harbor-internal-ca.crt
-    && {{ labweaver_ca_trust_refresh_command }}
+    > {{ harbor_ca_trust_anchors_dir }}/labweaver-harbor-internal-ca.crt
+    && {{ harbor_ca_trust_refresh_command }}
   args:
     executable: /bin/bash
   become: true

@@ -11,5 +11,5 @@ harbor_secret_locator_path: /etc/labweaver/harbor/bootstrap.env # noqa: var-nami
 
 # CA trust store layout differs between RHEL-family (/etc/pki/ca-trust) and
 # Debian-family (/usr/local/share/ca-certificates) control planes.
-labweaver_ca_trust_anchors_dir: /etc/pki/ca-trust/source/anchors
-labweaver_ca_trust_refresh_command: update-ca-trust extract
+platform_harbor_route_ca_trust_anchors_dir: /etc/pki/ca-trust/source/anchors
+platform_harbor_route_ca_trust_refresh_command: update-ca-trust extract

@@ -88,7 +88,13 @@
   when: ansible_facts.os_family == 'Debian'
 
 - name: Assert the exact pinned versions are available in the configured sources (Ubuntu)
-  ansible.builtin.shell: "apt-cache madison {{ item.pkg }} | awk '{print $3}' | grep -Fx '{{ item.version }}-1.1'"
+  ansible.builtin.shell: >-
+    set -o pipefail &&
+    apt-cache madison {{ item.pkg | quote }} |
+    awk '{print $3}' |
+    grep -Fx {{ (item.version ~ '-1.1') | quote }}
+  args:
+    executable: /bin/bash
   changed_when: false
   register: v1_pinned
   loop:

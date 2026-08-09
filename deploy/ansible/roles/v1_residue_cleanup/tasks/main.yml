@@ -4,18 +4,19 @@
 # refuses to clean unless labweaver_v1_cleanup_old_cluster=true is supplied.
 # Approved destructive operation under issue #148 (2026-08-07).
 - name: Inventorize old-cluster residue
-  ansible.builtin.shell: "{{ item }}"
+  ansible.builtin.command:
+    argv: "{{ item }}"
   changed_when: false
   failed_when: false
   register: v1_residue_inventory
   loop:
-    - "kubeadm version 2>/dev/null || true"
-    - "systemctl is-active kubelet crio 2>/dev/null || true"
-    - "ls -la /etc/kubernetes 2>/dev/null || true"
-    - "ls /etc/kubernetes/manifests 2>/dev/null || true"
-    - "ip -br link 2>/dev/null | grep -E 'cilium|lxc|docker' || true"
-    - "ls -la /etc/cni/net.d 2>/dev/null || true"
-    - "command -v lxc >/dev/null && lxc list --format json 2>/dev/null || echo 'no-lxc-cli'"
+    - [kubeadm, version]
+    - [systemctl, is-active, kubelet, crio]
+    - [ls, -la, /etc/kubernetes]
+    - [ls, /etc/kubernetes/manifests]
+    - [ip, -br, link]
+    - [ls, -la, /etc/cni/net.d]
+    - [lxc, list, --format, json]
 
 - name: Ensure the root-owned v1 audit directory exists
   ansible.builtin.file:
@@ -41,13 +42,16 @@
       Re-run with -e labweaver_v1_cleanup_old_cluster=true after confirming
       the audited residue (LXD containers are inventoried, never removed).
 
-- name: Stop old kubelet and CRI-O
+- name: Discover installed services before stopping the old cluster
+  ansible.builtin.service_facts:
+
+- name: Stop installed old kubelet and CRI-O services
   ansible.builtin.systemd_service:
     name: "{{ item }}"
     state: stopped
     enabled: false
-  ignore_errors: true
   loop: [kubelet, crio]
+  when: (item ~ '.service') in ansible_facts.services
 
 - name: Reset old kubeadm state
   ansible.builtin.command: >-
@@ -57,32 +61,44 @@
 
 - name: Kill surviving old-cluster container processes (control plane, Cilium,
     KubeVirt, etcd, conmon) - CRI-O stop/purge alone does not kill them.
-    Bracket patterns avoid pkill matching the task's own wrapper shell.
-  ansible.builtin.shell: "{{ item }} || true"
-  changed_when: false
+    Bracket patterns make every process match explicit.
+  ansible.builtin.command:
+    argv: [pkill, -9, -f, "{{ item }}"]
+  register: v1_residue_process_kill
+  changed_when: v1_residue_process_kill.rc == 0
+  failed_when: v1_residue_process_kill.rc not in [0, 1]
   loop:
-    - "pkill -9 -f '[c]onmon'"
-    - "pkill -9 -f '[k]ube-apiserver'"
-    - "pkill -9 -f '[k]ube-controller'"
-    - "pkill -9 -f '[k]ube-scheduler'"
-    - "pkill -9 -f '[k]ube-proxy'"
-    - "pkill -9 -f '[c]ilium-agent'"
-    - "pkill -9 -f '[c]ilium-envoy'"
-    - "pkill -9 -f '[c]ilium-health'"
-    - "pkill -9 -f '[v]irt-operator'"
-    - "pkill -9 -f '[v]irt-api'"
-    - "pkill -9 -f '[v]irt-controller'"
-    - "pkill -9 -f '[b]in/etcd'"
+    - '[c]onmon'
+    - '[k]ube-apiserver'
+    - '[k]ube-controller'
+    - '[k]ube-scheduler'
+    - '[k]ube-proxy'
+    - '[c]ilium-agent'
+    - '[c]ilium-envoy'
+    - '[c]ilium-health'
+    - '[v]irt-operator'
+    - '[v]irt-api'
+    - '[v]irt-controller'
+    - '[b]in/etcd'
 
 - name: Wait for processes to exit
   ansible.builtin.pause:
     seconds: 3
 
-- name: Unmount old container runtime mounts (shm / cilium cgroup)
-  ansible.builtin.shell: >-
-    for m in $(mount 2>/dev/null | grep -E 'overlay-containers|run/cilium'
-    | awk '{print $3}'); do umount -l "$m" 2>/dev/null || true; done
+- name: Discover old container runtime mounts (shm / cilium cgroup)
+  ansible.builtin.command:
+    argv: [findmnt, --raw, --noheadings, --output, TARGET]
   changed_when: false
+  register: v1_residue_mounts
+
+- name: Unmount every discovered old container runtime mount
+  ansible.builtin.command:
+    argv: [umount, -l, "{{ item }}"]
+  changed_when: true
+  loop: >-
+    {{ v1_residue_mounts.stdout_lines
+       | select('search', 'overlay-containers|run/cilium')
+       | list }}
 
 - name: Remove old pod logs, cilium runtime dir and stale container run dirs
   ansible.builtin.file:
@@ -93,11 +109,17 @@
     - /run/cilium
     - /run/containers/storage/overlay-containers
 
-- name: Remove leftover network namespaces
-  ansible.builtin.shell: >-
-    for ns in /var/run/netns/*; do [ -e "$ns" ] &&
-    ip netns del "$(basename $ns)" 2>/dev/null || true; done
+- name: Discover leftover network namespaces
+  ansible.builtin.command:
+    argv: [ip, netns, list]
   changed_when: false
+  register: v1_residue_network_namespaces
+
+- name: Remove every discovered network namespace
+  ansible.builtin.command:
+    argv: [ip, netns, delete, "{{ item.split()[0] }}"]
+  changed_when: true
+  loop: "{{ v1_residue_network_namespaces.stdout_lines }}"
 
 - name: Remove old cluster directories
   ansible.builtin.file:
@@ -113,26 +135,36 @@
     - /var/lib/kube-proxy
     - /etc/containers
 
-- name: Remove leftover Cilium / docker interfaces
-  ansible.builtin.shell: "ip link del {{ item }} 2>/dev/null || true"
+- name: Inspect leftover Cilium and Docker interfaces
+  ansible.builtin.command:
+    argv: [ip, link, show, "{{ item }}"]
   changed_when: false
+  failed_when: false
+  register: v1_residue_interfaces
   loop: [cilium_net, cilium_host, cilium_vxlan, cilium_health, docker0]
 
+- name: Remove every discovered Cilium and Docker interface
+  ansible.builtin.command:
+    argv: [ip, link, delete, "{{ item.item }}"]
+  changed_when: true
+  loop: "{{ v1_residue_interfaces.results | selectattr('rc', 'equalto', 0) | list }}"
+
 - name: Fail closed if any Cilium interface survives
-  ansible.builtin.shell: "ip -br link 2>/dev/null | grep -cE 'cilium' || true"
+  ansible.builtin.command:
+    argv: [ip, -br, link]
   changed_when: false
   register: v1_cilium_after
-  failed_when: (v1_cilium_after.stdout | trim | int) != 0
-  loop: [once]
+  failed_when: v1_cilium_after.stdout is search('cilium')
 
 - name: Fail closed if old-cluster processes survive
-  ansible.builtin.shell: >-
-    ps aux | grep -E 'kube-apiserver|cilium-agent|virt-controller|bin/etcd'
-    | grep -v grep | wc -l
+  ansible.builtin.command:
+    argv:
+      - pgrep
+      - -f
+      - '[k]ube-apiserver|[c]ilium-agent|[v]irt-controller|[b]in/etcd'
   changed_when: false
   register: v1_procs_after
-  failed_when: (v1_procs_after.stdout | trim | int) != 0
-  loop: [once]
+  failed_when: v1_procs_after.rc not in [0, 1] or v1_procs_after.rc == 0
 
 - name: Purge old Kubernetes/CRI-O packages for a fresh pinned install
   ansible.builtin.apt:
@@ -140,18 +172,18 @@
     state: absent
     purge: true
     allow_change_held_packages: true
-  ignore_errors: true
 
 - name: Verify residue is gone
-  ansible.builtin.shell: "{{ item }}"
+  ansible.builtin.command:
+    argv: "{{ item }}"
   changed_when: false
   failed_when: false
   register: v1_residue_after
   loop:
-    - "systemctl is-active kubelet crio 2>/dev/null || true"
-    - "ls /etc/kubernetes 2>/dev/null || echo gone"
-    - "ls /var/lib/kubelet 2>/dev/null || echo gone"
-    - "ip -br link 2>/dev/null | grep -E 'cilium|lxc|docker' || echo none"
+    - [systemctl, is-active, kubelet, crio]
+    - [ls, /etc/kubernetes]
+    - [ls, /var/lib/kubelet]
+    - [ip, -br, link]
 
 - name: Record cleanup result
   ansible.builtin.copy:

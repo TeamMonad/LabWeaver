@@ -285,6 +285,7 @@
       when: identity_dnsmasq_enabled | bool
 
     - name: Install the Keycloak-only DNS fragment with rollback
+      when: identity_dnsmasq_enabled | bool
       block:
         - name: Inspect the previous Keycloak DNS fragment
           ansible.builtin.stat:
@@ -351,7 +352,6 @@
 
         - name: Stop after failed Keycloak DNS validation
           ansible.builtin.fail: {msg: IDENTITY_DNS_VALIDATION_FAILED}
-      when: identity_dnsmasq_enabled | bool
 
 - name: Wait for the identity Gateway
   ansible.builtin.command:

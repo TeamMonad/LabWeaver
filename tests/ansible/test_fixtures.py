@@ -733,18 +733,18 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("Load the adopted Harbor CA for Kubernetes nodes", tasks)
         self.assertIn("groups['k8s_cluster']", tasks)
         self.assertIn(
-            'dest: "{{ labweaver_ca_trust_anchors_dir }}/labweaver-harbor.crt"',
+            'dest: "{{ platform_application_ca_trust_anchors_dir }}/labweaver-harbor.crt"',
             tasks,
         )
         self.assertIn(
-            "labweaver_ca_trust_anchors_dir: /etc/pki/ca-trust/source/anchors",
+            "platform_application_ca_trust_anchors_dir: /etc/pki/ca-trust/source/anchors",
             defaults,
         )
         self.assertIn("/etc/containers/certs.d/", tasks)
         self.assertIn("notify: Refresh Kubernetes node Harbor trust", tasks)
         self.assertIn("Apply changed Kubernetes node Harbor trust before workload rollout", tasks)
         self.assertIn("name: Refresh Kubernetes node Harbor trust", handlers)
-        self.assertIn("{{ labweaver_ca_trust_refresh_command }}", handlers)
+        self.assertIn("{{ platform_application_ca_trust_refresh_command }}", handlers)
         self.assertIn("groups['k8s_cluster']", handlers)
         application_namespace = tasks.split(
             "- name: Reconcile application namespace without deleting retained state",

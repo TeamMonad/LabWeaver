@@ -133,7 +133,7 @@
 
 - name: Install the adopted Harbor CA in the control-plane system trust
   ansible.builtin.copy:
-    dest: "{{ labweaver_ca_trust_anchors_dir }}/labweaver-harbor-nginx.crt"
+    dest: "{{ platform_harbor_route_ca_trust_anchors_dir }}/labweaver-harbor-nginx.crt"
     owner: root
     group: root
     mode: '0644'
@@ -144,7 +144,7 @@
 
 - name: Install the adopted Harbor CA in the router system trust
   ansible.builtin.copy:
-    dest: "{{ labweaver_ca_trust_anchors_dir }}/labweaver-harbor-nginx.crt"
+    dest: "{{ platform_harbor_route_ca_trust_anchors_dir }}/labweaver-harbor-nginx.crt"
     owner: root
     group: root
     mode: '0644'
