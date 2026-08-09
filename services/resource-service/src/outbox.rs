@@ -6,7 +6,7 @@
 )]
 
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_nats::jetstream::message::PublishMessage;
 use contracts::events::{CloudEvent, EVENT_CONTRACTS};
@@ -42,11 +42,19 @@ impl ResourceOutboxDispatcher {
     }
 
     pub async fn dispatch_once(&self) -> Result<ResourceOutboxOutcome, ResourceOutboxError> {
+        let started = Instant::now();
         let mut transaction = self.pool.begin().await?;
         let row = sqlx::query("SELECT event_id,subject,event_type,payload,payload_sha256 FROM resource.outbox_events WHERE published_at IS NULL ORDER BY created_at,event_id FOR UPDATE SKIP LOCKED LIMIT 1")
             .fetch_optional(&mut *transaction).await?;
         let Some(row) = row else {
             transaction.rollback().await?;
+            tracing::debug!(
+                event = "resource.outbox.idle",
+                component = "outbox",
+                operation = "nats.publish",
+                outcome = "idle",
+                duration_ms = elapsed_millis(started),
+            );
             return Ok(ResourceOutboxOutcome::Idle);
         };
         let event_id: Uuid = row.try_get("event_id")?;
@@ -99,10 +107,25 @@ impl ResourceOutboxDispatcher {
             return Err(ResourceOutboxError::FenceLost);
         }
         transaction.commit().await?;
+        tracing::info!(
+            event = "resource.outbox.published",
+            component = "outbox",
+            operation = "nats.publish",
+            outcome = "succeeded",
+            duration_ms = elapsed_millis(started),
+            trace_id = event.trace_id,
+            event_id = %event.id,
+            message_id = %event.id,
+            subject = event.subject,
+        );
         Ok(ResourceOutboxOutcome::Published {
             event_id: expected_id,
         })
     }
+}
+
+fn elapsed_millis(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

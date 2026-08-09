@@ -238,12 +238,16 @@ impl ProductionBuildExecutor {
             Err(error) => {
                 tracing::warn!(
                     event = "agent.build_executor.context_rejected",
+                    component = "build-executor",
+                    operation = "build.context.read",
+                    outcome = "rejected",
+                    duration_ms = 0_u64,
                     build_request_id = %context.build_request_id,
-                    object_key = %command.request.context_object_key,
-                    object_version = %command.request.context.object_version,
-                    expected_size_bytes = command.request.context.size_bytes,
-                    expected_media_type = %command.request.context.media_type,
                     diagnostic_code = error.diagnostic_code(),
+                    error_kind = "build_context_rejected",
+                    failure_stage = "build.context.read",
+                    retryable = false,
+                    safe_detail = "build_context_rejected",
                 );
                 return Err(rejected());
             }
@@ -269,9 +273,16 @@ impl ProductionBuildExecutor {
         ) {
             tracing::warn!(
                 event = "agent.build_executor.dockerfile_rejected",
+                component = "build-executor",
+                operation = "build.dockerfile.validate",
+                outcome = "rejected",
+                duration_ms = 0_u64,
                 build_request_id = %context.build_request_id,
-                dockerfile_path = %command.request.dockerfile_path,
-                code = ?failure.code,
+                diagnostic_code = failure.diagnostic_code(),
+                error_kind = "dockerfile_rejected",
+                failure_stage = "build.dockerfile.validate",
+                retryable = false,
+                safe_detail = "dockerfile_rejected",
             );
             return Err(failure);
         }
@@ -457,30 +468,51 @@ impl ProductionBuildExecutor {
             .authorized(self.client.get(url.clone()))
             .send()
             .await
-            .map_err(|error| {
+            .map_err(|_| {
                 tracing::error!(
                     event = "agent.build_executor.harbor_publish_request_failed",
-                    endpoint = %url,
-                    error = %error,
+                    component = "build-executor",
+                    operation = "build.publish",
+                    outcome = "failed",
+                    duration_ms = 0_u64,
+                    diagnostic_code = "LW_AGENT_BUILD_PROVIDER_UNAVAILABLE",
+                    error_kind = "registry_request_failed",
+                    failure_stage = "build.publish.request",
+                    retryable = false,
+                    safe_detail = "registry_request_failed",
                 );
                 unavailable()
             })?;
         let status = response.status();
-        let body = response.text().await.map_err(|error| {
+        let body = response.text().await.map_err(|_| {
             tracing::error!(
                 event = "agent.build_executor.harbor_publish_response_read_failed",
-                endpoint = %url,
-                status = %status,
-                error = %error,
+                component = "build-executor",
+                operation = "build.publish",
+                outcome = "failed",
+                duration_ms = 0_u64,
+                http_status = status.as_u16(),
+                diagnostic_code = "LW_AGENT_BUILD_PROVIDER_UNAVAILABLE",
+                error_kind = "registry_response_read_failed",
+                failure_stage = "build.publish.response",
+                retryable = false,
+                safe_detail = "registry_response_read_failed",
             );
             unavailable()
         })?;
         if !status.is_success() {
             tracing::error!(
                 event = "agent.build_executor.harbor_publish_rejected",
-                endpoint = %url,
-                status = %status,
-                body = %sanitize_diagnostic(&body),
+                component = "build-executor",
+                operation = "build.publish",
+                outcome = "failed",
+                duration_ms = 0_u64,
+                http_status = status.as_u16(),
+                diagnostic_code = "LW_AGENT_BUILD_PROVIDER_UNAVAILABLE",
+                error_kind = "registry_rejected",
+                failure_stage = "build.publish.response",
+                retryable = false,
+                safe_detail = "registry_rejected",
             );
             return Err(unavailable());
         }
@@ -961,14 +993,6 @@ fn prepare_private_directory(directory: &Path) -> Result<(), BuildProviderFailur
 
 fn network<T>(_error: T) -> BuildProviderFailure {
     unavailable()
-}
-
-fn sanitize_diagnostic(value: &str) -> String {
-    value
-        .chars()
-        .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
-        .take(512)
-        .collect()
 }
 
 const fn rejected() -> BuildProviderFailure {

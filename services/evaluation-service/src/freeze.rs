@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use artifact_store::{ImmutableObjectStore, ObjectStoreError};
 use contracts::authoring::RuntimeKind;
@@ -110,6 +110,7 @@ impl FreezeService {
         request: &FreezeRequest,
         source: &dyn SnapshotSource,
     ) -> Result<FrozenSubmission, FreezeServiceError> {
+        let started = Instant::now();
         validate_request(request, source)?;
         let submission_manifest_sha256 = Sha256Digest::of_canonical(&request.manifest)
             .map_err(|_| FreezeServiceError::ContractInvalid)?;
@@ -128,8 +129,38 @@ impl FreezeService {
             )
             .await?
         {
-            BeginFreeze::Acquired(lease) => lease,
-            BeginFreeze::Replay(submission) => return Ok(*submission),
+            BeginFreeze::Acquired(lease) => {
+                tracing::info!(
+                    event = "evaluation.freeze.claimed",
+                    component = "freeze-worker",
+                    operation = "submission.freeze",
+                    outcome = "claimed",
+                    duration_ms = elapsed_millis(started),
+                    trace_id = request.trace_id,
+                    run_id = %request.agent_run_id,
+                    environment_id = %request.environment.environment_id,
+                    course_id = %request.course_id,
+                    resource_id = %request.frozen_submission_id,
+                    attempt = lease.attempt,
+                    worker = self.worker_id,
+                );
+                lease
+            }
+            BeginFreeze::Replay(submission) => {
+                tracing::info!(
+                    event = "evaluation.freeze.idempotency_replayed",
+                    component = "freeze-worker",
+                    operation = "submission.freeze",
+                    outcome = "replayed",
+                    duration_ms = elapsed_millis(started),
+                    trace_id = request.trace_id,
+                    run_id = %request.agent_run_id,
+                    environment_id = %request.environment.environment_id,
+                    course_id = %request.course_id,
+                    resource_id = %request.frozen_submission_id,
+                );
+                return Ok(*submission);
+            }
             BeginFreeze::Conflict => return Err(FreezeServiceError::IdempotencyConflict),
             BeginFreeze::InProgress => return Err(FreezeServiceError::InProgress),
         };
@@ -139,9 +170,34 @@ impl FreezeService {
             return Err(FreezeServiceError::ContractInvalid);
         }
         self.store.mark_preflighting(&lease).await?;
+        tracing::debug!(
+            event = "evaluation.freeze.stage_started",
+            component = "freeze-worker",
+            operation = "submission.freeze.preflight",
+            outcome = "started",
+            duration_ms = elapsed_millis(started),
+            trace_id = request.trace_id,
+            resource_id = %request.frozen_submission_id,
+            attempt = lease.attempt,
+        );
         let preflight = match self.collector.preflight(source, &request.manifest).await {
             Ok(preflight) => preflight,
             Err(error) => {
+                tracing::warn!(
+                    event = "evaluation.freeze.stage_failed",
+                    component = "freeze-worker",
+                    operation = "submission.freeze.preflight",
+                    outcome = "failed",
+                    duration_ms = elapsed_millis(started),
+                    trace_id = request.trace_id,
+                    resource_id = %request.frozen_submission_id,
+                    attempt = lease.attempt,
+                    diagnostic_code = error.diagnostic_code(),
+                    error_kind = "collector_preflight_failed",
+                    failure_stage = "submission.freeze.preflight",
+                    retryable = true,
+                    safe_detail = "collector_preflight_rejected",
+                );
                 self.fail_attempt(&lease, error.diagnostic_code(), true)
                     .await?;
                 return Err(FreezeServiceError::Collect(error));
@@ -154,6 +210,21 @@ impl FreezeService {
         {
             Ok(archive) => archive,
             Err(error) => {
+                tracing::warn!(
+                    event = "evaluation.freeze.stage_failed",
+                    component = "freeze-worker",
+                    operation = "submission.freeze.collect",
+                    outcome = "failed",
+                    duration_ms = elapsed_millis(started),
+                    trace_id = request.trace_id,
+                    resource_id = %request.frozen_submission_id,
+                    attempt = lease.attempt,
+                    diagnostic_code = error.diagnostic_code(),
+                    error_kind = "collector_freeze_failed",
+                    failure_stage = "submission.freeze.collect",
+                    retryable = true,
+                    safe_detail = "collector_freeze_rejected",
+                );
                 self.fail_attempt(&lease, error.diagnostic_code(), true)
                     .await?;
                 return Err(FreezeServiceError::Collect(error));
@@ -180,9 +251,18 @@ impl FreezeService {
             Err(error) => {
                 tracing::error!(
                     event = "evaluation.freeze.object_store_failed",
-                    frozen_submission_id = %lease.frozen_submission_id,
-                    diagnostic = error.diagnostic_code(),
-                    error = ?error,
+                    component = "freeze-worker",
+                    operation = "submission.freeze.upload",
+                    outcome = "failed",
+                    duration_ms = elapsed_millis(started),
+                    trace_id = request.trace_id,
+                    resource_id = %lease.frozen_submission_id,
+                    attempt = lease.attempt,
+                    diagnostic_code = error.diagnostic_code(),
+                    error_kind = "object_store_failed",
+                    failure_stage = "submission.freeze.upload",
+                    retryable = false,
+                    safe_detail = "object_store_write_failed",
                 );
                 self.fail_attempt(&lease, error.diagnostic_code(), false)
                     .await?;
@@ -230,13 +310,36 @@ impl FreezeService {
         {
             tracing::error!(
                 event = "evaluation.freeze.persistence_failed",
-                frozen_submission_id = %lease.frozen_submission_id,
-                error = ?error,
+                component = "freeze-worker",
+                operation = "submission.freeze.commit",
+                outcome = "failed",
+                duration_ms = elapsed_millis(started),
+                trace_id = request.trace_id,
+                resource_id = %lease.frozen_submission_id,
+                attempt = lease.attempt,
+                diagnostic_code = error.diagnostic_code(),
+                error_kind = "persistence_failed",
+                failure_stage = "submission.freeze.commit",
+                retryable = false,
+                safe_detail = "freeze_commit_failed",
             );
             self.fail_attempt(&lease, error.diagnostic_code(), false)
                 .await?;
             return Err(FreezeServiceError::Store(error));
         }
+        tracing::info!(
+            event = "evaluation.freeze.completed",
+            component = "freeze-worker",
+            operation = "submission.freeze",
+            outcome = "succeeded",
+            duration_ms = elapsed_millis(started),
+            trace_id = request.trace_id,
+            run_id = %request.agent_run_id,
+            environment_id = %request.environment.environment_id,
+            course_id = %request.course_id,
+            resource_id = %request.frozen_submission_id,
+            attempt = lease.attempt,
+        );
         Ok(submission)
     }
 
@@ -249,16 +352,28 @@ impl FreezeService {
         self.store
             .fail(lease, diagnostic_code, cleanup_verified)
             .await
-            .map_err(|error| {
+            .map_err(|_| {
                 tracing::error!(
                     event = "evaluation.freeze.failure_persistence_failed",
-                    frozen_submission_id = %lease.frozen_submission_id,
-                    diagnostic = diagnostic_code,
-                    error = ?error,
+                    component = "freeze-worker",
+                    operation = "submission.freeze.failure_commit",
+                    outcome = "failed",
+                    duration_ms = 0_u64,
+                    resource_id = %lease.frozen_submission_id,
+                    attempt = lease.attempt,
+                    diagnostic_code,
+                    error_kind = "failure_persistence_failed",
+                    failure_stage = "submission.freeze.failure_commit",
+                    retryable = false,
+                    safe_detail = "failure_persistence_failed",
                 );
                 FreezeServiceError::FailurePersistence
             })
     }
+}
+
+fn elapsed_millis(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn validate_request(

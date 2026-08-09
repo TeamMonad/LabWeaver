@@ -132,7 +132,7 @@ impl FixtureBackend {
             .lock()
             .expect("operations lock")
             .push(operation.to_owned());
-        self.fences.lock().expect("fences lock").push(*fence);
+        self.fences.lock().expect("fences lock").push(fence.clone());
     }
 
     fn running(&self, fence: &KubeVirtBackendFence) -> KubeVirtRunningObservation {
@@ -617,6 +617,7 @@ async fn duplicate_reconcile_is_idempotent_and_fenced() {
         fence.protocol_version == KUBEVIRT_BACKEND_PROTOCOL_VERSION
             && fence.environment_id == instance.id
             && fence.operation_id == instance.operation.id
+            && fence.trace_id == instance.operation.trace_id
             && fence.provider_step == instance.operation.provider_step
             && fence.environment_generation == instance.generation
             && fence.attempt == instance.operation.attempt

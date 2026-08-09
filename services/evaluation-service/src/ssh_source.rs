@@ -20,11 +20,18 @@ use crate::collector::{
 
 const MAX_CREDENTIAL_TTL_SECONDS: i64 = 300;
 
-fn source_unavailable(stage: &'static str, error: &impl std::fmt::Debug) -> CollectError {
+fn source_unavailable(stage: &'static str, _error: &impl std::fmt::Debug) -> CollectError {
     tracing::error!(
         event = "evaluation.collector.ssh_source_unavailable",
-        stage,
-        error = ?error
+        component = "ssh-snapshot-source",
+        operation = "submission.collect",
+        outcome = "failed",
+        duration_ms = 0_u64,
+        diagnostic_code = "LW_COLLECT_SOURCE_UNAVAILABLE",
+        error_kind = "ssh_source_unavailable",
+        failure_stage = stage,
+        retryable = false,
+        safe_detail = "ssh_source_unavailable",
     );
     CollectError::SourceUnavailable
 }

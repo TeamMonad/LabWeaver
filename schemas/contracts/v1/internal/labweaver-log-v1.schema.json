@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:labweaver:schema:observability:log:v1",
+  "title": "LabWeaver structured runtime log event v1",
+  "type": "object",
+  "required": [
+    "timestamp_unix_ms",
+    "level",
+    "schema",
+    "event",
+    "service",
+    "component",
+    "operation",
+    "outcome",
+    "duration_ms"
+  ],
+  "properties": {
+    "timestamp_unix_ms": { "type": "integer", "minimum": 0 },
+    "level": { "enum": ["TRACE", "DEBUG", "INFO", "WARN", "ERROR"] },
+    "schema": { "const": "labweaver.log.v1" },
+    "event": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{2,127}$" },
+    "service": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,63}$" },
+    "component": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "operation": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "outcome": { "type": "string", "minLength": 1, "maxLength": 32 },
+    "duration_ms": { "type": "integer", "minimum": 0 },
+    "request_id": { "type": "string", "minLength": 8, "maxLength": 128 },
+    "trace_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "revision": { "type": "integer", "minimum": 0 },
+    "attempt": { "type": "integer", "minimum": 0 },
+    "delivery_attempt": { "type": "integer", "minimum": 0 },
+    "retryable": { "type": "boolean" },
+    "diagnostic_code": { "type": "string", "pattern": "^LW_[A-Z0-9_]+$" },
+    "error_kind": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]*$" },
+    "failure_stage": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]*$" },
+    "safe_detail": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}$" }
+  },
+  "additionalProperties": true
+}

@@ -328,7 +328,28 @@ async fn build_command_loop(
 ) -> Result<(), StartupError> {
     loop {
         let outcome = consumer.process_next(&store).await?;
-        tracing::info!(event = "agent.build.command_consumed", ?outcome);
+        match outcome {
+            agent_service::messaging::BuildConsumeOutcome::Applied => {
+                tracing::info!(event = "agent.build.command_consumed", outcome = "applied");
+            }
+            agent_service::messaging::BuildConsumeOutcome::Ignored => {
+                tracing::info!(event = "agent.build.command_consumed", outcome = "ignored");
+            }
+            agent_service::messaging::BuildConsumeOutcome::Deferred => tracing::warn!(
+                event = "agent.build.command_deferred",
+                outcome = "retry_scheduled",
+                failure_stage = "consume",
+                error_kind = "dependency",
+                retryable = true
+            ),
+            agent_service::messaging::BuildConsumeOutcome::Rejected => tracing::warn!(
+                event = "agent.build.command_rejected",
+                outcome = "rejected",
+                failure_stage = "consume",
+                error_kind = "contract",
+                retryable = false
+            ),
+        }
     }
 }
 
@@ -344,7 +365,26 @@ async fn build_worker_loop(
     loop {
         ticker.tick().await;
         let outcome = worker.run_once(timestamp()?).await?;
-        tracing::debug!(event = "agent.build.worker_completed", ?outcome);
+        match outcome {
+            agent_service::build_store::BuildWorkerOutcome::Idle => {
+                tracing::debug!(event = "agent.build.worker_idle", outcome = "idle");
+            }
+            agent_service::build_store::BuildWorkerOutcome::Completed { build_request_id } => {
+                tracing::info!(event = "agent.build.worker_completed", outcome = "succeeded", build_request_id = %build_request_id);
+            }
+            agent_service::build_store::BuildWorkerOutcome::RetryScheduled {
+                build_request_id,
+                attempt,
+            } => {
+                tracing::warn!(event = "agent.build.worker_retry_scheduled", outcome = "retry_scheduled", build_request_id = %build_request_id, attempt, failure_stage = "execute", error_kind = "provider", retryable = true);
+            }
+            agent_service::build_store::BuildWorkerOutcome::Failed {
+                build_request_id,
+                diagnostic_code,
+            } => {
+                tracing::error!(event = "agent.build.worker_failed", outcome = "failed", build_request_id = %build_request_id, diagnostic_code, failure_stage = "execute", error_kind = "provider", retryable = false);
+            }
+        }
     }
 }
 
@@ -400,7 +440,7 @@ impl Worker {
                         .store
                         .fail_dispatch_preparation(&lease, error.diagnostic_code(), now)
                         .await?;
-                    tracing::warn!(event = "agent.dispatch.preparation_failed", run_id = %run.id, diagnostic = error.diagnostic_code());
+                    tracing::warn!(event = "agent.dispatch.preparation_failed", run_id = %run.id, diagnostic_code = error.diagnostic_code(), failure_stage = "egress_gate", error_kind = "policy", retryable = false);
                     continue;
                 }
             };
@@ -432,7 +472,12 @@ impl Worker {
                     lease.run.clone(),
                 )
                 .await?;
-            tracing::info!(event = "agent.dispatch.completed", run_id = %lease.run.id, outcome = ?outcome);
+            let dispatch_outcome = match outcome {
+                agent_service::run_store::AgentRunDispatch::Executed(_) => "executed",
+                agent_service::run_store::AgentRunDispatch::Replayed(_) => "replayed",
+                agent_service::run_store::AgentRunDispatch::Progressed(_) => "progressed",
+            };
+            tracing::info!(event = "agent.dispatch.completed", run_id = %lease.run.id, outcome = dispatch_outcome);
         }
     }
 }

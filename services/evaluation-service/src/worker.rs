@@ -227,11 +227,13 @@ fn required_absolute_path(name: &'static str) -> Result<PathBuf, FreezeWorkerErr
 
 fn read_yaml<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, FreezeWorkerError> {
     let bytes = read_mounted_file(path, MAX_CONFIGURATION_BYTES)?;
-    serde_yaml::from_slice(&bytes).map_err(|error| {
+    serde_yaml::from_slice(&bytes).map_err(|_error| {
         tracing::error!(
             event = "evaluation.freeze_worker.configuration_parse_failed",
-            path = %path.display(),
-            error = %error,
+            diagnostic_code = "LW_EVALUATION_FREEZE_CONFIGURATION_INVALID",
+            error_kind = "configuration_parse",
+            failure_stage = "configuration",
+            retryable = false,
         );
         FreezeWorkerError::ConfigurationInvalid
     })
@@ -246,7 +248,13 @@ fn read_secret(path: &Path) -> Result<String, FreezeWorkerError> {
         .trim()
         .to_owned();
     if value.is_empty() || value.chars().any(char::is_control) {
-        tracing::error!(event = "evaluation.freeze_worker.secret_invalid", path = %path.display());
+        tracing::error!(
+            event = "evaluation.freeze_worker.secret_invalid",
+            diagnostic_code = "LW_EVALUATION_FREEZE_CONFIGURATION_INVALID",
+            error_kind = "secret_material",
+            failure_stage = "configuration",
+            retryable = false
+        );
         return Err(FreezeWorkerError::ConfigurationInvalid);
     }
     Ok(value)

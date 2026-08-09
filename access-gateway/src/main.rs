@@ -3,7 +3,7 @@
 use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use contracts::UtcTimestamp;
 use contracts::access::{
@@ -16,8 +16,7 @@ use sha2::{Digest, Sha256};
 use ssh_key::{HashAlg, PublicKey};
 use time::OffsetDateTime;
 use tokio::process::Command;
-use tracing::{error, info};
-use uuid::Uuid;
+use tracing::{error, info, warn};
 
 const AUTHORIZE_PATH: &str = "/internal/v1/ssh/authorize";
 const SESSION_PATH: &str = "/internal/v1/sessions";
@@ -36,15 +35,50 @@ enum GatewayError {
     Target,
 }
 
+impl GatewayError {
+    const fn diagnostic_code(&self) -> &'static str {
+        match self {
+            Self::Configuration => "LW_GATEWAY_CONFIGURATION_INVALID",
+            Self::InvalidInput | Self::InputStage(_) => "LW_GATEWAY_INPUT_INVALID",
+            Self::Authority => "LW_GATEWAY_AUTHORITY_FAILED",
+            Self::Target => "LW_GATEWAY_TARGET_SESSION_FAILED",
+        }
+    }
+
+    const fn error_kind(&self) -> &'static str {
+        match self {
+            Self::Configuration => "configuration_invalid",
+            Self::InvalidInput | Self::InputStage(_) => "input_rejected",
+            Self::Authority => "access_authority_failed",
+            Self::Target => "target_session_failed",
+        }
+    }
+
+    const fn failure_stage(&self) -> &'static str {
+        match self {
+            Self::InputStage(stage) => stage,
+            Self::Configuration => "gateway.configuration",
+            Self::InvalidInput => "gateway.input",
+            Self::Authority => "gateway.access_authority",
+            Self::Target => "gateway.target_session",
+        }
+    }
+
+    const fn retryable(&self) -> bool {
+        matches!(self, Self::Authority | Self::Target)
+    }
+}
+
 #[derive(Clone)]
 struct GatewayConfig {
     access_url: String,
     gateway_identity: String,
     client: Client,
+    context: telemetry::RequestContext,
 }
 
 impl GatewayConfig {
-    fn load() -> Result<Self, GatewayError> {
+    fn load(context: telemetry::RequestContext) -> Result<Self, GatewayError> {
         let access_url = required_env("LABWEAVER_ACCESS_URL")?;
         let gateway_identity = required_env("LABWEAVER_GATEWAY_IDENTITY")?;
         let cert_path = PathBuf::from(required_env("LABWEAVER_MTLS_CERT")?);
@@ -69,6 +103,7 @@ impl GatewayConfig {
             access_url: access_url.trim_end_matches('/').to_owned(),
             gateway_identity,
             client,
+            context,
         })
     }
 
@@ -79,34 +114,111 @@ impl GatewayConfig {
         idempotency_key: Option<&str>,
         revision: Option<contracts::Revision>,
     ) -> Result<reqwest::Response, GatewayError> {
+        let started = Instant::now();
         let mut request = self
             .client
             .post(format!("{}{path}", self.access_url))
-            .header("x-request-id", Uuid::now_v7().to_string())
             .json(body);
+        let mut headers = reqwest::header::HeaderMap::new();
+        self.context
+            .inject_headers(&mut headers)
+            .map_err(|_| GatewayError::Configuration)?;
+        request = request.headers(headers);
         if let Some(key) = idempotency_key {
             request = request.header("Idempotency-Key", key);
         }
         if let Some(revision) = revision {
             request = request.header("If-Match", format!("\"rev-{}\"", revision.get()));
         }
-        request.send().await.map_err(|_| GatewayError::Authority)
+        let operation = if path == AUTHORIZE_PATH {
+            "gateway.authorize"
+        } else if path.ends_with("/heartbeat") {
+            "gateway.session.heartbeat"
+        } else if path.ends_with("/close") {
+            "gateway.session.close"
+        } else {
+            "gateway.session.create"
+        };
+        let response = request.send().await.map_err(|_| GatewayError::Authority)?;
+        let outcome = if response.status().is_success() {
+            "succeeded"
+        } else {
+            "rejected"
+        };
+        info!(
+            schema = telemetry::LOG_SCHEMA,
+            event = "gateway.authority.completed",
+            service = "access-gateway",
+            component = "access-client",
+            operation,
+            outcome,
+            duration_ms = elapsed_millis(started),
+            request_id = self.context.request_id(),
+            trace_id = self.context.trace_id(),
+            http_status = response.status().as_u16(),
+        );
+        Ok(response)
     }
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    tracing_subscriber::fmt().json().with_target(false).init();
-    match run().await {
+    if telemetry::init("access-gateway").is_err() {
+        eprintln!(
+            "{{\"timestamp_unix_ms\":0,\"level\":\"ERROR\",\"schema\":\"labweaver.log.v1\",\"event\":\"gateway.telemetry.failed\",\"service\":\"access-gateway\",\"component\":\"process\",\"operation\":\"telemetry.initialize\",\"outcome\":\"failed\",\"duration_ms\":0,\"diagnostic_code\":\"LW_TELEMETRY_INIT_FAILED\",\"error_kind\":\"telemetry_initialization_failed\",\"failure_stage\":\"gateway.telemetry.initialize\",\"retryable\":false,\"safe_detail\":\"redacted_unclassified\"}}"
+        );
+        return ExitCode::FAILURE;
+    }
+    let context = telemetry::RequestContext::generate();
+    match run(&context).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            error!(event = "LW_GATEWAY_COMMAND_FAILED", reason = %error);
+            let level_is_warn = error.retryable()
+                || matches!(
+                    error,
+                    GatewayError::InvalidInput | GatewayError::InputStage(_)
+                );
+            if level_is_warn {
+                warn!(
+                    schema = telemetry::LOG_SCHEMA,
+                    event = "gateway.command.failed",
+                    service = "access-gateway",
+                    component = "command",
+                    operation = "gateway.command",
+                    outcome = "failed",
+                    duration_ms = 0_u64,
+                    request_id = context.request_id(),
+                    trace_id = context.trace_id(),
+                    diagnostic_code = error.diagnostic_code(),
+                    error_kind = error.error_kind(),
+                    failure_stage = error.failure_stage(),
+                    retryable = error.retryable(),
+                    safe_detail = "redacted_unclassified",
+                );
+            } else {
+                error!(
+                    schema = telemetry::LOG_SCHEMA,
+                    event = "gateway.command.failed",
+                    service = "access-gateway",
+                    component = "command",
+                    operation = "gateway.command",
+                    outcome = "failed",
+                    duration_ms = 0_u64,
+                    request_id = context.request_id(),
+                    trace_id = context.trace_id(),
+                    diagnostic_code = error.diagnostic_code(),
+                    error_kind = error.error_kind(),
+                    failure_stage = error.failure_stage(),
+                    retryable = false,
+                    safe_detail = "redacted_unclassified",
+                );
+            }
             ExitCode::FAILURE
         }
     }
 }
 
-async fn run() -> Result<(), GatewayError> {
+async fn run(context: &telemetry::RequestContext) -> Result<(), GatewayError> {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
         Some("authorized-keys") => {
@@ -129,7 +241,7 @@ async fn run() -> Result<(), GatewayError> {
                 .next()
                 .ok_or(GatewayError::InputStage("authorized_keys.source_address"))?;
             authorized_keys(
-                &GatewayConfig::load()?,
+                &GatewayConfig::load(context.clone())?,
                 &local_user,
                 &key,
                 &connection_id,
@@ -145,7 +257,7 @@ async fn run() -> Result<(), GatewayError> {
                 return Err(GatewayError::InvalidInput);
             }
             force_command(
-                &GatewayConfig::load()?,
+                &GatewayConfig::load(context.clone())?,
                 &authorization_id,
                 &token,
                 &connection_id,
@@ -203,6 +315,18 @@ async fn authorized_keys(
     {
         return Err(GatewayError::Authority);
     }
+    info!(
+        schema = telemetry::LOG_SCHEMA,
+        event = "gateway.authorization.succeeded",
+        service = "access-gateway",
+        component = "ssh-authorization",
+        operation = "gateway.authorize",
+        outcome = "succeeded",
+        duration_ms = 0_u64,
+        request_id = config.context.request_id(),
+        trace_id = config.context.trace_id(),
+        connection_id,
+    );
     println!(
         "restrict,command=\"/usr/local/bin/labweaver-gateway-command force-command {} {} {}\" {}",
         shell_token(&authorization.authorization_id)
@@ -243,6 +367,20 @@ async fn force_command(
         .json::<GatewaySession>()
         .await
         .map_err(|_| GatewayError::Authority)?;
+    info!(
+        schema = telemetry::LOG_SCHEMA,
+        event = "gateway.session.started",
+        service = "access-gateway",
+        component = "ssh-session",
+        operation = "gateway.session",
+        outcome = "started",
+        duration_ms = 0_u64,
+        request_id = config.context.request_id(),
+        trace_id = config.context.trace_id(),
+        session_id = %session.id,
+        connection_id,
+        revision = session.revision.get(),
+    );
     let mut child = Command::new("/usr/bin/ssh")
         .args([
             "-F",
@@ -421,7 +559,20 @@ async fn close_session(
         )
         .await?;
     if response.status().is_success() {
-        info!(event = "LW_GATEWAY_SESSION_CLOSED", session_id = %session.id);
+        info!(
+            schema = telemetry::LOG_SCHEMA,
+            event = "gateway.session.closed",
+            service = "access-gateway",
+            component = "ssh-session",
+            operation = "gateway.session.close",
+            outcome = "succeeded",
+            duration_ms = 0_u64,
+            request_id = config.context.request_id(),
+            trace_id = config.context.trace_id(),
+            session_id = %session.id,
+            connection_id,
+            revision = session.revision.get(),
+        );
         Ok(())
     } else {
         Err(GatewayError::Authority)
@@ -502,6 +653,10 @@ fn now() -> Result<UtcTimestamp, GatewayError> {
         .replace_nanosecond((value.nanosecond() / 1_000_000) * 1_000_000)
         .map_err(|_| GatewayError::Configuration)?;
     UtcTimestamp::from_utc(normalized).map_err(|_| GatewayError::Configuration)
+}
+
+fn elapsed_millis(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]

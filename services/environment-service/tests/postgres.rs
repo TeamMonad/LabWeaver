@@ -1062,6 +1062,7 @@ fn container_executor_envelope(
             attempt,
             action,
             request_id,
+            trace_id: "01900000000070008000000000000001".to_owned(),
             deadline_at,
         },
         request,
@@ -1289,6 +1290,7 @@ fn kubevirt_executor_envelope(
             attempt: 1,
             action,
             request_id,
+            trace_id: "01900000000070008000000000000002".to_owned(),
             deadline_at,
         },
         request,
@@ -1482,6 +1484,7 @@ fn kubevirt_fence(
         request_id: Sha256Digest::of_bytes(
             format!("{environment_id}:{generation}:{action:?}").as_bytes(),
         ),
+        trace_id: "01900000000070008000000000000003".to_owned(),
         deadline_at: timestamp("2026-07-16T09:00:00.000Z"),
     }
 }

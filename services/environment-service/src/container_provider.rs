@@ -78,7 +78,7 @@ pub struct ContainerApplyObservation {
 }
 
 /// Durable Environment operation identity carried across the remote Kubernetes boundary.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContainerBackendFence {
     pub protocol_version: u8,
@@ -89,6 +89,7 @@ pub struct ContainerBackendFence {
     pub attempt: u32,
     pub action: ReconcileAction,
     pub request_id: Sha256Digest,
+    pub trace_id: String,
     pub deadline_at: UtcTimestamp,
 }
 
@@ -116,6 +117,7 @@ impl ContainerBackendFence {
             attempt: instance.operation.attempt,
             action,
             request_id,
+            trace_id: instance.operation.trace_id.clone(),
             deadline_at: instance.operation.deadline_at,
         })
     }
@@ -191,9 +193,12 @@ impl NatsContainerProviderBackend {
         if !request.matches_action(fence.action) {
             return Err(invalid_observation());
         }
-        let fence = bind_container_executor_request(*fence, &request)?;
-        let payload = serde_json::to_vec(&ContainerExecutorRequestEnvelope { fence, request })
-            .map_err(|_| invalid_observation())?;
+        let fence = bind_container_executor_request(fence.clone(), &request)?;
+        let payload = serde_json::to_vec(&ContainerExecutorRequestEnvelope {
+            fence: fence.clone(),
+            request,
+        })
+        .map_err(|_| invalid_observation())?;
         let request = async_nats::Request::new()
             .timeout(Some(self.request_timeout))
             .payload(payload.into());
@@ -201,17 +206,22 @@ impl NatsContainerProviderBackend {
             .client
             .send_request(self.subject.clone(), request)
             .await
-            .map_err(|error| {
+            .map_err(|_| {
                 tracing::warn!(
                     event = "environment.container_provider.executor_request_failed",
-                    diagnostic = "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
+                    component = "container-provider",
+                    operation = "container.executor.request",
+                    outcome = "deferred",
+                    duration_ms = 0_u64,
+                    trace_id = fence.trace_id,
+                    diagnostic_code = "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
+                    error_kind = "provider_transport_failed",
+                    failure_stage = "container.executor.request",
+                    retryable = true,
+                    safe_detail = "executor_request_failed",
                     environment_id = %fence.environment_id,
                     operation_id = %fence.operation_id,
-                    provider_step = fence.provider_step,
                     attempt = fence.attempt,
-                    action = ?fence.action,
-                    timeout_milliseconds = self.request_timeout.as_millis(),
-                    error = %error
                 );
                 unavailable()
             })?;
@@ -497,7 +507,7 @@ impl PgContainerExecutorFenceStore {
         envelope: &ContainerExecutorRequestEnvelope,
     ) -> Result<ContainerExecutorAdmission, ContainerExecutorFenceError> {
         validate_container_executor_request(envelope)?;
-        let fence = envelope.fence;
+        let fence = envelope.fence.clone();
         let mut transaction = self.pool.begin().await?;
         let authority_now: time::OffsetDateTime =
             sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
@@ -675,7 +685,9 @@ impl<B: ContainerExecutorBackend> FencedContainerExecutor<B> {
                 )
                 .await
                 .map_err(|_| ContainerExecutorFenceError::DeadlineExceeded)?;
-                self.store.complete(envelope.fence, &response).await?;
+                self.store
+                    .complete(envelope.fence.clone(), &response)
+                    .await?;
                 response
             }
             ContainerExecutorAdmission::Replay(value) => serde_json::from_value(value)
@@ -752,20 +764,22 @@ impl<B: ContainerExecutorBackend + 'static> NatsContainerExecutorServer<B> {
             let client = self.client.clone();
             let executor = Arc::clone(&self.executor);
             tokio::spawn(async move {
-                let fence = envelope.fence;
+                let fence = envelope.fence.clone();
                 let response = match executor.execute(envelope).await {
                     Ok(response) => response,
                     Err(error) => {
                         let failure = container_executor_failure(&error);
                         tracing::warn!(
                             event = "environment.container_executor.request_failed",
-                            diagnostic = failure.diagnostic_code(),
+                            diagnostic_code = failure.diagnostic_code(),
                             operation_id = %fence.operation_id,
                             environment_id = %fence.environment_id,
                             action = ?fence.action,
                             provider_step = fence.provider_step,
                             operation_generation = fence.operation_generation,
-                            error = %error
+                            error_kind = "provider_transport",
+                            failure_stage = "execute",
+                            retryable = failure.retryable
                         );
                         ContainerExecutorResponseEnvelope {
                             protocol_version: fence.protocol_version,
@@ -821,7 +835,7 @@ const fn container_executor_failure(error: &ContainerExecutorFenceError) -> Prov
 fn validate_container_executor_request(
     envelope: &ContainerExecutorRequestEnvelope,
 ) -> Result<(), ContainerExecutorFenceError> {
-    let fence = envelope.fence;
+    let fence = &envelope.fence;
     let expected_request_id = container_executor_request_id(fence, &envelope.request)?;
     if fence.protocol_version != CONTAINER_BACKEND_PROTOCOL_VERSION
         || fence.operation_generation == 0
@@ -839,12 +853,12 @@ fn bind_container_executor_request(
     request: &ContainerExecutorRequest,
 ) -> Result<ContainerBackendFence, ProviderFailure> {
     fence.request_id =
-        container_executor_request_id(fence, request).map_err(|_| invalid_observation())?;
+        container_executor_request_id(&fence, request).map_err(|_| invalid_observation())?;
     Ok(fence)
 }
 
 fn container_executor_request_id(
-    fence: ContainerBackendFence,
+    fence: &ContainerBackendFence,
     request: &ContainerExecutorRequest,
 ) -> Result<Sha256Digest, ContainerExecutorFenceError> {
     Sha256Digest::of_canonical(&serde_json::json!({

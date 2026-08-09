@@ -8,7 +8,6 @@ use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::{Builder as S3ConfigBuilder, Region};
-use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::{ByteStream, DateTime};
 use aws_sdk_s3::types::ObjectLockMode;
@@ -348,7 +347,7 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
         if version.trim().is_empty() || expected_size == 0 || media_type.trim().is_empty() {
             return Err(ObjectStoreError::ObjectIdentityInvalid);
         }
-        let response = match self
+        let Ok(response) = self
             .client
             .get_object()
             .bucket(&self.config.bucket)
@@ -356,23 +355,21 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
             .version_id(version)
             .send()
             .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                let rendered_error = error.to_string();
-                let error_class = rendered_error.split(':').next().unwrap_or("unknown").trim();
-                tracing::warn!(
-                    event = "artifact_store.get_object_failed",
-                    endpoint = %self.config.endpoint,
-                    bucket = %self.config.bucket,
-                    object_key = %key,
-                    object_version = %version,
-                    error_class = %error_class,
-                    error_source = ?std::error::Error::source(&error).map(ToString::to_string),
-                    service_error_code = ?error.as_service_error().and_then(|service| service.code()),
-                );
-                return Err(ObjectStoreError::ObjectUnavailable);
-            }
+        else {
+            tracing::warn!(
+                event = "artifact_store.get_object_failed",
+                component = "immutable-object-store",
+                operation = "artifact.read",
+                outcome = "failed",
+                duration_ms = 0_u64,
+                binding = self.config.binding,
+                diagnostic_code = "LW_OBJECT_STORE_UNAVAILABLE",
+                error_kind = "object_read_failed",
+                failure_stage = "artifact.read.request",
+                retryable = true,
+                safe_detail = "object_read_failed",
+            );
+            return Err(ObjectStoreError::ObjectUnavailable);
         };
         let observed_size = response
             .content_length()
@@ -390,10 +387,16 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
         let Ok(body) = response.body.collect().await else {
             tracing::warn!(
                 event = "artifact_store.get_object_body_failed",
-                endpoint = %self.config.endpoint,
-                bucket = %self.config.bucket,
-                object_key = %key,
-                object_version = %version,
+                component = "immutable-object-store",
+                operation = "artifact.read",
+                outcome = "failed",
+                duration_ms = 0_u64,
+                binding = self.config.binding,
+                diagnostic_code = "LW_OBJECT_STORE_UNAVAILABLE",
+                error_kind = "object_body_read_failed",
+                failure_stage = "artifact.read.body",
+                retryable = true,
+                safe_detail = "object_body_read_failed",
             );
             return Err(ObjectStoreError::ObjectUnavailable);
         };

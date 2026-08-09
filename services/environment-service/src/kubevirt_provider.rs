@@ -35,7 +35,7 @@ const KUBEVIRT_NODE_LABEL_KEY: &str = "labweaver.io/kubevirt";
 const KUBEVIRT_NODE_LABEL_VALUE: &str = "true";
 
 /// Durable Environment operation identity carried across the KubeVirt/CDI boundary.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KubeVirtBackendFence {
     pub protocol_version: u8,
@@ -46,6 +46,7 @@ pub struct KubeVirtBackendFence {
     pub attempt: u32,
     pub action: ReconcileAction,
     pub request_id: Sha256Digest,
+    pub trace_id: String,
     pub deadline_at: UtcTimestamp,
 }
 
@@ -73,6 +74,7 @@ impl KubeVirtBackendFence {
             attempt: instance.operation.attempt,
             action,
             request_id,
+            trace_id: instance.operation.trace_id.clone(),
             deadline_at: instance.operation.deadline_at,
         })
     }
@@ -216,9 +218,12 @@ impl NatsKubeVirtProviderBackend {
         if !request.matches_action(fence.action) {
             return Err(invalid_observation());
         }
-        let fence = bind_kubevirt_executor_request(*fence, &request)?;
-        let payload = serde_json::to_vec(&KubeVirtExecutorRequestEnvelope { fence, request })
-            .map_err(|_| invalid_observation())?;
+        let fence = bind_kubevirt_executor_request(fence.clone(), &request)?;
+        let payload = serde_json::to_vec(&KubeVirtExecutorRequestEnvelope {
+            fence: fence.clone(),
+            request,
+        })
+        .map_err(|_| invalid_observation())?;
         let request = async_nats::Request::new()
             .timeout(Some(self.request_timeout))
             .payload(payload.into());
@@ -226,17 +231,22 @@ impl NatsKubeVirtProviderBackend {
             .client
             .send_request(self.subject.clone(), request)
             .await
-            .map_err(|error| {
+            .map_err(|_| {
                 tracing::warn!(
                     event = "environment.kubevirt_provider.executor_request_failed",
-                    diagnostic = "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
+                    component = "kubevirt-provider",
+                    operation = "kubevirt.executor.request",
+                    outcome = "deferred",
+                    duration_ms = 0_u64,
+                    trace_id = fence.trace_id,
+                    diagnostic_code = "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
+                    error_kind = "provider_transport_failed",
+                    failure_stage = "kubevirt.executor.request",
+                    retryable = true,
+                    safe_detail = "executor_request_failed",
                     environment_id = %fence.environment_id,
                     operation_id = %fence.operation_id,
-                    provider_step = fence.provider_step,
                     attempt = fence.attempt,
-                    action = ?fence.action,
-                    timeout_milliseconds = self.request_timeout.as_millis(),
-                    error = %error
                 );
                 unavailable()
             })?;
@@ -423,12 +433,12 @@ fn bind_kubevirt_executor_request(
     mut fence: KubeVirtBackendFence,
     request: &KubeVirtExecutorRequest,
 ) -> Result<KubeVirtBackendFence, ProviderFailure> {
-    fence.request_id = kubevirt_executor_request_id(fence, request)?;
+    fence.request_id = kubevirt_executor_request_id(&fence, request)?;
     Ok(fence)
 }
 
 fn kubevirt_executor_request_id(
-    fence: KubeVirtBackendFence,
+    fence: &KubeVirtBackendFence,
     request: &KubeVirtExecutorRequest,
 ) -> Result<Sha256Digest, ProviderFailure> {
     Sha256Digest::of_canonical(&json!({
@@ -526,7 +536,7 @@ impl PgKubeVirtExecutorFenceStore {
         envelope: &KubeVirtExecutorRequestEnvelope,
     ) -> Result<KubeVirtExecutorAdmission, KubeVirtExecutorFenceError> {
         validate_kubevirt_executor_request(envelope)?;
-        let fence = envelope.fence;
+        let fence = &envelope.fence;
         let mut transaction = self.pool.begin().await?;
         let authority_now: time::OffsetDateTime =
             sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
@@ -713,7 +723,9 @@ impl<B: KubeVirtExecutorBackend> FencedKubeVirtExecutor<B> {
                 )
                 .await
                 .map_err(|_| KubeVirtExecutorFenceError::DeadlineExceeded)?;
-                self.store.complete(envelope.fence, &response).await?;
+                self.store
+                    .complete(envelope.fence.clone(), &response)
+                    .await?;
                 response
             }
             KubeVirtExecutorAdmission::Replay(value) => serde_json::from_value(value)
@@ -789,7 +801,7 @@ impl<B: KubeVirtExecutorBackend + 'static> NatsKubeVirtExecutorServer<B> {
             let client = self.client.clone();
             let executor = Arc::clone(&self.executor);
             tokio::spawn(async move {
-                let fence = envelope.fence;
+                let fence = envelope.fence.clone();
                 let response = executor.execute(envelope).await.unwrap_or_else(|error| {
                     KubeVirtExecutorResponseEnvelope {
                         protocol_version: fence.protocol_version,
@@ -827,7 +839,7 @@ impl<B: KubeVirtExecutorBackend + 'static> NatsKubeVirtExecutorServer<B> {
 fn validate_kubevirt_executor_request(
     envelope: &KubeVirtExecutorRequestEnvelope,
 ) -> Result<(), KubeVirtExecutorFenceError> {
-    let fence = envelope.fence;
+    let fence = &envelope.fence;
     let expected = kubevirt_executor_request_id(fence, &envelope.request)
         .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?;
     if fence.protocol_version != KUBEVIRT_BACKEND_PROTOCOL_VERSION

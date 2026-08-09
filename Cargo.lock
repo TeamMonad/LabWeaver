@@ -12,12 +12,11 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "ssh-key 0.6.7",
+ "telemetry",
  "thiserror 2.0.18",
  "time",
  "tokio",
  "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
@@ -4119,6 +4118,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
+name = "opentelemetry"
+version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0142c63252a9e054e68a4c61a5778f7b14f576274d593f8ce883d191a099682"
+dependencies = [
+ "futures-core",
+ "futures-sink",
+ "js-sys",
+ "pin-project-lite",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "opentelemetry_sdk"
+version = "0.32.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b59f80e1ac4d5ff7a2db8fb6c80badb7f0f3f858211fba08dd9aaec750894f9"
+dependencies = [
+ "futures-channel",
+ "futures-executor",
+ "futures-util",
+ "opentelemetry",
+ "percent-encoding",
+ "portable-atomic",
+ "rand 0.9.5",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ordered-float"
 version = "2.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6508,9 +6536,20 @@ dependencies = [
 name = "telemetry"
 version = "0.1.0"
 dependencies = [
+ "axum 0.8.9",
+ "contracts",
+ "http 1.4.2",
+ "jsonschema",
  "metrics-exporter-prometheus",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "serde_json",
  "thiserror 2.0.18",
+ "tokio",
+ "tower",
+ "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

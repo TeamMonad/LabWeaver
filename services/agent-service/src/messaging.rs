@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
+use std::time::Instant;
 
 use async_nats::jetstream::AckKind;
 use async_nats::jetstream::consumer::PullConsumer;
@@ -75,10 +76,18 @@ impl AgentOutboxDispatcher {
     }
 
     pub async fn dispatch_once(&self) -> Result<bool, AgentMessagingError> {
+        let started = Instant::now();
         let mut transaction = self.pool.begin().await?;
         let row = sqlx::query("SELECT event_id,subject,event_type,payload,payload_sha256 FROM agent.outbox_events WHERE published_at IS NULL ORDER BY created_at,event_id FOR UPDATE SKIP LOCKED LIMIT 1").fetch_optional(&mut *transaction).await?;
         let Some(row) = row else {
             transaction.rollback().await?;
+            tracing::debug!(
+                event = "agent.outbox.idle",
+                component = "outbox",
+                operation = "nats.publish",
+                outcome = "idle",
+                duration_ms = elapsed_millis(started),
+            );
             return Ok(false);
         };
         let event_uuid: Uuid = row.try_get("event_id")?;
@@ -125,12 +134,24 @@ impl AgentOutboxDispatcher {
             return Err(AgentMessagingError::Fence);
         }
         transaction.commit().await?;
+        tracing::info!(
+            event = "agent.outbox.published",
+            component = "outbox",
+            operation = "nats.publish",
+            outcome = "succeeded",
+            duration_ms = elapsed_millis(started),
+            trace_id = event.trace_id,
+            event_id = %event.id,
+            message_id = %event.id,
+            subject = event.subject,
+        );
         Ok(true)
     }
 }
 
 /// Durable `JetStream` consumer for approved v1 build commands.
 pub struct AgentBuildCommandConsumer {
+    stream_name: String,
     consumer_name: String,
     quarantine_subject: String,
     context: async_nats::jetstream::Context,
@@ -169,6 +190,7 @@ impl AgentBuildCommandConsumer {
             .await
             .map_err(|_| AgentMessagingError::ConsumerUnavailable)?;
         Ok(Self {
+            stream_name: stream_name.to_owned(),
             consumer_name: consumer_name.to_owned(),
             quarantine_subject: quarantine_subject.to_owned(),
             context,
@@ -176,6 +198,10 @@ impl AgentBuildCommandConsumer {
         })
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one JetStream delivery owns parsing, durable decision, acknowledgement, and its correlated boundary log"
+    )]
     pub async fn process_next(
         &mut self,
         store: &PgBuildStore,
@@ -186,6 +212,10 @@ impl AgentBuildCommandConsumer {
             .await
             .ok_or(AgentMessagingError::ConsumerClosed)?
             .map_err(|_| AgentMessagingError::Receive)?;
+        let info = message.info().map_err(|_| AgentMessagingError::Receive)?;
+        let delivery_attempt =
+            u64::try_from(info.delivered).map_err(|_| AgentMessagingError::Receive)?;
+        let started = Instant::now();
         if message.payload.len() > MAX_BUILD_COMMAND_BYTES {
             self.quarantine(&message, None, "LW_AGENT_BUILD_COMMAND_PAYLOAD_TOO_LARGE")
                 .await?;
@@ -193,6 +223,14 @@ impl AgentBuildCommandConsumer {
                 .double_ack_with(AckKind::Term)
                 .await
                 .map_err(|_| AgentMessagingError::Acknowledge)?;
+            self.log_consumed(
+                "rejected",
+                started,
+                delivery_attempt,
+                None,
+                None,
+                "LW_AGENT_BUILD_COMMAND_PAYLOAD_TOO_LARGE",
+            );
             return Ok(BuildConsumeOutcome::Rejected);
         }
         let Ok(event): Result<CloudEvent<AgentBuildRequested>, _> =
@@ -204,6 +242,14 @@ impl AgentBuildCommandConsumer {
                 .double_ack_with(AckKind::Term)
                 .await
                 .map_err(|_| AgentMessagingError::Acknowledge)?;
+            self.log_consumed(
+                "rejected",
+                started,
+                delivery_attempt,
+                None,
+                None,
+                "LW_AGENT_BUILD_COMMAND_PAYLOAD_INVALID",
+            );
             return Ok(BuildConsumeOutcome::Rejected);
         };
         match store.accept_command(&self.consumer_name, &event).await {
@@ -212,6 +258,14 @@ impl AgentBuildCommandConsumer {
                     .double_ack()
                     .await
                     .map_err(|_| AgentMessagingError::Acknowledge)?;
+                self.log_consumed(
+                    "applied",
+                    started,
+                    delivery_attempt,
+                    Some(&event.trace_id),
+                    Some(event.id),
+                    "LW_OK",
+                );
                 Ok(BuildConsumeOutcome::Applied)
             }
             Ok(BuildCommandDecision::Duplicate | BuildCommandDecision::Stale) => {
@@ -219,6 +273,14 @@ impl AgentBuildCommandConsumer {
                     .double_ack()
                     .await
                     .map_err(|_| AgentMessagingError::Acknowledge)?;
+                self.log_consumed(
+                    "ignored",
+                    started,
+                    delivery_attempt,
+                    Some(&event.trace_id),
+                    Some(event.id),
+                    "LW_OK",
+                );
                 Ok(BuildConsumeOutcome::Ignored)
             }
             Ok(BuildCommandDecision::Gap) => {
@@ -226,6 +288,14 @@ impl AgentBuildCommandConsumer {
                     .ack_with(AckKind::Nak(Some(BUILD_REDELIVERY_DELAY)))
                     .await
                     .map_err(|_| AgentMessagingError::Acknowledge)?;
+                self.log_consumed(
+                    "deferred",
+                    started,
+                    delivery_attempt,
+                    Some(&event.trace_id),
+                    Some(event.id),
+                    "LW_AGENT_BUILD_COMMAND_GAP",
+                );
                 Ok(BuildConsumeOutcome::Deferred)
             }
             Err(error) if error.retryable() => {
@@ -233,6 +303,14 @@ impl AgentBuildCommandConsumer {
                     .ack_with(AckKind::Nak(Some(BUILD_REDELIVERY_DELAY)))
                     .await
                     .map_err(|_| AgentMessagingError::Acknowledge)?;
+                self.log_consumed(
+                    "deferred",
+                    started,
+                    delivery_attempt,
+                    Some(&event.trace_id),
+                    Some(event.id),
+                    "LW_AGENT_BUILD_COMMAND_RETRY_SCHEDULED",
+                );
                 Ok(BuildConsumeOutcome::Deferred)
             }
             Err(_) => {
@@ -242,8 +320,58 @@ impl AgentBuildCommandConsumer {
                     .double_ack_with(AckKind::Term)
                     .await
                     .map_err(|_| AgentMessagingError::Acknowledge)?;
+                self.log_consumed(
+                    "rejected",
+                    started,
+                    delivery_attempt,
+                    Some(&event.trace_id),
+                    Some(event.id),
+                    "LW_AGENT_BUILD_COMMAND_REJECTED",
+                );
                 Ok(BuildConsumeOutcome::Rejected)
             }
+        }
+    }
+
+    fn log_consumed(
+        &self,
+        outcome: &'static str,
+        started: Instant,
+        delivery_attempt: u64,
+        trace_id: Option<&str>,
+        event_id: Option<EventId>,
+        diagnostic_code: &'static str,
+    ) {
+        if let (Some(trace_id), Some(event_id)) = (trace_id, event_id) {
+            tracing::info!(
+                event = "agent.build_command.consumed",
+                component = "build-command-consumer",
+                operation = "nats.consume",
+                outcome,
+                duration_ms = elapsed_millis(started),
+                stream = self.stream_name,
+                consumer = self.consumer_name,
+                subject = subjects::AGENT_BUILD_REQUESTED,
+                delivery_attempt,
+                trace_id,
+                event_id = %event_id,
+                diagnostic_code,
+                retryable = outcome == "deferred",
+            );
+        } else {
+            tracing::info!(
+                event = "agent.build_command.consumed",
+                component = "build-command-consumer",
+                operation = "nats.consume",
+                outcome,
+                duration_ms = elapsed_millis(started),
+                stream = self.stream_name,
+                consumer = self.consumer_name,
+                subject = subjects::AGENT_BUILD_REQUESTED,
+                delivery_attempt,
+                diagnostic_code,
+                retryable = false,
+            );
         }
     }
 
@@ -312,6 +440,10 @@ fn valid_token(value: &str) -> bool {
 
 fn valid_subject(value: &str) -> bool {
     valid_token(value) && !value.contains('*') && !value.contains('>')
+}
+
+fn elapsed_millis(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 #[derive(Debug, thiserror::Error)]
