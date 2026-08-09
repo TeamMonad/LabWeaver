@@ -131,7 +131,7 @@ single-Environment issuer are mandatory before VM acceptance.
 
 ## Compatibility, rollback and evidence
 
-The destructive reset applies `evaluation/0001_sprint2_baseline.sql`, including
+The destructive reset applies `evaluation/0001_platform_baseline.sql`, including
 the corrected freeze uniqueness rule that distinguishes independent approved
 freezes with identical bytes. No pre-reset Evaluation data upgrade is
 supported. Empty regular files are valid and remain hash-addressed.

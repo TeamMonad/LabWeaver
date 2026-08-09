@@ -81,7 +81,7 @@ is durably recorded. Existing endpoints require an Access revocation revision
 before destructive or timeout cleanup. A superseding destructive command cannot
 begin Provider cleanup until the older Provider call's fenced lease has
 expired. The destructive Sprint 2 reset applies
-`environment/0001_sprint2_baseline.sql`, which creates the durable
+`environment/0001_platform_baseline.sql`, which creates the durable
 retry/deadline/reconcile-lease, Provider-step, capacity-binding and failed-phase
 columns together with the due-operation index. Pre-reset development rows are
 not upgraded or inferred; the reset removes them before this baseline is

@@ -6,7 +6,7 @@ Sprint 2 adopts the retained infrastructure without destructive reset. The six s
 boundaries remain fixed, but each domain now has exactly one current migration:
 
 ```text
-migrations/<domain>/0001_sprint2_baseline.sql
+migrations/<domain>/0001_platform_baseline.sql
 ```
 
 The domains are `control`, `access`, `environment`, `agent`, `evaluation`, and

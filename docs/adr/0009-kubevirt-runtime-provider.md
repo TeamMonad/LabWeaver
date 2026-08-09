@@ -111,7 +111,7 @@ a Ready endpoint.
 
 ## Compatibility and migration
 
-The destructive reset applies `environment/0001_sprint2_baseline.sql` before
+The destructive reset applies `environment/0001_platform_baseline.sql` before
 enabling a KubeVirt provider binding. Observation identity and executor fences
 are part of that single baseline; no upgrade compatibility is promised for
 pre-reset development data.
