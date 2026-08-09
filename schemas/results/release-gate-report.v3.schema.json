@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://labweaver.invalid/schemas/results/release-gate-report.v3.schema.json",
+  "title": "Sprint2ReleaseGateReportV3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "status", "sourceCommit", "runId", "deploymentManifest", "resourceDeploymentManifest", "migrationCatalog", "platformImages", "resourceImages", "runtimeArtifacts", "checks"],
+  "properties": {
+    "schemaVersion": {"const": "sprint2-release-gate-report.v3"},
+    "status": {"const": "passed"},
+    "sourceCommit": {"$ref": "#/$defs/commit"},
+    "runId": {"$ref": "#/$defs/uuid"},
+    "deploymentManifest": {"$ref": "#/$defs/evidence"},
+    "resourceDeploymentManifest": {"$ref": "#/$defs/evidence"},
+    "migrationCatalog": {"$ref": "#/$defs/evidence"},
+    "platformImages": {"type": "array", "minItems": 7, "maxItems": 7, "items": {"$ref": "#/$defs/image"}},
+    "resourceImages": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"$ref": "#/$defs/image"}},
+    "runtimeArtifacts": {"type": "array", "minItems": 2, "items": {"$ref": "#/$defs/artifact"}},
+    "checks": {"type": "array", "minItems": 13, "maxItems": 13, "items": {"$ref": "#/$defs/check"}}
+  },
+  "$defs": {
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "uuid": {"type": "string", "format": "uuid"},
+    "locator": {"type": "string", "minLength": 1, "pattern": "^(?![A-Za-z]:|/|\\\\)(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+$"},
+    "evidence": {"type": "object", "additionalProperties": false, "required": ["path", "sha256"], "properties": {"path": {"$ref": "#/$defs/locator"}, "sha256": {"$ref": "#/$defs/digest"}}},
+    "image": {"type": "object", "additionalProperties": false, "required": ["component", "reference"], "properties": {"component": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"}, "reference": {"type": "string", "pattern": "^[^@\\s]+/[^@\\s]+@sha256:[0-9a-f]{64}$"}}},
+    "artifact": {"type": "object", "additionalProperties": false, "required": ["name", "digest"], "properties": {"name": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"}, "digest": {"$ref": "#/$defs/digest"}}},
+    "check": {"type": "object", "additionalProperties": false, "required": ["name", "status", "mode", "sourceCommit", "runId", "evidence"], "properties": {"name": {"enum": ["teacher-agent-approval", "build-supply-chain", "container-lifecycle", "kubevirt-lifecycle", "access-negative", "submission-freeze", "cleanup-readback", "keycloak-playwright", "ansible-idempotent", "rollback-drill", "resource-lease", "container-xterm-console", "kubevirt-novnc-console"]}, "status": {"const": "passed"}, "mode": {"const": "connected"}, "sourceCommit": {"$ref": "#/$defs/commit"}, "runId": {"$ref": "#/$defs/uuid"}, "evidence": {"$ref": "#/$defs/evidence"}}}
+  }
+}

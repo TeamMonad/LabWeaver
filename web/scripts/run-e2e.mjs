@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { stat } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { validateConfiguration, buildReport, writeReport } from './verify-config.mjs'
@@ -13,10 +13,20 @@ const REQUIRED_VALUES = Object.freeze([
   'LABWEAVER_E2E_AGENT_RUN_ID',
   'LABWEAVER_E2E_CONTAINER_ENVIRONMENT_ID',
   'LABWEAVER_E2E_VM_ENVIRONMENT_ID',
+  'LABWEAVER_E2E_CONTAINER_CONSOLE_CASES_FILE',
+  'LABWEAVER_E2E_KUBEVIRT_CONSOLE_CASES_FILE',
+  'LABWEAVER_E2E_CONTROL_CHANNEL_COORDINATION_DIR',
 ])
 const PASSWORD_FILES = Object.freeze([
   'LABWEAVER_TEACHER_PASSWORD_FILE',
   'LABWEAVER_STUDENT_PASSWORD_FILE',
+])
+const CONSOLE_CASE_FILES = Object.freeze([
+  'LABWEAVER_E2E_CONTAINER_CONSOLE_CASES_FILE',
+  'LABWEAVER_E2E_KUBEVIRT_CONSOLE_CASES_FILE',
+])
+const REQUIRED_CONSOLE_CASES = Object.freeze([
+  'positive', 'revoke', 'expiry', 'stop', 'delete', 'control-channel-loss',
 ])
 export const LIVE_PROJECTS = Object.freeze(['setup', 'teacher', 'student'])
 
@@ -57,6 +67,36 @@ async function validateRuntimeInputs(environment, diagnostics) {
       }
     } catch {
       fail(`PW_AUTH_PASSWORD_FILE_INVALID:${name}`, diagnostics)
+    }
+  }
+  for (const name of CONSOLE_CASE_FILES) {
+    const fileName = environment[name]?.trim()
+    if (!fileName) continue
+    try {
+      const metadata = await stat(fileName)
+      if (!metadata.isFile() || metadata.size < 1 || metadata.size > 16_384) {
+        fail(`PW_CONSOLE_CASE_FILE_INVALID:${name}`, diagnostics)
+        continue
+      }
+      const cases = JSON.parse(await readFile(fileName, 'utf8'))
+      if (
+        !cases || typeof cases !== 'object' || Array.isArray(cases)
+        || Object.keys(cases).sort().join(',') !== [...REQUIRED_CONSOLE_CASES].sort().join(',')
+        || Object.values(cases).some((id) => typeof id !== 'string' || !id.trim())
+        || new Set(Object.values(cases)).size !== REQUIRED_CONSOLE_CASES.length
+      ) fail(`PW_CONSOLE_CASE_FILE_INVALID:${name}`, diagnostics)
+    } catch {
+      fail(`PW_CONSOLE_CASE_FILE_INVALID:${name}`, diagnostics)
+    }
+  }
+  const coordinationDirectory = environment.LABWEAVER_E2E_CONTROL_CHANNEL_COORDINATION_DIR?.trim()
+  if (coordinationDirectory) {
+    try {
+      if (!(await stat(coordinationDirectory)).isDirectory()) {
+        fail('PW_CONTROL_CHANNEL_COORDINATION_DIR_INVALID', diagnostics)
+      }
+    } catch {
+      fail('PW_CONTROL_CHANNEL_COORDINATION_DIR_INVALID', diagnostics)
     }
   }
 }

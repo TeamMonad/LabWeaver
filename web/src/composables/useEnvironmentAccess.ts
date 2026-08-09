@@ -1,5 +1,11 @@
 import { reactive, ref, type Ref } from 'vue'
-import { listEnvironmentEndpoints, createAccessGrant, getAccessGrant, revokeAccessGrant } from '@/generated/contracts'
+import {
+  listEnvironmentEndpoints,
+  listEnvironmentAccessGrants,
+  createAccessGrant,
+  getAccessGrant,
+  revokeAccessGrant,
+} from '@/generated/contracts'
 import type { AccessGrantSchema, EnvironmentEndpointSchema } from '@/generated/contracts'
 import { extractProblemDetails, makeDiagnostic, type AsyncState } from '@/types/async'
 import { idempotencyKey, ifMatch } from '@/utils/format'
@@ -94,6 +100,65 @@ export function useEnvironmentAccess(
     }
   }
 
+  async function loadCurrentGrant() {
+    const id = environmentId.value
+    if (!id) {
+      grant.value = { kind: 'idle' }
+      return { ok: true }
+    }
+    grant.value = { kind: 'loading', message: '加载当前访问授权…' }
+    const result = await listEnvironmentAccessGrants({
+      path: { environmentId: id },
+      query: { state: 'active', includeTerminal: false, limit: 2 },
+    })
+    if (result.error) {
+      const problem = extractProblemDetails(result.error)
+      const diagnostic = makeDiagnostic(
+        problem?.diagnosticCode ?? 'ACCESS_GRANT_LIST_FAILED',
+        problem?.detail ?? '加载当前访问授权失败。',
+        problem?.retryable ?? true,
+      )
+      grant.value = { kind: 'error', diagnostic }
+      return { ok: false, diagnostic }
+    }
+    const items = result.data.items ?? []
+    if (items.length === 0) {
+      grant.value = { kind: 'idle' }
+      return { ok: true }
+    }
+    if (items.length !== 1) {
+      const diagnostic = makeDiagnostic(
+        'ACCESS_GRANT_ACTIVE_CONFLICT',
+        '当前环境存在多个 active AccessGrant，已拒绝选择不明确的授权。',
+        false,
+      )
+      grant.value = { kind: 'error', diagnostic }
+      return { ok: false, diagnostic }
+    }
+    const loaded = await getAccessGrant({ path: { grantId: items[0].id } })
+    if (loaded.error) {
+      const problem = extractProblemDetails(loaded.error)
+      const diagnostic = makeDiagnostic(
+        problem?.diagnosticCode ?? 'ACCESS_GRANT_READ_FAILED',
+        problem?.detail ?? '读取当前访问授权失败。',
+        problem?.retryable ?? true,
+      )
+      grant.value = { kind: 'error', diagnostic }
+      return { ok: false, diagnostic }
+    }
+    if (loaded.data.environmentId !== id || loaded.data.state !== 'active') {
+      const diagnostic = makeDiagnostic(
+        'ACCESS_GRANT_AUTHORITY_DRIFT',
+        '当前访问授权与环境或权威状态不一致。',
+        false,
+      )
+      grant.value = { kind: 'error', diagnostic }
+      return { ok: false, diagnostic }
+    }
+    grant.value = { kind: 'success', data: loaded.data }
+    return { ok: true }
+  }
+
   async function waitForActivation(initial: AccessGrantSchema) {
     let current = initial
     const deadline = Date.now() + ACTIVATION_TIMEOUT_MS
@@ -153,5 +218,5 @@ export function useEnvironmentAccess(
     grant.value = { kind: 'idle' }
   }
 
-  return reactive({ endpoints, grant, creating, loadEndpoints, createGrant, revokeGrant, resetGrant })
+  return reactive({ endpoints, grant, creating, loadEndpoints, loadCurrentGrant, createGrant, revokeGrant, resetGrant })
 }

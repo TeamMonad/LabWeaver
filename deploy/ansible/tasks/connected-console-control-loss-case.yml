@@ -1,0 +1,82 @@
+---
+- name: Define runtime-scoped coordination identity
+  ansible.builtin.set_fact:
+    console_coordination_prefix: "{{ console_runtime }}-{{ console_case_environment_ids[console_runtime] }}"
+    console_fault_policy_name: "console-control-loss-{{ console_runtime }}"
+
+- name: Wait for browser console readiness
+  ansible.builtin.stat:
+    path: "{{ console_coordination_dir }}/{{ console_coordination_prefix }}.ready"
+  delegate_to: localhost
+  register: console_ready_marker
+  until: console_ready_marker.stat.exists
+  retries: 60
+  delay: 1
+
+- name: Inject and always recover the NATS control-channel fault
+  block:
+    - name: Deny only NATS egress from the exact Access Service pod
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: cilium.io/v2
+          kind: CiliumNetworkPolicy
+          metadata:
+            name: "{{ console_fault_policy_name }}"
+            namespace: "{{ console_acceptance_namespace }}"
+            labels:
+              labweaver.io/run-id: "{{ console_acceptance_run_id }}"
+              labweaver.io/acceptance-fault: console-control-channel-loss
+          spec:
+            endpointSelector:
+              matchLabels:
+                app.kubernetes.io/name: access-service
+            egressDeny:
+              - toPorts:
+                  - ports:
+                      - port: "4222"
+                        protocol: TCP
+
+    - name: Signal that the fault is active
+      ansible.builtin.file:
+        path: "{{ console_coordination_dir }}/{{ console_coordination_prefix }}.applied"
+        state: touch
+        mode: "0600"
+      delegate_to: localhost
+
+    - name: Wait for browser observation before recovery
+      ansible.builtin.stat:
+        path: "{{ console_coordination_dir }}/{{ console_coordination_prefix }}.observed"
+      delegate_to: localhost
+      register: console_observed_marker
+      until: console_observed_marker.stat.exists
+      retries: 60
+      delay: 1
+  always:
+    - name: Remove the runtime-scoped fault policy
+      kubernetes.core.k8s:
+        state: absent
+        api_version: cilium.io/v2
+        kind: CiliumNetworkPolicy
+        name: "{{ console_fault_policy_name }}"
+        namespace: "{{ console_acceptance_namespace }}"
+
+    - name: Read back fault policy removal
+      kubernetes.core.k8s_info:
+        api_version: cilium.io/v2
+        kind: CiliumNetworkPolicy
+        name: "{{ console_fault_policy_name }}"
+        namespace: "{{ console_acceptance_namespace }}"
+      register: console_fault_policy_readback
+
+    - name: Fail closed when the temporary policy remains
+      ansible.builtin.assert:
+        that: console_fault_policy_readback.resources | length == 0
+        fail_msg: LW_CONSOLE_CONTROL_LOSS_CLEANUP_REMAINING
+
+    - name: Signal authoritative policy recovery
+      ansible.builtin.file:
+        path: "{{ console_coordination_dir }}/{{ console_coordination_prefix }}.restored"
+        state: touch
+        mode: "0600"
+      delegate_to: localhost

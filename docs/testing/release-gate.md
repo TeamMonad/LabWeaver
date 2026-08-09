@@ -1,4 +1,4 @@
-# Sprint 2 Release Gate v2
+# Sprint 2 Release Gate v3
 
 `cargo xtask release-gate` is the only command that can produce a passing
 Sprint 2 report. It does not run a Fixture and it does not upgrade partial
@@ -10,12 +10,12 @@ rebind the retained infrastructure installation to the application commit.
 The Sprint 3 manual Demo, downstream implementation and evidence payloads use
 the identity, resource-readback and No-Go contract in
 [`runnable-environment-demo.md`](../architecture/runnable-environment-demo.md).
-That contract does not create another gate or change the v1 JSON shapes.
+That contract does not create another gate or weaken the v3 JSON shapes.
 
 ## Inputs
 
 The deployment controller writes a private, ignored JSON input conforming to
-`schemas/results/sprint2-release-gate-input.v2.schema.json` and exports its
+`schemas/results/sprint2-release-gate-input.v3.schema.json` and exports its
 project-relative locator:
 
 ```sh
@@ -39,8 +39,8 @@ The input must bind:
   `agent-service`, `control-service`, `environment-service`,
   `evaluation-service`, `openssh-gateway` and `web`);
 - Container and KubeVirt runtime artifact digests;
-- the exact eleven connected checks required by the input Schema, including
-  `resource-lease`.
+- the exact thirteen connected checks required by the input Schema, including
+  `resource-lease`, `container-xterm-console` and `kubevirt-novnc-console`.
 
 `cargo xtask resource replay` accepts only those four private locators and its
 Run ID. It uploads the reviewed material, uses the separate Work AgentRun
@@ -60,7 +60,7 @@ non-symlink evidence file with a SHA-256 digest. The gate rereads and hashes eac
 file. Missing, changed, Fixture, local-only, failed or cross-identity evidence
 blocks without writing a passing report.
 
-The eleven evidence files retain their authoritative product/runtime identity and
+The thirteen evidence files retain their authoritative product/runtime identity and
 readback rather than a boolean-only summary:
 
 | Check | Required evidence boundary |
@@ -76,12 +76,32 @@ readback rather than a boolean-only summary:
 | `ansible-idempotent` | same-identity application adoption reports; second replay has no conflicting or destructive change |
 | `rollback-drill` | reviewed Helm atomic rollback identity and restored immutable image set |
 | `resource-lease` | Work AgentRun/release, Resource approval, quota shell, Environment handoff, renewal/revocation and capacity cleanup readback |
+| `container-xterm-console` | real Container provider, unique Ready Pod and fixed `runtime` PTY; input/output, resize/fullscreen and manual reconnect; revoke, short Grant expiry, stop, delete and control-channel loss within 60 seconds; stale locator denial and zero-residue readback |
+| `kubevirt-novnc-console` | real KubeVirt provider and exact VMI UID through the `/vnc` subresource; visible RFB connection without password/public endpoint; the same fail-closed lifecycle matrix, stale locator denial and zero-residue readback |
 
-The Release Gate validates the v2 envelope and rehashes these files. v1 inputs
-and reports are legacy evidence and cannot satisfy Issue #142. Producers
-and D Verify remain responsible for the inner evidence semantics frozen by the
-Demo contract; an empty or fabricated evidence file is not acceptance evidence
-even if its hash is internally consistent. For the current Sprint, Issue #126
+For both console checks the gate additionally parses
+`connected-console-evidence.v1`, requires six isolated case environments and
+cross-checks source, Run, package, deployment, migration, service-image and
+runtime-artifact identities. Fixture/Mock mode, case omission, identity drift,
+an artifact path escape, unredacted material or non-zero cleanup readback
+returns a stable blocking diagnostic.
+
+Before assembling the gate input, validate each sanitized report independently:
+
+```sh
+cargo xtask console-evidence validate-report --report artifacts/evidence/container-xterm-console.json
+cargo xtask console-evidence validate-report --report artifacts/evidence/kubevirt-novnc-console.json
+```
+
+These commands validate existing controller-produced evidence; they do not run
+a browser, contact a cluster or manufacture a passing report.
+
+The Release Gate validates the v3 envelope and rehashes these files. v1/v2 inputs
+and reports are legacy evidence and cannot satisfy Issue #126. Producers and D
+Verify remain responsible for independently checking the private Trace, video,
+screenshot, audit and cluster readback whose hashes are recorded in the report.
+An empty or fabricated evidence file is not acceptance evidence even if its hash
+is internally consistent. For the current Sprint, Issue #126
 is the sole connected-acceptance owner; development Issues and PRs, including
 #142/#147, must not start deployment, Resource replay, connected E2E or Release
 Gate commands.
@@ -120,6 +140,6 @@ PVC, Secret, Stream, Bucket, Realm or workload.
 
 On success the gate writes exactly one ignored report at
 `artifacts/release-gate/<run-id>.json` and validates it against
-`schemas/results/release-gate-report.v2.schema.json`. The report is evidence for
+`schemas/results/release-gate-report.v3.schema.json`. The report is evidence for
 the bound deployment only; changing source, migration catalog, image set,
 runtime artifact or any referenced evidence requires a new Run ID and replay.

@@ -76,8 +76,17 @@ test('run-e2e records executed E3 browser evidence only after a successful runti
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), 'labweaver-e2e-runtime-'))
   try {
     const passwordPath = path.join(temporaryDirectory, 'password')
+    const casesPath = path.join(temporaryDirectory, 'console-cases.json')
     const reportPath = path.join(temporaryDirectory, 'report.json')
     await writeFile(passwordPath, 'test-only-password\n', { encoding: 'utf8', mode: 0o600 })
+    await writeFile(casesPath, JSON.stringify({
+      positive: 'environment-positive',
+      revoke: 'environment-revoke',
+      expiry: 'environment-expiry',
+      stop: 'environment-stop',
+      delete: 'environment-delete',
+      'control-channel-loss': 'environment-control-loss',
+    }), { encoding: 'utf8', mode: 0o600 })
     const environment = {
       ...process.env,
       LABWEAVER_BASE_URL: 'https://demo.lab.invalid',
@@ -88,6 +97,9 @@ test('run-e2e records executed E3 browser evidence only after a successful runti
       LABWEAVER_E2E_AGENT_RUN_ID: '01999999-9999-7999-8999-999999999999',
       LABWEAVER_E2E_CONTAINER_ENVIRONMENT_ID: '01999999-9999-7999-8999-999999999998',
       LABWEAVER_E2E_VM_ENVIRONMENT_ID: '01999999-9999-7999-8999-999999999997',
+      LABWEAVER_E2E_CONTAINER_CONSOLE_CASES_FILE: casesPath,
+      LABWEAVER_E2E_KUBEVIRT_CONSOLE_CASES_FILE: casesPath,
+      LABWEAVER_E2E_CONTROL_CHANNEL_COORDINATION_DIR: temporaryDirectory,
       LABWEAVER_E2E_REPORT_PATH: reportPath,
     }
     const result = await runE2e({
@@ -100,6 +112,43 @@ test('run-e2e records executed E3 browser evidence only after a successful runti
     assert.equal(result.report.evidenceLevel, 'E3')
     assert.deepEqual(result.report.checks.playwright, { status: 'passed', exitCode: 0 })
     assert.deepEqual(JSON.parse(await readFile(reportPath, 'utf8')), result.report)
+  } finally {
+    await rm(temporaryDirectory, { recursive: true, force: true })
+  }
+})
+
+test('run-e2e rejects incomplete console case identity before browser execution', async () => {
+  const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), 'labweaver-e2e-console-cases-'))
+  try {
+    const passwordPath = path.join(temporaryDirectory, 'password')
+    const casesPath = path.join(temporaryDirectory, 'console-cases.json')
+    await writeFile(passwordPath, 'test-only-password\n', { encoding: 'utf8', mode: 0o600 })
+    await writeFile(casesPath, JSON.stringify({ positive: 'only-one-environment' }), { encoding: 'utf8', mode: 0o600 })
+    let executed = false
+    const result = await runE2e({
+      environment: {
+        ...process.env,
+        LABWEAVER_BASE_URL: 'https://demo.lab.invalid',
+        LABWEAVER_TEACHER_USERNAME: 'teacher',
+        LABWEAVER_TEACHER_PASSWORD_FILE: passwordPath,
+        LABWEAVER_STUDENT_USERNAME: 'student',
+        LABWEAVER_STUDENT_PASSWORD_FILE: passwordPath,
+        LABWEAVER_E2E_AGENT_RUN_ID: '01999999-9999-7999-8999-999999999999',
+        LABWEAVER_E2E_CONTAINER_ENVIRONMENT_ID: 'container',
+        LABWEAVER_E2E_VM_ENVIRONMENT_ID: 'virtual-machine',
+        LABWEAVER_E2E_CONTAINER_CONSOLE_CASES_FILE: casesPath,
+        LABWEAVER_E2E_KUBEVIRT_CONSOLE_CASES_FILE: casesPath,
+        LABWEAVER_E2E_CONTROL_CHANNEL_COORDINATION_DIR: temporaryDirectory,
+        LABWEAVER_E2E_REPORT_PATH: path.join(temporaryDirectory, 'report.json'),
+      },
+      execute: async () => { executed = true; return { exitCode: 0 } },
+    })
+    assert.equal(result.exitCode, 2)
+    assert.equal(executed, false)
+    assert.deepEqual(result.report.diagnostics, [
+      'PW_CONSOLE_CASE_FILE_INVALID:LABWEAVER_E2E_CONTAINER_CONSOLE_CASES_FILE',
+      'PW_CONSOLE_CASE_FILE_INVALID:LABWEAVER_E2E_KUBEVIRT_CONSOLE_CASES_FILE',
+    ])
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true })
   }

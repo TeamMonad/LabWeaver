@@ -56,6 +56,14 @@ schemas, Fixture, historical PR #138 or mixed-source demonstrations:
   its evidence is local and cannot satisfy the connected gate.
 - #126 must demonstrate same-identity shared-cluster multi-role E4, negative
   revocation/expiry/control-channel-loss behavior and Release Gate evidence.
+- #126 console code and local validators do not authorize a connected write.
+  A may freeze and execute only after the Owner's read-only maintenance audit
+  records a new acceptance window without deleting or relocating the exhausted
+  ledger; a clean source and new package/deployment identity are frozen; the
+  Resource NATS signing source and credential registry are restored; and
+  KubeVirt/CDI/KVM, storage, identity, network and GPU/mdev preflights pass.
+  D independently verifies private browser artifacts and cluster readback; B
+  reviews console security and Release Gate semantics.
 
 ## Issue #142 local implementation and acceptance
 

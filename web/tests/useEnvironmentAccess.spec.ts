@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ref } from 'vue'
 import { useEnvironmentAccess } from '@/composables/useEnvironmentAccess'
-import { createAccessGrant, getAccessGrant, listEnvironmentEndpoints } from '@/generated/contracts'
+import {
+  createAccessGrant,
+  getAccessGrant,
+  listEnvironmentAccessGrants,
+  listEnvironmentEndpoints,
+} from '@/generated/contracts'
 
 vi.mock('@/generated/contracts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/generated/contracts')>()
@@ -9,6 +14,7 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
     ...actual,
     createAccessGrant: vi.fn(),
     getAccessGrant: vi.fn(),
+    listEnvironmentAccessGrants: vi.fn(),
     listEnvironmentEndpoints: vi.fn(),
     revokeAccessGrant: vi.fn(),
   }
@@ -53,6 +59,50 @@ afterEach(() => {
 })
 
 describe('useEnvironmentAccess', () => {
+  it('restores exactly one authoritative active grant after a page reload', async () => {
+    const active = grant('active')
+    vi.mocked(listEnvironmentAccessGrants).mockResolvedValue({
+      data: {
+        items: [{ id: active.id }],
+      },
+    } as never)
+    vi.mocked(getAccessGrant).mockResolvedValue({ data: active } as never)
+    const access = useEnvironmentAccess(
+      ref(active.environmentId),
+      ref(active.environmentRevision),
+      ref(active.courseId),
+    )
+
+    await expect(access.loadCurrentGrant()).resolves.toEqual({ ok: true })
+    expect(access.grant).toEqual({ kind: 'success', data: active })
+    expect(listEnvironmentAccessGrants).toHaveBeenCalledWith({
+      path: { environmentId: active.environmentId },
+      query: { state: 'active', includeTerminal: false, limit: 2 },
+    })
+  })
+
+  it('fails closed when multiple active grants make console authority ambiguous', async () => {
+    const active = grant('active')
+    vi.mocked(listEnvironmentAccessGrants).mockResolvedValue({
+      data: {
+        items: [{ id: active.id }, { id: '01900000-0000-7000-8000-000000000099' }],
+      },
+    } as never)
+    const access = useEnvironmentAccess(
+      ref(active.environmentId),
+      ref(active.environmentRevision),
+      ref(active.courseId),
+    )
+
+    const result = await access.loadCurrentGrant()
+    expect(result.ok).toBe(false)
+    expect(access.grant.kind).toBe('error')
+    if (access.grant.kind === 'error') {
+      expect(access.grant.diagnostic.code).toBe('ACCESS_GRANT_ACTIVE_CONFLICT')
+    }
+    expect(getAccessGrant).not.toHaveBeenCalled()
+  })
+
   it('waits for the authoritative active grant before exposing a connect URL', async () => {
     vi.useFakeTimers()
     vi.mocked(listEnvironmentEndpoints).mockResolvedValue({

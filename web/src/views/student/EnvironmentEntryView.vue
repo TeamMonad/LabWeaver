@@ -441,7 +441,7 @@ watch(
     access.resetGrant()
     lifecycleDiagnostic.value = null
     createGrantDiagnostic.value = null
-    if (id) access.loadEndpoints()
+    if (id) void Promise.all([access.loadEndpoints(), access.loadCurrentGrant()])
   },
   { immediate: true },
 )
@@ -453,7 +453,7 @@ watch(
       : null,
   (identity, previousIdentity) => {
     if (identity && identity !== previousIdentity) {
-      access.loadEndpoints()
+      void Promise.all([access.loadEndpoints(), access.loadCurrentGrant()])
     }
   },
 )

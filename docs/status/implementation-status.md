@@ -38,6 +38,7 @@ Sprint-end acceptance Issue.
 | Container xterm ConsoleCapability (#131) | implemented; locally verified; connected blocked | Additive capability/session migration, strict BFF/Origin/CSRF/ETag/idempotency issuance, atomic redemption, metadata lifecycle events, cancellation registry, Environment-authoritative `TerminalSpec`/Lease validation, mTLS proxy chain, unique Ready Pod selection, fixed `runtime` PTY, binary I/O, bounded resize/output and Sprint 3 Web reuse are implemented. Contract generation, focused Rust/Web tests, static deployment checks and local integration are merge evidence. No shared-cluster PTY, connected revocation/control-loss or Release Gate evidence is claimed; #126 owns it. |
 | KubeVirt noVNC ConsoleCapability (#124) | implemented; locally verified; connected blocked | Reuses the generic capability/session/proxy foundation and noVNC UI. Runtime-tagged Environment eligibility, kind-safe one-time consumption, per-connection revision/Lease/release checks, a dedicated mTLS KubeVirt console executor, fixed VMI namespace/name/UID/label fencing, bounded RFB relay and least-privilege deployment policy are implemented. Local contract, Rust, Web and deployment checks are merge evidence; real browser-to-VMI, connected revoke/expiry/stop/delete and Release Gate remain #126 scope. |
 | Web console Fixture preview | implemented; Fixture-verified | `pnpm --dir web preview:console:fixture` builds and serves the EX3-derived deterministic browser preview without a backend. It is visibly marked Fixture, renders only Fixture state, and is documented in `docs/testing/fixture-console-preview.md`. It is layout/state-machine evidence only, not Access proxy, Container, KubeVirt, connected-runtime, or Release Gate evidence. |
+| Connected console acceptance (#126) | implemented locally; connected blocked | Release Gate v3 requires 13 checks and parses same-identity `connected-console-evidence.v1` for real xterm and noVNC. Connected Playwright covers positive/manual reconnect, revoke, short Grant expiry, stop, delete, consumed-locator rejection and label/UID-fenced control-channel loss with cleanup readback. No cluster write or E4 claim has been made: the operation budget window, clean frozen candidate, new package/deployment identity, Resource signing source/credential registry, KubeVirt/CDI/KVM/storage/identity/network preflight and GPU/mdev capacity must all clear first; D retains independent Verify. |
 
 ## Current identity
 
@@ -50,7 +51,7 @@ Sprint-end acceptance Issue.
 - Local Resource replay identity envelope: implemented; it records only
   repository-relative locators, SHA-256 hashes, immutable Resource image and
   configuration-bundle identity; no private values are emitted
-- Formal Release Gate v2: owned by Sprint-end acceptance Issue #126; not a per-PR deployment gate
+- Formal Release Gate v3: owned by Sprint-end acceptance Issue #126; not a per-PR deployment gate
 
 The Docker Desktop local validation profile is deliberately separate from the
 formal gate. It records a `local-connected-non-release` preflight report and
@@ -89,7 +90,7 @@ No service credential, JWT, private key or signing material was read. Node
 allocatable resources expose no `nvidia.com/gpu` device-plugin capacity or
 mdev extension resource, so GPU capacity remains an explicit negative
 capability for this environment. These observations are diagnostic only and
-cannot satisfy the same-identity connected Resource replay or Release Gate v2.
+cannot satisfy the same-identity connected Resource replay or Release Gate v3.
 
 ### Development-cluster redeploy feasibility (2026-08-05)
 
@@ -221,7 +222,7 @@ cross-checked against the Access seed and requires UUIDv7 course/actor IDs plus
 exact teacher, student and platform-admin memberships. It cannot seed
 candidates, approvals, releases, requests or leases directly.
 
-Release Gate v2 requires a Resource deployment manifest, immutable
+Release Gate v3 requires a Resource deployment manifest, immutable
 `resource-service` identity and `resource-lease` connected evidence. v1 reports
 remain legacy and cannot close #142. The connected replay, real Container/VM
 evidence and Release Gate are owned exclusively by Sprint-end acceptance Issue
@@ -332,7 +333,7 @@ The current working tree contains the fixes requested by D's review: the
 Resource mTLS/delegation boundary, claim-fenced namespace cleanup with
 collision tests, lifecycle Outbox atomicity, and corrected request event
 semantics. Local Rust, contract/schema, and Ansible fixture checks pass. A
-same-identity package, connected replay, Release Gate v2 and B/D human review
+same-identity package, connected replay, Release Gate v3 and B/D human review
 remain outstanding and are not claimed by this local status.
 
 The retained application deployment at source `46d22482` remains connected on
@@ -396,7 +397,7 @@ new PostgreSQL migration and saga still require connected execution.
 Issue #142 is **implemented locally; ready for human review**. Its ordinary
 development gate is local integration, contract, Ansible/Helm render, targeted
 tests and CI evidence. Shared-cluster deployment, Resource replay, real
-Container/KubeVirt evidence, connected Playwright and Release Gate v2 are
+Container/KubeVirt evidence, connected Playwright and Release Gate v3 are
 delegated to Sprint-end acceptance Issue #126 and must not be duplicated from
 PR #147. #142 cannot be marked Done or release-ready until #126 completes its
 frozen-identity acceptance window.

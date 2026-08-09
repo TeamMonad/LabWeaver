@@ -1,0 +1,51 @@
+---
+- name: Inject and recover the connected console control-channel fault
+  hosts: control_plane[0]
+  gather_facts: false
+  any_errors_fatal: true
+  vars:
+    required_console_runtimes:
+      - container
+      - kubevirt
+  tasks:
+    - name: Validate acceptance-scoped inputs
+      ansible.builtin.assert:
+        that:
+          - console_acceptance_namespace is defined
+          - console_acceptance_namespace | length > 0
+          - console_acceptance_namespace != 'labweaver-system'
+          - console_acceptance_run_id is defined
+          - console_acceptance_run_id | length > 0
+          - console_access_pod_uid is defined
+          - console_access_pod_uid | length > 0
+          - console_configuration_bundle_sha256 is defined
+          - console_configuration_bundle_sha256 is match('^sha256:[0-9a-f]{64}$')
+          - console_coordination_dir is defined
+          - console_coordination_dir | length > 0
+          - console_case_environment_ids is mapping
+          - console_case_environment_ids.keys() | sort == required_console_runtimes | sort
+        fail_msg: LW_CONSOLE_CONTROL_LOSS_PRECONDITION_FAILED
+
+    - name: Read the exact acceptance Access Service pod
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: "{{ console_acceptance_namespace }}"
+        label_selectors:
+          - app.kubernetes.io/name=access-service
+      register: console_access_pods
+
+    - name: Reject ambiguous or stale Access Service identity
+      ansible.builtin.assert:
+        that:
+          - console_access_pods.resources | length == 1
+          - console_access_pods.resources[0].metadata.uid == console_access_pod_uid
+          - console_access_pods.resources[0].metadata.annotations['labweaver.io/configuration-bundle-sha256'] == console_configuration_bundle_sha256
+          - console_access_pods.resources[0].status.phase == 'Running'
+        fail_msg: LW_CONSOLE_CONTROL_LOSS_IDENTITY_MISMATCH
+
+    - name: Exercise each runtime control-channel loss
+      ansible.builtin.include_tasks: ../tasks/connected-console-control-loss-case.yml
+      loop: "{{ required_console_runtimes }}"
+      loop_control:
+        loop_var: console_runtime

@@ -1,11 +1,14 @@
 <template>
   <div class="novnc-console">
+    <p class="sr-only" role="status" aria-live="polite" data-testid="novnc-connection-state">
+      {{ accessibleState }}
+    </p>
     <div ref="rfbEl" class="novnc-host" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import RFB from '@novnc/novnc/lib/rfb'
 import type { ConsoleCapabilitySchema } from '@/generated/contracts'
 
@@ -20,6 +23,13 @@ const emit = defineEmits<{
 }>()
 
 const rfbEl = ref<HTMLDivElement | null>(null)
+const state = ref<'connecting' | 'open' | 'closed' | 'error'>('connecting')
+const accessibleState = computed(() => ({
+  connecting: '图形控制台正在连接',
+  open: '图形控制台已连接',
+  closed: '图形控制台已断开',
+  error: '图形控制台连接失败',
+}[state.value]))
 let rfb: RFB | null = null
 let connected = false
 let connectTimer: ReturnType<typeof setTimeout> | null = null
@@ -44,7 +54,10 @@ onMounted(() => {
   if (!rfbEl.value) return
   emit('stateChange', 'connecting')
   connectTimer = setTimeout(() => {
-    if (!connected) emit('stateChange', 'error', 'CONSOLE_UPSTREAM_UNAVAILABLE')
+    if (!connected) {
+      state.value = 'error'
+      emit('stateChange', 'error', 'CONSOLE_UPSTREAM_UNAVAILABLE')
+    }
   }, CONNECT_TIMEOUT_MS)
   try {
     rfb = new RFB(rfbEl.value, toWebSocketUrl(props.capability.connectionLocator), {
@@ -54,21 +67,25 @@ onMounted(() => {
     })
     rfb.addEventListener('connect', () => {
       connected = true
+      state.value = 'open'
       clearConnectTimer()
       emit('stateChange', 'open')
     })
     rfb.addEventListener('disconnect', (e) => {
       clearConnectTimer()
+      state.value = 'closed'
       const detail = (e as CustomEvent<{ clean?: boolean }>).detail
       emit('stateChange', 'closed', detail?.clean ? undefined : 'CONSOLE_UPSTREAM_UNAVAILABLE')
     })
     rfb.addEventListener('securityfailure', (e) => {
       clearConnectTimer()
+      state.value = 'error'
       const detail = (e as CustomEvent<{ reason?: number }>).detail
       emit('stateChange', 'error', detail?.reason === 1 ? 'CONSOLE_DENIED' : 'CONSOLE_UPSTREAM_UNAVAILABLE')
     })
   } catch {
     clearConnectTimer()
+    state.value = 'error'
     emit('stateChange', 'error', 'CONSOLE_UPSTREAM_UNAVAILABLE')
   }
 })
