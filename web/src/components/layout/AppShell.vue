@@ -17,14 +17,15 @@
       @toggle-rail="drawerRail = !drawerRail"
     />
 
-    <main class="app-main">
+    <main ref="appMain" class="app-main">
       <RouterView />
     </main>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, defineAsyncComponent } from 'vue'
+import { ref, onMounted, defineAsyncComponent, nextTick, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import TopAppBar from './TopAppBar.vue'
 import NavigationDrawer from './NavigationDrawer.vue'
 import { useThemeStore } from '@/stores/theme'
@@ -38,8 +39,26 @@ const FixtureBanner = showFixtureBanner
 
 const themeStore = useThemeStore()
 const auth = useAuth()
+const route = useRoute()
+const appMain = ref<HTMLElement | null>(null)
 const drawerOpen = ref(false)
 const drawerRail = ref(false)
+
+watch(
+  () => route.fullPath,
+  async () => {
+    if (window.innerWidth > 760) return
+    await nextTick()
+    if (appMain.value) {
+      appMain.value.scrollTop = 0
+      appMain.value.scrollLeft = 0
+    }
+    if (document.scrollingElement) {
+      document.scrollingElement.scrollTop = 0
+      document.scrollingElement.scrollLeft = 0
+    }
+  },
+)
 
 onMounted(() => {
   themeStore.listenToSystemTheme()
@@ -53,6 +72,7 @@ onMounted(() => {
   grid-template-rows: auto var(--app-top-bar-height) 1fr;
   grid-template-columns: 1fr;
   height: 100%;
+  overflow-anchor: none;
   background: var(--md-sys-color-background);
 }
 

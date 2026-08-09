@@ -113,6 +113,10 @@ function collectRequiredRoles(route: RouteRecordNormalized): AppRole[] {
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes,
+  scrollBehavior(_to, _from, savedPosition) {
+    if (savedPosition) return savedPosition
+    return window.innerWidth <= 760 ? { left: 0, top: 0 } : false
+  },
 })
 
 router.beforeEach(async (to) => {
