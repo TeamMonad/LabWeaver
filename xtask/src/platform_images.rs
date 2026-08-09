@@ -34,10 +34,10 @@ const DEPLOYMENT_SCHEMA: &str = "platform-image-deployment-manifest.v1";
 // is schema-valid (format only) and never drives a real scan; the manifest
 // records it so evidence stays auditable and a full pinned package must
 // still be run before any Release Gate.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 const DEVELOP_TRIVY_DATABASE_DIGEST: &str =
     "sha256:0000000000000000000000000000000000000000000000000000000000000000";
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 const DEVELOP_TRIVY_DATABASE_REFERENCE: &str = "docker.io/aquasec/trivy-db@sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
 #[cfg(target_os = "linux")]
