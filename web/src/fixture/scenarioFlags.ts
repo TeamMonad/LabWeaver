@@ -78,3 +78,11 @@ export function consumeResourceRevisionConflict(): boolean {
   writeFlag('resourceRevisionConflict', null)
   return true
 }
+
+/**
+ * `fixture:evaluationResults` — persistent student result read scenario.
+ * `empty` returns an empty page and `error` returns a stable service failure.
+ */
+export function evaluationResultsScenario(): string | null {
+  return readFlag('evaluationResults')
+}

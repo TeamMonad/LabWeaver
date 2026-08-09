@@ -200,6 +200,7 @@ pub(super) async fn forward_control(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
+    authorize_evaluation_release_path(&state, &method, &uri, &headers).await?;
     forward(
         &state,
         &state.control_proxy,
@@ -208,6 +209,55 @@ pub(super) async fn forward_control(
         headers,
         body,
         valid_control_path,
+    )
+    .await
+}
+
+async fn authorize_evaluation_release_path(
+    state: &AppState,
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+) -> Result<(), ApiError> {
+    let segments = uri.path().split('/').collect::<Vec<_>>();
+    let (course, operation) = match (method, segments.as_slice()) {
+        (method, ["", "api", "v1", "courses", course, "evaluation-releases"])
+            if *method == Method::POST =>
+        {
+            (*course, "createEvaluationRelease")
+        }
+        (method, ["", "api", "v1", "courses", course, "evaluation-releases"])
+            if *method == Method::GET =>
+        {
+            (*course, "listEvaluationReleases")
+        }
+        (method, ["", "api", "v1", "courses", course, "evaluation-releases", _])
+            if *method == Method::GET =>
+        {
+            (*course, "getEvaluationRelease")
+        }
+        (
+            method,
+            [
+                "",
+                "api",
+                "v1",
+                "courses",
+                course,
+                "evaluation-releases",
+                _,
+                "withdraw",
+            ],
+        ) if *method == Method::POST => (*course, "withdrawEvaluationRelease"),
+        _ => return Ok(()),
+    };
+    authorize_environment_course(
+        state,
+        headers,
+        course
+            .parse()
+            .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?,
+        operation,
     )
     .await
 }
@@ -258,6 +308,29 @@ pub(super) async fn forward_evaluation(
             .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
         authorize_environment_course(&state, &headers, request.course_id, "freezeSubmission")
             .await?;
+    } else if method == Method::GET {
+        let segments = uri.path().split('/').collect::<Vec<_>>();
+        if let [
+            "",
+            "api",
+            "v1",
+            "courses",
+            course,
+            "me",
+            "evaluation-results",
+            rest @ ..,
+        ] = segments.as_slice()
+        {
+            let course_id = course
+                .parse()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            let operation = if rest.is_empty() {
+                "listOwnEvaluationResults"
+            } else {
+                "getOwnEvaluationResult"
+            };
+            authorize_environment_course(&state, &headers, course_id, operation).await?;
+        }
     }
     forward(
         &state,
@@ -1037,6 +1110,10 @@ fn valid_evaluation_path(path: &str) -> bool {
         ) || matches!(
             segments.as_slice(),
             ["", "api", "v1", "frozen-submissions", _]
+        ) || matches!(
+            segments.as_slice(),
+            ["", "api", "v1", "courses", _, "me", "evaluation-results"]
+                | ["", "api", "v1", "courses", _, "me", "evaluation-results", _]
         ))
 }
 
@@ -1104,6 +1181,12 @@ mod tests {
         ));
         assert!(valid_evaluation_path(
             "/api/v1/frozen-submissions/01900000-0000-7000-8000-000000000001"
+        ));
+        assert!(valid_evaluation_path(
+            "/api/v1/courses/01900000-0000-7000-8000-000000000001/me/evaluation-results"
+        ));
+        assert!(valid_evaluation_path(
+            "/api/v1/courses/01900000-0000-7000-8000-000000000001/me/evaluation-results/01900000-0000-7000-8000-000000000002"
         ));
         assert!(!valid_evaluation_path("/api/v1/environments/a/freeze/more"));
         assert!(!valid_evaluation_path(

@@ -1,13 +1,11 @@
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Stable machine-readable diagnostic code.
 ///
 /// Consumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so
 /// additive diagnostics do not force a wire-version change.
-#[derive(
-    Clone, Debug, Deserialize, Eq, Hash, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
-)]
+#[derive(Clone, Debug, Eq, Hash, JsonSchema, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct DiagnosticCode(String);
 
@@ -43,6 +41,15 @@ impl DiagnosticCode {
     pub fn registered(value: &'static str) -> Self {
         debug_assert!(value.starts_with("LW_"));
         Self(value.to_owned())
+    }
+}
+
+impl<'de> Deserialize<'de> for DiagnosticCode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::parse(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
     }
 }
 

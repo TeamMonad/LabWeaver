@@ -15,7 +15,7 @@ use contracts::{
     },
     http::{
         IdempotencyKey, InternalCreateEvaluationRunRequest, InternalEvaluationRunMutationRequest,
-        InternalPublishEvaluationReleaseRequest,
+        InternalPublishEvaluationReleaseRequest, InternalWithdrawEvaluationReleaseRequest,
     },
 };
 use evaluation_service::{
@@ -110,6 +110,263 @@ async fn release_and_run_are_idempotent_and_close_identity()
         error,
         EvaluationControlStoreError::IdentityMismatch
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn release_withdrawal_is_revision_fenced_and_idempotent()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = TestContext::start(single_score_spec()?).await?;
+    let release = match fixture
+        .store
+        .publish_release(
+            &fixture.publish_request,
+            &idempotency("release-withdraw-source")?,
+            fixture.now().await?,
+            "trace-withdraw",
+        )
+        .await?
+    {
+        EvaluationReleaseReservation::Created(value)
+        | EvaluationReleaseReservation::Replayed(value) => value,
+    };
+    assert_eq!(
+        fixture
+            .store
+            .list_releases(fixture.course_id, None, 10)
+            .await?
+            .items
+            .len(),
+        1
+    );
+    let request = InternalWithdrawEvaluationReleaseRequest {
+        course_id: fixture.course_id,
+        expected_revision: release.revision,
+        withdrawn_by: fixture.actor_id,
+        reason_code: DiagnosticCode::registered("LW_EVALUATION_RELEASE_WITHDRAWN"),
+    };
+    let key = idempotency("release-withdraw-idempotency")?;
+    let first = fixture
+        .store
+        .withdraw_release(
+            release.id,
+            &request,
+            &key,
+            fixture.now().await?,
+            "trace-withdraw",
+        )
+        .await?;
+    let replay = fixture
+        .store
+        .withdraw_release(
+            release.id,
+            &request,
+            &key,
+            fixture.now().await?,
+            "trace-withdraw-replay",
+        )
+        .await?;
+    assert_eq!(first, replay);
+    assert_eq!(
+        first.state,
+        contracts::evaluation::EvaluationReleaseState::Withdrawn
+    );
+    let audit = sqlx::query(
+        "SELECT course_id,release_revision,withdrawn_by,reason_code,trace_id \
+         FROM evaluation.evaluation_release_withdrawals WHERE release_id=$1",
+    )
+    .bind(release.id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        audit.get::<uuid::Uuid, _>("course_id"),
+        fixture.course_id.as_uuid()
+    );
+    assert_eq!(audit.get::<i64, _>("release_revision"), 2);
+    assert_eq!(
+        audit.get::<uuid::Uuid, _>("withdrawn_by"),
+        fixture.actor_id.as_uuid()
+    );
+    assert_eq!(
+        audit.get::<String, _>("reason_code"),
+        "LW_EVALUATION_RELEASE_WITHDRAWN"
+    );
+    assert_eq!(audit.get::<String, _>("trace_id"), "trace-withdraw");
+    assert_eq!(
+        count(&fixture.pool, "evaluation.evaluation_release_withdrawals").await?,
+        1
+    );
+
+    let mut stale = request;
+    stale.expected_revision = first.revision;
+    let error = fixture
+        .store
+        .withdraw_release(
+            release.id,
+            &stale,
+            &idempotency("release-withdraw-second")?,
+            fixture.now().await?,
+            "trace-withdraw-second",
+        )
+        .await
+        .expect_err("withdrawn release cannot transition twice");
+    assert!(matches!(error, EvaluationControlStoreError::StateConflict));
+    Ok(())
+}
+
+#[tokio::test]
+async fn terminal_student_results_are_owner_scoped_and_survive_release_withdrawal()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = TestContext::start(single_score_spec()?).await?;
+    let run = fixture.create_seeded_run("trace-student-result").await?;
+    assert!(
+        fixture
+            .store
+            .student_results(fixture.course_id, fixture.actor_id, None, 10)
+            .await?
+            .items
+            .is_empty(),
+        "non-terminal runs must stay private"
+    );
+
+    let lease = fixture
+        .store
+        .claim_next_step("student-result-worker", Duration::from_secs(30))
+        .await?
+        .expect("score step must be claimable");
+    let completed = complete_leased_step(
+        &fixture,
+        run.id,
+        &lease,
+        &success_completion(7),
+        "trace-student-result",
+    )
+    .await?;
+    assert_eq!(completed.state, EvaluationRunState::Succeeded);
+
+    let result = fixture
+        .store
+        .student_result(fixture.course_id, fixture.actor_id, run.id)
+        .await?;
+    assert_eq!(result.awarded_score, Some(7));
+    assert_eq!(result.steps.len(), 1);
+    assert_eq!(result.steps[0].awarded_score, Some(7));
+    assert!(matches!(
+        fixture
+            .store
+            .student_result(fixture.course_id, ActorId::new(), run.id)
+            .await,
+        Err(EvaluationControlStoreError::RunNotFound)
+    ));
+    assert!(matches!(
+        fixture
+            .store
+            .student_result(CourseId::new(), fixture.actor_id, run.id)
+            .await,
+        Err(EvaluationControlStoreError::RunNotFound)
+    ));
+
+    let release = fixture.store.load_release(run.release_id).await?;
+    fixture
+        .store
+        .withdraw_release(
+            release.id,
+            &InternalWithdrawEvaluationReleaseRequest {
+                course_id: fixture.course_id,
+                expected_revision: release.revision,
+                withdrawn_by: fixture.actor_id,
+                reason_code: DiagnosticCode::registered("LW_EVALUATION_RELEASE_WITHDRAWN"),
+            },
+            &idempotency("student-result-withdraw")?,
+            fixture.now().await?,
+            "trace-student-result-withdraw",
+        )
+        .await?;
+    assert_eq!(
+        fixture
+            .store
+            .student_result(fixture.course_id, fixture.actor_id, run.id)
+            .await?
+            .awarded_score,
+        Some(7),
+        "withdrawing a release must not erase historical terminal results"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_and_cancelled_student_results_never_expose_partial_scores()
+-> Result<(), Box<dyn std::error::Error>> {
+    let failed_fixture = TestContext::start(single_score_spec()?).await?;
+    let failed_run = failed_fixture
+        .create_seeded_run("trace-student-failed")
+        .await?;
+    let failed_lease = failed_fixture
+        .store
+        .claim_next_step("student-failed-worker", Duration::from_secs(30))
+        .await?
+        .expect("failed score step must be claimable");
+    let failed = complete_leased_step(
+        &failed_fixture,
+        failed_run.id,
+        &failed_lease,
+        &failed_completion(true),
+        "trace-student-failed",
+    )
+    .await?;
+    assert_eq!(failed.state, EvaluationRunState::Failed);
+    let failed_result = failed_fixture
+        .store
+        .student_result(
+            failed_fixture.course_id,
+            failed_fixture.actor_id,
+            failed_run.id,
+        )
+        .await?;
+    assert_eq!(failed_result.awarded_score, None);
+    assert!(
+        failed_result
+            .steps
+            .iter()
+            .all(|step| step.awarded_score.is_none())
+    );
+    assert!(failed_result.diagnostic_code.is_some());
+
+    let cancelled_fixture = TestContext::start(single_score_spec()?).await?;
+    let cancelled_run = cancelled_fixture
+        .create_seeded_run("trace-student-cancelled")
+        .await?;
+    let cancelled = cancelled_fixture
+        .store
+        .request_cancellation(
+            cancelled_run.id,
+            &mutation(
+                cancelled_fixture.course_id,
+                cancelled_run.revision,
+                cancelled_fixture.actor_id,
+            ),
+            &idempotency("student-cancelled")?,
+            cancelled_fixture.now().await?,
+            "trace-student-cancelled",
+        )
+        .await?;
+    assert_eq!(cancelled.state, EvaluationRunState::Cancelled);
+    let cancelled_result = cancelled_fixture
+        .store
+        .student_result(
+            cancelled_fixture.course_id,
+            cancelled_fixture.actor_id,
+            cancelled_run.id,
+        )
+        .await?;
+    assert_eq!(cancelled_result.awarded_score, None);
+    assert!(
+        cancelled_result
+            .steps
+            .iter()
+            .all(|step| step.awarded_score.is_none())
+    );
+    assert!(cancelled_result.diagnostic_code.is_some());
     Ok(())
 }
 
@@ -603,9 +860,12 @@ impl TestContext {
             .connect(&database_url)
             .await?;
         let migrations = format!(
-            "CREATE SCHEMA evaluation; SET search_path TO evaluation;\n{}\n{}",
+            "CREATE SCHEMA evaluation; SET search_path TO evaluation;\n{}\n{}\n{}",
             include_str!("../../../migrations/evaluation/0001_platform_baseline.sql"),
-            include_str!("../../../migrations/evaluation/0002_evaluation_control_plane.sql")
+            include_str!("../../../migrations/evaluation/0002_evaluation_control_plane.sql"),
+            include_str!(
+                "../../../migrations/evaluation/0003_release_withdrawal_and_student_results.sql"
+            )
         );
         sqlx::raw_sql(&migrations).execute(&pool).await?;
         let store = PgEvaluationControlStore::new(pool.clone());

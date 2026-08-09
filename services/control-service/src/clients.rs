@@ -8,14 +8,17 @@
 use std::time::Duration;
 
 use contracts::authoring::{AgentRun, AgentTrackKind};
+use contracts::evaluation::EvaluationRelease;
 use contracts::http::{
-    IdempotencyKey, InternalAgentBuildCancellationRequest, InternalAgentBuildCancellationResult,
-    InternalAgentBuildStatusQuery, InternalAgentRunMutationRequest, InternalAgentRunOutcome,
-    InternalCreateAgentRunRequest, InternalImageArtifactResolution,
+    CursorPage, EvaluationReleaseListQuery, IdempotencyKey, InternalAgentBuildCancellationRequest,
+    InternalAgentBuildCancellationResult, InternalAgentBuildStatusQuery,
+    InternalAgentRunMutationRequest, InternalAgentRunOutcome, InternalCreateAgentRunRequest,
+    InternalImageArtifactResolution, InternalPublishEvaluationReleaseRequest,
+    InternalWithdrawEvaluationReleaseRequest,
 };
 use contracts::{
     AgentRunId, AuthorizationDecision, AuthorizationDecisionRequest, BuildRequestId,
-    ImageArtifactId,
+    EvaluationReleaseId, ImageArtifactId,
 };
 use reqwest::{Certificate, Identity, StatusCode, Url};
 use serde::Deserialize;
@@ -244,6 +247,116 @@ impl AgentClient {
             .map_err(|_| DownstreamError::IdentityMismatch)?;
         Ok(resolution)
     }
+}
+
+/// Evaluation authority adapter. All targets are fixed by deployment configuration.
+#[derive(Clone, Debug)]
+pub struct EvaluationClient {
+    config: MtlsClientFileConfig,
+    client: reqwest::Client,
+}
+
+impl EvaluationClient {
+    pub fn new(config: MtlsClientFileConfig) -> Result<Self, DownstreamError> {
+        let client = config.build()?;
+        Ok(Self { config, client })
+    }
+
+    pub async fn publish(
+        &self,
+        request: &InternalPublishEvaluationReleaseRequest,
+        key: &IdempotencyKey,
+        trace_id: &str,
+    ) -> Result<EvaluationRelease, DownstreamError> {
+        let release: EvaluationRelease = send_json(
+            self.client
+                .post(self.config.endpoint("internal/v1/evaluation-releases")?)
+                .header("Idempotency-Key", key.as_str())
+                .header("traceparent", trace_id)
+                .json(request),
+        )
+        .await?;
+        validate_release(release)
+    }
+
+    pub async fn list(
+        &self,
+        course_id: contracts::CourseId,
+        query: &EvaluationReleaseListQuery,
+    ) -> Result<CursorPage<EvaluationRelease>, DownstreamError> {
+        let mut page: CursorPage<EvaluationRelease> = send_json(
+            self.client
+                .get(self.config.endpoint("internal/v1/evaluation-releases")?)
+                .header("x-labweaver-course-id", course_id.to_string())
+                .query(query),
+        )
+        .await?;
+        if page
+            .items
+            .iter()
+            .any(|release| release.course_id != course_id)
+        {
+            return Err(DownstreamError::IdentityMismatch);
+        }
+        page.items = page
+            .items
+            .into_iter()
+            .map(validate_release)
+            .collect::<Result<_, _>>()?;
+        Ok(page)
+    }
+
+    pub async fn get(
+        &self,
+        release_id: EvaluationReleaseId,
+    ) -> Result<EvaluationRelease, DownstreamError> {
+        let release: EvaluationRelease = send_json(
+            self.client.get(
+                self.config
+                    .endpoint(&format!("internal/v1/evaluation-releases/{release_id}"))?,
+            ),
+        )
+        .await?;
+        if release.id != release_id {
+            return Err(DownstreamError::IdentityMismatch);
+        }
+        validate_release(release)
+    }
+
+    pub async fn withdraw(
+        &self,
+        release_id: EvaluationReleaseId,
+        request: &InternalWithdrawEvaluationReleaseRequest,
+        key: &IdempotencyKey,
+        trace_id: &str,
+    ) -> Result<EvaluationRelease, DownstreamError> {
+        let release: EvaluationRelease = send_json(
+            self.client
+                .post(self.config.endpoint(&format!(
+                    "internal/v1/evaluation-releases/{release_id}/withdraw"
+                ))?)
+                .header("Idempotency-Key", key.as_str())
+                .header(
+                    "If-Match",
+                    contracts::http::StrongEtag::from_revision(request.expected_revision)
+                        .header_value(),
+                )
+                .header("traceparent", trace_id)
+                .json(request),
+        )
+        .await?;
+        if release.id != release_id || release.course_id != request.course_id {
+            return Err(DownstreamError::IdentityMismatch);
+        }
+        validate_release(release)
+    }
+}
+
+fn validate_release(release: EvaluationRelease) -> Result<EvaluationRelease, DownstreamError> {
+    release
+        .validate()
+        .map_err(|_| DownstreamError::ProtocolInvalid)?;
+    Ok(release)
 }
 
 async fn send_json<T: serde::de::DeserializeOwned>(

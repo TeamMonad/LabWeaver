@@ -18,14 +18,16 @@ use contracts::authoring::{
     AgentTrackKind, CandidateApproval, CandidateDecision, CourseLlmEgressPolicy,
     EnvironmentCandidate, EvaluationCandidate, PackageFile, ProblemPackage, RuntimeKind,
 };
+use contracts::evaluation::EvaluationRuntimeIdentity;
 use contracts::events::{
     AgentBuildFailed, AgentBuildRequested, AgentRunEvent, CloudEvent, EVENT_CONTRACTS,
     ReleasePublished, ReleaseWithdrawn, SPEC_VERSION, subjects,
 };
 use contracts::http::{
     CandidateBuildState, CandidateBuildView, CandidateDecisionRequest,
-    CreateEnvironmentTemplateReleaseRequest, CreateProblemPackageUploadRequest,
-    EnvironmentCandidateView, EvaluationCandidateView, IdempotencyKey, ProblemPackageUploadFile,
+    CreateEnvironmentTemplateReleaseRequest, CreateEvaluationReleaseRequest,
+    CreateProblemPackageUploadRequest, EnvironmentCandidateView, EvaluationCandidateView,
+    IdempotencyKey, InternalPublishEvaluationReleaseRequest, ProblemPackageUploadFile,
     ProblemPackageUploadSession, ProblemPackageUploadTarget,
 };
 use contracts::supply_chain::{
@@ -91,6 +93,47 @@ pub struct ControlConfig {
     pub container_build: ContainerBuildPolicy,
     /// Exact deployment-owned `KubeVirt` base disk accepted for VM publication.
     pub virtual_machine_base: VirtualMachineBasePolicy,
+    /// Single deployment-owned Evaluation runtime identity template.
+    pub evaluation_runtime: EvaluationRuntimePolicy,
+}
+
+/// Non-secret immutable Evaluation runtime fields; package identity is derived per candidate.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EvaluationRuntimePolicy {
+    /// Clean source identity for the deployed Evaluation worker.
+    pub source_sha256: Sha256Digest,
+    /// Exact registered Evaluation provider.
+    pub provider_binding: String,
+    /// Sanitized effective runtime configuration identity.
+    pub configuration_sha256: Sha256Digest,
+    /// Checked-in Evaluation Migration catalog identity.
+    pub migration_catalog_sha256: Sha256Digest,
+    /// Digest-pinned Evaluation runner image.
+    pub runner_image: String,
+    /// Immutable worker/runtime artifact identity.
+    pub runtime_artifact_sha256: Sha256Digest,
+}
+
+impl EvaluationRuntimePolicy {
+    fn identity(
+        &self,
+        package_sha256: Sha256Digest,
+    ) -> Result<EvaluationRuntimeIdentity, ControlError> {
+        let identity = EvaluationRuntimeIdentity {
+            source_sha256: self.source_sha256,
+            provider_binding: self.provider_binding.clone(),
+            package_sha256,
+            configuration_sha256: self.configuration_sha256,
+            migration_catalog_sha256: self.migration_catalog_sha256,
+            runner_image: self.runner_image.clone(),
+            runtime_artifact_sha256: self.runtime_artifact_sha256,
+        };
+        identity
+            .validate()
+            .map_err(|_| ControlError::ConfigurationInvalid)?;
+        Ok(identity)
+    }
 }
 
 /// Deployment-owned, non-secret limits and bindings for approved Container builds.
@@ -140,6 +183,10 @@ impl ControlConfig {
         let retention_valid = self.retention_seconds != 0 && self.sse_retention_seconds != 0;
         let container_build_valid = self.container_build.validate();
         let virtual_machine_base_valid = self.virtual_machine_base.validate();
+        let evaluation_runtime_valid = self
+            .evaluation_runtime
+            .identity(self.evaluation_runtime.source_sha256)
+            .is_ok();
         if !(package_prefix_valid
             && upload_ttl_valid
             && completion_lease_valid
@@ -147,7 +194,8 @@ impl ControlConfig {
             && package_bytes_valid
             && retention_valid
             && container_build_valid
-            && virtual_machine_base_valid)
+            && virtual_machine_base_valid
+            && evaluation_runtime_valid)
         {
             tracing::error!(
                 event = "control.configuration_invalid",
@@ -159,6 +207,7 @@ impl ControlConfig {
                 retention_valid,
                 container_build_valid,
                 virtual_machine_base_valid,
+                evaluation_runtime_valid,
                 "deployment-owned Control policy failed validation"
             );
             return Err(ControlError::ConfigurationInvalid);
@@ -776,6 +825,68 @@ impl ControlService {
             candidate,
             approvals,
             trust_revision: self.config.trust_revision,
+        })
+    }
+
+    /// Builds the exact Control-authorized command; browser input cannot select runtime identity.
+    pub async fn prepare_evaluation_release(
+        &self,
+        course_id: CourseId,
+        request: &CreateEvaluationReleaseRequest,
+        published_by: ActorId,
+    ) -> Result<InternalPublishEvaluationReleaseRequest, ControlError> {
+        let candidate = self
+            .evaluation_candidate(course_id, request.candidate_id)
+            .await?;
+        if candidate.revision != request.candidate_revision
+            || candidate.spec_sha256 != request.evaluation_spec_sha256
+        {
+            return Err(ControlError::ReleaseCandidateMismatch);
+        }
+        let approval: CandidateApproval = load_contract_two(
+            &self.pool,
+            "SELECT contract FROM control.candidate_approvals WHERE approval_id=$1 AND candidate_id=$2",
+            request.approval_id.as_uuid(),
+            request.candidate_id.as_uuid(),
+        )
+        .await?;
+        let active_policy = sqlx::query_scalar::<_, i64>(
+            "SELECT revision FROM control.course_llm_policies WHERE course_id=$1 AND superseded_at IS NULL",
+        )
+        .bind(course_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db)?
+        .ok_or(ControlError::PolicyNotFound)?;
+        if !approval.is_release_eligible(
+            request.candidate_revision,
+            request.evaluation_spec_sha256,
+            revision_from_i64(active_policy)?,
+            self.config.evaluation_schema_sha256,
+            self.config.trust_revision,
+        ) {
+            return Err(ControlError::ReleaseCandidateMismatch);
+        }
+        let run = self.agent_run(course_id, candidate.run_id).await?;
+        let package = self.package(course_id, run.package_id).await?;
+        package
+            .validate()
+            .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+        Ok(InternalPublishEvaluationReleaseRequest {
+            course_id,
+            candidate_id: candidate.id,
+            candidate_revision: candidate.revision,
+            candidate_sha256: candidate.spec_sha256,
+            approval_id: approval.id,
+            approval_revision: Revision::new(1)
+                .map_err(|_| ControlError::PersistenceIdentityMismatch)?,
+            approval_sha256: canonical_hash(&approval)?,
+            evaluation_spec: candidate.spec,
+            runtime_identity: self
+                .config
+                .evaluation_runtime
+                .identity(package.manifest_sha256)?,
+            published_by,
         })
     }
 
@@ -3042,8 +3153,8 @@ mod tests {
     use contracts::supply_chain::BuildNetworkPolicy;
 
     use super::{
-        ContainerBuildPolicy, ControlConfig, ControlError, VirtualMachineBasePolicy,
-        reject_sensitive_payload, validate_upload_request,
+        ContainerBuildPolicy, ControlConfig, ControlError, EvaluationRuntimePolicy,
+        VirtualMachineBasePolicy, reject_sensitive_payload, validate_upload_request,
     };
 
     fn config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
@@ -3085,6 +3196,14 @@ mod tests {
                     capacity_bytes: 10_737_418_240,
                 },
                 format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
+            },
+            evaluation_runtime: EvaluationRuntimePolicy {
+                source_sha256: Sha256Digest::of_bytes(b"source"),
+                provider_binding: "evaluation-primary-v1".to_owned(),
+                configuration_sha256: Sha256Digest::of_bytes(b"configuration"),
+                migration_catalog_sha256: Sha256Digest::of_bytes(b"migrations"),
+                runner_image: format!("runner@sha256:{}", "a".repeat(64)),
+                runtime_artifact_sha256: Sha256Digest::of_bytes(b"runtime"),
             },
         })
     }

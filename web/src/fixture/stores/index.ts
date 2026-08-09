@@ -3,8 +3,11 @@ import { resetClock } from '../utils/clock'
 import { resetSequence } from '../utils/sequence'
 import { resetAccessGrantStore, seedAccessGrants } from './accessGrantStore'
 import { resetAgentRunStore } from './agentRunStore'
+import { resetApprovalStore } from './approvalStore'
+import { resetCandidateStore } from './candidateStore'
 import { resetEndpointStore } from './endpointStore'
 import { resetEnvironmentStore, seedEnvironments } from './environmentStore'
+import { resetEvaluationStore, seedEvaluationData } from './evaluationStore'
 import { resetEventLog } from './eventLog'
 import { resetLlmPolicyStore, seedLlmPolicies } from './llmPolicyStore'
 import { resetOperationStore, seedTimedOutOperation } from './operationStore'
@@ -22,9 +25,12 @@ export function resetFixtureState(): void {
   resetClock()
   resetAccessGrantStore()
   resetAgentRunStore()
+  resetApprovalStore()
+  resetCandidateStore()
   resetEndpointStore()
   resetOperationStore()
   resetEnvironmentStore()
+  resetEvaluationStore()
   resetEventLog()
   resetLlmPolicyStore()
   resetProblemPackageStore()
@@ -37,6 +43,7 @@ export function resetFixtureState(): void {
   seedTimedOutOperation(envIds[0])
   seedTemplateReleases(['course-101', 'course-102', 'course-admin'])
   seedLlmPolicies(['course-101', 'course-102', 'course-admin'])
+  seedEvaluationData()
   seedResources()
 }
 
@@ -45,6 +52,7 @@ export * from './accessGrantStore'
 export * from './agentRunStore'
 export * from './endpointStore'
 export * from './environmentStore'
+export * from './evaluationStore'
 export * from './eventLog'
 export * from './llmPolicyStore'
 export * from './operationStore'

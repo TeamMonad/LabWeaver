@@ -104,12 +104,14 @@ defineProps<Props>()
 .role-tab {
   position: relative;
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   height: 44px;
   padding: 0 20px;
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-label-large);
   text-decoration: none;
+  white-space: nowrap;
   transition: color 0.2s;
 }
 

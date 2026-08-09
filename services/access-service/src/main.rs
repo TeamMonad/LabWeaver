@@ -154,6 +154,14 @@ fn browser_router(state: Arc<AppState>) -> Router {
             get(proxy::forward_evaluation),
         )
         .route(
+            "/api/v1/courses/{course_id}/me/evaluation-results",
+            get(proxy::forward_evaluation),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/me/evaluation-results/{run_id}",
+            get(proxy::forward_evaluation),
+        )
+        .route(
             "/api/v1/environments/{environment_id}",
             axum::routing::any(proxy::forward_environment),
         )

@@ -166,6 +166,36 @@ Evaluation worker path. Missing binding, permission, image digest, provider or
 environment conditions must fail closed with the same diagnostic family and
 must not be represented by this local test.
 
+## Issue #160 Evaluation release and student-result API gate
+
+The local merge gate extends the #123 disposable PostgreSQL proof and adds the
+public Access/Control contract without starting shared-cluster work:
+
+```sh
+cargo xtask contracts check
+cargo test -p contracts --all-targets --all-features
+cargo test -p control-service --lib --test postgres --test mtls
+cargo test -p access-service --lib
+cargo test -p evaluation-service --test control_plane -- --nocapture
+cargo xtask test --suite integration
+```
+
+Required assertions cover strict request fields, invalid revision/hash and
+approval binding, duplicate-key replay and key/payload conflict, revision-fenced
+withdrawal, one append-only withdrawal audit row, course/actor isolation,
+terminal-only visibility, score suppression for failed/cancelled runs, stable
+cursor paging, sensitive-field absence, mTLS caller identity and downstream
+failure propagation. On Windows, Evaluation worker compilation remains a
+platform limitation because those workers intentionally use Unix process and
+resource primitives; Linux CI/local integration owns that executable evidence.
+
+Fixture Web tests in #161 cover teacher publish/withdraw, idempotent client
+submission, read-only runtime identity, student success/failure/cancelled
+projections, empty/error/role-denied states, mobile layout, light/dark themes and
+WCAG A/AA scanning. They prove browser state handling only and are not connected
+evidence. #126 alone owns shared-cluster deployment, real teacher/student
+Playwright, real runner/provider identity and Release Gate closure.
+
 ## Issue #140 C++17 OJ gate
 
 The local gate proves only strict semantics and resource construction:

@@ -10,6 +10,9 @@
     },
     "Sha256Digest": {
       "description": "Canonical lowercase SHA-256 digest.",
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
       "type": "string"
     },
     "VirtualMachineBaseDisk": {

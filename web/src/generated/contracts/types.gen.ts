@@ -38,6 +38,8 @@ export type InternalImageArtifactResolution = InternalImageArtifactResolutionSch
 
 export type InternalPublishEvaluationReleaseRequest = InternalPublishEvaluationReleaseRequestSchema;
 
+export type InternalWithdrawEvaluationReleaseRequest = InternalWithdrawEvaluationReleaseRequestSchema;
+
 export type OperationAccepted = {
     operationId: string;
     revision: number;
@@ -60,6 +62,8 @@ export type ProblemDetails = {
         message: string;
     }>;
 };
+
+export type StudentEvaluationResult = StudentEvaluationResultSchema;
 
 /**
  * AccessGrant
@@ -2247,6 +2251,38 @@ export type CreateEnvironmentTemplateReleaseRequestSchemaRuntimeKind = 'containe
  * Canonical lowercase SHA-256 digest.
  */
 export type CreateEnvironmentTemplateReleaseRequestSchemaSha256Digest = string;
+
+/**
+ * CreateEvaluationReleaseRequest
+ *
+ * Public teacher command for publishing an exact approved Evaluation candidate.
+ */
+export type CreateEvaluationReleaseRequestSchema = {
+    approvalId: CreateEvaluationReleaseRequestSchemaApprovalId;
+    candidateId: CreateEvaluationReleaseRequestSchemaCandidateId;
+    candidateRevision: CreateEvaluationReleaseRequestSchemaRevision;
+    evaluationSpecSha256: CreateEvaluationReleaseRequestSchemaSha256Digest;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ApprovalId`.
+ */
+export type CreateEvaluationReleaseRequestSchemaApprovalId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CandidateId`.
+ */
+export type CreateEvaluationReleaseRequestSchemaCandidateId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type CreateEvaluationReleaseRequestSchemaRevision = number;
+
+/**
+ * Canonical lowercase SHA-256 digest.
+ */
+export type CreateEvaluationReleaseRequestSchemaSha256Digest = string;
 
 /**
  * CreateProblemPackageUploadRequest
@@ -5608,6 +5644,41 @@ export type InternalPublishEvaluationReleaseRequestSchemaTestGroup = {
 };
 
 /**
+ * InternalWithdrawEvaluationReleaseRequest
+ *
+ * Control-to-Evaluation withdrawal command carried only over mTLS.
+ */
+export type InternalWithdrawEvaluationReleaseRequestSchema = {
+    courseId: InternalWithdrawEvaluationReleaseRequestSchemaCourseId;
+    expectedRevision: InternalWithdrawEvaluationReleaseRequestSchemaRevision;
+    reasonCode: InternalWithdrawEvaluationReleaseRequestSchemaDiagnosticCode;
+    withdrawnBy: InternalWithdrawEvaluationReleaseRequestSchemaActorId;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type InternalWithdrawEvaluationReleaseRequestSchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type InternalWithdrawEvaluationReleaseRequestSchemaCourseId = string;
+
+/**
+ * Stable machine-readable diagnostic code.
+ *
+ * Consumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so
+ * additive diagnostics do not force a wire-version change.
+ */
+export type InternalWithdrawEvaluationReleaseRequestSchemaDiagnosticCode = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type InternalWithdrawEvaluationReleaseRequestSchemaRevision = number;
+
+/**
  * IssueConsoleCapabilityRequest
  *
  * Revision-fenced request to issue a single browser console capability.
@@ -5804,6 +5875,29 @@ export type WithdrawEnvironmentTemplateReleaseRequestSchema = {
      */
     reasonCode: string;
 };
+
+/**
+ * WithdrawEvaluationReleaseRequest
+ *
+ * Revision-fenced append-only Evaluation release withdrawal.
+ */
+export type WithdrawEvaluationReleaseRequestSchema = {
+    expectedRevision: WithdrawEvaluationReleaseRequestSchemaRevision;
+    reasonCode: WithdrawEvaluationReleaseRequestSchemaDiagnosticCode;
+};
+
+/**
+ * Stable machine-readable diagnostic code.
+ *
+ * Consumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so
+ * additive diagnostics do not force a wire-version change.
+ */
+export type WithdrawEvaluationReleaseRequestSchemaDiagnosticCode = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type WithdrawEvaluationReleaseRequestSchemaRevision = number;
 
 /**
  * ProblemPackage
@@ -6122,6 +6216,92 @@ export type SshPublicKeyId = string;
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
  */
 export type SshPublicKeySchemaUtcTimestamp = string;
+
+/**
+ * StudentEvaluationResult
+ *
+ * Privacy-preserving terminal result exposed to the owning student.
+ */
+export type StudentEvaluationResultSchema = {
+    awardedScore?: number | null;
+    completedAt: StudentEvaluationResultSchemaUtcTimestamp;
+    courseId: StudentEvaluationResultSchemaCourseId;
+    createdAt: StudentEvaluationResultSchemaUtcTimestamp;
+    diagnosticCode?: StudentEvaluationResultSchemaDiagnosticCode | null;
+    frozenSubmissionId: StudentEvaluationResultSchemaFrozenSubmissionId;
+    maxScore: number;
+    releaseId: StudentEvaluationResultSchemaEvaluationReleaseId;
+    revision: StudentEvaluationResultSchemaRevision;
+    runId: StudentEvaluationResultSchemaEvaluationRunId;
+    state: StudentEvaluationResultState;
+    steps: Array<StudentEvaluationStepResult>;
+    updatedAt: StudentEvaluationResultSchemaUtcTimestamp;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type StudentEvaluationResultSchemaCourseId = string;
+
+/**
+ * Stable machine-readable diagnostic code.
+ *
+ * Consumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so
+ * additive diagnostics do not force a wire-version change.
+ */
+export type StudentEvaluationResultSchemaDiagnosticCode = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `EvaluationReleaseId`.
+ */
+export type StudentEvaluationResultSchemaEvaluationReleaseId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `EvaluationRunId`.
+ */
+export type StudentEvaluationResultSchemaEvaluationRunId = string;
+
+/**
+ * Stable role copied from the immutable `EvaluationSpec` step.
+ */
+export type StudentEvaluationResultSchemaEvaluationStepRole = 'gate' | 'score' | 'advisory';
+
+/**
+ * Public step lifecycle.
+ */
+export type StudentEvaluationResultSchemaEvaluationStepRunState = 'pending' | 'running' | 'retryable' | 'succeeded' | 'failed' | 'cancelled' | 'skipped';
+
+/**
+ * Strongly typed UUIDv7 identifier for `FrozenSubmissionId`.
+ */
+export type StudentEvaluationResultSchemaFrozenSubmissionId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type StudentEvaluationResultSchemaRevision = number;
+
+/**
+ * Terminal-only lifecycle exposed by the student result projection.
+ */
+export type StudentEvaluationResultState = 'succeeded' | 'failed' | 'cancelled';
+
+/**
+ * Bounded step projection that deliberately omits private step identifiers and evidence.
+ */
+export type StudentEvaluationStepResult = {
+    awardedScore?: number | null;
+    diagnosticCode?: StudentEvaluationResultSchemaDiagnosticCode | null;
+    maxScore: number;
+    position: number;
+    role: StudentEvaluationResultSchemaEvaluationStepRole;
+    state: StudentEvaluationResultSchemaEvaluationStepRunState;
+};
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type StudentEvaluationResultSchemaUtcTimestamp = string;
 
 export type GetAccessGrantData = {
     body?: never;
@@ -7346,6 +7526,293 @@ export type AppendEvaluationCandidateDecisionResponses = {
 
 export type AppendEvaluationCandidateDecisionResponse = AppendEvaluationCandidateDecisionResponses[keyof AppendEvaluationCandidateDecisionResponses];
 
+export type ListEvaluationReleasesData = {
+    body?: never;
+    path: {
+        courseId: string;
+    };
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/api/v1/courses/{courseId}/evaluation-releases';
+};
+
+export type ListEvaluationReleasesErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ListEvaluationReleasesError = ListEvaluationReleasesErrors[keyof ListEvaluationReleasesErrors];
+
+export type ListEvaluationReleasesResponses = {
+    /**
+     * Successful response
+     */
+    200: {
+        items: Array<EvaluationReleaseSchema>;
+        nextCursor?: string | null;
+    };
+};
+
+export type ListEvaluationReleasesResponse = ListEvaluationReleasesResponses[keyof ListEvaluationReleasesResponses];
+
+export type CreateEvaluationReleaseData = {
+    body: CreateEvaluationReleaseRequestSchema;
+    headers: {
+        'Idempotency-Key': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        courseId: string;
+    };
+    query?: never;
+    url: '/api/v1/courses/{courseId}/evaluation-releases';
+};
+
+export type CreateEvaluationReleaseErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type CreateEvaluationReleaseError = CreateEvaluationReleaseErrors[keyof CreateEvaluationReleaseErrors];
+
+export type CreateEvaluationReleaseResponses = {
+    /**
+     * Successful response
+     */
+    201: EvaluationReleaseSchema;
+};
+
+export type CreateEvaluationReleaseResponse = CreateEvaluationReleaseResponses[keyof CreateEvaluationReleaseResponses];
+
+export type GetEvaluationReleaseData = {
+    body?: never;
+    path: {
+        courseId: string;
+        releaseId: string;
+    };
+    query?: never;
+    url: '/api/v1/courses/{courseId}/evaluation-releases/{releaseId}';
+};
+
+export type GetEvaluationReleaseErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetEvaluationReleaseError = GetEvaluationReleaseErrors[keyof GetEvaluationReleaseErrors];
+
+export type GetEvaluationReleaseResponses = {
+    /**
+     * Successful response
+     */
+    200: EvaluationReleaseSchema;
+};
+
+export type GetEvaluationReleaseResponse = GetEvaluationReleaseResponses[keyof GetEvaluationReleaseResponses];
+
+export type WithdrawEvaluationReleaseData = {
+    body: WithdrawEvaluationReleaseRequestSchema;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        courseId: string;
+        releaseId: string;
+    };
+    query?: never;
+    url: '/api/v1/courses/{courseId}/evaluation-releases/{releaseId}/withdraw';
+};
+
+export type WithdrawEvaluationReleaseErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type WithdrawEvaluationReleaseError = WithdrawEvaluationReleaseErrors[keyof WithdrawEvaluationReleaseErrors];
+
+export type WithdrawEvaluationReleaseResponses = {
+    /**
+     * Successful response
+     */
+    200: EvaluationReleaseSchema;
+};
+
+export type WithdrawEvaluationReleaseResponse = WithdrawEvaluationReleaseResponses[keyof WithdrawEvaluationReleaseResponses];
+
 export type CreateCourseLlmPolicyData = {
     body: CourseLlmEgressPolicySchema;
     headers: {
@@ -7482,6 +7949,147 @@ export type GetActiveCourseLlmPolicyResponses = {
 };
 
 export type GetActiveCourseLlmPolicyResponse = GetActiveCourseLlmPolicyResponses[keyof GetActiveCourseLlmPolicyResponses];
+
+export type ListOwnEvaluationResultsData = {
+    body?: never;
+    path: {
+        courseId: string;
+    };
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/api/v1/courses/{courseId}/me/evaluation-results';
+};
+
+export type ListOwnEvaluationResultsErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ListOwnEvaluationResultsError = ListOwnEvaluationResultsErrors[keyof ListOwnEvaluationResultsErrors];
+
+export type ListOwnEvaluationResultsResponses = {
+    /**
+     * Successful response
+     */
+    200: {
+        items: Array<StudentEvaluationResultSchema>;
+        nextCursor?: string | null;
+    };
+};
+
+export type ListOwnEvaluationResultsResponse = ListOwnEvaluationResultsResponses[keyof ListOwnEvaluationResultsResponses];
+
+export type GetOwnEvaluationResultData = {
+    body?: never;
+    path: {
+        courseId: string;
+        runId: string;
+    };
+    query?: never;
+    url: '/api/v1/courses/{courseId}/me/evaluation-results/{runId}';
+};
+
+export type GetOwnEvaluationResultErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetOwnEvaluationResultError = GetOwnEvaluationResultErrors[keyof GetOwnEvaluationResultErrors];
+
+export type GetOwnEvaluationResultResponses = {
+    /**
+     * Successful response
+     */
+    200: StudentEvaluationResultSchema;
+};
+
+export type GetOwnEvaluationResultResponse = GetOwnEvaluationResultResponses[keyof GetOwnEvaluationResultResponses];
 
 export type CreateProblemPackageUploadData = {
     body: CreateProblemPackageUploadRequestSchema;

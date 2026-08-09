@@ -21,6 +21,12 @@ agent_service:
   client_certificate_file: "/etc/labweaver/secrets/tls.crt"
   client_private_key_file: "/etc/labweaver/secrets/tls.key"
   timeout_milliseconds: 5000
+evaluation_service:
+  base_url: "https://evaluation-service:9447/"
+  ca_certificate_file: "/etc/labweaver/secrets/mtls-ca.pem"
+  client_certificate_file: "/etc/labweaver/secrets/tls.crt"
+  client_private_key_file: "/etc/labweaver/secrets/tls.key"
+  timeout_milliseconds: 5000
 object_store:
   binding: "problem-package-minio-v1"
   # The Control endpoint is also the authority embedded in browser upload
@@ -71,6 +77,13 @@ control:
       diskSha256: "ffe6203da54deeb6db5d2a98a83f9ec8e55f149d3f7ba622e1abe5fa966ee3d6"
       capacityBytes: 10737418240
     format: "qcow2"
+  evaluationRuntime:
+    sourceSha256: "1111111111111111111111111111111111111111111111111111111111111111"
+    providerBinding: "evaluation-kubernetes-primary-v1"
+    configurationSha256: "2222222222222222222222222222222222222222222222222222222222222222"
+    migrationCatalogSha256: "3333333333333333333333333333333333333333333333333333333333333333"
+    runnerImage: "harbor.example.invalid/labweaver/evaluation-runner@sha256:4444444444444444444444444444444444444444444444444444444444444444"
+    runtimeArtifactSha256: "5555555555555555555555555555555555555555555555555555555555555555"
 cleanup_interval_seconds: 30
 nats:
   server: "tls://nats.labweaver-data.svc:4222"

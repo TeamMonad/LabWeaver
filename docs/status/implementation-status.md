@@ -163,6 +163,33 @@ cleanup-boundary completion. It does not prove a real Control Service caller,
 Kubernetes/OJ runner, runner image digest, provider binding, shared cluster,
 Release Gate report or D connected Verify.
 
+## Issue #125 / #160 / #161 release and result product surface
+
+Status: **implemented, local verification pending completion**.
+
+The #160 backend candidate adds explicit teacher EvaluationRelease
+publish/list/detail/withdraw contracts and student owner-scoped terminal-result
+list/detail contracts. Access authorizes every new route by session, role and
+course scope; Control reconstructs runtime identity from authoritative
+candidate, approval, course policy, ProblemPackage and deployment configuration;
+Evaluation remains the sole release/run authority. Migration 3 records an
+append-only actor-attributed withdrawal audit and adds newest-first release and
+student terminal-result indexes. OpenAPI, JSON Schema and the generated Web SDK
+are generated from the Rust contracts.
+
+The #161 stacked Web candidate adds a teacher publish/list/detail/withdraw
+surface to the existing approval page and student terminal-result list/detail
+routes. Both use the generated SDK, existing role routing, `AsyncState`,
+`DiagnosticBanner`, confirmation dialog and Fixture transport. Runtime identity
+is read-only. Failed/cancelled runs omit partial scores, and the client neither
+polls nor subscribes to running state.
+
+No shared-cluster operation is part of #125/#160/#161. Contract, Rust,
+disposable PostgreSQL, Web unit and Fixture browser checks remain PR evidence,
+not connected evidence. Real Keycloak sessions, connected Playwright, actual
+runtime/provider identity and Release Gate evidence remain exclusively owned by
+Sprint-end acceptance #126.
+
 ## Issue #140 local implementation
 
 The `feature/140-oj-cpp17-runner` worktree adds the internal C++17 OJ request,

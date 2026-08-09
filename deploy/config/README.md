@@ -39,6 +39,7 @@ Copy and specialize the examples as follows:
 - `build-executor.yaml.example` → `build-executor-config/config.yaml`
 - `environment-providers.json.example` → `environment-service-config/providers.json`
 - `runtime-executor.yaml.example` → both runtime executor `config.yaml` files
+- `evaluation-service.yaml.example` → `evaluation-service-config/config.yaml`
 - `resource-service.yaml.example` → `resource-service-config/mtls.yaml`
 - `web-deployment.json.example` → `web-config/deployment.json`
 

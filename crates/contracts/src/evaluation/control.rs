@@ -176,6 +176,108 @@ pub struct EvaluationRun {
     pub completed_at: Option<UtcTimestamp>,
 }
 
+/// Privacy-preserving terminal result exposed to the owning student.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StudentEvaluationResult {
+    pub run_id: EvaluationRunId,
+    pub course_id: CourseId,
+    pub release_id: EvaluationReleaseId,
+    pub frozen_submission_id: FrozenSubmissionId,
+    pub state: StudentEvaluationResultState,
+    pub revision: Revision,
+    pub max_score: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub awarded_score: Option<u32>,
+    pub steps: Vec<StudentEvaluationStepResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic_code: Option<DiagnosticCode>,
+    pub created_at: UtcTimestamp,
+    pub updated_at: UtcTimestamp,
+    pub completed_at: UtcTimestamp,
+}
+
+/// Bounded step projection that deliberately omits private step identifiers and evidence.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StudentEvaluationStepResult {
+    #[schemars(extend("minimum" = 1))]
+    pub position: u32,
+    pub role: EvaluationStepRole,
+    pub state: EvaluationStepRunState,
+    pub max_score: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub awarded_score: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic_code: Option<DiagnosticCode>,
+}
+
+impl StudentEvaluationResult {
+    /// Creates a terminal, owner-safe projection. In-progress and malformed runs are rejected.
+    pub fn from_terminal(run: &EvaluationRun) -> Result<Self, EvaluationControlContractError> {
+        run.validate()?;
+        let state = StudentEvaluationResultState::try_from(run.state)?;
+        let completed_at = run
+            .completed_at
+            .ok_or(EvaluationControlContractError::TerminalStateInvalid)?;
+        Ok(Self {
+            run_id: run.id,
+            course_id: run.course_id,
+            release_id: run.release_id,
+            frozen_submission_id: run.frozen_submission_id,
+            state,
+            revision: run.revision,
+            max_score: run.max_score,
+            awarded_score: (run.state == EvaluationRunState::Succeeded)
+                .then_some(run.awarded_score),
+            steps: run
+                .steps
+                .iter()
+                .map(|step| StudentEvaluationStepResult {
+                    position: step.position,
+                    role: step.role,
+                    state: step.state,
+                    max_score: step.max_score,
+                    awarded_score: (run.state == EvaluationRunState::Succeeded)
+                        .then_some(step.awarded_score)
+                        .flatten(),
+                    diagnostic_code: step.diagnostic_code.clone(),
+                })
+                .collect(),
+            diagnostic_code: run.diagnostic_code.clone(),
+            created_at: run.created_at,
+            updated_at: run.updated_at,
+            completed_at,
+        })
+    }
+}
+
+/// Terminal-only lifecycle exposed by the student result projection.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StudentEvaluationResultState {
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+impl TryFrom<EvaluationRunState> for StudentEvaluationResultState {
+    type Error = EvaluationControlContractError;
+
+    fn try_from(state: EvaluationRunState) -> Result<Self, Self::Error> {
+        match state {
+            EvaluationRunState::Succeeded => Ok(Self::Succeeded),
+            EvaluationRunState::Failed => Ok(Self::Failed),
+            EvaluationRunState::Cancelled => Ok(Self::Cancelled),
+            EvaluationRunState::Queued
+            | EvaluationRunState::Running
+            | EvaluationRunState::Cancelling => {
+                Err(EvaluationControlContractError::TerminalStateInvalid)
+            }
+        }
+    }
+}
+
 impl EvaluationRun {
     /// Validates aggregate, step, and terminal-state consistency.
     pub fn validate(&self) -> Result<(), EvaluationControlContractError> {
@@ -260,6 +362,7 @@ pub struct EvaluationStepRun {
     pub id: EvaluationStepRunId,
     pub run_id: EvaluationRunId,
     pub step_id: String,
+    #[schemars(extend("minimum" = 1))]
     pub position: u32,
     pub role: EvaluationStepRole,
     pub failure_policy: EvaluationStepFailurePolicy,

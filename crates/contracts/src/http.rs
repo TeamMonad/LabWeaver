@@ -228,6 +228,48 @@ pub struct EvaluationCandidateView {
     pub trust_revision: Revision,
 }
 
+/// Public teacher command for publishing an exact approved Evaluation candidate.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateEvaluationReleaseRequest {
+    pub candidate_id: CandidateId,
+    pub candidate_revision: Revision,
+    pub evaluation_spec_sha256: Sha256Digest,
+    pub approval_id: ApprovalId,
+}
+
+/// Revision-fenced append-only Evaluation release withdrawal.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WithdrawEvaluationReleaseRequest {
+    pub expected_revision: Revision,
+    pub reason_code: DiagnosticCode,
+}
+
+/// Bounded newest-first Evaluation release list query.
+#[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EvaluationReleaseListQuery {
+    pub cursor: Option<String>,
+    pub limit: Option<u16>,
+}
+
+impl EvaluationReleaseListQuery {
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        validate_cursor_page(self.cursor.as_deref(), self.limit)
+    }
+}
+
+/// Control-to-Evaluation withdrawal command carried only over mTLS.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InternalWithdrawEvaluationReleaseRequest {
+    pub course_id: CourseId,
+    pub expected_revision: Revision,
+    pub withdrawn_by: ActorId,
+    pub reason_code: DiagnosticCode,
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateEnvironmentTemplateReleaseRequest {
@@ -975,6 +1017,36 @@ pub const OPERATION_AUTHORIZATIONS: &[OperationAuthorization] = &[
         scope: OperationScopeKind::Course,
     },
     OperationAuthorization {
+        operation_id: "createEvaluationRelease",
+        allowed_roles: TEACHER,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "listEvaluationReleases",
+        allowed_roles: TEACHER,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "getEvaluationRelease",
+        allowed_roles: TEACHER,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "withdrawEvaluationRelease",
+        allowed_roles: TEACHER,
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "listOwnEvaluationResults",
+        allowed_roles: &[PlatformRole::Student],
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
+        operation_id: "getOwnEvaluationResult",
+        allowed_roles: &[PlatformRole::Student],
+        scope: OperationScopeKind::Course,
+    },
+    OperationAuthorization {
         operation_id: "createEnvironmentTemplateRelease",
         allowed_roles: TEACHER,
         scope: OperationScopeKind::Course,
@@ -1538,6 +1610,78 @@ pub const OPERATIONS: &[OperationContract] = &[
         201,
         false,
         false
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/courses/{courseId}/evaluation-releases",
+        "createEvaluationRelease",
+        "evaluation_release:publish",
+        BffSession,
+        IdempotentCreate,
+        201,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/courses/{courseId}/evaluation-releases",
+        "listEvaluationReleases",
+        "evaluation_release:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/courses/{courseId}/evaluation-releases/{releaseId}",
+        "getEvaluationRelease",
+        "evaluation_release:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/courses/{courseId}/evaluation-releases/{releaseId}/withdraw",
+        "withdrawEvaluationRelease",
+        "evaluation_release:withdraw",
+        BffSession,
+        IdempotentRevisioned,
+        200,
+        false,
+        false
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/courses/{courseId}/me/evaluation-results",
+        "listOwnEvaluationResults",
+        "evaluation_result:read_own",
+        Oidc,
+        None,
+        200,
+        false,
+        true
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/courses/{courseId}/me/evaluation-results/{runId}",
+        "getOwnEvaluationResult",
+        "evaluation_result:read_own",
+        Oidc,
+        None,
+        200,
+        false,
+        true
     ),
     op!(
         Public,
