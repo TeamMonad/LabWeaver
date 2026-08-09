@@ -14,7 +14,7 @@ connected 镜头与通过的 Release Gate v3，随后由 D 完成成片 Verify �
 | Issue | #128 |
 | Branch | `feature/128-release-demo` |
 | Target | `develop` |
-| PR | 待创建；禁止 auto-merge |
+| PR | #164（Draft）；禁止 auto-merge |
 | Fixture source commit | `b04a1ab8a8d959adfafa2b8b766e1608035d40b1` |
 | Preview manifest | `artifacts/demo-video/preview/demo-video-manifest.v1.json` |
 | Preview manifest SHA-256 | `sha256:529a71ced6e5b4b6955b7ee0bf21b6b47f847290b4bf8601313524e73824b9fd` |
