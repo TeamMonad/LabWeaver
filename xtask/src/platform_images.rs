@@ -38,8 +38,7 @@ const DEPLOYMENT_SCHEMA: &str = "platform-image-deployment-manifest.v1";
 const DEVELOP_TRIVY_DATABASE_DIGEST: &str =
     "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 #[cfg(target_os = "linux")]
-const DEVELOP_TRIVY_DATABASE_REFERENCE: &str =
-    "docker.io/aquasec/trivy-db@sha256:0000000000000000000000000000000000000000000000000000000000000000";
+const DEVELOP_TRIVY_DATABASE_REFERENCE: &str = "docker.io/aquasec/trivy-db@sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
 #[cfg(target_os = "linux")]
 #[derive(Debug, Deserialize)]
@@ -709,11 +708,10 @@ fn build_scan(
                 "LABWEAVER_PACKAGE_DEVELOP placeholder (dirty worktree={dirty}); full scan required before Release Gate"
             ),
         });
-        let placeholder_bytes =
-            serde_json::to_vec(&placeholder).map_err(|error| AppError::Io {
-                role: "serialize skipped-scan placeholder",
-                detail: error.to_string(),
-            })?;
+        let placeholder_bytes = serde_json::to_vec(&placeholder).map_err(|error| AppError::Io {
+            role: "serialize skipped-scan placeholder",
+            detail: error.to_string(),
+        })?;
         (placeholder_bytes, 0u64, 0u64)
     } else {
         scan_image(run_dir, component, &reference, database_reference)?
@@ -1480,9 +1478,14 @@ mod tests {
     #[test]
     fn develop_placeholder_database_identity_is_schema_valid() {
         assert!(is_digest(DEVELOP_TRIVY_DATABASE_DIGEST));
-        assert!(DEVELOP_TRIVY_DATABASE_REFERENCE
-            .ends_with(&format!("@{DEVELOP_TRIVY_DATABASE_DIGEST}")));
-        let (reference, digest) = (DEVELOP_TRIVY_DATABASE_REFERENCE, DEVELOP_TRIVY_DATABASE_DIGEST);
+        assert!(
+            DEVELOP_TRIVY_DATABASE_REFERENCE
+                .ends_with(&format!("@{DEVELOP_TRIVY_DATABASE_DIGEST}"))
+        );
+        let (reference, digest) = (
+            DEVELOP_TRIVY_DATABASE_REFERENCE,
+            DEVELOP_TRIVY_DATABASE_DIGEST,
+        );
         assert!(validate_trivy_database_reference(reference, digest).is_ok());
     }
 

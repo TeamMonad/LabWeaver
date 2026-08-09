@@ -73,7 +73,8 @@ pub(super) fn validate(root: &Path) -> Result<(), AppError> {
                 expected_id,
                 &format!("{expected}/{expected_id:04}_"),
             )?;
-            if expected_id == 1 && migration.file != format!("{expected}/0001_platform_baseline.sql")
+            if expected_id == 1
+                && migration.file != format!("{expected}/0001_platform_baseline.sql")
             {
                 return Err(invalid(
                     "the first domain migration must be the Sprint 2 baseline",
