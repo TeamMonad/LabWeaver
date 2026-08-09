@@ -189,7 +189,10 @@ failure propagation. On Windows, Evaluation worker compilation remains a
 platform limitation because those workers intentionally use Unix process and
 resource primitives; Linux CI/local integration owns that executable evidence.
 
-Fixture Web tests in #161 may prove browser state handling but are not connected
+Fixture Web tests in #161 cover teacher publish/withdraw, idempotent client
+submission, read-only runtime identity, student success/failure/cancelled
+projections, empty/error/role-denied states, mobile layout, light/dark themes and
+WCAG A/AA scanning. They prove browser state handling only and are not connected
 evidence. #126 alone owns shared-cluster deployment, real teacher/student
 Playwright, real runner/provider identity and Release Gate closure.
 

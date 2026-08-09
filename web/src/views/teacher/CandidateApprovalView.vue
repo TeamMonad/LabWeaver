@@ -2,7 +2,7 @@
   <div class="candidate-approval">
     <header class="page-header">
       <h2>候选审批与发布</h2>
-      <p class="page-subtitle">分别审查 Environment 与 Evaluation 候选，确认镜像证据后发布 EnvironmentTemplateRelease。</p>
+      <p class="page-subtitle">审批候选后，以独立、可审计的操作发布 EnvironmentTemplateRelease 或 EvaluationRelease。</p>
     </header>
 
     <DiagnosticBanner
@@ -181,7 +181,7 @@
             Evaluation 候选
           </h3>
 
-          <p class="sprint-note">Sprint 2 不执行 EvaluationRun；审批仅作为候选确认，不触发评分。</p>
+          <p class="sprint-note">审批不会自动发布；Evaluation Runtime 身份由 Control 从受控配置构造，浏览器只读展示。</p>
 
           <AsyncStateView :state="approval.evaluationCandidate" @retry="approval.load">
             <template #success="{ data: view }">
@@ -253,6 +253,83 @@
                   最新审批：{{ approval.latestEvaluationApproval.decision }} — {{ approval.latestEvaluationApproval.reason }}
                 </div>
               </div>
+
+              <section class="release-section" aria-labelledby="evaluation-release-heading">
+                <h4 id="evaluation-release-heading" class="section-title">
+                  <SvgIcon name="publish" size="sm" aria-hidden="true" />
+                  EvaluationRelease
+                </h4>
+                <div class="publish-actions">
+                  <button
+                    type="button"
+                    class="filled-button"
+                    :disabled="!evaluationReleases.canPublish"
+                    @click="evaluationPublishConfirmOpen = true"
+                  >
+                    发布 EvaluationRelease
+                  </button>
+                  <p v-if="!evaluationReleases.canPublish" class="publish-hint">
+                    需要当前 Evaluation 候选已批准，且尚未发布同一候选 revision。
+                  </p>
+                </div>
+
+                <AsyncStateView v-if="evaluationReleases.publication.kind !== 'idle'" :state="evaluationReleases.publication">
+                  <template #success="{ data }">
+                    <div class="publish-success">
+                      <SvgIcon name="check_circle" size="md" aria-hidden="true" />
+                      <span>EvaluationRelease 已发布：{{ data.id }}</span>
+                    </div>
+                  </template>
+                </AsyncStateView>
+
+                <AsyncStateView
+                  class="release-list-state"
+                  :state="evaluationReleases.releases"
+                  empty-text="尚未发布 EvaluationRelease"
+                  @retry="evaluationReleases.load"
+                >
+                  <template #success="{ data: releases }">
+                    <ul class="release-list" aria-label="EvaluationRelease 列表">
+                      <li v-for="release in releases" :key="release.id" class="release-card md-card">
+                        <button type="button" class="release-select" @click="evaluationReleases.select(release.id)">
+                          <span><code>{{ release.id }}</code></span>
+                          <span>rev-{{ release.revision }} · {{ release.state }}</span>
+                        </button>
+                        <button
+                          v-if="release.state === 'active'"
+                          type="button"
+                          class="outlined-button"
+                          :disabled="evaluationReleases.withdrawingId !== null"
+                          @click="evaluationWithdrawTarget = release"
+                        >
+                          撤回
+                        </button>
+                      </li>
+                    </ul>
+                  </template>
+                </AsyncStateView>
+
+                <AsyncStateView v-if="evaluationReleases.selected.kind !== 'idle'" :state="evaluationReleases.selected" @retry="reloadSelectedRelease">
+                  <template #success="{ data: release }">
+                    <article class="runtime-card md-card" aria-labelledby="runtime-identity-heading">
+                      <h5 id="runtime-identity-heading" class="subsection-title">受控 Runtime 身份（只读）</h5>
+                      <dl class="runtime-grid">
+                        <template v-for="entry in runtimeIdentityEntries(release)" :key="entry.label">
+                          <dt>{{ entry.label }}</dt>
+                          <dd><code>{{ entry.value }}</code></dd>
+                        </template>
+                      </dl>
+                      <DiagnosticBanner
+                        v-if="release.withdrawalDiagnosticCode"
+                        :code="release.withdrawalDiagnosticCode"
+                        message="该 Release 已撤回；历史终态结果仍保留。"
+                        :retryable="false"
+                        severity="warning"
+                      />
+                    </article>
+                  </template>
+                </AsyncStateView>
+              </section>
             </template>
           </AsyncStateView>
         </section>
@@ -268,6 +345,24 @@
       @confirm="onPublishConfirmed"
       @cancel="publishConfirmOpen = false"
     />
+    <ConfirmDialog
+      :open="evaluationPublishConfirmOpen"
+      title="确认发布 EvaluationRelease"
+      description="`将发布当前已批准的 Evaluation 候选 rev-${evaluationCandidateView?.candidate.revision ?? '?'}。Runtime 身份由 Control 固定构造，是否继续？`"
+      confirm-text="发布"
+      severity="warning"
+      @confirm="onEvaluationPublishConfirmed"
+      @cancel="evaluationPublishConfirmOpen = false"
+    />
+    <ConfirmDialog
+      :open="evaluationWithdrawTarget !== null"
+      title="确认撤回 EvaluationRelease"
+      :description="`撤回 release rev-${evaluationWithdrawTarget?.revision ?? '?'} 后不会删除历史终态结果，是否继续？`"
+      confirm-text="撤回"
+      severity="warning"
+      @confirm="onEvaluationWithdrawConfirmed"
+      @cancel="evaluationWithdrawTarget = null"
+    />
   </div>
 </template>
 
@@ -281,6 +376,8 @@ import SvgIcon from '@/components/common/SvgIcon.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import { useCourseContext } from '@/composables/useCourseContext'
 import { useCandidateApproval } from '@/composables/useCandidateApproval'
+import { useEvaluationReleases } from '@/composables/useEvaluationReleases'
+import type { EvaluationReleaseSchema } from '@/generated/contracts'
 import { truncateSha256 } from '@/utils/format'
 
 const route = useRoute()
@@ -288,14 +385,47 @@ const runId = computed(() => (typeof route.query.runId === 'string' ? route.quer
 
 const course = useCourseContext()
 const approval = useCandidateApproval(course.courseId, runId)
+const evaluationCandidateView = computed(() => approval.evaluationCandidate.kind === 'success' ? approval.evaluationCandidate.data : null)
+const evaluationApproval = computed(() => approval.latestEvaluationApproval ?? null)
+const evaluationReleases = useEvaluationReleases(course.courseId, evaluationCandidateView, evaluationApproval)
 
 const environmentReason = ref('')
 const evaluationReason = ref('')
 const publishConfirmOpen = ref(false)
+const evaluationPublishConfirmOpen = ref(false)
+const evaluationWithdrawTarget = ref<EvaluationReleaseSchema | null>(null)
 
 function onPublishConfirmed() {
   publishConfirmOpen.value = false
   approval.publishRelease()
+}
+
+async function onEvaluationPublishConfirmed() {
+  evaluationPublishConfirmOpen.value = false
+  await evaluationReleases.publish()
+}
+
+async function onEvaluationWithdrawConfirmed() {
+  const target = evaluationWithdrawTarget.value
+  evaluationWithdrawTarget.value = null
+  if (target) await evaluationReleases.withdraw(target)
+}
+
+function reloadSelectedRelease() {
+  if (evaluationReleases.selected.kind === 'success') evaluationReleases.select(evaluationReleases.selected.data.id)
+}
+
+function runtimeIdentityEntries(release: EvaluationReleaseSchema) {
+  const identity = release.runtimeIdentity
+  return [
+    { label: 'Provider binding', value: identity.providerBinding },
+    { label: 'Runner image', value: identity.runnerImage },
+    { label: 'Package SHA-256', value: identity.packageSha256 },
+    { label: 'Configuration SHA-256', value: identity.configurationSha256 },
+    { label: 'Migration catalog SHA-256', value: identity.migrationCatalogSha256 },
+    { label: 'Runtime artifact SHA-256', value: identity.runtimeArtifactSha256 },
+    { label: 'Source SHA-256', value: identity.sourceSha256 },
+  ]
 }
 </script>
 
@@ -502,5 +632,84 @@ function onPublishConfirmed() {
   font: var(--md-sys-body-small);
   color: var(--md-sys-color-on-surface-variant);
   margin: 0;
+}
+
+.release-list-state {
+  margin-top: 16px;
+}
+
+.release-list {
+  display: grid;
+  gap: 10px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.release-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+}
+
+.release-select {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 4px;
+  border: 0;
+  background: transparent;
+  color: var(--md-sys-color-on-surface);
+  text-align: left;
+  cursor: pointer;
+}
+
+.release-select code {
+  overflow-wrap: anywhere;
+}
+
+.runtime-card {
+  margin-top: 16px;
+  padding: 16px;
+}
+
+.runtime-grid {
+  display: grid;
+  grid-template-columns: minmax(150px, 200px) 1fr;
+  gap: 8px 16px;
+  margin: 0;
+}
+
+.runtime-grid dt {
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.runtime-grid dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 600px) {
+  .summary-row,
+  .meta-row,
+  .evidence-row,
+  .release-card {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .summary-label,
+  .meta-label,
+  .evidence-label {
+    width: auto;
+  }
+
+  .runtime-grid {
+    grid-template-columns: 1fr;
+  }
 }
 </style>
