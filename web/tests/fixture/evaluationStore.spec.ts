@@ -77,6 +77,7 @@ describe('evaluationStore', () => {
     expect(visible).not.toBe('invalid-cursor')
     if (visible === 'invalid-cursor') return
     expect(visible.items.map((result) => result.state).sort()).toEqual(['cancelled', 'failed', 'succeeded'])
+    expect(visible.items.every((result) => result.steps.every((step) => step.position > 0))).toBe(true)
     for (const result of visible.items.filter((item) => item.state !== 'succeeded')) {
       expect(result.awardedScore).toBeUndefined()
       expect(result.steps.every((step) => step.awardedScore === undefined)).toBe(true)

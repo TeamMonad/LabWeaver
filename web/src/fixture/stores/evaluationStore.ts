@@ -204,7 +204,7 @@ function seedResult(
           ...(succeeded ? { awardedScore: 92 } : {}),
           ...(diagnosticCode ? { diagnosticCode } : {}),
           maxScore: 100,
-          position: 0,
+          position: 1,
           role: 'score',
           state: succeeded ? 'succeeded' : state,
         },
