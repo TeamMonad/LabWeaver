@@ -163,11 +163,11 @@ cleanup-boundary completion. It does not prove a real Control Service caller,
 Kubernetes/OJ runner, runner image digest, provider binding, shared cluster,
 Release Gate report or D connected Verify.
 
-## Issue #125 / #160 release and result product API
+## Issue #125 / #160 / #161 release and result product surface
 
 Status: **implemented, local verification pending completion**.
 
-The current #160 candidate adds explicit teacher EvaluationRelease
+The #160 backend candidate adds explicit teacher EvaluationRelease
 publish/list/detail/withdraw contracts and student owner-scoped terminal-result
 list/detail contracts. Access authorizes every new route by session, role and
 course scope; Control reconstructs runtime identity from authoritative
@@ -177,10 +177,16 @@ append-only actor-attributed withdrawal audit and adds newest-first release and
 student terminal-result indexes. OpenAPI, JSON Schema and the generated Web SDK
 are generated from the Rust contracts.
 
-No shared-cluster operation is part of #125/#160. Until the focused Contract,
-Rust and disposable PostgreSQL gates complete on the same commit, this section
-must not be upgraded to `verified`. The teacher/student Web surfaces and Fixture
-browser matrix belong to #161. Real Keycloak sessions, connected Playwright,
+The #161 stacked Web candidate adds a teacher publish/list/detail/withdraw
+surface to the existing approval page and student terminal-result list/detail
+routes. Both use the generated SDK, existing role routing, `AsyncState`,
+`DiagnosticBanner`, confirmation dialog and Fixture transport. Runtime identity
+is read-only. Failed/cancelled runs omit partial scores, and the client neither
+polls nor subscribes to running state.
+
+No shared-cluster operation is part of #125/#160/#161. Contract, Rust,
+disposable PostgreSQL, Web unit and Fixture browser checks remain PR evidence,
+not connected evidence. Real Keycloak sessions, connected Playwright, actual
 runtime/provider identity and Release Gate evidence remain exclusively owned by
 Sprint-end acceptance #126.
 

@@ -9,6 +9,7 @@ import * as environmentAccessGrants from './environmentAccessGrants'
 import * as environmentEndpoints from './environmentEndpoints'
 import * as environmentOperations from './environmentOperations'
 import * as environments from './environments'
+import * as evaluation from './evaluation'
 import * as events from './events'
 import * as frozenSubmissions from './frozenSubmissions'
 import * as llmPolicy from './llmPolicy'
@@ -24,6 +25,14 @@ interface RouteEntry {
 }
 
 const routes: RouteEntry[] = [
+  // Evaluation release lifecycle and owner-scoped terminal results
+  { method: 'GET', match: (url) => /^\/api\/v1\/courses\/[^/]+\/evaluation-releases$/.test(url), handler: evaluation.listReleases },
+  { method: 'POST', match: (url) => /^\/api\/v1\/courses\/[^/]+\/evaluation-releases$/.test(url), handler: evaluation.createRelease },
+  { method: 'GET', match: (url) => /^\/api\/v1\/courses\/[^/]+\/evaluation-releases\/[^/]+$/.test(url), handler: evaluation.getRelease },
+  { method: 'POST', match: (url) => /^\/api\/v1\/courses\/[^/]+\/evaluation-releases\/[^/]+\/withdraw$/.test(url), handler: evaluation.withdrawRelease },
+  { method: 'GET', match: (url) => /^\/api\/v1\/courses\/[^/]+\/me\/evaluation-results$/.test(url), handler: evaluation.listResults },
+  { method: 'GET', match: (url) => /^\/api\/v1\/courses\/[^/]+\/me\/evaluation-results\/[^/]+$/.test(url), handler: evaluation.getResult },
+
   // Environment template releases
   { method: 'GET', match: (url) => /^\/api\/v1\/courses\/[^/]+\/environment-template-releases$/.test(url), handler: templateReleases.listEnvironmentTemplateReleases },
   { method: 'POST', match: (url) => /^\/api\/v1\/courses\/[^/]+\/environment-template-releases$/.test(url), handler: templateReleases.createEnvironmentTemplateRelease },

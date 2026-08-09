@@ -54,6 +54,16 @@ test('candidate approval flow publishes release', async ({ page }) => {
   await page.locator('button:has-text("批准")').last().click()
   await expect(page.locator('text=最新审批：approved — Evaluation candidate acknowledged')).toBeVisible()
 
+  await page.locator('button:has-text("发布 EvaluationRelease")').click()
+  await page.getByRole('button', { name: '发布', exact: true }).click()
+  await expect(page.locator('text=EvaluationRelease 已发布')).toBeVisible()
+  await expect(page.getByText('受控 Runtime 身份（只读）')).toBeVisible()
+  await expect(page.getByText('kubernetes/evaluation-primary-v1')).toBeVisible()
+
+  await page.locator('.release-list .outlined-button').first().click()
+  await page.getByRole('alertdialog').getByRole('button', { name: '撤回', exact: true }).click()
+  await expect(page.getByText('该 Release 已撤回；历史终态结果仍保留。')).toBeVisible()
+
   await page.locator('button:has-text("发布 EnvironmentTemplateRelease")').click()
   await page.getByRole('button', { name: '发布', exact: true }).click()
   await expect(page.locator('text=已接受发布请求')).toBeVisible()

@@ -4,6 +4,12 @@
   "epoch": "2026-07-11T10:00:00.000Z",
   "scenarios": [
     "template-releases:list",
+    "evaluation-releases:list",
+    "evaluation-releases:create",
+    "evaluation-releases:get",
+    "evaluation-releases:withdraw",
+    "evaluation-results:list-own",
+    "evaluation-results:get-own",
     "llm-policy:get-active",
     "problem-packages:create-upload",
     "problem-packages:complete-upload",
@@ -62,6 +68,7 @@
   "handlers": [
     "sshKeys",
     "templateReleases",
+    "evaluation",
     "llmPolicy",
     "problemPackages",
     "agentRuns",
