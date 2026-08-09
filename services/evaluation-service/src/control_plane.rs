@@ -274,7 +274,7 @@ impl PgEvaluationControlStore {
              ORDER BY published_at DESC,release_id DESC LIMIT $3",
         )
         .bind(course_id.as_uuid())
-        .bind(cursor.map(|value| value.as_uuid()))
+        .bind(cursor.map(contracts::EvaluationReleaseId::as_uuid))
         .bind(i64::from(limit) + 1)
         .fetch_all(&self.pool)
         .await?;
@@ -594,7 +594,7 @@ impl PgEvaluationControlStore {
         )
         .bind(course_id.as_uuid())
         .bind(actor_id.as_uuid())
-        .bind(cursor.map(|value| value.as_uuid()))
+        .bind(cursor.map(EvaluationRunId::as_uuid))
         .bind(i64::from(limit) + 1)
         .fetch_all(&self.pool)
         .await?;
