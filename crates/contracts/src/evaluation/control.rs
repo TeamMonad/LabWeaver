@@ -184,7 +184,7 @@ pub struct StudentEvaluationResult {
     pub course_id: CourseId,
     pub release_id: EvaluationReleaseId,
     pub frozen_submission_id: FrozenSubmissionId,
-    pub state: EvaluationRunState,
+    pub state: StudentEvaluationResultState,
     pub revision: Revision,
     pub max_score: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -215,14 +215,7 @@ impl StudentEvaluationResult {
     /// Creates a terminal, owner-safe projection. In-progress and malformed runs are rejected.
     pub fn from_terminal(run: &EvaluationRun) -> Result<Self, EvaluationControlContractError> {
         run.validate()?;
-        if !matches!(
-            run.state,
-            EvaluationRunState::Succeeded
-                | EvaluationRunState::Failed
-                | EvaluationRunState::Cancelled
-        ) {
-            return Err(EvaluationControlContractError::TerminalStateInvalid);
-        }
+        let state = StudentEvaluationResultState::try_from(run.state)?;
         let completed_at = run
             .completed_at
             .ok_or(EvaluationControlContractError::TerminalStateInvalid)?;
@@ -231,7 +224,7 @@ impl StudentEvaluationResult {
             course_id: run.course_id,
             release_id: run.release_id,
             frozen_submission_id: run.frozen_submission_id,
-            state: run.state,
+            state,
             revision: run.revision,
             max_score: run.max_score,
             awarded_score: (run.state == EvaluationRunState::Succeeded)
@@ -255,6 +248,32 @@ impl StudentEvaluationResult {
             updated_at: run.updated_at,
             completed_at,
         })
+    }
+}
+
+/// Terminal-only lifecycle exposed by the student result projection.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StudentEvaluationResultState {
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+impl TryFrom<EvaluationRunState> for StudentEvaluationResultState {
+    type Error = EvaluationControlContractError;
+
+    fn try_from(state: EvaluationRunState) -> Result<Self, Self::Error> {
+        match state {
+            EvaluationRunState::Succeeded => Ok(Self::Succeeded),
+            EvaluationRunState::Failed => Ok(Self::Failed),
+            EvaluationRunState::Cancelled => Ok(Self::Cancelled),
+            EvaluationRunState::Queued
+            | EvaluationRunState::Running
+            | EvaluationRunState::Cancelling => {
+                Err(EvaluationControlContractError::TerminalStateInvalid)
+            }
+        }
     }
 }
 

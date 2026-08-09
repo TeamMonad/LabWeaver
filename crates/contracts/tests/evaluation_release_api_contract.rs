@@ -65,9 +65,11 @@ fn evaluation_list_cursor_is_bounded_and_injection_safe() {
 }
 
 #[test]
-fn student_projection_schema_excludes_private_evaluation_fields() {
+fn student_projection_schema_excludes_private_evaluation_fields()
+-> Result<(), Box<dyn std::error::Error>> {
     let schema =
         include_str!("../../../schemas/contracts/v1/student-evaluation-result.schema.json");
+    let document: serde_json::Value = serde_json::from_str(schema)?;
     for forbidden in [
         "stepId",
         "stepRunId",
@@ -85,4 +87,26 @@ fn student_projection_schema_excludes_private_evaluation_fields() {
         );
     }
     assert!(schema.contains("\"additionalProperties\": false"));
+    assert_eq!(
+        document["$defs"]["StudentEvaluationResultState"]["enum"],
+        serde_json::json!(["succeeded", "failed", "cancelled"]),
+        "student result wire contract must be terminal-only"
+    );
+    Ok(())
+}
+
+#[test]
+fn generated_release_schema_enforces_revision_and_sha256_wire_constraints()
+-> Result<(), Box<dyn std::error::Error>> {
+    let document: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/contracts/v1/http/create-evaluation-release-request.schema.json"
+    ))?;
+    assert_eq!(document["$defs"]["Revision"]["minimum"], 1);
+    assert_eq!(
+        document["$defs"]["Sha256Digest"]["pattern"],
+        "^[0-9a-f]{64}$"
+    );
+    assert_eq!(document["$defs"]["Sha256Digest"]["minLength"], 64);
+    assert_eq!(document["$defs"]["Sha256Digest"]["maxLength"], 64);
+    Ok(())
 }

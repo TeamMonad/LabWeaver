@@ -174,7 +174,7 @@
     "Revision": {
       "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
       "format": "uint64",
-      "minimum": 0,
+      "minimum": 1,
       "type": "integer"
     },
     "UtcTimestamp": {

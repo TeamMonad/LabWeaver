@@ -107,6 +107,7 @@ typed_id!(UploadSessionId);
 
 /// Monotonic aggregate revision. Zero is never a persisted revision.
 #[derive(Clone, Copy, Debug, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize)]
+#[schemars(extend("minimum" = 1))]
 #[serde(transparent)]
 pub struct Revision(u64);
 
@@ -220,7 +221,10 @@ impl<'de> Deserialize<'de> for StreamSequence {
 
 /// Canonical lowercase SHA-256 digest.
 #[derive(Clone, Copy, Debug, Eq, Hash, JsonSchema, Ord, PartialEq, PartialOrd)]
-#[schemars(with = "String")]
+#[schemars(
+    with = "String",
+    extend("pattern" = "^[0-9a-f]{64}$", "minLength" = 64, "maxLength" = 64)
+)]
 pub struct Sha256Digest([u8; 32]);
 
 impl Sha256Digest {

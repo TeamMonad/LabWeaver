@@ -10,7 +10,7 @@ pub use control::{
     EvaluationControlContractError, EvaluationRelease, EvaluationReleaseState, EvaluationRun,
     EvaluationRunIdentity, EvaluationRunState, EvaluationRuntimeIdentity, EvaluationStepCompletion,
     EvaluationStepFailurePolicy, EvaluationStepRole, EvaluationStepRun, EvaluationStepRunState,
-    StudentEvaluationResult, StudentEvaluationStepResult,
+    StudentEvaluationResult, StudentEvaluationResultState, StudentEvaluationStepResult,
 };
 pub use review::{
     EvidenceLocation, FindingResult, GoalAssessment, GoalFinding, GoalReview, GoalReviewError,

@@ -6233,7 +6233,7 @@ export type StudentEvaluationResultSchema = {
     releaseId: StudentEvaluationResultSchemaEvaluationReleaseId;
     revision: StudentEvaluationResultSchemaRevision;
     runId: StudentEvaluationResultSchemaEvaluationRunId;
-    state: StudentEvaluationResultSchemaEvaluationRunState;
+    state: StudentEvaluationResultState;
     steps: Array<StudentEvaluationStepResult>;
     updatedAt: StudentEvaluationResultSchemaUtcTimestamp;
 };
@@ -6262,11 +6262,6 @@ export type StudentEvaluationResultSchemaEvaluationReleaseId = string;
 export type StudentEvaluationResultSchemaEvaluationRunId = string;
 
 /**
- * Public run lifecycle.
- */
-export type StudentEvaluationResultSchemaEvaluationRunState = 'queued' | 'running' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled';
-
-/**
  * Stable role copied from the immutable `EvaluationSpec` step.
  */
 export type StudentEvaluationResultSchemaEvaluationStepRole = 'gate' | 'score' | 'advisory';
@@ -6285,6 +6280,11 @@ export type StudentEvaluationResultSchemaFrozenSubmissionId = string;
  * Monotonic aggregate revision. Zero is never a persisted revision.
  */
 export type StudentEvaluationResultSchemaRevision = number;
+
+/**
+ * Terminal-only lifecycle exposed by the student result projection.
+ */
+export type StudentEvaluationResultState = 'succeeded' | 'failed' | 'cancelled';
 
 /**
  * Bounded step projection that deliberately omits private step identifiers and evidence.
