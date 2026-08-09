@@ -9,6 +9,7 @@ apiMtls:
   client_ca_file: /etc/labweaver/secrets/mtls-ca.pem
   allowed_san_uris:
     - spiffe://labweaver/access-service
+    - spiffe://labweaver/control-service
   required_eku: clientAuth
 nats:
   server: tls://nats.labweaver-data.svc:4222

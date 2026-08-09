@@ -1,0 +1,47 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "DiagnosticCode": {
+      "description": "Stable machine-readable diagnostic code.\n\nConsumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so\nadditive diagnostics do not force a wire-version change.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Control-to-Evaluation withdrawal command carried only over mTLS.",
+  "properties": {
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    },
+    "expectedRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "reasonCode": {
+      "$ref": "#/$defs/DiagnosticCode"
+    },
+    "withdrawnBy": {
+      "$ref": "#/$defs/ActorId"
+    }
+  },
+  "required": [
+    "courseId",
+    "expectedRevision",
+    "withdrawnBy",
+    "reasonCode"
+  ],
+  "title": "InternalWithdrawEvaluationReleaseRequest",
+  "type": "object"
+}

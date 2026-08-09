@@ -11,7 +11,7 @@ use auth::extract_mtls_principal;
 use axum::{
     Extension, Json, Router,
     body::Bytes,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -19,11 +19,12 @@ use axum::{
 use contracts::{
     ActorId, DiagnosticCode, EnvironmentId, EvaluationReleaseId, EvaluationRunId,
     EvaluationStepRunId, FrozenSubmissionId, OperationId, ProblemDetails, Revision,
-    evaluation::{EvaluationRelease, EvaluationRun},
+    evaluation::{EvaluationRelease, EvaluationRun, StudentEvaluationResult},
     http::{
-        FreezeSubmissionRequest, IDEMPOTENCY_KEY_HEADER, IdempotencyKey,
-        InternalCompleteEvaluationStepRequest, InternalCreateEvaluationRunRequest,
-        InternalEvaluationRunMutationRequest, InternalPublishEvaluationReleaseRequest,
+        CursorPage, DEFAULT_PAGE_LIMIT, EvaluationReleaseListQuery, FreezeSubmissionRequest,
+        IDEMPOTENCY_KEY_HEADER, IdempotencyKey, InternalCompleteEvaluationStepRequest,
+        InternalCreateEvaluationRunRequest, InternalEvaluationRunMutationRequest,
+        InternalPublishEvaluationReleaseRequest, InternalWithdrawEvaluationReleaseRequest,
         OperationAccepted, StrongEtag,
     },
     submission::FrozenSubmission,
@@ -84,12 +85,24 @@ pub fn evaluation_api_router(state: EvaluationApiState) -> Router {
             get(get_frozen_submission),
         )
         .route(
+            "/api/v1/courses/{course_id}/me/evaluation-results",
+            get(list_student_results),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/me/evaluation-results/{run_id}",
+            get(get_student_result),
+        )
+        .route(
             "/internal/v1/evaluation-releases",
-            post(publish_evaluation_release),
+            post(publish_evaluation_release).get(list_evaluation_releases),
         )
         .route(
             "/internal/v1/evaluation-releases/{release_id}",
             get(get_evaluation_release),
+        )
+        .route(
+            "/internal/v1/evaluation-releases/{release_id}/withdraw",
+            post(withdraw_evaluation_release),
         )
         .route("/internal/v1/evaluation-runs", post(create_evaluation_run))
         .route(
@@ -189,6 +202,122 @@ async fn get_evaluation_release(
 ) -> Result<Json<EvaluationRelease>, EvaluationApiError> {
     require_control(principal)?;
     Ok(Json(state.control.load_release(release_id).await?))
+}
+
+async fn list_evaluation_releases(
+    State(state): State<EvaluationApiState>,
+    principal: Option<Extension<GatewayPrincipal>>,
+    Query(query): Query<EvaluationReleaseListQuery>,
+    headers: HeaderMap,
+) -> Result<Json<CursorPage<EvaluationRelease>>, EvaluationApiError> {
+    require_control(principal)?;
+    let course_id = course_header(&headers)?;
+    query
+        .validate()
+        .map_err(|_| EvaluationApiError::RequestInvalid)?;
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(str::parse)
+        .transpose()
+        .map_err(|_| EvaluationApiError::RequestInvalid)?;
+    Ok(Json(
+        state
+            .control
+            .list_releases(course_id, cursor, query.limit.unwrap_or(DEFAULT_PAGE_LIMIT))
+            .await?,
+    ))
+}
+
+async fn withdraw_evaluation_release(
+    State(state): State<EvaluationApiState>,
+    principal: Option<Extension<GatewayPrincipal>>,
+    Path(release_id): Path<EvaluationReleaseId>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<EvaluationRelease>, EvaluationApiError> {
+    require_control(principal)?;
+    let request = contracts::parse_strict_json::<InternalWithdrawEvaluationReleaseRequest>(&body)
+        .map_err(|_| EvaluationApiError::RequestInvalid)?;
+    if request.expected_revision != if_match(&headers)? {
+        return Err(EvaluationApiError::RevisionInvalid);
+    }
+    let now = state.control.authority_now().await?;
+    Ok(Json(
+        state
+            .control
+            .withdraw_release(
+                release_id,
+                &request,
+                &idempotency_key(&headers)?,
+                now,
+                &trace_id(&headers)?,
+            )
+            .await?,
+    ))
+}
+
+async fn list_student_results(
+    State(state): State<EvaluationApiState>,
+    principal: Option<Extension<GatewayPrincipal>>,
+    Path(course_id): Path<contracts::CourseId>,
+    Query(query): Query<EvaluationReleaseListQuery>,
+    headers: HeaderMap,
+) -> Result<Json<CursorPage<StudentEvaluationResult>>, EvaluationApiError> {
+    require_access(principal)?;
+    require_session(&headers)?;
+    let actor_id = actor(&headers)?;
+    query
+        .validate()
+        .map_err(|_| EvaluationApiError::RequestInvalid)?;
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(str::parse)
+        .transpose()
+        .map_err(|_| EvaluationApiError::RequestInvalid)?;
+    let page = state
+        .control
+        .student_results(
+            course_id,
+            actor_id,
+            cursor,
+            query.limit.unwrap_or(DEFAULT_PAGE_LIMIT),
+        )
+        .await?;
+    tracing::info!(
+        event = "evaluation.student_results.listed",
+        course_id = %course_id,
+        actor_id = %actor_id,
+        result_count = page.items.len(),
+        trace_id = %trace_id(&headers)?,
+    );
+    Ok(Json(page))
+}
+
+async fn get_student_result(
+    State(state): State<EvaluationApiState>,
+    principal: Option<Extension<GatewayPrincipal>>,
+    Path((course_id, run_id)): Path<(contracts::CourseId, EvaluationRunId)>,
+    headers: HeaderMap,
+) -> Result<Json<StudentEvaluationResult>, EvaluationApiError> {
+    require_access(principal)?;
+    require_session(&headers)?;
+    let actor_id = actor(&headers)?;
+    let result = state
+        .control
+        .student_result(course_id, actor_id, run_id)
+        .await?;
+    tracing::info!(
+        event = "evaluation.student_result.read",
+        course_id = %course_id,
+        actor_id = %actor_id,
+        run_id = %run_id,
+        release_id = %result.release_id,
+        revision = result.revision.get(),
+        trace_id = %trace_id(&headers)?,
+    );
+    Ok(Json(result))
 }
 
 async fn create_evaluation_run(
@@ -434,6 +563,14 @@ fn actor(headers: &HeaderMap) -> Result<ActorId, EvaluationApiError> {
         .ok_or(EvaluationApiError::IdentityInvalid)
 }
 
+fn course_header(headers: &HeaderMap) -> Result<contracts::CourseId, EvaluationApiError> {
+    headers
+        .get("x-labweaver-course-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| contracts::CourseId::from_str(value).ok())
+        .ok_or(EvaluationApiError::IdentityInvalid)
+}
+
 fn require_session(headers: &HeaderMap) -> Result<(), EvaluationApiError> {
     headers
         .get(SESSION_HEADER)
@@ -563,6 +700,9 @@ impl IntoResponse for EvaluationApiError {
                 | EvaluationControlStoreError::StateConflict
                 | EvaluationControlStoreError::LeaseLost,
             ) => StatusCode::CONFLICT,
+            Self::Control(EvaluationControlStoreError::RevisionConflict) => {
+                StatusCode::PRECONDITION_FAILED
+            }
             Self::Control(
                 EvaluationControlStoreError::ReleaseNotFound
                 | EvaluationControlStoreError::RunNotFound

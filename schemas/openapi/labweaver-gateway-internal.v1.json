@@ -64,6 +64,9 @@
       "InternalPublishEvaluationReleaseRequest": {
         "$ref": "../contracts/v1/http/internal-publish-evaluation-release-request.schema.json"
       },
+      "InternalWithdrawEvaluationReleaseRequest": {
+        "$ref": "../contracts/v1/http/internal-withdraw-evaluation-release-request.schema.json"
+      },
       "OperationAccepted": {
         "additionalProperties": false,
         "properties": {
@@ -157,6 +160,9 @@
           "retryable"
         ],
         "type": "object"
+      },
+      "StudentEvaluationResult": {
+        "$ref": "../contracts/v1/student-evaluation-result.schema.json"
       }
     },
     "securitySchemes": {
@@ -809,6 +815,58 @@
       }
     },
     "/internal/v1/evaluation-releases": {
+      "get": {
+        "operationId": "listInternalEvaluationReleases",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-labweaver-course-id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/EvaluationRelease"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Evaluation releases"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceMtls": []
+          }
+        ],
+        "summary": "List authoritative Evaluation releases for one course"
+      },
       "post": {
         "operationId": "publishInternalEvaluationRelease",
         "parameters": [
@@ -834,7 +892,7 @@
           "required": true
         },
         "responses": {
-          "202": {
+          "201": {
             "content": {
               "application/json": {
                 "schema": {
@@ -842,7 +900,7 @@
                 }
               }
             },
-            "description": "EvaluationRelease accepted"
+            "description": "EvaluationRelease created"
           },
           "409": {
             "$ref": "#/components/responses/Problem"
@@ -900,6 +958,77 @@
           }
         ],
         "summary": "Read one authoritative Evaluation release"
+      }
+    },
+    "/internal/v1/evaluation-releases/{releaseId}/withdraw": {
+      "post": {
+        "operationId": "withdrawInternalEvaluationRelease",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "releaseId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 16,
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InternalWithdrawEvaluationReleaseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluationRelease"
+                }
+              }
+            },
+            "description": "Withdrawn EvaluationRelease"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceMtls": []
+          }
+        ],
+        "summary": "Withdraw one Evaluation release at an exact revision"
       }
     },
     "/internal/v1/evaluation-runs": {

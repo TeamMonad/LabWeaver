@@ -8,7 +8,7 @@ use std::time::Duration;
 use artifact_store::{S3Credential, S3ImmutableObjectStore, S3StoreConfig};
 use auth::{MtlsFileConfig, load_mtls_server_config};
 use control_service::api::{ApiState, router, serve_mtls};
-use control_service::clients::{AccessClient, AgentClient, MtlsClientFileConfig};
+use control_service::clients::{AccessClient, AgentClient, EvaluationClient, MtlsClientFileConfig};
 use control_service::messaging::{
     AgentBuildConsumer, AgentRunConsumer, ControlOutboxDispatcher, connect_nats_mtls,
 };
@@ -25,6 +25,7 @@ struct DeploymentFile {
     gateway_mtls: MtlsFileConfig,
     access_service: MtlsClientFileConfig,
     agent_service: MtlsClientFileConfig,
+    evaluation_service: MtlsClientFileConfig,
     object_store: S3StoreConfig,
     object_store_access_key_file: String,
     object_store_secret_key_file: String,
@@ -80,10 +81,12 @@ async fn main() -> Result<(), StartupError> {
     let service = ControlService::new(pool.clone(), objects, deployment.control)?;
     let access = AccessClient::new(deployment.access_service)?;
     let agent = AgentClient::new(deployment.agent_service)?;
+    let evaluation = EvaluationClient::new(deployment.evaluation_service)?;
     let state = Arc::new(ApiState {
         control: service.clone(),
         access,
         agent: agent.clone(),
+        evaluation,
     });
     let bind = SocketAddr::from_str(&deployment.gateway_mtls.bind_addr)
         .map_err(|_| StartupError::Configuration)?;

@@ -42,6 +42,9 @@ domains:
       - id: 2
         file: evaluation/0002_evaluation_control_plane.sql
         sha256: f594c5410de5a7e085a3d4109b6a36c462af9b69ec6291047db4923022947231
+      - id: 3
+        file: evaluation/0003_release_withdrawal_and_student_results.sql
+        sha256: 0f70b12f8bbe6e4f8a4f3e06eb49b49557966152d4097d0b70f98497597660ed
   - name: resource
     migrations:
       - id: 1

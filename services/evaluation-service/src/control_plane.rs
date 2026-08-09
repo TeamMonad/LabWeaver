@@ -15,15 +15,16 @@ use contracts::{
         EVALUATION_RELEASE_SCHEMA_VERSION, EVALUATION_RUN_SCHEMA_VERSION, EvaluationRelease,
         EvaluationReleaseState, EvaluationRun, EvaluationRunState, EvaluationRuntimeIdentity,
         EvaluationStepCompletion, EvaluationStepFailurePolicy, EvaluationStepRole,
-        EvaluationStepRun, EvaluationStepRunState,
+        EvaluationStepRun, EvaluationStepRunState, StudentEvaluationResult,
     },
     events::{
         CloudEvent, EVENT_CONTRACTS, EvaluationReleasePublished, EvaluationRunEvent,
         EvaluationStepRunEvent, EventContract, SPEC_VERSION, subjects,
     },
     http::{
-        IdempotencyKey, InternalCreateEvaluationRunRequest, InternalEvaluationRunMutationRequest,
-        InternalPublishEvaluationReleaseRequest,
+        CursorPage, IdempotencyKey, InternalCreateEvaluationRunRequest,
+        InternalEvaluationRunMutationRequest, InternalPublishEvaluationReleaseRequest,
+        InternalWithdrawEvaluationReleaseRequest,
     },
 };
 use persistence_sqlx::{Domain, IdempotencyDecision, IdempotencyStore, OutboxStore};
@@ -32,6 +33,7 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 const PUBLISH_RELEASE_OPERATION: &str = "publish_evaluation_release_v1";
+const WITHDRAW_RELEASE_OPERATION: &str = "withdraw_evaluation_release_v1";
 const CREATE_RUN_OPERATION: &str = "create_evaluation_run_v1";
 const CANCEL_RUN_OPERATION: &str = "cancel_evaluation_run_v1";
 const RETRY_STEP_OPERATION: &str = "retry_evaluation_step_v1";
@@ -127,6 +129,16 @@ impl PgEvaluationControlStore {
             IdempotencyDecision::Replay(value) => {
                 let release = decode_release(value)?;
                 transaction.rollback().await?;
+                tracing::info!(
+                    event = "evaluation.release.publish_replayed",
+                    course_id = %release.course_id,
+                    candidate_id = %release.candidate_id,
+                    approval_id = %release.approval_id,
+                    release_id = %release.id,
+                    revision = release.revision.get(),
+                    idempotency_replay = true,
+                    trace_id,
+                );
                 return Ok(EvaluationReleaseReservation::Replayed(release));
             }
             IdempotencyDecision::Conflict => {
@@ -205,6 +217,16 @@ impl PgEvaluationControlStore {
         .await?;
         transaction.commit().await?;
         release.validate()?;
+        tracing::info!(
+            event = "evaluation.release.published",
+            course_id = %release.course_id,
+            candidate_id = %release.candidate_id,
+            approval_id = %release.approval_id,
+            release_id = %release.id,
+            revision = release.revision.get(),
+            idempotency_replay = false,
+            trace_id,
+        );
         Ok(EvaluationReleaseReservation::Created(release))
     }
 
@@ -220,6 +242,168 @@ impl PgEvaluationControlStore {
         .await?
         .ok_or(EvaluationControlStoreError::ReleaseNotFound)?;
         decode_release(value)
+    }
+
+    pub async fn list_releases(
+        &self,
+        course_id: CourseId,
+        cursor: Option<EvaluationReleaseId>,
+        limit: u16,
+    ) -> Result<CursorPage<EvaluationRelease>, EvaluationControlStoreError> {
+        if !(1..=100).contains(&limit) {
+            return Err(EvaluationControlStoreError::ContractInvalid);
+        }
+        if let Some(cursor) = cursor {
+            let exists = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM evaluation.evaluation_releases \
+                 WHERE course_id=$1 AND release_id=$2)",
+            )
+            .bind(course_id.as_uuid())
+            .bind(cursor.as_uuid())
+            .fetch_one(&self.pool)
+            .await?;
+            if !exists {
+                return Err(EvaluationControlStoreError::ContractInvalid);
+            }
+        }
+        let values = sqlx::query_scalar::<_, Value>(
+            "SELECT contract FROM evaluation.evaluation_releases \
+             WHERE course_id=$1 AND ($2::uuid IS NULL OR (published_at,release_id) < \
+               (SELECT published_at,release_id FROM evaluation.evaluation_releases \
+                WHERE course_id=$1 AND release_id=$2)) \
+             ORDER BY published_at DESC,release_id DESC LIMIT $3",
+        )
+        .bind(course_id.as_uuid())
+        .bind(cursor.map(|value| value.as_uuid()))
+        .bind(i64::from(limit) + 1)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut items = values
+            .into_iter()
+            .map(decode_release)
+            .collect::<Result<Vec<_>, _>>()?;
+        let has_more = items.len() > usize::from(limit);
+        items.truncate(usize::from(limit));
+        let next_cursor = if has_more {
+            items.last().map(|release| release.id.to_string())
+        } else {
+            None
+        };
+        Ok(CursorPage { items, next_cursor })
+    }
+
+    pub async fn withdraw_release(
+        &self,
+        release_id: EvaluationReleaseId,
+        request: &InternalWithdrawEvaluationReleaseRequest,
+        idempotency_key: &IdempotencyKey,
+        now: UtcTimestamp,
+        trace_id: &str,
+    ) -> Result<EvaluationRelease, EvaluationControlStoreError> {
+        validate_trace(trace_id)?;
+        let request_sha256 = Sha256Digest::of_canonical(&serde_json::json!({
+            "releaseId": release_id,
+            "request": request,
+        }))
+        .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+        let mut transaction = self.pool.begin().await?;
+        match IdempotencyStore::reserve(
+            &mut transaction,
+            Domain::Evaluation,
+            WITHDRAW_RELEASE_OPERATION,
+            idempotency_key.as_str(),
+            request_sha256,
+        )
+        .await?
+        {
+            IdempotencyDecision::Replay(value) => {
+                let release = decode_release(value)?;
+                transaction.rollback().await?;
+                tracing::info!(
+                    event = "evaluation.release.withdraw_replayed",
+                    course_id = %release.course_id,
+                    release_id = %release.id,
+                    revision = release.revision.get(),
+                    actor_id = %request.withdrawn_by,
+                    diagnostic = request.reason_code.as_str(),
+                    idempotency_replay = true,
+                    trace_id,
+                );
+                return Ok(release);
+            }
+            IdempotencyDecision::Conflict => {
+                return Err(EvaluationControlStoreError::IdempotencyConflict);
+            }
+            IdempotencyDecision::InProgress => {
+                return Err(EvaluationControlStoreError::RequestInProgress);
+            }
+            IdempotencyDecision::Reserved => {}
+        }
+        let mut release = load_release_for_update(&mut transaction, release_id).await?;
+        if release.course_id != request.course_id {
+            return Err(EvaluationControlStoreError::CourseMismatch);
+        }
+        if release.revision != request.expected_revision {
+            return Err(EvaluationControlStoreError::RevisionConflict);
+        }
+        if release.state != EvaluationReleaseState::Active {
+            return Err(EvaluationControlStoreError::StateConflict);
+        }
+        release.state = EvaluationReleaseState::Withdrawn;
+        release.revision = next_revision(release.revision)?;
+        release.withdrawn_at = Some(now);
+        release.withdrawal_diagnostic_code = Some(request.reason_code.clone());
+        release.validate()?;
+        let contract = serde_json::to_value(&release)
+            .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+        sqlx::query(
+            "UPDATE evaluation.evaluation_releases SET state='withdrawn',revision=$2,contract=$3,\
+             withdrawn_at=$4,withdrawal_diagnostic_code=$5,updated_at=$4 WHERE release_id=$1",
+        )
+        .bind(release.id.as_uuid())
+        .bind(revision_i64(release.revision)?)
+        .bind(&contract)
+        .bind(now.get())
+        .bind(request.reason_code.as_str())
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO evaluation.evaluation_release_withdrawals \
+             (release_id,course_id,release_revision,withdrawn_by,reason_code,idempotency_key,\
+              request_sha256,trace_id,withdrawn_at) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+        )
+        .bind(release.id.as_uuid())
+        .bind(release.course_id.as_uuid())
+        .bind(revision_i64(release.revision)?)
+        .bind(request.withdrawn_by.as_uuid())
+        .bind(request.reason_code.as_str())
+        .bind(idempotency_key.as_str())
+        .bind(request_sha256.to_string())
+        .bind(trace_id)
+        .bind(now.get())
+        .execute(&mut *transaction)
+        .await?;
+        IdempotencyStore::complete(
+            &mut transaction,
+            Domain::Evaluation,
+            WITHDRAW_RELEASE_OPERATION,
+            idempotency_key.as_str(),
+            &contract,
+        )
+        .await?;
+        transaction.commit().await?;
+        tracing::info!(
+            event = "evaluation.release.withdrawn",
+            course_id = %request.course_id,
+            release_id = %release.id,
+            revision = release.revision.get(),
+            actor_id = %request.withdrawn_by,
+            diagnostic = request.reason_code.as_str(),
+            idempotency_replay = false,
+            trace_id,
+        );
+        Ok(release)
     }
 
     pub async fn create_run(
@@ -370,6 +554,88 @@ impl PgEvaluationControlStore {
                 .await?
                 .ok_or(EvaluationControlStoreError::RunNotFound)?;
         decode_run(value)
+    }
+
+    pub async fn student_results(
+        &self,
+        course_id: CourseId,
+        actor_id: ActorId,
+        cursor: Option<EvaluationRunId>,
+        limit: u16,
+    ) -> Result<CursorPage<StudentEvaluationResult>, EvaluationControlStoreError> {
+        if !(1..=100).contains(&limit) {
+            return Err(EvaluationControlStoreError::ContractInvalid);
+        }
+        if let Some(cursor) = cursor {
+            let exists = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM evaluation.evaluation_runs \
+                 WHERE course_id=$1 AND actor_id=$2 AND run_id=$3 \
+                   AND state IN ('succeeded','failed','cancelled'))",
+            )
+            .bind(course_id.as_uuid())
+            .bind(actor_id.as_uuid())
+            .bind(cursor.as_uuid())
+            .fetch_one(&self.pool)
+            .await?;
+            if !exists {
+                return Err(EvaluationControlStoreError::ContractInvalid);
+            }
+        }
+        let values = sqlx::query_scalar::<_, Value>(
+            "SELECT runs.contract FROM evaluation.evaluation_runs runs \
+             JOIN evaluation.evaluation_releases releases ON releases.release_id=runs.release_id \
+             WHERE runs.course_id=$1 AND runs.actor_id=$2 \
+               AND runs.state IN ('succeeded','failed','cancelled') \
+               AND ($3::uuid IS NULL OR (runs.updated_at,runs.run_id) < \
+                 (SELECT updated_at,run_id FROM evaluation.evaluation_runs \
+                  WHERE course_id=$1 AND actor_id=$2 AND run_id=$3 \
+                    AND state IN ('succeeded','failed','cancelled'))) \
+             ORDER BY runs.updated_at DESC,runs.run_id DESC LIMIT $4",
+        )
+        .bind(course_id.as_uuid())
+        .bind(actor_id.as_uuid())
+        .bind(cursor.map(|value| value.as_uuid()))
+        .bind(i64::from(limit) + 1)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut items = values
+            .into_iter()
+            .map(decode_run)
+            .map(|run| {
+                run.and_then(|value| {
+                    StudentEvaluationResult::from_terminal(&value).map_err(Into::into)
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let has_more = items.len() > usize::from(limit);
+        items.truncate(usize::from(limit));
+        let next_cursor = if has_more {
+            items.last().map(|result| result.run_id.to_string())
+        } else {
+            None
+        };
+        Ok(CursorPage { items, next_cursor })
+    }
+
+    pub async fn student_result(
+        &self,
+        course_id: CourseId,
+        actor_id: ActorId,
+        run_id: EvaluationRunId,
+    ) -> Result<StudentEvaluationResult, EvaluationControlStoreError> {
+        let value = sqlx::query_scalar::<_, Value>(
+            "SELECT runs.contract FROM evaluation.evaluation_runs runs \
+             JOIN evaluation.evaluation_releases releases ON releases.release_id=runs.release_id \
+             WHERE runs.run_id=$1 AND runs.course_id=$2 AND runs.actor_id=$3 \
+               AND runs.state IN ('succeeded','failed','cancelled')",
+        )
+        .bind(run_id.as_uuid())
+        .bind(course_id.as_uuid())
+        .bind(actor_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(EvaluationControlStoreError::RunNotFound)?;
+        StudentEvaluationResult::from_terminal(&decode_run(value)?).map_err(Into::into)
     }
 
     pub async fn request_cancellation(
@@ -1823,6 +2089,8 @@ pub enum EvaluationControlStoreError {
     RequestInProgress,
     #[error("LW_EVALUATION_STATE_CONFLICT")]
     StateConflict,
+    #[error("LW_EVALUATION_REVISION_CONFLICT")]
+    RevisionConflict,
     #[error("LW_EVALUATION_STEP_LEASE_LOST")]
     LeaseLost,
     #[error("LW_EVALUATION_CLOCK_INVALID")]
@@ -1856,6 +2124,7 @@ impl EvaluationControlStoreError {
             Self::IdempotencyConflict => "LW_IDEMPOTENCY_CONFLICT",
             Self::RequestInProgress => "LW_OPERATION_IN_PROGRESS",
             Self::StateConflict => "LW_EVALUATION_STATE_CONFLICT",
+            Self::RevisionConflict => "LW_EVALUATION_REVISION_CONFLICT",
             Self::LeaseLost => "LW_EVALUATION_STEP_LEASE_LOST",
             Self::ClockInvalid => "LW_EVALUATION_CLOCK_INVALID",
             Self::WorkerIdentityInvalid => "LW_EVALUATION_WORKER_IDENTITY_INVALID",

@@ -106,9 +106,7 @@ typed_id!(SshPublicKeyId);
 typed_id!(UploadSessionId);
 
 /// Monotonic aggregate revision. Zero is never a persisted revision.
-#[derive(
-    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
-)]
+#[derive(Clone, Copy, Debug, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct Revision(u64);
 
@@ -125,6 +123,15 @@ impl Revision {
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for Revision {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(u64::deserialize(deserializer)?).map_err(serde::de::Error::custom)
     }
 }
 

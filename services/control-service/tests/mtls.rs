@@ -21,7 +21,9 @@ use contracts::{
     Sha256Digest, UtcTimestamp,
 };
 use control_service::api::{ApiState, router, serve_mtls};
-use control_service::clients::{AccessClient, AgentClient, DownstreamError, MtlsClientFileConfig};
+use control_service::clients::{
+    AccessClient, AgentClient, DownstreamError, EvaluationClient, MtlsClientFileConfig,
+};
 use control_service::{ContainerBuildPolicy, ControlConfig, ControlService};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as HyperBuilder;
@@ -77,6 +79,8 @@ async fn mtls_sans_rotation_and_outage_fail_closed_on_control_routes()
     let downstream_url = format!("https://localhost:{}/", downstream_address.port());
     let access = AccessClient::new(client_config(&downstream_url, &ca_file, &control1, 1_000)?)?;
     let agent = AgentClient::new(client_config(&downstream_url, &ca_file, &control1, 1_000)?)?;
+    let evaluation =
+        EvaluationClient::new(client_config(&downstream_url, &ca_file, &control1, 1_000)?)?;
 
     let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
     let pool = PgPoolOptions::new()
@@ -97,6 +101,7 @@ async fn mtls_sans_rotation_and_outage_fail_closed_on_control_routes()
         control,
         access,
         agent,
+        evaluation,
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let control_address = listener.local_addr()?;
@@ -495,6 +500,14 @@ fn config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
                 capacity_bytes: 10_737_418_240,
             },
             format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
+        },
+        evaluation_runtime: control_service::EvaluationRuntimePolicy {
+            source_sha256: Sha256Digest::of_bytes(b"source"),
+            provider_binding: "evaluation-primary-v1".to_owned(),
+            configuration_sha256: Sha256Digest::of_bytes(b"configuration"),
+            migration_catalog_sha256: Sha256Digest::of_bytes(b"migrations"),
+            runner_image: format!("runner@sha256:{}", "a".repeat(64)),
+            runtime_artifact_sha256: Sha256Digest::of_bytes(b"runtime"),
         },
     })
 }

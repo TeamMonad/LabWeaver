@@ -2,7 +2,7 @@
 
 import { type Client, type ClientMeta, type Options as Options2, type RequestResult, type ServerSentEventsResult, type TDataShape, urlSearchParamsBodySerializer } from './client';
 import { client } from './client.gen';
-import type { AppendEnvironmentCandidateDecisionData, AppendEnvironmentCandidateDecisionErrors, AppendEnvironmentCandidateDecisionResponses, AppendEvaluationCandidateDecisionData, AppendEvaluationCandidateDecisionErrors, AppendEvaluationCandidateDecisionResponses, ApproveResourceRequestData, ApproveResourceRequestErrors, ApproveResourceRequestResponses, BeginOidcLoginData, BeginOidcLoginErrors, CancelAgentRunData, CancelAgentRunErrors, CancelAgentRunResponses, CancelEnvironmentOperationData, CancelEnvironmentOperationErrors, CancelEnvironmentOperationResponses, CancelResourceRequestData, CancelResourceRequestErrors, CancelResourceRequestResponses, CompleteOidcLoginData, CompleteOidcLoginErrors, CompleteProblemPackageUploadData, CompleteProblemPackageUploadErrors, CompleteProblemPackageUploadResponses, ConsumeOidcBackchannelLogoutData, ConsumeOidcBackchannelLogoutErrors, ConsumeOidcBackchannelLogoutResponses, CreateAccessGrantData, CreateAccessGrantErrors, CreateAccessGrantResponses, CreateAgentRunData, CreateAgentRunErrors, CreateAgentRunResponses, CreateCourseLlmPolicyData, CreateCourseLlmPolicyErrors, CreateCourseLlmPolicyResponses, CreateEnvironmentData, CreateEnvironmentErrors, CreateEnvironmentResponses, CreateEnvironmentTemplateReleaseData, CreateEnvironmentTemplateReleaseErrors, CreateEnvironmentTemplateReleaseResponses, CreateProblemPackageUploadData, CreateProblemPackageUploadErrors, CreateProblemPackageUploadResponses, CreateResourceRequestData, CreateResourceRequestErrors, CreateResourceRequestResponses, CreateSshPublicKeyData, CreateSshPublicKeyErrors, CreateSshPublicKeyResponses, CreateWorkAgentRunData, CreateWorkAgentRunErrors, CreateWorkAgentRunResponses, DeleteEnvironmentData, DeleteEnvironmentErrors, DeleteEnvironmentResponses, DeleteSshPublicKeyData, DeleteSshPublicKeyErrors, DeleteSshPublicKeyResponses, FreezeSubmissionData, FreezeSubmissionErrors, FreezeSubmissionResponses, GetAccessGrantData, GetAccessGrantErrors, GetAccessGrantResponses, GetActiveCourseLlmPolicyData, GetActiveCourseLlmPolicyErrors, GetActiveCourseLlmPolicyResponses, GetAgentRunData, GetAgentRunErrors, GetAgentRunResponses, GetAuthSessionData, GetAuthSessionErrors, GetAuthSessionResponses, GetEnvironmentCandidateData, GetEnvironmentCandidateErrors, GetEnvironmentCandidateResponses, GetEnvironmentData, GetEnvironmentErrors, GetEnvironmentOperationData, GetEnvironmentOperationErrors, GetEnvironmentOperationResponses, GetEnvironmentResponses, GetEnvironmentTemplateReleaseData, GetEnvironmentTemplateReleaseErrors, GetEnvironmentTemplateReleaseResponses, GetEvaluationCandidateData, GetEvaluationCandidateErrors, GetEvaluationCandidateResponses, GetFrozenSubmissionData, GetFrozenSubmissionErrors, GetFrozenSubmissionResponses, GetProblemPackageData, GetProblemPackageErrors, GetProblemPackageResponses, GetResourceLeaseData, GetResourceLeaseErrors, GetResourceLeaseResponses, GetResourceRequestData, GetResourceRequestErrors, GetResourceRequestResponses, IssueConsoleCapabilityData, IssueConsoleCapabilityErrors, IssueConsoleCapabilityResponses, IssueCsrfTokenData, IssueCsrfTokenErrors, IssueCsrfTokenResponses, ListConsoleCapabilitiesData, ListConsoleCapabilitiesErrors, ListConsoleCapabilitiesResponses, ListEnvironmentAccessGrantsData, ListEnvironmentAccessGrantsErrors, ListEnvironmentAccessGrantsResponses, ListEnvironmentEndpointsData, ListEnvironmentEndpointsErrors, ListEnvironmentEndpointsResponses, ListEnvironmentOperationsData, ListEnvironmentOperationsErrors, ListEnvironmentOperationsResponses, ListEnvironmentsData, ListEnvironmentsErrors, ListEnvironmentsResponses, ListEnvironmentTemplateReleasesData, ListEnvironmentTemplateReleasesErrors, ListEnvironmentTemplateReleasesResponses, ListResourceLeasesData, ListResourceLeasesErrors, ListResourceLeasesResponses, ListResourceRequestsData, ListResourceRequestsErrors, ListResourceRequestsResponses, ListSshPublicKeysData, ListSshPublicKeysErrors, ListSshPublicKeysResponses, LogoutBrowserSessionData, LogoutBrowserSessionErrors, RecoverEnvironmentData, RecoverEnvironmentErrors, RecoverEnvironmentResponses, RejectResourceRequestData, RejectResourceRequestErrors, RejectResourceRequestResponses, RenewAccessGrantData, RenewAccessGrantErrors, RenewAccessGrantResponses, RenewResourceLeaseData, RenewResourceLeaseErrors, RenewResourceLeaseResponses, ResetEnvironmentData, ResetEnvironmentErrors, ResetEnvironmentResponses, ResizeAndApproveResourceRequestData, ResizeAndApproveResourceRequestErrors, ResizeAndApproveResourceRequestResponses, RestartEnvironmentData, RestartEnvironmentErrors, RestartEnvironmentResponses, RetryAgentRunTrackData, RetryAgentRunTrackErrors, RetryAgentRunTrackResponses, RetryEnvironmentData, RetryEnvironmentErrors, RetryEnvironmentResponses, RetryResourceRequestData, RetryResourceRequestErrors, RetryResourceRequestResponses, RevokeAccessGrantData, RevokeAccessGrantErrors, RevokeAccessGrantResponses, RevokeResourceLeaseData, RevokeResourceLeaseErrors, RevokeResourceLeaseResponses, StartEnvironmentData, StartEnvironmentErrors, StartEnvironmentResponses, StopEnvironmentData, StopEnvironmentErrors, StopEnvironmentResponses, StreamCourseEventsData, StreamCourseEventsErrors, StreamCourseEventsResponse, StreamCourseEventsResponses, WithdrawEnvironmentTemplateReleaseData, WithdrawEnvironmentTemplateReleaseErrors, WithdrawEnvironmentTemplateReleaseResponses } from './types.gen';
+import type { AppendEnvironmentCandidateDecisionData, AppendEnvironmentCandidateDecisionErrors, AppendEnvironmentCandidateDecisionResponses, AppendEvaluationCandidateDecisionData, AppendEvaluationCandidateDecisionErrors, AppendEvaluationCandidateDecisionResponses, ApproveResourceRequestData, ApproveResourceRequestErrors, ApproveResourceRequestResponses, BeginOidcLoginData, BeginOidcLoginErrors, CancelAgentRunData, CancelAgentRunErrors, CancelAgentRunResponses, CancelEnvironmentOperationData, CancelEnvironmentOperationErrors, CancelEnvironmentOperationResponses, CancelResourceRequestData, CancelResourceRequestErrors, CancelResourceRequestResponses, CompleteOidcLoginData, CompleteOidcLoginErrors, CompleteProblemPackageUploadData, CompleteProblemPackageUploadErrors, CompleteProblemPackageUploadResponses, ConsumeOidcBackchannelLogoutData, ConsumeOidcBackchannelLogoutErrors, ConsumeOidcBackchannelLogoutResponses, CreateAccessGrantData, CreateAccessGrantErrors, CreateAccessGrantResponses, CreateAgentRunData, CreateAgentRunErrors, CreateAgentRunResponses, CreateCourseLlmPolicyData, CreateCourseLlmPolicyErrors, CreateCourseLlmPolicyResponses, CreateEnvironmentData, CreateEnvironmentErrors, CreateEnvironmentResponses, CreateEnvironmentTemplateReleaseData, CreateEnvironmentTemplateReleaseErrors, CreateEnvironmentTemplateReleaseResponses, CreateEvaluationReleaseData, CreateEvaluationReleaseErrors, CreateEvaluationReleaseResponses, CreateProblemPackageUploadData, CreateProblemPackageUploadErrors, CreateProblemPackageUploadResponses, CreateResourceRequestData, CreateResourceRequestErrors, CreateResourceRequestResponses, CreateSshPublicKeyData, CreateSshPublicKeyErrors, CreateSshPublicKeyResponses, CreateWorkAgentRunData, CreateWorkAgentRunErrors, CreateWorkAgentRunResponses, DeleteEnvironmentData, DeleteEnvironmentErrors, DeleteEnvironmentResponses, DeleteSshPublicKeyData, DeleteSshPublicKeyErrors, DeleteSshPublicKeyResponses, FreezeSubmissionData, FreezeSubmissionErrors, FreezeSubmissionResponses, GetAccessGrantData, GetAccessGrantErrors, GetAccessGrantResponses, GetActiveCourseLlmPolicyData, GetActiveCourseLlmPolicyErrors, GetActiveCourseLlmPolicyResponses, GetAgentRunData, GetAgentRunErrors, GetAgentRunResponses, GetAuthSessionData, GetAuthSessionErrors, GetAuthSessionResponses, GetEnvironmentCandidateData, GetEnvironmentCandidateErrors, GetEnvironmentCandidateResponses, GetEnvironmentData, GetEnvironmentErrors, GetEnvironmentOperationData, GetEnvironmentOperationErrors, GetEnvironmentOperationResponses, GetEnvironmentResponses, GetEnvironmentTemplateReleaseData, GetEnvironmentTemplateReleaseErrors, GetEnvironmentTemplateReleaseResponses, GetEvaluationCandidateData, GetEvaluationCandidateErrors, GetEvaluationCandidateResponses, GetEvaluationReleaseData, GetEvaluationReleaseErrors, GetEvaluationReleaseResponses, GetFrozenSubmissionData, GetFrozenSubmissionErrors, GetFrozenSubmissionResponses, GetOwnEvaluationResultData, GetOwnEvaluationResultErrors, GetOwnEvaluationResultResponses, GetProblemPackageData, GetProblemPackageErrors, GetProblemPackageResponses, GetResourceLeaseData, GetResourceLeaseErrors, GetResourceLeaseResponses, GetResourceRequestData, GetResourceRequestErrors, GetResourceRequestResponses, IssueConsoleCapabilityData, IssueConsoleCapabilityErrors, IssueConsoleCapabilityResponses, IssueCsrfTokenData, IssueCsrfTokenErrors, IssueCsrfTokenResponses, ListConsoleCapabilitiesData, ListConsoleCapabilitiesErrors, ListConsoleCapabilitiesResponses, ListEnvironmentAccessGrantsData, ListEnvironmentAccessGrantsErrors, ListEnvironmentAccessGrantsResponses, ListEnvironmentEndpointsData, ListEnvironmentEndpointsErrors, ListEnvironmentEndpointsResponses, ListEnvironmentOperationsData, ListEnvironmentOperationsErrors, ListEnvironmentOperationsResponses, ListEnvironmentsData, ListEnvironmentsErrors, ListEnvironmentsResponses, ListEnvironmentTemplateReleasesData, ListEnvironmentTemplateReleasesErrors, ListEnvironmentTemplateReleasesResponses, ListEvaluationReleasesData, ListEvaluationReleasesErrors, ListEvaluationReleasesResponses, ListOwnEvaluationResultsData, ListOwnEvaluationResultsErrors, ListOwnEvaluationResultsResponses, ListResourceLeasesData, ListResourceLeasesErrors, ListResourceLeasesResponses, ListResourceRequestsData, ListResourceRequestsErrors, ListResourceRequestsResponses, ListSshPublicKeysData, ListSshPublicKeysErrors, ListSshPublicKeysResponses, LogoutBrowserSessionData, LogoutBrowserSessionErrors, RecoverEnvironmentData, RecoverEnvironmentErrors, RecoverEnvironmentResponses, RejectResourceRequestData, RejectResourceRequestErrors, RejectResourceRequestResponses, RenewAccessGrantData, RenewAccessGrantErrors, RenewAccessGrantResponses, RenewResourceLeaseData, RenewResourceLeaseErrors, RenewResourceLeaseResponses, ResetEnvironmentData, ResetEnvironmentErrors, ResetEnvironmentResponses, ResizeAndApproveResourceRequestData, ResizeAndApproveResourceRequestErrors, ResizeAndApproveResourceRequestResponses, RestartEnvironmentData, RestartEnvironmentErrors, RestartEnvironmentResponses, RetryAgentRunTrackData, RetryAgentRunTrackErrors, RetryAgentRunTrackResponses, RetryEnvironmentData, RetryEnvironmentErrors, RetryEnvironmentResponses, RetryResourceRequestData, RetryResourceRequestErrors, RetryResourceRequestResponses, RevokeAccessGrantData, RevokeAccessGrantErrors, RevokeAccessGrantResponses, RevokeResourceLeaseData, RevokeResourceLeaseErrors, RevokeResourceLeaseResponses, StartEnvironmentData, StartEnvironmentErrors, StartEnvironmentResponses, StopEnvironmentData, StopEnvironmentErrors, StopEnvironmentResponses, StreamCourseEventsData, StreamCourseEventsErrors, StreamCourseEventsResponse, StreamCourseEventsResponses, WithdrawEnvironmentTemplateReleaseData, WithdrawEnvironmentTemplateReleaseErrors, WithdrawEnvironmentTemplateReleaseResponses, WithdrawEvaluationReleaseData, WithdrawEvaluationReleaseErrors, WithdrawEvaluationReleaseResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -354,6 +354,78 @@ export const appendEvaluationCandidateDecision = <ThrowOnError extends boolean =
 });
 
 /**
+ * listEvaluationReleases
+ *
+ * Permission: evaluation_release:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const listEvaluationReleases = <ThrowOnError extends boolean = false>(options: Options<ListEvaluationReleasesData, ThrowOnError>): RequestResult<ListEvaluationReleasesResponses, ListEvaluationReleasesErrors, ThrowOnError> => (options.client ?? client).get<ListEvaluationReleasesResponses, ListEvaluationReleasesErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/courses/{courseId}/evaluation-releases',
+    ...options
+});
+
+/**
+ * createEvaluationRelease
+ *
+ * Permission: evaluation_release:publish. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const createEvaluationRelease = <ThrowOnError extends boolean = false>(options: Options<CreateEvaluationReleaseData, ThrowOnError>): RequestResult<CreateEvaluationReleaseResponses, CreateEvaluationReleaseErrors, ThrowOnError> => (options.client ?? client).post<CreateEvaluationReleaseResponses, CreateEvaluationReleaseErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            in: 'cookie',
+            name: '__Host-labweaver_session',
+            type: 'apiKey'
+        }],
+    url: '/api/v1/courses/{courseId}/evaluation-releases',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * getEvaluationRelease
+ *
+ * Permission: evaluation_release:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const getEvaluationRelease = <ThrowOnError extends boolean = false>(options: Options<GetEvaluationReleaseData, ThrowOnError>): RequestResult<GetEvaluationReleaseResponses, GetEvaluationReleaseErrors, ThrowOnError> => (options.client ?? client).get<GetEvaluationReleaseResponses, GetEvaluationReleaseErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/courses/{courseId}/evaluation-releases/{releaseId}',
+    ...options
+});
+
+/**
+ * withdrawEvaluationRelease
+ *
+ * Permission: evaluation_release:withdraw. Timeout: 30000 ms. Cancellable: false. Retryable: false. v1 permits additive endpoints and optional response fields only.
+ */
+export const withdrawEvaluationRelease = <ThrowOnError extends boolean = false>(options: Options<WithdrawEvaluationReleaseData, ThrowOnError>): RequestResult<WithdrawEvaluationReleaseResponses, WithdrawEvaluationReleaseErrors, ThrowOnError> => (options.client ?? client).post<WithdrawEvaluationReleaseResponses, WithdrawEvaluationReleaseErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            in: 'cookie',
+            name: '__Host-labweaver_session',
+            type: 'apiKey'
+        }],
+    url: '/api/v1/courses/{courseId}/evaluation-releases/{releaseId}/withdraw',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
  * createCourseLlmPolicy
  *
  * Permission: llm_policy:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
@@ -386,6 +458,38 @@ export const getActiveCourseLlmPolicy = <ThrowOnError extends boolean = false>(o
             type: 'http'
         }],
     url: '/api/v1/courses/{courseId}/llm-egress-policies/active',
+    ...options
+});
+
+/**
+ * listOwnEvaluationResults
+ *
+ * Permission: evaluation_result:read_own. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const listOwnEvaluationResults = <ThrowOnError extends boolean = false>(options: Options<ListOwnEvaluationResultsData, ThrowOnError>): RequestResult<ListOwnEvaluationResultsResponses, ListOwnEvaluationResultsErrors, ThrowOnError> => (options.client ?? client).get<ListOwnEvaluationResultsResponses, ListOwnEvaluationResultsErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/courses/{courseId}/me/evaluation-results',
+    ...options
+});
+
+/**
+ * getOwnEvaluationResult
+ *
+ * Permission: evaluation_result:read_own. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const getOwnEvaluationResult = <ThrowOnError extends boolean = false>(options: Options<GetOwnEvaluationResultData, ThrowOnError>): RequestResult<GetOwnEvaluationResultResponses, GetOwnEvaluationResultErrors, ThrowOnError> => (options.client ?? client).get<GetOwnEvaluationResultResponses, GetOwnEvaluationResultErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/courses/{courseId}/me/evaluation-results/{runId}',
     ...options
 });
 

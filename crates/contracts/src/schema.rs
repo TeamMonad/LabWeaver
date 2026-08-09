@@ -70,6 +70,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::evaluation::EvaluationRun
     );
     document!(
+        "schemas/contracts/v1/student-evaluation-result.schema.json",
+        crate::evaluation::StudentEvaluationResult
+    );
+    document!(
         "schemas/contracts/v1/evaluation-step-run.schema.json",
         crate::evaluation::EvaluationStepRun
     );
@@ -348,6 +352,18 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/http/internal-publish-evaluation-release-request.schema.json",
         crate::http::InternalPublishEvaluationReleaseRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/internal-withdraw-evaluation-release-request.schema.json",
+        crate::http::InternalWithdrawEvaluationReleaseRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/create-evaluation-release-request.schema.json",
+        crate::http::CreateEvaluationReleaseRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/withdraw-evaluation-release-request.schema.json",
+        crate::http::WithdrawEvaluationReleaseRequest
     );
     document!(
         "schemas/contracts/v1/http/internal-create-evaluation-run-request.schema.json",
@@ -686,7 +702,10 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         let mut parameters = path_parameters(operation.path);
         if matches!(
             operation.operation_id,
-            "listEnvironmentTemplateReleases" | "listSshPublicKeys"
+            "listEnvironmentTemplateReleases"
+                | "listEvaluationReleases"
+                | "listOwnEvaluationResults"
+                | "listSshPublicKeys"
         ) {
             parameters.push(json!({"name":"cursor","in":"query","required":false,"schema":{"type":"string","minLength":1,"maxLength":512}}));
             parameters.push(json!({"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":100,"default":50}}));
@@ -836,7 +855,9 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 ,"InternalImageArtifactResolution": contract_ref("http/internal-image-artifact-resolution")
                 ,"EvaluationRelease": contract_ref("evaluation-release")
                 ,"EvaluationRun": contract_ref("evaluation-run")
+                ,"StudentEvaluationResult": contract_ref("student-evaluation-result")
                 ,"InternalPublishEvaluationReleaseRequest": contract_ref("http/internal-publish-evaluation-release-request")
+                ,"InternalWithdrawEvaluationReleaseRequest": contract_ref("http/internal-withdraw-evaluation-release-request")
                 ,"InternalCreateEvaluationRunRequest": contract_ref("http/internal-create-evaluation-run-request")
                 ,"InternalEvaluationRunMutationRequest": contract_ref("http/internal-evaluation-run-mutation-request")
                 ,"InternalCompleteEvaluationStepRequest": contract_ref("http/internal-complete-evaluation-step-request")
@@ -915,11 +936,18 @@ fn add_auth_paths(surface: ApiSurface, paths: &mut BTreeMap<String, Value>) {
             );
             paths.insert(
                 "/internal/v1/evaluation-releases".to_owned(),
-                json!({"post":{"operationId":"publishInternalEvaluationRelease","summary":"Publish one Control-approved immutable EvaluationSpec release","security":[{"serviceMtls":[]}],"parameters":[{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalPublishEvaluationReleaseRequest"}}}},"responses":{"202":{"description":"EvaluationRelease accepted","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRelease"}}}},"409":{"$ref":"#/components/responses/Problem"},"422":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({
+                    "post":{"operationId":"publishInternalEvaluationRelease","summary":"Publish one Control-approved immutable EvaluationSpec release","security":[{"serviceMtls":[]}],"parameters":[{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalPublishEvaluationReleaseRequest"}}}},"responses":{"201":{"description":"EvaluationRelease created","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRelease"}}}},"409":{"$ref":"#/components/responses/Problem"},"422":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}},
+                    "get":{"operationId":"listInternalEvaluationReleases","summary":"List authoritative Evaluation releases for one course","security":[{"serviceMtls":[]}],"parameters":[{"name":"x-labweaver-course-id","in":"header","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":100,"default":50}}],"responses":{"200":{"description":"Evaluation releases","content":{"application/json":{"schema":{"type":"array","items":{"$ref":"#/components/schemas/EvaluationRelease"}}}}},"403":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}
+                }),
             );
             paths.insert(
                 "/internal/v1/evaluation-releases/{releaseId}".to_owned(),
                 json!({"get":{"operationId":"getInternalEvaluationRelease","summary":"Read one authoritative Evaluation release","security":[{"serviceMtls":[]}],"parameters":[{"name":"releaseId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Authoritative EvaluationRelease","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRelease"}}}},"404":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+            );
+            paths.insert(
+                "/internal/v1/evaluation-releases/{releaseId}/withdraw".to_owned(),
+                json!({"post":{"operationId":"withdrawInternalEvaluationRelease","summary":"Withdraw one Evaluation release at an exact revision","security":[{"serviceMtls":[]}],"parameters":[{"name":"releaseId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}},{"name":"If-Match","in":"header","required":true,"schema":{"type":"string"}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalWithdrawEvaluationReleaseRequest"}}}},"responses":{"200":{"description":"Withdrawn EvaluationRelease","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRelease"}}}},"409":{"$ref":"#/components/responses/Problem"},"412":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/internal/v1/evaluation-runs".to_owned(),
@@ -1091,6 +1119,8 @@ fn request_schema(operation_id: &str) -> Option<Value> {
             "http/candidate-decision-request"
         }
         "createEnvironmentTemplateRelease" => "http/create-environment-template-release-request",
+        "createEvaluationRelease" => "http/create-evaluation-release-request",
+        "withdrawEvaluationRelease" => "http/withdraw-evaluation-release-request",
         "withdrawEnvironmentTemplateRelease" => {
             "http/withdraw-environment-template-release-request"
         }
@@ -1132,6 +1162,16 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         | "retryAgentRunTrack" => contract_ref("agent-run"),
         "getEnvironmentCandidate" => contract_ref("http/environment-candidate-view"),
         "getEvaluationCandidate" => contract_ref("http/evaluation-candidate-view"),
+        "createEvaluationRelease" | "getEvaluationRelease" | "withdrawEvaluationRelease" => {
+            contract_ref("evaluation-release")
+        }
+        "listEvaluationReleases" => {
+            json!({"type":"object","additionalProperties":false,"required":["items"],"properties":{"items":{"type":"array","items":contract_ref("evaluation-release")} ,"nextCursor":{"type":["string","null"]}}})
+        }
+        "getOwnEvaluationResult" => contract_ref("student-evaluation-result"),
+        "listOwnEvaluationResults" => {
+            json!({"type":"object","additionalProperties":false,"required":["items"],"properties":{"items":{"type":"array","items":contract_ref("student-evaluation-result")} ,"nextCursor":{"type":["string","null"]}}})
+        }
         "appendEnvironmentCandidateDecision" | "appendEvaluationCandidateDecision" => {
             contract_ref("candidate-approval")
         }

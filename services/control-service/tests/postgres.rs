@@ -776,6 +776,14 @@ fn control_config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
             },
             format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
         },
+        evaluation_runtime: control_service::EvaluationRuntimePolicy {
+            source_sha256: Sha256Digest::of_bytes(b"source"),
+            provider_binding: "evaluation-primary-v1".to_owned(),
+            configuration_sha256: Sha256Digest::of_bytes(b"configuration"),
+            migration_catalog_sha256: Sha256Digest::of_bytes(b"migrations"),
+            runner_image: format!("runner@sha256:{}", "a".repeat(64)),
+            runtime_artifact_sha256: Sha256Digest::of_bytes(b"runtime"),
+        },
     })
 }
 

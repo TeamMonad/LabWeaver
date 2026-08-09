@@ -18,15 +18,18 @@ use axum::{Extension, Json, Router};
 use contracts::authoring::{AgentRun, AgentTrackKind, CourseLlmEgressPolicy};
 use contracts::http::{
     CandidateDecisionRequest, CompleteProblemPackageUploadRequest, CreateAgentRunRequest,
-    CreateEnvironmentTemplateReleaseRequest, CreateProblemPackageUploadRequest,
-    CreateWorkAgentRunRequest, CursorPage, IdempotencyKey, InternalAgentRunMutationRequest,
-    InternalCreateAgentRunRequest, OperationAccepted, StrongEtag,
-    WithdrawEnvironmentTemplateReleaseRequest, resolve_sse_resume,
+    CreateEnvironmentTemplateReleaseRequest, CreateEvaluationReleaseRequest,
+    CreateProblemPackageUploadRequest, CreateWorkAgentRunRequest, CursorPage,
+    EvaluationReleaseListQuery, IdempotencyKey, InternalAgentRunMutationRequest,
+    InternalCreateAgentRunRequest, InternalWithdrawEvaluationReleaseRequest, OperationAccepted,
+    StrongEtag, WithdrawEnvironmentTemplateReleaseRequest, WithdrawEvaluationReleaseRequest,
+    resolve_sse_resume,
 };
 use contracts::{
     ActorId, AgentRunId, AuthorizationDecisionRequest, AuthorizationScope, BffSessionId,
-    CandidateId, CourseId, DiagnosticCode, EventId, OperationId, ProblemDetails, ProblemPackageId,
-    ReleaseId, Revision, StreamSequence, UploadSessionId, UtcTimestamp,
+    CandidateId, CourseId, DiagnosticCode, EvaluationReleaseId, EventId, OperationId,
+    ProblemDetails, ProblemPackageId, ReleaseId, Revision, StreamSequence, UploadSessionId,
+    UtcTimestamp,
 };
 use futures_util::stream;
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -36,7 +39,7 @@ use serde::Deserialize;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::clients::{AccessClient, AgentClient, DownstreamError};
+use crate::clients::{AccessClient, AgentClient, DownstreamError, EvaluationClient};
 use crate::{ControlError, ControlService};
 
 const ACTOR_HEADER: &str = "x-labweaver-actor-id";
@@ -50,6 +53,8 @@ pub struct ApiState {
     pub access: AccessClient,
     /// Agent-owned run and artifact authority.
     pub agent: AgentClient,
+    /// Evaluation-owned release authority.
+    pub evaluation: EvaluationClient,
 }
 
 /// Verified URI SAN injected by the mTLS accept loop.
@@ -117,6 +122,18 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route(
             "/api/v1/courses/{course_id}/evaluation-candidates/{candidate_id}/decisions",
             post(decide_evaluation_candidate),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/evaluation-releases",
+            post(create_evaluation_release).get(list_evaluation_releases),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/evaluation-releases/{release_id}",
+            get(get_evaluation_release),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/evaluation-releases/{release_id}/withdraw",
+            post(withdraw_evaluation_release),
         )
         .route(
             "/api/v1/courses/{course_id}/environment-template-releases",
@@ -576,6 +593,137 @@ async fn decide_evaluation_candidate(
         &value,
         value.candidate_revision,
     ))
+}
+
+async fn create_evaluation_release(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path(course_id): Path<CourseId>,
+    headers: HeaderMap,
+    Json(request): Json<CreateEvaluationReleaseRequest>,
+) -> Result<Response, ApiError> {
+    let actor = authorize(
+        &state,
+        &principal,
+        &headers,
+        "createEvaluationRelease",
+        course_id,
+    )
+    .await?;
+    let key = idempotency(&headers)?;
+    let trace = trace_id(&headers);
+    let command = state
+        .control
+        .prepare_evaluation_release(course_id, &request, actor)
+        .await?;
+    let release = state.evaluation.publish(&command, &key, &trace).await?;
+    if release.course_id != course_id
+        || release.candidate_id != request.candidate_id
+        || release.approval_id != request.approval_id
+    {
+        return Err(ApiError::internal(
+            "LW_CONTROL_DOWNSTREAM_IDENTITY_MISMATCH",
+        ));
+    }
+    tracing::info!(
+        event = "control.evaluation_release.published",
+        course_id = %course_id,
+        actor_id = %actor,
+        candidate_id = %request.candidate_id,
+        approval_id = %request.approval_id,
+        release_id = %release.id,
+        revision = release.revision.get(),
+        trace_id = %trace,
+    );
+    Ok(with_etag(StatusCode::CREATED, &release, release.revision))
+}
+
+async fn list_evaluation_releases(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path(course_id): Path<CourseId>,
+    headers: HeaderMap,
+    Query(query): Query<EvaluationReleaseListQuery>,
+) -> Result<Response, ApiError> {
+    authorize(
+        &state,
+        &principal,
+        &headers,
+        "listEvaluationReleases",
+        course_id,
+    )
+    .await?;
+    query
+        .validate()
+        .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+    Ok(Json(state.evaluation.list(course_id, &query).await?).into_response())
+}
+
+async fn get_evaluation_release(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path((course_id, release_id)): Path<(CourseId, EvaluationReleaseId)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize(
+        &state,
+        &principal,
+        &headers,
+        "getEvaluationRelease",
+        course_id,
+    )
+    .await?;
+    let release = state.evaluation.get(release_id).await?;
+    if release.course_id != course_id {
+        return Err(ApiError::forbidden("LW_AUTH_COURSE_SCOPE_DENIED"));
+    }
+    Ok(with_etag(StatusCode::OK, &release, release.revision))
+}
+
+async fn withdraw_evaluation_release(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path((course_id, release_id)): Path<(CourseId, EvaluationReleaseId)>,
+    headers: HeaderMap,
+    Json(request): Json<WithdrawEvaluationReleaseRequest>,
+) -> Result<Response, ApiError> {
+    let actor = authorize(
+        &state,
+        &principal,
+        &headers,
+        "withdrawEvaluationRelease",
+        course_id,
+    )
+    .await?;
+    let expected = etag(&headers)?;
+    if expected != request.expected_revision {
+        return Err(ApiError::precondition("LW_REVISION_CONFLICT"));
+    }
+    let trace = trace_id(&headers);
+    let release = state
+        .evaluation
+        .withdraw(
+            release_id,
+            &InternalWithdrawEvaluationReleaseRequest {
+                course_id,
+                expected_revision: expected,
+                withdrawn_by: actor,
+                reason_code: request.reason_code.clone(),
+            },
+            &idempotency(&headers)?,
+            &trace,
+        )
+        .await?;
+    tracing::info!(
+        event = "control.evaluation_release.withdrawn",
+        course_id = %course_id,
+        actor_id = %actor,
+        release_id = %release.id,
+        revision = release.revision.get(),
+        diagnostic = request.reason_code.as_str(),
+        trace_id = %trace,
+    );
+    Ok(with_etag(StatusCode::OK, &release, release.revision))
 }
 
 async fn create_release(

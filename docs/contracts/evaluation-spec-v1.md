@@ -76,6 +76,35 @@ fenced by `(stepRunId, attempt, workerId, leaseToken)` and accepts only hash-onl
 evidence. Failed or cancelled StepRuns may remain pending cleanup; the aggregate
 Run is completed only after cleanup is explicitly verified.
 
+Control exposes the teacher release lifecycle through the Access BFF:
+
+- `POST /api/v1/courses/{courseId}/evaluation-releases` accepts only
+  `candidateId`, `candidateRevision`, `evaluationSpecSha256` and `approvalId`,
+  plus `Idempotency-Key`. Control reloads the authoritative candidate, approval,
+  active course policy and ProblemPackage and constructs the deployment-owned
+  `EvaluationRuntimeIdentity`; no browser field can select an image, Provider or
+  runtime hash.
+- `GET /api/v1/courses/{courseId}/evaluation-releases` and the corresponding
+  `/{releaseId}` route return Evaluation-owned state. The list is newest-first
+  and uses an opaque, scope-bound cursor.
+- `POST /api/v1/courses/{courseId}/evaluation-releases/{releaseId}/withdraw`
+  requires `Idempotency-Key`, `If-Match`, the same expected revision in the
+  request, and a stable diagnostic `reasonCode`. Evaluation persists the actor,
+  trace, request hash and revision in an append-only withdrawal audit row.
+
+The Access BFF routes student reads directly to Evaluation after checking the
+session, student role and course membership:
+
+- `GET /api/v1/courses/{courseId}/me/evaluation-results`
+- `GET /api/v1/courses/{courseId}/me/evaluation-results/{runId}`
+
+Only terminal runs owned by the current actor are visible. Successful runs
+expose the deterministic total and public step scores. Failed and cancelled
+runs expose state and stable diagnostics without a partial total. The projection
+omits step IDs, dependencies, evidence hashes, runtime identity, private cases,
+submission content and raw logs. Withdrawal prevents new runs but does not erase
+historical terminal results.
+
 Outbox events are payload-safe projections. They carry release, run or step-run
 identity, revision, state, diagnostics, evidence hashes and cleanup flags, but
 not submissions, raw logs, private evaluator inputs, object locators or numeric
@@ -116,6 +145,8 @@ score payloads.
 ## Artifacts and verification
 
 - `schemas/contracts/v1/evaluation-spec.schema.json`
+- `schemas/contracts/v1/evaluation-release.schema.json`
+- `schemas/contracts/v1/student-evaluation-result.schema.json`
 - `schemas/evaluation/goal-review.v1.schema.json`
 - `crates/contracts/tests/fixtures/evaluation/oj/evaluation.yaml`
 - `crates/contracts/tests/fixtures/evaluation/linux/evaluation.yaml`
