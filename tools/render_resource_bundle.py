@@ -95,7 +95,7 @@ def render(manifest_path: Path, input_root: Path, expected_issuer: str | None) -
         for name in sorted(names):
             if kind == "Secret":
                 validate_creds(root / name, expected_issuer)
-            value = {"apiVersion":"v1","kind":kind,"metadata":{"name":name,"namespace":manifest["namespace"],"labels":{"app.kubernetes.io/part-of":"labweaver","labweaver.io/sprint":"sprint2"}},"data":read_exact(root / name, manifest[section][name], binary)}
+            value = {"apiVersion":"v1","kind":kind,"metadata":{"name":name,"namespace":manifest["namespace"],"labels":{"app.kubernetes.io/part-of":"labweaver","labweaver.io/sprint":"platform"}},"data":read_exact(root / name, manifest[section][name], binary)}
             if kind == "Secret": value["type"] = "Opaque"
             objects.append(value)
     return b"".join(b"---\n" + json.dumps(v, sort_keys=True, separators=(",", ":")).encode() + b"\n" for v in objects)

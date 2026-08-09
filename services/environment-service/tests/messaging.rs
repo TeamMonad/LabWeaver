@@ -42,7 +42,7 @@ async fn jetstream_command_outbox_and_provider_rpc_use_durable_identities()
         .await?;
     let migrations = format!(
         "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
-        include_str!("../../../migrations/environment/0001_sprint2_baseline.sql")
+        include_str!("../../../migrations/environment/0001_platform_baseline.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;
 

@@ -1,11 +1,11 @@
 # Sprint 2 deployment bundle
 
-`sprint2-bundle-manifest.json` is the exact ConfigMap and Secret input contract for the
+`platform-bundle-manifest.json` is the exact ConfigMap and Secret input contract for the
 non-destructive Sprint 2 application adoption. Prepare values only under an ignored private
 directory using this layout:
 
 ```text
-.private/sprint2-input/
+.private/platform-input/
 ├── configmaps/<object-name>/<required-key>
 └── secrets/<object-name>/<required-key>
 ```
@@ -14,9 +14,9 @@ Every object and key declared by the manifest is required. Extra objects, extra 
 empty files and files larger than 1 MiB are rejected. Generate the private bundle with:
 
 ```sh
-python tools/render_sprint2_bundle.py \
-  --input .private/sprint2-input \
-  --output .private/sprint2-configuration-bundle.yaml
+python tools/render_platform_bundle.py \
+  --input .private/platform-input \
+  --output .private/platform-configuration-bundle.yaml
 ```
 
 The command creates the output exclusively with mode `0600`, prints only its SHA-256 and object
@@ -63,7 +63,7 @@ includes reviewed `hostAliases`, matching `/32` entries under
 for `sshGatewayService`. The portal route creates only the application HTTPRoute and
 ReferenceGrant; it does not replace the retained Gateway. OpenSSH uses a dedicated TCP/2222
 `LoadBalancer` Service on the same reviewed VIP because the adopted Cilium Gateway API controller
-does not reconcile TCPRoute. `sprint2-application` fails unless the HTTPRoute is `Accepted` and
+does not reconcile TCPRoute. `platform-application` fails unless the HTTPRoute is `Accepted` and
 `ResolvedRefs` and the OpenSSH Service owns the exact shared VIP and port.
 The portal authority is installed only in the retained router system trust so controller-side
 verification never disables TLS validation.

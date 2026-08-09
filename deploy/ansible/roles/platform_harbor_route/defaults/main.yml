@@ -1,0 +1,15 @@
+---
+harbor_namespace: harbor # noqa: var-naming[no-role-prefix]
+harbor_release_name: harbor # noqa: var-naming[no-role-prefix]
+harbor_gateway_name: harbor-gateway # noqa: var-naming[no-role-prefix]
+harbor_gateway_vip: '' # noqa: var-naming[no-role-prefix]
+harbor_hostname: harbor.lab.lan # noqa: var-naming[no-role-prefix]
+harbor_kubeconfig_path: /etc/kubernetes/admin.conf # noqa: var-naming[no-role-prefix]
+harbor_public_ca_path: /var/lib/labweaver/.private/harbor-public/registry-ca.crt # noqa: var-naming[no-role-prefix]
+harbor_project_name: labweaver-system # noqa: var-naming[no-role-prefix]
+harbor_secret_locator_path: /etc/labweaver/harbor/bootstrap.env # noqa: var-naming[no-role-prefix]
+
+# CA trust store layout differs between RHEL-family (/etc/pki/ca-trust) and
+# Debian-family (/usr/local/share/ca-certificates) control planes.
+platform_harbor_route_ca_trust_anchors_dir: /etc/pki/ca-trust/source/anchors
+platform_harbor_route_ca_trust_refresh_command: update-ca-trust extract

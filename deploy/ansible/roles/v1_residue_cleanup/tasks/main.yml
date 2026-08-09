@@ -1,0 +1,194 @@
+---
+# One-shot audit + cleanup of old-cluster residue on v1 workers (97/158).
+# The audit record is written BEFORE any destructive action and the playbook
+# refuses to clean unless labweaver_v1_cleanup_old_cluster=true is supplied.
+# Approved destructive operation under issue #148 (2026-08-07).
+- name: Inventorize old-cluster residue
+  ansible.builtin.command:
+    argv: "{{ item }}"
+  changed_when: false
+  failed_when: false
+  register: v1_residue_inventory
+  loop:
+    - [kubeadm, version]
+    - [systemctl, is-active, kubelet, crio]
+    - [ls, -la, /etc/kubernetes]
+    - [ls, /etc/kubernetes/manifests]
+    - [ip, -br, link]
+    - [ls, -la, /etc/cni/net.d]
+    - [lxc, list, --format, json]
+
+- name: Ensure the root-owned v1 audit directory exists
+  ansible.builtin.file:
+    path: /var/lib/labweaver/.private/v1
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Record residue audit (root-owned, before cleanup)
+  ansible.builtin.copy:
+    dest: "/var/lib/labweaver/.private/v1/residue-audit-{{ ansible_date_time.iso8601_basic_short }}-{{ inventory_hostname }}.json"
+    mode: '0600'
+    owner: root
+    group: root
+    content: "{{ v1_residue_inventory.results | to_nice_json }}"
+
+- name: Refuse to clean without explicit approval
+  ansible.builtin.assert:
+    that: labweaver_v1_cleanup_old_cluster | default(false) | bool
+    fail_msg: >-
+      V1_RESIDUE_CLEANUP_NOT_APPROVED: audit recorded, no destructive action.
+      Re-run with -e labweaver_v1_cleanup_old_cluster=true after confirming
+      the audited residue (LXD containers are inventoried, never removed).
+
+- name: Discover installed services before stopping the old cluster
+  ansible.builtin.service_facts:
+
+- name: Stop installed old kubelet and CRI-O services
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+  loop: [kubelet, crio]
+  when: (item ~ '.service') in ansible_facts.services
+
+- name: Reset old kubeadm state
+  ansible.builtin.command: >-
+    kubeadm reset -f --cri-socket unix:///var/run/crio/crio.sock
+  changed_when: false
+  failed_when: false
+
+- name: Kill surviving old-cluster container processes (control plane, Cilium,
+    KubeVirt, etcd, conmon) - CRI-O stop/purge alone does not kill them.
+    Bracket patterns make every process match explicit.
+  ansible.builtin.command:
+    argv: [pkill, -9, -f, "{{ item }}"]
+  register: v1_residue_process_kill
+  changed_when: v1_residue_process_kill.rc == 0
+  failed_when: v1_residue_process_kill.rc not in [0, 1]
+  loop:
+    - '[c]onmon'
+    - '[k]ube-apiserver'
+    - '[k]ube-controller'
+    - '[k]ube-scheduler'
+    - '[k]ube-proxy'
+    - '[c]ilium-agent'
+    - '[c]ilium-envoy'
+    - '[c]ilium-health'
+    - '[v]irt-operator'
+    - '[v]irt-api'
+    - '[v]irt-controller'
+    - '[b]in/etcd'
+
+- name: Wait for processes to exit
+  ansible.builtin.pause:
+    seconds: 3
+
+- name: Discover old container runtime mounts (shm / cilium cgroup)
+  ansible.builtin.command:
+    argv: [findmnt, --raw, --noheadings, --output, TARGET]
+  changed_when: false
+  register: v1_residue_mounts
+
+- name: Unmount every discovered old container runtime mount
+  ansible.builtin.command:
+    argv: [umount, -l, "{{ item }}"]
+  changed_when: true
+  loop: >-
+    {{ v1_residue_mounts.stdout_lines
+       | select('search', 'overlay-containers|run/cilium')
+       | list }}
+
+- name: Remove old pod logs, cilium runtime dir and stale container run dirs
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /var/log/pods
+    - /run/cilium
+    - /run/containers/storage/overlay-containers
+
+- name: Discover leftover network namespaces
+  ansible.builtin.command:
+    argv: [ip, netns, list]
+  changed_when: false
+  register: v1_residue_network_namespaces
+
+- name: Remove every discovered network namespace
+  ansible.builtin.command:
+    argv: [ip, netns, delete, "{{ item.split()[0] }}"]
+  changed_when: true
+  loop: "{{ v1_residue_network_namespaces.stdout_lines }}"
+
+- name: Remove old cluster directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/kubernetes
+    - /var/lib/kubelet
+    - /var/lib/crio
+    - /etc/cni/net.d
+    - /var/lib/cni
+    - /var/lib/etcd
+    - /var/lib/kube-proxy
+    - /etc/containers
+
+- name: Inspect leftover Cilium and Docker interfaces
+  ansible.builtin.command:
+    argv: [ip, link, show, "{{ item }}"]
+  changed_when: false
+  failed_when: false
+  register: v1_residue_interfaces
+  loop: [cilium_net, cilium_host, cilium_vxlan, cilium_health, docker0]
+
+- name: Remove every discovered Cilium and Docker interface
+  ansible.builtin.command:
+    argv: [ip, link, delete, "{{ item.item }}"]
+  changed_when: true
+  loop: "{{ v1_residue_interfaces.results | selectattr('rc', 'equalto', 0) | list }}"
+
+- name: Fail closed if any Cilium interface survives
+  ansible.builtin.command:
+    argv: [ip, -br, link]
+  changed_when: false
+  register: v1_cilium_after
+  failed_when: v1_cilium_after.stdout is search('cilium')
+
+- name: Fail closed if old-cluster processes survive
+  ansible.builtin.command:
+    argv:
+      - pgrep
+      - -f
+      - '[k]ube-apiserver|[c]ilium-agent|[v]irt-controller|[b]in/etcd'
+  changed_when: false
+  register: v1_procs_after
+  failed_when: v1_procs_after.rc not in [0, 1] or v1_procs_after.rc == 0
+
+- name: Purge old Kubernetes/CRI-O packages for a fresh pinned install
+  ansible.builtin.apt:
+    name: [kubeadm, kubelet, kubectl, cri-o, cri-o-runc, cri-tools]
+    state: absent
+    purge: true
+    allow_change_held_packages: true
+
+- name: Verify residue is gone
+  ansible.builtin.command:
+    argv: "{{ item }}"
+  changed_when: false
+  failed_when: false
+  register: v1_residue_after
+  loop:
+    - [systemctl, is-active, kubelet, crio]
+    - [ls, /etc/kubernetes]
+    - [ls, /var/lib/kubelet]
+    - [ip, -br, link]
+
+- name: Record cleanup result
+  ansible.builtin.copy:
+    dest: "/var/lib/labweaver/.private/v1/residue-cleanup-{{ ansible_date_time.iso8601_basic_short }}-{{ inventory_hostname }}.json"
+    mode: '0600'
+    owner: root
+    group: root
+    content: "{{ v1_residue_after.results | to_nice_json }}"

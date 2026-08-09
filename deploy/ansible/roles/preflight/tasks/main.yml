@@ -3,8 +3,8 @@
   ansible.builtin.assert:
     that: >-
       (labweaver_preflight_scope | default('cluster')) in
-      ['cluster', 'identity-foundation', 'sprint2-foundation',
-       'sprint2-buildkit', 'sprint2-harbor-route', 'sprint2-application', 'sprint2-reset',
+      ['cluster', 'identity-foundation', 'platform-foundation',
+       'platform-buildkit', 'platform-harbor-route', 'platform-application', 'platform-reset',
        'resource-application', 'resource-replay', 'resource-replay-auth',
        'foundation-clean-redeploy', 'foundation-rotation-verify']
     fail_msg: PREFLIGHT_SCOPE_INVALID
@@ -23,8 +23,8 @@
   delegate_to: localhost
   when: >-
     (labweaver_preflight_scope | default('cluster')) in
-    ['cluster', 'sprint2-foundation', 'sprint2-buildkit',
-     'sprint2-harbor-route', 'sprint2-application', 'sprint2-reset',
+    ['cluster', 'platform-foundation', 'platform-buildkit',
+     'platform-harbor-route', 'platform-application', 'platform-reset',
      'resource-application', 'resource-replay', 'resource-replay-auth',
      'foundation-clean-redeploy', 'foundation-rotation-verify']
 
@@ -46,9 +46,9 @@
 - name: Assert the adopted-cluster identity-foundation inventory boundary
   ansible.builtin.assert:
     that:
-      - (groups.get('routers', []) | sort) == ['edge-router']
-      - (groups.get('control_plane', []) | sort) == ['k8s-cp1']
-      - "'k8s-cp1' in groups.get('k8s_cluster', [])"
+      - (groups.get('routers', []) | sort) == [preflight_identity_router]
+      - (groups.get('control_plane', []) | sort) == [preflight_identity_control_plane]
+      - "'{{ preflight_identity_control_plane }}' in groups.get('k8s_cluster', [])"
     fail_msg: IDENTITY_INVENTORY_SCOPE_INVALID
   run_once: true
   delegate_to: localhost
@@ -103,12 +103,21 @@
   delegate_to: localhost
   when: (labweaver_preflight_scope | default('cluster')) == 'identity-foundation'
 
-- name: Assert Rocky family target
+- name: Assert supported OS family target
   ansible.builtin.assert:
     that:
-      - ansible_facts.os_family == 'RedHat'
-      - ansible_facts.distribution_major_version | int >= 10
-    fail_msg: "only Rocky/RHEL 10+ nodes are supported by this playbook"
+      - >-
+        (ansible_facts.os_family == 'RedHat'
+         and (ansible_facts.distribution_major_version | int) >= 10)
+        or
+        (ansible_facts.os_family == 'Debian'
+         and ansible_facts.distribution == 'Ubuntu'
+         and (ansible_facts.distribution_major_version | int) >= 22)
+    fail_msg: >-
+      supported node families are Rocky/RHEL 10+ (RedHat) and Ubuntu 22.04+
+      (Debian); this host is {{ ansible_facts.os_family }}
+      {{ ansible_facts.distribution | default('') }}
+      {{ ansible_facts.distribution_version | default('') }}
   when:
     - inventory_hostname != 'localhost'
     - not (labweaver_direct_kubernetes_controller | default(false) | bool)
@@ -149,6 +158,7 @@
   when:
     - inventory_hostname in groups['routers']
     - not (labweaver_direct_kubernetes_controller | default(false) | bool)
+    - not (labweaver_skip_router_services | default(false) | bool)
 
 - name: Assert Kubernetes node SELinux is enforcing
   ansible.builtin.command: /usr/sbin/getenforce
@@ -158,6 +168,7 @@
   failed_when: preflight_selinux_mode.stdout != 'Enforcing'
   when:
     - inventory_hostname in groups['k8s_cluster']
+    - ansible_facts.os_family == 'RedHat'
     - not (labweaver_direct_kubernetes_controller | default(false) | bool)
 
 - name: Assert workers expose the KVM device
@@ -179,7 +190,10 @@
   when: inventory_hostname in groups.get('workers', [])
 
 - name: Assert NFS server is running # noqa: command-instead-of-module
-  ansible.builtin.command: /usr/bin/systemctl is-active --quiet nfs-server.service
+  ansible.builtin.command: >-
+    systemctl is-active --quiet
+    {{ 'nfs-server.service' if ansible_facts.os_family == 'RedHat'
+       else 'nfs-kernel-server.service' }}
   check_mode: false
   changed_when: false
   when: inventory_hostname in groups.get('nfs_servers', [])

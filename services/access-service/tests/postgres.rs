@@ -23,7 +23,7 @@ async fn access_schema_enforces_unique_keys_single_live_grant_and_hashed_tokens(
         .await?;
     let migrations = format!(
         "CREATE SCHEMA access; SET search_path TO access;\n{}\n{}",
-        include_str!("../../../migrations/access/0001_sprint2_baseline.sql"),
+        include_str!("../../../migrations/access/0001_platform_baseline.sql"),
         include_str!("../../../migrations/access/0002_console_capabilities_and_sessions.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;

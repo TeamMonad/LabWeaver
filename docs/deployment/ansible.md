@@ -4,10 +4,10 @@ The only deployment controller entry points are `cargo xtask preflight --infra
 --env <environment>`, `cargo xtask deploy --infra --env <environment> --yes`,
 `cargo xtask verify --infra --env <environment> --yes`, and `cargo xtask backup
 --infra --env <environment> --yes`. Sprint 2 adopts retained infrastructure with
-`cargo xtask sprint2-foundation --infra --env <environment> --yes`,
-`cargo xtask sprint2-buildkit --infra --env <environment> --yes`, and bounded
-commands such as `cargo xtask sprint2-harbor-route --infra --env <environment>
---yes` and `cargo xtask sprint2-application --infra --env <environment>
+`cargo xtask platform-foundation --infra --env <environment> --yes`,
+`cargo xtask platform-buildkit --infra --env <environment> --yes`, and bounded
+commands such as `cargo xtask platform-harbor-route --infra --env <environment>
+--yes` and `cargo xtask platform-application --infra --env <environment>
 --package-manifest <manifest> --yes`. They run only on the approved Linux router
 worktree through `ansible-rs`; Windows fails with a stable unsupported-platform
 diagnostic. The removed Python launcher is not a deployment fallback.
@@ -98,7 +98,7 @@ contains persistent data, the operator must additionally provide a protected
 Harbor data-backup evidence locator through
 `LABWEAVER_HARBOR_DATA_BACKUP_LOCATOR`; missing or identity-mismatched evidence
 blocks reconciliation. Sprint 2 adoption does not use this broad entry point for
-a route-only change. `sprint2-harbor-route` verifies that the namespace,
+a route-only change. `platform-harbor-route` verifies that the namespace,
 Gateway, nginx Service, ready EndpointSlice and existing HTTPRoute are managed
 LabWeaver objects, then changes the existing Gateway listener to TLS passthrough
 and applies one `TLSRoute` to the Harbor nginx HTTPS Service. The Harbor nginx
@@ -106,7 +106,7 @@ certificate and public CA remain the end-to-end registry identity. It verifies G
 and the authenticated Docker Registry `/v2/` response. It does not invoke Helm,
 write a Secret, restart a Harbor Pod, or mutate Harbor database, registry, PVC,
 project, or image state. A route previously owned by kubectl client-side apply
-has its Gateway fields transferred to the dedicated `labweaver-sprint2-adoption`
+has its Gateway fields transferred to the dedicated `labweaver-platform-adoption`
 field manager only after all managed-object checks pass. The retained HTTPRoute
 is left in place but no longer attaches to the TLS-only listener. TestFlight temporary resources in `labweaver-demo` are
 named and selected by its run ID, so cleanup cannot target another run.
@@ -149,7 +149,7 @@ webhooks before their controller disappears, and verify that namespaces, CRDs,
 cluster RBAC, routes and persistent volumes leave no residue. The 2026-07-24
 connected cleanup used this boundary to remove Private Sigstore and Kyverno;
 Packer was already absent. This does not change the non-destructive semantics of
-`sprint2-application` or count as Release Gate evidence.
+`platform-application` or count as Release Gate evidence.
 
 The foundation command reconciles the retained PostgreSQL, NATS JetStream and
 MinIO service bodies in `labweaver-data` before application adoption. All images are digest
@@ -157,7 +157,7 @@ locked, all three workloads use TLS, persistent volumes, restricted Pod Security
 and default-deny NetworkPolicy. Each StatefulSet Pod template binds the exact
 private bundle SHA-256 so an identity or configuration rotation cannot be
 mistaken for a completed rollout while an old process remains Ready. Its private bundle uses
-`sprint2-foundation-bundle-manifest.json`; the same renderer and strict key
+`platform-foundation-bundle-manifest.json`; the same renderer and strict key
 validation used for the workload bundle apply. The reset deliberately excludes
 `labweaver-data` and `labweaver-build` from namespace deletion and clears only
 their LabWeaver schemas, streams and buckets.
@@ -173,17 +173,17 @@ On the approved router, create a new root-owned private authoring directory and
 render its exact Kubernetes input bundle without printing credential values:
 
 ```sh
-python3 tools/prepare_sprint2_foundation.py \
-  --output .private/sprint2-foundation-<run-id>
-python3 tools/render_sprint2_bundle.py \
-  --manifest deploy/config/sprint2-foundation-bundle-manifest.json \
-  --input .private/sprint2-foundation-<run-id>/render-input \
-  --output .private/sprint2-foundation-<run-id>/bundle.yml
+python3 tools/prepare_platform_foundation.py \
+  --output .private/platform-foundation-<run-id>
+python3 tools/render_platform_bundle.py \
+  --manifest deploy/config/platform-foundation-bundle-manifest.json \
+  --input .private/platform-foundation-<run-id>/render-input \
+  --output .private/platform-foundation-<run-id>/bundle.yml
 ```
 
 The authoring command creates one infrastructure CA, separate server
 certificates, eight workload-specific NATS users and mTLS clients, one distinct
-`sprint2-admin` mTLS client for controller-side NATS administration, the static
+`platform-admin` mTLS client for controller-side NATS administration, the static
 operator/account resolver config, and random PostgreSQL/MinIO bootstrap
 credentials. The `WORKLOADS` account enables JetStream with bounded 8 GiB disk,
 256 MiB memory, 16-stream, 64-consumer and 4096-pending-ack limits; the NATS
@@ -204,10 +204,10 @@ then enforces the exact foundation ConfigMap/Secret key set.
 
 Application adoption must bind the retained NATS administrator credentials and
 the dedicated TLS identity separately. Set
-`sprint2_application_nats_credentials_file`,
-`sprint2_application_nats_ca_file`,
-`sprint2_application_nats_client_certificate_file`, and
-`sprint2_application_nats_client_private_key_file` to root-owned mode-0600
+`platform_application_nats_credentials_file`,
+`platform_application_nats_ca_file`,
+`platform_application_nats_client_certificate_file`, and
+`platform_application_nats_client_private_key_file` to root-owned mode-0600
 files in ignored private storage. The role passes all four inputs to every NATS
 CLI invocation and fails before mutation when any input is absent; a workload
 client certificate must not be reused for administration.
@@ -215,7 +215,7 @@ The application role also owns the five reviewed pull-consumer identities used
 by Control, Agent and Environment. It creates a durable consumer only when it
 is absent, then reads back its stream, durable name, explicit-ack policy and
 complete subject filter set. A retained consumer with conflicting semantics
-blocks as `SPRINT2_APPLICATION_CONSUMER_CONFLICT`; the role never deletes or
+blocks as `PLATFORM_APPLICATION_CONSUMER_CONFLICT`; the role never deletes or
 silently replaces retained JetStream state.
 
 ### NATS authority forward rotation
@@ -272,11 +272,11 @@ the JWT, seed or Secret value. A retained credential created before this
 permission existed must be forward-rotated from the retained NSC account and
 rebundled before application reconciliation; it is never accepted with a
 runtime fallback.
-The root-owned PostgreSQL service file must bind `sprint2-admin` to the
+The root-owned PostgreSQL service file must bind `platform-admin` to the
 `labweaver` database, not the server's default `postgres` database. Before any
 baseline SQL is applied, the role checks `current_database()` against
-`sprint2_application_postgres_database` and blocks with
-`SPRINT2_APPLICATION_POSTGRES_DATABASE_IDENTITY_MISMATCH` on drift. This keeps
+`platform_application_postgres_database` and blocks with
+`PLATFORM_APPLICATION_POSTGRES_DATABASE_IDENTITY_MISMATCH` on drift. This keeps
 the six domain schemas and the runtime `database-url` in one authoritative
 database without resetting retained PostgreSQL state.
 When the retained Keycloak public hostname rejects traffic routed through the
@@ -309,7 +309,7 @@ uses a read-only root filesystem. The Gateway exception does not permit
 `privileged`, HostPath, host networking, or a Kubernetes API token.
 
 ```sh
-cargo xtask sprint2-foundation --infra --env demo --yes
+cargo xtask platform-foundation --infra --env demo --yes
 ```
 
 BuildKit is reconciled separately in `labweaver-build`. Generate a distinct
@@ -318,22 +318,22 @@ CA of the existing Harbor endpoint so registry TLS remains strict; then provide
 the reviewed Harbor endpoint CIDR in the ignored inventory:
 
 ```sh
-python3 tools/prepare_sprint2_buildkit.py \
+python3 tools/prepare_platform_buildkit.py \
   --registry-host harbor.lab.lan \
   --dns-nameserver 10.96.0.10 \
   --registry-ca /var/lib/labweaver/.private/harbor-public/registry-ca.crt \
-  --output .private/sprint2-buildkit-<run-id>
-python3 tools/render_sprint2_bundle.py \
-  --manifest deploy/config/sprint2-buildkit-bundle-manifest.json \
-  --input .private/sprint2-buildkit-<run-id>/render-input \
-  --output .private/sprint2-buildkit-<run-id>/bundle.yml
-cargo xtask sprint2-buildkit --infra --env demo --yes
+  --output .private/platform-buildkit-<run-id>
+python3 tools/render_platform_bundle.py \
+  --manifest deploy/config/platform-buildkit-bundle-manifest.json \
+  --input .private/platform-buildkit-<run-id>/render-input \
+  --output .private/platform-buildkit-<run-id>/bundle.yml
+cargo xtask platform-buildkit --infra --env demo --yes
 ```
 
 `--registry-ca` 必须指向当前 Harbor 公网入口证书的签发 CA，不能使用
 Harbor 集群内部 CA。部署角色会在修改 BuildKit 前把 bundle 中的 CA 与
 保留的 Harbor nginx TLS Secret 做精确比对；不一致时以
-`SPRINT2_BUILDKIT_HARBOR_CA_MISMATCH` 阻断。
+`PLATFORM_BUILDKIT_HARBOR_CA_MISMATCH` 阻断。
 
 The BuildKit namespace is the sole approved Sprint 2 exception for
 `Unconfined` seccomp/AppArmor, container-scoped SELinux `spc_t`, and
@@ -369,9 +369,9 @@ seed and Helm values with the checked-in renderers. Then adopt the retained data
 services and deploy the immutable profile:
 
 ```sh
-export LABWEAVER_RUN_ID=sprint2-application-<run-id>
-export LABWEAVER_TESTFLIGHT_RUN_ID=testflight-sprint2-<run-id>
-cargo xtask sprint2-application \
+export LABWEAVER_RUN_ID=platform-application-<run-id>
+export LABWEAVER_TESTFLIGHT_RUN_ID=testflight-platform-<run-id>
+cargo xtask platform-application \
   --infra \
   --env demo \
   --package-manifest artifacts/package/<package-run>/PlatformImagePackageManifest.json \
@@ -403,11 +403,11 @@ Helm upgrades using the exact manifest-bound digest references. The command neve
 `demo reset`, `DROP`, stream or bucket deletion, Harbor project/image deletion,
 realm deletion, namespace deletion, trust-plane uninstall, CRD removal or PVC
 removal. Its sanitized report conforms to
-`schemas/results/sprint2-application-report.v1.schema.json`.
+`schemas/results/platform-application-report.v1.schema.json`.
 
 The following legacy reset description documents an out-of-scope maintenance
 path and must not be followed for Sprint 2 adoption. `demo reset` runs only the
-allowlisted `93-sprint2-reset.yml` playbook. It is a
+allowlisted `93-platform-reset.yml` playbook. It is a
 pre-release destructive operation: there is no upgrade or restore guarantee for
 the deleted LabWeaver business data. Before it changes the cluster it verifies
 PostgreSQL, JetStream, MinIO, BuildKit, Harbor and Keycloak connectivity, then
@@ -431,26 +431,26 @@ teacher/student/platform-admin course memberships are bound before any browser
 session is created:
 
 ```sh
-python3 tools/prepare_sprint2_access_seed.py \
+python3 tools/prepare_platform_access_seed.py \
   --realm-file .private/keycloak-realm.json \
   --issuer https://keycloak.example.invalid/realms/workloads \
   --course-id 00000000-0000-7000-8000-000000000301 \
   --teacher-username teacher \
   --student-username student \
   --admin-username platform-admin \
-  --output .private/sprint2-access-seed.json
+  --output .private/platform-access-seed.json
 ```
 
 The application inventory supplies that file as
-`sprint2_application_access_seed_file`. The legacy reset inventory may retain
+`platform_application_access_seed_file`. The legacy reset inventory may retain
 the old variable only for out-of-scope maintenance.
 The role validates all identities before destruction, seeds only Control and
 OpenSSH Gateway service identities, and checks the exact membership count after
 the baseline migration. The operator must first read the target UID and set:
 
 ```sh
-export LABWEAVER_RUN_ID=sprint2-reset-20260719
-export LABWEAVER_SPRINT2_RESET_CONFIRMATION="destroy-pre-release-data:<cluster-uid>:${LABWEAVER_RUN_ID}"
+export LABWEAVER_RUN_ID=platform-reset-20260719
+export LABWEAVER_PLATFORM_RESET_CONFIRMATION="destroy-pre-release-data:<cluster-uid>:${LABWEAVER_RUN_ID}"
 cargo xtask demo reset --infra --env demo --yes
 ```
 
@@ -461,7 +461,7 @@ artifact bucket, Harbor project/images and Keycloak realm. It applies the single
 Sprint 2 baseline migration for each domain, deploys the ten-workload profile
 twice, exercises Helm atomic rollback with the reviewed failing values, verifies
 all rollouts, and writes a sanitized report conforming to
-`schemas/results/sprint2-reset-report.v1.schema.json`.
+`schemas/results/platform-reset-report.v1.schema.json`.
 
 The reset report is deployment evidence, not Sprint 2 acceptance. Real Container,
 KubeVirt, Gateway, Keycloak Playwright, freeze/cleanup and Release Gate checks
@@ -510,7 +510,7 @@ replay. The second occurrence of the same stable diagnostic stops the run as
    `FOUNDATION_OLD_CREDENTIAL_ACCEPTED`.
 
 New credentials are authored into a fresh private directory with
-`tools/prepare_sprint2_foundation.py`; the sanitized registry is rendered with
+`tools/prepare_platform_foundation.py`; the sanitized registry is rendered with
 `tools/render_credential_registry.py --input .private/<rotation-dir> --output
 .private/<rotation-dir>/credential-registry.json --run-id <run-id>
 --source-commit <commit>`. The registry records only locators, modes, sizes,

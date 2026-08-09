@@ -36,7 +36,7 @@ executor:
   harborUsernameFile: "/etc/labweaver/secrets/harbor-username"
   harborPasswordFile: "/etc/labweaver/secrets/harbor-password"
   projectStorageQuotaBytes: 10737418240
-  robotSubject: "sprint2-build-executor"
+  robotSubject: "platform-build-executor"
   scannerName: "trivy"
   scannerVersion: "0.72.0"
   scannerDatabaseRepository: "harbor.example.invalid/labweaver-system/trivy-db@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

@@ -54,7 +54,7 @@ commands:
   local_preflight: "cargo xtask local preflight --profile local-hostpath"
   local_stack_plan: "ansible-playbook deploy/ansible/playbooks/local-hostpath-stack-plan.yml"
   resource_local_replay: "cargo xtask resource replay --mode local --preflight --env demo --profile <private-profile> --authentication <private-auth> --deployment-manifest <manifest> --package-manifest <manifest>"
-  adopt_sprint2_application: "cargo xtask sprint2-application --infra --env demo --package-manifest <manifest> --yes"
+  adopt_platform_application: "cargo xtask platform-application --infra --env demo --package-manifest <manifest> --yes"
   deploy_verify: "cargo xtask verify --env demo"
   demo_replay: "cargo xtask demo replay"
 
@@ -918,7 +918,7 @@ as a usable NATS signing source.
 
 The former active operator seed was not recoverable and is retired; historical
 operator public IDs must not be treated as signing authority. The reviewed
-`sprint2-foundation-547d8fea` source is retained only for the existing
+`platform-foundation-547d8fea` source is retained only for the existing
 `WORKLOADS` account seed. Authority recovery therefore means a forward rotation:
 create a new operator and SYS account, import the retained `WORKLOADS` account
 key, reissue every NATS JWT and mTLS client, then reconcile NATS and all affected
@@ -936,7 +936,7 @@ Git. The rotation output is the canonical root-only record for the new
 operator/SYS/WORKLOADS public identities, the ten JWT/mTLS identities
 (`control-service`, `access-service`, `agent-service`, `build-executor`,
 `environment-service`, `evaluation-service`, `container-executor`,
-`kubevirt-executor`, `resource-service`, and `sprint2-admin`), rollback objects,
+`kubevirt-executor`, `resource-service`, and `platform-admin`), rollback objects,
 and deployment verification. Run the playbook twice and require stable public
 identity, JetStream state, workload readiness, and a successful Resource
 request/approval/Lease verification flow before declaring adoption complete.

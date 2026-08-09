@@ -43,7 +43,7 @@ ansible_probe:
   base_runtime: cgr.dev/chainguard/python@sha256:cc8d5c94686633e8affbaf52ac4e6c739544fb8a7f69c1e7091adf1a312f30b8
 postgresql:
   image: docker.io/library/postgres:17.6-alpine@sha256:747d5ed1fdeeb124b880fbe3d7c6557d2c4064ae41d6b6297d417882effce4be
-sprint2_foundation:
+platform_foundation:
   nats: docker.io/library/nats:2.14.1-scratch@sha256:4223c8fa116891628611e154fb66570cad599d8f8b3b131b82caf10f378e9dcf
   nats_box: docker.io/natsio/nats-box:0.18.0@sha256:abdc9f9f0120bb8adfbf674eb037d1551db55356eb198b7bd4ffed377f6950a6
   minio: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
@@ -124,7 +124,7 @@ test_images:
   cirros: quay.io/kubevirt/cirros-container-disk-demo@sha256:e2a45211b1f4a73e40b5356e503786c6dc7b5fb003b5d1d4ffa0a450a3dfdefe
   kind_node: kindest/node:v1.35.0@sha256:452d707d4862f52530247495d180205e029056831160e22870e37e3f6c1ac31f
   registry: docker.io/library/registry:3.0.0@sha256:6c5666b861f3505b116bb9aa9b25175e71210414bd010d92035ff64018f9457e
-sprint2_vm_base:
+platform_vm_base:
   binding: ubuntu-24.04-v1
   release: ubuntu-24.04
   registry_url: docker://quay.io/containerdisks/ubuntu@sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5

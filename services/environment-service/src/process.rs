@@ -830,7 +830,7 @@ mod deployment_contract_tests {
     use super::ProviderBindingConfiguration;
 
     #[test]
-    fn checked_in_sprint2_provider_example_has_no_legacy_contract() {
+    fn checked_in_platform_provider_example_has_no_legacy_contract() {
         let example = include_str!("../../../deploy/config/environment-providers.json.example");
         let bindings: Vec<ProviderBindingConfiguration> =
             serde_json::from_str(example).expect("provider example must deserialize");

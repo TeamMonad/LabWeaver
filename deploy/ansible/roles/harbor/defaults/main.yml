@@ -1,6 +1,10 @@
 ---
 harbor_project_name: labweaver-system
 harbor_chart_archive: /var/lib/labweaver/bundle/harbor-1.19.1.tgz
+harbor_dnsmasq_enabled: true
+# harbor_approved_controller_id is provided by inventory group_vars (e.g.
+# 'edge-router' for the Rocky controller, 'v1-cp-63' for the v1 cluster).
+# It must match LABWEAVER_CONTROLLER_ID when the controller env is set.
 harbor_component_resources:
   nginx: { requests: { cpu: 100m, memory: 128Mi }, limits: { cpu: 500m, memory: 512Mi } }
   portal: { requests: { cpu: 100m, memory: 128Mi }, limits: { cpu: 500m, memory: 512Mi } }
@@ -13,3 +17,8 @@ harbor_component_resources:
   database_permissions: { requests: { cpu: 50m, memory: 64Mi }, limits: { cpu: 250m, memory: 256Mi } }
   redis: { requests: { cpu: 100m, memory: 128Mi }, limits: { cpu: 500m, memory: 512Mi } }
   exporter: { requests: { cpu: 50m, memory: 64Mi }, limits: { cpu: 250m, memory: 256Mi } }
+
+# CA trust store layout differs between RHEL-family (/etc/pki/ca-trust) and
+# Debian-family (/usr/local/share/ca-certificates) control planes.
+harbor_ca_trust_anchors_dir: /etc/pki/ca-trust/source/anchors
+harbor_ca_trust_refresh_command: update-ca-trust extract

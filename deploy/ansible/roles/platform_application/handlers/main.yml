@@ -1,0 +1,21 @@
+---
+- name: Refresh retained router trust
+  ansible.builtin.command: "{{ platform_application_ca_trust_refresh_command }}"
+  changed_when: true
+  delegate_to: "{{ groups['routers'] | first }}"
+  become: true
+
+- name: Refresh Kubernetes node Harbor trust
+  ansible.builtin.command: "{{ platform_application_ca_trust_refresh_command }}"
+  changed_when: true
+  delegate_to: "{{ item }}"
+  become: true
+  loop: "{{ groups['k8s_cluster'] }}"
+
+- name: Restart the adopted PostgreSQL port-forward
+  ansible.builtin.systemd_service:
+    name: "{{ platform_application_postgres_forward_service_name }}"
+    enabled: true
+    state: restarted
+    daemon_reload: true
+  become: true

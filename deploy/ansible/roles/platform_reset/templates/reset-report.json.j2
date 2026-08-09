@@ -1,0 +1,34 @@
+{
+  "schema_version": "labweaver.platform-reset-report.v1",
+  "run_id": {{ platform_reset_run_id | to_json }},
+  "source_commit": {{ platform_reset_source_commit | to_json }},
+  "cluster_uid": {{ platform_reset_cluster_uid.stdout | trim | to_json }},
+  "migration_catalog_sha256": {{ ('sha256:' + platform_reset_migration_catalog_stat.stat.checksum) | to_json }},
+  "configuration_bundle_sha256": {{ ('sha256:' + platform_reset_configuration_bundle_stat.stat.checksum) | to_json }},
+  "configuration_manifest_sha256": {{ ('sha256:' + platform_reset_configuration_manifest_stat.stat.checksum) | to_json }},
+  "inventory_sha256": {{ ('sha256:' + platform_reset_inventory_stat.stat.checksum) | to_json }},
+  "destructive_reset": true,
+  "removed": {
+    "private_sigstore": true,
+    "kyverno": true,
+    "namespaces": {{ platform_reset_namespaces | to_json }},
+    "postgres_schemas": {{ platform_reset_domains | to_json }},
+    "nats_streams": {{ platform_reset_nats_streams | map(attribute='name') | list | to_json }},
+    "minio_bucket": {{ platform_reset_minio_bucket | to_json }},
+    "harbor_project": {{ platform_reset_harbor_project | to_json }},
+    "keycloak_realm": {{ platform_reset_keycloak_realm | to_json }}
+  },
+  "deployment": {
+    "release": {{ platform_reset_release_name | to_json }},
+    "namespace": {{ platform_reset_namespace | to_json }},
+    "workloads": {{ platform_reset_workloads | to_json }},
+    "platform_images": [{% for deployment in (platform_reset_deployment_readback.stdout | from_json).items %}{{ deployment.spec.template.spec.containers[0].image | to_json }}{% if not loop.last %}, {% endif %}{% endfor %}],
+    "first_revision": {{ platform_reset_first_revision.stdout | trim | to_json }},
+    "second_revision": {{ platform_reset_second_revision.stdout | trim | to_json }}
+  },
+  "readback": {
+    "kyverno_webhooks_remaining": 0,
+    "private_sigstore_namespace_removed": true,
+    "runtime_probe_namespace": {{ platform_reset_runtime_probe_namespace | to_json }}
+  }
+}

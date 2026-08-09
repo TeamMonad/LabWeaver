@@ -294,7 +294,7 @@ class ResourceAcceptanceProfileTests(unittest.TestCase):
         self.assertIn("create_resource_replay_auth.py", defaults)
         self.assertIn("os.chmod", driver)
         self.assertIn("IDENTITIES", driver)
-        self.assertIn("sprint2-teacher", driver)
+        self.assertIn("platform-teacher", driver)
         self.assertNotIn("--teacher-password-file", driver)
         playbook = (ROOT / "deploy/ansible/playbooks/94-resource-replay-auth.yml").read_text(
             encoding="utf-8"

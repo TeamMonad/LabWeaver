@@ -8,12 +8,12 @@ domains:
   - name: control
     migrations:
       - id: 1
-        file: control/0001_sprint2_baseline.sql
+        file: control/0001_platform_baseline.sql
         sha256: ece6f9d2bd19f8219fa670d827c7fdf9d1b21c7f6d4c4836b8ec5868f950883e
   - name: access
     migrations:
       - id: 1
-        file: access/0001_sprint2_baseline.sql
+        file: access/0001_platform_baseline.sql
         sha256: b8cd92479a7e5f314a2b79fcc578845c149be38334d344a84b784bad0ebafe5b
       - id: 2
         file: access/0002_console_capabilities_and_sessions.sql
@@ -21,12 +21,12 @@ domains:
   - name: environment
     migrations:
       - id: 1
-        file: environment/0001_sprint2_baseline.sql
+        file: environment/0001_platform_baseline.sql
         sha256: a1050a77e3f077854972302d33805db9bac33caf0acbd7c582116457ef354569
   - name: agent
     migrations:
       - id: 1
-        file: agent/0001_sprint2_baseline.sql
+        file: agent/0001_platform_baseline.sql
         sha256: c98cefba2529109d7ac833f93a192cab1315889e86da811339fe1ada2af0f3b2
       - id: 2
         file: agent/0002_allow_content_addressed_image_reuse.sql
@@ -37,7 +37,7 @@ domains:
   - name: evaluation
     migrations:
       - id: 1
-        file: evaluation/0001_sprint2_baseline.sql
+        file: evaluation/0001_platform_baseline.sql
         sha256: 81bc4a539f5ecc56beb709c797917ade281e68a7483e6fadb3574b503c6a6dba
       - id: 2
         file: evaluation/0002_evaluation_control_plane.sql
@@ -45,7 +45,7 @@ domains:
   - name: resource
     migrations:
       - id: 1
-        file: resource/0001_sprint2_baseline.sql
+        file: resource/0001_platform_baseline.sql
         sha256: 54b2f428109fb3e819da9db23802b58ecd760858f39404e7ef4d028cfa508e79
       - id: 2
         file: resource/0002_resource_request_capacity_lease.sql

@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://labweaver.invalid/schemas/results/release-gate-report.schema.json",
-  "title": "Sprint2ReleaseGateReport",
+  "title": "PlatformReleaseGateReport",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "status", "sourceCommit", "runId", "deploymentManifest", "migrationCatalog", "platformImages", "runtimeArtifacts", "checks"],
   "properties": {
-    "schemaVersion": {"const": "sprint2-release-gate-report.v1"},
+    "schemaVersion": {"const": "platform-release-gate-report.v1"},
     "status": {"const": "passed"},
     "sourceCommit": {"$ref": "#/$defs/commit"},
     "runId": {"$ref": "#/$defs/uuid"},

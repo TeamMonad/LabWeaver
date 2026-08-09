@@ -14,7 +14,7 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: "{{ identity_namespace }}"
-        - ipBlock: {cidr: 10.20.0.0/16}
+        - ipBlock: {cidr: "{{ identity_admin_allowed_cidr }}"}
   egress:
     - to:
         - namespaceSelector:

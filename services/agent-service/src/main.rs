@@ -604,7 +604,7 @@ mod deployment_contract_tests {
     use super::{BuildExecutorDeploymentFile, DeploymentFile};
 
     #[test]
-    fn checked_in_sprint2_example_matches_the_runtime_contract() {
+    fn checked_in_platform_example_matches_the_runtime_contract() {
         let example = include_str!("../../../deploy/config/agent-control-plane.yaml.example");
         let deployment: DeploymentFile =
             serde_yaml::from_str(example).expect("agent deployment example must deserialize");

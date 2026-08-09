@@ -22,25 +22,25 @@ SPEC.loader.exec_module(SAFETY)
 
 
 class AnsibleFixtureTests(unittest.TestCase):
-    def test_sprint2_foundation_images_are_immutable(self) -> None:
+    def test_platform_foundation_images_are_immutable(self) -> None:
         lock = yaml.safe_load((ROOT / "deploy/versions.lock.yml").read_text(encoding="utf-8"))
-        foundation = lock["sprint2_foundation"]
+        foundation = lock["platform_foundation"]
         images = {key: foundation[key] for key in ("nats", "nats_box", "minio", "buildkit_rootless")}
 
         for reference in images.values():
             self.assertRegex(reference, r"^[^\s]+@sha256:[0-9a-f]{64}$")
         self.assertRegex(lock["postgresql"]["image"], r"^[^\s]+@sha256:[0-9a-f]{64}$")
 
-    def test_sprint2_administration_tools_are_locked_and_installed_before_foundation(self) -> None:
+    def test_platform_administration_tools_are_locked_and_installed_before_foundation(self) -> None:
         lock = yaml.safe_load((ROOT / "deploy/versions.lock.yml").read_text(encoding="utf-8"))
-        tools = lock["sprint2_foundation"]["admin_tools"]
-        foundation_playbook = (ROOT / "deploy/ansible/playbooks/92-sprint2-foundation.yml").read_text(
+        tools = lock["platform_foundation"]["admin_tools"]
+        foundation_playbook = (ROOT / "deploy/ansible/playbooks/92-platform-foundation.yml").read_text(
             encoding="utf-8"
         )
-        tool_playbook = (ROOT / "deploy/ansible/playbooks/91-sprint2-admin-tools.yml").read_text(
+        tool_playbook = (ROOT / "deploy/ansible/playbooks/91-platform-admin-tools.yml").read_text(
             encoding="utf-8"
         )
-        tasks = (ROOT / "deploy/ansible/roles/sprint2_admin_tools/tasks/main.yml").read_text(
+        tasks = (ROOT / "deploy/ansible/roles/platform_admin_tools/tasks/main.yml").read_text(
             encoding="utf-8"
         )
 
@@ -51,53 +51,53 @@ class AnsibleFixtureTests(unittest.TestCase):
         for name in ("nats_cli", "nsc", "minio_client", "buildctl", "keycloak_admin"):
             self.assertRegex(tools[name]["linux_amd64_sha256"], r"^[0-9a-f]{64}$")
             self.assertTrue(tools[name]["linux_amd64_url"].startswith("https://github.com/"))
-        self.assertIn("- import_playbook: 91-sprint2-admin-tools.yml", foundation_playbook)
-        self.assertIn("sprint2_admin_tools_profile: authoring", tool_playbook)
-        self.assertIn("sprint2_admin_tools_profile: execution", tool_playbook)
+        self.assertIn("- import_playbook: 91-platform-admin-tools.yml", foundation_playbook)
+        self.assertIn("platform_admin_tools_profile: authoring", tool_playbook)
+        self.assertIn("platform_admin_tools_profile: execution", tool_playbook)
         self.assertIn("checksum: \"sha256:", tasks)
         self.assertNotIn("ansible.builtin.shell", tasks)
 
-    def test_sprint2_foundation_is_persistent_and_reset_preserves_it(self) -> None:
-        playbook = (ROOT / "deploy/ansible/playbooks/92-sprint2-foundation.yml").read_text(
+    def test_platform_foundation_is_persistent_and_reset_preserves_it(self) -> None:
+        playbook = (ROOT / "deploy/ansible/playbooks/92-platform-foundation.yml").read_text(
             encoding="utf-8"
         )
-        tasks = (ROOT / "deploy/ansible/roles/sprint2_foundation/tasks/main.yml").read_text(
+        tasks = (ROOT / "deploy/ansible/roles/platform_foundation/tasks/main.yml").read_text(
             encoding="utf-8"
         )
         workloads = (
-            ROOT / "deploy/ansible/roles/sprint2_foundation/templates/workloads.yml.j2"
+            ROOT / "deploy/ansible/roles/platform_foundation/templates/workloads.yml.j2"
         ).read_text(encoding="utf-8")
-        reset = (ROOT / "deploy/ansible/roles/sprint2_reset/defaults/main.yml").read_text(
+        reset = (ROOT / "deploy/ansible/roles/platform_reset/defaults/main.yml").read_text(
             encoding="utf-8"
         )
 
-        self.assertIn("labweaver_preflight_scope: sprint2-foundation", playbook)
-        self.assertIn("- import_playbook: 91-sprint2-admin-tools.yml", playbook)
-        self.assertIn("sprint2-foundation --infra", (
+        self.assertIn("labweaver_preflight_scope: platform-foundation", playbook)
+        self.assertIn("- import_playbook: 91-platform-admin-tools.yml", playbook)
+        self.assertIn("platform-foundation --infra", (
             ROOT / "docs/deployment/ansible.md"
         ).read_text(encoding="utf-8"))
-        self.assertIn("SPRINT2_FOUNDATION_BUNDLE_KEYS_INVALID", tasks)
-        self.assertIn("sprint2_foundation_postgres_admin_role", tasks)
+        self.assertIn("PLATFORM_FOUNDATION_BUNDLE_KEYS_INVALID", tasks)
+        self.assertIn("platform_foundation_postgres_admin_role", tasks)
         self.assertIn("kubernetes.core.k8s_exec", tasks)
-        self.assertIn("SPRINT2_FOUNDATION_POSTGRES_ADMIN_ROLE_INVALID", tasks)
-        self.assertIn("sprint2_foundation_postgres_database", tasks)
+        self.assertIn("PLATFORM_FOUNDATION_POSTGRES_ADMIN_ROLE_INVALID", tasks)
+        self.assertIn("platform_foundation_postgres_database", tasks)
         self.assertIn("Delete exact pod blocked on a superseded failed revision", tasks)
         self.assertIn("item.status.currentRevision != item.status.updateRevision", tasks)
         self.assertIn("kind: StatefulSet", workloads)
         self.assertEqual(workloads.count("kind: StatefulSet"), 3)
         replacements = {
-            "{{ sprint2_foundation_namespace }}": "labweaver-data",
-            "{{ sprint2_foundation_storage_class }}": "local-path",
-            "{{ sprint2_foundation_minio_storage_class }}": "nfs-rwx",
-            "{{ sprint2_foundation_postgres_storage }}": "20Gi",
-            "{{ sprint2_foundation_nats_storage }}": "10Gi",
-            "{{ sprint2_foundation_minio_storage }}": "100Gi",
-            "{{ sprint2_foundation_lock.postgresql.image }}": "registry.invalid/postgres@sha256:" + "a" * 64,
-            "{{ sprint2_foundation_lock.sprint2_foundation.nats }}": "registry.invalid/nats@sha256:" + "b" * 64,
-            "{{ sprint2_foundation_lock.sprint2_foundation.minio }}": "registry.invalid/minio@sha256:" + "c" * 64,
-            "{{ sprint2_foundation_workload_configuration_sha256.postgres }}": "d" * 64,
-            "{{ sprint2_foundation_workload_configuration_sha256.nats }}": "e" * 64,
-            "{{ sprint2_foundation_workload_configuration_sha256.minio }}": "f" * 64,
+            "{{ platform_foundation_namespace }}": "labweaver-data",
+            "{{ platform_foundation_storage_class }}": "local-path",
+            "{{ platform_foundation_minio_storage_class }}": "nfs-rwx",
+            "{{ platform_foundation_postgres_storage }}": "20Gi",
+            "{{ platform_foundation_nats_storage }}": "10Gi",
+            "{{ platform_foundation_minio_storage }}": "100Gi",
+            "{{ platform_foundation_lock.postgresql.image }}": "registry.invalid/postgres@sha256:" + "a" * 64,
+            "{{ platform_foundation_lock.platform_foundation.nats }}": "registry.invalid/nats@sha256:" + "b" * 64,
+            "{{ platform_foundation_lock.platform_foundation.minio }}": "registry.invalid/minio@sha256:" + "c" * 64,
+            "{{ platform_foundation_workload_configuration_sha256.postgres }}": "d" * 64,
+            "{{ platform_foundation_workload_configuration_sha256.nats }}": "e" * 64,
+            "{{ platform_foundation_workload_configuration_sha256.minio }}": "f" * 64,
         }
         rendered = workloads
         for source, value in replacements.items():
@@ -139,7 +139,7 @@ class AnsibleFixtureTests(unittest.TestCase):
             {"4222", "5432", "9000"},
         )
         self.assertIn("pod-security.kubernetes.io/enforce: restricted", tasks)
-        reset_namespaces = reset.split("sprint2_reset_domains:", maxsplit=1)[0]
+        reset_namespaces = reset.split("platform_reset_domains:", maxsplit=1)[0]
         self.assertNotIn("labweaver-data", reset_namespaces)
         self.assertNotIn("labweaver-build", reset_namespaces)
 
@@ -151,7 +151,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("--workloads-seed-file", playbook)
         self.assertIn("NATS_AUTHORITY_ROTATION_ROLLBACK_SURFACE_INCOMPLETE", playbook)
         self.assertIn("rollback/kubernetes-objects.yaml", playbook)
-        self.assertIn("- import_playbook: 92-sprint2-foundation.yml", playbook)
+        self.assertIn("- import_playbook: 92-platform-foundation.yml", playbook)
         self.assertIn("Apply only reviewed NATS-bearing application objects", playbook)
         self.assertIn("--force-conflicts", playbook)
         self.assertIn("Roll every affected workload to the replacement authority", playbook)
@@ -167,7 +167,7 @@ class AnsibleFixtureTests(unittest.TestCase):
 
     def test_object_store_proxy_has_a_minio_only_transport_rule(self) -> None:
         tasks = (
-            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
         ).read_text(encoding="utf-8")
         marker = "Browser uploads terminate at the Web nginx object-store proxy."
         self.assertIn(marker, tasks)
@@ -180,25 +180,25 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertNotIn('port: "5432"', scoped_rule)
         self.assertNotIn('port: "4222"', scoped_rule)
 
-    def test_sprint2_buildkit_is_rootless_isolated_and_explicitly_exception_bound(self) -> None:
-        playbook = (ROOT / "deploy/ansible/playbooks/92-sprint2-buildkit.yml").read_text(
+    def test_platform_buildkit_is_rootless_isolated_and_explicitly_exception_bound(self) -> None:
+        playbook = (ROOT / "deploy/ansible/playbooks/92-platform-buildkit.yml").read_text(
             encoding="utf-8"
         )
-        tasks = (ROOT / "deploy/ansible/roles/sprint2_buildkit/tasks/main.yml").read_text(
+        tasks = (ROOT / "deploy/ansible/roles/platform_buildkit/tasks/main.yml").read_text(
             encoding="utf-8"
         )
         workloads = (
-            ROOT / "deploy/ansible/roles/sprint2_buildkit/templates/workloads.yml.j2"
+            ROOT / "deploy/ansible/roles/platform_buildkit/templates/workloads.yml.j2"
         ).read_text(encoding="utf-8")
-        self.assertIn("labweaver_preflight_scope: sprint2-buildkit", playbook)
+        self.assertIn("labweaver_preflight_scope: platform-buildkit", playbook)
         self.assertIn(
-            "'sprint2-buildkit'",
+            "'platform-buildkit'",
             (ROOT / "deploy/ansible/roles/preflight/tasks/main.yml").read_text(
                 encoding="utf-8"
             ),
         )
-        self.assertIn("SPRINT2_BUILDKIT_BUNDLE_KEYS_INVALID", tasks)
-        self.assertIn("SPRINT2_BUILDKIT_READBACK_INVALID", tasks)
+        self.assertIn("PLATFORM_BUILDKIT_BUNDLE_KEYS_INVALID", tasks)
+        self.assertIn("PLATFORM_BUILDKIT_READBACK_INVALID", tasks)
         self.assertIn("pod-security.kubernetes.io/enforce: privileged", tasks)
         self.assertIn("runAsNonRoot: true", workloads)
         self.assertIn("privileged: false", workloads)
@@ -209,28 +209,28 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("appArmorProfile: {type: Unconfined}", workloads)
         self.assertIn("automountServiceAccountToken: false", workloads)
         self.assertIn("dnsPolicy: None", workloads)
-        self.assertIn("nameservers: [{{ sprint2_buildkit_dns_nameserver }}]", workloads)
+        self.assertIn("nameservers: [{{ platform_buildkit_dns_nameserver }}]", workloads)
         self.assertNotIn("hostPath:", workloads)
         self.assertNotIn("hostNetwork: true", workloads)
         self.assertIn("--oci-worker-no-process-sandbox", workloads)
-        self.assertIn("labweaver.io/configuration-sha256: {{ sprint2_buildkit_bundle_sha256 }}", workloads)
+        self.assertIn("labweaver.io/configuration-sha256: {{ platform_buildkit_bundle_sha256 }}", workloads)
         self.assertIn("mountPath: /home/user/.local/tmp", workloads)
         self.assertIn("name: TMPDIR, value: /tmp", workloads)
         self.assertIn("default-deny", workloads)
         self.assertIn("buildctl", workloads)
-        self.assertIn("sprint2_buildkit_registry_cidr", tasks)
+        self.assertIn("platform_buildkit_registry_cidr", tasks)
         self.assertIn("/etc/buildkit/tls/registry-ca.crt", tasks)
-        self.assertIn("SPRINT2_BUILDKIT_HARBOR_CA_MISMATCH", tasks)
+        self.assertIn("PLATFORM_BUILDKIT_HARBOR_CA_MISMATCH", tasks)
         self.assertIn("harbor-nginx", (
-            ROOT / "deploy/ansible/roles/sprint2_buildkit/defaults/main.yml"
+            ROOT / "deploy/ansible/roles/platform_buildkit/defaults/main.yml"
         ).read_text(encoding="utf-8"))
         self.assertIn("harbor-public/registry-ca.crt", (
             ROOT / "docs/deployment/ansible.md"
         ).read_text(encoding="utf-8"))
-        self.assertIn("sprint2-buildkit --infra", (
+        self.assertIn("platform-buildkit --infra", (
             ROOT / "docs/deployment/ansible.md"
         ).read_text(encoding="utf-8"))
-        self.assertIn("Sprint2Buildkit", (
+        self.assertIn("PlatformBuildkit", (
             ROOT / "xtask/src/main.rs"
         ).read_text(encoding="utf-8"))
 
@@ -253,24 +253,24 @@ class AnsibleFixtureTests(unittest.TestCase):
         gateway = (
             ROOT / "deploy/ansible/roles/harbor/templates/gateway.yml.j2"
         ).read_text(encoding="utf-8")
-        sprint2_route = (
-            ROOT / "deploy/ansible/roles/sprint2_harbor_route/tasks/main.yml"
+        platform_route = (
+            ROOT / "deploy/ansible/roles/platform_harbor_route/tasks/main.yml"
         ).read_text(encoding="utf-8")
         self.assertIn("name: {{ harbor_release_name }}\n          port: 80", gateway)
         self.assertNotIn("{{ harbor_release_name }}-core", gateway)
         self.assertNotIn("{{ harbor_release_name }}-portal", gateway)
-        self.assertIn("LABWEAVER SPRINT2 HARBOR", sprint2_route)
-        self.assertIn("SPRINT2_HARBOR_ROUTER_RESOLUTION_INVALID", sprint2_route)
-        self.assertIn("Refresh router system trust", sprint2_route)
+        self.assertIn("LABWEAVER PLATFORM HARBOR", platform_route)
+        self.assertIn("PLATFORM_HARBOR_ROUTER_RESOLUTION_INVALID", platform_route)
+        self.assertIn("Refresh router system trust", platform_route)
 
-    def test_sprint2_application_pins_and_adopts_the_vm_base(self) -> None:
+    def test_platform_application_pins_and_adopts_the_vm_base(self) -> None:
         tasks = (
-            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
         ).read_text(encoding="utf-8")
         lock = (ROOT / "deploy/versions.lock.yml").read_text(encoding="utf-8")
-        self.assertIn("SPRINT2_VM_BASE_DATAVOLUME_CONFLICT", tasks)
-        self.assertIn("SPRINT2_VM_BASE_DATASOURCE_CONFLICT", tasks)
-        self.assertIn("SPRINT2_VM_BASE_IDENTITY_INVALID", tasks)
+        self.assertIn("PLATFORM_VM_BASE_DATAVOLUME_CONFLICT", tasks)
+        self.assertIn("PLATFORM_VM_BASE_DATASOURCE_CONFLICT", tasks)
+        self.assertIn("PLATFORM_VM_BASE_IDENTITY_INVALID", tasks)
         self.assertEqual(
             tasks.count('cdi.kubevirt.io/storage.bind.immediate.requested: "true"'),
             3,
@@ -287,10 +287,10 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("data_source_name: ubuntu-lab-base-v1", lock)
         self.assertNotIn("state: absent", tasks)
 
-    def test_sprint2_application_report_excludes_removed_product_dependencies(self) -> None:
+    def test_platform_application_report_excludes_removed_product_dependencies(self) -> None:
         report = (
             ROOT
-            / "deploy/ansible/roles/sprint2_application/templates/application-report.json.j2"
+            / "deploy/ansible/roles/platform_application/templates/application-report.json.j2"
         ).read_text(encoding="utf-8")
         self.assertNotIn('"kyverno"', report)
         self.assertNotIn('"private-sigstore"', report)
@@ -305,47 +305,47 @@ class AnsibleFixtureTests(unittest.TestCase):
         ):
             self.assertIn(f'"{retained}"', report)
 
-    def test_sprint2_application_ssh_service_port_is_an_integer(self) -> None:
+    def test_platform_application_ssh_service_port_is_an_integer(self) -> None:
         values = (ROOT / "deploy/helm/labweaver/values.yaml").read_text(encoding="utf-8")
         self.assertIn("containerPort: 2222, servicePort: 2222", values)
         self.assertNotIn('servicePort: "2222"', values)
 
-    def test_sprint2_application_builds_helm_value_arguments_without_regex(self) -> None:
+    def test_platform_application_builds_helm_value_arguments_without_regex(self) -> None:
         tasks = (
-            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
         ).read_text(encoding="utf-8")
         arguments = tasks.split(
             "- name: Build immutable Helm arguments", maxsplit=1
         )[1].split("- name:", maxsplit=1)[0]
-        self.assertIn("for values_file in sprint2_application_values_files", arguments)
-        self.assertIn("'--values=' + sprint2_application_report_root", arguments)
+        self.assertIn("for values_file in platform_application_values_files", arguments)
+        self.assertIn("'--values=' + platform_application_report_root", arguments)
         self.assertIn(
-            "'imagePullSecrets[0].name=' + sprint2_application_image_pull_secret_name",
+            "'imagePullSecrets[0].name=' + platform_application_image_pull_secret_name",
             arguments,
         )
         self.assertIn(
-            "'deploymentIdentity.configurationBundleSha256=' + sprint2_application_configuration_bundle_sha256",
+            "'deploymentIdentity.configurationBundleSha256=' + platform_application_configuration_bundle_sha256",
             arguments,
         )
         self.assertIn("'portalRoute.enabled=true'", arguments)
         self.assertIn("'objectStoreRoute.enabled=true'", arguments)
-        self.assertIn("'objectStoreRoute.pathPrefix=/' + sprint2_application_minio_bucket", arguments)
-        self.assertIn("'objectStoreRoute.caCertificate=' + sprint2_application_minio_ca_file", arguments)
+        self.assertIn("'objectStoreRoute.pathPrefix=/' + platform_application_minio_bucket", arguments)
+        self.assertIn("'objectStoreRoute.caCertificate=' + platform_application_minio_ca_file", arguments)
         self.assertIn("'workloads.control-service.externalEgress[0].cidr='", arguments)
         self.assertIn(
-            "'portalRoute.namespace=' + sprint2_application_portal_route_namespace",
+            "'portalRoute.namespace=' + platform_application_portal_route_namespace",
             arguments,
         )
         self.assertIn("'sshGatewayService.enabled=true'", arguments)
         self.assertIn(
-            "'sshGatewayService.loadBalancerIP=' + sprint2_application_ssh_load_balancer_ip",
+            "'sshGatewayService.loadBalancerIP=' + platform_application_ssh_load_balancer_ip",
             arguments,
         )
         self.assertNotIn("regex_replace", arguments)
 
-    def test_sprint2_application_binds_configuration_identity_to_every_workload(self) -> None:
+    def test_platform_application_binds_configuration_identity_to_every_workload(self) -> None:
         tasks = (
-            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
         ).read_text(encoding="utf-8")
         values = (ROOT / "deploy/helm/labweaver/values.yaml").read_text(encoding="utf-8")
         helpers = (
@@ -355,8 +355,8 @@ class AnsibleFixtureTests(unittest.TestCase):
             ROOT / "deploy/helm/labweaver/templates/workloads.yaml"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("sprint2_application_configuration_bundle_sha256", tasks)
-        self.assertIn("sprint2_application_controller_inputs.results[4].stat.checksum", tasks)
+        self.assertIn("platform_application_configuration_bundle_sha256", tasks)
+        self.assertIn("platform_application_controller_inputs.results[4].stat.checksum", tasks)
         self.assertIn("configurationBundleSha256: \"\"", values)
         self.assertIn(
             'required "deploymentIdentity.configurationBundleSha256 is required"',
@@ -368,18 +368,18 @@ class AnsibleFixtureTests(unittest.TestCase):
             workloads,
         )
 
-    def test_sprint2_application_binds_freeze_worker_to_packaged_evaluation_image(
+    def test_platform_application_binds_freeze_worker_to_packaged_evaluation_image(
         self,
     ) -> None:
         tasks = (
-            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
         ).read_text(encoding="utf-8")
         self.assertIn(
             "Bind the evaluation freeze worker to the immutable package image",
             tasks,
         )
         self.assertIn(
-            "SPRINT2_APPLICATION_EVALUATION_WORKER_IMAGE_INVALID",
+            "PLATFORM_APPLICATION_EVALUATION_WORKER_IMAGE_INVALID",
             tasks,
         )
         self.assertIn(
@@ -387,31 +387,31 @@ class AnsibleFixtureTests(unittest.TestCase):
             tasks,
         )
 
-    def test_sprint2_application_requires_canonical_oidc_platform_admin_mapping(self) -> None:
+    def test_platform_application_requires_canonical_oidc_platform_admin_mapping(self) -> None:
         tasks = (
-            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
         ).read_text(encoding="utf-8")
-        self.assertIn("sprint2_application_access_configuration", tasks)
+        self.assertIn("platform_application_access_configuration", tasks)
         self.assertIn("| from_yaml_all", tasks)
         self.assertLess(
             tasks.index("Parse immutable package and private configuration"),
             tasks.index("Parse Access Service role configuration from the reviewed bundle"),
         )
         self.assertNotIn(
-            "sprint2_application_configuration_objects\n         | selectattr('kind'",
+            "platform_application_configuration_objects\n         | selectattr('kind'",
             tasks.split("Parse Access Service role configuration from the reviewed bundle", 1)[0],
         )
         self.assertIn(
-            "sprint2_application_access_configuration.oidc.role_mappings.platform_admin == 'platform_admin'",
+            "platform_application_access_configuration.oidc.role_mappings.platform_admin == 'platform_admin'",
             tasks,
         )
         self.assertIn(
-            "sprint2_application_access_configuration.oidc.role_mappings['platform-admin'] == 'platform_admin'",
+            "platform_application_access_configuration.oidc.role_mappings['platform-admin'] == 'platform_admin'",
             tasks,
         )
-        self.assertIn("SPRINT2_APPLICATION_OIDC_ROLE_MAPPING_INVALID", tasks)
+        self.assertIn("PLATFORM_APPLICATION_OIDC_ROLE_MAPPING_INVALID", tasks)
         self.assertIn(
-            "'workerImage':\n                              sprint2_application_evaluation_worker_image",
+            "'workerImage':\n                              platform_application_evaluation_worker_image",
             tasks,
         )
         self.assertIn(
@@ -419,37 +419,37 @@ class AnsibleFixtureTests(unittest.TestCase):
             tasks,
         )
 
-    def test_sprint2_application_rejects_stale_nats_ca_and_incomplete_evaluation_binding(self) -> None:
+    def test_platform_application_rejects_stale_nats_ca_and_incomplete_evaluation_binding(self) -> None:
         tasks = (
-            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
         ).read_text(encoding="utf-8")
         self.assertIn("Select reviewed NATS and Evaluation configuration objects", tasks)
-        self.assertIn("sprint2_application_bundle_nats_ca_sha256", tasks)
-        self.assertIn("sprint2_application_remote_nats_ca_sha256", tasks)
+        self.assertIn("platform_application_bundle_nats_ca_sha256", tasks)
+        self.assertIn("platform_application_remote_nats_ca_sha256", tasks)
         self.assertIn(
-            "selectattr('item', 'equalto', sprint2_application_nats_ca_file)",
+            "selectattr('item', 'equalto', platform_application_nats_ca_file)",
             tasks,
         )
         self.assertIn("map(attribute='stat.checksum')", tasks)
         self.assertIn(
-            "sprint2_application_bundle_nats_ca_sha256 == sprint2_application_remote_nats_ca_sha256",
+            "platform_application_bundle_nats_ca_sha256 == platform_application_remote_nats_ca_sha256",
             tasks,
         )
         self.assertIn(
-            "sprint2_application_evaluation_configuration.coordinator.workerRegistryPullConfigFile",
+            "platform_application_evaluation_configuration.coordinator.workerRegistryPullConfigFile",
             tasks,
         )
-        self.assertIn("SPRINT2_APPLICATION_CONFIGURATION_BINDING_INVALID", tasks)
+        self.assertIn("PLATFORM_APPLICATION_CONFIGURATION_BINDING_INVALID", tasks)
         self.assertLess(
             tasks.index("Require reviewed configuration bindings before any cluster mutation"),
             tasks.index("Atomically deploy the immutable Sprint 2 profile"),
         )
 
-    def test_sprint2_application_preinstalls_evaluation_runner_default_deny(
+    def test_platform_application_preinstalls_evaluation_runner_default_deny(
         self,
     ) -> None:
         tasks = (
-            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
         ).read_text(encoding="utf-8")
         policy = tasks.split(
             "- name: Reconcile the permanent evaluation runner namespace default deny",
@@ -461,7 +461,7 @@ class AnsibleFixtureTests(unittest.TestCase):
 
         self.assertIn("name: oj-runner-default-deny", policy)
         self.assertIn(
-            'namespace: "{{ sprint2_application_evaluation_namespace }}"',
+            'namespace: "{{ platform_application_evaluation_namespace }}"',
             policy,
         )
         self.assertIn("podSelector: {}", policy)
@@ -477,7 +477,7 @@ class AnsibleFixtureTests(unittest.TestCase):
             policy,
         )
         self.assertIn(
-            "SPRINT2_APPLICATION_EVALUATION_DEFAULT_DENY_INVALID",
+            "PLATFORM_APPLICATION_EVALUATION_DEFAULT_DENY_INVALID",
             policy,
         )
 
@@ -589,9 +589,9 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("delegation_key_file", resource_config)
         self.assertIn("port: 9448", network_policy)
 
-    def test_sprint2_application_reads_kubernetes_items_as_a_mapping_key(self) -> None:
+    def test_platform_application_reads_kubernetes_items_as_a_mapping_key(self) -> None:
         tasks = (
-            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
         ).read_text(encoding="utf-8")
         readback = tasks.split(
             "- name: Require exact workload count and digest-only images", maxsplit=1
@@ -599,32 +599,32 @@ class AnsibleFixtureTests(unittest.TestCase):
 
         self.assertEqual(
             readback.count(
-                "(sprint2_application_deployments.stdout | from_json)['items']"
+                "(platform_application_deployments.stdout | from_json)['items']"
             ),
             3,
         )
-        self.assertNotIn("(sprint2_application_deployments.stdout | from_json).items", readback)
+        self.assertNotIn("(platform_application_deployments.stdout | from_json).items", readback)
 
         helpers = (
             ROOT / "deploy/helm/labweaver/templates/_helpers.tpl"
         ).read_text(encoding="utf-8")
         self.assertIn("app.kubernetes.io/instance: {{ .Release.Name }}", helpers)
 
-    def test_sprint2_application_binds_the_baseline_to_the_runtime_database(self) -> None:
+    def test_platform_application_binds_the_baseline_to_the_runtime_database(self) -> None:
         tasks = (
-            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
         ).read_text(encoding="utf-8")
         defaults = (
-            ROOT / "deploy/ansible/roles/sprint2_application/defaults/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/defaults/main.yml"
         ).read_text(encoding="utf-8")
         adoption = (
             ROOT
-            / "deploy/ansible/roles/sprint2_application/templates/baseline-adopt.sql.j2"
+            / "deploy/ansible/roles/platform_application/templates/baseline-adopt.sql.j2"
         ).read_text(encoding="utf-8")
-        self.assertIn("sprint2_application_postgres_database: labweaver", defaults)
+        self.assertIn("platform_application_postgres_database: labweaver", defaults)
         self.assertIn("SELECT current_database()", tasks)
         self.assertIn(
-            "SPRINT2_APPLICATION_POSTGRES_DATABASE_IDENTITY_MISMATCH", tasks
+            "PLATFORM_APPLICATION_POSTGRES_DATABASE_IDENTITY_MISMATCH", tasks
         )
         self.assertLess(
             tasks.index("Require the exact Sprint 2 PostgreSQL database"),
@@ -634,43 +634,43 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("MIGRATION_PREFIX_INVALID", adoption)
         self.assertIn("MIGRATION_SET_INCOMPLETE", adoption)
         self.assertIn("migration.file | basename", adoption)
-        self.assertIn("sprint2_application_retained_baseline_sha256", adoption)
+        self.assertIn("platform_application_retained_baseline_sha256", adoption)
         self.assertNotIn("count(*) FROM {{ domain }}.schema_migrations) <> 1", adoption)
-        self.assertIn("SPRINT2_APPLICATION_RETAINED_BASELINE_IDENTITY_INVALID", tasks)
-        self.assertIn("sprint2_application_retained_baseline_sha256", defaults)
+        self.assertIn("PLATFORM_APPLICATION_RETAINED_BASELINE_IDENTITY_INVALID", tasks)
+        self.assertIn("platform_application_retained_baseline_sha256", defaults)
 
-    def test_sprint2_application_owns_a_reconnectable_postgres_port_forward(self) -> None:
+    def test_platform_application_owns_a_reconnectable_postgres_port_forward(self) -> None:
         defaults = (
-            ROOT / "deploy/ansible/roles/sprint2_application/defaults/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/defaults/main.yml"
         ).read_text(encoding="utf-8")
         tasks = (
-            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
         ).read_text(encoding="utf-8")
         handlers = (
-            ROOT / "deploy/ansible/roles/sprint2_application/handlers/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/handlers/main.yml"
         ).read_text(encoding="utf-8")
         service = (
             ROOT
-            / "deploy/ansible/roles/sprint2_application/templates/postgres-port-forward.service.j2"
+            / "deploy/ansible/roles/platform_application/templates/postgres-port-forward.service.j2"
         ).read_text(encoding="utf-8")
-        self.assertIn("sprint2_application_postgres_forward_enabled", defaults)
-        self.assertIn("sprint2_application_postgres_forward_service_name is match", tasks)
+        self.assertIn("platform_application_postgres_forward_enabled", defaults)
+        self.assertIn("platform_application_postgres_forward_service_name is match", tasks)
         self.assertIn("Restart=on-failure", service)
-        self.assertIn("service/{{ sprint2_application_postgres_forward_kubernetes_service }}", service)
+        self.assertIn("service/{{ platform_application_postgres_forward_kubernetes_service }}", service)
         self.assertIn("Apply the PostgreSQL port-forward before database adoption", tasks)
         self.assertIn("Require the adopted PostgreSQL port-forward endpoint", tasks)
         self.assertIn("Restart the adopted PostgreSQL port-forward", handlers)
-        self.assertIn("sprint2_application_postgres_forward_service_name", handlers)
+        self.assertIn("platform_application_postgres_forward_service_name", handlers)
 
-    def test_sprint2_application_preflight_does_not_requalify_retained_hosts(self) -> None:
+    def test_platform_application_preflight_does_not_requalify_retained_hosts(self) -> None:
         application = (
-            ROOT / "deploy/ansible/playbooks/93-sprint2-application.yml"
+            ROOT / "deploy/ansible/playbooks/93-platform-application.yml"
         ).read_text(encoding="utf-8")
         preflight = (
             ROOT / "deploy/ansible/playbooks/00-preflight.yml"
         ).read_text(encoding="utf-8")
         self.assertIn("labweaver_preflight_validate_remote_hosts: false", application)
-        self.assertNotIn("91-sprint2-admin-tools.yml", application)
+        self.assertNotIn("91-platform-admin-tools.yml", application)
         self.assertIn("hosts: localhost", application)
         self.assertIn("connection: local", application)
         self.assertNotIn("hosts: control_plane", application)
@@ -681,12 +681,12 @@ class AnsibleFixtureTests(unittest.TestCase):
             6,
         )
 
-    def test_sprint2_application_reconciles_the_exact_durable_consumers(self) -> None:
+    def test_platform_application_reconciles_the_exact_durable_consumers(self) -> None:
         tasks = (
-            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
         ).read_text(encoding="utf-8")
         defaults = (
-            ROOT / "deploy/ansible/roles/sprint2_application/defaults/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/defaults/main.yml"
         ).read_text(encoding="utf-8")
         for consumer in (
             "control-agent-run-projection-v1",
@@ -697,7 +697,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         ):
             self.assertIn(consumer, defaults)
         self.assertIn("Create only missing Sprint 2 durable consumers", tasks)
-        self.assertIn("SPRINT2_APPLICATION_CONSUMER_CONFLICT", tasks)
+        self.assertIn("PLATFORM_APPLICATION_CONSUMER_CONFLICT", tasks)
         self.assertIn("'--ack', 'explicit'", tasks)
         self.assertIn("'--pull'", tasks)
         self.assertIn("map('regex_replace', '^', '--filter=')", tasks)
@@ -720,20 +720,31 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("port: 443", policies)
         self.assertIn("kubernetes.io/metadata.name: keycloak-system", values)
 
-    def test_sprint2_application_distributes_harbor_ca_and_bounds_gateway_pod_security(self) -> None:
+    def test_platform_application_distributes_harbor_ca_and_bounds_gateway_pod_security(self) -> None:
         tasks = (
-            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
         ).read_text(encoding="utf-8")
         handlers = (
-            ROOT / "deploy/ansible/roles/sprint2_application/handlers/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/handlers/main.yml"
+        ).read_text(encoding="utf-8")
+        defaults = (
+            ROOT / "deploy/ansible/roles/platform_application/defaults/main.yml"
         ).read_text(encoding="utf-8")
         self.assertIn("Load the adopted Harbor CA for Kubernetes nodes", tasks)
         self.assertIn("groups['k8s_cluster']", tasks)
-        self.assertIn("/etc/pki/ca-trust/source/anchors/labweaver-harbor.crt", tasks)
+        self.assertIn(
+            'dest: "{{ platform_application_ca_trust_anchors_dir }}/labweaver-harbor.crt"',
+            tasks,
+        )
+        self.assertIn(
+            "platform_application_ca_trust_anchors_dir: /etc/pki/ca-trust/source/anchors",
+            defaults,
+        )
         self.assertIn("/etc/containers/certs.d/", tasks)
         self.assertIn("notify: Refresh Kubernetes node Harbor trust", tasks)
         self.assertIn("Apply changed Kubernetes node Harbor trust before workload rollout", tasks)
         self.assertIn("name: Refresh Kubernetes node Harbor trust", handlers)
+        self.assertIn("{{ platform_application_ca_trust_refresh_command }}", handlers)
         self.assertIn("groups['k8s_cluster']", handlers)
         application_namespace = tasks.split(
             "- name: Reconcile application namespace without deleting retained state",
@@ -743,22 +754,22 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("pod-security.kubernetes.io/audit: restricted", application_namespace)
         self.assertIn("pod-security.kubernetes.io/warn: restricted", application_namespace)
 
-    def test_sprint2_buildkit_prepares_the_router_owned_package_endpoint(self) -> None:
-        tasks = (ROOT / "deploy/ansible/roles/sprint2_buildkit/tasks/main.yml").read_text(
+    def test_platform_buildkit_prepares_the_router_owned_package_endpoint(self) -> None:
+        tasks = (ROOT / "deploy/ansible/roles/platform_buildkit/tasks/main.yml").read_text(
             encoding="utf-8"
         )
         defaults = (
-            ROOT / "deploy/ansible/roles/sprint2_buildkit/defaults/main.yml"
+            ROOT / "deploy/ansible/roles/platform_buildkit/defaults/main.yml"
         ).read_text(encoding="utf-8")
         unit = (
             ROOT
-            / "deploy/ansible/roles/sprint2_buildkit/templates/buildkit-port-forward.service.j2"
+            / "deploy/ansible/roles/platform_buildkit/templates/buildkit-port-forward.service.j2"
         ).read_text(encoding="utf-8")
-        self.assertIn("SPRINT2_BUILDKIT_CONTROLLER_IDENTITY_INVALID", tasks)
+        self.assertIn("PLATFORM_BUILDKIT_CONTROLLER_IDENTITY_INVALID", tasks)
         self.assertIn("tcp://127.0.0.1:1234", tasks)
         self.assertIn("groups['routers'] | first", defaults)
         self.assertNotIn("groups['edge_router']", defaults)
-        self.assertIn("--server {{ sprint2_buildkit_controller_api_server }}", unit)
+        self.assertIn("--server {{ platform_buildkit_controller_api_server }}", unit)
         self.assertIn("ProtectSystem=strict", unit)
         tunnel_tasks = tasks.split(
             "- name: Ensure the router-owned BuildKit tunnel is enabled and started",
@@ -776,9 +787,9 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertEqual(tasks.count("kubeconfig: /etc/kubernetes/admin.conf"), 3)
         self.assertEqual(tasks.count("KUBECONFIG: /etc/kubernetes/admin.conf"), 2)
 
-    def test_sprint2_application_adopts_portal_route_and_shared_ssh_service(self) -> None:
+    def test_platform_application_adopts_portal_route_and_shared_ssh_service(self) -> None:
         tasks = (
-            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
         ).read_text(encoding="utf-8")
         portal = (ROOT / "deploy/helm/labweaver/templates/portal-route.yaml").read_text(
             encoding="utf-8"
@@ -790,10 +801,10 @@ class AnsibleFixtureTests(unittest.TestCase):
             ROOT / "deploy/helm/labweaver/templates/network-policy.yaml"
         ).read_text(encoding="utf-8")
         handlers = (
-            ROOT / "deploy/ansible/roles/sprint2_application/handlers/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/handlers/main.yml"
         ).read_text(encoding="utf-8")
-        self.assertIn("SPRINT2_APPLICATION_PORTAL_GATEWAY_CONFLICT", tasks)
-        self.assertNotIn("SPRINT2_APPLICATION_SSH_ROUTE_INVALID", tasks)
+        self.assertIn("PLATFORM_APPLICATION_PORTAL_GATEWAY_CONFLICT", tasks)
+        self.assertNotIn("PLATFORM_APPLICATION_SSH_ROUTE_INVALID", tasks)
         self.assertIn("Refresh retained router trust", tasks)
         self.assertIn("labweaver.io/gateway-routes: allowed", tasks)
         self.assertIn("kind: HTTPRoute", portal)
@@ -809,19 +820,19 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertNotIn("groups['edge_router']", tasks + handlers)
         self.assertNotIn("state: absent", tasks)
 
-    def test_sprint2_application_supports_ssh_on_the_existing_metallb_address(self) -> None:
+    def test_platform_application_supports_ssh_on_the_existing_metallb_address(self) -> None:
         tasks = (
-            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
         ).read_text(encoding="utf-8")
         defaults = (
-            ROOT / "deploy/ansible/roles/sprint2_application/defaults/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/defaults/main.yml"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("sprint2_application_ssh_load_balancer_ip", defaults)
+        self.assertIn("platform_application_ssh_load_balancer_ip", defaults)
         self.assertIn("Persist the MetalLB sharing key", tasks)
-        self.assertIn("SPRINT2_APPLICATION_SSH_SHARED_IP_CONFLICT", tasks)
+        self.assertIn("PLATFORM_APPLICATION_SSH_SHARED_IP_CONFLICT", tasks)
         self.assertIn("Wait for the OpenSSH Gateway shared load balancer address", tasks)
-        self.assertIn("SPRINT2_APPLICATION_SSH_LOAD_BALANCER_INVALID", tasks)
+        self.assertIn("PLATFORM_APPLICATION_SSH_LOAD_BALANCER_INVALID", tasks)
 
     def test_cilium_ingress_identity_reaches_only_public_backends(self) -> None:
         policy = (
@@ -844,9 +855,9 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn('if eq $name "agent-service"', policy)
         self.assertIn("    - {}", policy)
 
-    def test_sprint2_service_configs_use_declared_tls_secret_keys(self) -> None:
+    def test_platform_service_configs_use_declared_tls_secret_keys(self) -> None:
         manifest = json.loads(
-            (ROOT / "deploy/config/sprint2-bundle-manifest.json").read_text(encoding="utf-8")
+            (ROOT / "deploy/config/platform-bundle-manifest.json").read_text(encoding="utf-8")
         )
         for service, config_map, example in (
             ("control-service-secrets", "control-service-config", "control-plane.yaml.example"),
@@ -861,10 +872,10 @@ class AnsibleFixtureTests(unittest.TestCase):
 
     def test_evaluation_freeze_worker_pull_secret_is_reconciled(self) -> None:
         manifest = json.loads(
-            (ROOT / "deploy/config/sprint2-bundle-manifest.json").read_text(encoding="utf-8")
+            (ROOT / "deploy/config/platform-bundle-manifest.json").read_text(encoding="utf-8")
         )
         tasks = (
-            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
         ).read_text(encoding="utf-8")
 
         self.assertIn(
@@ -876,18 +887,18 @@ class AnsibleFixtureTests(unittest.TestCase):
             tasks,
         )
         self.assertIn(
-            "SPRINT2_APPLICATION_EVALUATION_REGISTRY_PULL_CONFIG_INVALID",
+            "PLATFORM_APPLICATION_EVALUATION_REGISTRY_PULL_CONFIG_INVALID",
             tasks,
         )
         self.assertIn("type: kubernetes.io/dockerconfigjson", tasks)
 
     def test_exact_retained_cdi_policy_is_adopted_before_helm(self) -> None:
         tasks = (
-            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
         ).read_text(encoding="utf-8")
 
         self.assertIn(
-            "SPRINT2_APPLICATION_CDI_CLONE_SOURCE_POLICY_CONFLICT",
+            "PLATFORM_APPLICATION_CDI_CLONE_SOURCE_POLICY_CONFLICT",
             tasks,
         )
         self.assertIn(
@@ -901,9 +912,9 @@ class AnsibleFixtureTests(unittest.TestCase):
         )
         self.assertEqual(tasks.count("'--take-ownership'"), 2)
 
-    def test_sprint2_application_uses_supported_nats_account_probe(self) -> None:
+    def test_platform_application_uses_supported_nats_account_probe(self) -> None:
         tasks = (
-            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
         ).read_text(encoding="utf-8")
         probe = tasks.split("- name: Probe retained JetStream", maxsplit=1)[1].split(
             "- name: Inspect exact Sprint 2 streams", maxsplit=1
@@ -912,9 +923,9 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("- account\n      - info", probe)
         self.assertNotIn("--json", probe)
 
-    def test_sprint2_application_nats_administration_requires_mtls(self) -> None:
+    def test_platform_application_nats_administration_requires_mtls(self) -> None:
         tasks = (
-            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
         ).read_text(encoding="utf-8")
         nats_sections = [
             tasks.split(f"- name: {name}", maxsplit=1)[1].split("- name:", maxsplit=1)[0]
@@ -932,14 +943,14 @@ class AnsibleFixtureTests(unittest.TestCase):
             self.assertIn("--tlskey", section)
 
         defaults = (
-            ROOT / "deploy/ansible/roles/sprint2_application/defaults/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/defaults/main.yml"
         ).read_text(encoding="utf-8")
-        self.assertIn("sprint2_application_nats_client_certificate_file", defaults)
-        self.assertIn("sprint2_application_nats_client_private_key_file", defaults)
+        self.assertIn("platform_application_nats_client_certificate_file", defaults)
+        self.assertIn("platform_application_nats_client_private_key_file", defaults)
 
-    def test_sprint2_application_reads_locked_minio_versioning_shape(self) -> None:
+    def test_platform_application_reads_locked_minio_versioning_shape(self) -> None:
         tasks = (
-            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
         ).read_text(encoding="utf-8")
         versioning = tasks.split(
             "- name: Verify immutable artifact bucket versioning", maxsplit=1
@@ -948,64 +959,64 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn(".versioning.status != 'Enabled'", versioning)
         self.assertNotIn("no_log: true", versioning)
 
-    def test_sprint2_application_stages_keycloak_realm_on_execution_host(self) -> None:
+    def test_platform_application_stages_keycloak_realm_on_execution_host(self) -> None:
         tasks = (
-            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
         ).read_text(encoding="utf-8")
         staging = tasks.split(
             "- name: Stage the reviewed Keycloak realm on the execution host", maxsplit=1
         )[1].split("- name:", maxsplit=1)[0]
-        self.assertIn('src: "{{ sprint2_application_keycloak_realm_file }}"', staging)
+        self.assertIn('src: "{{ platform_application_keycloak_realm_file }}"', staging)
         self.assertIn("keycloak-realm.json", staging)
         self.assertIn('mode: "0600"', staging)
         self.assertIn("no_log: true", staging)
 
         remote_path = (
-            '"{{ sprint2_application_report_root }}/{{ sprint2_application_run_id }}/'
+            '"{{ platform_application_report_root }}/{{ platform_application_run_id }}/'
             'keycloak-realm.json"'
         )
         self.assertEqual(tasks.count(f"- {remote_path}"), 2)
 
-    def test_sprint2_application_rejects_kcadm_http_errors_and_missing_authorization(self) -> None:
+    def test_platform_application_rejects_kcadm_http_errors_and_missing_authorization(self) -> None:
         tasks = (
-            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
         ).read_text(encoding="utf-8")
         authentication = tasks.split(
             "- name: Authenticate retained Keycloak administration", maxsplit=1
         )[1].split("- name:", maxsplit=1)[0]
-        self.assertIn("sprint2_application_keycloak_authentication.stderr", authentication)
+        self.assertIn("platform_application_keycloak_authentication.stderr", authentication)
         self.assertIn("HTTP [45][0-9][0-9]", authentication)
 
         session_binding = tasks.split(
             "- name: Load the isolated Keycloak administration session", maxsplit=1
         )[1].split("- name: Require retained Keycloak realm-management authorization", maxsplit=1)[0]
-        self.assertIn("sprint2_application_keycloak_session_file.content", session_binding)
-        self.assertIn("sprint2_application_keycloak_admin_realm", session_binding)
-        self.assertIn("SPRINT2_APPLICATION_KEYCLOAK_ADMIN_TOKEN_INVALID", session_binding)
+        self.assertIn("platform_application_keycloak_session_file.content", session_binding)
+        self.assertIn("platform_application_keycloak_admin_realm", session_binding)
+        self.assertIn("PLATFORM_APPLICATION_KEYCLOAK_ADMIN_TOKEN_INVALID", session_binding)
         self.assertIn("no_log: true", session_binding)
 
         authorization = tasks.split(
             "- name: Require retained Keycloak realm-management authorization", maxsplit=1
         )[1].split("- name:", maxsplit=1)[0]
         self.assertIn("- get\n      - users", authorization)
-        self.assertIn("sprint2_application_keycloak_admin_realm", authorization)
+        self.assertIn("platform_application_keycloak_admin_realm", authorization)
         self.assertIn("- --limit\n      - \"1\"", authorization)
         self.assertNotIn("--max-results", authorization)
         self.assertIn("HTTP [45][0-9][0-9]", authorization)
-        self.assertIn("sprint2_application_keycloak_admin_token", authorization)
+        self.assertIn("platform_application_keycloak_admin_token", authorization)
         self.assertIn("no_log: true", authorization)
 
         target_realm_commands = tasks.split(
             "- name: Inspect retained Sprint 2 Keycloak realm", maxsplit=1
         )[1].split("- name: Require the reviewed Sprint 2 identity surface", maxsplit=1)[0]
         self.assertGreaterEqual(
-            target_realm_commands.count("sprint2_application_keycloak_admin_token"),
+            target_realm_commands.count("platform_application_keycloak_admin_token"),
             7,
         )
 
-    def test_sprint2_application_reconciles_only_reviewed_demo_identities(self) -> None:
+    def test_platform_application_reconciles_only_reviewed_demo_identities(self) -> None:
         tasks = (
-            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
         ).read_text(encoding="utf-8")
         identity_reconcile = tasks.split(
             "- name: Load the reviewed Sprint 2 identity seed", maxsplit=1
@@ -1013,8 +1024,8 @@ class AnsibleFixtureTests(unittest.TestCase):
             "- name: Require the reviewed Sprint 2 identity surface", maxsplit=1
         )[0]
 
-        self.assertIn("SPRINT2_APPLICATION_KEYCLOAK_SEED_INVALID", identity_reconcile)
-        self.assertIn("sprint2_application_keycloak_required_users", identity_reconcile)
+        self.assertIn("PLATFORM_APPLICATION_KEYCLOAK_SEED_INVALID", identity_reconcile)
+        self.assertIn("platform_application_keycloak_required_users", identity_reconcile)
         self.assertIn("clients/{{", identity_reconcile)
         self.assertIn("reset-password", identity_reconcile)
         self.assertIn("firstName", identity_reconcile)
@@ -1024,7 +1035,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertNotIn("delete", identity_reconcile.lower())
         self.assertGreaterEqual(identity_reconcile.count("no_log: true"), 5)
 
-    def test_sprint2_runtime_authorities_match_control_policy(self) -> None:
+    def test_platform_runtime_authorities_match_control_policy(self) -> None:
         control = (ROOT / "deploy/config/control-plane.yaml.example").read_text(encoding="utf-8")
         providers = json.loads(
             (ROOT / "deploy/config/environment-providers.json.example").read_text(
@@ -1044,7 +1055,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         control_config = yaml.safe_load(control)
         lock = yaml.safe_load((ROOT / "deploy/versions.lock.yml").read_text(encoding="utf-8"))
         vm_policy = control_config["control"]["virtualMachineBase"]
-        vm_lock = lock["sprint2_vm_base"]
+        vm_lock = lock["platform_vm_base"]
         self.assertEqual(vm_policy["providerBinding"], virtual_machine["binding"])
         self.assertEqual(vm_policy["storageClassBinding"], virtual_machine["storageClassBinding"])
         self.assertEqual(vm_policy["artifactId"], vm_lock["artifact_id"])
@@ -1058,10 +1069,10 @@ class AnsibleFixtureTests(unittest.TestCase):
             (ROOT / "deploy/config/control-plane.yaml.example").read_text(encoding="utf-8")
         )
         tasks = (
-            ROOT / "deploy/ansible/roles/sprint2_application/tasks/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
         ).read_text(encoding="utf-8")
         defaults = (
-            ROOT / "deploy/ansible/roles/sprint2_application/defaults/main.yml"
+            ROOT / "deploy/ansible/roles/platform_application/defaults/main.yml"
         ).read_text(encoding="utf-8")
 
         self.assertEqual(control["nats"]["stream_name"], "LABWEAVER_AGENT_EVENTS")
@@ -1071,20 +1082,20 @@ class AnsibleFixtureTests(unittest.TestCase):
             control["nats"]["quarantine_subject"],
             control["nats"]["build_quarantine_subject"],
         )
-        self.assertIn("SPRINT2_APPLICATION_CONTROL_QUARANTINE_STREAM_MISMATCH", tasks)
+        self.assertIn("PLATFORM_APPLICATION_CONTROL_QUARANTINE_STREAM_MISMATCH", tasks)
         self.assertIn("validate_nats_user_credentials.py", defaults)
-        self.assertIn("sprint2_application_control_nats_credentials", tasks)
+        self.assertIn("platform_application_control_nats_credentials", tasks)
 
     def test_environment_quarantine_subjects_are_retained_by_application_streams(self) -> None:
         defaults = yaml.safe_load(
             (
                 ROOT
-                / "deploy/ansible/roles/sprint2_application/defaults/main.yml"
+                / "deploy/ansible/roles/platform_application/defaults/main.yml"
             ).read_text(encoding="utf-8")
         )
         streams = {
             stream["name"]: stream
-            for stream in defaults["sprint2_application_nats_streams"]
+            for stream in defaults["platform_application_nats_streams"]
         }
         self.assertIn(
             "labweaver.environment.command.quarantine.v1",
@@ -1285,21 +1296,21 @@ class AnsibleFixtureTests(unittest.TestCase):
         with self.assertRaises(SAFETY.UnsafeStorage):
             SAFETY.validate([safe], "/dev/test", "fixture-wwn", 1073741824, "/dev/root", ["holder"])
 
-    def test_sprint2_reset_is_identity_bound_and_fail_closed(self) -> None:
-        playbook = (ROOT / "deploy/ansible/playbooks/93-sprint2-reset.yml").read_text(
+    def test_platform_reset_is_identity_bound_and_fail_closed(self) -> None:
+        playbook = (ROOT / "deploy/ansible/playbooks/93-platform-reset.yml").read_text(
             encoding="utf-8"
         )
-        tasks = (ROOT / "deploy/ansible/roles/sprint2_reset/tasks/main.yml").read_text(
+        tasks = (ROOT / "deploy/ansible/roles/platform_reset/tasks/main.yml").read_text(
             encoding="utf-8"
         )
         baseline = (
-            ROOT / "deploy/ansible/roles/sprint2_reset/templates/baseline.sql.j2"
+            ROOT / "deploy/ansible/roles/platform_reset/templates/baseline.sql.j2"
         ).read_text(encoding="utf-8")
         xtask = (ROOT / "xtask/src/main.rs").read_text(encoding="utf-8")
         self.assertEqual(playbook.splitlines()[1], "- import_playbook: 00-preflight.yml")
-        self.assertIn("labweaver_preflight_scope: sprint2-reset", playbook)
+        self.assertIn("labweaver_preflight_scope: platform-reset", playbook)
         self.assertIn("destroy-pre-release-data:", tasks)
-        self.assertIn("sprint2_reset_cluster_uid", tasks)
+        self.assertIn("platform_reset_cluster_uid", tasks)
         self.assertIn("KYVERNO_EXTERNAL_DEPENDENCY_DETECTED", tasks)
         destructive_action = tasks.index("Uninstall the historical Private Sigstore release")
         for dependency_probe in (
@@ -1318,17 +1329,17 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("KYVERNO_ADMISSION_WEBHOOK_REMAINS", tasks)
         self.assertIn("Deploy the identical Sprint 2 profile a second time", tasks)
         self.assertIn("Exercise atomic rollback with reviewed invalid readiness values", tasks)
-        self.assertIn("SPRINT2_ATOMIC_ROLLBACK_FAILED", tasks)
+        self.assertIn("PLATFORM_ATOMIC_ROLLBACK_FAILED", tasks)
         self.assertIn("Delete exact residual Kyverno CRDs", tasks)
         self.assertIn("Require the exact Sprint 2 deployment set", tasks)
-        self.assertIn("sprint2_reset_migration_catalog_stat", tasks)
-        self.assertIn("sprint2_reset_inventory_stat", tasks)
-        self.assertIn("SPRINT2_CONFIGURATION_BUNDLE_INVALID", tasks)
+        self.assertIn("platform_reset_migration_catalog_stat", tasks)
+        self.assertIn("platform_reset_inventory_stat", tasks)
+        self.assertIn("PLATFORM_CONFIGURATION_BUNDLE_INVALID", tasks)
         self.assertIn("Apply the reviewed workload configuration bundle", tasks)
         self.assertIn("kubernetes.core.k8s", tasks)
         self.assertNotIn("configuration_bundle", baseline)
         self.assertIn("DROP SCHEMA IF EXISTS", baseline)
-        self.assertIn("0001_sprint2_baseline.sql", baseline)
+        self.assertIn("0001_platform_baseline.sql", baseline)
         self.assertEqual(baseline.count("0001_roles_and_schemas.sql"), 2)
         bootstrap = (ROOT / "migrations/bootstrap/0001_roles_and_schemas.sql").read_text(
             encoding="utf-8"
@@ -1338,7 +1349,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("SET ROLE lw_{{ domain }}_owner", baseline)
         self.assertIn("schema_migrations", baseline)
         self.assertIn("catalog_sha256", baseline)
-        self.assertIn('run_infrastructure(&args.env, "93-sprint2-reset.yml"', xtask)
+        self.assertIn('run_infrastructure(&args.env, "93-platform-reset.yml"', xtask)
         self.assertNotIn("ansible.builtin.shell", tasks)
 
 

@@ -73,7 +73,8 @@ pub(super) fn validate(root: &Path) -> Result<(), AppError> {
                 expected_id,
                 &format!("{expected}/{expected_id:04}_"),
             )?;
-            if expected_id == 1 && migration.file != format!("{expected}/0001_sprint2_baseline.sql")
+            if expected_id == 1
+                && migration.file != format!("{expected}/0001_platform_baseline.sql")
             {
                 return Err(invalid(
                     "the first domain migration must be the Sprint 2 baseline",
@@ -137,7 +138,7 @@ mod tests {
         fs::create_dir_all(&migrations)?;
         copy_tree(&source.join("migrations"), &migrations)?;
         fs::write(
-            migrations.join("control/0001_sprint2_baseline.sql"),
+            migrations.join("control/0001_platform_baseline.sql"),
             b"SELECT 1;\n",
         )?;
         assert!(validate(temporary.path()).is_err());

@@ -1,0 +1,11 @@
+---
+# LabWeaver v1 old-cluster residue cleanup on workers (97/158).
+# The residue audit runs ALWAYS and is written to the root-owned registry
+# BEFORE any destructive action. Destructive steps are gated on the explicit
+# approval flag; without it the play stops with V1_RESIDUE_CLEANUP_NOT_APPROVED.
+#
+# Approved destructive operation under issue #148 (2026-08-07, owner A).
+- name: Audit and clean old-cluster residue on v1 workers
+  hosts: workers
+  gather_facts: true
+  roles: [v1_residue_cleanup]

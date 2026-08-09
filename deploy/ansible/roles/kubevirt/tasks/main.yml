@@ -15,8 +15,8 @@
     state: present
     src: "{{ item }}"
   loop:
-    - "https://github.com/kubevirt/kubevirt/releases/download/{{ kubevirt_version }}/kubevirt-operator.yaml"
-    - "https://github.com/kubevirt/kubevirt/releases/download/{{ kubevirt_version }}/kubevirt-cr.yaml"
+    - "{{ kubevirt_operator_file | default('https://github.com/kubevirt/kubevirt/releases/download/' ~ kubevirt_version ~ '/kubevirt-operator.yaml') }}"
+    - "{{ kubevirt_cr_file | default('https://github.com/kubevirt/kubevirt/releases/download/' ~ kubevirt_version ~ '/kubevirt-cr.yaml') }}"
 
 - name: Wait for KubeVirt availability
   ansible.builtin.command: "kubectl -n kubevirt wait kv/kubevirt --for=condition=Available --timeout=10m"
@@ -41,8 +41,8 @@
     state: present
     src: "{{ item }}"
   loop:
-    - "https://github.com/kubevirt/containerized-data-importer/releases/download/{{ cdi_version }}/cdi-operator.yaml"
-    - "https://github.com/kubevirt/containerized-data-importer/releases/download/{{ cdi_version }}/cdi-cr.yaml"
+    - "{{ cdi_operator_file | default('https://github.com/kubevirt/containerized-data-importer/releases/download/' ~ cdi_version ~ '/cdi-operator.yaml') }}"
+    - "{{ cdi_cr_file | default('https://github.com/kubevirt/containerized-data-importer/releases/download/' ~ cdi_version ~ '/cdi-cr.yaml') }}"
 
 - name: Wait for CDI availability
   ansible.builtin.command: kubectl -n cdi wait cdi/cdi --for=condition=Available --timeout=10m

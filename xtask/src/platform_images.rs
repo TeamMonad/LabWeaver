@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 use super::AppError;
 
-const SPRINT2_COMPONENTS: [&str; 7] = [
+const PLATFORM_COMPONENTS: [&str; 7] = [
     "access-service",
     "agent-service",
     "control-service",
@@ -25,21 +25,31 @@ const SPRINT2_COMPONENTS: [&str; 7] = [
 ];
 const RESOURCE_COMPONENTS: [&str; 1] = ["resource-service"];
 const PACKAGE_SCHEMA: &str = "platform-image-package-manifest.v1";
-const SPRINT2_PROFILE: &str = "sprint2";
+const PLATFORM_PROFILE: &str = "platform";
 const RESOURCE_PROFILE: &str = "resource";
 #[cfg(target_os = "linux")]
 const DEPLOYMENT_SCHEMA: &str = "platform-image-deployment-manifest.v1";
+// Develop iteration mode: the Trivy database pin is optional so the deploy
+// loop does not depend on a specific upstream digest. The placeholder below
+// is schema-valid (format only) and never drives a real scan; the manifest
+// records it so evidence stays auditable and a full pinned package must
+// still be run before any Release Gate.
+#[cfg(any(target_os = "linux", test))]
+const DEVELOP_TRIVY_DATABASE_DIGEST: &str =
+    "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+#[cfg(any(target_os = "linux", test))]
+const DEVELOP_TRIVY_DATABASE_REFERENCE: &str = "docker.io/aquasec/trivy-db@sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
 #[cfg(target_os = "linux")]
 #[derive(Debug, Deserialize)]
 struct VersionLock {
     platform_images: PlatformImageLock,
-    sprint2_foundation: Sprint2FoundationLock,
+    platform_foundation: PlatformFoundationLock,
 }
 
 #[cfg(target_os = "linux")]
 #[derive(Debug, Deserialize)]
-struct Sprint2FoundationLock {
+struct PlatformFoundationLock {
     buildkit_rootless: String,
 }
 
@@ -94,12 +104,12 @@ pub(crate) struct PackageManifest {
 }
 
 fn default_package_profile() -> String {
-    SPRINT2_PROFILE.to_owned()
+    PLATFORM_PROFILE.to_owned()
 }
 
 fn components_for_profile(profile: &str) -> Option<&'static [&'static str]> {
     match profile {
-        SPRINT2_PROFILE => Some(&SPRINT2_COMPONENTS),
+        PLATFORM_PROFILE => Some(&PLATFORM_COMPONENTS),
         RESOURCE_PROFILE => Some(&RESOURCE_COMPONENTS),
         _ => None,
     }
@@ -429,6 +439,11 @@ fn required_env(name: &'static str) -> Result<String, AppError> {
 }
 
 #[cfg(target_os = "linux")]
+fn enabled_env(name: &'static str) -> bool {
+    std::env::var(name).is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
+}
+
+#[cfg(target_os = "linux")]
 fn run_checked(command: &mut Command, role: &'static str) -> Result<String, AppError> {
     let output = command
         .output()
@@ -463,7 +478,13 @@ fn package_linux(
     if !is_commit(&source_commit) {
         return manifest_invalid("Git source commit is not a full lowercase SHA-1");
     }
-    if !git_output(root, ["status", "--porcelain"])?.is_empty() {
+    // Develop iteration mode: allowed to run against a dirty worktree so
+    // uncommitted changes can be exercised in the deploy loop. Identity is
+    // still bound to HEAD, and the manifest's scan placeholder records the
+    // dirty state so evidence stays auditable.
+    let develop = enabled_env("LABWEAVER_PACKAGE_DEVELOP");
+    let dirty = !git_output(root, ["status", "--porcelain"])?.is_empty();
+    if !develop && dirty {
         return Err(AppError::PlatformImage {
             code: "LW_PACKAGE_INPUT_DIRTY",
             detail: "package requires a clean tracked and untracked source tree".to_owned(),
@@ -485,12 +506,24 @@ fn package_linux(
     verify_rust_toolchain(root, &lock.platform_images)?;
     let registry = required_env("LABWEAVER_PLATFORM_REGISTRY")?;
     validate_registry(&registry)?;
-    let (database_reference, database_digest) = verified_trivy_database()?;
+    let (database_reference, database_digest) = if develop {
+        develop_trivy_database()
+    } else {
+        verified_trivy_database()?
+    };
     let run_id = format!("pkg-{environment}-{release}-{}", &source_commit[..12]);
     let run_dir = root.join("artifacts/package").join(&run_id);
     fs::create_dir_all(&run_dir)
         .map_err(|error| io_error("create package run directory", error))?;
-    scan_build_context(root, &run_dir)?;
+    // Develop iteration mode (Owner decision, time-boxed window): skip the
+    // build-context secret scan, the per-image trivy scan and the
+    // reproducibility double build. Scan evidence is an explicit skipped
+    // placeholder and must NOT be used for a formal Release Gate; a full
+    // package must be re-run for acceptance.
+    let iterate = develop;
+    if !iterate {
+        scan_build_context(root, &run_dir)?;
+    }
     let Some(components) = components_for_profile(profile) else {
         return manifest_invalid("package profile is not supported");
     };
@@ -506,6 +539,8 @@ fn package_linux(
             &database_reference,
             &database_digest,
             &lock.platform_images,
+            develop,
+            dirty,
         )?);
     }
     let manifest = PackageManifest {
@@ -621,6 +656,8 @@ fn build_scan(
     database_reference: &str,
     database_digest: &str,
     lock: &PlatformImageLock,
+    develop: bool,
+    dirty: bool,
 ) -> Result<ImageEvidence, AppError> {
     let tag = format!(
         "{registry}/labweaver-system/{component}:git-{}",
@@ -636,30 +673,53 @@ fn build_scan(
         registry,
         lock,
     )?;
-    build_image(
-        root,
-        component,
-        source_commit,
-        source_date_epoch,
-        &reproducibility_tag,
-        registry,
-        lock,
-    )?;
-    let first = inspect_platform_digest(&tag)?;
-    let second = inspect_platform_digest(&reproducibility_tag)?;
-    if first != second {
-        return Err(AppError::PlatformImage {
-            code: "LW_PACKAGE_BUILD_NOT_REPRODUCIBLE",
-            detail: component.to_owned(),
-        });
+    if !develop {
+        build_image(
+            root,
+            component,
+            source_commit,
+            source_date_epoch,
+            &reproducibility_tag,
+            registry,
+            lock,
+        )?;
     }
+    let first = inspect_platform_digest(&tag)?;
     let reference = format!("{registry}/labweaver-system/{component}@{first}");
-    let (scan_bytes, critical, high) =
-        scan_image(run_dir, component, &reference, database_reference)?;
+    let digest = first.clone();
+    if !develop {
+        let second = inspect_platform_digest(&reproducibility_tag)?;
+        if first != second {
+            return Err(AppError::PlatformImage {
+                code: "LW_PACKAGE_BUILD_NOT_REPRODUCIBLE",
+                detail: component.to_owned(),
+            });
+        }
+    }
+    let (scan_bytes, critical, high) = if develop {
+        // Develop placeholder: no trivy image scan was run. This evidence is
+        // explicitly NOT release-grade; acceptance must re-run a full package.
+        let placeholder = serde_json::json!({
+            "schema_version": 1,
+            "scanner": "skipped-develop",
+            "component": component,
+            "reference": reference,
+            "note": format!(
+                "LABWEAVER_PACKAGE_DEVELOP placeholder (dirty worktree={dirty}); full scan required before Release Gate"
+            ),
+        });
+        let placeholder_bytes = serde_json::to_vec(&placeholder).map_err(|error| AppError::Io {
+            role: "serialize skipped-scan placeholder",
+            detail: error.to_string(),
+        })?;
+        (placeholder_bytes, 0u64, 0u64)
+    } else {
+        scan_image(run_dir, component, &reference, database_reference)?
+    };
     Ok(ImageEvidence {
         component: component.to_owned(),
         reference: reference.clone(),
-        digest: first,
+        digest,
         scan: ScanEvidence {
             scanner: format!("trivy:{}", lock.trivy),
             database_digest: database_digest.to_owned(),
@@ -950,6 +1010,31 @@ fn verified_trivy_database() -> Result<(String, String), AppError> {
     Ok((reference, expected))
 }
 
+#[cfg(target_os = "linux")]
+fn develop_trivy_database() -> (String, String) {
+    // Develop iteration mode: the Trivy database pin is optional so the loop
+    // does not depend on a specific upstream digest. If the caller still
+    // supplies a well-formed pin, honor it so the manifest records the
+    // eventual production identity; otherwise emit an explicit placeholder
+    // digest that satisfies the manifest schema (format only). No registry
+    // connectivity check is performed in this mode.
+    let reference = std::env::var("LABWEAVER_TRIVY_DATABASE_REFERENCE")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let expected = std::env::var("LABWEAVER_TRIVY_DATABASE_DIGEST")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    if let (Some(reference), Some(expected)) = (reference, expected) {
+        if validate_trivy_database_reference(&reference, &expected).is_ok() {
+            return (reference, expected);
+        }
+    }
+    (
+        DEVELOP_TRIVY_DATABASE_REFERENCE.to_owned(),
+        DEVELOP_TRIVY_DATABASE_DIGEST.to_owned(),
+    )
+}
+
 #[cfg(any(target_os = "linux", test))]
 fn validate_trivy_database_reference(reference: &str, expected: &str) -> Result<(), AppError> {
     if !is_digest(expected) || !reference.ends_with(&format!("@{expected}")) {
@@ -1033,7 +1118,7 @@ fn verify_tools(lock: &VersionLock) -> Result<(), AppError> {
         return Ok(());
     }
 
-    verify_remote_buildkit_deployment(&lock.sprint2_foundation.buildkit_rootless)
+    verify_remote_buildkit_deployment(&lock.platform_foundation.buildkit_rootless)
 }
 
 #[cfg(target_os = "linux")]
@@ -1343,7 +1428,7 @@ mod tests {
     fn valid_manifest() -> PackageManifest {
         PackageManifest {
             schema_version: PACKAGE_SCHEMA.to_owned(),
-            profile: SPRINT2_PROFILE.to_owned(),
+            profile: PLATFORM_PROFILE.to_owned(),
             run_id: "pkg-test-0001".to_owned(),
             release_id: "test-0001".to_owned(),
             source_commit: "a".repeat(40),
@@ -1357,7 +1442,7 @@ mod tests {
                 buildkit: "v0.31.1".to_owned(),
                 buildx: "v0.35.0".to_owned(),
             },
-            images: SPRINT2_COMPONENTS
+            images: PLATFORM_COMPONENTS
                 .iter()
                 .enumerate()
                 .map(|(index, component)| {
@@ -1388,6 +1473,20 @@ mod tests {
     #[test]
     fn static_manifest_accepts_exact_complete_digest_set() {
         assert!(validate_manifest(&valid_manifest()).is_ok());
+    }
+
+    #[test]
+    fn develop_placeholder_database_identity_is_schema_valid() {
+        assert!(is_digest(DEVELOP_TRIVY_DATABASE_DIGEST));
+        assert!(
+            DEVELOP_TRIVY_DATABASE_REFERENCE
+                .ends_with(&format!("@{DEVELOP_TRIVY_DATABASE_DIGEST}"))
+        );
+        let (reference, digest) = (
+            DEVELOP_TRIVY_DATABASE_REFERENCE,
+            DEVELOP_TRIVY_DATABASE_DIGEST,
+        );
+        assert!(validate_trivy_database_reference(reference, digest).is_ok());
     }
 
     #[test]

@@ -1,0 +1,10 @@
+---
+- name: Run non-destructive Sprint 2 Harbor route preflight
+  import_playbook: 00-preflight.yml
+  vars:
+    labweaver_preflight_scope: platform-harbor-route
+
+- name: Adopt the existing Harbor Gateway route for Sprint 2
+  hosts: control_plane
+  gather_facts: false
+  roles: [platform_harbor_route]

@@ -23,3 +23,13 @@ identity_tls_secret_name: labweaver-keycloak-tls # noqa: var-naming[no-role-pref
 identity_database_secret_name: labweaver-keycloak-database # noqa: var-naming[no-role-prefix]
 identity_bootstrap_secret_name: labweaver-keycloak-bootstrap # noqa: var-naming[no-role-prefix]
 identity_workload_secret_name: labweaver-buildkit-client # noqa: var-naming[no-role-prefix]
+# v1-style controllers have no dnsmasq; the Keycloak endpoint is resolved by
+# Gateway VIP + curl --resolve during verification. RHEL routers keep the
+# fragment-based DNS path enabled.
+identity_dnsmasq_enabled: true # noqa: var-naming[no-role-prefix]
+# Management CIDR allowed by the identity NetworkPolicy (edge-router LAN for
+# RHEL controllers, the v1 campus subnet for the Ubuntu cluster).
+identity_admin_allowed_cidr: 10.20.0.0/16 # noqa: var-naming[no-role-prefix]
+# RHEL controllers install the locked python3-kubernetes RPM; Debian-family
+# controllers already run the pinned client from the ansible venv.
+identity_controller_manage_python_kubernetes: true # noqa: var-naming[no-role-prefix]

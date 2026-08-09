@@ -32,7 +32,7 @@
       - harbor_commit_sha is match('^[0-9a-f]{40,64}$')
       - harbor_inventory_hash is match('^sha256:[0-9a-f]{64}$')
       - harbor_component_lock_hash is match('^sha256:[0-9a-f]{64}$')
-      - harbor_controller_id == 'edge-router'
+      - (harbor_controller_id | default(harbor_approved_controller_id, true)) == harbor_approved_controller_id
       - harbor_locked_images | dict2items | length == 10
       - harbor_locked_images | dict2items | map(attribute='value') | select('match', '^sha256:[0-9a-f]{64}$') | list | length == 10
       - harbor_component_resources | dict2items | length == 11
@@ -280,13 +280,16 @@
   changed_when: false
   failed_when: false
   register: harbor_dns_records
+  when: harbor_dnsmasq_enabled | bool
 
 - name: Reject a DNS collision outside the dedicated Harbor fragment
   ansible.builtin.assert:
     that: harbor_dns_records.rc != 0 or (harbor_dns_records.stdout_lines | reject('search', harbor_dns_fragment_path) | list | length == 0)
     fail_msg: HARBOR_DNS_CONFLICT
+  when: harbor_dnsmasq_enabled | bool
 
 - name: Install the dedicated Harbor DNS fragment with rollback on validation failure
+  when: harbor_dnsmasq_enabled | bool
   block:
     - name: Record the existing Harbor DNS fragment before replacement
       ansible.builtin.stat:
@@ -632,8 +635,8 @@
     {{ harbor_kubectl_path }} --kubeconfig {{ harbor_kubeconfig_path }}
     -n {{ harbor_namespace }} get secret harbor-internal-ca
     -o jsonpath='{.data.ca\.crt}' | base64 -d
-    > /etc/pki/ca-trust/source/anchors/labweaver-harbor-internal-ca.crt
-    && update-ca-trust extract
+    > {{ harbor_ca_trust_anchors_dir }}/labweaver-harbor-internal-ca.crt
+    && {{ harbor_ca_trust_refresh_command }}
   args:
     executable: /bin/bash
   become: true

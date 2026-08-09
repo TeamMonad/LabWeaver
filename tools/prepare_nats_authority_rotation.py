@@ -15,7 +15,7 @@ from typing import Any
 
 import yaml
 
-from prepare_sprint2_foundation import (
+from prepare_platform_foundation import (
     NATS_ADMIN_PUBLISH,
     NATS_ADMIN_SUBSCRIBE,
     NATS_ADMIN_USER,

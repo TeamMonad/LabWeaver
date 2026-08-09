@@ -1,0 +1,27 @@
+{
+  "schema_version": "labweaver.platform-application-report.v1",
+  "run_id": {{ platform_application_run_id | to_json }},
+  "source_commit": {{ platform_application_source_commit | to_json }},
+  "cluster_uid": {{ platform_application_cluster_uid.stdout | trim | to_json }},
+  "package_manifest_sha256": {{ ('sha256:' + platform_application_identity_inputs.results[0].stat.checksum) | to_json }},
+  "migration_catalog_sha256": {{ ('sha256:' + platform_application_identity_inputs.results[1].stat.checksum) | to_json }},
+  "retained_baseline_sha256": {{ platform_application_retained_baseline_sha256 | to_json }},
+  "configuration_manifest_sha256": {{ ('sha256:' + platform_application_identity_inputs.results[2].stat.checksum) | to_json }},
+  "configuration_bundle_sha256": {{ ('sha256:' + platform_application_identity_inputs.results[3].stat.checksum) | to_json }},
+  "destructive_reset": false,
+  "retained": ["kubernetes", "kubevirt", "postgresql", "nats", "minio", "harbor", "keycloak"],
+  "adopted": {
+    "postgres_domains": {{ platform_application_domains | to_json }},
+    "nats_streams": {{ platform_application_nats_streams | map(attribute='name') | list | to_json }},
+    "minio_bucket": {{ platform_application_minio_bucket | to_json }},
+    "harbor_project": {{ platform_application_harbor_project | to_json }},
+    "keycloak_realm": {{ platform_application_keycloak_realm | to_json }}
+  },
+  "deployment": {
+    "release": {{ platform_application_release_name | to_json }},
+    "namespace": {{ platform_application_namespace | to_json }},
+    "helm_revision": {{ ((platform_application_helm_history.stdout | from_json | first).revision | int) | to_json }},
+    "workloads": {{ platform_application_workloads | to_json }},
+    "images": {{ platform_application_package.images | map(attribute='reference') | list | to_json }}
+  }
+}

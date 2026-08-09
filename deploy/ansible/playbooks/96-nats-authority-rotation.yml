@@ -31,7 +31,7 @@
       - evaluation-service
       - kubevirt-executor
       - resource-service
-      - sprint2-admin
+      - platform-admin
     nats_rotation_secret_names:
       - nats-server-secrets
       - control-service-secrets
@@ -218,9 +218,9 @@
         force: false
       no_log: true
 
-- import_playbook: 92-sprint2-foundation.yml
+- import_playbook: 92-platform-foundation.yml
   vars:
-    sprint2_foundation_bundle: "{{ lookup('ansible.builtin.env', 'LABWEAVER_NATS_ROTATION_OUTPUT') }}/foundation-bundle.yaml"
+    platform_foundation_bundle: "{{ lookup('ansible.builtin.env', 'LABWEAVER_NATS_ROTATION_OUTPUT') }}/foundation-bundle.yaml"
 
 - name: Rotate every NATS-bearing application identity
   hosts: localhost

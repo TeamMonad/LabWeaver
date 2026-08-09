@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use super::AppError;
 
-const INPUT_SCHEMA: &str = "schemas/results/sprint2-release-gate-input.v3.schema.json";
+const INPUT_SCHEMA: &str = "schemas/results/platform-release-gate-input.v3.schema.json";
 const REPORT_SCHEMA: &str = "schemas/results/release-gate-report.v3.schema.json";
 const DEPLOYMENT_SCHEMA: &str = "schemas/results/platform-image-deployment-manifest.v1.schema.json";
 const RESOURCE_DEPLOYMENT_SCHEMA: &str =
@@ -128,7 +128,7 @@ fn run_with_locator(root: &Path, input_locator: &str) -> Result<(), AppError> {
     validate_input(root, &input)?;
 
     let report = GateReport {
-        schema_version: "sprint2-release-gate-report.v3",
+        schema_version: "platform-release-gate-report.v3",
         status: "passed",
         source_commit: input.source_commit,
         run_id: input.run_id,
@@ -169,7 +169,7 @@ fn run_with_locator(root: &Path, input_locator: &str) -> Result<(), AppError> {
     reason = "the gate keeps every fail-closed identity and evidence check visible in one ordered boundary"
 )]
 fn validate_input(root: &Path, input: &GateInput) -> Result<(), AppError> {
-    if input.schema_version != "sprint2-release-gate-input.v3" {
+    if input.schema_version != "platform-release-gate-input.v3" {
         return Err(gate(
             "LW_RELEASE_GATE_INPUT_SCHEMA_INVALID",
             "unexpected schemaVersion",
@@ -664,7 +664,7 @@ mod tests {
     use super::{REQUIRED_CHECKS, run_with_locator};
 
     const INPUT_SCHEMA: &str =
-        include_str!("../../schemas/results/sprint2-release-gate-input.v3.schema.json");
+        include_str!("../../schemas/results/platform-release-gate-input.v3.schema.json");
     const REPORT_SCHEMA: &str =
         include_str!("../../schemas/results/release-gate-report.v3.schema.json");
     const CONSOLE_SCHEMA: &str =
@@ -685,7 +685,7 @@ mod tests {
         let root = temporary.path();
         write(
             root,
-            "schemas/results/sprint2-release-gate-input.v3.schema.json",
+            "schemas/results/platform-release-gate-input.v3.schema.json",
             INPUT_SCHEMA,
         )?;
         write(
@@ -800,7 +800,7 @@ mod tests {
             }));
         }
         let input = json!({
-            "schemaVersion": "sprint2-release-gate-input.v3",
+            "schemaVersion": "platform-release-gate-input.v3",
             "sourceCommit": commit,
             "runId": run_id,
             "deploymentManifest": {"path": "artifacts/evidence/deployment.json", "sha256": deployment_hash},

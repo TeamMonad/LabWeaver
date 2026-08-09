@@ -24,7 +24,7 @@ async fn revisioned_mutation_rejects_cross_course_before_writing_state()
         .await?;
     let migrations = format!(
         "CREATE SCHEMA agent; SET search_path TO agent;\n{}",
-        include_str!("../../../migrations/agent/0001_sprint2_baseline.sql")
+        include_str!("../../../migrations/agent/0001_platform_baseline.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;
 

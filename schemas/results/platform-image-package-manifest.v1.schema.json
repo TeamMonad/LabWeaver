@@ -19,7 +19,7 @@
   ],
   "properties": {
     "schema_version": { "const": "platform-image-package-manifest.v1" },
-    "profile": { "enum": ["sprint2", "resource"], "default": "sprint2" },
+    "profile": { "enum": ["platform", "resource"], "default": "platform" },
     "run_id": { "type": "string", "minLength": 1, "maxLength": 128 },
     "release_id": { "type": "string", "minLength": 1, "maxLength": 64 },
     "source_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },

@@ -1,7 +1,7 @@
 ---
 - import_playbook: 00-preflight.yml
   vars:
-    labweaver_preflight_scope: sprint2-application
+    labweaver_preflight_scope: platform-application
     labweaver_preflight_validate_remote_hosts: false
 
 - name: Deploy the independently reviewed Resource authority profile

@@ -42,7 +42,7 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
         .await?;
     sqlx::raw_sql(&format!(
         "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}",
-        include_str!("../../../migrations/resource/0001_sprint2_baseline.sql"),
+        include_str!("../../../migrations/resource/0001_platform_baseline.sql"),
         include_str!("../../../migrations/resource/0002_resource_request_capacity_lease.sql"),
         include_str!("../../../migrations/resource/0003_resource_contract_snapshots.sql"),
         include_str!("../../../migrations/resource/0004_resource_claim_quota_resources.sql"),
@@ -342,7 +342,7 @@ async fn migrated_pool()
         .await?;
     sqlx::raw_sql(&format!(
         "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}",
-        include_str!("../../../migrations/resource/0001_sprint2_baseline.sql"),
+        include_str!("../../../migrations/resource/0001_platform_baseline.sql"),
         include_str!("../../../migrations/resource/0002_resource_request_capacity_lease.sql"),
         include_str!("../../../migrations/resource/0003_resource_contract_snapshots.sql"),
         include_str!("../../../migrations/resource/0004_resource_claim_quota_resources.sql"),

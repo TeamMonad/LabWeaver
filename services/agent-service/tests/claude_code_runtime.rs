@@ -1222,7 +1222,7 @@ async fn isolated_agent_database(
         .execute(&mut *migration_connection)
         .await?;
     sqlx::raw_sql(include_str!(
-        "../../../migrations/agent/0001_sprint2_baseline.sql"
+        "../../../migrations/agent/0001_platform_baseline.sql"
     ))
     .execute(&mut *migration_connection)
     .await?;

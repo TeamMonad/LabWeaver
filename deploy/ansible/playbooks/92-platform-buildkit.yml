@@ -1,0 +1,13 @@
+---
+- name: Run Sprint 2 BuildKit preflight
+  import_playbook: 00-preflight.yml
+  vars:
+    labweaver_preflight_scope: platform-buildkit
+
+- import_playbook: 91-platform-admin-tools.yml
+
+- name: Reconcile the Sprint 2 rootless BuildKit service
+  hosts: control_plane
+  gather_facts: false
+  become: true
+  roles: [platform_buildkit]
