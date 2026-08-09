@@ -43,6 +43,20 @@ test('renders empty and error states explicitly', async ({ page }) => {
   await expect(page.getByText('LW_EVALUATION_UNAVAILABLE')).toBeVisible()
 })
 
+test('course isolation fails closed for an out-of-scope course claim', async ({ page }) => {
+  await page.goto('/student/results')
+  await page.evaluate(() => {
+    const key = Object.keys(localStorage).find((name) => name.startsWith('oidc.user:'))
+    if (!key) throw new Error('fixture OIDC state is missing')
+    const user = JSON.parse(localStorage.getItem(key))
+    user.profile.course_id = 'course-102'
+    localStorage.setItem(key, JSON.stringify(user))
+  })
+  await page.reload()
+  await expect(page.getByText('FORBIDDEN')).toBeVisible()
+  await expect(page.locator('.result-card')).toHaveCount(0)
+})
+
 test.describe('teacher role denial', () => {
   test.use({ storageState: '.auth/teacher.json' })
   test('teacher cannot access student results', async ({ page }) => {

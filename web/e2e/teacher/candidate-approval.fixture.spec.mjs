@@ -42,7 +42,7 @@ async function setImageGate(page, scenario) {
   }, scenario)
 }
 
-test('candidate approval flow publishes release', async ({ page }) => {
+test('candidate approval flow publishes and withdraws one release under a duplicate confirm event', async ({ page }) => {
   await uploadAndStartRun(page)
   await openApprovalPage(page)
 
@@ -55,8 +55,14 @@ test('candidate approval flow publishes release', async ({ page }) => {
   await expect(page.locator('text=最新审批：approved — Evaluation candidate acknowledged')).toBeVisible()
 
   await page.locator('button:has-text("发布 EvaluationRelease")').click()
-  await page.getByRole('button', { name: '发布', exact: true }).click()
+  await page.getByRole('alertdialog').getByRole('button', { name: '发布', exact: true }).evaluate((button) => {
+    button.click()
+    button.click()
+  })
   await expect(page.locator('text=EvaluationRelease 已发布')).toBeVisible()
+  // The fixture starts with one release. Two synchronous confirmation events
+  // must replay one idempotency fence instead of creating two more releases.
+  await expect(page.locator('.release-list > li')).toHaveCount(2)
   await expect(page.getByText('受控 Runtime 身份（只读）')).toBeVisible()
   await expect(page.getByText('kubernetes/evaluation-primary-v1')).toBeVisible()
 
