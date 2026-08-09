@@ -20,6 +20,22 @@ decision. Real HTTP-to-NATS-to-Worker-to-Provider evidence remains owned by
 Sprint-end acceptance Issue #126 under its frozen identity and independent D
 Verify.
 
+## Release demo video (#128)
+
+The versioned capture and edit pipeline is implemented in `tools/demo-video`.
+It uses eight fixed Playwright scene IDs, repository-relative evidence
+locators, strict capture/manifest Schemas, Remotion, FFprobe and external
+`zh-CN`/`en-US` SRT files. The complete Fixture preview is visibly labelled
+`Fixture preview / not release evidence` and remains `releaseEligible: false`.
+
+Current formal state: **blocked**. A public final cannot be resolved until #126
+provides all eight connected shots from one frozen source/package/configuration/
+migration/deployment/image/runtime/Run identity, a passing Release Gate v3
+report, D Verify and a completed frame-by-frame privacy review. #128 consumes
+those outputs and does not open another package, deployment, Resource replay,
+connected Playwright or Release Gate window. The existing PPT and its source
+are unchanged and are not #128 deliverables.
+
 ## Local integration candidate gate (#150)
 
 The local Docker-first integration entry point is implemented at

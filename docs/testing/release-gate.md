@@ -12,6 +12,14 @@ the identity, resource-readback and No-Go contract in
 [`runnable-environment-demo.md`](../architecture/runnable-environment-demo.md).
 That contract does not create another gate or weaken the v3 JSON shapes.
 
+Issue #128 is a downstream evidence consumer, not another connected execution
+owner. Its final video resolver accepts the passing v3 report and all runtime
+shots only when they share #126's frozen commit, Run, package, configuration,
+migration, deployment, image and runtime-artifact identity. Missing, Fixture,
+cross-identity or failed evidence blocks the final; the resolver never falls
+back to the Fixture preview. The Fixture preview is reviewable only as
+`releaseEligible: false` and cannot be uploaded as the public final.
+
 ## Inputs
 
 The deployment controller writes a private, ignored JSON input conforming to

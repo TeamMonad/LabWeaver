@@ -4,6 +4,25 @@ The Sprint 2 terminal gate and its evidence contract are documented in
 [`release-gate.md`](release-gate.md). A local or Fixture pass cannot satisfy a
 check whose gate mode is `connected`.
 
+## Issue #128 video acceptance
+
+`tools/demo-video` has three fail-fast commands: `capture`, `render` and
+`verify`. Contract tests cover unknown fields, illegal profile/cut, scoped
+locator traversal, missing or duplicate scenes, duration overflow, Fixture
+contamination and SRT structure. Runtime verification rehashes every indexed
+file and uses FFprobe to require 1920×1080, 60 fps, H.264, zero audio streams,
+810–870 seconds and seekable playback. Both SRT timelines must end before the
+video. Rendering pins a 12 Mbit/s H.264 hardware encoder and three frame workers;
+missing hardware acceleration fails instead of silently falling back to software.
+
+The three rehearsals are distinct: Fixture flow, Fixture full-film/playback,
+and connected-final playback. The first two do not perform or imply a connected
+deployment. The third is allowed only after #126 supplies a same-identity Gate
+report and connected shots. Automated text privacy scanning is necessary but
+insufficient; the public final additionally requires D's frame-by-frame human
+review. Raw clips, VNC pixels, terminal pixels, traces and MP4 files remain in
+ignored `artifacts/demo-video/` only.
+
 ## Issue and Sprint verification boundary
 
 Every Issue and its PR use the local integration gate as the merge evidence:

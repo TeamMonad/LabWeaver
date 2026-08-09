@@ -1,0 +1,63 @@
+1
+00:00:00,000 --> 00:00:10,000
+LabWeaver connects a Container C/C++ lab and a KubeVirt Linux systems lab in one course journey.
+
+2
+00:00:10,500 --> 00:00:19,500
+The film stays inside the product; build identity and engineering evidence live in the manifest and final report.
+
+3
+00:00:20,000 --> 00:00:48,000
+The teacher uploads public-safe material and reviews the LLM egress and protected-content policy first.
+
+4
+00:00:49,000 --> 00:01:30,000
+Two AgentRuns independently produce Environment and Evaluation candidates; waiting is compressed at observable succeeded states.
+
+5
+00:01:31,000 --> 00:02:05,000
+The teacher reviews, explains, and approves each candidate; LLM advice cannot alter deterministic scores or bypass approval.
+
+6
+00:02:06,000 --> 00:02:44,000
+Publishing creates immutable releases with controlled Runtime identity and deterministic validation results.
+
+7
+00:02:45,000 --> 00:03:20,000
+The platform administrator handles a resource request pre-created through the formal Work/Agent flow.
+
+8
+00:03:21,000 --> 00:03:59,000
+After approval, ResourceQuota and Lease terminal state are read back; no missing research-request UI is fabricated.
+
+9
+00:04:00,000 --> 00:05:10,000
+The student creates a Container environment from a published template and receives a time-bounded AccessGrant after ready.
+
+10
+00:05:11,000 --> 00:06:59,000
+The terminal sequence covers editing, compiling, and running the public sample, plus resize, reconnect, and lifecycle state.
+
+11
+00:07:00,000 --> 00:08:20,000
+The student launches a real KubeVirt VM in the same course and enters Linux through the controlled noVNC endpoint.
+
+12
+00:08:21,000 --> 00:10:29,000
+After the operation, stop/start or recovery is performed and the environment identity is checked across recovery.
+
+13
+00:10:30,000 --> 00:11:44,000
+The workspace is frozen and its Object Version and SHA-256 are read back; only implemented terminal projections are shown.
+
+14
+00:11:45,000 --> 00:12:35,000
+The teacher revokes the AccessGrant; the existing session must close and capability expires with the revision.
+
+15
+00:12:36,000 --> 00:13:14,000
+A reconnect is explicitly refused with a stable diagnostic; network reachability never replaces authorization.
+
+16
+00:13:15,000 --> 00:13:59,500
+The student deletes the environment and verifies residue-free cleanup, completing the journey from authoring to safe reclamation.
