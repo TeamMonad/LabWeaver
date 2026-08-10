@@ -387,12 +387,18 @@ impl ProductionBuildExecutor {
             .args(["--metadata-file"])
             .arg(metadata)
             .env("DOCKER_CONFIG", &self.config.docker_config_directory)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
+            .output()
             .await
             .map_err(network)?;
-        if !status.success() {
+        if !status.status.success() {
+            let stderr = String::from_utf8_lossy(&status.stderr);
+            let stdout = String::from_utf8_lossy(&status.stdout);
+            tracing::error!(
+                event = "agent.build_executor.buildctl_failed",
+                exit_code = status.status.code(),
+                stderr = %stderr,
+                stdout = %stdout,
+            );
             return Err(unavailable());
         }
         Ok(())

@@ -38,6 +38,13 @@ pub struct S3StoreConfig {
     pub max_object_bytes: u64,
     /// `MinIO` and other S3-compatible deployments require path-style addressing.
     pub force_path_style: bool,
+    /// Optional PEM trust-anchor file for the S3 endpoint's private CA.
+    ///
+    /// When set, the S3 client builds a TLS connector trusting exactly this
+    /// file, bypassing platform native roots (which may not include the
+    /// private CA on minimal runtime images).
+    #[serde(default)]
+    pub ca_bundle_file: Option<String>,
 }
 
 impl S3StoreConfig {
@@ -177,15 +184,51 @@ impl S3ImmutableObjectStore {
             None,
             "labweaver-secret-locator",
         );
-        let shared = aws_config::defaults(BehaviorVersion::latest())
+        let mut loader = aws_config::defaults(BehaviorVersion::latest())
             .region(Region::new(config.region.clone()))
             .credentials_provider(credentials)
-            .endpoint_url(config.endpoint.as_str())
-            .load()
-            .await;
+            .endpoint_url(config.endpoint.as_str());
+        if let Some(ca_file) = config.ca_bundle_file.as_deref() {
+            let ca_pem =
+                std::fs::read(ca_file).map_err(|_| ObjectStoreError::ConfigurationInvalid)?;
+            let certs: Result<Vec<_>, _> = rustls_pemfile::certs(&mut &ca_pem[..]).collect();
+            let certs = certs.map_err(|_| ObjectStoreError::ConfigurationInvalid)?;
+            let mut roots = rustls::RootCertStore::empty();
+            for cert in certs {
+                let c = rustls::Certificate(cert.as_ref().to_vec());
+                roots.add(&c).map_err(|_| ObjectStoreError::ConfigurationInvalid)?;
+            }
+            let tls_config = rustls::ClientConfig::builder()
+                .with_safe_defaults()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            let connector = hyper_rustls::HttpsConnectorBuilder::new()
+                .with_tls_config(tls_config)
+                .https_only()
+                .enable_http1()
+                .enable_http2()
+                .build();
+            let http_client =
+                aws_smithy_runtime::client::http::hyper_014::HyperClientBuilder::new()
+                    .build(connector);
+            loader = loader.http_client(http_client);
+        }
+        let shared = loader.load().await;
         let service = S3ConfigBuilder::from(&shared)
             .force_path_style(config.force_path_style)
             .build();
+        // Instrumentation: report the effective native trust store size so a
+        // private CA mismatch is observable at startup instead of surfacing as
+        // an opaque dispatch failure on the first GetObject.
+        let native_roots_loaded = rustls_native_certs::load_native_certs()
+            .map(|certs| certs.len())
+            .map_err(|error| error.to_string());
+        tracing::info!(
+            event = "artifact_store.s3_client_ready",
+            binding = %config.binding,
+            endpoint = %config.endpoint,
+            native_roots_loaded = ?native_roots_loaded,
+        );
         Ok(Self {
             config,
             client: Client::from_conf(service),
@@ -356,6 +399,14 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
             .send()
             .await
         else {
+            let rendered_error = error.to_string();
+            let error_class = rendered_error.split(':').next().unwrap_or("unknown").trim();
+            let mut chain: Vec<String> = Vec::new();
+            let mut current: Option<&dyn std::error::Error> = Some(&error);
+            while let Some(source) = current {
+                chain.push(source.to_string());
+                current = source.source();
+            }
             tracing::warn!(
                 event = "artifact_store.get_object_failed",
                 component = "immutable-object-store",
@@ -363,7 +414,13 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
                 outcome = "failed",
                 duration_ms = 0_u64,
                 binding = self.config.binding,
+                endpoint = %self.config.endpoint,
+                object_key = %key,
+                object_version = %version,
                 diagnostic_code = "LW_OBJECT_STORE_UNAVAILABLE",
+                error_class = %error_class,
+                error_chain = ?chain,
+                service_error_code = ?error.as_service_error().and_then(|service| service.code()),
                 error_kind = "object_read_failed",
                 failure_stage = "artifact.read.request",
                 retryable = true,

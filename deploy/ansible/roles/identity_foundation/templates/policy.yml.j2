@@ -15,6 +15,13 @@ spec:
             matchLabels:
               kubernetes.io/metadata.name: "{{ identity_namespace }}"
         - ipBlock: {cidr: "{{ identity_admin_allowed_cidr }}"}
+{% if identity_allow_platform_namespaces | length > 0 %}
+{% for ns in identity_allow_platform_namespaces %}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: "{{ ns }}"
+{% endfor %}
+{% endif %}
   egress:
     - to:
         - namespaceSelector:
@@ -35,3 +42,12 @@ spec:
     - fromEntities: [ingress]
       toPorts:
         - ports: [{port: "8080", protocol: TCP}]
+{% if identity_allow_platform_namespaces | length > 0 %}
+{% for ns in identity_allow_platform_namespaces %}
+    - fromEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: "{{ ns }}"
+      toPorts:
+        - ports: [{port: "8080", protocol: TCP}]
+{% endfor %}
+{% endif %}

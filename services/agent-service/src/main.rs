@@ -440,7 +440,7 @@ impl Worker {
                         .store
                         .fail_dispatch_preparation(&lease, error.diagnostic_code(), now)
                         .await?;
-                    tracing::warn!(event = "agent.dispatch.preparation_failed", run_id = %run.id, diagnostic_code = error.diagnostic_code(), failure_stage = "egress_gate", error_kind = "policy", retryable = false);
+                    tracing::warn!(event = "agent.dispatch.preparation_failed", run_id = %run.id, diagnostic_code = error.diagnostic_code(), failure_stage = "egress_gate", error_kind = "policy", retryable = false, error_detail = %error);
                     continue;
                 }
             };

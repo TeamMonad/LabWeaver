@@ -154,10 +154,10 @@ deployment manifest, migration catalog, image set, and run ID.
   object or apply a reviewed forward change, but it never drops or recreates an
   existing object.
 - A narrow adoption command owns each required infrastructure change. For
-  example, `sprint2-harbor-route` validates the existing managed Harbor
+  example, `platform-harbor-route` validates the existing managed Harbor
   installation and changes only its `HTTPRoute`; it does not run the Harbor
   Helm reconciliation or touch persistent Harbor state.
-- `sprint2-application` creates only missing application-owned state, verifies
+- `platform-application` creates only missing application-owned state, verifies
   exact migration and service identities when state already exists, and deploys
   the manifest-bound image profile without invoking the destructive reset path.
 - `demo replay` reuses that non-destructive application adoption and requires
