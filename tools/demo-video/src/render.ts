@@ -18,8 +18,9 @@ export const RENDERER_PROFILE = {
   hardwareAcceleration: 'required',
   videoBitrate: '12M',
   pixelFormat: 'yuv420p',
-  concurrency: 1,
-  mediaLoopMode: 'native-video',
+  concurrency: 4,
+  mediaLoopMode: 'disabled',
+  sourcePlaybackMode: 'once-then-final-frame',
   trimLeadingFrames: VIDEO.fps,
   mediaComponent: '@remotion/media/Video:onError=fail',
 } as const;
@@ -73,11 +74,16 @@ export async function render(options: RenderOptions): Promise<string> {
     scenes: receipts.map((receipt, index): RenderScene => {
       const scene = SCENES[index]!;
       invariant(receipt.clip.durationSeconds > 1.25, 'LW_DEMO_VIDEO_CLIP_TOO_SHORT', `${scene.id} clip must retain at least 250ms after the one-second transition trim`);
+      const clipDurationInFrames = Math.floor((receipt.clip.durationSeconds - 1) * VIDEO.fps);
+      invariant(clipDurationInFrames < scene.seconds * VIDEO.fps, 'LW_DEMO_VIDEO_CLIP_TIMELINE_OVERFLOW', `${scene.id} source clip exceeds its timeline allocation`);
       return {
         sceneId: scene.id, label: scene.label,
         clip: receipt.clip.path.replace(/^artifacts\/demo-video\//, ''),
+        screenshot: receipt.screenshot.path.replace(/^artifacts\/demo-video\//, ''),
+        clipDurationInFrames,
         durationInFrames: scene.seconds * VIDEO.fps,
         trimBeforeFrames: VIDEO.fps,
+        beats: [...scene.beats],
       };
     }),
   };
@@ -142,7 +148,7 @@ export async function render(options: RenderOptions): Promise<string> {
   await writeFile(concatPath, chunkPaths.map((chunk) => `file '${path.basename(chunk).replaceAll("'", "'\\''")}'`).join('\n') + '\n');
   await run('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', concatPath, '-c', 'copy', '-movflags', '+faststart', videoPath], 'LW_DEMO_VIDEO_CONCAT_FAILED');
   const probe = await probeVideo(videoPath);
-  invariant(probe.durationSeconds >= 810 && probe.durationSeconds <= 870, 'LW_DEMO_VIDEO_DURATION_INVALID', `duration is ${probe.durationSeconds}s`);
+  invariant(probe.durationSeconds >= 180 && probe.durationSeconds <= 300, 'LW_DEMO_VIDEO_DURATION_INVALID', `duration is ${probe.durationSeconds}s`);
 
   const subtitleEntries = await Promise.all((['zh-CN', 'en-US'] as const).map(async (language) => {
     const subtitlePath = path.join(options.root, `tools/demo-video/captions/${language}.srt`);

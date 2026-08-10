@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import path from 'node:path';
 import {repositoryRoot, resolveLocator} from '../src/paths.js';
-import {SCENES, VIDEO} from '../src/model.js';
+import {SCENES, TOTAL_SECONDS, VIDEO} from '../src/model.js';
 import {validateLocalClusterReport, validateManifest, validateReceipt} from '../src/schema.js';
 import {assertIdentity, assertReleaseGateIdentity, RENDERER_PROFILE} from '../src/render.js';
 
@@ -28,10 +28,10 @@ function manifest() {
   return {
     schemaVersion: 'demo-video-manifest.v1', status: 'verified', cut: 'preview', releaseEligible: false,
     sourceCommit: 'a'.repeat(40), runId: null, identity: null, createdAt: '2026-08-09T00:00:00Z',
-    video: {...checksums[0], width: VIDEO.width, height: VIDEO.height, fps: VIDEO.fps, codec: 'h264', audioStreams: 0, durationSeconds: 840},
+    video: {...checksums[0], width: VIDEO.width, height: VIDEO.height, fps: VIDEO.fps, codec: 'h264', audioStreams: 0, durationSeconds: 270},
     subtitles: [
-      {...evidence('tools/demo-video/captions/zh-CN.srt', 'c'), language: 'zh-CN', format: 'srt', lastCueSeconds: 839.5},
-      {...evidence('tools/demo-video/captions/en-US.srt', 'd'), language: 'en-US', format: 'srt', lastCueSeconds: 839.5},
+      {...evidence('tools/demo-video/captions/zh-CN.srt', 'c'), language: 'zh-CN', format: 'srt', lastCueSeconds: 269.5},
+      {...evidence('tools/demo-video/captions/en-US.srt', 'd'), language: 'en-US', format: 'srt', lastCueSeconds: 269.5},
     ],
     scenes: SCENES.map((scene, index) => ({
       sceneId: scene.id, role: scene.role, profile: 'fixture-preview',
@@ -101,8 +101,10 @@ test('manifest rejects missing scenes, duplicate IDs, duration overflow, and Fix
   await assert.rejects(validateManifest(root, duplicate), /MANIFEST_INVALID/);
   const duplicateChecksum = manifest(); duplicateChecksum.checksums[1]!.path = duplicateChecksum.checksums[0]!.path;
   await assert.rejects(validateManifest(root, duplicateChecksum), /MANIFEST_INVALID/);
-  const long = manifest(); long.video.durationSeconds = 871;
+  const long = manifest(); long.video.durationSeconds = 301;
   await assert.rejects(validateManifest(root, long), /MANIFEST_INVALID/);
+  const short = manifest(); short.video.durationSeconds = 179;
+  await assert.rejects(validateManifest(root, short), /MANIFEST_INVALID/);
   const mixed = manifest(); mixed.scenes[0]!.profile = 'connected-final';
   await assert.rejects(validateManifest(root, mixed), /MANIFEST_INVALID/);
 });
@@ -113,10 +115,11 @@ test('repository locator rejects absolute paths, traversal, and unrelated trees'
   assert.throws(() => resolveLocator(root, path.resolve(root, 'secret'), ['artifacts/demo-video']), /PATH_INVALID/);
 });
 
-test('local Docker Desktop report is non-release and renderer uses one GPU-backed worker', async () => {
+test('local Docker Desktop report is non-release and renderer uses four GPU-backed workers', async () => {
   assert.equal(RENDERER_PROFILE.hardwareAcceleration, 'required');
-  assert.equal(RENDERER_PROFILE.concurrency, 1);
-  assert.equal(RENDERER_PROFILE.mediaLoopMode, 'native-video');
+  assert.equal(RENDERER_PROFILE.concurrency, 4);
+  assert.equal(RENDERER_PROFILE.mediaLoopMode, 'disabled');
+  assert.equal(RENDERER_PROFILE.sourcePlaybackMode, 'once-then-final-frame');
   assert.equal(RENDERER_PROFILE.trimLeadingFrames, 60);
   const report = {
     schemaVersion: 'demo-video-local-cluster-report.v1', status: 'verified', releaseEligible: false,
@@ -125,10 +128,22 @@ test('local Docker Desktop report is non-release and renderer uses one GPU-backe
     image: {reference: `labweaver/demo-fixture:${'a'.repeat(40)}`, id: digest('b')},
     chartManifestSha256: digest('c'),
     node: {name: 'docker-desktop', ready: true, kubernetesVersion: 'v1.34.1'},
-    capabilities: {containerFixture: true, kubevirt: false, cdi: false, hardwareVideoEncoding: 'required', hardwareEncoder: 'h264_amf', renderConcurrency: 1},
+    capabilities: {containerFixture: true, kubevirt: false, cdi: false, hardwareVideoEncoding: 'required', hardwareEncoder: 'h264_amf', renderConcurrency: 4},
     checks: ['context', 'docker-context', 'node-ready', 'namespace-owned', 'helm-release', 'deployment-ready', 'health-ready', 'fixture-banner', 'hardware-encoder'],
     createdAt: '2026-08-10T00:00:00Z',
   };
   await validateLocalClusterReport(root, report);
   await assert.rejects(validateLocalClusterReport(root, {...report, releaseEligible: true}), /LOCAL_CLUSTER_REPORT_INVALID/);
+});
+
+test('four-and-a-half-minute timeline explains every scene without media looping', () => {
+  assert.equal(TOTAL_SECONDS, 270);
+  assert.ok(TOTAL_SECONDS >= 180 && TOTAL_SECONDS <= 300);
+  for (const scene of SCENES) {
+    assert.equal(scene.beats[0].atSeconds, 0);
+    assert.ok(scene.beats.every((beat, index) => beat.atSeconds < scene.seconds
+      && (index === 0 || beat.atSeconds > scene.beats[index - 1]!.atSeconds)));
+    assert.ok(scene.beats.every((beat) => beat.title.length > 0 && beat.body.length >= 20));
+  }
+  assert.equal(RENDERER_PROFILE.mediaLoopMode, 'disabled');
 });

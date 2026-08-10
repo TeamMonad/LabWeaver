@@ -149,7 +149,7 @@ async function deploymentReport(root: string, image: string, imageId: string, ch
     image: {reference: image, id: imageId},
     chartManifestSha256: `sha256:${createHash('sha256').update(chartManifest).digest('hex')}`,
     node,
-    capabilities: {...capabilities, containerFixture: true, hardwareVideoEncoding: 'required', hardwareEncoder: encoder, renderConcurrency: 1},
+    capabilities: {...capabilities, containerFixture: true, hardwareVideoEncoding: 'required', hardwareEncoder: encoder, renderConcurrency: 4},
     checks: ['context', 'docker-context', 'node-ready', 'namespace-owned', 'helm-release', 'deployment-ready', 'health-ready', 'fixture-banner', 'hardware-encoder'],
     createdAt: new Date().toISOString(),
   };

@@ -46,7 +46,7 @@
         "cdi": {"type": "boolean"},
         "hardwareVideoEncoding": {"const": "required"},
         "hardwareEncoder": {"enum": ["h264_nvenc", "h264_qsv", "h264_amf"]},
-        "renderConcurrency": {"const": 1}
+        "renderConcurrency": {"enum": [1, 4]}
       }
     },
     "checks": {

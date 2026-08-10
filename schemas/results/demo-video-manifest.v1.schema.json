@@ -179,7 +179,7 @@
         "path": {"$ref": "#/$defs/locator"}, "sha256": {"$ref": "#/$defs/digest"}, "bytes": {"type": "integer", "minimum": 1},
         "width": {"const": 1920}, "height": {"const": 1080}, "fps": {"const": 60},
         "codec": {"const": "h264"}, "audioStreams": {"const": 0},
-        "durationSeconds": {"type": "number", "minimum": 810, "maximum": 870}
+        "durationSeconds": {"type": "number", "minimum": 180, "maximum": 300}
       }
     },
     "subtitle": {
@@ -188,7 +188,7 @@
       "properties": {
         "path": {"$ref": "#/$defs/locator"}, "sha256": {"$ref": "#/$defs/digest"}, "bytes": {"type": "integer", "minimum": 1},
         "language": {"enum": ["zh-CN", "en-US"]}, "format": {"const": "srt"},
-        "lastCueSeconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 870}
+        "lastCueSeconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 300}
       }
     },
     "scene": {

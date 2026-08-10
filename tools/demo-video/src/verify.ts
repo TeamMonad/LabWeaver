@@ -63,7 +63,7 @@ export async function verify(options: VerifyOptions): Promise<string> {
   invariant(probe.width === VIDEO.width && probe.height === VIDEO.height, 'LW_DEMO_VIDEO_RESOLUTION_INVALID', `resolution is ${probe.width}x${probe.height}`);
   invariant(Math.abs(probe.fps - VIDEO.fps) < 0.001, 'LW_DEMO_VIDEO_FPS_INVALID', `fps is ${probe.fps}`);
   invariant(probe.audioStreams === 0, 'LW_DEMO_VIDEO_AUDIO_FORBIDDEN', `found ${probe.audioStreams} audio streams`);
-  invariant(probe.durationSeconds >= 810 && probe.durationSeconds <= 870 && Math.abs(probe.durationSeconds - TOTAL_SECONDS) < 0.1, 'LW_DEMO_VIDEO_DURATION_INVALID', `duration is ${probe.durationSeconds}s`);
+  invariant(probe.durationSeconds >= 180 && probe.durationSeconds <= 300 && Math.abs(probe.durationSeconds - TOTAL_SECONDS) < 0.1, 'LW_DEMO_VIDEO_DURATION_INVALID', `duration is ${probe.durationSeconds}s`);
   for (const subtitle of manifest.subtitles) {
     const cues = await validateSrt(resolveLocator(options.root, subtitle.path, ['tools/demo-video/captions']), probe.durationSeconds);
     invariant(Math.abs(cues.at(-1)!.endSeconds - subtitle.lastCueSeconds) < 0.001, 'LW_DEMO_VIDEO_SRT_MANIFEST_MISMATCH', `subtitle timing differs: ${subtitle.path}`);

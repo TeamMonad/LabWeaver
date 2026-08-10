@@ -11,9 +11,13 @@ check whose gate mode is `connected`.
 locator traversal, missing or duplicate scenes, duration overflow, Fixture
 contamination and SRT structure. Runtime verification rehashes every indexed
 file and uses FFprobe to require 1920×1080, 60 fps, H.264, zero audio streams,
-810–870 seconds and seekable playback. Both SRT timelines must end before the
-video. Rendering pins a 12 Mbit/s H.264 hardware encoder and one frame worker;
+180–300 seconds and seekable playback. Both SRT timelines must end before the
+video. Rendering pins a 12 Mbit/s H.264 hardware encoder and four frame workers;
 missing hardware acceleration fails instead of silently falling back to software.
+Every source recording plays exactly once and then yields to its audited final
+screenshot while distinct explanation beats continue. The composition and
+renderer profile disable media looping so short source footage cannot silently
+be repeated to fill a scene.
 
 The three rehearsals are distinct: Fixture flow, Fixture full-film/playback,
 and connected-final playback. The first two do not perform or imply a connected
