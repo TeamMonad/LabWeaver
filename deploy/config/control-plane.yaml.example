@@ -54,7 +54,7 @@ control:
   trustRevision: 1
   imagePolicyId: "00000000-0000-7000-8000-000000000002"
   imagePolicyRevision: 1
-  environmentSchemaSha256: "54533e71dbd3a3c2914b2f49fab87a491c73085e7722aebe416a4452a6044b31"
+  environmentSchemaSha256: "ec5089a9502a7fbc4166fd4792c78cc19a8211ec382bf4f67ef03d24755b5553"
   evaluationSchemaSha256: "e6ccd10b1c34d8aa3024e29ec0884488f07a9be0df9f6b2c47605a1279d62cc7"
   containerBuild:
     builderBinding: "buildkit-primary-v1"

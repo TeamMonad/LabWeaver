@@ -319,8 +319,7 @@ impl ProblemPackageEgressGate {
                 // contents. The empty content string signals "metadata only".
                 String::new()
             } else {
-                String::from_utf8(bytes)
-                    .map_err(|_| EgressPreparationError::UnsupportedContent)?
+                String::from_utf8(bytes).map_err(|_| EgressPreparationError::UnsupportedContent)?
             };
             files.push(EgressFile {
                 path: &file.path,
@@ -1877,6 +1876,13 @@ impl ClaudeCodeRuntimeError {
     }
 }
 
+/// Returns true for archive media types used as immutable container build
+/// contexts. These are binary; the LLM receives metadata only.
+fn is_build_context_media_type(media_type: &str) -> bool {
+    let normalized = media_type.to_ascii_lowercase();
+    normalized.contains("tar") || normalized.contains("build-context")
+}
+
 #[cfg(test)]
 mod tests {
     use std::error::Error;
@@ -1943,11 +1949,4 @@ mod tests {
         assert!(output.ends_with(b"\n"));
         Ok(())
     }
-}
-
-/// Returns true for archive media types used as immutable container build
-/// contexts. These are binary; the LLM receives metadata only.
-fn is_build_context_media_type(media_type: &str) -> bool {
-    let normalized = media_type.to_ascii_lowercase();
-    normalized.contains("tar") || normalized.contains("build-context")
 }

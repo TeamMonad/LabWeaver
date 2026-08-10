@@ -347,7 +347,20 @@ impl AgentRunConsumer {
                 .ack_with(AckKind::Nak(Some(REDELIVERY_DELAY)))
                 .await
                 .map_err(|_| MessagingError::Ack)?,
-            Err(_) => {
+            Err(error) => {
+                tracing::error!(
+                    event = "control.agent_run_projection_conflict",
+                    component = "control-service",
+                    operation = "agent_run.projection",
+                    outcome = "quarantined",
+                    duration_ms = 0_u64,
+                    event_id = %event.id,
+                    run_id = %event.data.run_id,
+                    diagnostic_code = "LW_AGENT_PROJECTION_CONFLICT",
+                    error_kind = %format!("{error}"),
+                    failure_stage = "agent_run.projection.consume",
+                    retryable = false,
+                );
                 self.quarantine(&message, Some(event.id), "LW_AGENT_PROJECTION_CONFLICT")
                     .await?;
                 message

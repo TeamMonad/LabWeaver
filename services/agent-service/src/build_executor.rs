@@ -7,22 +7,31 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::str::FromStr as _;
 use std::sync::Arc;
 
 use artifact_store::{ImmutableObjectStore, S3ImmutableObjectStore};
 use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use bollard::auth::DockerCredentials;
+use bollard::grpc::build::{ImageBuildFrontendOptions, ImageBuildLoadInput, ImageBuildPlatform};
+use bollard::grpc::driver::Image as _;
+use bollard::grpc::driver::buildkitd::BuildkitDaemon;
+use bollard::grpc::registry::ImageRegistryOutputBuilder;
+use bytes::Bytes;
 use contracts::events::AgentBuildRequested;
 use contracts::supply_chain::VulnerabilitySummary;
 use contracts::{BuildRequestId, Sha256Digest};
 use flate2::read::GzDecoder;
+use futures::executor::block_on;
 use reqwest::{Certificate, Client, StatusCode, Url};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use tempfile::TempDir;
 use tokio::process::Command;
+use tonic::transport::{Certificate as TlsCertificate, ClientTlsConfig, Endpoint, Identity};
 
 use crate::build_pipeline::{
     BuildIdentity, BuildProviderFailure, BuildProviderFailureCode, BuildProviderRequestContext,
@@ -288,26 +297,17 @@ impl ProductionBuildExecutor {
         }
         let tag = candidate_tag(identity);
         let tagged = format!("{}:{tag}", command.request.output_repository);
-        let metadata = workspace.path().join("build-metadata.json");
-        self.run_buildctl(
-            workspace.path(),
-            &command.request.dockerfile_path,
-            &tagged,
-            &metadata,
-        )
-        .await?;
-        let metadata: Value = serde_json::from_slice(
-            &tokio::fs::read(&metadata)
-                .await
-                .map_err(|_| output_invalid())?,
-        )
-        .map_err(|_| output_invalid())?;
-        let digest = metadata
-            .get("containerimage.digest")
-            .and_then(Value::as_str)
-            .filter(|value| valid_digest(value))
-            .ok_or_else(output_invalid)?
-            .to_owned();
+        // BuildKit solves with a push-to-registry exporter. The authoritative
+        // digest is read back from the BuildKit history exporter response;
+        // Harbor tag association is not guaranteed for BuildKit pushes.
+        let digest = self
+            .run_buildkit(
+                context,
+                workspace.path(),
+                &command.request.dockerfile_path,
+                &tagged,
+            )
+            .await?;
         self.persist_built_candidate(context, command, identity, &repository, &tag, &digest)
             .await
     }
@@ -349,59 +349,183 @@ impl ProductionBuildExecutor {
         })
     }
 
-    async fn run_buildctl(
+    /// Run the build through the deployment-owned `BuildKit` daemon using the
+    /// `bollard` gRPC client. No `buildctl` binary and no shell are involved.
+    async fn run_buildkit(
         &self,
+        request_context: &BuildProviderRequestContext,
         workspace: &Path,
         dockerfile_path: &str,
         tagged: &str,
-        metadata: &Path,
-    ) -> Result<(), BuildProviderFailure> {
-        let status = Command::new(&self.config.buildctl_path)
-            .args([
-                "--addr",
-                &self.config.buildkit_address,
-                "--tlscacert",
-                self.config.buildkit_ca_file.to_str().ok_or_else(rejected)?,
-                "--tlscert",
-                self.config
-                    .buildkit_client_certificate_file
-                    .to_str()
-                    .ok_or_else(rejected)?,
-                "--tlskey",
-                self.config
-                    .buildkit_client_private_key_file
-                    .to_str()
-                    .ok_or_else(rejected)?,
-                "build",
-                "--frontend",
-                "dockerfile.v0",
-                "--local",
-            ])
-            .arg(format!("context={}", workspace.display()))
-            .arg("--local")
-            .arg(format!("dockerfile={}", workspace.display()))
-            .arg("--opt")
-            .arg(format!("filename={dockerfile_path}"))
-            .args(["--opt", "platform=linux/amd64", "--output"])
-            .arg(format!("type=image,name={tagged},push=true"))
-            .args(["--metadata-file"])
-            .arg(metadata)
-            .env("DOCKER_CONFIG", &self.config.docker_config_directory)
-            .output()
-            .await
-            .map_err(network)?;
-        if !status.status.success() {
-            let stderr = String::from_utf8_lossy(&status.stderr);
-            let stdout = String::from_utf8_lossy(&status.stdout);
+    ) -> Result<String, BuildProviderFailure> {
+        let context = tar_context(workspace)?;
+        let endpoint = self.buildkit_endpoint()?;
+        let daemon = BuildkitDaemon::new(endpoint.clone());
+        let platform = ImageBuildPlatform {
+            os: String::from("linux"),
+            architecture: String::from("amd64"),
+            variant: None,
+        };
+        let frontend = ImageBuildFrontendOptions::builder()
+            .dockerfile(Path::new(dockerfile_path))
+            .platforms(&platform)
+            .label(
+                "labweaver.build-request-id",
+                &request_context.build_request_id.to_string(),
+            )
+            .build();
+        let output = ImageRegistryOutputBuilder::new(tagged).push(true).consume();
+        let registry_host = self.config.harbor_registry.clone();
+        let username = self.harbor_username.clone();
+        let password = self.harbor_password.clone();
+        // bollard's buildkit drivers do not produce `Send` futures; drive the
+        // solve on a dedicated blocking thread and bridge the result back.
+        let outcome = tokio::task::spawn_blocking(move || {
+            let mut credentials = std::collections::HashMap::new();
+            let host: &'static str = Box::leak(registry_host.into_boxed_str());
+            credentials.insert(
+                host,
+                DockerCredentials {
+                    username: Some(username),
+                    password: Some(password),
+                    ..Default::default()
+                },
+            );
+            block_on(daemon.registry(
+                output,
+                frontend,
+                ImageBuildLoadInput::Upload(context),
+                Some(credentials),
+            ))
+        })
+        .await
+        .map_err(|_| unavailable())?;
+        if let Err(error) = outcome {
             tracing::error!(
-                event = "agent.build_executor.buildctl_failed",
-                exit_code = status.status.code(),
-                stderr = %stderr,
-                stdout = %stdout,
+                event = "agent.build_executor.buildkit_solve_failed",
+                component = "build-executor",
+                operation = "build.solve",
+                outcome = "failed",
+                duration_ms = 0_u64,
+                diagnostic_code = "LW_AGENT_BUILD_SOLVE_FAILED",
+                error_kind = "buildkit_solve_rejected",
+                failure_stage = "build.solve",
+                retryable = false,
+                error = %error,
             );
             return Err(unavailable());
         }
-        Ok(())
+        self.buildkit_history_digest(endpoint, tagged, request_context.build_request_id)
+            .await
+    }
+
+    /// Read the authoritative pushed image digest from the `BuildKit` history
+    /// exporter response. The image exporter records `{"digest": ...}` in the
+    /// per-build `exporter_response`; `Harbor` tag association is not guaranteed
+    /// for `BuildKit` pushes, so the digest is the registry identity.
+    async fn buildkit_history_digest(
+        &self,
+        endpoint: Endpoint,
+        tagged: &str,
+        build_request_id: BuildRequestId,
+    ) -> Result<String, BuildProviderFailure> {
+        let channel = endpoint.connect().await.map_err(|_| unavailable())?;
+        let mut client =
+            bollard_buildkit_proto::moby::buildkit::v1::control_client::ControlClient::new(channel);
+        let request = bollard_buildkit_proto::moby::buildkit::v1::BuildHistoryRequest {
+            active_only: false,
+            r#ref: String::new(),
+            early_exit: true,
+            filter: Vec::new(),
+            limit: 200,
+        };
+        let mut stream = client
+            .listen_build_history(request)
+            .await
+            .map_err(|_| unavailable())?
+            .into_inner();
+        let label_key = "label:labweaver.build-request-id".to_owned();
+        let label_value = build_request_id.to_string();
+        let mut seen = 0_u64;
+        while let Ok(Some(event)) = stream.message().await {
+            let Some(record) = event.record else { continue };
+            seen += 1;
+            let by_label = record
+                .frontend_attrs
+                .get(&label_key)
+                .is_some_and(|value| value == &label_value);
+            let by_name = record.exporters.iter().any(|exporter| {
+                exporter
+                    .attrs
+                    .get("name")
+                    .is_some_and(|name| name == tagged)
+            });
+            if !by_label && !by_name {
+                continue;
+            }
+            if let Some(digest) = history_record_digest(&record) {
+                tracing::info!(
+                    event = "agent.build_executor.buildkit_history_digest",
+                    component = "build-executor",
+                    operation = "build.digest.read",
+                    outcome = "succeeded",
+                    duration_ms = 0_u64,
+                    build_request_id = %build_request_id,
+                    tagged,
+                    records_seen = seen,
+                    digest = %digest,
+                );
+                return Ok(digest);
+            }
+            tracing::warn!(
+                event = "agent.build_executor.buildkit_history_missing_digest",
+                component = "build-executor",
+                operation = "build.digest.read",
+                outcome = "missing",
+                duration_ms = 0_u64,
+                build_request_id = %build_request_id,
+                tagged,
+                records_seen = seen,
+                exporter_response_keys = ?record.exporter_response.keys().collect::<Vec<_>>(),
+                has_result = record.result.is_some(),
+                diagnostic_code = "LW_AGENT_BUILD_DIGEST_MISSING",
+                error_kind = "buildkit_history_digest_missing",
+                failure_stage = "build.digest.read",
+                retryable = false,
+            );
+            return Err(output_invalid());
+        }
+        tracing::warn!(
+            event = "agent.build_executor.buildkit_history_record_not_found",
+            component = "build-executor",
+            operation = "build.digest.read",
+            outcome = "missing",
+            duration_ms = 0_u64,
+            build_request_id = %build_request_id,
+            tagged,
+            records_seen = seen,
+            diagnostic_code = "LW_AGENT_BUILD_DIGEST_MISSING",
+            error_kind = "buildkit_history_record_not_found",
+            failure_stage = "build.digest.read",
+            retryable = false,
+        );
+        Err(output_invalid())
+    }
+
+    /// Build a mutually-authenticated `tonic` endpoint for the `BuildKit` daemon.
+    fn buildkit_endpoint(&self) -> Result<Endpoint, BuildProviderFailure> {
+        let address = buildkit_tls_address(&self.config.buildkit_address)?;
+        let ca = std::fs::read(&self.config.buildkit_ca_file).map_err(|_| rejected())?;
+        let certificate =
+            std::fs::read(&self.config.buildkit_client_certificate_file).map_err(|_| rejected())?;
+        let key =
+            std::fs::read(&self.config.buildkit_client_private_key_file).map_err(|_| rejected())?;
+        let ca = TlsCertificate::from_pem(ca);
+        let identity = Identity::from_pem(certificate, key);
+        let tls = ClientTlsConfig::new().ca_certificate(ca).identity(identity);
+        Endpoint::from_str(&address)
+            .and_then(|endpoint| endpoint.tls_config(tls))
+            .map_err(|_| rejected())
     }
 
     async fn scan(&self, candidate: &BuiltCandidate) -> Result<ScanEvidence, BuildProviderFailure> {
@@ -915,8 +1039,79 @@ fn parse_trivy_report(bytes: &[u8]) -> Result<VulnerabilitySummary, BuildProvide
     Ok(summary)
 }
 
+/// Extract the pushed image digest from a `BuildKit` history record. The image
+/// exporter records the digest in `exporter_response`; older or alternative
+/// exporters place it in `result`/`results` descriptors.
+fn history_record_digest(
+    record: &bollard_buildkit_proto::moby::buildkit::v1::BuildHistoryRecord,
+) -> Option<String> {
+    record
+        .exporter_response
+        .get("digest")
+        .filter(|digest| valid_digest(digest))
+        .cloned()
+        .or_else(|| {
+            record
+                .result
+                .as_ref()
+                .and_then(|result| result.result_deprecated.as_ref())
+                .map(|descriptor| descriptor.digest.clone())
+                .filter(|digest| valid_digest(digest))
+        })
+        .or_else(|| {
+            record.result.as_ref().and_then(|result| {
+                result.results.values().find_map(|descriptor| {
+                    let digest = descriptor.digest.clone();
+                    valid_digest(&digest).then_some(digest)
+                })
+            })
+        })
+        .or_else(|| {
+            record.results.values().find_map(|info| {
+                info.result_deprecated
+                    .as_ref()
+                    .map(|descriptor| descriptor.digest.clone())
+                    .filter(|digest| valid_digest(digest))
+                    .or_else(|| {
+                        info.results.values().find_map(|descriptor| {
+                            let digest = descriptor.digest.clone();
+                            valid_digest(&digest).then_some(digest)
+                        })
+                    })
+            })
+        })
+}
+
 fn candidate_tag(identity: BuildIdentity) -> String {
     format!("candidate-{}", &identity.0.to_string()[..24])
+}
+
+/// Pack the unpacked build workspace into a single tar stream without
+/// following symlinks. `BuildKit` consumes the archive directly as the
+/// dockerfile frontend context.
+fn tar_context(workspace: &Path) -> Result<Bytes, BuildProviderFailure> {
+    let mut buffer = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut buffer);
+        builder.follow_symlinks(false);
+        builder
+            .append_dir_all(".", workspace)
+            .map_err(|_| rejected())?;
+        builder.finish().map_err(|_| rejected())?;
+    }
+    Ok(Bytes::from(buffer))
+}
+
+/// Convert the deployment-owned `tcp://host:port` `BuildKit` address into the
+/// `https://host:port` form accepted by the `tonic` endpoint for `mTLS`.
+fn buildkit_tls_address(address: &str) -> Result<String, BuildProviderFailure> {
+    let host = address
+        .strip_prefix("tcp://")
+        .filter(|host| {
+            !host.is_empty() && !host.contains('/') && !host.contains(char::is_whitespace)
+        })
+        .ok_or_else(rejected)?;
+    Ok(format!("https://{host}"))
 }
 
 fn valid_digest(value: &str) -> bool {
@@ -1035,6 +1230,46 @@ mod tests {
     use std::io::Write as _;
 
     use super::*;
+
+    #[test]
+    fn buildkit_address_is_converted_to_mtls_https() {
+        assert_eq!(
+            buildkit_tls_address("tcp://buildkit.labweaver-build.svc:1234").expect("valid"),
+            "https://buildkit.labweaver-build.svc:1234"
+        );
+        for invalid in [
+            "http://buildkit:1234",
+            "tcp://",
+            "tcp://buildkit:1234/extra",
+            "tcp://build kit:1234",
+        ] {
+            assert!(buildkit_tls_address(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn build_context_tar_contains_dockerfile() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        std::fs::write(
+            directory.path().join("Dockerfile"),
+            "FROM scratch\nCOPY . /workspace\n",
+        )
+        .expect("write Dockerfile");
+        let archive = tar_context(directory.path()).expect("packed context");
+        let mut reader = tar::Archive::new(&archive[..]);
+        let names: Vec<String> = reader
+            .entries()
+            .expect("entries")
+            .map(|entry| entry.expect("entry").path().expect("path").into_owned())
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names
+                .iter()
+                .any(|name| name == "Dockerfile" || name == "./Dockerfile"),
+            "context must contain Dockerfile at its root: {names:?}"
+        );
+    }
 
     #[test]
     fn repository_identity_is_exactly_harbor_project_and_repository() {
