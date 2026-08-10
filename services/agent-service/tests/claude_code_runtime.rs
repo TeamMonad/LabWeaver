@@ -1426,7 +1426,7 @@ async fn environment_prompt_preserves_mixed_case_variant_contract() -> Result<()
     for required in [
         "runtime variant properties are exactly provider_binding",
         "Container security requires rootFilesystemPolicy read_only_required",
-        "virtual_machine requires mutable_required",
+        "virtual_machine requires rootFilesystemPolicy mutable_required",
         "\"build_context\"",
         "\"base_image_digest\"",
         "\"service_port\":8080",
