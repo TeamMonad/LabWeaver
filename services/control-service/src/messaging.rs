@@ -121,7 +121,7 @@ impl ControlOutboxDispatcher {
         client: async_nats::Client,
         timeout: Duration,
     ) -> Result<Self, MessagingError> {
-        if timeout.is_zero() || timeout > Duration::from_secs(300) {
+        if timeout.is_zero() || timeout > Duration::from_mins(5) {
             return Err(MessagingError::Configuration);
         }
         Ok(Self {

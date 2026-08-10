@@ -28,7 +28,7 @@ set -eu
 export MSYS_NO_PATHCONV=1
 export MSYS2_ARG_CONV_EXCL='*'
 
-IMAGE="labweaver/xtask-controller:1.85.1-ansible-2.18.6"
+IMAGE="labweaver/xtask-controller:1.97.1-ansible-2.18.6"
 CARGO_TARGET_VOLUME="labweaver-xtask-cargo-target"
 CARGO_REGISTRY_VOLUME="labweaver-xtask-cargo-registry"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

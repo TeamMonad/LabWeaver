@@ -1287,13 +1287,13 @@ impl ClaudeCodeRuntime {
                 .map(CandidateDocument::Evaluation),
         }
         .map_err(|_| failure_with_audit(ClaudeCodeRuntimeError::SchemaInvalid, audit.clone()))?;
-        if let CandidateDocument::Environment(spec) = &document {
-            if spec.class != expected_environment_class {
-                return Err(failure_with_audit(
-                    ClaudeCodeRuntimeError::EnvironmentClassMismatch,
-                    audit,
-                ));
-            }
+        if let CandidateDocument::Environment(spec) = &document
+            && spec.class != expected_environment_class
+        {
+            return Err(failure_with_audit(
+                ClaudeCodeRuntimeError::EnvironmentClassMismatch,
+                audit,
+            ));
         }
         let output_sha256 = Sha256Digest::of_canonical(&output).map_err(|_| {
             failure_with_audit(ClaudeCodeRuntimeError::ProtocolInvalid, audit.clone())

@@ -629,8 +629,7 @@ fn is_admin(principal: &ResourceCallerPrincipal) -> Result<bool, ResourceApiErro
     }
     Ok(principal
         .roles
-        .iter()
-        .any(|role| *role == contracts::PlatformRole::PlatformAdmin))
+        .contains(&contracts::PlatformRole::PlatformAdmin))
 }
 fn required_header(headers: &HeaderMap, name: &'static str) -> Result<String, ResourceApiError> {
     headers

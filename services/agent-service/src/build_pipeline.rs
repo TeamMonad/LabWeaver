@@ -151,7 +151,7 @@ impl BuildPipelinePolicy {
             || self.evidence_ttl_milliseconds == 0
             || self.evidence_ttl_milliseconds > 86_400_000
             || self.stage_timeout.is_zero()
-            || self.stage_timeout > Duration::from_secs(3_600)
+            || self.stage_timeout > Duration::from_hours(1)
         {
             return Err(BuildPipelineError::new(
                 BuildFailureCode::ConfigurationInvalid,

@@ -155,7 +155,7 @@ class LocalHostpathContractTests(unittest.TestCase):
         self.assertIn("CARGO_HOME=/tmp/cargo", containerfile)
         self.assertIn("CARGO_TARGET_DIR=/workspace/target/controller", containerfile)
         self.assertIn(
-            'cargo", "+1.85.1-x86_64-unknown-linux-gnu", "run"', containerfile
+            'cargo", "+1.97.1-x86_64-unknown-linux-gnu", "run"', containerfile
         )
         self.assertIn("CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse", containerfile)
         self.assertNotIn("--privileged", containerfile)

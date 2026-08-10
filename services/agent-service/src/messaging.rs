@@ -65,7 +65,7 @@ impl AgentOutboxDispatcher {
         client: async_nats::Client,
         timeout: Duration,
     ) -> Result<Self, AgentMessagingError> {
-        if timeout.is_zero() || timeout > Duration::from_secs(300) {
+        if timeout.is_zero() || timeout > Duration::from_mins(5) {
             return Err(AgentMessagingError::Configuration);
         }
         Ok(Self {

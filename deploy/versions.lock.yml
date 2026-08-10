@@ -1,7 +1,7 @@
 schema_version: 1
 platform_images:
   platform: linux/amd64
-  rust_toolchain: 1.85.1
+  rust_toolchain: 1.97.1
   buildkit: v0.31.1
   buildkit_image: docker.io/moby/buildkit@sha256:6b59b7df63a8cb9902736f9ddf7fcff8261613d3e7449b8ea8b7537fc399c03a
   buildx: v0.35.0
@@ -16,15 +16,15 @@ platform_images:
   claude_code: 2.1.215
   claude_code_linux_x64_sha512: cf00de4e2b500f7bf4fc6c57de19753d3639e23ee2177fe103d40614cf79ca29ddf61064bcbcafe9a53d59d1fbd3cf6cdc02027c8ea167be00157b41469e9bcd
   bases:
-    rust_builder: docker.io/library/rust:1.85.1-bookworm@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4
+    rust_builder: docker.io/library/rust:1.97.1-bookworm@sha256:14bc9c5966e7b3a385794b3d5389a8765668342025fbcc7b2e3d2866ac4bd8c3
     rust_runtime: gcr.io/distroless/cc-debian12:nonroot@sha256:66aa873a4a14fb164aa01296058efd8253744606d72715e45acface073359faa
     node_builder: docker.io/library/node:22.18.0-bookworm-slim@sha256:752ea8a2f758c34002a0461bd9f1cee4f9a3c36d48494586f60ffce1fc708e0e
     web_runtime: docker.io/nginxinc/nginx-unprivileged:1.29.5-alpine@sha256:42a7d7f2ee23e9f5a1dcdf3647ba5c585bbd18f79e79cd817e70e8cd61c55779
-    gateway_builder: docker.io/library/rust:1.85.1-alpine3.21@sha256:4333721398de61f53ccbe53b0b855bcc4bb49e55828e8f652d7a8ac33dd0c118
+    gateway_builder: docker.io/library/rust:1.97.1-alpine3.21@sha256:7bae7c67364dad5ebbd4060923b34d734fbed66d7c1cf3af72aa2f062af93eb6
     gateway_runtime: docker.io/library/alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
 controller:
   image: containers/Containerfile.controller
-  rust_toolchain: 1.85.1
+  rust_toolchain: 1.97.1
   ansible_core: 2.18.6
   ansible_lint: 25.6.1
   python_kubernetes: 34.1.0

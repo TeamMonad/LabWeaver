@@ -42,7 +42,7 @@ impl NatsBuildSupplyChainProvider {
     ) -> Result<Self, BuildProviderFailure> {
         if !valid_subject(&subject)
             || request_timeout.is_zero()
-            || request_timeout > Duration::from_secs(3_600)
+            || request_timeout > Duration::from_hours(1)
             || [
                 builder_binding.as_str(),
                 scanner_binding.as_str(),

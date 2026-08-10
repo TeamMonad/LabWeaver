@@ -42,8 +42,8 @@ const WORKER_ID: &str = "LABWEAVER_ENVIRONMENT_WORKER_ID";
 const SYSTEM_ACTOR_ID: &str = "LABWEAVER_ENVIRONMENT_SYSTEM_ACTOR_ID";
 
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(150);
-const EXECUTOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
-const RECONCILE_LEASE: Duration = Duration::from_secs(180);
+const EXECUTOR_REQUEST_TIMEOUT: Duration = Duration::from_mins(2);
+const RECONCILE_LEASE: Duration = Duration::from_mins(3);
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 const OUTBOX_TIMEOUT: Duration = Duration::from_secs(5);
 const ACCESS_REVOCATION_TIMEOUT: Duration = Duration::from_secs(5);

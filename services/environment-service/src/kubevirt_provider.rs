@@ -199,7 +199,7 @@ impl NatsKubeVirtProviderBackend {
     ) -> Result<Self, ProviderFailure> {
         if !valid_subject(&subject)
             || request_timeout.is_zero()
-            || request_timeout > Duration::from_secs(300)
+            || request_timeout > Duration::from_mins(5)
         {
             return Err(configuration_invalid());
         }
