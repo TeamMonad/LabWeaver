@@ -316,6 +316,7 @@ fn safe_log_field(name: &str) -> bool {
             | "error_kind"
             | "failure_stage"
             | "safe_detail"
+            | "stdout_preview"
             | "retryable"
             | "http_method"
             | "http_status"
