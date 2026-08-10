@@ -15,12 +15,13 @@ connected 镜头与通过的 Release Gate v3，随后由 D 完成成片 Verify �
 | Branch | `feature/128-release-demo` |
 | Target | `develop` |
 | PR | #164（Draft）；禁止 auto-merge |
-| Fixture source commit | `b04a1ab8a8d959adfafa2b8b766e1608035d40b1` |
+| Fixture source commit | `6316c60557ad52edaf78d7b15b0679a5107dab84` |
 | Preview manifest | `artifacts/demo-video/preview/demo-video-manifest.v1.json` |
-| Preview manifest SHA-256 | `sha256:529a71ced6e5b4b6955b7ee0bf21b6b47f847290b4bf8601313524e73824b9fd` |
-| Preview video SHA-256 | `sha256:4819e6dd47cf52ca2b76c75f4dfa4820d71caaa42a026e7d2dc791a7da8eafe7` |
-| Preview media | 1920×1080、60 fps、H.264、无音轨、840 秒、624129435 bytes |
+| Preview manifest SHA-256 | `sha256:4523e6374fe99e4351fcd5189304cd9eb36bfcaa7164b66656dea884213f6ff2` |
+| Preview video SHA-256 | `sha256:69a4d3573b0fe17f2f4c4f009cfabbc4b681c4c5f7b67f9a1968e1ef2bbb7709` |
+| Preview media | 1920×1080、60 fps、H.264、无音轨、840 秒、659569599 bytes |
 | Renderer | Remotion `4.0.507`；H.264 hardware acceleration `required`；12 Mbit/s；1 worker |
+| Local deployment report SHA-256 | `sha256:3645a3e547d8eda2931bdcb1cc539571a77079f8b0d07714c52cb12d5bd063ca` |
 | #126 Run / Gate identity | 未提供，blocked |
 | 归档策略 | 仅保留忽略的本地工作目录；无 CI/Release 上传、远端备份或压缩包 |
 
@@ -47,9 +48,12 @@ connected 镜头与通过的 Release Gate v3，随后由 D 完成成片 Verify �
 
 ## 彩排与隐私
 
-1. Fixture 完整流程：八段采集 receipt、Trace、截图与 hash 完整后通过。
+1. Fixture 完整流程：八段采集 receipt、Trace、截图与 hash 完整后通过；记录时间为
+   `2026-08-10T05:01:17.765Z`，证据 hash 与 Preview video SHA-256 一致。
 2. Fixture 全片播放：已通过 FFprobe、首/中/末 seek、双语 SRT 边界、逐文件
-   checksum 和 Chromium 播放验证。
+   checksum 和 Chromium 播放验证；记录时间为 `2026-08-10T05:01:29.876Z`，
+   播放验证证据 hash 为
+   `sha256:07809376b6b1ce23396aadb14153d2e0bb1326bcd2bda479e3432cf3cefe2524`。
 3. Connected final：尚未执行；仅消费 #126 的一次冻结验收窗口，不重复 deployment/replay。
 
 自动隐私门禁扫描 manifest、字幕与文件名中的 token、内部域名、绝对路径和私有

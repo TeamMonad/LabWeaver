@@ -27,6 +27,12 @@ It uses eight fixed Playwright scene IDs, repository-relative evidence
 locators, strict capture/manifest Schemas, Remotion, FFprobe and external
 `zh-CN`/`en-US` SRT files. The complete Fixture preview is visibly labelled
 `Fixture preview / not release evidence` and remains `releaseEligible: false`.
+The source identity `6316c60557ad52edaf78d7b15b0679a5107dab84` has one
+machine-verified 840-second preview: 1920×1080, 60 fps, H.264, zero audio
+streams and video SHA-256
+`69a4d3573b0fe17f2f4c4f009cfabbc4b681c4c5f7b67f9a1968e1ef2bbb7709`.
+Its first two Fixture rehearsals passed; the connected-final rehearsal has not
+run.
 
 Current formal state: **blocked**. A public final cannot be resolved until #126
 provides all eight connected shots from one frozen source/package/configuration/
