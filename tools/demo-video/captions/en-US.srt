@@ -1,6 +1,6 @@
 1
 00:00:00,000 --> 00:00:09,500
-LabWeaver links materials, approvals, environments, access, resources, and evidence into one traceable lab journey.
+LabWeaver links materials, approvals, environments, access, resources, and evidence into one traceable journey.
 
 2
 00:00:10,000 --> 00:00:19,500
@@ -8,76 +8,104 @@ Six domain services coordinate through PostgreSQL authoritative state and NATS J
 
 3
 00:00:20,000 --> 00:00:29,500
-Container and KubeVirt VM share one environment contract while dedicated executors isolate runtime failures.
+Container and KubeVirt VM share one contract while dedicated executors isolate runtime failures.
 
 4
-00:00:30,000 --> 00:00:44,500
-The teacher uploads public-safe material and first checks LLM egress and protected-content boundaries.
+00:00:30,000 --> 00:00:32,500
+The teacher uploads public-safe material and checks LLM egress and protected-content boundaries.
 
 5
-00:00:45,000 --> 00:00:59,500
-AgentRuns create Environment and Evaluation candidates; deterministic tools validate them and candidates never execute automatically.
+00:00:33,000 --> 00:00:35,500
+AgentRuns create Environment and Evaluation candidates; deterministic tools validate them before execution.
 
 6
-00:01:00,000 --> 00:01:14,500
-Independent teacher approval publishes immutable releases with source, validation result, and Runtime identity.
+00:00:36,000 --> 00:00:38,500
+The teacher independently reviews candidate differences, validation results, and reasons.
 
 7
-00:01:15,000 --> 00:01:26,500
-The administrator handles a request produced by the formal Work/Agent path without fabricating a missing request UI.
+00:00:39,000 --> 00:01:14,500
+Immutable releases retain source, validation result, and Runtime identity to prevent silent drift.
 
 8
-00:01:27,000 --> 00:01:39,500
-ResourceQuota and time-bounded Lease readback give capacity allocation an explicit scope, lifetime, and audit trail.
+00:01:15,000 --> 00:01:15,500
+The administrator handles a resource request produced by the formal Work/Agent path.
 
 9
-00:01:40,000 --> 00:01:52,500
-The student creates a Container from a teacher-published template while Environment Service owns lifecycle state.
+00:01:16,000 --> 00:01:17,500
+Scope review, an explicit reason, and confirmation make the resource decision accountable.
 
 10
-00:01:53,000 --> 00:02:05,500
-An AccessGrant is issued after ready; network reachability and business authorization remain separate.
+00:01:18,000 --> 00:01:39,500
+ResourceQuota and time-bounded Lease readback give capacity allocation an explicit scope and lifetime.
 
 11
-00:02:06,000 --> 00:02:18,500
-The student edits, compiles, and runs the public C++ sample in the browser terminal.
+00:01:40,000 --> 00:01:40,500
+The student creates a Container from a teacher-published template under Environment Service lifecycle ownership.
 
 12
-00:02:19,000 --> 00:02:29,500
-Resize, disconnect, and reconnect return to the same environment while the control plane tracks lifecycle state.
+00:01:41,000 --> 00:01:41,500
+An AccessGrant binds role, endpoint, and expiry after the environment becomes ready.
 
 13
-00:02:30,000 --> 00:02:43,500
-The KubeVirt Provider brings Linux system labs under the same Environment contract as Container labs.
+00:01:42,000 --> 00:01:42,500
+Only a valid ConsoleCapability opens the browser xterm.
 
 14
-00:02:44,000 --> 00:02:57,500
-ConsoleCapability converts short-lived authorization into noVNC access without exposing VMI endpoints directly.
+00:01:43,000 --> 00:01:46,500
+The student edits, compiles, and runs the public C++ sample with material and release identity intact.
 
 15
-00:02:58,000 --> 00:03:11,500
-A dedicated executor reconciles stop/start or recovery and preserves environment identity across the transition.
+00:01:47,000 --> 00:02:29,500
+Resize, disconnect, and reconnect return to the same environment while lifecycle remains tracked.
 
 16
-00:03:12,000 --> 00:03:24,500
-This rehearsal keeps its Fixture boundary explicit; real VMI/noVNC success still belongs to #126 connected acceptance.
+00:02:30,000 --> 00:02:30,500
+The KubeVirt Provider brings Linux labs under the same Environment contract as Container labs.
 
 17
-00:03:25,000 --> 00:03:36,500
-Freezing creates an immutable FrozenSubmission reference instead of relying on a mutable workspace or screenshot.
+00:02:31,000 --> 00:02:31,500
+AccessGrant and ConsoleCapability jointly constrain VM console access.
 
 18
-00:03:37,000 --> 00:03:49,500
-Object Version, SHA-256, source commit, and runtime identity form one auditable evidence chain.
+00:02:32,000 --> 00:02:36,500
+Short-lived authorization becomes controlled noVNC access without directly exposing VMI endpoints.
 
 19
-00:03:50,000 --> 00:04:01,500
-After the AccessGrant revision changes, the active session closes and the old capability becomes invalid.
+00:02:37,000 --> 00:02:39,500
+A dedicated executor reconciles stop/start or recovery and preserves environment identity.
 
 20
-00:04:02,000 --> 00:04:14,500
-A reconnect receives a stable diagnostic; identity, policy, or version mismatch fails closed.
+00:02:40,000 --> 00:03:24,500
+This rehearsal keeps its Fixture boundary; real VMI/noVNC success remains with #126 connected acceptance.
 
 21
-00:04:15,000 --> 00:04:29,500
-Environment deletion and residue-free readback close the loop from authoring through evidence and resource reclamation.
+00:03:25,000 --> 00:03:26,500
+Freezing first loads the same environment and grant so another runtime instance cannot be mixed in.
+
+22
+00:03:27,000 --> 00:03:49,500
+Object Version, SHA-256, source commit, and runtime identity form one auditable evidence chain.
+
+23
+00:03:50,000 --> 00:03:50,500
+The student must obtain an AccessGrant bound to role, endpoint, and expiry.
+
+24
+00:03:51,000 --> 00:03:51,500
+The console session remains tied to the grant revision instead of checking only at connection time.
+
+25
+00:03:52,000 --> 00:04:14,500
+Revocation closes the session and a reconnect receives a stable fail-closed diagnostic.
+
+26
+00:04:15,000 --> 00:04:15,500
+Cleanup binds an explicit Environment identity to avoid deleting another environment.
+
+27
+00:04:16,000 --> 00:04:17,500
+Explicit confirmation triggers the controlled lifecycle transition and runtime reclamation.
+
+28
+00:04:18,000 --> 00:04:29,500
+Readback returns a stable not-found diagnostic and closes the evidence and resource lifecycle.
