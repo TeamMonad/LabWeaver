@@ -1205,6 +1205,23 @@ impl ClaudeCodeRuntime {
                 &process_output,
                 expected_environment_class,
             );
+            // Diagnostic: persist the raw Claude Code stdout when parsing fails
+            // so acceptance debugging can inspect the actual LLM output. Only
+            // active when LABWEAVER_LLM_OUTPUT_DIR is set; removed at cleanup.
+            if parsed.is_err() {
+                if let Ok(output_dir) = std::env::var("LABWEAVER_LLM_OUTPUT_DIR") {
+                    let stamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_millis());
+                    let name = match track {
+                        AgentTrackKind::Environment => "environment",
+                        AgentTrackKind::Evaluation => "evaluation",
+                    };
+                    let path = std::path::Path::new(&output_dir)
+                        .join(format!("llm-{name}-{stamp}-repair{repairs}.stdout"));
+                    let _ = std::fs::write(path, process_output.stdout());
+                }
+            }
             match parsed {
                 Ok(execution) => return Ok(execution),
                 Err(failure) if failure.is_schema_invalid() && repairs < max_repairs => {
