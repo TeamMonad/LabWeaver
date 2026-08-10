@@ -21,7 +21,20 @@ pnpm --dir tools/demo-video verify -- --cut preview --manifest artifacts/demo-vi
 
 The eight scene IDs are `opening`, `teacher-authoring`, `admin-resource`, `student-container`, `student-kubevirt`, `submission-freeze`, `access-revoke`, and `cleanup`. Capture uses a 1920×1080 light browser viewport and one Chromium worker. It waits only on visible business state; it does not use fixed sleeps.
 
-The rendered deliverable is 1920×1080, 60 fps, H.264, silent, and 14:00 long. Subtitles remain external as `captions/zh-CN.srt` and `captions/en-US.srt`. Rendering requires a hardware H.264 encoder, uses a fixed 12 Mbit/s video bitrate, and limits Chromium frame generation to three workers. Remotion is configured with `hardwareAcceleration: required`, so an unavailable or incompatible encoder is a blocking error rather than a silent software fallback. The complete renderer profile participates in every scene chunk's input hash; chunks produced with different worker or CPU/GPU settings cannot be reused together.
+The rendered deliverable is 1920×1080, 60 fps, H.264, silent, and 14:00 long. Subtitles remain external as `captions/zh-CN.srt` and `captions/en-US.srt`. Rendering requires a hardware H.264 encoder, uses a fixed 12 Mbit/s video bitrate, and limits Chromium frame generation to one worker so capture/render does not starve the local Kubernetes node. Remotion is configured with `hardwareAcceleration: required`, so an unavailable or incompatible encoder is a blocking error rather than a silent software fallback. The complete renderer profile participates in every scene chunk's input hash; chunks produced with different worker or CPU/GPU settings cannot be reused together.
+
+## Docker Desktop Fixture environment
+
+The local cluster command owns only the explicitly authorized `labweaver-local-demo` namespace and `labweaver-fixture-demo` Helm release. It requires the active Kubernetes context to be exactly `docker-desktop`, builds the dedicated Fixture image from a clean commit, deploys it atomically, verifies the Pod security contract and Fixture banner, and records a schema-validated non-release report. It never deploys the application services, KubeVirt/CDI, or #126 connected evidence.
+
+```sh
+pnpm --dir tools/demo-video local-cluster -- --action deploy
+pnpm --dir tools/demo-video local-cluster -- --action verify
+pnpm --dir tools/demo-video local-cluster -- --action demo
+pnpm --dir tools/demo-video local-cluster -- --action teardown
+```
+
+`demo` refreshes the deterministic role storage states, opens a loopback-only port-forward, captures all eight scenes sequentially with one Chromium worker, renders the GPU-required preview, and verifies the resulting manifest. The port-forward closes after the command; the Helm release remains running until the explicit `teardown` action. KubeVirt/CDI absence is recorded as a capability limit and the VM scene remains visibly Fixture evidence.
 
 ## Final resolver
 

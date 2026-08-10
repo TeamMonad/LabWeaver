@@ -20,7 +20,7 @@ connected 镜头与通过的 Release Gate v3，随后由 D 完成成片 Verify �
 | Preview manifest SHA-256 | `sha256:529a71ced6e5b4b6955b7ee0bf21b6b47f847290b4bf8601313524e73824b9fd` |
 | Preview video SHA-256 | `sha256:4819e6dd47cf52ca2b76c75f4dfa4820d71caaa42a026e7d2dc791a7da8eafe7` |
 | Preview media | 1920×1080、60 fps、H.264、无音轨、840 秒、624129435 bytes |
-| Renderer | Remotion `4.0.507`；H.264 hardware acceleration `required`；12 Mbit/s；3 workers |
+| Renderer | Remotion `4.0.507`；H.264 hardware acceleration `required`；12 Mbit/s；1 worker |
 | #126 Run / Gate identity | 未提供，blocked |
 | 归档策略 | 仅保留忽略的本地工作目录；无 CI/Release 上传、远端备份或压缩包 |
 

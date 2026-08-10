@@ -36,6 +36,16 @@ those outputs and does not open another package, deployment, Resource replay,
 connected Playwright or Release Gate window. The existing PPT and its source
 are unchanged and are not #128 deliverables.
 
+The Docker Desktop Fixture preview has a separate non-release deployment path.
+`tools/demo-video local-cluster` owns only the labelled
+`labweaver-local-demo` namespace and `labweaver-fixture-demo` Helm release,
+requires a clean commit and the exact Docker Desktop contexts, deploys one
+non-root/no-token/read-only Web Pod, then records
+`demo-video-local-cluster-report.v1`. Its `demo` action refreshes deterministic
+role state, captures the eight Fixture scenes sequentially and renders with one
+GPU-backed worker. This path remains `releaseEligible: false`; it does not
+deploy application services or change the #126/KubeVirt final blocker.
+
 ## Local integration candidate gate (#150)
 
 The local Docker-first integration entry point is implemented at

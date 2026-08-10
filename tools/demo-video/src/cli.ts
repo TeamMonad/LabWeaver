@@ -5,6 +5,7 @@ import {repositoryRoot} from './paths.js';
 import {render} from './render.js';
 import {SCENE_IDS, type Cut, type Profile, type SceneId} from './model.js';
 import {verify} from './verify.js';
+import {localCluster} from './local-cluster.js';
 
 export function argumentsMap(values: string[]): Map<string, string> {
   const result = new Map<string, string>();
@@ -41,7 +42,15 @@ async function main(): Promise<void> {
     console.log(command === 'render' ? await render({root, cut, manifestLocator}) : await verify({root, cut, manifestLocator}));
     return;
   }
-  throw new DemoVideoError('LW_DEMO_VIDEO_COMMAND_INVALID', `expected capture, render, or verify; received ${command ?? '<none>'}`);
+  if (command === 'local-cluster') {
+    for (const key of args.keys()) invariant(key === 'action', 'LW_DEMO_VIDEO_ARGUMENT_UNKNOWN', `unknown local-cluster argument: --${key}`);
+    const action = args.get('action');
+    invariant(action === 'deploy' || action === 'verify' || action === 'demo' || action === 'teardown',
+      'LW_DEMO_VIDEO_LOCAL_ACTION_INVALID', `invalid local action: ${action ?? '<missing>'}`);
+    console.log(await localCluster(root, action));
+    return;
+  }
+  throw new DemoVideoError('LW_DEMO_VIDEO_COMMAND_INVALID', `expected capture, render, verify, or local-cluster; received ${command ?? '<none>'}`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

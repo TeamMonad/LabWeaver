@@ -53,6 +53,16 @@ order. It contains no Kubernetes apply/delete, Helm install/upgrade/uninstall,
 or namespace/PVC/Secret mutation; applying the stack requires separate
 deployment authorization.
 
+Issue #128 carries one narrower authorization for its visibly marked Fixture
+preview. `spec.fixtureDemoPolicy` owns only the `labweaver-local-demo`
+namespace and `labweaver-fixture-demo` Helm release. The `tools/demo-video
+local-cluster` command requires the exact `docker-desktop` context and a clean
+source commit, applies that dedicated Web-only chart atomically, verifies its
+non-root/read-only/no-token security contract and records a schema-valid
+`releaseEligible: false` report. This does not change the application-stack
+write policy above, deploy platform services, enable KubeVirt/CDI, or create
+connected/Release Gate evidence.
+
 The retained data-service CiliumNetworkPolicy admits credentialed administration probes only from
 Cilium's `host` and `remote-node` reserved identities, and only on PostgreSQL 5432, NATS 4222 and
 MinIO 9000. Cilium represents node-originated traffic with those identities rather than a source

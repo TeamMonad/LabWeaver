@@ -3,8 +3,8 @@ import test from 'node:test';
 import path from 'node:path';
 import {repositoryRoot, resolveLocator} from '../src/paths.js';
 import {SCENES, VIDEO} from '../src/model.js';
-import {validateManifest, validateReceipt} from '../src/schema.js';
-import {assertIdentity, assertReleaseGateIdentity} from '../src/render.js';
+import {validateLocalClusterReport, validateManifest, validateReceipt} from '../src/schema.js';
+import {assertIdentity, assertReleaseGateIdentity, RENDERER_PROFILE} from '../src/render.js';
 
 const root = repositoryRoot();
 const digest = (value: string) => `sha256:${value.repeat(64).slice(0, 64)}`;
@@ -111,4 +111,22 @@ test('repository locator rejects absolute paths, traversal, and unrelated trees'
   assert.throws(() => resolveLocator(root, '../secret', ['artifacts/demo-video']), /PATH_ESCAPE/);
   assert.throws(() => resolveLocator(root, 'docs/secret', ['artifacts/demo-video']), /PATH_SCOPE/);
   assert.throws(() => resolveLocator(root, path.resolve(root, 'secret'), ['artifacts/demo-video']), /PATH_INVALID/);
+});
+
+test('local Docker Desktop report is non-release and renderer uses one GPU-backed worker', async () => {
+  assert.equal(RENDERER_PROFILE.hardwareAcceleration, 'required');
+  assert.equal(RENDERER_PROFILE.concurrency, 1);
+  const report = {
+    schemaVersion: 'demo-video-local-cluster-report.v1', status: 'verified', releaseEligible: false,
+    profile: 'fixture-preview', sourceCommit: 'a'.repeat(40), context: 'docker-desktop', dockerContext: 'desktop-linux',
+    namespace: 'labweaver-local-demo', releaseName: 'labweaver-fixture-demo',
+    image: {reference: `labweaver/demo-fixture:${'a'.repeat(40)}`, id: digest('b')},
+    chartManifestSha256: digest('c'),
+    node: {name: 'docker-desktop', ready: true, kubernetesVersion: 'v1.34.1'},
+    capabilities: {containerFixture: true, kubevirt: false, cdi: false, hardwareVideoEncoding: 'required', hardwareEncoder: 'h264_amf', renderConcurrency: 1},
+    checks: ['context', 'docker-context', 'node-ready', 'namespace-owned', 'helm-release', 'deployment-ready', 'health-ready', 'fixture-banner', 'hardware-encoder'],
+    createdAt: '2026-08-10T00:00:00Z',
+  };
+  await validateLocalClusterReport(root, report);
+  await assert.rejects(validateLocalClusterReport(root, {...report, releaseEligible: true}), /LOCAL_CLUSTER_REPORT_INVALID/);
 });

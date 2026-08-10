@@ -1,9 +1,16 @@
 import {spawn} from 'node:child_process';
 import {DemoVideoError} from './errors.js';
 
-export async function run(command: string, args: string[], code: string): Promise<string> {
+type RunOptions = {cwd?: string; env?: NodeJS.ProcessEnv};
+
+export async function run(command: string, args: string[], code: string, options: RunOptions = {}): Promise<string> {
   return await new Promise((resolve, reject) => {
-    const child = spawn(command, args, {stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true});
+    const child = spawn(command, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+      ...(options.cwd ? {cwd: options.cwd} : {}),
+      ...(options.env ? {env: options.env} : {}),
+    });
     let stdout = '';
     let stderr = '';
     child.stdout.setEncoding('utf8').on('data', (chunk: string) => { stdout += chunk; });

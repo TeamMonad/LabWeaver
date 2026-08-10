@@ -7,6 +7,7 @@
     "capture": "tsx src/cli.ts capture",
     "render": "tsx src/cli.ts render",
     "verify": "tsx src/cli.ts verify",
+    "local-cluster": "tsx src/cli.ts local-cluster",
     "test": "tsx --test tests/**/*.test.ts",
     "typecheck": "tsc --noEmit"
   },

@@ -12,7 +12,7 @@ locator traversal, missing or duplicate scenes, duration overflow, Fixture
 contamination and SRT structure. Runtime verification rehashes every indexed
 file and uses FFprobe to require 1920×1080, 60 fps, H.264, zero audio streams,
 810–870 seconds and seekable playback. Both SRT timelines must end before the
-video. Rendering pins a 12 Mbit/s H.264 hardware encoder and three frame workers;
+video. Rendering pins a 12 Mbit/s H.264 hardware encoder and one frame worker;
 missing hardware acceleration fails instead of silently falling back to software.
 
 The three rehearsals are distinct: Fixture flow, Fixture full-film/playback,

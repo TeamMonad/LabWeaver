@@ -13,12 +13,12 @@ import type {DemoVideoProps, RenderScene} from './composition.js';
 
 type RenderOptions = {root: string; cut: Cut; manifestLocator: string};
 
-const RENDERER_PROFILE = {
+export const RENDERER_PROFILE = {
   codec: 'h264',
   hardwareAcceleration: 'required',
   videoBitrate: '12M',
   pixelFormat: 'yuv420p',
-  concurrency: 3,
+  concurrency: 1,
 } as const;
 
 async function loadReceipts(root: string, cut: Cut): Promise<Array<{receipt: CaptureReceipt; receiptPath: string}>> {

@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://labweaver.invalid/schemas/results/demo-video-local-cluster-report.v1.schema.json",
+  "title": "DemoVideoLocalClusterReportV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "status", "releaseEligible", "profile", "sourceCommit",
+    "context", "dockerContext", "namespace", "releaseName", "image", "chartManifestSha256",
+    "node", "capabilities", "checks", "createdAt"
+  ],
+  "properties": {
+    "schemaVersion": {"const": "demo-video-local-cluster-report.v1"},
+    "status": {"enum": ["verified", "blocked"]},
+    "releaseEligible": {"const": false},
+    "profile": {"const": "fixture-preview"},
+    "sourceCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "context": {"const": "docker-desktop"},
+    "dockerContext": {"const": "desktop-linux"},
+    "namespace": {"const": "labweaver-local-demo"},
+    "releaseName": {"const": "labweaver-fixture-demo"},
+    "image": {
+      "type": "object", "additionalProperties": false,
+      "required": ["reference", "id"],
+      "properties": {
+        "reference": {"type": "string", "pattern": "^labweaver/demo-fixture:[0-9a-f]{40}$"},
+        "id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    },
+    "chartManifestSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "node": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "ready", "kubernetesVersion"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "ready": {"const": true},
+        "kubernetesVersion": {"type": "string", "minLength": 1}
+      }
+    },
+    "capabilities": {
+      "type": "object", "additionalProperties": false,
+      "required": ["containerFixture", "kubevirt", "cdi", "hardwareVideoEncoding", "hardwareEncoder", "renderConcurrency"],
+      "properties": {
+        "containerFixture": {"const": true},
+        "kubevirt": {"type": "boolean"},
+        "cdi": {"type": "boolean"},
+        "hardwareVideoEncoding": {"const": "required"},
+        "hardwareEncoder": {"enum": ["h264_nvenc", "h264_qsv", "h264_amf"]},
+        "renderConcurrency": {"const": 1}
+      }
+    },
+    "checks": {
+      "type": "array", "minItems": 4, "uniqueItems": true,
+      "items": {"enum": ["context", "docker-context", "node-ready", "namespace-owned", "helm-release", "deployment-ready", "health-ready", "fixture-banner", "hardware-encoder"]}
+    },
+    "createdAt": {"type": "string", "format": "date-time"}
+  }
+}
