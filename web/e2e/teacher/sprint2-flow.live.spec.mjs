@@ -10,7 +10,7 @@ test('teacher sees the ECNU policy and both approved AgentRun candidates', async
   await page.goto('/teacher/materials', { waitUntil: 'domcontentloaded' })
   await expect(page.getByRole('heading', { name: '材料上传与 AgentRun' })).toBeVisible()
   await expect(page.getByText('课程 LLM 出站策略')).toBeVisible()
-  await expect(page.getByText('ecnu-plus', { exact: true })).toBeVisible()
+  await expect(page.getByText('qwen3.6:27b', { exact: true })).toBeVisible()
 
   const runId = requiredEnvironment('LABWEAVER_E2E_AGENT_RUN_ID')
   await page.goto(`/teacher/approvals?runId=${encodeURIComponent(runId)}`, {
