@@ -450,3 +450,25 @@ PR #147 still requires the appropriate human core/security review and resolved
 review threads; it is not a connected acceptance or release pass. The author
 must not approve or merge the PR. No Tag, formal release or `main` merge is
 included.
+
+## #126 v1 集群验收执行状态（2026-08-10，工作区 commit 8bfc6f4）
+
+Sprint-end 验收 Issue #126 的 v1 集群执行在本轮（2026-08-10，DDL 22:00）推进如下，结论以实测证据为准：
+
+### 已完成（有集群证据）
+- **§3 build 链架构改造上线**：agent-service/build-executor 使用 bollard BuildkitDaemon gRPC 直连 buildkit（bollard-dg3 镜像），digest 从 BuildKit history 提取；control-service 使用 projfix3（含 retry 投影修复）。配套集群配置：control schema ec5089a9、buildkit registry-ca=harbor-ca、robot tag:create、outbound-ca 追加 harbor-ca。
+- **build 链到 scan 全部执行成功**（solve/push/digest/persist/scan），scan 门禁正确拒绝 critical 漏洞（LW_AGENT_BUILD_CRITICAL_VULNERABILITY——perl-base 3 CVE，无修复版本；用户接受为已知限制）。
+- **Playwright teacher 黄金路径 4/4 通过**（3 角色 Keycloak 真实登录 + sprint2-flow.live.spec）。
+- **access-negative 授权层**：student 越权创建/审批均 403 LW_AUTH_SCOPE_DENIED。
+- **trivy-db 已上线 Harbor**（f98b56ab digest，oras 经 63 中转）。
+
+### 阻塞（证据在 .private/handoffs/issue126-v2-execution-handoff-20260810.md）
+- **Container release/环境（验收1b）与依赖链（submission-freeze/access-grant/cleanup）**：release 门禁 LW_RELEASE_ARTIFACT_NOT_AUTHORITATIVE 强制 build succeeded，而 build 因产物 critical 漏洞被安全门禁拒绝——用户已接受 critical 为已知限制，但平台门禁不放行（fail-closed 正确）。
+- **KubeVirt（验收2，P0）**：LLM 生成的 virtual_machine EnvironmentSpec 连续 3 次 LW_LLM_SCHEMA_INVALID（非偶发，需 prompt/模型引导）。
+- **rollback-drill（验收7）**：`--check` 暴露 Ansible 部署源与运行时漂移（模板缺 evaluationRuntime/evaluation_service 等），直接重跑会破坏 control-service；需先同步 inventory。
+- **Release Gate（验收8）**：输入不完整（依赖 build 产物与 verify），本轮无法执行。
+
+### 证据归档
+- Playwright 报告/trace：`.private/issue126-v2/playwright-live/`
+- rollback-drill 集群状态备份：`.private/issue126-v2/rollback-backup/`
+- 完整交接：`.private/handoffs/issue126-v2-execution-handoff-20260810.md`
