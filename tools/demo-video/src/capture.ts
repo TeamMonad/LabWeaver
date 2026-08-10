@@ -189,6 +189,7 @@ export async function capture(options: CaptureOptions): Promise<string> {
   await mkdir(outputDir, {recursive: true});
   const tracePath = path.join(outputDir, 'trace.zip');
   const screenshotPath = path.join(outputDir, 'final.png');
+  const failureScreenshotPath = path.join(outputDir, 'failure.png');
   const clipPath = path.join(outputDir, 'scene.webm');
   const browser = await chromium.launch({headless: true, slowMo: 650});
   let browserVersion = '';
@@ -206,13 +207,25 @@ export async function capture(options: CaptureOptions): Promise<string> {
     await context.tracing.start({screenshots: true, snapshots: true, sources: false});
     const page = await context.newPage();
     invariant(page.video(), 'LW_DEMO_VIDEO_CAPTURE_NOT_STARTED', 'Playwright did not start video recording');
-    await driveScene(page, options.profile, options.sceneId);
-    await page.screenshot({path: screenshotPath, fullPage: false, animations: 'disabled'});
-    await context.tracing.stop({path: tracePath});
-    const recorded = await page.video()!.path();
-    await context.close();
-    await run('ffmpeg', ['-y', '-i', recorded, '-c', 'copy', clipPath], 'LW_DEMO_VIDEO_CAPTURE_FINALIZE_FAILED');
-    if (recorded !== clipPath) await rm(recorded, {force: true});
+    try {
+      await driveScene(page, options.profile, options.sceneId);
+      await page.screenshot({path: screenshotPath, fullPage: false, animations: 'disabled'});
+      await context.tracing.stop({path: tracePath});
+      const recorded = await page.video()!.path();
+      await context.close();
+      await run('ffmpeg', ['-y', '-i', recorded, '-c', 'copy', clipPath], 'LW_DEMO_VIDEO_CAPTURE_FINALIZE_FAILED');
+      if (recorded !== clipPath) await rm(recorded, {force: true});
+    } catch (error) {
+      await page.screenshot({path: failureScreenshotPath, fullPage: false, animations: 'disabled'}).catch(() => undefined);
+      await context.tracing.stop({path: tracePath}).catch(() => undefined);
+      const recorded = await page.video()!.path().catch(() => '');
+      await context.close().catch(() => undefined);
+      if (recorded) {
+        await run('ffmpeg', ['-y', '-i', recorded, '-c', 'copy', path.join(outputDir, 'failure.webm')], 'LW_DEMO_VIDEO_CAPTURE_FAILURE_VIDEO_FAILED');
+        await rm(recorded, {force: true});
+      }
+      throw error;
+    }
   } finally {
     await browser.close();
   }
