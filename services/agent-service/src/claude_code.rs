@@ -1221,6 +1221,22 @@ impl ClaudeCodeRuntime {
                         .join(format!("llm-{name}-{stamp}-repair{repairs}.stdout"));
                     let _ = std::fs::write(path, process_output.stdout());
                 }
+                let preview: String = String::from_utf8_lossy(process_output.stdout())
+                    .chars()
+                    .take(2_000)
+                    .collect();
+                tracing::warn!(
+                    event = "agent.llm.candidate_parse_failed",
+                    component = "agent-service",
+                    operation = "llm.candidate.parse",
+                    outcome = "failed",
+                    duration_ms = 0_u64,
+                    track = ?track,
+                    repair_attempt = repairs,
+                    stdout_preview = ?preview,
+                    diagnostic_code = "LLM_SCHEMA_INVALID",
+                    retryable = true,
+                );
             }
             match parsed {
                 Ok(execution) => return Ok(execution),

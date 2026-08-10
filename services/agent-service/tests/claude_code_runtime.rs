@@ -62,6 +62,7 @@ struct FakeProcess {
     commands: Mutex<Vec<ClaudeCodeCommand>>,
     active: AtomicUsize,
     max_active: AtomicUsize,
+    total_calls: AtomicUsize,
 }
 
 struct StaticPackageReader {
@@ -110,7 +111,12 @@ impl FakeProcess {
             commands: Mutex::new(Vec::new()),
             active: AtomicUsize::new(0),
             max_active: AtomicUsize::new(0),
+            total_calls: AtomicUsize::new(0),
         }
+    }
+
+    fn total_calls(&self) -> usize {
+        self.total_calls.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn commands(&self) -> std::sync::MutexGuard<'_, Vec<ClaudeCodeCommand>> {
@@ -145,6 +151,8 @@ impl ClaudeCodeProcess for FakeProcess {
             .last()
             .is_some_and(|prompt| prompt.contains("EvaluationSpec"));
         self.commands().push(command);
+        self.total_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
         let slow = matches!(self.mode, FakeMode::SlowSuccess | FakeMode::SlowFullSuccess);
         if slow {
@@ -1569,7 +1577,7 @@ async fn tokio_process_clears_inheritance_and_isolates_invocation_directories()
 
 #[tokio::test]
 async fn markdown_or_non_json_candidate_result_is_rejected() -> Result<(), Box<dyn Error>> {
-    let (runtime, _, policy) = runtime(FakeMode::InvalidCandidateJson)?;
+    let (runtime, process, policy) = runtime(FakeMode::InvalidCandidateJson)?;
     let result = runtime
         .generate(
             AgentTrackKind::Environment,
@@ -1580,6 +1588,10 @@ async fn markdown_or_non_json_candidate_result_is_rejected() -> Result<(), Box<d
     let failure = expected_failure(result, "non-JSON candidate result was accepted")?;
     assert_diagnostic(&failure, "LW_LLM_SCHEMA_INVALID");
     assert!(failure.audit().output_sha256.is_none());
+    // The schema repair loop must retry up to budget.max_schema_repairs (2):
+    // one initial attempt plus two repair attempts, all producing the same
+    // schema-invalid candidate.
+    assert_eq!(process.total_calls(), 3);
     Ok(())
 }
 
