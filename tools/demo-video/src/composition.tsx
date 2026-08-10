@@ -1,5 +1,6 @@
 import React from 'react';
-import {AbsoluteFill, Composition, Loop, OffthreadVideo, Sequence, interpolate, staticFile, useCurrentFrame} from 'remotion';
+import {Video} from '@remotion/media';
+import {AbsoluteFill, Composition, Loop, Sequence, interpolate, staticFile, useCurrentFrame} from 'remotion';
 import {SCENES, TOTAL_SECONDS, VIDEO} from './model.ts';
 
 export type RenderScene = {sceneId: string; label: string; clip: string; durationInFrames: number; sourceFrames: number};
@@ -17,7 +18,7 @@ const SceneView: React.FC<{scene: RenderScene; cut: DemoVideoProps['cut']}> = ({
   return <AbsoluteFill style={{backgroundColor: '#07111f', overflow: 'hidden'}}>
     <div style={{width: '100%', height: '100%', transform: `scale(${scale})`}}>
       <Loop durationInFrames={Math.max(1, scene.sourceFrames)}>
-        <OffthreadVideo src={staticFile(scene.clip)} muted />
+        <Video src={staticFile(scene.clip)} muted onError={() => 'fail'} />
       </Loop>
     </div>
     <div style={labelStyle}>{scene.label}{cut === 'preview' ? ' · Fixture preview / not release evidence' : ''}</div>

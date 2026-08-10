@@ -19,6 +19,7 @@ export const RENDERER_PROFILE = {
   videoBitrate: '12M',
   pixelFormat: 'yuv420p',
   concurrency: 1,
+  mediaComponent: '@remotion/media/Video:onError=fail',
 } as const;
 
 async function loadReceipts(root: string, cut: Cut): Promise<Array<{receipt: CaptureReceipt; receiptPath: string}>> {

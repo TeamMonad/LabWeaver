@@ -17,6 +17,9 @@ importers:
       '@remotion/cli':
         specifier: 4.0.507
         version: 4.0.507(postcss@8.5.26)(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
+      '@remotion/media':
+        specifier: 4.0.507
+        version: 4.0.507(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
       '@remotion/renderer':
         specifier: 4.0.507
         version: 4.0.507(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
@@ -582,6 +585,12 @@ packages:
 
   '@remotion/media-utils@4.0.507':
     resolution: {integrity: sha512-Ncm9ATXVOJ7aFbGXycVAXo+ISp3PFZb2JYSnGBuzat+d03CLR3yyCzGPhovlZqhnP7UIaRJxo15I5DlUkiGxrQ==}
+    peerDependencies:
+      react: '>=16.8.0'
+      react-dom: '>=16.8.0'
+
+  '@remotion/media@4.0.507':
+    resolution: {integrity: sha512-PpSbLq0x2E/yZGHyYcGsFpUWcocy+w2uV64qcTgASSN3Vd2ZSwNAaAGrNCUD9nN3EUaHjsoqheL/o8cRTZZ06g==}
     peerDependencies:
       react: '>=16.8.0'
       react-dom: '>=16.8.0'
@@ -1923,13 +1932,13 @@ snapshots:
       '@remotion/timeline-utils': 4.0.507
       '@rspack/core': 1.7.11
       '@rspack/plugin-react-refresh': 1.6.1(react-refresh@0.18.0)
-      css-loader: 7.1.4(@rspack/core@1.7.11)(webpack@5.105.0(esbuild@0.28.1)(postcss@8.5.26))
+      css-loader: 7.1.4(@rspack/core@1.7.11)(webpack@5.105.0(postcss@8.5.26))
       esbuild: 0.28.1
       react: 19.2.0
       react-dom: 19.2.0(react@19.2.0)
       react-refresh: 0.18.0
       remotion: 4.0.507(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
-      style-loader: 4.0.0(webpack@5.105.0(esbuild@0.28.1)(postcss@8.5.26))
+      style-loader: 4.0.0(webpack@5.105.0(postcss@8.5.26))
       webpack: 5.105.0(esbuild@0.28.1)(postcss@8.5.26)
     transitivePeerDependencies:
       - '@minify-html/node'
@@ -2018,6 +2027,14 @@ snapshots:
       react: 19.2.0
       react-dom: 19.2.0(react@19.2.0)
       remotion: 4.0.507(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
+
+  '@remotion/media@4.0.507(react-dom@19.2.0(react@19.2.0))(react@19.2.0)':
+    dependencies:
+      mediabunny: 1.50.8
+      react: 19.2.0
+      react-dom: 19.2.0(react@19.2.0)
+      remotion: 4.0.507(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
+      zod: 4.4.3
 
   '@remotion/player@4.0.507(react-dom@19.2.0(react@19.2.0))(react@19.2.0)':
     dependencies:
@@ -2475,7 +2492,7 @@ snapshots:
       shebang-command: 2.0.0
       which: 2.0.1
 
-  css-loader@7.1.4(@rspack/core@1.7.11)(webpack@5.105.0(esbuild@0.28.1)(postcss@8.5.26)):
+  css-loader@7.1.4(@rspack/core@1.7.11)(webpack@5.105.0(postcss@8.5.26)):
     dependencies:
       icss-utils: 5.1.0(postcss@8.5.26)
       postcss: 8.5.26
@@ -2897,7 +2914,7 @@ snapshots:
 
   strip-final-newline@2.0.0: {}
 
-  style-loader@4.0.0(webpack@5.105.0(esbuild@0.28.1)(postcss@8.5.26)):
+  style-loader@4.0.0(webpack@5.105.0(postcss@8.5.26)):
     dependencies:
       webpack: 5.105.0(esbuild@0.28.1)(postcss@8.5.26)
 
@@ -2909,7 +2926,7 @@ snapshots:
 
   tapable@2.3.3: {}
 
-  terser-webpack-plugin@5.6.1(esbuild@0.28.1)(postcss@8.5.26)(webpack@5.105.0(esbuild@0.28.1)(postcss@8.5.26)):
+  terser-webpack-plugin@5.6.1(esbuild@0.28.1)(postcss@8.5.26)(webpack@5.105.0(postcss@8.5.26)):
     dependencies:
       '@jridgewell/trace-mapping': 0.3.31
       jest-worker: 27.4.5
@@ -2984,7 +3001,7 @@ snapshots:
       neo-async: 2.6.2
       schema-utils: 4.3.3
       tapable: 2.3.3
-      terser-webpack-plugin: 5.6.1(esbuild@0.28.1)(postcss@8.5.26)(webpack@5.105.0(esbuild@0.28.1)(postcss@8.5.26))
+      terser-webpack-plugin: 5.6.1(esbuild@0.28.1)(postcss@8.5.26)(webpack@5.105.0(postcss@8.5.26))
       watchpack: 2.5.2
       webpack-sources: 3.5.1
     transitivePeerDependencies:
