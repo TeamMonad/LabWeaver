@@ -2,9 +2,10 @@
 
 ## 结论
 
-当前 Go/No-Go 为 **No-Go / blocked**，诊断为
-`LW_DEMO_VIDEO_CONNECTED_EVIDENCE_PENDING`。完整 Fixture 预演版只用于不公开
-评审，不能作为发布证据或公开最终版。解除条件是 #126 在同一冻结身份下交付全部
+当前公开发布的 Go/No-Go 为 **No-Go / blocked**，诊断为
+`LW_DEMO_VIDEO_CONNECTED_EVIDENCE_PENDING`。即使 #126 延期，当前完整 Fixture
+预演版仍可作为明确标注的 Demo 视频，通过不公开链接按期交付和播放；它不能作为
+发布证据或公开最终版。解除公开发布阻塞的条件是 #126 在同一冻结身份下交付全部
 connected 镜头与通过的 Release Gate v3，随后由 D 完成成片 Verify 和逐帧隐私审阅。
 
 ## 构建与交付身份
@@ -17,9 +18,9 @@ connected 镜头与通过的 Release Gate v3，随后由 D 完成成片 Verify �
 | PR | #164（Draft）；禁止 auto-merge |
 | Fixture source commit | `6316c60557ad52edaf78d7b15b0679a5107dab84` |
 | Preview manifest | `artifacts/demo-video/preview/demo-video-manifest.v1.json` |
-| Preview manifest SHA-256 | `sha256:4523e6374fe99e4351fcd5189304cd9eb36bfcaa7164b66656dea884213f6ff2` |
-| Preview video SHA-256 | `sha256:69a4d3573b0fe17f2f4c4f009cfabbc4b681c4c5f7b67f9a1968e1ef2bbb7709` |
-| Preview media | 1920×1080、60 fps、H.264、无音轨、840 秒、659569599 bytes |
+| Preview manifest SHA-256 | `sha256:b648f54031b8ab8a14d772ec1fb6a8e3694671ff3b9ae372ca8c33bb9d8fcea3` |
+| Preview video SHA-256 | `sha256:6f402908556574145be363a2b93517b08fcddb82bfe47bb56c5addc276e46a20` |
+| Preview media | 1920×1080、60 fps、H.264、无音轨、840 秒、607771082 bytes |
 | Renderer | Remotion `4.0.507`；H.264 hardware acceleration `required`；12 Mbit/s；1 worker |
 | Local deployment report SHA-256 | `sha256:3645a3e547d8eda2931bdcb1cc539571a77079f8b0d07714c52cb12d5bd063ca` |
 | #126 Run / Gate identity | 未提供，blocked |
@@ -49,12 +50,17 @@ connected 镜头与通过的 Release Gate v3，随后由 D 完成成片 Verify �
 ## 彩排与隐私
 
 1. Fixture 完整流程：八段采集 receipt、Trace、截图与 hash 完整后通过；记录时间为
-   `2026-08-10T05:01:17.765Z`，证据 hash 与 Preview video SHA-256 一致。
+   `2026-08-10T07:55:34.100Z`，证据 hash 与 Preview video SHA-256 一致。
 2. Fixture 全片播放：已通过 FFprobe、首/中/末 seek、双语 SRT 边界、逐文件
-   checksum 和 Chromium 播放验证；记录时间为 `2026-08-10T05:01:29.876Z`，
+   checksum 和 Chromium 播放验证；记录时间为 `2026-08-10T08:08:06.952Z`，
    播放验证证据 hash 为
-   `sha256:07809376b6b1ce23396aadb14153d2e0bb1326bcd2bda479e3432cf3cefe2524`。
+   `sha256:486c00044c8f77b504d7c37f92ea47b46e073240f79c79364500fb996678142e`。
 3. Connected final：尚未执行；仅消费 #126 的一次冻结验收窗口，不重复 deployment/replay。
+
+人工视觉复核覆盖八个场景的代表帧与 Container 切片起始精确帧。复核发现并
+修复了循环播放重新引入浏览器导航白帧的根因：渲染现在使用 native media loop，
+统一裁掉每段开头一秒，并拒绝裁切后长度不足的镜头。重复执行 `verify` 后 manifest
+SHA-256 保持不变，证据对账可重现。
 
 自动隐私门禁扫描 manifest、字幕与文件名中的 token、内部域名、绝对路径和私有
 locator。像素内容无法由文本扫描证明安全，因此 preview 维持 `humanReview: pending`，

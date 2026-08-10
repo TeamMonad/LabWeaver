@@ -19,6 +19,8 @@ export const RENDERER_PROFILE = {
   videoBitrate: '12M',
   pixelFormat: 'yuv420p',
   concurrency: 1,
+  mediaLoopMode: 'native-video',
+  trimLeadingFrames: VIDEO.fps,
   mediaComponent: '@remotion/media/Video:onError=fail',
 } as const;
 
@@ -70,11 +72,12 @@ export async function render(options: RenderOptions): Promise<string> {
     cut: options.cut,
     scenes: receipts.map((receipt, index): RenderScene => {
       const scene = SCENES[index]!;
+      invariant(receipt.clip.durationSeconds > 1.25, 'LW_DEMO_VIDEO_CLIP_TOO_SHORT', `${scene.id} clip must retain at least 250ms after the one-second transition trim`);
       return {
         sceneId: scene.id, label: scene.label,
         clip: receipt.clip.path.replace(/^artifacts\/demo-video\//, ''),
         durationInFrames: scene.seconds * VIDEO.fps,
-        sourceFrames: Math.max(1, Math.floor(receipt.clip.durationSeconds * VIDEO.fps)),
+        trimBeforeFrames: VIDEO.fps,
       };
     }),
   };

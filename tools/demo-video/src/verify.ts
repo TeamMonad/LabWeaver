@@ -13,7 +13,7 @@ import {validateSrt} from './srt.js';
 type VerifyOptions = {root: string; cut: Cut; manifestLocator: string};
 type Manifest = Record<string, any> & {checksums: FileEvidence[]; video: FileEvidence & Record<string, unknown>; subtitles: Array<FileEvidence & {lastCueSeconds: number}>};
 
-async function verifyPlayback(videoPath: string, screenshotPath: string): Promise<void> {
+async function verifyPlayback(videoPath: string, screenshotPath: string | null): Promise<void> {
   const browser = await chromium.launch({headless: true});
   try {
     const page = await browser.newPage({viewport: {width: 1280, height: 720}});
@@ -38,7 +38,7 @@ async function verifyPlayback(videoPath: string, screenshotPath: string): Promis
         await seeked;
       }
     });
-    await page.screenshot({path: screenshotPath});
+    if (screenshotPath !== null) await page.screenshot({path: screenshotPath});
   } finally {
     await browser.close();
   }
@@ -74,7 +74,10 @@ export async function verify(options: VerifyOptions): Promise<string> {
   ]);
   assertNoForbiddenText([manifestText, ...subtitleTexts, ...receiptTexts, ...manifest.checksums.map(({path: value}) => value)]);
   const playbackEvidence = path.join(path.dirname(manifestPath), 'playback-seek-verification.png');
-  await verifyPlayback(videoPath, playbackEvidence);
+  // Preserve the evidence identity after the first successful rehearsal. A
+  // repeated verification still performs every seek, but Chromium screenshots
+  // are not byte-deterministic and must not silently rewrite the manifest.
+  await verifyPlayback(videoPath, wasVerified ? null : playbackEvidence);
   const playbackFile = await fileEvidence(options.root, playbackEvidence);
   const playbackChecksum = manifest.checksums.findIndex(({path: value}) => value === playbackFile.path);
   if (playbackChecksum >= 0) manifest.checksums[playbackChecksum] = playbackFile;

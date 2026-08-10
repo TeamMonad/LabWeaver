@@ -30,9 +30,10 @@ locators, strict capture/manifest Schemas, Remotion, FFprobe and external
 The source identity `6316c60557ad52edaf78d7b15b0679a5107dab84` has one
 machine-verified 840-second preview: 1920×1080, 60 fps, H.264, zero audio
 streams and video SHA-256
-`69a4d3573b0fe17f2f4c4f009cfabbc4b681c4c5f7b67f9a1968e1ef2bbb7709`.
-Its first two Fixture rehearsals passed; the connected-final rehearsal has not
-run.
+`6f402908556574145be363a2b93517b08fcddb82bfe47bb56c5addc276e46a20`.
+Its first two Fixture rehearsals passed, repeated verification preserves the
+manifest identity, and exact-frame visual review found and removed navigation
+frames at media-loop boundaries. The connected-final rehearsal has not run.
 
 Current formal state: **blocked**. A public final cannot be resolved until #126
 provides all eight connected shots from one frozen source/package/configuration/
@@ -41,6 +42,10 @@ report, D Verify and a completed frame-by-frame privacy review. #128 consumes
 those outputs and does not open another package, deployment, Resource replay,
 connected Playwright or Release Gate window. The existing PPT and its source
 are unchanged and are not #128 deliverables.
+
+If #126 is delayed, the complete Fixture cut remains an on-time, unlisted Demo
+deliverable with its non-release label and `releaseEligible: false` boundary
+intact. It is not promoted to connected or release evidence.
 
 The Docker Desktop Fixture preview has a separate non-release deployment path.
 `tools/demo-video local-cluster` owns only the labelled

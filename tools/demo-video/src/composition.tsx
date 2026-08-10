@@ -1,9 +1,9 @@
 import React from 'react';
 import {Video} from '@remotion/media';
-import {AbsoluteFill, Composition, Loop, Sequence, interpolate, staticFile, useCurrentFrame} from 'remotion';
+import {AbsoluteFill, Composition, Sequence, interpolate, staticFile, useCurrentFrame} from 'remotion';
 import {SCENES, TOTAL_SECONDS, VIDEO} from './model.ts';
 
-export type RenderScene = {sceneId: string; label: string; clip: string; durationInFrames: number; sourceFrames: number};
+export type RenderScene = {sceneId: string; label: string; clip: string; durationInFrames: number; trimBeforeFrames: number};
 export type DemoVideoProps = {cut: 'preview' | 'final'; scenes: RenderScene[]};
 
 const labelStyle: React.CSSProperties = {
@@ -17,9 +17,7 @@ const SceneView: React.FC<{scene: RenderScene; cut: DemoVideoProps['cut']}> = ({
   const scale = interpolate(frame, [0, scene.durationInFrames], [1, 1.018], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'});
   return <AbsoluteFill style={{backgroundColor: '#07111f', overflow: 'hidden'}}>
     <div style={{width: '100%', height: '100%', transform: `scale(${scale})`}}>
-      <Loop durationInFrames={Math.max(1, scene.sourceFrames)}>
-        <Video src={staticFile(scene.clip)} muted onError={() => 'fail'} />
-      </Loop>
+      <Video src={staticFile(scene.clip)} trimBefore={scene.trimBeforeFrames} loop muted onError={() => 'fail'} />
     </div>
     <div style={labelStyle}>{scene.label}{cut === 'preview' ? ' · Fixture preview / not release evidence' : ''}</div>
   </AbsoluteFill>;
@@ -45,5 +43,5 @@ export const RemotionRoot: React.FC = () => <Composition
   fps={VIDEO.fps}
   width={VIDEO.width}
   height={VIDEO.height}
-  defaultProps={{cut: 'preview', scenes: SCENES.map((scene) => ({sceneId: scene.id, label: scene.label, clip: '', durationInFrames: scene.seconds * VIDEO.fps, sourceFrames: VIDEO.fps}))}}
+  defaultProps={{cut: 'preview', scenes: SCENES.map((scene) => ({sceneId: scene.id, label: scene.label, clip: '', durationInFrames: scene.seconds * VIDEO.fps, trimBeforeFrames: VIDEO.fps}))}}
 />;

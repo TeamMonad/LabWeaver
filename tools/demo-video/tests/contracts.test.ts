@@ -116,6 +116,8 @@ test('repository locator rejects absolute paths, traversal, and unrelated trees'
 test('local Docker Desktop report is non-release and renderer uses one GPU-backed worker', async () => {
   assert.equal(RENDERER_PROFILE.hardwareAcceleration, 'required');
   assert.equal(RENDERER_PROFILE.concurrency, 1);
+  assert.equal(RENDERER_PROFILE.mediaLoopMode, 'native-video');
+  assert.equal(RENDERER_PROFILE.trimLeadingFrames, 60);
   const report = {
     schemaVersion: 'demo-video-local-cluster-report.v1', status: 'verified', releaseEligible: false,
     profile: 'fixture-preview', sourceCommit: 'a'.repeat(40), context: 'docker-desktop', dockerContext: 'desktop-linux',
