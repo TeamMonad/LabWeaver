@@ -72,7 +72,7 @@ impl EnvironmentApiState {
 
 /// Builds the public routes served only behind the existing mTLS acceptor.
 pub fn environment_api_router(state: EnvironmentApiState) -> Router {
-    Router::new()
+    let router = Router::new()
         .route(
             "/api/v1/environments",
             get(list_environments).post(create_environment),
@@ -125,7 +125,8 @@ pub fn environment_api_router(state: EnvironmentApiState) -> Router {
             "/internal/v1/resource/work-cleanups/{environment_id}",
             get(read_resource_work_cleanup),
         )
-        .with_state(state)
+        .with_state(state);
+    telemetry::instrument_http(router, "environment-service", "environment-api")
 }
 
 async fn accept_resource_work_lease_update(
@@ -482,6 +483,7 @@ fn environment_summary(
 
 async fn create_environment(
     State(state): State<EnvironmentApiState>,
+    Extension(context): Extension<telemetry::RequestContext>,
     caller: Option<Extension<VerifiedCallerIdentity>>,
     headers: HeaderMap,
     body: Bytes,
@@ -521,7 +523,7 @@ async fn create_environment(
         kind: EnvironmentOperationKind::Create,
         expected_revision: Revision::new(1).map_err(|_| EnvironmentApiError::RequestInvalid)?,
         actor_id,
-        trace_id: trace_id(),
+        trace_id: context.trace_id().to_owned(),
         accepted_at,
         deadline_at,
         access_revocation_revision: None,
@@ -578,18 +580,20 @@ macro_rules! lifecycle_handler {
     ($name:ident, $kind:expr, $reason:expr, $preserve:expr) => {
         async fn $name(
             State(state): State<EnvironmentApiState>,
+            Extension(context): Extension<telemetry::RequestContext>,
             caller: Option<Extension<VerifiedCallerIdentity>>,
             Path(environment_id): Path<EnvironmentId>,
             headers: HeaderMap,
         ) -> Result<(StatusCode, Json<EnvironmentOperationAccepted>), EnvironmentApiError> {
+            require_access_bff(caller)?;
             accept_lifecycle(
                 &state,
-                caller,
                 environment_id,
                 &headers,
                 $kind,
                 $reason,
                 $preserve,
+                context.trace_id(),
             )
             .await
         }
@@ -629,14 +633,13 @@ lifecycle_handler!(
 
 async fn accept_lifecycle(
     state: &EnvironmentApiState,
-    caller: Option<Extension<VerifiedCallerIdentity>>,
     environment_id: EnvironmentId,
     headers: &HeaderMap,
     kind: EnvironmentOperationKind,
     revocation_reason: Option<&'static str>,
     preserve_mutable_disk: bool,
+    trace_id: &str,
 ) -> Result<(StatusCode, Json<EnvironmentOperationAccepted>), EnvironmentApiError> {
-    require_access_bff(caller)?;
     require_session(headers)?;
     let instance = load_owned(state, environment_id, actor(headers)?).await?;
     let expected_revision = if_match(headers)?;
@@ -659,7 +662,7 @@ async fn accept_lifecycle(
         kind,
         expected_revision,
         actor_id: instance.owner_id,
-        trace_id: trace_id(),
+        trace_id: trace_id.to_owned(),
         accepted_at,
         deadline_at: add_duration(accepted_at, OPERATION_DEADLINE)?,
         access_revocation_revision,
@@ -750,10 +753,6 @@ fn add_duration(
         .map_err(|_| EnvironmentApiError::ClockInvalid)
 }
 
-fn trace_id() -> String {
-    format!("environment-api-{}", Uuid::now_v7())
-}
-
 fn instance_response(instance: EnvironmentInstance) -> Result<Response, EnvironmentApiError> {
     let etag = StrongEtag::from_revision(instance.revision).header_value();
     let mut response = Json(instance).into_response();
@@ -829,8 +828,25 @@ impl IntoResponse for EnvironmentApiError {
             ) => StatusCode::CONFLICT,
             _ => StatusCode::SERVICE_UNAVAILABLE,
         };
-        let diagnostic = self.to_string();
-        tracing::warn!(event = "environment.api.rejected", %diagnostic, status = status.as_u16());
+        let rendered = self.to_string();
+        let diagnostic = rendered
+            .split(':')
+            .next()
+            .unwrap_or("LW_ENVIRONMENT_REQUEST_FAILED");
+        let retryable = status == StatusCode::SERVICE_UNAVAILABLE;
+        tracing::warn!(
+            event = "environment.api.rejected",
+            component = "api-error-boundary",
+            operation = "http.request",
+            outcome = "rejected",
+            duration_ms = 0_u64,
+            diagnostic_code = diagnostic,
+            error_kind = "request_rejected",
+            failure_stage = "environment.request.finalize",
+            retryable,
+            safe_detail = "request_rejected",
+            http_status = status.as_u16(),
+        );
         (
             status,
             Json(serde_json::json!({"diagnosticCode": diagnostic})),
@@ -841,7 +857,7 @@ impl IntoResponse for EnvironmentApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::{add_duration, trace_id};
+    use super::add_duration;
     use contracts::UtcTimestamp;
     use std::time::Duration;
 
@@ -851,7 +867,6 @@ mod tests {
         let now: UtcTimestamp = "2026-07-19T00:00:00.000Z".parse()?;
         let deadline = add_duration(now, Duration::from_secs(900))?;
         assert_eq!(deadline.to_string(), "2026-07-19T00:15:00.000Z");
-        assert!(trace_id().starts_with("environment-api-"));
         Ok(())
     }
 }

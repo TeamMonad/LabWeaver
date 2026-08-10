@@ -384,12 +384,14 @@ pub(super) async fn forward_resource(
     let response = copy_request_headers(request, &headers)
         .send()
         .await
-        .map_err(|error| {
+        .map_err(|_error| {
             tracing::warn!(
                 event = "auth.resource_gateway.unavailable",
-                diagnostic = "LW_AUTH_RESOURCE_UNAVAILABLE",
+                diagnostic_code = "LW_AUTH_RESOURCE_UNAVAILABLE",
                 operation_id,
-                error = %error
+                error_kind = "upstream_transport",
+                failure_stage = "resource_request",
+                retryable = true
             );
             ApiError::unavailable("LW_AUTH_RESOURCE_UNAVAILABLE")
         })?;
@@ -712,13 +714,15 @@ pub(super) async fn forward_runtime(
     let response = copy_runtime_request_headers(request, &headers)
         .send()
         .await
-        .map_err(|error| {
+        .map_err(|_error| {
             tracing::warn!(
                 event = "access.runtime_proxy.unavailable",
-                diagnostic = "LW_ACCESS_RUNTIME_UNAVAILABLE",
+                diagnostic_code = "LW_ACCESS_RUNTIME_UNAVAILABLE",
                 environment_id = %target.environment_id,
                 endpoint_grant_id = %endpoint_grant_id,
-                error = %error
+                error_kind = "upstream_transport",
+                failure_stage = "runtime_request",
+                retryable = true
             );
             ApiError::unavailable("LW_ACCESS_RUNTIME_UNAVAILABLE")
         })?;
@@ -917,11 +921,13 @@ async fn forward(
         .header(SESSION_HEADER, session.session_id.to_string())
         .body(body);
     let request = copy_request_headers(request, &headers);
-    let response = request.send().await.map_err(|error| {
+    let response = request.send().await.map_err(|_error| {
         tracing::warn!(
             event = "auth.control_gateway.unavailable",
-            diagnostic = "LW_AUTH_CONTROL_UNAVAILABLE",
-            error = %error
+            diagnostic_code = "LW_AUTH_CONTROL_UNAVAILABLE",
+            error_kind = "upstream_transport",
+            failure_stage = "control_request",
+            retryable = true
         );
         ApiError::unavailable("LW_AUTH_CONTROL_UNAVAILABLE")
     })?;
@@ -1020,6 +1026,7 @@ fn copy_request_headers(
         header::IF_NONE_MATCH.as_str(),
         "idempotency-key",
         "last-event-id",
+        "x-request-id",
         "traceparent",
         "tracestate",
     ] {
@@ -1044,6 +1051,7 @@ fn copy_runtime_request_headers(
         header::IF_MATCH.as_str(),
         header::IF_NONE_MATCH.as_str(),
         header::IF_MODIFIED_SINCE.as_str(),
+        "x-request-id",
         "traceparent",
         "tracestate",
     ] {

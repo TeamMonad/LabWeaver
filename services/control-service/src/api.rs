@@ -37,7 +37,6 @@ use hyper_util::server::conn::auto::Builder as HyperBuilder;
 use hyper_util::service::TowerToHyperService;
 use serde::Deserialize;
 use time::OffsetDateTime;
-use uuid::Uuid;
 
 use crate::clients::{AccessClient, AgentClient, DownstreamError, EvaluationClient};
 use crate::{ControlError, ControlService};
@@ -66,7 +65,7 @@ pub struct GatewayPrincipal {
 
 /// Builds the complete Issue #48 public control-plane route table.
 pub fn router(state: Arc<ApiState>) -> Router {
-    Router::new()
+    let router = Router::new()
         .route(
             "/api/v1/courses/{course_id}/problem-package-uploads",
             post(create_upload),
@@ -148,7 +147,8 @@ pub fn router(state: Arc<ApiState>) -> Router {
             post(withdraw_release),
         )
         .route("/api/v1/courses/{course_id}/events", get(events))
-        .with_state(state)
+        .with_state(state);
+    telemetry::instrument_http(router, "control-service", "control-api")
 }
 
 /// Serves the Control router only after CA verification and exact Gateway URI SAN extraction.
@@ -394,6 +394,7 @@ async fn create_agent_run_for_class(
                 policy,
             },
             &key,
+            &headers,
         )
         .await?;
     state
@@ -436,6 +437,7 @@ async fn cancel_agent_run(
                 expected_revision,
             },
             &key,
+            &headers,
         )
         .await?;
     if run.course_id != course_id {
@@ -475,6 +477,7 @@ async fn retry_agent_run(
                 expected_revision,
             },
             &key,
+            &headers,
         )
         .await?;
     if run.course_id != course_id {
@@ -616,7 +619,7 @@ async fn create_evaluation_release(
         .control
         .prepare_evaluation_release(course_id, &request, actor)
         .await?;
-    let release = state.evaluation.publish(&command, &key, &trace).await?;
+    let release = state.evaluation.publish(&command, &key, &headers).await?;
     if release.course_id != course_id
         || release.candidate_id != request.candidate_id
         || release.approval_id != request.approval_id
@@ -656,7 +659,7 @@ async fn list_evaluation_releases(
     query
         .validate()
         .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
-    Ok(Json(state.evaluation.list(course_id, &query).await?).into_response())
+    Ok(Json(state.evaluation.list(course_id, &query, &headers).await?).into_response())
 }
 
 async fn get_evaluation_release(
@@ -673,7 +676,7 @@ async fn get_evaluation_release(
         course_id,
     )
     .await?;
-    let release = state.evaluation.get(release_id).await?;
+    let release = state.evaluation.get(release_id, &headers).await?;
     if release.course_id != course_id {
         return Err(ApiError::forbidden("LW_AUTH_COURSE_SCOPE_DENIED"));
     }
@@ -711,7 +714,7 @@ async fn withdraw_evaluation_release(
                 reason_code: request.reason_code.clone(),
             },
             &idempotency(&headers)?,
-            &trace,
+            &headers,
         )
         .await?;
     tracing::info!(
@@ -983,14 +986,17 @@ async fn authorize_decision(
     let session_id = parse_header::<BffSessionId>(headers, SESSION_HEADER)?;
     let decision = state
         .access
-        .authorize(&AuthorizationDecisionRequest {
-            operation_id: operation.to_owned(),
-            actor_id,
-            session_id,
-            scope: AuthorizationScope::Course { course_id },
-            authorization_revision: None,
-            scope_revision: None,
-        })
+        .authorize(
+            &AuthorizationDecisionRequest {
+                operation_id: operation.to_owned(),
+                actor_id,
+                session_id,
+                scope: AuthorizationScope::Course { course_id },
+                authorization_revision: None,
+                scope_revision: None,
+            },
+            headers,
+        )
         .await?;
     let current = now()?;
     if decision.actor.actor_id != actor_id
@@ -1042,11 +1048,11 @@ fn now() -> Result<UtcTimestamp, ApiError> {
 }
 
 fn trace_id(headers: &HeaderMap) -> String {
-    headers
-        .get("traceparent")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty() && value.len() <= 256)
-        .map_or_else(|| Uuid::now_v7().to_string(), str::to_owned)
+    let _ = headers;
+    telemetry::current_request_context()
+        .unwrap_or_else(telemetry::RequestContext::generate)
+        .trace_id()
+        .to_owned()
 }
 
 fn current_timestamp() -> Result<UtcTimestamp, ()> {
@@ -1161,7 +1167,9 @@ impl From<DownstreamError> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let request_id = Uuid::now_v7().to_string();
+        let context = telemetry::current_request_context()
+            .unwrap_or_else(telemetry::RequestContext::generate);
+        let request_id = context.request_id().to_owned();
         let diagnostic = DiagnosticCode::parse(self.diagnostic)
             .unwrap_or_else(|_| DiagnosticCode::registered("LW_CONTROL_UNCLASSIFIED_ERROR"));
         let problem = ProblemDetails {
@@ -1175,10 +1183,37 @@ impl IntoResponse for ApiError {
             instance: format!("urn:labweaver:request:{request_id}"),
             diagnostic_code: diagnostic,
             request_id,
-            trace_id: None,
+            trace_id: Some(context.trace_id().to_owned()),
             retryable: self.retryable,
             violations: Vec::new(),
         };
+        if self.retryable || self.status.is_client_error() {
+            tracing::warn!(
+                event = "control.request.rejected",
+                component = "api-error-boundary",
+                operation = "http.request",
+                outcome = "rejected",
+                duration_ms = 0_u64,
+                diagnostic_code = problem.diagnostic_code.as_str(),
+                error_kind = "request_rejected",
+                failure_stage = "control.request.finalize",
+                retryable = self.retryable,
+                safe_detail = "request_rejected",
+            );
+        } else {
+            tracing::error!(
+                event = "control.request.failed",
+                component = "api-error-boundary",
+                operation = "http.request",
+                outcome = "failed",
+                duration_ms = 0_u64,
+                diagnostic_code = problem.diagnostic_code.as_str(),
+                error_kind = "terminal_api_failure",
+                failure_stage = "control.request.finalize",
+                retryable = false,
+                safe_detail = "redacted_unclassified",
+            );
+        }
         (
             self.status,
             [(header::CONTENT_TYPE, "application/problem+json")],

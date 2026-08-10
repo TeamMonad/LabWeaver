@@ -100,21 +100,25 @@ where
                 break;
             }
             completed = connections.join_next(), if !connections.is_empty() => {
-                if let Some(Err(error)) = completed {
+                if let Some(Err(_error)) = completed {
                     tracing::error!(
                         event = "environment.owner_resolver.connection_task_failed",
                         diagnostic_code = "LW_ENV_OWNER_CONNECTION_FAILED",
-                        error = %error,
+                        error_kind = "connection_task",
+                        failure_stage = "connection_task",
+                        retryable = false,
                     );
                 }
             }
             accepted = listener.accept() => {
-                let (stream, peer_address) = accepted.map_err(MtlsServerError::Accept)?;
+                let (stream, _peer_address) = accepted.map_err(MtlsServerError::Accept)?;
                 let Ok(connection_permit) = Arc::clone(&connection_permits).try_acquire_owned() else {
                     tracing::warn!(
                         event = "environment.owner_resolver.connection_rejected",
-                        %peer_address,
                         diagnostic_code = "LW_ENV_OWNER_CONNECTION_LIMIT_EXCEEDED",
+                        error_kind = "capacity",
+                        failure_stage = "accept",
+                        retryable = true,
                     );
                     continue;
                 };
@@ -127,29 +131,33 @@ where
                         Err(_) => {
                             tracing::warn!(
                                 event = "environment.owner_resolver.tls_timeout",
-                                %peer_address,
                                 diagnostic_code = "LW_ENV_OWNER_TLS_HANDSHAKE_TIMEOUT",
+                                error_kind = "timeout",
+                                failure_stage = "handshake",
+                                retryable = true,
                             );
                             return;
                         }
-                        Ok(Err(error)) => {
+                        Ok(Err(_error)) => {
                             tracing::warn!(
                                 event = "environment.owner_resolver.tls_rejected",
-                                %peer_address,
                                 diagnostic_code = "LW_ENV_OWNER_CALLER_UNTRUSTED",
-                                error = %error,
+                                error_kind = "tls_handshake",
+                                failure_stage = "handshake",
+                                retryable = false,
                             );
                             return;
                         }
                     };
                     let identity = match verified_identity(&tls_stream) {
                         Ok(identity) => identity,
-                        Err(error) => {
+                        Err(_error) => {
                             tracing::warn!(
                                 event = "environment.owner_resolver.san_rejected",
-                                %peer_address,
                                 diagnostic_code = "LW_ENV_OWNER_CALLER_UNTRUSTED",
-                                error = %error,
+                                error_kind = "peer_identity",
+                                failure_stage = "peer_validation",
+                                retryable = false,
                             );
                             return;
                         }
@@ -163,19 +171,22 @@ where
                     .await
                     {
                         Ok(Ok(())) => {}
-                        Ok(Err(error)) => {
+                        Ok(Err(_error)) => {
                             tracing::warn!(
                                 event = "environment.owner_resolver.connection_failed",
-                                %peer_address,
                                 diagnostic_code = "LW_ENV_OWNER_CONNECTION_FAILED",
-                                error = %error,
+                                error_kind = "connection",
+                                failure_stage = "serve_connection",
+                                retryable = true,
                             );
                         }
                         Err(_) => {
                             tracing::warn!(
                                 event = "environment.owner_resolver.connection_timeout",
-                                %peer_address,
                                 diagnostic_code = "LW_ENV_OWNER_CONNECTION_TIMEOUT",
+                                error_kind = "timeout",
+                                failure_stage = "serve_connection",
+                                retryable = true,
                             );
                         }
                     }

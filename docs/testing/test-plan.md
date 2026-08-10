@@ -28,6 +28,24 @@ For the current Sprint, Issue #126 is that sole acceptance owner; development
 Issues and PRs, including #142/#147, must not start shared-cluster deployment,
 Resource replay, connected E2E or Release Gate commands.
 
+### Issue #165 observability verification
+
+The #165 local gate validates `labweaver.log.v1` against
+`schemas/contracts/v1/internal/labweaver-log-v1.schema.json`; service identity and required
+fields; INFO/DEBUG filtering; W3C extraction and outbound propagation; UUIDv7
+request IDs; fail-closed RFC 9457 responses for malformed `traceparent` and
+`x-request-id`; and absence of token, path, URL, object-key, locator, payload,
+command, terminal, and raw-error sentinels from serialized output.
+
+Focused runtime tests cover an accepted transition, retryable failure, and
+terminal failure across HTTP, Outbox/NATS, Build, Container, KubeVirt, Freeze,
+and Access Gateway boundaries. Assertions require one continuous trace
+identity, an explicit `failure_stage`, DEBUG-only idle polling, and one final
+ERROR owner. The PR runs targeted tests before the normal format, Clippy,
+workspace, contract, and local candidate integration gates. It does not run a
+shared-cluster deploy, replay, connected Playwright, or Release Gate; #126 owns
+the real-chain verification.
+
 ### Issue #126 connected console matrix
 
 The Container xterm and KubeVirt noVNC checks reuse

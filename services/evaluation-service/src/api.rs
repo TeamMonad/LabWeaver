@@ -75,7 +75,7 @@ pub struct GatewayPrincipal {
 }
 
 pub fn evaluation_api_router(state: EvaluationApiState) -> Router {
-    Router::new()
+    let router = Router::new()
         .route(
             "/api/v1/environments/{environment_id}/freeze",
             post(freeze_submission),
@@ -125,7 +125,8 @@ pub fn evaluation_api_router(state: EvaluationApiState) -> Router {
             "/internal/v1/evaluation-runs/{run_id}/steps/{step_run_id}/complete",
             post(complete_evaluation_step),
         )
-        .with_state(state)
+        .with_state(state);
+    telemetry::instrument_http(router, "evaluation-service", "evaluation-api")
 }
 
 async fn freeze_submission(
@@ -156,7 +157,7 @@ async fn freeze_submission(
         manifest_revision: Revision::new(1).map_err(|_| EvaluationApiError::RequestInvalid)?,
         manifest: request.manifest,
         idempotency_key: idempotency_key.as_str().to_owned(),
-        trace_id: format!("evaluation-api-{}", uuid::Uuid::now_v7()),
+        trace_id: trace_id()?,
         requested_at: state.commands.authority_now().await?,
     };
     let accepted = state.commands.accept(&command).await?;
@@ -182,12 +183,7 @@ async fn publish_evaluation_release(
     let now = state.control.authority_now().await?;
     match state
         .control
-        .publish_release(
-            &request,
-            &idempotency_key(&headers)?,
-            now,
-            &trace_id(&headers)?,
-        )
+        .publish_release(&request, &idempotency_key(&headers)?, now, &trace_id()?)
         .await?
     {
         EvaluationReleaseReservation::Created(release) => Ok((StatusCode::CREATED, Json(release))),
@@ -251,7 +247,7 @@ async fn withdraw_evaluation_release(
                 &request,
                 &idempotency_key(&headers)?,
                 now,
-                &trace_id(&headers)?,
+                &trace_id()?,
             )
             .await?,
     ))
@@ -290,7 +286,7 @@ async fn list_student_results(
         course_id = %course_id,
         actor_id = %actor_id,
         result_count = page.items.len(),
-        trace_id = %trace_id(&headers)?,
+        trace_id = %trace_id()?,
     );
     Ok(Json(page))
 }
@@ -315,7 +311,7 @@ async fn get_student_result(
         run_id = %run_id,
         release_id = %result.release_id,
         revision = result.revision.get(),
-        trace_id = %trace_id(&headers)?,
+        trace_id = %trace_id()?,
     );
     Ok(Json(result))
 }
@@ -332,12 +328,7 @@ async fn create_evaluation_run(
     let now = state.control.authority_now().await?;
     match state
         .control
-        .create_run(
-            &request,
-            &idempotency_key(&headers)?,
-            now,
-            &trace_id(&headers)?,
-        )
+        .create_run(&request, &idempotency_key(&headers)?, now, &trace_id()?)
         .await?
     {
         EvaluationRunReservation::Created(run) => Ok((StatusCode::CREATED, Json(run))),
@@ -373,7 +364,7 @@ async fn cancel_evaluation_run(
                 &request,
                 &idempotency_key(&headers)?,
                 now,
-                &trace_id(&headers)?,
+                &trace_id()?,
             )
             .await?,
     ))
@@ -399,7 +390,7 @@ async fn retry_evaluation_step(
                 &request,
                 &idempotency_key(&headers)?,
                 now,
-                &trace_id(&headers)?,
+                &trace_id()?,
             )
             .await?,
     ))
@@ -425,7 +416,7 @@ async fn verify_evaluation_step_cleanup(
                 &request,
                 &idempotency_key(&headers)?,
                 now,
-                &trace_id(&headers)?,
+                &trace_id()?,
             )
             .await?,
     ))
@@ -435,7 +426,7 @@ async fn complete_evaluation_step(
     State(state): State<EvaluationApiState>,
     principal: Option<Extension<GatewayPrincipal>>,
     Path((run_id, step_run_id)): Path<(EvaluationRunId, EvaluationStepRunId)>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<EvaluationRun>, EvaluationApiError> {
     let request = contracts::parse_strict_json::<InternalCompleteEvaluationStepRequest>(&body)
@@ -462,7 +453,7 @@ async fn complete_evaluation_step(
                 &request.runtime_identity,
                 lease_token,
                 &request.completion,
-                &trace_id(&headers)?,
+                &trace_id()?,
             )
             .await?,
     ))
@@ -541,18 +532,10 @@ fn idempotency_key(headers: &HeaderMap) -> Result<IdempotencyKey, EvaluationApiE
         })
 }
 
-fn trace_id(headers: &HeaderMap) -> Result<String, EvaluationApiError> {
-    let value = headers
-        .get("traceparent")
-        .and_then(|header| header.to_str().ok())
-        .map_or_else(
-            || format!("evaluation-api-{}", uuid::Uuid::now_v7()),
-            str::to_owned,
-        );
-    if value.trim().is_empty() || value.len() > 128 || value.chars().any(char::is_control) {
-        return Err(EvaluationApiError::RequestInvalid);
-    }
-    Ok(value)
+fn trace_id() -> Result<String, EvaluationApiError> {
+    telemetry::current_request_context()
+        .ok_or(EvaluationApiError::CorrelationContextMissing)
+        .map(|context| context.trace_id().to_owned())
 }
 
 fn actor(headers: &HeaderMap) -> Result<ActorId, EvaluationApiError> {
@@ -650,6 +633,8 @@ pub async fn serve_evaluation_mtls(
 
 #[derive(Debug, thiserror::Error)]
 pub enum EvaluationApiError {
+    #[error("LW_HTTP_REQUEST_CONTEXT_MISSING")]
+    CorrelationContextMissing,
     #[error("LW_EVALUATION_GATEWAY_DENIED")]
     CallerDenied,
     #[error("LW_AUTH_SESSION_REJECTED")]
@@ -719,7 +704,24 @@ impl IntoResponse for EvaluationApiError {
             ) => StatusCode::BAD_REQUEST,
             _ => StatusCode::SERVICE_UNAVAILABLE,
         };
-        tracing::warn!(event = "evaluation.api.rejected", %diagnostic, status = status.as_u16());
+        let diagnostic_code = DiagnosticCode::parse(&diagnostic)
+            .unwrap_or_else(|_| DiagnosticCode::registered("LW_EVALUATION_REQUEST_FAILED"));
+        let retryable = status == StatusCode::SERVICE_UNAVAILABLE;
+        tracing::warn!(
+            event = "evaluation.api.rejected",
+            component = "api-error-boundary",
+            operation = "http.request",
+            outcome = "rejected",
+            duration_ms = 0_u64,
+            diagnostic_code = diagnostic_code.as_str(),
+            error_kind = "request_rejected",
+            failure_stage = "evaluation.request.finalize",
+            retryable,
+            safe_detail = "request_rejected",
+            http_status = status.as_u16(),
+        );
+        let context = telemetry::current_request_context()
+            .unwrap_or_else(telemetry::RequestContext::generate);
         (
             status,
             Json(ProblemDetails {
@@ -728,11 +730,10 @@ impl IntoResponse for EvaluationApiError {
                 status: status.as_u16(),
                 detail: "The freeze request could not be accepted.".to_owned(),
                 instance: String::new(),
-                diagnostic_code: DiagnosticCode::parse(diagnostic)
-                    .unwrap_or_else(|_| DiagnosticCode::registered("LW_EVALUATION_REQUEST_FAILED")),
-                request_id: uuid::Uuid::now_v7().to_string(),
-                trace_id: None,
-                retryable: status == StatusCode::SERVICE_UNAVAILABLE,
+                diagnostic_code,
+                request_id: context.request_id().to_owned(),
+                trace_id: Some(context.trace_id().to_owned()),
+                retryable,
                 violations: Vec::new(),
             }),
         )

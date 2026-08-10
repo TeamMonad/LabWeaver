@@ -55,15 +55,15 @@ impl NatsLeaseVerificationResponder {
                         Ok(request) => {
                             let now = match store.current_time().await {
                                 Ok(now) => now,
-                                Err(error) => {
-                                    tracing::error!(event = "resource.lease_verification.authority_failed", diagnostic_code = "LW_RESOURCE_LEASE_VERIFY_FAILED", error = %error);
+                                Err(_error) => {
+                                    tracing::error!(event = "resource.lease_verification.authority_failed", diagnostic_code = "LW_RESOURCE_LEASE_VERIFY_FAILED", error_kind = "persistence", failure_stage = "read_clock", retryable = false);
                                     continue;
                                 }
                             };
                             match store.verify_environment_lease(&request, now).await {
                                 Ok(response) => response,
-                                Err(error) => {
-                                    tracing::error!(event = "resource.lease_verification.authority_failed", diagnostic_code = "LW_RESOURCE_LEASE_VERIFY_FAILED", error = %error);
+                                Err(_error) => {
+                                    tracing::error!(event = "resource.lease_verification.authority_failed", diagnostic_code = "LW_RESOURCE_LEASE_VERIFY_FAILED", error_kind = "persistence", failure_stage = "verify_lease", retryable = false);
                                     continue;
                                 }
                             }

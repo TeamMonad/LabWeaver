@@ -16,7 +16,6 @@ use contracts::resource::{ResourceRequest, ResourceRequestState, ResourceTarget}
 use contracts::{ActorId, LeaseId, ResourceRequestId, Revision, UtcTimestamp};
 use serde::Deserialize;
 use std::sync::Arc;
-use uuid::Uuid;
 
 use crate::ApprovalPolicy;
 use crate::store::{PendingAllocation, PgResourceStore, ResourceStoreError};
@@ -51,7 +50,7 @@ impl ResourceApiState {
 }
 
 pub fn resource_api_router(state: ResourceApiState) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/api/v1/resource-requests", post(create_request))
         .route("/api/v1/resource-requests", get(list_requests))
         .route("/api/v1/resource-requests/{request_id}", get(get_request))
@@ -85,7 +84,8 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
             "/api/v1/resource-leases/{lease_id}/revoke",
             post(revoke_lease),
         )
-        .with_state(state)
+        .with_state(state);
+    telemetry::instrument_http(router, "resource-service", "resource-api")
 }
 
 /// Serves Resource API routes only over a CA-verified client-certificate connection.
@@ -109,7 +109,7 @@ pub async fn serve_mtls(
 
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::clone(&mtls.server_config));
     loop {
-        let (stream, peer_address) = listener.accept().await?;
+        let (stream, _peer_address) = listener.accept().await?;
         let acceptor = acceptor.clone();
         let router = router.clone();
         let allowed = mtls.allowed_san_uris.clone();
@@ -117,12 +117,13 @@ pub async fn serve_mtls(
         tokio::spawn(async move {
             let tls = match acceptor.accept(stream).await {
                 Ok(tls) => tls,
-                Err(error) => {
+                Err(_error) => {
                     tracing::warn!(
                         event = "resource.mtls.handshake_denied",
                         diagnostic_code = "LW_AUTH_SERVICE_IDENTITY_DENIED",
-                        %peer_address,
-                        error = %error
+                        error_kind = "tls_handshake",
+                        failure_stage = "handshake",
+                        retryable = false
                     );
                     return;
                 }
@@ -136,7 +137,9 @@ pub async fn serve_mtls(
                 tracing::warn!(
                     event = "resource.mtls.peer_denied",
                     diagnostic_code = "LW_AUTH_SERVICE_IDENTITY_DENIED",
-                    %peer_address
+                    error_kind = "peer_certificate_missing",
+                    failure_stage = "peer_validation",
+                    retryable = false
                 );
                 return;
             };
@@ -146,7 +149,9 @@ pub async fn serve_mtls(
                     tracing::warn!(
                         event = "resource.mtls.peer_denied",
                         diagnostic_code = "LW_AUTH_SERVICE_IDENTITY_DENIED",
-                        %peer_address
+                        error_kind = "peer_identity",
+                        failure_stage = "peer_validation",
+                        retryable = false
                     );
                     return;
                 }
@@ -172,11 +177,13 @@ pub async fn serve_mtls(
                             token,
                         ) {
                             Ok(delegation) => delegation,
-                            Err(error) => {
+                            Err(_error) => {
                                 tracing::warn!(
                                     event = "resource.delegation.denied",
-                                    diagnostic_code = %error,
-                                    %peer_address
+                                    diagnostic_code = "LW_AUTH_RESOURCE_DELEGATION_INVALID",
+                                    error_kind = "delegation",
+                                    failure_stage = "delegation_validation",
+                                    retryable = false
                                 );
                                 return (
                                     StatusCode::FORBIDDEN,
@@ -195,7 +202,7 @@ pub async fn serve_mtls(
                     }
                 },
             ));
-            if let Err(error) = HyperBuilder::new(TokioExecutor::new())
+            if let Err(_error) = HyperBuilder::new(TokioExecutor::new())
                 .serve_connection_with_upgrades(
                     TokioIo::new(tls),
                     TowerToHyperService::new(service),
@@ -205,8 +212,9 @@ pub async fn serve_mtls(
                 tracing::warn!(
                     event = "resource.mtls.connection_failed",
                     diagnostic_code = "LW_RESOURCE_CONNECTION_FAILED",
-                    %peer_address,
-                    error = %error
+                    error_kind = "connection",
+                    failure_stage = "serve_connection",
+                    retryable = true
                 );
             }
         });
@@ -235,6 +243,7 @@ async fn list_requests(
 
 async fn create_request(
     State(state): State<ResourceApiState>,
+    Extension(context): Extension<telemetry::RequestContext>,
     Extension(principal): Extension<ResourceCallerPrincipal>,
     headers: HeaderMap,
     Json(input): Json<CreateResourceRequest>,
@@ -266,7 +275,7 @@ async fn create_request(
     };
     let stored = state
         .store
-        .create(&idempotency, &request, &trace_id())
+        .create(&idempotency, &request, context.trace_id())
         .await?;
     let accepted = ResourceOperationAccepted {
         request_id: stored.id,
@@ -291,6 +300,7 @@ async fn get_request(
 
 async fn approve_request(
     State(state): State<ResourceApiState>,
+    Extension(context): Extension<telemetry::RequestContext>,
     Extension(principal): Extension<ResourceCallerPrincipal>,
     headers: HeaderMap,
     Path(request_id): Path<ResourceRequestId>,
@@ -355,7 +365,7 @@ async fn approve_request(
                 max_duration_seconds: 86_400,
                 gpu_capacity: 0,
             },
-            &trace_id(),
+            context.trace_id(),
         )
         .await?;
     let accepted = ResourceOperationAccepted {
@@ -369,6 +379,7 @@ async fn approve_request(
 
 async fn cancel_request(
     State(state): State<ResourceApiState>,
+    Extension(context): Extension<telemetry::RequestContext>,
     Extension(principal): Extension<ResourceCallerPrincipal>,
     headers: HeaderMap,
     Path(request_id): Path<ResourceRequestId>,
@@ -381,12 +392,14 @@ async fn cancel_request(
         request_id,
         input,
         ResourceRequestState::Cancelled,
+        context.trace_id(),
     )
     .await
 }
 
 async fn reject_request(
     State(state): State<ResourceApiState>,
+    Extension(context): Extension<telemetry::RequestContext>,
     Extension(principal): Extension<ResourceCallerPrincipal>,
     headers: HeaderMap,
     Path(request_id): Path<ResourceRequestId>,
@@ -401,12 +414,14 @@ async fn reject_request(
         request_id,
         input,
         ResourceRequestState::Rejected,
+        context.trace_id(),
     )
     .await
 }
 
 async fn retry_request(
     State(state): State<ResourceApiState>,
+    Extension(context): Extension<telemetry::RequestContext>,
     Extension(principal): Extension<ResourceCallerPrincipal>,
     headers: HeaderMap,
     Path(request_id): Path<ResourceRequestId>,
@@ -423,7 +438,7 @@ async fn retry_request(
             request_id,
             input.expected_revision,
             actor,
-            &trace_id(),
+            context.trace_id(),
         )
         .await?;
     let accepted = ResourceOperationAccepted {
@@ -442,6 +457,7 @@ async fn terminal_request(
     request_id: ResourceRequestId,
     input: contracts::http::ResourceRequestMutation,
     terminal: ResourceRequestState,
+    trace_id: &str,
 ) -> Result<Response, ResourceApiError> {
     authorize(&principal)?;
     if input.reason.trim().is_empty() || input.reason.chars().count() > 500 {
@@ -461,7 +477,7 @@ async fn terminal_request(
             input.expected_revision,
             terminal,
             actor,
-            &trace_id(),
+            trace_id,
         )
         .await?;
     let accepted = ResourceOperationAccepted {
@@ -506,6 +522,7 @@ async fn list_leases(
 
 async fn renew_lease(
     State(state): State<ResourceApiState>,
+    Extension(context): Extension<telemetry::RequestContext>,
     Extension(principal): Extension<ResourceCallerPrincipal>,
     headers: HeaderMap,
     Path(lease_id): Path<LeaseId>,
@@ -529,7 +546,7 @@ async fn renew_lease(
             lease_id,
             input.expected_revision,
             expires,
-            &trace_id(),
+            context.trace_id(),
         )
         .await?;
     let revision = lease.revision;
@@ -538,6 +555,7 @@ async fn renew_lease(
 
 async fn revoke_lease(
     State(state): State<ResourceApiState>,
+    Extension(context): Extension<telemetry::RequestContext>,
     Extension(principal): Extension<ResourceCallerPrincipal>,
     headers: HeaderMap,
     Path(lease_id): Path<LeaseId>,
@@ -558,7 +576,7 @@ async fn revoke_lease(
             input.expected_revision,
             input.reason,
             actor,
-            &trace_id(),
+            context.trace_id(),
         )
         .await?;
     let revision = lease.revision;
@@ -621,9 +639,6 @@ fn required_header(headers: &HeaderMap, name: &'static str) -> Result<String, Re
         .map(str::to_owned)
         .ok_or(ResourceApiError::IdentityInvalid)
 }
-fn trace_id() -> String {
-    format!("resource-api-{}", Uuid::now_v7())
-}
 fn with_etag<T: serde::Serialize>(
     Json(value): Json<T>,
     revision: Revision,
@@ -657,7 +672,13 @@ pub enum ResourceApiError {
 
 impl IntoResponse for ResourceApiError {
     fn into_response(self) -> Response {
-        let status = match self {
+        let diagnostic = self.to_string();
+        let diagnostic_code = diagnostic
+            .split(':')
+            .next()
+            .unwrap_or("LW_RESOURCE_REQUEST_FAILED")
+            .to_owned();
+        let status = match &self {
             Self::CallerDenied | Self::IdentityInvalid | Self::ScopeDenied => StatusCode::FORBIDDEN,
             Self::Invalid => StatusCode::BAD_REQUEST,
             Self::RevisionConflict => StatusCode::PRECONDITION_FAILED,
@@ -666,7 +687,24 @@ impl IntoResponse for ResourceApiError {
             }
             Self::Store(_) => StatusCode::CONFLICT,
         };
-        (status, self.to_string()).into_response()
+        let retryable = matches!(
+            self,
+            Self::Store(ResourceStoreError::Persistence(_) | ResourceStoreError::Database(_))
+        );
+        tracing::warn!(
+            event = "resource.api.rejected",
+            component = "api-error-boundary",
+            operation = "http.request",
+            outcome = "rejected",
+            duration_ms = 0_u64,
+            diagnostic_code = diagnostic_code.as_str(),
+            error_kind = "request_rejected",
+            failure_stage = "resource.request.finalize",
+            retryable,
+            safe_detail = "request_rejected",
+            http_status = status.as_u16(),
+        );
+        (status, diagnostic_code).into_response()
     }
 }
 

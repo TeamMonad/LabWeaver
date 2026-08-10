@@ -101,7 +101,7 @@ async fn main() -> Result<(), StartupError> {
     reason = "the browser surface is intentionally enumerated in one auditable router"
 )]
 fn browser_router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/auth/login", get(login))
         .route("/auth/callback", get(callback))
         .route("/auth/backchannel-logout", post(backchannel_logout))
@@ -214,7 +214,8 @@ fn browser_router(state: Arc<AppState>) -> Router {
             axum::routing::any(proxy::forward_runtime),
         )
         .merge(resource_browser_router())
-        .with_state(state)
+        .with_state(state);
+    telemetry::instrument_http(router, "access-service", "browser-api")
 }
 
 fn resource_browser_router() -> Router<Arc<AppState>> {
@@ -243,7 +244,7 @@ fn resource_browser_router() -> Router<Arc<AppState>> {
 }
 
 fn internal_router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/internal/v1/auth/decision", post(authorization_decision))
         .route("/internal/v1/metrics", get(metrics_endpoint))
         .route("/internal/v1/ssh/authorize", post(grants::authorize_ssh))
@@ -259,7 +260,8 @@ fn internal_router(state: Arc<AppState>) -> Router {
             "/internal/v1/sessions/{session_id}/close",
             post(grants::close_gateway_session),
         )
-        .with_state(state)
+        .with_state(state);
+    telemetry::instrument_http(router, "access-service", "internal-api")
 }
 
 #[allow(
@@ -451,12 +453,14 @@ async fn auth_cleanup_loop(state: Arc<AppState>) -> Result<(), StartupError> {
                 metrics::counter!("labweaver_auth_cleanup_records", "kind" => "logout_events_deleted")
                     .increment(report.logout_events_deleted);
             }
-            Err(error) => {
+            Err(_error) => {
                 metrics::counter!("labweaver_auth_cleanup_runs", "result" => "failed").increment(1);
                 tracing::error!(
                     event = "auth.cleanup.failed",
-                    diagnostic = "LW_AUTH_MEMBERSHIP_UNAVAILABLE",
-                    error = %error
+                    diagnostic_code = "LW_AUTH_MEMBERSHIP_UNAVAILABLE",
+                    error_kind = "persistence",
+                    failure_stage = "cleanup",
+                    retryable = false
                 );
             }
         }
@@ -477,10 +481,16 @@ async fn serve_internal_mtls(
         tokio::spawn(async move {
             let tls = match acceptor.accept(stream).await {
                 Ok(tls) => tls,
-                Err(error) => {
+                Err(_error) => {
                     metrics::counter!("labweaver_auth_mtls_handshakes", "result" => "denied")
                         .increment(1);
-                    tracing::warn!(event = "auth.mtls.handshake_denied", diagnostic = "LW_AUTH_SERVICE_IDENTITY_DENIED", error = %error);
+                    tracing::warn!(
+                        event = "auth.mtls.handshake_denied",
+                        diagnostic_code = "LW_AUTH_SERVICE_IDENTITY_DENIED",
+                        error_kind = "tls_handshake",
+                        failure_stage = "handshake",
+                        retryable = false
+                    );
                     return;
                 }
             };
@@ -498,10 +508,16 @@ async fn serve_internal_mtls(
             };
             let san_uri = match extract_mtls_principal(peer, &allowed_san_uris) {
                 Ok(principal) => principal,
-                Err(error) => {
+                Err(_error) => {
                     metrics::counter!("labweaver_auth_mtls_handshakes", "result" => "denied")
                         .increment(1);
-                    tracing::warn!(event = "auth.mtls.peer_denied", diagnostic = "LW_AUTH_SERVICE_IDENTITY_DENIED", error = %error);
+                    tracing::warn!(
+                        event = "auth.mtls.peer_denied",
+                        diagnostic_code = "LW_AUTH_SERVICE_IDENTITY_DENIED",
+                        error_kind = "peer_identity",
+                        failure_stage = "peer_validation",
+                        retryable = false
+                    );
                     return;
                 }
             };
@@ -509,11 +525,17 @@ async fn serve_internal_mtls(
                 .increment(1);
             let service = router.layer(Extension(MtlsPrincipal { san_uri }));
             let io = TokioIo::new(tls);
-            if let Err(error) = HyperBuilder::new(TokioExecutor::new())
+            if let Err(_error) = HyperBuilder::new(TokioExecutor::new())
                 .serve_connection_with_upgrades(io, TowerToHyperService::new(service))
                 .await
             {
-                tracing::warn!(event = "auth.mtls.connection_failed", diagnostic = "LW_AUTH_SERVICE_IDENTITY_DENIED", error = %error);
+                tracing::warn!(
+                    event = "auth.mtls.connection_failed",
+                    diagnostic_code = "LW_AUTH_SERVICE_IDENTITY_DENIED",
+                    error_kind = "connection",
+                    failure_stage = "serve_connection",
+                    retryable = true
+                );
             }
         });
     }
@@ -747,11 +769,13 @@ async fn authorization_decision(
     validate_observed_revisions(&request, &decision)?;
     tracing::info!(
         event = "auth.authorization.decision",
+        component = "authorization",
+        outcome = "permitted",
+        duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         actor_id = %decision.actor.actor_id,
         operation = policy.operation_id,
-        scope = ?policy.scope,
-        decision = "permit",
-        diagnostic = "LW_AUTH_DECISION_PERMIT"
+        diagnostic_code = "LW_AUTH_DECISION_PERMIT",
+        retryable = false,
     );
     metrics::counter!("labweaver_auth_authorization_decisions", "decision" => "permit")
         .increment(1);
@@ -1208,6 +1232,39 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        let retryable = matches!(
+            self.status,
+            StatusCode::SERVICE_UNAVAILABLE
+                | StatusCode::GATEWAY_TIMEOUT
+                | StatusCode::TOO_MANY_REQUESTS
+        );
+        if self.status.is_server_error() && !retryable {
+            tracing::error!(
+                event = "auth.request.failed",
+                component = "api-error-boundary",
+                operation = "http.request",
+                outcome = "failed",
+                duration_ms = 0_u64,
+                diagnostic_code = self.diagnostic,
+                error_kind = "terminal_api_failure",
+                failure_stage = "auth.request.finalize",
+                retryable = false,
+                safe_detail = "redacted_unclassified",
+            );
+        } else {
+            tracing::warn!(
+                event = "auth.request.rejected",
+                component = "api-error-boundary",
+                operation = "http.request",
+                outcome = "rejected",
+                duration_ms = 0_u64,
+                diagnostic_code = self.diagnostic,
+                error_kind = "request_rejected",
+                failure_stage = "auth.request.finalize",
+                retryable,
+                safe_detail = "request_rejected",
+            );
+        }
         metrics::counter!(
             "labweaver_auth_http_failures",
             "diagnostic" => self.diagnostic,

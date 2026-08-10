@@ -4,6 +4,22 @@ This document records current repository and connected-runtime facts. Design
 documents, fixtures, health endpoints and reports from another source identity
 are not completion evidence.
 
+## Sprint 3 Rust fault-localization logging (#165)
+
+The internal `labweaver.log.v1` formatter, schema, strict HTTP correlation
+boundary, downstream header propagation, CloudEvent/NATS correlation,
+Container/KubeVirt provider fence trace identity, Freeze Worker stage events,
+and Access Gateway authorization/session events are implemented on the #165
+candidate. The formatter supplies the mandatory event envelope to all Rust
+logs and redacts or omits non-allowlisted detail before serialization. Focused
+schema, privacy, INFO/DEBUG, W3C and invalid-header tests are local merge
+evidence.
+
+This status does not claim a connected failure reconstruction or release
+decision. Real HTTP-to-NATS-to-Worker-to-Provider evidence remains owned by
+Sprint-end acceptance Issue #126 under its frozen identity and independent D
+Verify.
+
 ## Local integration candidate gate (#150)
 
 The local Docker-first integration entry point is implemented at

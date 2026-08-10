@@ -70,7 +70,7 @@ impl FixtureBackend {
             .lock()
             .expect("operations lock")
             .push(operation.to_owned());
-        self.fences.lock().expect("fences lock").push(*fence);
+        self.fences.lock().expect("fences lock").push(fence.clone());
     }
 }
 
@@ -454,6 +454,7 @@ async fn provision_returns_one_stable_healthy_endpoint() {
         fence.protocol_version == CONTAINER_BACKEND_PROTOCOL_VERSION
             && fence.environment_id == instance.id
             && fence.operation_id == instance.operation.id
+            && fence.trace_id == instance.operation.trace_id
             && fence.provider_step == instance.operation.provider_step
             && fence.operation_generation == instance.generation
             && fence.attempt == instance.operation.attempt

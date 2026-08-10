@@ -170,10 +170,13 @@ async fn outbox_loop(
                 Ok(true) => tracing::debug!(event = "control.outbox.published"),
                 Ok(false) => break,
                 Err(error) if error.retryable() => {
-                    tracing::error!(
+                    tracing::warn!(
                         event = "control.outbox.retry_scheduled",
-                        diagnostic = %error,
-                        retry_after_milliseconds = interval.as_millis()
+                        diagnostic_code = error.diagnostic_code(),
+                        error_kind = "message_publish",
+                        failure_stage = "outbox_publish",
+                        retryable = true,
+                        retry_after_ms = interval.as_millis()
                     );
                     break;
                 }
@@ -246,9 +249,14 @@ async fn cleanup_loop(
         let now = contracts::UtcTimestamp::from_utc(value).map_err(|_| StartupError::Clock)?;
         let outcome = service.cleanup_one_object(now).await?;
         let purged = service.purge_expired_sse(now).await?;
-        tracing::info!(
+        let cleanup = match outcome {
+            control_service::CleanupOutcome::Idle => "idle",
+            control_service::CleanupOutcome::Deleted => "deleted",
+            control_service::CleanupOutcome::RetryScheduled { .. } => "retry_scheduled",
+        };
+        tracing::debug!(
             event = "control.maintenance.completed",
-            cleanup = ?outcome,
+            cleanup,
             sse_purged = purged
         );
     }

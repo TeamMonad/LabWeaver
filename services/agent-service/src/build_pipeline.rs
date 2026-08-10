@@ -715,6 +715,21 @@ pub enum BuildProviderFailureCode {
     OutputInvalid,
 }
 
+impl BuildProviderFailure {
+    /// Returns the closed diagnostic exposed at the provider boundary.
+    #[must_use]
+    pub const fn diagnostic_code(self) -> &'static str {
+        match self.code {
+            BuildProviderFailureCode::Unavailable => "LW_AGENT_BUILD_PROVIDER_UNAVAILABLE",
+            BuildProviderFailureCode::Rejected => "LW_AGENT_BUILD_REJECTED",
+            BuildProviderFailureCode::IdentityMismatch => {
+                "LW_AGENT_BUILD_PROVIDER_IDENTITY_MISMATCH"
+            }
+            BuildProviderFailureCode::OutputInvalid => "LW_AGENT_BUILD_PROVIDER_OUTPUT_INVALID",
+        }
+    }
+}
+
 /// Stable build failure used by Inbox retry and terminal event publication.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BuildPipelineError {

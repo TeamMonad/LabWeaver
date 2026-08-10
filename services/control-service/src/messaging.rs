@@ -761,6 +761,29 @@ pub enum MessagingError {
 }
 
 impl MessagingError {
+    /// Returns the closed diagnostic without formatting wrapped infrastructure errors.
+    #[must_use]
+    pub const fn diagnostic_code(&self) -> &'static str {
+        match self {
+            Self::Configuration => "LW_NATS_CONFIG_INVALID",
+            Self::Credentials => "LW_NATS_CREDENTIALS_INVALID",
+            Self::Connect => "LW_NATS_UNAVAILABLE",
+            Self::Stream => "LW_NATS_STREAM_UNAVAILABLE",
+            Self::Consumer => "LW_NATS_CONSUMER_UNAVAILABLE",
+            Self::Closed => "LW_NATS_CONSUMER_CLOSED",
+            Self::Receive => "LW_NATS_RECEIVE_FAILED",
+            Self::Ack => "LW_NATS_ACK_FAILED",
+            Self::ArtifactAuthority => "LW_CONTROL_AGENT_ARTIFACT_AUTHORITY_INVALID",
+            Self::Quarantine => "LW_NATS_QUARANTINE_FAILED",
+            Self::Identity => "LW_CONTROL_OUTBOX_IDENTITY_INVALID",
+            Self::Contract => "LW_CONTROL_OUTBOX_CONTRACT_INVALID",
+            Self::Publish => "LW_CONTROL_OUTBOX_PUBLISH_FAILED",
+            Self::PublishTimeout => "LW_CONTROL_OUTBOX_PUBLISH_TIMEOUT",
+            Self::Fence => "LW_CONTROL_OUTBOX_FENCE_LOST",
+            Self::Database(_) => "LW_CONTROL_OUTBOX_DATABASE_FAILED",
+        }
+    }
+
     /// Transport and database outages retain the Outbox row and are safe to retry.
     #[must_use]
     pub const fn retryable(&self) -> bool {

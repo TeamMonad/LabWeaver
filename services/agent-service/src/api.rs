@@ -24,7 +24,6 @@ use hyper_util::service::TowerToHyperService;
 use serde_json::Value;
 use sqlx::Row;
 use time::OffsetDateTime;
-use uuid::Uuid;
 
 use crate::build_store::{BuildStoreError, PgBuildStore};
 use crate::run_store::{
@@ -49,7 +48,7 @@ pub struct ControlPrincipal {
 
 /// Builds all Control-to-Agent routes.
 pub fn router(state: Arc<AgentApiState>) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/internal/v1/agent-runs", post(create_run))
         .route("/internal/v1/agent-runs/{run_id}", get(get_run))
         .route("/internal/v1/agent-runs/{run_id}/cancel", post(cancel_run))
@@ -70,7 +69,8 @@ pub fn router(state: Arc<AgentApiState>) -> Router {
             "/internal/v1/image-artifacts/{artifact_id}",
             get(get_artifact),
         )
-        .with_state(state)
+        .with_state(state);
+    telemetry::instrument_http(router, "agent-service", "agent-api")
 }
 
 /// Serves internal Agent routes only after CA verification and exact Control URI SAN extraction.
@@ -332,11 +332,11 @@ fn idempotency(headers: &HeaderMap) -> Result<IdempotencyKey, AgentApiError> {
         .and_then(|value| IdempotencyKey::parse(value).map_err(|_| AgentApiError::contract()))
 }
 fn trace_id(headers: &HeaderMap) -> String {
-    headers
-        .get("traceparent")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty() && value.len() <= 256)
-        .map_or_else(|| Uuid::now_v7().to_string(), str::to_owned)
+    let _ = headers;
+    telemetry::current_request_context()
+        .unwrap_or_else(telemetry::RequestContext::generate)
+        .trace_id()
+        .to_owned()
 }
 fn now() -> Result<UtcTimestamp, AgentApiError> {
     let value = OffsetDateTime::now_utc();
@@ -457,7 +457,9 @@ impl From<BuildStoreError> for AgentApiError {
 }
 impl IntoResponse for AgentApiError {
     fn into_response(self) -> Response {
-        let request_id = Uuid::now_v7().to_string();
+        let context = telemetry::current_request_context()
+            .unwrap_or_else(telemetry::RequestContext::generate);
+        let request_id = context.request_id().to_owned();
         let problem = ProblemDetails {
             problem_type: format!(
                 "urn:labweaver:problem:{}",
@@ -469,10 +471,37 @@ impl IntoResponse for AgentApiError {
             instance: format!("urn:labweaver:request:{request_id}"),
             diagnostic_code: DiagnosticCode::registered(self.diagnostic),
             request_id,
-            trace_id: None,
+            trace_id: Some(context.trace_id().to_owned()),
             retryable: self.retryable,
             violations: Vec::new(),
         };
+        if self.retryable || self.status.is_client_error() {
+            tracing::warn!(
+                event = "agent.request.rejected",
+                component = "api-error-boundary",
+                operation = "http.request",
+                outcome = "rejected",
+                duration_ms = 0_u64,
+                diagnostic_code = self.diagnostic,
+                error_kind = "request_rejected",
+                failure_stage = "agent.request.finalize",
+                retryable = self.retryable,
+                safe_detail = "request_rejected",
+            );
+        } else {
+            tracing::error!(
+                event = "agent.request.failed",
+                component = "api-error-boundary",
+                operation = "http.request",
+                outcome = "failed",
+                duration_ms = 0_u64,
+                diagnostic_code = self.diagnostic,
+                error_kind = "terminal_api_failure",
+                failure_stage = "agent.request.finalize",
+                retryable = false,
+                safe_detail = "redacted_unclassified",
+            );
+        }
         (self.status, Json(problem)).into_response()
     }
 }

@@ -209,7 +209,6 @@ impl KubernetesContainerExecutor {
     ) -> Result<(), ProviderFailure> {
         validate_resource(plan, resource)?;
         let url = self.resource_url(resource)?;
-        let api_path = url.path().to_owned();
         let response = self
             .authorized(
                 self.client
@@ -220,16 +219,16 @@ impl KubernetesContainerExecutor {
             )
             .send()
             .await
-            .map_err(|error| {
+            .map_err(|_error| {
                 tracing::warn!(
                     event = "environment.container_executor.kubernetes_request_failed",
-                    diagnostic = "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
-                    phase = "apply",
+                    diagnostic_code = "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
+                    failure_stage = "apply",
                     environment_id = %plan.environment_id,
                     resource_kind = %resource.kind,
                     resource_name = %resource.name,
-                    api_path,
-                    error = %error
+                    error_kind = "provider_transport",
+                    retryable = true
                 );
                 unavailable()
             })?;
@@ -238,13 +237,14 @@ impl KubernetesContainerExecutor {
             let failure = status_failure(status);
             tracing::warn!(
                 event = "environment.container_executor.kubernetes_response_rejected",
-                diagnostic = ?failure.code,
-                phase = "apply",
+                diagnostic_code = failure.diagnostic_code(),
+                failure_stage = "apply",
                 environment_id = %plan.environment_id,
                 resource_kind = %resource.kind,
                 resource_name = %resource.name,
-                api_path,
-                status = status.as_u16()
+                status_code = status.as_u16(),
+                error_kind = "provider_response",
+                retryable = failure.retryable
             );
             return Err(failure);
         }
@@ -265,15 +265,16 @@ impl KubernetesContainerExecutor {
             .authorized(self.client.get(self.resource_url(deployment)?))
             .send()
             .await
-            .map_err(|error| {
+            .map_err(|_error| {
                 tracing::warn!(
                     event = "environment.container_executor.kubernetes_request_failed",
-                    diagnostic = "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
-                    phase = "observe",
+                    diagnostic_code = "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
+                    failure_stage = "observe",
                     environment_id = %plan.environment_id,
                     resource_kind = %deployment.kind,
                     resource_name = %deployment.name,
-                    error = %error
+                    error_kind = "provider_transport",
+                    retryable = true
                 );
                 unavailable()
             })?;
@@ -287,12 +288,14 @@ impl KubernetesContainerExecutor {
             let failure = status_failure(response.status());
             tracing::warn!(
                 event = "environment.container_executor.kubernetes_response_rejected",
-                diagnostic = ?failure.code,
-                phase = "observe",
+                diagnostic_code = failure.diagnostic_code(),
+                failure_stage = "observe",
                 environment_id = %plan.environment_id,
                 resource_kind = %deployment.kind,
                 resource_name = %deployment.name,
-                status = response.status().as_u16()
+                status_code = response.status().as_u16(),
+                error_kind = "provider_response",
+                retryable = failure.retryable
             );
             return Err(failure);
         }
@@ -474,7 +477,6 @@ impl KubernetesContainerExecutor {
         for resource in &plan.resources {
             validate_kubevirt_resource(plan, resource)?;
             let url = self.kubevirt_resource_url(resource)?;
-            let api_path = url.path().to_owned();
             let response = self
                 .authorized(
                     self.client
@@ -485,16 +487,16 @@ impl KubernetesContainerExecutor {
                 )
                 .send()
                 .await
-                .map_err(|error| {
+                .map_err(|_error| {
                     tracing::warn!(
                         event = "environment.kubevirt_executor.kubernetes_request_failed",
-                        diagnostic = "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
-                        phase = "apply",
+                        diagnostic_code = "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
+                        failure_stage = "apply",
                         environment_id = %plan.environment_id,
                         resource_kind = %resource.kind,
                         resource_name = %resource.name,
-                        api_path,
-                        error = %error
+                        error_kind = "provider_transport",
+                        retryable = true
                     );
                     unavailable()
                 })?;
@@ -503,13 +505,14 @@ impl KubernetesContainerExecutor {
                 let failure = status_failure(status);
                 tracing::warn!(
                     event = "environment.kubevirt_executor.kubernetes_response_rejected",
-                    diagnostic = ?failure.code,
-                    phase = "apply",
+                    diagnostic_code = failure.diagnostic_code(),
+                    failure_stage = "apply",
                     environment_id = %plan.environment_id,
                     resource_kind = %resource.kind,
                     resource_name = %resource.name,
-                    api_path,
-                    status = status.as_u16()
+                    status_code = status.as_u16(),
+                    error_kind = "provider_response",
+                    retryable = failure.retryable
                 );
                 return Err(failure);
             }
@@ -806,13 +809,15 @@ impl KubernetesContainerExecutor {
         let key = self
             .objects
             .scoped_key(&format!("cleanup/{environment_id}/{request_id}.json"))
-            .map_err(|error| {
+            .map_err(|_error| {
                 tracing::warn!(
                     event = "environment.runtime_executor.cleanup_evidence_key_invalid",
-                    diagnostic = "LW_ENVIRONMENT_PROVIDER_CLEANUP_FAILED",
+                    diagnostic_code = "LW_ENVIRONMENT_PROVIDER_CLEANUP_FAILED",
                     environment_id = %environment_id,
                     request_id = %request_id,
-                    error = %error
+                    error_kind = "artifact_identity",
+                    failure_stage = "cleanup_evidence_key",
+                    retryable = false
                 );
                 rejected()
             })?;
@@ -820,13 +825,15 @@ impl KubernetesContainerExecutor {
             .put_versioned_immutable(&key, &bytes, sha256, CLEANUP_MEDIA_TYPE)
             .await
             .map(|object| object.reference)
-            .map_err(|error| {
+            .map_err(|_error| {
                 tracing::warn!(
                     event = "environment.runtime_executor.cleanup_evidence_store_failed",
-                    diagnostic = "LW_ENVIRONMENT_PROVIDER_CLEANUP_FAILED",
+                    diagnostic_code = "LW_ENVIRONMENT_PROVIDER_CLEANUP_FAILED",
                     environment_id = %environment_id,
                     request_id = %request_id,
-                    error = %error
+                    error_kind = "artifact_store",
+                    failure_stage = "cleanup_evidence_store",
+                    retryable = true
                 );
                 ProviderFailure {
                     code: ProviderFailureCode::CleanupFailed,

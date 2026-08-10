@@ -412,7 +412,7 @@ async fn release_loop(
             }
             result = consumer.process_next(&store) => {
                 let outcome = result?;
-                tracing::info!(event = "environment.release.consumed", ?outcome);
+                log_consume_outcome("environment.release", outcome);
             }
         }
     }
@@ -432,7 +432,7 @@ async fn command_loop(
             }
             result = consumer.process_next(&store, &lease_verifier) => {
                 let outcome = result?;
-                tracing::info!(event = "environment.command.consumed", ?outcome);
+                log_consume_outcome("environment.command", outcome);
             }
         }
     }
@@ -455,7 +455,12 @@ async fn reconcile_loop(
             _ = interval.tick() => {
                 let now = store.current_time().await?;
                 let outcome = worker.run_once(&worker_id, now).await?;
-                tracing::debug!(event = "environment.reconcile.completed", ?outcome);
+                match outcome {
+                    crate::reconciler::ReconcileWorkerOutcome::Idle => { tracing::debug!(event = "environment.reconcile.idle", outcome = "idle"); }
+                    crate::reconciler::ReconcileWorkerOutcome::Advanced { terminal, .. } => { tracing::info!(event = "environment.reconcile.advanced", outcome = if terminal { "terminal" } else { "advanced" }); }
+                    crate::reconciler::ReconcileWorkerOutcome::RetryScheduled { attempt } => { tracing::warn!(event = "environment.reconcile.retry_scheduled", outcome = "retry_scheduled", attempt, failure_stage = "reconcile", error_kind = "provider", retryable = true); }
+                    crate::reconciler::ReconcileWorkerOutcome::Failed { diagnostic_code } => { tracing::error!(event = "environment.reconcile.failed", outcome = "failed", diagnostic_code, failure_stage = "reconcile", error_kind = "provider", retryable = false); }
+                }
             }
         }
     }
@@ -475,8 +480,50 @@ async fn outbox_loop(
             }
             _ = interval.tick() => {
                 let outcome = outbox.dispatch_once().await?;
-                tracing::debug!(event = "environment.outbox.completed", ?outcome);
+                match outcome {
+                    crate::outbox::OutboxDispatchOutcome::Idle => { tracing::debug!(event = "environment.outbox.idle", outcome = "idle"); }
+                    crate::outbox::OutboxDispatchOutcome::Published { event_id } => { tracing::info!(event = "environment.outbox.published", outcome = "succeeded", event_id = %event_id, message_id = %event_id); }
+                }
             }
+        }
+    }
+}
+
+fn log_consume_outcome(prefix: &str, outcome: crate::messaging::CommandConsumeOutcome) {
+    match outcome {
+        crate::messaging::CommandConsumeOutcome::Applied => {
+            tracing::info!(
+                event = "environment.message.consumed",
+                component = prefix,
+                outcome = "applied"
+            );
+        }
+        crate::messaging::CommandConsumeOutcome::Ignored => {
+            tracing::info!(
+                event = "environment.message.consumed",
+                component = prefix,
+                outcome = "ignored"
+            );
+        }
+        crate::messaging::CommandConsumeOutcome::Deferred => {
+            tracing::warn!(
+                event = "environment.message.deferred",
+                component = prefix,
+                outcome = "retry_scheduled",
+                failure_stage = "consume",
+                error_kind = "dependency",
+                retryable = true
+            );
+        }
+        crate::messaging::CommandConsumeOutcome::Rejected => {
+            tracing::warn!(
+                event = "environment.message.rejected",
+                component = prefix,
+                outcome = "rejected",
+                failure_stage = "consume",
+                error_kind = "contract",
+                retryable = false
+            );
         }
     }
 }

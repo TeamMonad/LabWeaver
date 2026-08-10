@@ -89,12 +89,14 @@ impl AccessClient {
     pub async fn authorize(
         &self,
         request: &AuthorizationDecisionRequest,
+        headers: &reqwest::header::HeaderMap,
     ) -> Result<AuthorizationDecision, DownstreamError> {
-        send_json(
+        send_json(correlate(
             self.client
                 .post(self.config.endpoint("internal/v1/auth/decision")?)
                 .json(request),
-        )
+            headers,
+        ))
         .await
     }
 }
@@ -116,13 +118,15 @@ impl AgentClient {
         &self,
         request: &InternalCreateAgentRunRequest,
         key: &IdempotencyKey,
+        headers: &reqwest::header::HeaderMap,
     ) -> Result<AgentRun, DownstreamError> {
-        send_json(
+        send_json(correlate(
             self.client
                 .post(self.config.endpoint("internal/v1/agent-runs")?)
                 .header("Idempotency-Key", key.as_str())
                 .json(request),
-        )
+            headers,
+        ))
         .await
     }
 
@@ -141,8 +145,9 @@ impl AgentClient {
         run_id: AgentRunId,
         request: &InternalAgentRunMutationRequest,
         key: &IdempotencyKey,
+        headers: &reqwest::header::HeaderMap,
     ) -> Result<AgentRun, DownstreamError> {
-        send_json(
+        send_json(correlate(
             self.client
                 .post(
                     self.config
@@ -150,7 +155,8 @@ impl AgentClient {
                 )
                 .header("Idempotency-Key", key.as_str())
                 .json(request),
-        )
+            headers,
+        ))
         .await
     }
 
@@ -160,19 +166,21 @@ impl AgentClient {
         track: AgentTrackKind,
         request: &InternalAgentRunMutationRequest,
         key: &IdempotencyKey,
+        headers: &reqwest::header::HeaderMap,
     ) -> Result<AgentRun, DownstreamError> {
         let track = match track {
             AgentTrackKind::Environment => "environment",
             AgentTrackKind::Evaluation => "evaluation",
         };
-        send_json(
+        send_json(correlate(
             self.client
                 .post(self.config.endpoint(&format!(
                     "internal/v1/agent-runs/{run_id}/tracks/{track}/retry"
                 ))?)
                 .header("Idempotency-Key", key.as_str())
                 .json(request),
-        )
+            headers,
+        ))
         .await
     }
 
@@ -266,15 +274,15 @@ impl EvaluationClient {
         &self,
         request: &InternalPublishEvaluationReleaseRequest,
         key: &IdempotencyKey,
-        trace_id: &str,
+        headers: &reqwest::header::HeaderMap,
     ) -> Result<EvaluationRelease, DownstreamError> {
-        let release: EvaluationRelease = send_json(
+        let release: EvaluationRelease = send_json(correlate(
             self.client
                 .post(self.config.endpoint("internal/v1/evaluation-releases")?)
                 .header("Idempotency-Key", key.as_str())
-                .header("traceparent", trace_id)
                 .json(request),
-        )
+            headers,
+        ))
         .await?;
         validate_release(release)
     }
@@ -283,13 +291,15 @@ impl EvaluationClient {
         &self,
         course_id: contracts::CourseId,
         query: &EvaluationReleaseListQuery,
+        headers: &reqwest::header::HeaderMap,
     ) -> Result<CursorPage<EvaluationRelease>, DownstreamError> {
-        let mut page: CursorPage<EvaluationRelease> = send_json(
+        let mut page: CursorPage<EvaluationRelease> = send_json(correlate(
             self.client
                 .get(self.config.endpoint("internal/v1/evaluation-releases")?)
                 .header("x-labweaver-course-id", course_id.to_string())
                 .query(query),
-        )
+            headers,
+        ))
         .await?;
         if page
             .items
@@ -309,13 +319,15 @@ impl EvaluationClient {
     pub async fn get(
         &self,
         release_id: EvaluationReleaseId,
+        headers: &reqwest::header::HeaderMap,
     ) -> Result<EvaluationRelease, DownstreamError> {
-        let release: EvaluationRelease = send_json(
+        let release: EvaluationRelease = send_json(correlate(
             self.client.get(
                 self.config
                     .endpoint(&format!("internal/v1/evaluation-releases/{release_id}"))?,
             ),
-        )
+            headers,
+        ))
         .await?;
         if release.id != release_id {
             return Err(DownstreamError::IdentityMismatch);
@@ -328,9 +340,9 @@ impl EvaluationClient {
         release_id: EvaluationReleaseId,
         request: &InternalWithdrawEvaluationReleaseRequest,
         key: &IdempotencyKey,
-        trace_id: &str,
+        headers: &reqwest::header::HeaderMap,
     ) -> Result<EvaluationRelease, DownstreamError> {
-        let release: EvaluationRelease = send_json(
+        let release: EvaluationRelease = send_json(correlate(
             self.client
                 .post(self.config.endpoint(&format!(
                     "internal/v1/evaluation-releases/{release_id}/withdraw"
@@ -341,15 +353,27 @@ impl EvaluationClient {
                     contracts::http::StrongEtag::from_revision(request.expected_revision)
                         .header_value(),
                 )
-                .header("traceparent", trace_id)
                 .json(request),
-        )
+            headers,
+        ))
         .await?;
         if release.id != release_id || release.course_id != request.course_id {
             return Err(DownstreamError::IdentityMismatch);
         }
         validate_release(release)
     }
+}
+
+fn correlate(
+    mut request: reqwest::RequestBuilder,
+    headers: &reqwest::header::HeaderMap,
+) -> reqwest::RequestBuilder {
+    for name in [telemetry::REQUEST_ID_HEADER, telemetry::TRACEPARENT_HEADER] {
+        if let Some(value) = headers.get(name) {
+            request = request.header(name, value);
+        }
+    }
+    request
 }
 
 fn validate_release(release: EvaluationRelease) -> Result<EvaluationRelease, DownstreamError> {
