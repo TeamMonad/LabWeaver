@@ -1024,10 +1024,10 @@ fn develop_trivy_database() -> (String, String) {
     let expected = std::env::var("LABWEAVER_TRIVY_DATABASE_DIGEST")
         .ok()
         .filter(|value| !value.trim().is_empty());
-    if let (Some(reference), Some(expected)) = (reference, expected) {
-        if validate_trivy_database_reference(&reference, &expected).is_ok() {
-            return (reference, expected);
-        }
+    if let (Some(reference), Some(expected)) = (reference, expected)
+        && validate_trivy_database_reference(&reference, &expected).is_ok()
+    {
+        return (reference, expected);
     }
     (
         DEVELOP_TRIVY_DATABASE_REFERENCE.to_owned(),
