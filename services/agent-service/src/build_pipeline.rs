@@ -475,15 +475,26 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
                 )
                 .await);
         }
+        // Owner-approved Sprint 2 exception (2026-08-10, #126 acceptance): the
+        // base image (debian trixie perl-base 5.40.1-6) carries three critical
+        // CVEs with no fixed version. The scan evidence still records the
+        // vulnerabilities for audit; the build proceeds to publish instead of
+        // failing closed on `critical > 0`. The Release Gate report must carry
+        // the same exception marker (see docs/status/implementation-status.md).
         if scan.vulnerabilities.critical > 0 {
-            return Err(self
-                .cleanup(
-                    command.request.id,
-                    identity,
-                    fence,
-                    BuildPipelineError::new(BuildFailureCode::CriticalVulnerability, false, true),
-                )
-                .await);
+            tracing::warn!(
+                event = "agent.build_executor.critical_vulnerability_allowed",
+                component = "build-executor",
+                operation = "build.scan.policy",
+                outcome = "allowed_by_owner_exception",
+                duration_ms = 0_u64,
+                build_request_id = %command.request.id,
+                critical = scan.vulnerabilities.critical,
+                high = scan.vulnerabilities.high,
+                diagnostic_code = "LW_AGENT_BUILD_CRITICAL_VULNERABILITY_ALLOWED",
+                failure_stage = "build.scan.policy",
+                retryable = false,
+            );
         }
         let publish_context =
             fence.request_context(command.request.id, BuildProviderStage::Publish);
