@@ -4,8 +4,9 @@
 
 package、部署、Resource replay 和 Release Gate 都可能占用共享集群、远程
 BuildKit、数据库和真实运行时。没有执行边界时，一个失败会被重复部署放大为无限
-测试周期。该文档是 `xtask` connected 入口的操作合同：先冻结身份，再取得租约，
-按固定预算执行；任何无法确认的状态都阻断，而不是猜测成功或启动并行操作。
+测试周期。该文档是 `xtask` connected 入口的操作合同：先冻结身份，再按规则执行；
+任何无法确认的状态都阻断，而不是猜测成功或启动并行操作。本窗口不依赖账本文件、
+租约文件或替代预算机制，执行记录保存在验收 Issue 和受控交接记录中。
 
 ## 候选身份
 
@@ -19,47 +20,45 @@ BuildKit、数据库和真实运行时。没有执行边界时，一个失败会
 
 Resource replay 的额外 profile、authentication、deployment 和 package locator 也会
 参与 configuration identity；`xtask` 对存在的 locator 计算内容哈希。因此同一路径原地
-轮换凭据会形成新的候选，不能把新凭据伪装成旧尝试；账本仍按候选固定预算阻止无限重放。
+轮换凭据会形成新的候选，不能把新凭据伪装成旧尝试。候选预算由操作者按本合同执行，
+不通过创建新账本、改名 operation 或生成新 Run ID 绕过限制。
 
 Release Gate 只接受同一组身份。开发期可以复用 BuildKit/OCI 层缓存来减少编译，
 但缓存不是验收证据，也不能把旧 digest、旧 Run ID 或旧 report 拼接到新候选中。
 影响运行时、合同、部署、测试或证据生成的提交必须重新 package；仅文档变更应先
 批量提交，随后由 Owner 判断是否需要重新部署和重放。
 
-## 执行账本
+## 操作记录与互斥规则
 
-connected 控制器必须设置：
+每次 connected 操作开始前，操作者必须在验收 Issue 或受控交接记录中写入候选
+`source_commit`、package/deployment/configuration/migration hash、镜像 digest 集合、
+environment、Run ID、testflight Run ID 和执行意图。记录只包含 hash、locator、状态、
+计数和 diagnostic，不包含 Secret、JWT、私钥或用户内容。
 
-```sh
-export LABWEAVER_EXECUTION_LEDGER_ROOT=/var/lib/labweaver/execution-ledger
-```
-
-目录由 `xtask` 创建并固定为 `0700`。账本 JSON 只包含候选 hash、相对/受控
-locator、时间、Run ID、尝试状态和稳定 diagnostic；`.lock` 使用 create-new
-语义，避免 PID 文件在进程崩溃后造成误判。账本或锁无法读取时不自动删除，必须由
-Owner 先做只读进程、Helm、Ansible 和集群状态检查。
+同一环境同一 operation 同时只能有一个执行实例。发现运行中的锁、无法确认的旧进程、
+超时或未知终态时，只能做只读进程/Helm/Ansible/集群检查并转为 `Blocked`；本窗口不创建
+账本文件、锁文件或替代预算机制，也不删除历史文件来恢复预算。
 
 ## 固定预算
 
-同一候选、同一环境按下表执行；账本同时限制同一 `operation + environment`
+同一候选、同一环境按下表执行；操作者同时限制同一 `operation + environment`
 跨不同 commit、release label 或私有 locator 形成的新候选总数。这样修复一个问题
 不会把 connected 测试变成无限的新候选循环。
 
 | 操作 | 单候选最大尝试 | operation 总预算 | 失败后的动作 |
 | --- | ---: | ---: | --- |
-| package | 1 | 3 | 同一 source/config/release 只允许一次；失败后必须修复并产生新候选；第四个候选直接阻断 |
-| Resource replay | 1 | 3 | 记录 diagnostic；无新根因修复不得重放；第四个候选直接阻断 |
-| application reconcile | 2 | 3 | 第一次部署和一次幂等重放；第二次仍失败即 Blocked，跨候选累计第三次后停止 |
+| package/release | 1 个冻结候选 | 1 个活动实例 | 失败、超时或身份不明直接保留现场并阻断；修复后必须重新冻结候选 |
+| Resource replay | 1 | 3 | 只有已修复根因且有新观测才能重试；同一 operation 达到上限即阻断 |
+| application reconcile | 2 | 3 | 首次部署和一次幂等重放；仍失败或达到总上限即阻断 |
 | 其他 deploy/reset | 1 | 1 | 只读核对，创建责任域 Issue |
 
-每次尝试必须在同一账本中记录前置检查、唯一根因假设、实际状态变化、证据 locator、
-终态和下一步。账本的 operation 名称必须跨 release label 稳定；release label、source
-commit、package/deployment/locator hash 进入候选键，而不是创建新的预算文件。外部连接
-瞬时失败只允许一次有界只读复核；超时先读取原进程，不得直接再开新 Run ID。operation
-总预算耗尽返回 `LW_EXECUTION_OPERATION_BUDGET_EXHAUSTED`，必须停止写操作并登记
+每次尝试必须记录前置检查、唯一根因假设、实际状态变化、证据 locator、终态和下一步。
+operation 名称必须跨 release label 稳定；release label、source commit、package/deployment/
+locator hash 进入候选键，而不是创建新的预算文件。外部连接瞬时失败只允许一次有界只读
+复核；超时先读取原进程，不得直接再开新 Run ID。达到 operation 上限时停止写操作并登记
 `Blocked`。
 
-Resource replay 在取得账本租约前还必须完成本地 preflight：deployment manifest 的
+Resource replay 在 connected 写操作前还必须完成本地 preflight：deployment manifest 的
 `runId` 必须等于本次 `LABWEAVER_RUN_ID`，package/profile/auth locator 必须通过
 当前提交的 identity 校验，storage-state 必须存在有效 cookie；所有带 expiry 的 cookie
 都过期时返回 `LW_RESOURCE_REPLAY_AUTHENTICATION_EXPIRED`，不得消耗一次 connected
@@ -81,33 +80,29 @@ replay 预算。这样已知的身份错配和陈旧浏览器会话不会把昂�
 
 ## 排障顺序
 
-1. 只读检查账本、锁、远程进程、Helm operation 和目标 namespace；
+1. 只读检查受控交接记录、远程进程、Helm operation 和目标 namespace；
 2. 核对 package/deployment/catalog/configuration hash 与当前集群 readback；
 3. 只修复一个已证实的根因，并先运行对应本地/契约/Ansible 负向测试；
-4. 按剩余预算最多重试一次；
+4. 按本合同剩余规则最多重试一次；
 5. 若仍为同一 diagnostic，登记 `Blocked`，由 Owner 拆分责任域或安排基础设施维护。
 
-禁止删除账本、切换旧 package、伪造成功 report、用 Fixture 替代 connected evidence，
-或通过并行部署“碰运气”。
+禁止切换旧 package、伪造成功 report、用 Fixture 替代 connected evidence，或通过并行部署
+“碰运气”。历史账本（若存在）只作审计，不是本窗口输入；本窗口不创建新的预算账本。
 
-## 预算耗尽后的 Owner 续行决定（2026-08-03）
+## 新验收窗口（2026-08-12）
 
-`resource replay` 与 `resource-application --infra` 在 demo 的原始预算已被多个不同
-根因的失败耗尽：候选身份未绑定私有 locator、BFF 会话过期、replay driver 误用契约
-未声明的 `statusUrl` 字段。旧账本文件完整保留为审计记录，不做任何删除或改写。
-经 Owner（A）决定，根因修复提交之后启用一次性、有界的续行 operation：
-`resource replay repair` 与 `resource-application-repair --infra`。它们各自拥有独立
-的固定预算（单候选 1 次、operation 3 条），再次耗尽即阻断。该机制只允许在“每个
-失败候选都有已证实且已修复的不同根因”时使用一次；同一根因的重复尝试仍然被候选
-预算拒绝。Release Gate 不消费 repair operation 之外的旧证据，最终发布身份必须以
-同一候选完整闭合 package、application、replay 与 report。
+部分历史记录损坏后，用户授权开启新的独立 #126 验收窗口并删除旧预算账本。
+旧候选、旧镜像、旧报告和旧账本只作历史审计，不参与本窗口的 Release Gate；精确的
+legacy ledger locator 已只读确认不存在。本窗口不创建账本或替代租约文件，而由 A 按
+本合同保留候选身份、执行意图、状态和 diagnostic。任何身份漂移、超时、Provider 不可用、
+清理残留或未知终态都保持 `Blocked`。
 
 ## #126 console 验收窗口
 
 Container xterm 与 KubeVirt noVNC 只能在 #126 的同一冻结候选和 Run 中执行。A
-负责候选冻结、账本租约和 connected 操作，D 保留独立 Verify；B 审查 console
+负责候选冻结、操作记录和 connected 操作，D 保留独立 Verify；B 审查 console
 安全边界和 Release Gate v3。开始任何写操作前，Owner 必须先记录只读维护审计，
-明确授权新的验收环境和剩余预算。旧账本不得删除、改 root 或通过新 operation 名称
+明确授权新的验收环境和剩余规则预算。旧账本不作为输入，也不得通过新 operation 名称
 绕过。
 
 验收需要六个隔离环境/每种 runtime，使用公开 API 创建专用 AccessGrant；expiry
@@ -120,5 +115,5 @@ TCP 4222，并在 `always` 中删除和 readback；浏览器观察、策略应�
 Release Gate v3 只接受两个 `connected-console-evidence.v1` 文件。报告记录每个 case
 的 Environment/Pod 或 VMI、Grant/Lease/capability/session revision、稳定 diagnostic、
 artifact hash 与清理计数；不得记录 locator、Cookie、token、PTY transcript、VNC
-frame 或控制器绝对路径。任一超时、未知旧进程、账本终态失败、身份漂移或清理残留
+frame 或控制器绝对路径。任一超时、未知旧进程、身份漂移或清理残留
 都保持 `Blocked`，不得生成 `passed` 文件。

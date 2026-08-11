@@ -34,19 +34,17 @@ export LABWEAVER_PLATFORM_REGISTRY=harbor.example.internal
 export LABWEAVER_TRIVY_DATABASE_REFERENCE=harbor.example.internal/cache/trivy-db@sha256:<digest>
 export LABWEAVER_TRIVY_DATABASE_DIGEST=sha256:<digest>
 export LABWEAVER_KUBECONFIG="$HOME/.config/labweaver/package/kubeconfig"
-export LABWEAVER_EXECUTION_LEDGER_ROOT=/var/lib/labweaver/execution-ledger
 cargo xtask package --env demo --release platform --yes
 ```
 
-The connected controller reserves one package attempt for the exact
+The connected controller records one package attempt for the exact
 `source_commit + component-lock + migration-catalog + profile + release` identity.
-The ledger operation is stable across release labels and also enforces a total
-three-candidate package budget for the environment. A failed or completed
-package cannot be started again with the same identity, and a fourth candidate
-is blocked instead of extending the test cycle indefinitely. Use BuildKit cache
-for development iterations; after the operation budget is exhausted, inspect
-the ledger and open an explicitly approved new validation window rather than
-deleting the ledger or changing its root.
+The operation name remains stable across release labels; a failed, timed-out or
+unknown package operation is blocked until the process and cluster state are
+read back. The #126 acceptance window does not use an execution-ledger file or
+replacement budget mechanism. Use BuildKit cache for development iterations,
+but freeze and rebuild a complete candidate after any runtime, contract,
+deployment, test or evidence change.
 
 Before packaging, run the non-destructive `platform-buildkit` adoption with
 `platform_buildkit_controller_enabled=true`, an exact router-local kubeconfig source, and explicit
