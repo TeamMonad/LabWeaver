@@ -734,6 +734,10 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("groups['k8s_cluster']", tasks)
         self.assertIn("Probe the retained Kubernetes node CA trust implementation", tasks)
         self.assertIn("update-ca-certificates", tasks)
+        self.assertIn(
+            "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            tasks,
+        )
         self.assertIn("platform_application_node_ca_trust_anchors_dir", tasks)
         self.assertIn("platform_application_node_ca_trust_refresh_argv", tasks)
         self.assertIn(
@@ -749,6 +753,10 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("Apply changed Kubernetes node Harbor trust before workload rollout", tasks)
         self.assertIn("name: Refresh Kubernetes node Harbor trust", handlers)
         self.assertIn("platform_application_node_ca_trust_refresh_argv", handlers)
+        self.assertIn(
+            "PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            handlers,
+        )
         self.assertIn("groups['k8s_cluster']", handlers)
         application_namespace = tasks.split(
             "- name: Reconcile application namespace without deleting retained state",

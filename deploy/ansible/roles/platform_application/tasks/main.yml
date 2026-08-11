@@ -1052,6 +1052,7 @@
 - name: Probe the retained Kubernetes node CA trust implementation
   ansible.builtin.shell:
     cmd: |
+      export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       if command -v update-ca-trust >/dev/null 2>&1; then
         printf 'rhel\n'
       elif command -v update-ca-certificates >/dev/null 2>&1; then
