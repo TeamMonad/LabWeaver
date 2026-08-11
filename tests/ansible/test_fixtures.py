@@ -995,6 +995,27 @@ class AnsibleFixtureTests(unittest.TestCase):
             self.assertIn(diagnostic, validation)
             self.assertIn("when: not (ansible_check_mode and item.rc != 0)", validation)
 
+    def test_platform_application_assertion_failure_messages_stay_inside_assertions(self) -> None:
+        tasks = yaml.safe_load(
+            (ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        for name, diagnostic in (
+            (
+                "Validate retained or created stream identities",
+                "PLATFORM_APPLICATION_STREAM_CONFLICT",
+            ),
+            (
+                "Validate retained or created consumer identities",
+                "PLATFORM_APPLICATION_CONSUMER_CONFLICT",
+            ),
+        ):
+            task = next(item for item in tasks if item.get("name") == name)
+            self.assertEqual(task["ansible.builtin.assert"]["fail_msg"], diagnostic)
+            self.assertNotIn("fail_msg", task)
+
     def test_platform_application_nats_administration_requires_mtls(self) -> None:
         tasks = (
             ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
