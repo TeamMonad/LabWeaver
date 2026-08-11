@@ -947,10 +947,6 @@ class AnsibleFixtureTests(unittest.TestCase):
             "Read back Sprint 2 Keycloak client",
             "Read back Sprint 2 Keycloak roles",
             "Read back Sprint 2 Keycloak users",
-            "Verify every Sprint 2 workload rollout",
-            "Read back exact deployment image set",
-            "Read back the adopted portal route",
-            "Read back the object store web proxy configuration",
             "Read final Helm revision",
         )
 
@@ -969,6 +965,20 @@ class AnsibleFixtureTests(unittest.TestCase):
                 any("check_mode: false" in section for section in command_sections),
                 name,
             )
+
+        for name in (
+            "Verify every Sprint 2 workload rollout",
+            "Read back exact deployment image set",
+            "Read back the adopted portal route",
+            "Read back the object store web proxy configuration",
+        ):
+            sections = [
+                section.split("- name:", maxsplit=1)[0]
+                for section in tasks.split("- name: ")[1:]
+                if section.startswith(f"{name}\n")
+            ]
+            self.assertTrue(sections, name)
+            self.assertTrue(any("not ansible_check_mode" in section for section in sections), name)
 
         for name in (
             "Create isolated MinIO administration configuration",
