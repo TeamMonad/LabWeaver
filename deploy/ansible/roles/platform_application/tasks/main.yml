@@ -529,6 +529,7 @@
     owner: root
     group: root
     mode: "0700"
+  check_mode: false
 
 - name: Authenticate retained MinIO administration
   # mc parses any argument starting with '-' as a flag, which breaks aliases
@@ -547,6 +548,7 @@
            'api': 'S3v4',
            'path': 'on'}}} | to_nice_json }}
   no_log: true
+  check_mode: false
 
 - name: Probe retained PostgreSQL database identity
   ansible.builtin.slurp:

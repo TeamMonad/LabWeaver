@@ -970,6 +970,18 @@ class AnsibleFixtureTests(unittest.TestCase):
                 name,
             )
 
+        for name in (
+            "Create isolated MinIO administration configuration",
+            "Authenticate retained MinIO administration",
+        ):
+            sections = [
+                section.split("- name:", maxsplit=1)[0]
+                for section in tasks.split("- name: ")[1:]
+                if section.startswith(f"{name}\n")
+            ]
+            self.assertTrue(sections, name)
+            self.assertIn("check_mode: false", sections[0], name)
+
         for name, diagnostic in (
             (
                 "Read back exact Sprint 2 streams",
