@@ -4,6 +4,47 @@ This document records current repository and connected-runtime facts. Design
 documents, fixtures, health endpoints and reports from another source identity
 are not completion evidence.
 
+## #126 v3 bounded acceptance window (2026-08-11)
+
+The current window is **blocked before deployment**. The frozen runtime source
+commit was `68cb6f15f27d542747f967d7175498ba0f8eb31c`, with Run ID
+`019fef14-1cd0-70bd-8b5a-e8bcf43cdff3` and independent testflight ID
+`019fef14-3922-784d-9e9e-858ad7d6a983`. No prior package, image digest,
+deployment manifest, configuration bundle or connected report is part of this
+identity.
+
+The VM Agent implementation in that commit captures bounded provider stdout
+only under the explicit pod-scoped `LABWEAVER_LLM_OUTPUT_DIR`, logs a schema
+repair diagnostic only for schema-invalid output, and leaves provider error,
+timeout and output-limit failures terminal. Local evidence passed `cargo fmt`,
+workspace Clippy, the Agent runtime regression suite (21 passed, 2 ignored),
+Agent module tests (5 passed), telemetry tests (6 passed), frontend lint and
+typecheck. Full `cargo test --workspace` then passed, including the Agent,
+Environment, Contracts, Control, Evaluation and Resource test suites; the two
+billable/externally configured tests remained explicitly ignored.
+`cargo xtask test --suite contract` also passed, including generated schema and
+web contract checks.
+The changed local integration entry was also attempted and stopped with
+`LW_INTEGRATION_DOCKER_API_FAILED` while Docker timed out contacting the
+configured Quay registry; no connected cluster action was taken.
+
+Two bounded platform package attempts were made against the frozen source.
+Both stopped before any build, scan or publish at the controller-side Buildx
+read of the pinned Harbor Trivy DB manifest with `EOF`; no platform package
+manifest or new image digest exists. A later read-only six-attempt probe did
+read the same digest, but that does not upgrade either failed package attempt
+or authorize a third attempt. The controller must separately repair and verify
+the Buildx-to-Harbor CA/auth/OCI-HEAD path before a new Owner-authorized
+candidate can be started.
+
+The retained `labweaver-system/kc-probe` is independently `ImagePullBackOff`
+as the default ServiceAccount cannot pull the private `base-gateway-runtime`
+image. This remains an explicit blocker for D's deployment/readback Verify and
+cannot be silently ignored. Because package identity was not produced, Ansible
+reconcile, Container/VM execution, AccessGrant matrix, console evidence,
+Playwright, rollback Verify and Release Gate v3 were not started. See the
+sanitized v3 handoff under `.private/handoffs/` for the bounded operation record.
+
 ## Sprint 3 Rust fault-localization logging (#165)
 
 The internal `labweaver.log.v1` formatter, schema, strict HTTP correlation
