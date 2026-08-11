@@ -6,7 +6,9 @@ identity_name: labweaver-keycloak # noqa: var-naming[no-role-prefix]
 identity_hostname: keycloak.labweaver.internal # noqa: var-naming[no-role-prefix]
 identity_gateway_vip: 10.20.0.222 # noqa: var-naming[no-role-prefix]
 identity_gateway_class: cilium # noqa: var-naming[no-role-prefix]
-# Management subnet allowed to reach Keycloak directly (identity-allow ingress).
+# Management subnet allowed to reach Keycloak directly and through the identity
+# NetworkPolicy (identity-allow ingress). This covers the edge-router LAN for
+# RHEL controllers and the v1 campus subnet for the Ubuntu cluster.
 identity_admin_allowed_cidr: 10.20.0.0/16 # noqa: var-naming[no-role-prefix]
 # Platform namespaces allowed to reach Keycloak from inside the cluster
 # (identity-allow ingress + identity-gateway-ingress CNP). Leave empty for a
@@ -33,9 +35,6 @@ identity_workload_secret_name: labweaver-buildkit-client # noqa: var-naming[no-r
 # Gateway VIP + curl --resolve during verification. RHEL routers keep the
 # fragment-based DNS path enabled.
 identity_dnsmasq_enabled: true # noqa: var-naming[no-role-prefix]
-# Management CIDR allowed by the identity NetworkPolicy (edge-router LAN for
-# RHEL controllers, the v1 campus subnet for the Ubuntu cluster).
-identity_admin_allowed_cidr: 10.20.0.0/16 # noqa: var-naming[no-role-prefix]
 # RHEL controllers install the locked python3-kubernetes RPM; Debian-family
 # controllers already run the pinned client from the ansible venv.
 identity_controller_manage_python_kubernetes: true # noqa: var-naming[no-role-prefix]
