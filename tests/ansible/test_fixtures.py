@@ -1070,6 +1070,29 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("platform_application_nats_client_certificate_file", defaults)
         self.assertIn("platform_application_nats_client_private_key_file", defaults)
 
+    def test_platform_application_minio_administration_bypasses_external_proxies(self) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        for name in (
+            "Inspect the immutable artifact bucket without mutation",
+            "Create the immutable artifact bucket only when missing",
+            "Enable versioning without removing existing objects",
+            "Verify immutable artifact bucket versioning",
+        ):
+            section = tasks.split(f"- name: {name}", maxsplit=1)[1].split(
+                "- name:", maxsplit=1
+            )[0]
+            for variable in (
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "ALL_PROXY",
+                "all_proxy",
+            ):
+                self.assertIn(f'{variable}: ""', section, name)
+
     def test_platform_application_reads_locked_minio_versioning_shape(self) -> None:
         tasks = (
             ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"

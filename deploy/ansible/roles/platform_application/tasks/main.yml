@@ -907,6 +907,12 @@
   environment:
     MC_CONFIG_DIR: "{{ platform_application_report_root }}/{{ platform_application_run_id }}/mc"
     SSL_CERT_FILE: "{{ platform_application_minio_ca_file }}"
+    HTTP_PROXY: ""
+    HTTPS_PROXY: ""
+    http_proxy: ""
+    https_proxy: ""
+    ALL_PROXY: ""
+    all_proxy: ""
   no_log: true
 
 - name: Create the immutable artifact bucket only when missing
@@ -922,6 +928,12 @@
   environment:
     MC_CONFIG_DIR: "{{ platform_application_report_root }}/{{ platform_application_run_id }}/mc"
     SSL_CERT_FILE: "{{ platform_application_minio_ca_file }}"
+    HTTP_PROXY: ""
+    HTTPS_PROXY: ""
+    http_proxy: ""
+    https_proxy: ""
+    ALL_PROXY: ""
+    all_proxy: ""
   no_log: false
 
 - name: Enable versioning without removing existing objects
@@ -935,6 +947,12 @@
   environment:
     MC_CONFIG_DIR: "{{ platform_application_report_root }}/{{ platform_application_run_id }}/mc"
     SSL_CERT_FILE: "{{ platform_application_minio_ca_file }}"
+    HTTP_PROXY: ""
+    HTTPS_PROXY: ""
+    http_proxy: ""
+    https_proxy: ""
+    ALL_PROXY: ""
+    all_proxy: ""
   no_log: true
 
 - name: Verify immutable artifact bucket versioning
@@ -950,6 +968,12 @@
   environment:
     MC_CONFIG_DIR: "{{ platform_application_report_root }}/{{ platform_application_run_id }}/mc"
     SSL_CERT_FILE: "{{ platform_application_minio_ca_file }}"
+    HTTP_PROXY: ""
+    HTTPS_PROXY: ""
+    http_proxy: ""
+    https_proxy: ""
+    ALL_PROXY: ""
+    all_proxy: ""
   changed_when: false
   failed_when: >-
     platform_application_minio_version.rc != 0 or
