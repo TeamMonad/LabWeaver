@@ -35,6 +35,8 @@ class CurrentCredentialRegistryTests(unittest.TestCase):
         nested.mkdir(mode=0o700)
         (nested / "seed.nk").write_text("secret-value\n", encoding="utf-8")
         (nested / "seed.nk").chmod(0o600)
+        (nested / "ca.crt").write_text("public-certificate\n", encoding="utf-8")
+        (nested / "ca.crt").chmod(0o644)
         for name, path in self.targets.items():
             if name != "nats-authority-source":
                 path.write_text(f"{name}\n", encoding="utf-8")
@@ -94,6 +96,16 @@ class CurrentCredentialRegistryTests(unittest.TestCase):
                 targets=self.targets,
                 require_root=False,
             )
+
+    def test_public_certificate_permissions_are_allowed_in_authority_source(self) -> None:
+        result = MODULE.adopt(
+            root=self.root / "credential-registry",
+            run_id="issue126-v21-public-cert",
+            source_commit=COMMIT,
+            targets=self.targets,
+            require_root=False,
+        )
+        self.assertEqual(result["entry_count"], 5)
 
 
 if __name__ == "__main__":

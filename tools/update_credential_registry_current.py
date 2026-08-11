@@ -54,7 +54,20 @@ def _private_path(path: Path) -> Path:
     return resolved
 
 
-def _validate_tree(path: Path, *, require_root: bool) -> None:
+def _sensitive_file(path: Path) -> bool:
+    name = path.name.lower()
+    if any(token in name for token in ("password", "secret", "token", "private", "credential", "seed")):
+        return True
+    if path.suffix.lower() in {".key", ".nk", ".creds", ".jwt"}:
+        return True
+    try:
+        sample = path.read_bytes()
+    except OSError as error:
+        raise RegistryError("LW_CREDENTIAL_REGISTRY_TARGET_INVALID") from error
+    return b"PRIVATE KEY" in sample
+
+
+def _validate_tree(path: Path, *, require_root: bool, allow_public_files: bool) -> None:
     if path.is_symlink() or not path.is_dir():
         raise RegistryError("LW_CREDENTIAL_REGISTRY_TARGET_INVALID")
     if not _owner_is_controlled(path, require_root=require_root) or _mode(path) & 0o077:
@@ -68,20 +81,27 @@ def _validate_tree(path: Path, *, require_root: bool) -> None:
             if _mode(child) & 0o077:
                 raise RegistryError("LW_CREDENTIAL_REGISTRY_TARGET_PERMISSIONS_INVALID")
         elif child.is_file():
-            if _mode(child) & 0o077:
+            mode = _mode(child)
+            if (not allow_public_files or _sensitive_file(child)) and mode & 0o077:
+                raise RegistryError("LW_CREDENTIAL_REGISTRY_TARGET_PERMISSIONS_INVALID")
+            if allow_public_files and not _sensitive_file(child) and mode & 0o022:
                 raise RegistryError("LW_CREDENTIAL_REGISTRY_TARGET_PERMISSIONS_INVALID")
         else:
             raise RegistryError("LW_CREDENTIAL_REGISTRY_TARGET_INVALID")
 
 
-def _validate_target(path: Path, *, require_root: bool) -> Path:
+def _validate_target(path: Path, *, require_root: bool, allow_public_files: bool = False) -> Path:
     if path.is_symlink():
         raise RegistryError("LW_CREDENTIAL_REGISTRY_TARGET_INVALID")
     resolved = _private_path(path)
     if not resolved.exists() or resolved.is_symlink():
         raise RegistryError("LW_CREDENTIAL_REGISTRY_TARGET_INVALID")
     if resolved.is_dir():
-        _validate_tree(resolved, require_root=require_root)
+        _validate_tree(
+            resolved,
+            require_root=require_root,
+            allow_public_files=allow_public_files,
+        )
     elif resolved.is_file():
         if not _owner_is_controlled(resolved, require_root=require_root) or _mode(resolved) & 0o077:
             raise RegistryError("LW_CREDENTIAL_REGISTRY_TARGET_PERMISSIONS_INVALID")
@@ -188,7 +208,11 @@ def _verify_current(
         link = target_dir / name
         if not link.is_symlink():
             raise RegistryError("LW_CREDENTIAL_REGISTRY_CURRENT_INVALID")
-        target = _validate_target(link.resolve(), require_root=require_root)
+        target = _validate_target(
+            link.resolve(),
+            require_root=require_root,
+            allow_public_files=name == "nats-authority-source",
+        )
         if _content_digest(target) != parsed[name]:
             raise RegistryError("LW_CREDENTIAL_REGISTRY_HASH_MISMATCH")
     return {
@@ -213,7 +237,14 @@ def adopt(
     if set(targets) != set(NAMES):
         raise RegistryError("LW_CREDENTIAL_REGISTRY_TARGET_SET_INVALID")
     root = _registry_root(root, require_root=require_root)
-    resolved = {name: _validate_target(path, require_root=require_root) for name, path in targets.items()}
+    resolved = {
+        name: _validate_target(
+            path,
+            require_root=require_root,
+            allow_public_files=name == "nats-authority-source",
+        )
+        for name, path in targets.items()
+    }
     version = root / "versions" / run_id
     if version.exists() or version.is_symlink():
         raise RegistryError("LW_CREDENTIAL_REGISTRY_RUN_EXISTS")
