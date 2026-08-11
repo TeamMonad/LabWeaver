@@ -886,6 +886,28 @@ class AnsibleFixtureTests(unittest.TestCase):
             for locator in re.findall(r"/etc/labweaver/config/([a-z0-9.-]+)", configuration):
                 self.assertIn(locator, manifest["configMaps"][config_map])
 
+    def test_platform_application_rejects_stale_access_configuration_schema(self) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "Require the current Access Service configuration schema before mutation",
+            tasks,
+        )
+        self.assertIn(
+            "platform_application_access_configuration.grants.max_console_sessions",
+            tasks,
+        )
+        self.assertIn(
+            "platform_application_access_configuration.grants.environment_state_stream",
+            tasks,
+        )
+        self.assertIn(
+            "PLATFORM_APPLICATION_ACCESS_CONFIGURATION_SCHEMA_INVALID",
+            tasks,
+        )
+
     def test_evaluation_freeze_worker_pull_secret_is_reconciled(self) -> None:
         manifest = json.loads(
             (ROOT / "deploy/config/platform-bundle-manifest.json").read_text(encoding="utf-8")

@@ -214,6 +214,16 @@
          | first }}
   no_log: true
 
+- name: Require the current Access Service configuration schema before mutation
+  ansible.builtin.assert:
+    that:
+      - platform_application_access_configuration.grants is mapping
+      - platform_application_access_configuration.grants.max_console_sessions is defined
+      - platform_application_access_configuration.grants.environment_state_stream == 'LABWEAVER_ENVIRONMENT_COMMANDS'
+      - platform_application_access_configuration.grants.environment_state_consumer == 'access-environment-state-v1'
+    fail_msg: PLATFORM_APPLICATION_ACCESS_CONFIGURATION_SCHEMA_INVALID
+  no_log: true
+
 - name: Select reviewed NATS and Evaluation configuration objects
   ansible.builtin.set_fact:
     platform_application_control_secret_objects: >-
