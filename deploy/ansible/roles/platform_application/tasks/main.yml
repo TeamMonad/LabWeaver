@@ -2053,11 +2053,18 @@
 - name: Require the permanent evaluation runner namespace default deny
   ansible.builtin.assert:
     that:
-      - platform_application_evaluation_default_deny.resources | length == 1
-      - platform_application_evaluation_default_deny.resources[0].spec.podSelector == {}
-      - platform_application_evaluation_default_deny.resources[0].spec.policyTypes | sort == ['Egress', 'Ingress']
-      - platform_application_evaluation_default_deny.resources[0].spec.ingress | default([]) == []
-      - platform_application_evaluation_default_deny.resources[0].spec.egress | default([]) == []
+      - >-
+        (
+          ansible_check_mode and
+          platform_application_evaluation_default_deny.resources | length == 0
+        ) or
+        (
+          platform_application_evaluation_default_deny.resources | length == 1 and
+          platform_application_evaluation_default_deny.resources[0].spec.podSelector == {} and
+          platform_application_evaluation_default_deny.resources[0].spec.policyTypes | sort == ['Egress', 'Ingress'] and
+          platform_application_evaluation_default_deny.resources[0].spec.ingress | default([]) == [] and
+          platform_application_evaluation_default_deny.resources[0].spec.egress | default([]) == []
+        )
     fail_msg: PLATFORM_APPLICATION_EVALUATION_DEFAULT_DENY_INVALID
 
 - name: Reconcile the permanent ansible probe namespace default deny
@@ -2093,11 +2100,18 @@
 - name: Require the permanent ansible probe namespace default deny
   ansible.builtin.assert:
     that:
-      - platform_application_probe_default_deny.resources | length == 1
-      - platform_application_probe_default_deny.resources[0].spec.podSelector == {}
-      - platform_application_probe_default_deny.resources[0].spec.policyTypes | sort == ['Egress', 'Ingress']
-      - platform_application_probe_default_deny.resources[0].spec.ingress | default([]) == []
-      - platform_application_probe_default_deny.resources[0].spec.egress | default([]) == []
+      - >-
+        (
+          ansible_check_mode and
+          platform_application_probe_default_deny.resources | length == 0
+        ) or
+        (
+          platform_application_probe_default_deny.resources | length == 1 and
+          platform_application_probe_default_deny.resources[0].spec.podSelector == {} and
+          platform_application_probe_default_deny.resources[0].spec.policyTypes | sort == ['Egress', 'Ingress'] and
+          platform_application_probe_default_deny.resources[0].spec.ingress | default([]) == [] and
+          platform_application_probe_default_deny.resources[0].spec.egress | default([]) == []
+        )
     fail_msg: PLATFORM_APPLICATION_PROBE_DEFAULT_DENY_INVALID
 
 - name: Require the evaluation worker to use the platform image pull identity

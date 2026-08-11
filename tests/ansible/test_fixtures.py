@@ -1111,6 +1111,27 @@ class AnsibleFixtureTests(unittest.TestCase):
         )[1].split("- name:", maxsplit=1)[0]
         self.assertIn("when: platform_application_harbor_project_info.json | length == 0", create)
 
+    def test_platform_application_check_mode_allows_planned_network_policy_creation(self) -> None:
+        tasks = yaml.safe_load(
+            (ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml").read_text(
+                encoding="utf-8"
+            )
+        )
+        for name, diagnostic in (
+            (
+                "Require the permanent evaluation runner namespace default deny",
+                "PLATFORM_APPLICATION_EVALUATION_DEFAULT_DENY_INVALID",
+            ),
+            (
+                "Require the permanent ansible probe namespace default deny",
+                "PLATFORM_APPLICATION_PROBE_DEFAULT_DENY_INVALID",
+            ),
+        ):
+            task = next(item for item in tasks if item.get("name") == name)
+            assertions = task["ansible.builtin.assert"]["that"]
+            self.assertTrue(any("ansible_check_mode" in assertion for assertion in assertions), name)
+            self.assertEqual(task["ansible.builtin.assert"]["fail_msg"], diagnostic)
+
     def test_platform_application_reads_locked_minio_versioning_shape(self) -> None:
         tasks = (
             ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
