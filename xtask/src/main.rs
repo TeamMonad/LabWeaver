@@ -1481,19 +1481,18 @@ impl InfrastructureInputs {
             identity_secret_locator,
         } = PlaybookLocators::load(playbook_name)?;
 
+        let collections_path = resolve_infrastructure_directory(
+            "approved Ansible collections",
+            [controller_root.as_path(), shared_controller_root.as_path()],
+            "collections",
+        )?;
+
         Ok(Self {
             inventory: infrastructure_path(&inventory),
             vault_password: infrastructure_path(&vault_password),
             playbook: infrastructure_path(&playbook),
             ansible_config: infrastructure_path(&ansible_config),
-            // Collection requirements are lockfile inputs, but a controller may
-            // legitimately execute these playbooks using only built-in modules
-            // and repository-local modules.  Requiring an otherwise unused
-            // `collections/` directory made the allowlisted entrypoint reject
-            // the same controller that Ansible could safely execute directly.
-            // Keep the standard location explicit for Ansible without making a
-            // non-existent directory a false deployment dependency.
-            collections_path: infrastructure_path(&controller_root.join("collections")),
+            collections_path: infrastructure_path(&collections_path),
             roles_path: infrastructure_path(&roles_path),
             commit_sha: infrastructure_commit_sha()?,
             controller_id: approved_controller_identity(&controller_lock)?,
@@ -1971,6 +1970,27 @@ mod tests {
         .map_err(|error| error.to_string())?;
         if first == second {
             return Err("connected identity ignored a changed private locator".into());
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn infrastructure_collections_fall_back_to_shared_controller_root() -> Result<(), String> {
+        let source_root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let controller_root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let collections = controller_root.path().join("collections");
+        std::fs::create_dir(&collections).map_err(|error| error.to_string())?;
+
+        let resolved = super::resolve_infrastructure_directory(
+            "approved Ansible collections",
+            [source_root.path(), controller_root.path()],
+            "collections",
+        )
+        .map_err(|error| error.to_string())?;
+
+        if resolved != collections {
+            return Err("shared controller collections were not selected".into());
         }
         Ok(())
     }
