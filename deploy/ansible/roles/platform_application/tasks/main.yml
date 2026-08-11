@@ -413,6 +413,7 @@
     stdin_add_newline: false
   delegate_to: localhost
   become: false
+  check_mode: false
   changed_when: false
   no_log: true
 
@@ -456,6 +457,7 @@
       - -o
       - jsonpath={.metadata.uid}
   register: platform_application_cluster_uid
+  check_mode: false
   changed_when: false
 
 - name: Create bounded application report directory
@@ -481,6 +483,7 @@
       - --output=jsonpath={.items[0].endpoints[0].addresses[0]}
   loop: "{{ platform_application_data_services }}"
   register: platform_application_data_endpoints
+  check_mode: false
   changed_when: false
 
 - name: Require one valid retained endpoint per data service
@@ -569,6 +572,7 @@
     PGSSLCERT: "{{ platform_application_postgres_client_certificate_file }}"
     PGSSLKEY: "{{ platform_application_postgres_client_private_key_file }}"
   register: platform_application_postgres_identity
+  check_mode: false
   changed_when: false
   retries: 6
   delay: 2
@@ -665,6 +669,7 @@
       - "{{ platform_application_nats_client_private_key_file }}"
       - account
       - info
+  check_mode: false
   changed_when: false
 
 - name: Inspect exact Sprint 2 streams without mutation
@@ -687,6 +692,7 @@
       - --json
   loop: "{{ platform_application_nats_streams }}"
   register: platform_application_stream_info_before
+  check_mode: false
   failed_when: false
   changed_when: false
 
@@ -769,6 +775,7 @@
       - --json
   loop: "{{ platform_application_nats_streams }}"
   register: platform_application_stream_info_after
+  check_mode: false
   changed_when: false
 
 - name: Validate retained or created stream identities
@@ -804,6 +811,7 @@
       - --json
   loop: "{{ platform_application_nats_consumers }}"
   register: platform_application_consumer_info_before
+  check_mode: false
   failed_when: false
   changed_when: false
 
@@ -845,6 +853,7 @@
       - --json
   loop: "{{ platform_application_nats_consumers }}"
   register: platform_application_consumer_info_after
+  check_mode: false
   changed_when: false
 
 - name: Validate retained or created consumer identities
@@ -870,6 +879,7 @@
       - ls
       - "{{ platform_application_minio_alias }}/{{ platform_application_minio_bucket }}"
   register: platform_application_minio_bucket_before
+  check_mode: false
   changed_when: false
   failed_when: false
   environment:
@@ -914,6 +924,7 @@
       - "{{ platform_application_minio_alias }}/{{ platform_application_minio_bucket }}"
       - --json
   register: platform_application_minio_version
+  check_mode: false
   environment:
     MC_CONFIG_DIR: "{{ platform_application_report_root }}/{{ platform_application_run_id }}/mc"
     SSL_CERT_FILE: "{{ platform_application_minio_ca_file }}"
@@ -1036,6 +1047,7 @@
     mode: "0600"
     content: |
       {{ platform_application_keycloak_endpoint_address }} {{ platform_application_keycloak_hostname }}
+  check_mode: false
 
 - name: Stage the reviewed Keycloak realm on the execution host
   ansible.builtin.copy:
@@ -1045,6 +1057,7 @@
     group: root
     mode: "0600"
   no_log: true
+  check_mode: false
 
 - name: Build an isolated Keycloak administration truststore
   ansible.builtin.command:
@@ -1062,6 +1075,7 @@
       - "{{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak-truststore.p12.tmp"
       - -storepass
       - "{{ platform_application_keycloak_truststore_password }}"
+  check_mode: false
   changed_when: true
   no_log: true
 
@@ -1072,6 +1086,7 @@
       - -f
       - "{{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak-truststore.p12.tmp"
       - "{{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak-truststore.p12"
+  check_mode: false
   changed_when: true
   no_log: true
 
@@ -1086,6 +1101,7 @@
       - "{{ platform_application_keycloak_truststore_password }}"
       - --config
       - "{{ platform_application_keycloak_config }}"
+  check_mode: false
   changed_when: false
   no_log: true
 
@@ -1108,6 +1124,7 @@
   environment:
     JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak.hosts"
   register: platform_application_keycloak_authentication
+  check_mode: false
   changed_when: false
   failed_when: >-
     platform_application_keycloak_authentication.rc != 0 or
@@ -1160,6 +1177,7 @@
   environment:
     JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak.hosts"
   register: platform_application_keycloak_authorization
+  check_mode: false
   changed_when: false
   failed_when: >-
     platform_application_keycloak_authorization.rc != 0 or
@@ -1180,6 +1198,7 @@
   environment:
     JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak.hosts"
   failed_when: false
+  check_mode: false
   changed_when: false
   no_log: true
 
@@ -1288,6 +1307,7 @@
   register: platform_application_keycloak_realm_after
   environment:
     JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak.hosts"
+  check_mode: false
   changed_when: false
   no_log: true
 
@@ -1319,6 +1339,7 @@
   register: platform_application_keycloak_client
   environment:
     JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak.hosts"
+  check_mode: false
   changed_when: false
   no_log: true
 
@@ -1339,6 +1360,7 @@
   register: platform_application_keycloak_roles
   environment:
     JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak.hosts"
+  check_mode: false
   changed_when: false
   no_log: true
 
@@ -1359,6 +1381,7 @@
   register: platform_application_keycloak_users
   environment:
     JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak.hosts"
+  check_mode: false
   changed_when: false
   no_log: true
 
@@ -2313,6 +2336,7 @@
       - "deployment/{{ item }}"
       - "--timeout={{ platform_application_rollout_timeout }}"
   loop: "{{ platform_application_workloads }}"
+  check_mode: false
   changed_when: false
 
 - name: Read back exact deployment image set
@@ -2330,6 +2354,7 @@
       - -o
       - json
   register: platform_application_deployments
+  check_mode: false
   changed_when: false
 
 - name: Require exact workload count and digest-only images
@@ -2359,6 +2384,7 @@
       - --output=json
   register: platform_application_portal_route
   when: platform_application_portal_route_name | length > 0
+  check_mode: false
   changed_when: false
 
 - name: Require the adopted portal route accepted and resolved
@@ -2391,6 +2417,7 @@
       - --output=json
   register: platform_application_object_store_proxy
   when: platform_application_object_store_route_enabled
+  check_mode: false
   changed_when: false
 
 - name: Require the verified object store web proxy configuration
@@ -2444,6 +2471,7 @@
       - --output
       - json
   register: platform_application_helm_history
+  check_mode: false
   changed_when: false
 
 - name: Hash application identity inputs

@@ -923,6 +923,53 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("- account\n      - info", probe)
         self.assertNotIn("--json", probe)
 
+    def test_platform_application_check_mode_executes_retained_state_probes(self) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+
+        read_only_probes = (
+            "Require Control to publish both retained quarantine subjects",
+            "Read target cluster UID",
+            "Resolve retained headless data-service endpoints",
+            "Probe retained PostgreSQL database identity",
+            "Probe retained JetStream",
+            "Inspect exact Sprint 2 streams without mutation",
+            "Read back exact Sprint 2 streams",
+            "Inspect exact Sprint 2 durable consumers without mutation",
+            "Read back exact Sprint 2 durable consumers",
+            "Inspect the immutable artifact bucket without mutation",
+            "Verify immutable artifact bucket versioning",
+            "Authenticate retained Keycloak administration",
+            "Require retained Keycloak realm-management authorization",
+            "Inspect retained Sprint 2 Keycloak realm",
+            "Read back Sprint 2 Keycloak realm",
+            "Read back Sprint 2 Keycloak client",
+            "Read back Sprint 2 Keycloak roles",
+            "Read back Sprint 2 Keycloak users",
+            "Verify every Sprint 2 workload rollout",
+            "Read back exact deployment image set",
+            "Read back the adopted portal route",
+            "Read back the object store web proxy configuration",
+            "Read final Helm revision",
+        )
+
+        for name in read_only_probes:
+            sections = [
+                section.split("- name:", maxsplit=1)[0]
+                for section in tasks.split("- name: ")[1:]
+                if section.startswith(f"{name}\n")
+            ]
+            self.assertTrue(sections, name)
+            command_sections = [
+                section for section in sections if "ansible.builtin.command:" in section
+            ]
+            self.assertTrue(command_sections, name)
+            self.assertTrue(
+                any("check_mode: false" in section for section in command_sections),
+                name,
+            )
+
     def test_platform_application_nats_administration_requires_mtls(self) -> None:
         tasks = (
             ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
