@@ -1449,19 +1449,44 @@ impl InfrastructureInputs {
     fn load(environment: &str, playbook_name: &str) -> Result<Self, AppError> {
         let root = infrastructure_root()?;
         let controller_root = root.join("deploy/ansible");
-        let inventory_root = controller_root.join("inventories").join(environment);
-        let inventory = inventory_root.join("hosts.yml");
-        let vault_password = inventory_root.join(".vault-password");
-        let playbook = controller_root.join("playbooks").join(playbook_name);
-        require_infrastructure_file("infrastructure deployment input", &inventory)?;
-        require_infrastructure_file("infrastructure deployment input", &vault_password)?;
-        require_infrastructure_file("infrastructure deployment input", &playbook)?;
+        let shared_controller_root = infrastructure_dependency_root()?;
+        let shared_controller_ansible_root =
+            if shared_controller_root.join("deploy/ansible").is_dir() {
+                shared_controller_root.join("deploy/ansible")
+            } else {
+                shared_controller_root.clone()
+            };
+        let controller_roots = [
+            shared_controller_ansible_root.as_path(),
+            controller_root.as_path(),
+        ];
+        let inventory = resolve_infrastructure_file(
+            "infrastructure deployment input",
+            controller_roots,
+            &format!("inventories/{environment}/hosts.yml"),
+        )?;
+        let vault_password = resolve_infrastructure_file(
+            "infrastructure deployment input",
+            controller_roots,
+            &format!("inventories/{environment}/.vault-password"),
+        )?;
+        let playbook = resolve_infrastructure_file(
+            "infrastructure deployment input",
+            controller_roots,
+            &format!("playbooks/{playbook_name}"),
+        )?;
         let ansible_binary = std::path::Path::new("/usr/local/bin/ansible-playbook");
         require_infrastructure_file("approved ansible-playbook binary", ansible_binary)?;
-        let ansible_config = controller_root.join("ansible.cfg");
-        require_infrastructure_file("approved Ansible configuration", &ansible_config)?;
-        let controller_lock = controller_root.join("controller.lock.yml");
-        require_infrastructure_file("approved infrastructure controller lock", &controller_lock)?;
+        let ansible_config = resolve_infrastructure_file(
+            "approved Ansible configuration",
+            controller_roots,
+            "ansible.cfg",
+        )?;
+        let controller_lock = resolve_infrastructure_file(
+            "approved infrastructure controller lock",
+            controller_roots,
+            "controller.lock.yml",
+        )?;
         require_ansible_version(&controller_lock, ansible_binary)?;
         require_python_module_version(
             &controller_lock,
@@ -1470,12 +1495,8 @@ impl InfrastructureInputs {
             "python_kubernetes_version",
         )?;
 
-        let shared_controller_root = infrastructure_dependency_root()?;
-        let roles_path = resolve_infrastructure_directory(
-            "approved Ansible roles",
-            [controller_root.as_path(), shared_controller_root.as_path()],
-            "roles",
-        )?;
+        let roles_path =
+            resolve_infrastructure_directory("approved Ansible roles", controller_roots, "roles")?;
 
         let PlaybookLocators {
             identity_secret_locator,
@@ -1483,9 +1504,17 @@ impl InfrastructureInputs {
 
         let collections_path = resolve_infrastructure_directory(
             "approved Ansible collections",
-            [controller_root.as_path(), shared_controller_root.as_path()],
+            controller_roots,
             "collections",
         )?;
+
+        let inventory_root = inventory
+            .parent()
+            .ok_or_else(|| AppError::ExternalCommand {
+                role: "infrastructure inventory identity",
+                code: None,
+                detail: Some("inventory path has no parent".into()),
+            })?;
 
         Ok(Self {
             inventory: infrastructure_path(&inventory),
@@ -1496,7 +1525,7 @@ impl InfrastructureInputs {
             roles_path: infrastructure_path(&roles_path),
             commit_sha: infrastructure_commit_sha()?,
             controller_id: approved_controller_identity(&controller_lock)?,
-            inventory_hash: inventory_identity_hash(&inventory_root)?,
+            inventory_hash: inventory_identity_hash(inventory_root)?,
             component_lock_hash: file_sha256(&root.join("deploy/versions.lock.yml"))?,
             harbor_data_backup_locator: std::env::var("LABWEAVER_HARBOR_DATA_BACKUP_LOCATOR")
                 .unwrap_or_default(),
@@ -1590,6 +1619,23 @@ fn require_infrastructure_file(role: &'static str, path: &std::path::Path) -> Re
         code: None,
         detail: Some(format!("required file is missing: {}", path.display())),
     })
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_infrastructure_file(
+    role: &'static str,
+    roots: [&std::path::Path; 2],
+    relative: &str,
+) -> Result<std::path::PathBuf, AppError> {
+    roots
+        .into_iter()
+        .map(|root| root.join(relative))
+        .find(|path| path.is_file())
+        .ok_or_else(|| AppError::ExternalCommand {
+            role,
+            code: None,
+            detail: Some(format!("required file is missing: {relative}")),
+        })
 }
 
 #[cfg(target_os = "linux")]
@@ -1991,6 +2037,33 @@ mod tests {
 
         if resolved != collections {
             return Err("shared controller collections were not selected".into());
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn infrastructure_file_resolution_prefers_the_controlled_controller() -> Result<(), String> {
+        let source_root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let controller_root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let source_file = source_root.path().join("inventories/demo/hosts.yml");
+        let controller_file = controller_root.path().join("inventories/demo/hosts.yml");
+        std::fs::create_dir_all(source_file.parent().ok_or("source parent")?)
+            .map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(controller_file.parent().ok_or("controller parent")?)
+            .map_err(|error| error.to_string())?;
+        std::fs::write(&source_file, b"source").map_err(|error| error.to_string())?;
+        std::fs::write(&controller_file, b"controller").map_err(|error| error.to_string())?;
+
+        let resolved = super::resolve_infrastructure_file(
+            "infrastructure deployment input",
+            [controller_root.path(), source_root.path()],
+            "inventories/demo/hosts.yml",
+        )
+        .map_err(|error| error.to_string())?;
+
+        if resolved != controller_file {
+            return Err("controlled controller input was not selected".into());
         }
         Ok(())
     }
