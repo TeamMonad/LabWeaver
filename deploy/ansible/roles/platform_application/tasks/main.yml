@@ -1003,6 +1003,7 @@
     validate_certs: true
     ca_path: "{{ platform_application_harbor_ca_file }}"
     return_content: true
+  check_mode: false
   register: platform_application_harbor_project_info
   failed_when: platform_application_harbor_project_info.status != 200 or platform_application_harbor_project_info.json | length > 1
   no_log: true
@@ -1033,6 +1034,7 @@
     validate_certs: true
     ca_path: "{{ platform_application_harbor_ca_file }}"
     return_content: true
+  check_mode: false
   register: platform_application_harbor_project_verified
   failed_when: >-
     platform_application_harbor_project_verified.status != 200 or

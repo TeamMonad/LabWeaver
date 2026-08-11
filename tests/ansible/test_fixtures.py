@@ -1093,6 +1093,24 @@ class AnsibleFixtureTests(unittest.TestCase):
             ):
                 self.assertIn(f'{variable}: ""', section, name)
 
+    def test_platform_application_check_mode_reads_harbor_project_before_reconcile(self) -> None:
+        tasks = (
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        for name in (
+            "Inspect the adopted Harbor project without mutation",
+            "Verify adopted private Harbor project identity",
+        ):
+            section = tasks.split(f"- name: {name}", maxsplit=1)[1].split(
+                "- name:", maxsplit=1
+            )[0]
+            self.assertIn("ansible.builtin.uri:", section, name)
+            self.assertIn("check_mode: false", section, name)
+        create = tasks.split(
+            "- name: Create the adopted Harbor project only when missing", maxsplit=1
+        )[1].split("- name:", maxsplit=1)[0]
+        self.assertIn("when: platform_application_harbor_project_info.json | length == 0", create)
+
     def test_platform_application_reads_locked_minio_versioning_shape(self) -> None:
         tasks = (
             ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
