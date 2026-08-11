@@ -776,8 +776,16 @@
   loop: "{{ platform_application_nats_streams }}"
   register: platform_application_stream_info_after
   check_mode: false
-  failed_when: item.rc != 0 and not ansible_check_mode
+  failed_when: false
   changed_when: false
+
+- name: Reject failed Sprint 2 stream readback outside check mode
+  ansible.builtin.assert:
+    that: item.rc == 0
+    fail_msg: PLATFORM_APPLICATION_STREAM_READBACK_FAILED
+  loop: "{{ platform_application_stream_info_after.results }}"
+  when: not ansible_check_mode
+  no_log: true
 
 - name: Validate retained or created stream identities
   ansible.builtin.assert:
@@ -789,7 +797,7 @@
       - (item.stdout | from_json).config.discard == 'old'
     fail_msg: PLATFORM_APPLICATION_STREAM_CONFLICT
   loop: "{{ platform_application_stream_info_after.results }}"
-  when: not (ansible_check_mode and item.rc != 0)
+  when: item.rc == 0
   no_log: true
 
 - name: Inspect exact Sprint 2 durable consumers without mutation
@@ -856,8 +864,16 @@
   loop: "{{ platform_application_nats_consumers }}"
   register: platform_application_consumer_info_after
   check_mode: false
-  failed_when: item.rc != 0 and not ansible_check_mode
+  failed_when: false
   changed_when: false
+
+- name: Reject failed Sprint 2 consumer readback outside check mode
+  ansible.builtin.assert:
+    that: item.rc == 0
+    fail_msg: PLATFORM_APPLICATION_CONSUMER_READBACK_FAILED
+  loop: "{{ platform_application_consumer_info_after.results }}"
+  when: not ansible_check_mode
+  no_log: true
 
 - name: Validate retained or created consumer identities
   ansible.builtin.assert:
@@ -873,7 +889,7 @@
              else [])) | sort == item.item.filters | sort
     fail_msg: PLATFORM_APPLICATION_CONSUMER_CONFLICT
   loop: "{{ platform_application_consumer_info_after.results }}"
-  when: not (ansible_check_mode and item.rc != 0)
+  when: item.rc == 0
   no_log: true
 
 - name: Inspect the immutable artifact bucket without mutation

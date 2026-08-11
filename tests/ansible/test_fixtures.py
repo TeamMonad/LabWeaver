@@ -983,7 +983,7 @@ class AnsibleFixtureTests(unittest.TestCase):
             section = tasks.split(f"- name: {name}", maxsplit=1)[1].split(
                 "- name:", maxsplit=1
             )[0]
-            self.assertIn("failed_when: item.rc != 0 and not ansible_check_mode", section)
+            self.assertIn("failed_when: false", section)
             validation_name = (
                 "Validate retained or created stream identities"
                 if "streams" in name
@@ -993,7 +993,24 @@ class AnsibleFixtureTests(unittest.TestCase):
                 "- name:", maxsplit=1
             )[0]
             self.assertIn(diagnostic, validation)
-            self.assertIn("when: not (ansible_check_mode and item.rc != 0)", validation)
+            self.assertIn("when: item.rc == 0", validation)
+
+            readback_diagnostic = (
+                "PLATFORM_APPLICATION_STREAM_READBACK_FAILED"
+                if "streams" in name
+                else "PLATFORM_APPLICATION_CONSUMER_READBACK_FAILED"
+            )
+            readback_name = (
+                "Reject failed Sprint 2 stream readback outside check mode"
+                if "streams" in name
+                else "Reject failed Sprint 2 consumer readback outside check mode"
+            )
+            readback = tasks.split(f"- name: {readback_name}", maxsplit=1)[1].split(
+                "- name:", maxsplit=1
+            )[0]
+            self.assertIn(readback_diagnostic, readback)
+            self.assertIn("that: item.rc == 0", readback)
+            self.assertIn("when: not ansible_check_mode", readback)
 
     def test_platform_application_assertion_failure_messages_stay_inside_assertions(self) -> None:
         tasks = yaml.safe_load(
