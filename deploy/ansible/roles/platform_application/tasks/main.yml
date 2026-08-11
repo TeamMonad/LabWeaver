@@ -1480,6 +1480,59 @@
   changed_when: false
   no_log: true
 
+- name: Refresh retained Keycloak administration before managed identity updates
+  ansible.builtin.command:
+    argv:
+      - "{{ platform_application_kcadm }}"
+      - config
+      - credentials
+      - --server
+      - "{{ platform_application_keycloak_server }}"
+      - --realm
+      - "{{ platform_application_keycloak_admin_realm }}"
+      - --user
+      - "{{ platform_application_keycloak_username }}"
+      - --password
+      - "{{ platform_application_keycloak_password }}"
+      - --config
+      - "{{ platform_application_keycloak_config }}"
+  environment:
+    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak.hosts"
+  register: platform_application_keycloak_refresh
+  check_mode: false
+  changed_when: false
+  failed_when: >-
+    platform_application_keycloak_refresh.rc != 0 or
+    platform_application_keycloak_refresh.stderr is search('HTTP [45][0-9][0-9]')
+  no_log: true
+
+- name: Load the refreshed isolated Keycloak administration session
+  ansible.builtin.slurp:
+    src: "{{ platform_application_keycloak_config }}"
+  register: platform_application_keycloak_refreshed_session_file
+  changed_when: false
+  no_log: true
+
+- name: Bind the refreshed Keycloak administration token explicitly
+  ansible.builtin.set_fact:
+    platform_application_keycloak_admin_token: >-
+      {{
+        ((platform_application_keycloak_refreshed_session_file.content | b64decode | from_json)
+          .get('endpoints', {})
+          .get(platform_application_keycloak_server, {})
+          .get(platform_application_keycloak_admin_realm, {})
+          .get('token', ''))
+      }}
+  no_log: true
+
+- name: Require the refreshed Keycloak administration token
+  ansible.builtin.assert:
+    that:
+      - platform_application_keycloak_admin_token is string
+      - platform_application_keycloak_admin_token.split('.') | length == 3
+    fail_msg: PLATFORM_APPLICATION_KEYCLOAK_REFRESHED_TOKEN_INVALID
+  no_log: true
+
 - name: Reconcile the managed Sprint 2 OIDC client without replacing the realm
   ansible.builtin.uri:
     url: >-

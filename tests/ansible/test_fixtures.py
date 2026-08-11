@@ -735,6 +735,10 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("Probe the retained Kubernetes node CA trust implementation", tasks)
         self.assertIn("update-ca-certificates", tasks)
         self.assertIn(
+            "Refresh retained Keycloak administration before managed identity updates",
+            tasks,
+        )
+        self.assertIn(
             "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             tasks,
         )
