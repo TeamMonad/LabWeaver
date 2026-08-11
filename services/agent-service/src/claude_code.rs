@@ -1205,26 +1205,22 @@ impl ClaudeCodeRuntime {
                 &process_output,
                 expected_environment_class,
             );
-            // Diagnostic: persist the raw Claude Code stdout when parsing fails
-            // so acceptance debugging can inspect the actual LLM output. Only
-            // active when LABWEAVER_LLM_OUTPUT_DIR is set; removed at cleanup.
-            if parsed.is_err() {
-                if let Ok(output_dir) = std::env::var("LABWEAVER_LLM_OUTPUT_DIR") {
-                    let stamp = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_or(0, |d| d.as_millis());
-                    let name = match track {
-                        AgentTrackKind::Environment => "environment",
-                        AgentTrackKind::Evaluation => "evaluation",
-                    };
-                    let path = std::path::Path::new(&output_dir)
-                        .join(format!("llm-{name}-{stamp}-repair{repairs}.stdout"));
-                    let _ = std::fs::write(path, process_output.stdout());
+            if let Err(failure) = &parsed {
+                // Raw provider output is an acceptance-only diagnostic. Keep it
+                // out of ordinary provider-error handling: an error envelope is
+                // not a schema repair candidate and must retain its stable
+                // upstream diagnostic. The directory is injected only into the
+                // isolated worker and the file is private, bounded stdout.
+                let schema_invalid = failure.is_schema_invalid();
+                if schema_invalid {
+                    persist_failed_stdout(track, repairs, process_output.stdout());
                 }
-                let preview: String = String::from_utf8_lossy(process_output.stdout())
-                    .chars()
-                    .take(2_000)
-                    .collect();
+                let preview = schema_invalid.then(|| {
+                    String::from_utf8_lossy(process_output.stdout())
+                        .chars()
+                        .take(2_000)
+                        .collect::<String>()
+                });
                 tracing::warn!(
                     event = "agent.llm.candidate_parse_failed",
                     component = "agent-service",
@@ -1234,8 +1230,8 @@ impl ClaudeCodeRuntime {
                     track = ?track,
                     repair_attempt = repairs,
                     stdout_preview = ?preview,
-                    diagnostic_code = "LLM_SCHEMA_INVALID",
-                    retryable = true,
+                    diagnostic_code = failure.diagnostic_code(),
+                    retryable = schema_invalid,
                 );
             }
             match parsed {
@@ -1475,6 +1471,50 @@ fn candidate_json_prompt(prompt: &str, schema: &str) -> String {
     format!(
         "{prompt}\n\nReturn exactly one JSON object as your complete final response. Do not use Markdown, a code fence, comments, or explanatory text. The object MUST satisfy this exact JSON Schema; LabWeaver will reject the response locally if JSON parsing, protected-field checks, typed deserialization, or semantic validation fails.\n\n{schema}"
     )
+}
+
+/// Persists bounded provider stdout only for an explicitly enabled acceptance
+/// diagnostic. The file is never part of a service report and is created with
+/// exclusive creation so concurrent runs cannot overwrite one another.
+fn persist_failed_stdout(track: AgentTrackKind, repairs: u8, stdout: &[u8]) {
+    let Ok(output_dir) = std::env::var("LABWEAVER_LLM_OUTPUT_DIR") else {
+        return;
+    };
+    let directory = std::path::Path::new(&output_dir);
+    if !directory.is_absolute() || std::fs::create_dir_all(directory).is_err() {
+        return;
+    }
+    let name = match track {
+        AgentTrackKind::Environment => "environment",
+        AgentTrackKind::Evaluation => "evaluation",
+    };
+    let path = directory.join(format!(
+        "llm-{name}-{}-repair{repairs}.stdout",
+        Uuid::now_v7()
+    ));
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(_) => return,
+        }
+    };
+    #[cfg(not(unix))]
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(_) => return,
+    };
+    let _ = std::io::Write::write_all(&mut file, stdout);
 }
 
 /// Both independently retained track outcomes.
@@ -2020,6 +2060,24 @@ mod tests {
         .await??;
         assert!(terminal);
         assert!(output.ends_with(b"\n"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stream_without_a_result_is_rejected_when_capture_limit_is_exceeded()
+    -> Result<(), Box<dyn Error>> {
+        let (reader, mut writer) = duplex(4_096);
+        let writer_task = tokio::spawn(async move { writer.write_all(&vec![b'x'; 4_097]).await });
+        let result = timeout(
+            Duration::from_secs(1),
+            read_stream_until_result(reader, 4_096),
+        )
+        .await?;
+        assert_eq!(
+            result,
+            Err(super::ClaudeCodeProcessError::OutputLimitExceeded)
+        );
+        writer_task.abort();
         Ok(())
     }
 }
