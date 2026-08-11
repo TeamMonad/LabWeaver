@@ -187,7 +187,5 @@ platform_application_components:
   - openssh-gateway
   - web
 
-# CA trust store layout differs between RHEL-family (/etc/pki/ca-trust) and
-# Debian-family (/usr/local/share/ca-certificates) routers and nodes.
-platform_application_ca_trust_anchors_dir: /etc/pki/ca-trust/source/anchors
-platform_application_ca_trust_refresh_command: update-ca-trust extract
+# CA trust store layout is probed on each retained node because the adopted
+# cluster may mix RHEL-family and Debian-family hosts.

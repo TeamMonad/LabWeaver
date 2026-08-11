@@ -1049,23 +1049,69 @@
   changed_when: false
   no_log: true
 
-- name: Create Harbor trust directories on every Kubernetes node
+- name: Probe the retained Kubernetes node CA trust implementation
+  ansible.builtin.shell:
+    cmd: |
+      if command -v update-ca-trust >/dev/null 2>&1; then
+        printf 'rhel\n'
+      elif command -v update-ca-certificates >/dev/null 2>&1; then
+        printf 'debian\n'
+      else
+        printf 'unsupported\n'
+        exit 127
+      fi
+  register: platform_application_ca_trust_probes
+  delegate_to: "{{ item }}"
+  become: true
+  loop: "{{ groups['k8s_cluster'] }}"
+  check_mode: false
+  changed_when: false
+
+- name: Require a supported Kubernetes node CA trust implementation
+  ansible.builtin.assert:
+    that:
+      - item.rc == 0
+      - item.stdout | trim in ['rhel', 'debian']
+    fail_msg: PLATFORM_APPLICATION_CA_TRUST_IMPLEMENTATION_UNSUPPORTED
+  loop: "{{ platform_application_ca_trust_probes.results }}"
+
+- name: Bind the retained Kubernetes node CA trust layout
+  ansible.builtin.set_fact:
+    platform_application_node_ca_trust_anchors_dir: >-
+      {{ '/etc/pki/ca-trust/source/anchors'
+         if (item.stdout | trim) == 'rhel'
+         else '/usr/local/share/ca-certificates' }}
+    platform_application_node_ca_trust_refresh_argv: >-
+      {{ ['update-ca-trust', 'extract']
+         if (item.stdout | trim) == 'rhel'
+         else ['update-ca-certificates'] }}
+  delegate_to: "{{ item.item }}"
+  delegate_facts: true
+  loop: "{{ platform_application_ca_trust_probes.results }}"
+
+- name: Create system CA trust directories on every Kubernetes node
   ansible.builtin.file:
-    path: "{{ item.1 }}"
+    path: "{{ hostvars[item].platform_application_node_ca_trust_anchors_dir }}"
     state: directory
     owner: root
     group: root
     mode: "0755"
-  delegate_to: "{{ item.0 }}"
-  loop: >-
-    {{ groups['k8s_cluster']
-       | product([platform_application_ca_trust_anchors_dir,
-                  '/etc/containers/certs.d/' + platform_application_harbor_registry])
-       | list }}
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['k8s_cluster'] }}"
+
+- name: Create Harbor container runtime trust directories on every Kubernetes node
+  ansible.builtin.file:
+    path: "/etc/containers/certs.d/{{ platform_application_harbor_registry }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['k8s_cluster'] }}"
 
 - name: Install the adopted Harbor CA in every Kubernetes node system trust
   ansible.builtin.copy:
-    dest: "{{ platform_application_ca_trust_anchors_dir }}/labweaver-harbor.crt"
+    dest: "{{ hostvars[item].platform_application_node_ca_trust_anchors_dir }}/labweaver-harbor.crt"
     owner: root
     group: root
     mode: "0644"
@@ -1784,7 +1830,9 @@
 - name: Install the Sprint 2 portal authority on the retained router
   ansible.builtin.copy:
     src: "{{ platform_application_portal_tls_ca_file }}"
-    dest: "{{ platform_application_ca_trust_anchors_dir }}/labweaver-platform-portal.crt"
+    dest: >-
+      {{ hostvars[groups['routers'] | first].platform_application_node_ca_trust_anchors_dir
+         }}/labweaver-platform-portal.crt
     owner: root
     group: root
     mode: "0644"

@@ -732,19 +732,23 @@ class AnsibleFixtureTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("Load the adopted Harbor CA for Kubernetes nodes", tasks)
         self.assertIn("groups['k8s_cluster']", tasks)
+        self.assertIn("Probe the retained Kubernetes node CA trust implementation", tasks)
+        self.assertIn("update-ca-certificates", tasks)
+        self.assertIn("platform_application_node_ca_trust_anchors_dir", tasks)
+        self.assertIn("platform_application_node_ca_trust_refresh_argv", tasks)
         self.assertIn(
-            'dest: "{{ platform_application_ca_trust_anchors_dir }}/labweaver-harbor.crt"',
+            'dest: "{{ hostvars[item].platform_application_node_ca_trust_anchors_dir }}/labweaver-harbor.crt"',
             tasks,
         )
         self.assertIn(
-            "platform_application_ca_trust_anchors_dir: /etc/pki/ca-trust/source/anchors",
+            "CA trust store layout is probed on each retained node",
             defaults,
         )
         self.assertIn("/etc/containers/certs.d/", tasks)
         self.assertIn("notify: Refresh Kubernetes node Harbor trust", tasks)
         self.assertIn("Apply changed Kubernetes node Harbor trust before workload rollout", tasks)
         self.assertIn("name: Refresh Kubernetes node Harbor trust", handlers)
-        self.assertIn("{{ platform_application_ca_trust_refresh_command }}", handlers)
+        self.assertIn("platform_application_node_ca_trust_refresh_argv", handlers)
         self.assertIn("groups['k8s_cluster']", handlers)
         application_namespace = tasks.split(
             "- name: Reconcile application namespace without deleting retained state",
