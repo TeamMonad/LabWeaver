@@ -776,6 +776,7 @@
   loop: "{{ platform_application_nats_streams }}"
   register: platform_application_stream_info_after
   check_mode: false
+  failed_when: item.rc != 0 and not ansible_check_mode
   changed_when: false
 
 - name: Validate retained or created stream identities
@@ -786,8 +787,9 @@
       - (item.stdout | from_json).config.storage == 'file'
       - (item.stdout | from_json).config.retention == 'limits'
       - (item.stdout | from_json).config.discard == 'old'
-    fail_msg: PLATFORM_APPLICATION_STREAM_CONFLICT
+  fail_msg: PLATFORM_APPLICATION_STREAM_CONFLICT
   loop: "{{ platform_application_stream_info_after.results }}"
+  when: not (ansible_check_mode and item.rc != 0)
   no_log: true
 
 - name: Inspect exact Sprint 2 durable consumers without mutation
@@ -854,6 +856,7 @@
   loop: "{{ platform_application_nats_consumers }}"
   register: platform_application_consumer_info_after
   check_mode: false
+  failed_when: item.rc != 0 and not ansible_check_mode
   changed_when: false
 
 - name: Validate retained or created consumer identities
@@ -868,8 +871,9 @@
           + ([((item.stdout | from_json).config.filter_subject)]
              if ((item.stdout | from_json).config.filter_subject | default('') | length > 0)
              else [])) | sort == item.item.filters | sort
-    fail_msg: PLATFORM_APPLICATION_CONSUMER_CONFLICT
+  fail_msg: PLATFORM_APPLICATION_CONSUMER_CONFLICT
   loop: "{{ platform_application_consumer_info_after.results }}"
+  when: not (ansible_check_mode and item.rc != 0)
   no_log: true
 
 - name: Inspect the immutable artifact bucket without mutation

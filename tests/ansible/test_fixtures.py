@@ -970,6 +970,31 @@ class AnsibleFixtureTests(unittest.TestCase):
                 name,
             )
 
+        for name, diagnostic in (
+            (
+                "Read back exact Sprint 2 streams",
+                "PLATFORM_APPLICATION_STREAM_CONFLICT",
+            ),
+            (
+                "Read back exact Sprint 2 durable consumers",
+                "PLATFORM_APPLICATION_CONSUMER_CONFLICT",
+            ),
+        ):
+            section = tasks.split(f"- name: {name}", maxsplit=1)[1].split(
+                "- name:", maxsplit=1
+            )[0]
+            self.assertIn("failed_when: item.rc != 0 and not ansible_check_mode", section)
+            validation_name = (
+                "Validate retained or created stream identities"
+                if "streams" in name
+                else "Validate retained or created consumer identities"
+            )
+            validation = tasks.split(f"- name: {validation_name}", maxsplit=1)[1].split(
+                "- name:", maxsplit=1
+            )[0]
+            self.assertIn(diagnostic, validation)
+            self.assertIn("when: not (ansible_check_mode and item.rc != 0)", validation)
+
     def test_platform_application_nats_administration_requires_mtls(self) -> None:
         tasks = (
             ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
