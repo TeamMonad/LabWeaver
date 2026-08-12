@@ -233,7 +233,9 @@
           - nats_rotation_record.system_account_public is match('^A[A-Z2-7]{55}$')
           - nats_rotation_record.workloads_account_public == nats_rotation_expected_workloads_account
           - nats_rotation_record.identities | length == 10
-          - nats_rotation_record.identities | map(attribute='identity') | sort == nats_rotation_expected_identities | sort
+          - >-
+            (nats_rotation_record.identities | map(attribute='identity') | sort)
+            == (nats_rotation_expected_identities | sort)
           - nats_rotation_record.identities | map(attribute='issuer') | unique | list == [nats_rotation_expected_workloads_account]
         fail_msg: NATS_AUTHORITY_ROTATION_IDENTITY_INVALID
 

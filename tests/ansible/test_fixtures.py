@@ -153,7 +153,11 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("NATS_AUTHORITY_ROTATION_RESOURCE_SURFACE_AMBIGUOUS", playbook)
         self.assertIn("nats_rotation_resource_bootstrap", playbook)
         self.assertIn(
-            "nats_rotation_record.identities | map(attribute='identity') | sort == nats_rotation_expected_identities | sort",
+            "(nats_rotation_record.identities | map(attribute='identity') | sort)",
+            playbook,
+        )
+        self.assertIn(
+            "== (nats_rotation_expected_identities | sort)",
             playbook,
         )
         self.assertIn("nats_rotation_existing_secret_objects", playbook)
