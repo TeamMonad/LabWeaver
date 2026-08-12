@@ -1470,9 +1470,19 @@ impl InfrastructureInputs {
             controller_roots,
             &format!("inventories/{environment}/.vault-password"),
         )?;
+        // The inventory, controller lock, Ansible configuration and
+        // collections are controlled controller inputs.  The playbook and
+        // role implementation, however, are part of the frozen source
+        // checkout and must come from the candidate source commit.  Resolving
+        // those from the shared controller first can silently execute an old
+        // role against a new package/configuration candidate.
+        let candidate_roots = [
+            controller_root.as_path(),
+            shared_controller_ansible_root.as_path(),
+        ];
         let playbook = resolve_infrastructure_file(
-            "infrastructure deployment input",
-            controller_roots,
+            "candidate infrastructure deployment input",
+            candidate_roots,
             &format!("playbooks/{playbook_name}"),
         )?;
         let ansible_binary = std::path::Path::new("/usr/local/bin/ansible-playbook");
@@ -1496,7 +1506,7 @@ impl InfrastructureInputs {
         )?;
 
         let roles_path =
-            resolve_infrastructure_directory("approved Ansible roles", controller_roots, "roles")?;
+            resolve_infrastructure_directory("candidate Ansible roles", candidate_roots, "roles")?;
 
         let PlaybookLocators {
             identity_secret_locator,

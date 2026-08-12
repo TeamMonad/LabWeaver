@@ -289,6 +289,20 @@ baseline SQL is applied, the role checks `current_database()` against
 `PLATFORM_APPLICATION_POSTGRES_DATABASE_IDENTITY_MISMATCH` on drift. This keeps
 the six domain schemas and the runtime `database-url` in one authoritative
 database without resetting retained PostgreSQL state.
+
+The v1 controller does not have a route to the Kubernetes Service CIDR, so
+`platform_application_postgres_forward_enabled` defaults to `true`. The
+application role owns `labweaver-postgres-forward.service`, waits for its
+loopback endpoint on `15432`, and only then probes the database. An operator may
+set `LABWEAVER_POSTGRES_FORWARD_ENABLED=false` only when the controller's
+Service-CIDR route has been independently verified; an unreachable in-cluster
+PostgreSQL address is not an accepted fallback.
+
+For a connected candidate operation, the inventory, controller lock, Ansible
+configuration, collections and vault locator come from the approved controller.
+The playbook and role implementation come from the frozen candidate source
+checkout. This prevents an older controller role from silently masking a fix
+when the package and private configuration are bound to a newer source commit.
 When the retained Keycloak public hostname rejects traffic routed through the
 node-facing address, private Helm values may bind only `access-service` to the
 retained in-cluster identity Gateway through

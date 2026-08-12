@@ -30,7 +30,12 @@ platform_application_postgres_client_certificate_file: "{{ lookup('ansible.built
 platform_application_postgres_client_private_key_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_POSTGRES_CLIENT_PRIVATE_KEY_FILE') }}"
 platform_application_postgres_service: "{{ lookup('ansible.builtin.env', 'LABWEAVER_POSTGRES_SERVICE') | default('platform-admin', true) }}"
 platform_application_postgres_database: labweaver
-platform_application_postgres_forward_enabled: "{{ lookup('ansible.builtin.env', 'LABWEAVER_POSTGRES_FORWARD_ENABLED') | default('false', true) | bool }}"
+# The adopted v1 controller has no route to the Kubernetes Service CIDR.  The
+# application role owns this reconnectable controller-side forward so database
+# adoption cannot silently fall back to an unreachable in-cluster address.
+# Operators with a verified Service-CIDR route may explicitly disable it via
+# LABWEAVER_POSTGRES_FORWARD_ENABLED=false.
+platform_application_postgres_forward_enabled: "{{ lookup('ansible.builtin.env', 'LABWEAVER_POSTGRES_FORWARD_ENABLED') | default('true', true) | bool }}"
 platform_application_postgres_forward_service_name: labweaver-postgres-forward.service
 platform_application_postgres_forward_namespace: labweaver-data
 platform_application_postgres_forward_kubernetes_service: postgres

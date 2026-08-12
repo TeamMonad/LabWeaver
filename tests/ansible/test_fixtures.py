@@ -747,6 +747,19 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("Restart the adopted PostgreSQL port-forward", handlers)
         self.assertIn("platform_application_postgres_forward_service_name", handlers)
 
+    def test_platform_application_enables_the_controller_postgres_forward_by_default(self) -> None:
+        defaults = (
+            ROOT / "deploy/ansible/roles/platform_application/defaults/main.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("default('true', true) | bool", defaults)
+        self.assertIn("LABWEAVER_POSTGRES_FORWARD_ENABLED=false", defaults)
+
+    def test_xtask_uses_the_candidate_playbook_and_roles_before_shared_controller(self) -> None:
+        xtask = (ROOT / "xtask/src/main.rs").read_text(encoding="utf-8")
+        self.assertIn("candidate infrastructure deployment input", xtask)
+        self.assertIn("candidate Ansible roles", xtask)
+        self.assertIn("let candidate_roots", xtask)
+
     def test_platform_application_preflight_does_not_requalify_retained_hosts(self) -> None:
         application = (
             ROOT / "deploy/ansible/playbooks/93-platform-application.yml"
