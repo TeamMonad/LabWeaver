@@ -48,11 +48,15 @@ def credentials(claims: dict) -> bytes:
 
 
 class NatsAuthorityRotationTests(unittest.TestCase):
-    def test_access_rotation_adds_canonical_platform_admin_alias(self) -> None:
+    def test_access_rotation_repairs_missing_current_grant_schema(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             example = root / "access-auth.example.yaml"
             example.write_text(
+                "grants:\n"
+                "  max_console_sessions: 128\n"
+                "  environment_state_stream: LABWEAVER_ENVIRONMENT_COMMANDS\n"
+                "  environment_state_consumer: access-environment-state-v1\n"
                 "resource_gateway:\n"
                 "  base_uri: https://resource-service:9448/\n",
                 encoding="utf-8",
@@ -65,6 +69,92 @@ class NatsAuthorityRotationTests(unittest.TestCase):
                     "data": {
                         "config.yaml": yaml.safe_dump(
                             {
+                                "grants": {
+                                    "default_ttl_seconds": 1800,
+                                },
+                                "oidc": {
+                                    "role_mappings": {
+                                        "platform-admin": "platform_admin"
+                                    }
+                                },
+                            }
+                        )
+                    },
+                }
+            ]
+            example.chmod(0o600)
+            ROTATION._ensure_access_resource_gateway(application, example)
+            config = yaml.safe_load(application[0]["data"]["config.yaml"])
+            self.assertEqual(config["grants"]["max_console_sessions"], 128)
+            self.assertEqual(
+                config["grants"]["environment_state_stream"],
+                "LABWEAVER_ENVIRONMENT_COMMANDS",
+            )
+            self.assertEqual(
+                config["grants"]["environment_state_consumer"],
+                "access-environment-state-v1",
+            )
+
+    def test_access_rotation_rejects_conflicting_current_grant_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            example = root / "access-auth.example.yaml"
+            example.write_text(
+                "grants:\n"
+                "  max_console_sessions: 128\n"
+                "  environment_state_stream: LABWEAVER_ENVIRONMENT_COMMANDS\n"
+                "  environment_state_consumer: access-environment-state-v1\n"
+                "resource_gateway:\n"
+                "  base_uri: https://resource-service:9448/\n",
+                encoding="utf-8",
+            )
+            application = [
+                {
+                    "apiVersion": "v1",
+                    "kind": "ConfigMap",
+                    "metadata": {"name": "access-service-config"},
+                    "data": {
+                        "config.yaml": yaml.safe_dump(
+                            {
+                                "grants": {"max_console_sessions": 7},
+                                "oidc": {
+                                    "role_mappings": {
+                                        "platform-admin": "platform_admin"
+                                    }
+                                },
+                            }
+                        )
+                    },
+                }
+            ]
+            example.chmod(0o600)
+            with self.assertRaisesRegex(
+                ROTATION.RotationError, "LW_NATS_ROTATION_CONTRACT_INVALID"
+            ):
+                ROTATION._ensure_access_resource_gateway(application, example)
+
+    def test_access_rotation_adds_canonical_platform_admin_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            example = root / "access-auth.example.yaml"
+            example.write_text(
+                "grants:\n"
+                "  max_console_sessions: 128\n"
+                "  environment_state_stream: LABWEAVER_ENVIRONMENT_COMMANDS\n"
+                "  environment_state_consumer: access-environment-state-v1\n"
+                "resource_gateway:\n"
+                "  base_uri: https://resource-service:9448/\n",
+                encoding="utf-8",
+            )
+            application = [
+                {
+                    "apiVersion": "v1",
+                    "kind": "ConfigMap",
+                    "metadata": {"name": "access-service-config"},
+                    "data": {
+                        "config.yaml": yaml.safe_dump(
+                            {
+                                "grants": {},
                                 "oidc": {
                                     "role_mappings": {
                                         "platform-admin": "platform_admin"

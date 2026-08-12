@@ -281,13 +281,37 @@ def _dump_bundle(path: Path, documents: list[dict[str, Any]]) -> None:
 def _ensure_access_resource_gateway(
     application_bundle: list[dict[str, Any]], example_path: Path
 ) -> None:
-    """Apply the reviewed Access aliases and Resource gateway contract."""
+    """Apply the reviewed Access schema, aliases, and Resource gateway contract.
+
+    Private deployment inputs can outlive the checked-in Access contract.  The
+    rotation boundary is the last deterministic point before a bundle can be
+    applied, so it must materialize newly-added non-secret fields from the
+    reviewed example while rejecting conflicting values.  This keeps a stale
+    private input from becoming a candidate that only fails after deployment
+    has started.
+    """
     try:
         example_config = yaml.safe_load(
             _contract_file(example_path).read_text(encoding="utf-8")
         )
         access = _object(application_bundle, "ConfigMap", "access-service-config")
         config = yaml.safe_load(access["data"]["config.yaml"])
+        grants = config.get("grants")
+        example_grants = example_config.get("grants")
+        if not isinstance(grants, dict) or not isinstance(example_grants, dict):
+            raise RotationError("LW_NATS_ROTATION_CONTRACT_INVALID")
+        for field in (
+            "max_console_sessions",
+            "environment_state_stream",
+            "environment_state_consumer",
+        ):
+            expected = example_grants.get(field)
+            if expected is None:
+                raise RotationError("LW_NATS_ROTATION_CONTRACT_INVALID")
+            existing = grants.get(field)
+            if existing is not None and existing != expected:
+                raise RotationError("LW_NATS_ROTATION_CONTRACT_INVALID")
+            grants[field] = expected
         resource_gateway = example_config.get("resource_gateway")
         if not isinstance(resource_gateway, dict):
             raise RotationError("LW_NATS_ROTATION_CONTRACT_INVALID")
