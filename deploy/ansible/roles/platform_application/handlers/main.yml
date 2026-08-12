@@ -33,3 +33,11 @@
     state: restarted
     daemon_reload: true
   become: true
+
+- name: Restart the adopted MinIO port-forward
+  ansible.builtin.systemd_service:
+    name: "{{ platform_application_minio_forward_service_name }}"
+    enabled: true
+    state: restarted
+    daemon_reload: true
+  become: true

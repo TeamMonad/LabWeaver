@@ -196,6 +196,43 @@
     timeout: 30
   when: platform_application_nats_forward_enabled | bool
 
+- name: Validate the MinIO port-forward contract
+  ansible.builtin.assert:
+    that:
+      - platform_application_minio_forward_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - platform_application_minio_forward_kubernetes_service is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - platform_application_minio_forward_hostname is match('^[a-z0-9][a-z0-9.-]+$')
+      - platform_application_minio_forward_hostname == 'minio.labweaver-data.svc'
+      - platform_application_minio_forward_address == '127.0.0.1'
+      - platform_application_minio_forward_address is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
+      - platform_application_minio_forward_service_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?\.service$')
+      - platform_application_minio_forward_port | int > 1024
+      - platform_application_minio_forward_port | int < 65536
+    fail_msg: PLATFORM_APPLICATION_MINIO_FORWARD_INPUT_INVALID
+  when: platform_application_minio_forward_enabled | bool
+
+- name: Install the persistent MinIO port-forward
+  ansible.builtin.template:
+    src: minio-port-forward.service.j2
+    dest: /etc/systemd/system/{{ platform_application_minio_forward_service_name }}
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart the adopted MinIO port-forward
+  when: platform_application_minio_forward_enabled | bool
+
+- name: Apply the MinIO port-forward before bucket adoption
+  ansible.builtin.meta: flush_handlers
+  when: platform_application_minio_forward_enabled | bool
+
+- name: Require the adopted MinIO port-forward endpoint
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ platform_application_minio_forward_port }}"
+    state: started
+    timeout: 30
+  when: platform_application_minio_forward_enabled | bool
+
 - name: Validate controller-owned reviewed inputs
   ansible.builtin.stat:
     path: "{{ item }}"
@@ -573,8 +610,25 @@
   ansible.builtin.replace:
     path: /etc/hosts
     regexp: '^[0-9.]+\s+minio\.labweaver-data\.svc$'
-    replace: "{{ platform_application_minio_controller_address }} minio.labweaver-data.svc"
-  when: platform_application_minio_controller_address | length > 0
+    replace: >-
+      {{ (platform_application_minio_forward_address
+          if platform_application_minio_forward_enabled | bool
+          else platform_application_minio_controller_address)
+         ~ ' ' ~ platform_application_minio_forward_hostname }}
+  when: >-
+    platform_application_minio_forward_enabled | bool
+    or platform_application_minio_controller_address | length > 0
+
+- name: Bind the effective MinIO administration endpoint
+  ansible.builtin.set_fact:
+    platform_application_minio_effective_endpoint: >-
+      {{ ('https://' ~ platform_application_minio_forward_hostname ~ ':' ~
+          (platform_application_minio_forward_port | string) ~ '/')
+         if platform_application_minio_forward_enabled | bool
+         else (('https://' ~ platform_application_minio_forward_hostname ~ ':' ~
+                (platform_application_minio_controller_port | string) ~ '/')
+               if platform_application_minio_controller_address | length > 0
+               else platform_application_minio_endpoint) }}
 
 - name: Create isolated MinIO administration configuration
   ansible.builtin.file:
@@ -596,7 +650,7 @@
     mode: "0600"
     content: >-
       {{ {'version': '10', 'aliases': {platform_application_minio_alias: {
-           'url': platform_application_minio_endpoint,
+           'url': platform_application_minio_effective_endpoint,
            'accessKey': platform_application_minio_username,
            'secretKey': platform_application_minio_password,
            'api': 'S3v4',

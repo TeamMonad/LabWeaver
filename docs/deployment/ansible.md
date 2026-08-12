@@ -309,6 +309,19 @@ transport only; workload NATS configuration and provider selection remain the
 reviewed bundle values. Set `LABWEAVER_NATS_FORWARD_ENABLED=false` only after
 independently verifying a controller Service-CIDR route.
 
+The same controller limitation applies to retained MinIO administration.
+`platform_application_minio_forward_enabled` defaults to `true`; the role owns
+`labweaver-minio-forward.service`, waits for its loopback endpoint on `19000`,
+and maps the reviewed `minio.labweaver-data.svc` name to loopback for the
+TLS-preserving bucket and versioning probes. The MinIO forward is an
+administration transport only: workload object-store endpoints and provider
+bindings remain the reviewed bundle values. Set
+`LABWEAVER_MINIO_FORWARD_ENABLED=false` only after independently verifying a
+controller Service-CIDR route. A connected `--check` wrapper may instead create
+an explicitly bounded temporary `kubectl port-forward` and pass the matching
+controller address/port overrides; it must remove that process and restore the
+host mapping before returning.
+
 For a connected candidate operation, the inventory, controller lock, Ansible
 configuration, collections and vault locator come from the approved controller.
 The playbook and role implementation come from the frozen candidate source

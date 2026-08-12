@@ -104,7 +104,21 @@ platform_application_nats_consumers:
       - labweaver.control.environment_template_release.withdrawn.v1
 platform_application_minio_alias: ""
 platform_application_minio_endpoint: ""
+# The adopted v1 controller also has no route to the Kubernetes Service CIDR
+# for MinIO.  The application role owns this reconnectable controller-side
+# forward for administrative bucket/versioning probes; workload object-store
+# endpoints remain the reviewed in-cluster value.
+# Operators with an independently verified Service-CIDR route may explicitly
+# disable it via LABWEAVER_MINIO_FORWARD_ENABLED=false.
+platform_application_minio_forward_enabled: "{{ lookup('ansible.builtin.env', 'LABWEAVER_MINIO_FORWARD_ENABLED') | default('true', true) | bool }}"
+platform_application_minio_forward_service_name: labweaver-minio-forward.service
+platform_application_minio_forward_namespace: labweaver-data
+platform_application_minio_forward_kubernetes_service: minio
+platform_application_minio_forward_hostname: minio.labweaver-data.svc
+platform_application_minio_forward_address: 127.0.0.1
+platform_application_minio_forward_port: 19000
 platform_application_minio_controller_address: ""
+platform_application_minio_controller_port: 9000
 platform_application_minio_username: ""
 platform_application_minio_password: ""
 platform_application_minio_ca_file: ""
