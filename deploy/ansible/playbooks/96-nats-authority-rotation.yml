@@ -482,10 +482,23 @@
           - --field-manager=labweaver-nats-authority-rotation
           - --force-conflicts
           - --filename
-          - "{{ item }}"
-      loop:
-        - "{{ nats_rotation_output }}/application-bundle.yaml"
-        - "{{ nats_rotation_output }}/resource-bundle.yaml"
+          - "{{ nats_rotation_output }}/application-bundle.yaml"
+      changed_when: true
+      no_log: true
+
+    - name: Apply reviewed Resource NATS-bearing objects when Resource is adopted
+      ansible.builtin.command:
+        argv:
+          - "{{ nats_rotation_kubectl }}"
+          - --kubeconfig
+          - "{{ nats_rotation_kubeconfig }}"
+          - apply
+          - --server-side
+          - --field-manager=labweaver-nats-authority-rotation
+          - --force-conflicts
+          - --filename
+          - "{{ nats_rotation_output }}/resource-bundle.yaml"
+      when: not (hostvars['localhost'].nats_rotation_resource_bootstrap | default(false) | bool)
       changed_when: true
       no_log: true
 
@@ -570,10 +583,7 @@
             == (hostvars['localhost'].nats_rotation_resource_bootstrap | default(false) | bool)
           - >-
             (nats_rotation_readback.results[3].resources | length == 1)
-            or (
-              ansible_check_mode
-              and (hostvars['localhost'].nats_rotation_resource_bootstrap | default(false) | bool)
-            )
+            == (not (hostvars['localhost'].nats_rotation_resource_bootstrap | default(false) | bool))
         fail_msg: NATS_AUTHORITY_ROTATION_READBACK_FAILED
       no_log: true
 
@@ -621,7 +631,7 @@
                'application_ready_deployments': hostvars['localhost'].nats_rotation_expected_application_deployments | int,
                'resource_bootstrap': hostvars['localhost'].nats_rotation_resource_bootstrap | default(false) | bool,
                'resource_ready_replicas': 0 if (hostvars['localhost'].nats_rotation_resource_bootstrap | default(false) | bool) else 1,
-               'resource_secret_adopted': true
+               'resource_secret_adopted': not (hostvars['localhost'].nats_rotation_resource_bootstrap | default(false) | bool)
              } | to_nice_json }}
         owner: root
         group: root

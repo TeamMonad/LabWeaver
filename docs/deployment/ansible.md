@@ -241,11 +241,13 @@ affected Pod templates.
 If Sprint 2 Resource is intentionally not deployed yet, the playbook accepts
 only the explicit initial-bootstrap state in which both
 `resource-service-secrets` and the `resource-service` Deployment are absent. It
-then applies the authority-owned Resource Secret but does not patch or require
-the absent Deployment; `94-resource-application.yml` must subsequently verify
-that Secret and create the Resource Deployment. Any one-sided state (Secret
-without Deployment or Deployment without Secret) remains a hard rollback-surface
-failure.
+does not apply the authority-owned Resource bundle or patch the absent
+Deployment; `94-resource-application.yml` must subsequently create and verify
+the Resource Deployment and its Secret as a separate operation. When the
+Resource Deployment is already adopted, the rotation applies the Resource
+bundle and requires both the Deployment and Secret to remain present. Any
+one-sided state (Secret without Deployment or Deployment without Secret)
+remains a hard rollback-surface failure.
 Every private input and generated file is root-owned mode `0600`, while
 directories are mode `0700`.
 

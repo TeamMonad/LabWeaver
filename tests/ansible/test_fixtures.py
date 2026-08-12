@@ -171,6 +171,10 @@ class AnsibleFixtureTests(unittest.TestCase):
         )
         self.assertIn("- import_playbook: 92-platform-foundation.yml", playbook)
         self.assertIn("Apply only reviewed NATS-bearing application objects", playbook)
+        self.assertIn(
+            "Apply reviewed Resource NATS-bearing objects when Resource is adopted",
+            playbook,
+        )
         self.assertIn("--force-conflicts", playbook)
         self.assertIn("Roll every affected workload to the replacement authority", playbook)
         self.assertIn("resource-service", playbook)
@@ -185,7 +189,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertNotRegex(playbook, r"\bkubectl\s+delete\b")
         self.assertNotRegex(playbook, r"\bDROP\s+(?:DATABASE|SCHEMA)\b")
 
-    def test_nats_rotation_check_mode_allows_only_declared_resource_bootstrap(
+    def test_nats_rotation_resource_bootstrap_does_not_synthesize_secret(
         self,
     ) -> None:
         plays = yaml.safe_load(
@@ -206,9 +210,17 @@ class AnsibleFixtureTests(unittest.TestCase):
             if "nats_rotation_readback.results[3]" in condition
         )
         self.assertIn("resources | length == 1", resource_secret)
-        self.assertIn("ansible_check_mode", resource_secret)
         self.assertIn("nats_rotation_resource_bootstrap", resource_secret)
-        self.assertIn("or", resource_secret)
+        self.assertIn("not", resource_secret)
+        resource_apply = next(
+            task
+            for play in plays
+            for task in play.get("tasks", [])
+            if task.get("name")
+            == "Apply reviewed Resource NATS-bearing objects when Resource is adopted"
+        )
+        self.assertIn("nats_rotation_resource_bootstrap", resource_apply["when"])
+        self.assertIn("not", resource_apply["when"])
 
     def test_nats_rotation_readback_checks_each_workload_without_nested_map(self) -> None:
         playbook = (
