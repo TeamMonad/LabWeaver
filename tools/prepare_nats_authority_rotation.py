@@ -44,14 +44,26 @@ NATS_SECRET_KEYS = {
     "nats-client.key": "nats-client.key",
 }
 PLATFORM_ROTATION_IDENTITIES = {
+    "control-service": "control-service-secrets",
+    "access-service": "access-service-secrets",
+    "agent-service": "agent-service-secrets",
     "environment-service": "environment-service-secrets",
     "container-executor": "container-executor-secrets",
     "kubevirt-console-executor": "kubevirt-console-executor-secrets",
+    "evaluation-service": "evaluation-service-secrets",
+    "openssh-gateway": "openssh-gateway-secrets",
 }
 PLATFORM_SECRET_KEYS = {
     "mtls-ca.pem": "ca.pem",
     "tls.crt": "certificate.pem",
     "tls.key": "key.pem",
+}
+PLATFORM_SECRET_KEYS_BY_IDENTITY = {
+    "openssh-gateway": {
+        "mtls-ca.pem": "ca.pem",
+        "mtls.crt": "certificate.pem",
+        "mtls.key": "key.pem",
+    },
 }
 JWT_PATTERN = re.compile(
     rb"-----BEGIN NATS USER JWT-----\s+([A-Za-z0-9._-]+)"
@@ -179,12 +191,12 @@ def _replace_client(
 
 
 def _replace_platform_identity(
-    secret: dict[str, Any], identity_directory: Path
+    secret: dict[str, Any], identity_directory: Path, keys: dict[str, str]
 ) -> None:
     data = secret["data"]
-    if not set(PLATFORM_SECRET_KEYS).issubset(data):
+    if not set(keys).issubset(data):
         raise RotationError("LW_NATS_ROTATION_BUNDLE_INVALID")
-    for data_key, filename in PLATFORM_SECRET_KEYS.items():
+    for data_key, filename in keys.items():
         data[data_key] = base64.b64encode(
             _read(identity_directory / filename)
         ).decode("ascii")
@@ -364,6 +376,9 @@ def prepare(
             _replace_platform_identity(
                 _object(application_bundle, "Secret", secret_name),
                 platform_identities / identity,
+                PLATFORM_SECRET_KEYS_BY_IDENTITY.get(
+                    identity, PLATFORM_SECRET_KEYS
+                ),
             )
 
     for identity, secret_name in PLATFORM_ROTATION_IDENTITIES.items():
@@ -371,6 +386,9 @@ def prepare(
             _replace_platform_identity(
                 _object(application_bundle, "Secret", secret_name),
                 platform_identities / identity,
+                PLATFORM_SECRET_KEYS_BY_IDENTITY.get(
+                    identity, PLATFORM_SECRET_KEYS
+                ),
             )
 
     resource_claims = _credential_claims(
@@ -394,6 +412,7 @@ def prepare(
     _replace_platform_identity(
         _object(resource_bundle, "Secret", "resource-service-secrets"),
         platform_identities / "resource-service",
+        PLATFORM_SECRET_KEYS,
     )
 
     admin_claims = _credential_claims(

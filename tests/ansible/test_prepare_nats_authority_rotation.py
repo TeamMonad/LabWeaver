@@ -216,7 +216,10 @@ class NatsAuthorityRotationTests(unittest.TestCase):
             for identity in (*ROTATION.PLATFORM_ROTATION_IDENTITIES, "resource-service"):
                 directory = platform_identities / identity
                 directory.mkdir(parents=True)
-                for filename in ROTATION.PLATFORM_SECRET_KEYS.values():
+                keys = ROTATION.PLATFORM_SECRET_KEYS_BY_IDENTITY.get(
+                    identity, ROTATION.PLATFORM_SECRET_KEYS
+                )
+                for filename in keys.values():
                     (directory / filename).write_bytes(
                         f"{identity}-{filename}".encode()
                     )
@@ -261,12 +264,14 @@ class NatsAuthorityRotationTests(unittest.TestCase):
                                 },
                                 **{
                                     key: "old-platform"
-                                    for key in ROTATION.PLATFORM_SECRET_KEYS
+                                    for key in ROTATION.PLATFORM_SECRET_KEYS_BY_IDENTITY.get(
+                                        identity, ROTATION.PLATFORM_SECRET_KEYS
+                                    )
                                 },
                                 "unrelated": "preserved",
                             },
                         }
-                        for secret_name in ROTATION.APPLICATION_IDENTITIES.values()
+                        for identity, secret_name in ROTATION.APPLICATION_IDENTITIES.items()
                     ]
                     + [
                         {
@@ -276,7 +281,9 @@ class NatsAuthorityRotationTests(unittest.TestCase):
                             "data": {
                                 **{
                                     key: "old-platform"
-                                    for key in ROTATION.PLATFORM_SECRET_KEYS
+                                    for key in ROTATION.PLATFORM_SECRET_KEYS_BY_IDENTITY.get(
+                                        identity, ROTATION.PLATFORM_SECRET_KEYS
+                                    )
                                 },
                                 "unrelated": "preserved",
                             },
@@ -347,7 +354,20 @@ class NatsAuthorityRotationTests(unittest.TestCase):
                 if "nats.creds" in document["data"]:
                     self.assertNotEqual(document["data"]["nats.creds"], "old")
                 if document["metadata"]["name"] in ROTATION.PLATFORM_ROTATION_IDENTITIES.values():
-                    self.assertNotEqual(document["data"]["tls.crt"], "old-platform")
+                    identity = next(
+                        name
+                        for name, secret_name
+                        in ROTATION.PLATFORM_ROTATION_IDENTITIES.items()
+                        if secret_name == document["metadata"]["name"]
+                    )
+                    certificate_key = (
+                        "mtls.crt"
+                        if identity == "openssh-gateway"
+                        else "tls.crt"
+                    )
+                    self.assertNotEqual(
+                        document["data"][certificate_key], "old-platform"
+                    )
             rendered_resource = list(
                 yaml.safe_load_all((output / "resource-bundle.yaml").read_text())
             )
