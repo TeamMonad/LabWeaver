@@ -87,7 +87,25 @@ BEGIN
 END
 $deployment_admin$;
 
-REVOKE ALL ON SCHEMA public FROM PUBLIC;
+DO $public_schema_contract$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+          FROM pg_namespace namespace
+         WHERE namespace.nspname = 'public'
+           AND (
+               namespace.nspacl IS NULL
+               OR EXISTS (
+                   SELECT 1
+                     FROM unnest(namespace.nspacl) acl
+                    WHERE acl::text LIKE '=%'
+               )
+           )
+    ) THEN
+        RAISE EXCEPTION 'PLATFORM_BOOTSTRAP_PUBLIC_SCHEMA_ACL_INVALID';
+    END IF;
+END
+$public_schema_contract$;
 
 CREATE SCHEMA IF NOT EXISTS platform_meta AUTHORIZATION lw_release_coordinator;
 CREATE SCHEMA IF NOT EXISTS shared_audit AUTHORIZATION lw_audit_projection;

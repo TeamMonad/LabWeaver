@@ -1590,6 +1590,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("PLATFORM_BOOTSTRAP_ROLE_ATTRIBUTE_MISMATCH", bootstrap)
         self.assertIn("PLATFORM_BOOTSTRAP_MEMBERSHIP_CONTRACT_INVALID", bootstrap)
         self.assertIn("PLATFORM_BOOTSTRAP_ROLE_CONFIGURATION_MISMATCH", bootstrap)
+        self.assertIn("PLATFORM_BOOTSTRAP_PUBLIC_SCHEMA_ACL_INVALID", bootstrap)
         self.assertIn("IF NOT FOUND THEN", bootstrap)
         self.assertIn("IF NOT EXISTS (\n                SELECT 1", bootstrap)
         self.assertIn("GRANT %I TO %I", bootstrap)
