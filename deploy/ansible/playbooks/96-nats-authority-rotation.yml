@@ -562,7 +562,6 @@
           - nats_rotation_readback.results[0].resources | length == 1
           - nats_rotation_readback.results[0].resources[0].status.readyReplicas | default(0) == 1
           - nats_rotation_readback.results[1].resources | length == hostvars['localhost'].nats_rotation_expected_application_deployments
-          - nats_rotation_readback.results[1].resources | map(attribute='status.readyReplicas') | map('default', 0, true) | map('int') | min == 1
           - >-
             (nats_rotation_readback.results[2].resources | length == 0)
             == (hostvars['localhost'].nats_rotation_resource_bootstrap | default(false) | bool)
@@ -576,6 +575,17 @@
               and (hostvars['localhost'].nats_rotation_resource_bootstrap | default(false) | bool)
             )
         fail_msg: NATS_AUTHORITY_ROTATION_READBACK_FAILED
+      no_log: true
+
+    - name: Require every affected workload to be ready
+      ansible.builtin.assert:
+        that:
+          - >-
+            (item.get('status', {}).get('readyReplicas', 0) | int) == 1
+        fail_msg: NATS_AUTHORITY_ROTATION_WORKLOAD_READBACK_FAILED
+      loop: "{{ nats_rotation_readback.results[1].resources }}"
+      loop_control:
+        label: "{{ item.metadata.name | default('unknown') }}"
       no_log: true
 
     - name: Write the non-secret deployment record

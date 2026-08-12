@@ -206,6 +206,21 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("nats_rotation_resource_bootstrap", resource_secret)
         self.assertIn("or", resource_secret)
 
+    def test_nats_rotation_readback_checks_each_workload_without_nested_map(self) -> None:
+        playbook = (
+            ROOT / "deploy/ansible/playbooks/96-nats-authority-rotation.yml"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn(
+            "map(attribute='status.readyReplicas')",
+            playbook,
+        )
+        self.assertIn("Require every affected workload to be ready", playbook)
+        self.assertIn(
+            "item.get('status', {}).get('readyReplicas', 0)",
+            playbook,
+        )
+        self.assertIn("NATS_AUTHORITY_ROTATION_WORKLOAD_READBACK_FAILED", playbook)
+
     def test_object_store_proxy_has_a_minio_only_transport_rule(self) -> None:
         tasks = (
             ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
