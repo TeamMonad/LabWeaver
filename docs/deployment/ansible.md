@@ -300,6 +300,15 @@ set `LABWEAVER_POSTGRES_FORWARD_ENABLED=false` only when the controller's
 Service-CIDR route has been independently verified; an unreachable in-cluster
 PostgreSQL address is not an accepted fallback.
 
+The same controller limitation applies to retained NATS administration.
+`platform_application_nats_forward_enabled` therefore defaults to `true`; the
+role owns `labweaver-nats-forward.service`, waits for its loopback endpoint on
+`4222`, and maps the reviewed `nats.labweaver-data.svc` name to loopback for
+the TLS-preserving NATS probes. The NATS forward is an administration
+transport only; workload NATS configuration and provider selection remain the
+reviewed bundle values. Set `LABWEAVER_NATS_FORWARD_ENABLED=false` only after
+independently verifying a controller Service-CIDR route.
+
 For a connected candidate operation, the inventory, controller lock, Ansible
 configuration, collections and vault locator come from the approved controller.
 The playbook and role implementation come from the frozen candidate source

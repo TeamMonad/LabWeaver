@@ -42,6 +42,18 @@ platform_application_postgres_forward_kubernetes_service: postgres
 platform_application_postgres_forward_hostname: postgres.labweaver-data.svc
 platform_application_postgres_forward_port: 15432
 platform_application_nats_server: ""
+# The adopted v1 controller has no route to the Kubernetes Service CIDR.  The
+# application role owns this reconnectable controller-side forward so NATS
+# administration cannot silently fall back to an unreachable in-cluster
+# address. Operators with an independently verified Service-CIDR route may
+# explicitly disable it via LABWEAVER_NATS_FORWARD_ENABLED=false.
+platform_application_nats_forward_enabled: "{{ lookup('ansible.builtin.env', 'LABWEAVER_NATS_FORWARD_ENABLED') | default('true', true) | bool }}"
+platform_application_nats_forward_service_name: labweaver-nats-forward.service
+platform_application_nats_forward_namespace: labweaver-data
+platform_application_nats_forward_kubernetes_service: nats
+platform_application_nats_forward_hostname: nats.labweaver-data.svc
+platform_application_nats_forward_address: 127.0.0.1
+platform_application_nats_forward_port: 4222
 platform_application_nats_controller_address: ""
 platform_application_nats_controller_port: 4222
 platform_application_nats_credentials_file: ""

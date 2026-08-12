@@ -757,6 +757,38 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("default('true', true) | bool", defaults)
         self.assertIn("LABWEAVER_POSTGRES_FORWARD_ENABLED=false", defaults)
 
+    def test_platform_application_owns_a_reconnectable_nats_port_forward(self) -> None:
+        defaults = (
+            ROOT / "deploy/ansible/roles/platform_application/defaults/main.yml"
+        ).read_text(encoding="utf-8")
+        tasks = (
+            ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        handlers = (
+            ROOT / "deploy/ansible/roles/platform_application/handlers/main.yml"
+        ).read_text(encoding="utf-8")
+        service = (
+            ROOT
+            / "deploy/ansible/roles/platform_application/templates/nats-port-forward.service.j2"
+        ).read_text(encoding="utf-8")
+        self.assertIn("platform_application_nats_forward_enabled", defaults)
+        self.assertIn("platform_application_nats_forward_hostname", defaults)
+        self.assertIn("platform_application_nats_forward_address", defaults)
+        self.assertIn("platform_application_nats_forward_service_name is match", tasks)
+        self.assertIn("Apply the NATS port-forward before JetStream adoption", tasks)
+        self.assertIn("Require the adopted NATS port-forward endpoint", tasks)
+        self.assertIn("platform_application_nats_forward_address", service)
+        self.assertIn("service/{{ platform_application_nats_forward_kubernetes_service }}", service)
+        self.assertIn("Restart=on-failure", service)
+        self.assertIn("Restart the adopted NATS port-forward", handlers)
+        self.assertIn("platform_application_nats_forward_service_name", handlers)
+
+    def test_platform_application_enables_the_controller_nats_forward_by_default(self) -> None:
+        defaults = (
+            ROOT / "deploy/ansible/roles/platform_application/defaults/main.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("LABWEAVER_NATS_FORWARD_ENABLED=false", defaults)
+
     def test_xtask_uses_the_candidate_playbook_and_roles_before_shared_controller(self) -> None:
         xtask = (ROOT / "xtask/src/main.rs").read_text(encoding="utf-8")
         self.assertIn("candidate infrastructure deployment input", xtask)
