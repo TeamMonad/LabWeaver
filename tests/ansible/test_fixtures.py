@@ -159,6 +159,12 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("nats_rotation_existing_secret_objects", playbook)
         self.assertIn("item != 'resource-service'", playbook)
         self.assertIn("rollback/kubernetes-objects.yaml", playbook)
+        self.assertIn("Require a complete application rollback surface", playbook)
+        self.assertIn("rollback/application-objects.yaml", playbook)
+        self.assertLess(
+            playbook.index("Create the root-only rollback directory"),
+            playbook.index("Preserve the complete root-only application rollback surface"),
+        )
         self.assertIn("- import_playbook: 92-platform-foundation.yml", playbook)
         self.assertIn("Apply only reviewed NATS-bearing application objects", playbook)
         self.assertIn("--force-conflicts", playbook)

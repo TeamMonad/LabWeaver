@@ -151,6 +151,79 @@
           {{ lookup('ansible.builtin.file',
                     nats_rotation_output ~ '/rotation-record.json') | from_json }}
 
+    - name: Create the root-only rollback directory
+      ansible.builtin.file:
+        path: "{{ nats_rotation_output }}/rollback"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Load the complete replacement application object set
+      ansible.builtin.set_fact:
+        nats_rotation_application_bundle_objects: >-
+          {{ lookup('ansible.builtin.file',
+                    nats_rotation_output ~ '/application-bundle.yaml')
+             | from_yaml_all | list }}
+
+    - name: Require a complete application rollback object set
+      ansible.builtin.assert:
+        that:
+          - nats_rotation_application_bundle_objects | length > 0
+          - >-
+            nats_rotation_application_bundle_objects
+            | selectattr('apiVersion', 'equalto', 'v1') | list | length
+            == nats_rotation_application_bundle_objects | length
+          - >-
+            nats_rotation_application_bundle_objects
+            | selectattr('kind', 'in', ['ConfigMap', 'Secret']) | list | length
+            == nats_rotation_application_bundle_objects | length
+          - >-
+            nats_rotation_application_bundle_objects
+            | map(attribute='metadata.namespace') | unique | list
+            == ['labweaver-system']
+          - >-
+            nats_rotation_application_bundle_objects
+            | map(attribute='metadata.name') | unique | list | length
+            == nats_rotation_application_bundle_objects | length
+        fail_msg: NATS_AUTHORITY_ROTATION_APPLICATION_BUNDLE_INVALID
+      no_log: true
+
+    - name: Read every current application object for rollback
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ nats_rotation_kubeconfig }}"
+        api_version: v1
+        kind: "{{ item.kind }}"
+        namespace: "{{ item.metadata.namespace }}"
+        name: "{{ item.metadata.name }}"
+      loop: "{{ nats_rotation_application_bundle_objects }}"
+      loop_control:
+        label: "{{ item.kind }}/{{ item.metadata.name }}"
+      register: nats_rotation_current_application_objects
+      no_log: true
+
+    - name: Require a complete application rollback surface
+      ansible.builtin.assert:
+        that:
+          - >-
+            nats_rotation_current_application_objects.results
+            | map(attribute='resources') | map('length') | min == 1
+        fail_msg: NATS_AUTHORITY_ROTATION_APPLICATION_ROLLBACK_SURFACE_INCOMPLETE
+      no_log: true
+
+    - name: Preserve the complete root-only application rollback surface
+      ansible.builtin.copy:
+        dest: "{{ nats_rotation_output }}/rollback/application-objects.yaml"
+        content: >-
+          {{ (nats_rotation_current_application_objects.results
+              | map(attribute='resources') | map('first') | list)
+             | to_nice_yaml(indent=2, explicit_start=true) }}
+        owner: root
+        group: root
+        mode: "0600"
+        force: false
+      no_log: true
+
     - name: Verify authority and complete identity coverage
       ansible.builtin.assert:
         that:
@@ -163,14 +236,6 @@
           - nats_rotation_record.identities | map(attribute='identity') | sort == nats_rotation_expected_identities | sort
           - nats_rotation_record.identities | map(attribute='issuer') | unique | list == [nats_rotation_expected_workloads_account]
         fail_msg: NATS_AUTHORITY_ROTATION_IDENTITY_INVALID
-
-    - name: Create the root-only rollback directory
-      ansible.builtin.file:
-        path: "{{ nats_rotation_output }}/rollback"
-        state: directory
-        owner: root
-        group: root
-        mode: "0700"
 
     - name: Read current NATS configuration for rollback
       kubernetes.core.k8s_info:
