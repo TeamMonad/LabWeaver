@@ -560,14 +560,10 @@
       ansible.builtin.assert:
         that:
           - nats_rotation_readback.results[0].resources | length == 1
-          - nats_rotation_readback.results[0].resources[0].status.readyReplicas | default(0) == 1
           - nats_rotation_readback.results[1].resources | length == hostvars['localhost'].nats_rotation_expected_application_deployments
           - >-
             (nats_rotation_readback.results[2].resources | length == 0)
             == (hostvars['localhost'].nats_rotation_resource_bootstrap | default(false) | bool)
-          - >-
-            (hostvars['localhost'].nats_rotation_resource_bootstrap | default(false) | bool)
-            or nats_rotation_readback.results[2].resources[0].status.readyReplicas | default(0) == 1
           - >-
             (nats_rotation_readback.results[3].resources | length == 1)
             or (
@@ -577,15 +573,35 @@
         fail_msg: NATS_AUTHORITY_ROTATION_READBACK_FAILED
       no_log: true
 
+    - name: Require NATS StatefulSet to be ready
+      ansible.builtin.assert:
+        that:
+          - item.status.readyReplicas | default(0, true) | int == 1
+        fail_msg: NATS_AUTHORITY_ROTATION_NATS_READBACK_FAILED
+      loop: "{{ nats_rotation_readback.results[0].resources }}"
+      loop_control:
+        label: nats
+      no_log: true
+
     - name: Require every affected workload to be ready
       ansible.builtin.assert:
         that:
-          - >-
-            (item.get('status', {}).get('readyReplicas', 0) | int) == 1
+          - item.status.readyReplicas | default(0, true) | int == 1
         fail_msg: NATS_AUTHORITY_ROTATION_WORKLOAD_READBACK_FAILED
       loop: "{{ nats_rotation_readback.results[1].resources }}"
       loop_control:
         label: "{{ item.metadata.name | default('unknown') }}"
+      no_log: true
+
+    - name: Require Resource workload to be ready when adopted
+      ansible.builtin.assert:
+        that:
+          - item.status.readyReplicas | default(0, true) | int == 1
+        fail_msg: NATS_AUTHORITY_ROTATION_RESOURCE_READBACK_FAILED
+      loop: "{{ nats_rotation_readback.results[2].resources }}"
+      loop_control:
+        label: resource-service
+      when: not (hostvars['localhost'].nats_rotation_resource_bootstrap | default(false) | bool)
       no_log: true
 
     - name: Write the non-secret deployment record

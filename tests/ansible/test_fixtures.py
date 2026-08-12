@@ -216,10 +216,19 @@ class AnsibleFixtureTests(unittest.TestCase):
         )
         self.assertIn("Require every affected workload to be ready", playbook)
         self.assertIn(
-            "item.get('status', {}).get('readyReplicas', 0)",
+            "item.status.readyReplicas | default(0, true) | int == 1",
             playbook,
         )
         self.assertIn("NATS_AUTHORITY_ROTATION_WORKLOAD_READBACK_FAILED", playbook)
+        self.assertIn("Require NATS StatefulSet to be ready", playbook)
+        self.assertIn("Require Resource workload to be ready when adopted", playbook)
+        self.assertIn("NATS_AUTHORITY_ROTATION_NATS_READBACK_FAILED", playbook)
+        self.assertIn("NATS_AUTHORITY_ROTATION_RESOURCE_READBACK_FAILED", playbook)
+        readiness = playbook.split(
+            "- name: Require NATS and every affected workload to be ready",
+            maxsplit=1,
+        )[1].split("- name: Require NATS StatefulSet to be ready", maxsplit=1)[0]
+        self.assertNotIn(".status.readyReplicas", readiness)
 
     def test_object_store_proxy_has_a_minio_only_transport_rule(self) -> None:
         tasks = (
