@@ -181,6 +181,31 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertNotRegex(playbook, r"\bkubectl\s+delete\b")
         self.assertNotRegex(playbook, r"\bDROP\s+(?:DATABASE|SCHEMA)\b")
 
+    def test_nats_rotation_check_mode_allows_only_declared_resource_bootstrap(
+        self,
+    ) -> None:
+        plays = yaml.safe_load(
+            (ROOT / "deploy/ansible/playbooks/96-nats-authority-rotation.yml").read_text(
+                encoding="utf-8"
+            )
+        )
+        readiness = next(
+            task
+            for play in plays
+            for task in play.get("tasks", [])
+            if task.get("name") == "Require NATS and every affected workload to be ready"
+        )
+        conditions = readiness["ansible.builtin.assert"]["that"]
+        resource_secret = next(
+            condition
+            for condition in conditions
+            if "nats_rotation_readback.results[3]" in condition
+        )
+        self.assertIn("resources | length == 1", resource_secret)
+        self.assertIn("ansible_check_mode", resource_secret)
+        self.assertIn("nats_rotation_resource_bootstrap", resource_secret)
+        self.assertIn("or", resource_secret)
+
     def test_object_store_proxy_has_a_minio_only_transport_rule(self) -> None:
         tasks = (
             ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"

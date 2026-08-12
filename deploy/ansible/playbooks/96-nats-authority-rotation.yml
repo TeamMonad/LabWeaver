@@ -569,7 +569,12 @@
           - >-
             (hostvars['localhost'].nats_rotation_resource_bootstrap | default(false) | bool)
             or nats_rotation_readback.results[2].resources[0].status.readyReplicas | default(0) == 1
-          - nats_rotation_readback.results[3].resources | length == 1
+          - >-
+            (nats_rotation_readback.results[3].resources | length == 1)
+            or (
+              ansible_check_mode
+              and (hostvars['localhost'].nats_rotation_resource_bootstrap | default(false) | bool)
+            )
         fail_msg: NATS_AUTHORITY_ROTATION_READBACK_FAILED
       no_log: true
 
