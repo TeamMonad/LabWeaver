@@ -130,6 +130,7 @@
     that:
       - platform_application_postgres_forward_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
       - platform_application_postgres_forward_kubernetes_service is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - platform_application_postgres_forward_hostname is match('^[a-z0-9][a-z0-9.-]+$')
       - platform_application_postgres_forward_service_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?\\.service$')
       - platform_application_postgres_forward_port | int > 1024
       - platform_application_postgres_forward_port | int < 65536
@@ -568,7 +569,28 @@
 
 - name: Bind effective PostgreSQL service identity
   ansible.builtin.set_fact:
+    platform_application_postgres_effective_service_file: >-
+      {{ platform_application_report_root }}/{{ platform_application_run_id }}/postgres-service.conf
+
+- name: Bind PostgreSQL service through the adopted controller forward
+  ansible.builtin.copy:
+    dest: "{{ platform_application_postgres_effective_service_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+    content: >-
+      {{ (platform_application_postgres_service_source.content | b64decode)
+         | regex_replace('(?m)^hostaddr=.*\\n?', '')
+         | regex_replace('(?m)^port=.*$', 'port=' ~ (platform_application_postgres_forward_port | string))
+         | regex_replace('(?m)^host=.*$', 'hostaddr=127.0.0.1' ~ '\\n' ~
+             'host=' ~ platform_application_postgres_forward_hostname) }}
+  when: platform_application_postgres_forward_enabled | bool
+  no_log: true
+
+- name: Bind PostgreSQL service without a controller forward
+  ansible.builtin.set_fact:
     platform_application_postgres_effective_service_file: "{{ platform_application_postgres_service_file }}"
+  when: not (platform_application_postgres_forward_enabled | bool)
 
 - name: Probe retained PostgreSQL database identity
   ansible.builtin.command:

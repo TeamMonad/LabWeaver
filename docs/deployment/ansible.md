@@ -293,7 +293,9 @@ database without resetting retained PostgreSQL state.
 The v1 controller does not have a route to the Kubernetes Service CIDR, so
 `platform_application_postgres_forward_enabled` defaults to `true`. The
 application role owns `labweaver-postgres-forward.service`, waits for its
-loopback endpoint on `15432`, and only then probes the database. An operator may
+loopback endpoint on `15432`, binds libpq's `hostaddr` to that loopback while
+retaining the service hostname for `verify-full` certificate validation, and
+only then probes the database. An operator may
 set `LABWEAVER_POSTGRES_FORWARD_ENABLED=false` only when the controller's
 Service-CIDR route has been independently verified; an unreachable in-cluster
 PostgreSQL address is not an accepted fallback.

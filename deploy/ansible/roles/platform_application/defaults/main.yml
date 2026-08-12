@@ -39,6 +39,7 @@ platform_application_postgres_forward_enabled: "{{ lookup('ansible.builtin.env',
 platform_application_postgres_forward_service_name: labweaver-postgres-forward.service
 platform_application_postgres_forward_namespace: labweaver-data
 platform_application_postgres_forward_kubernetes_service: postgres
+platform_application_postgres_forward_hostname: postgres.labweaver-data.svc
 platform_application_postgres_forward_port: 15432
 platform_application_nats_server: ""
 platform_application_nats_controller_address: ""

@@ -739,11 +739,14 @@ class AnsibleFixtureTests(unittest.TestCase):
             / "deploy/ansible/roles/platform_application/templates/postgres-port-forward.service.j2"
         ).read_text(encoding="utf-8")
         self.assertIn("platform_application_postgres_forward_enabled", defaults)
+        self.assertIn("platform_application_postgres_forward_hostname", defaults)
         self.assertIn("platform_application_postgres_forward_service_name is match", tasks)
         self.assertIn("Restart=on-failure", service)
         self.assertIn("service/{{ platform_application_postgres_forward_kubernetes_service }}", service)
         self.assertIn("Apply the PostgreSQL port-forward before database adoption", tasks)
         self.assertIn("Require the adopted PostgreSQL port-forward endpoint", tasks)
+        self.assertIn("platform_application_postgres_effective_service_file", tasks)
+        self.assertIn("hostaddr=127.0.0.1", tasks)
         self.assertIn("Restart the adopted PostgreSQL port-forward", handlers)
         self.assertIn("platform_application_postgres_forward_service_name", handlers)
 
