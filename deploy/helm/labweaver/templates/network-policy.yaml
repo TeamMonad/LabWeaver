@@ -114,6 +114,14 @@ spec:
         - {protocol: TCP, port: {{ $port }}}
         {{- end }}
     {{- end }}
+    # The console adapter reads the authoritative Environment state before
+    # opening the KubeVirt VNC stream. Keep that database path explicit; the
+    # default-deny policy must not turn a database timeout into a misleading
+    # console runtime failure.
+    - to:
+        - namespaceSelector:
+            {{- toYaml $root.Values.network.infrastructureNamespaceSelector | nindent 12 }}
+      ports: [{protocol: TCP, port: 5432}]
     {{- else }}
     {{- if eq $name "agent-service" }}
     # Agent candidate generation may reach arbitrary external tools and package

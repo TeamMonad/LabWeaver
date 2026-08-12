@@ -1382,6 +1382,8 @@ class AnsibleFixtureTests(unittest.TestCase):
         )[1].split('{{- else }}', maxsplit=1)[0]
         self.assertIn("app.kubernetes.io/name: environment-service", console_policy)
         self.assertIn("port: 9451", console_policy)
+        self.assertIn("infrastructureNamespaceSelector", network_policy)
+        self.assertIn("port: 5432", network_policy)
         self.assertNotIn("port: 8089", console_policy)
 
     def test_cdi_clone_network_is_bounded_to_dns_and_upload_server(self) -> None:
