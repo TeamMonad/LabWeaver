@@ -1587,6 +1587,11 @@ class AnsibleFixtureTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("current_user = 'postgres-admin'", bootstrap)
+        self.assertIn("PLATFORM_BOOTSTRAP_ROLE_ATTRIBUTE_MISMATCH", bootstrap)
+        self.assertIn("PLATFORM_BOOTSTRAP_MEMBERSHIP_CONTRACT_INVALID", bootstrap)
+        self.assertIn("PLATFORM_BOOTSTRAP_ROLE_CONFIGURATION_MISMATCH", bootstrap)
+        self.assertIn("IF NOT FOUND THEN", bootstrap)
+        self.assertIn("IF NOT EXISTS (\n                SELECT 1", bootstrap)
         self.assertIn("GRANT %I TO %I", bootstrap)
         self.assertIn("SET ROLE lw_{{ domain }}_owner", baseline)
         self.assertIn("schema_migrations", baseline)

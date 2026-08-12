@@ -1,7 +1,14 @@
 DO $bootstrap$
 DECLARE
     role_name text;
-    parent_role text;
+    role_superuser boolean;
+    role_inherit boolean;
+    role_create_role boolean;
+    role_create_db boolean;
+    role_can_login boolean;
+    role_replication boolean;
+    role_bypass_rls boolean;
+    expected_login boolean;
 BEGIN
     FOREACH role_name IN ARRAY ARRAY[
         'lw_release_coordinator', 'lw_audit_projection',
@@ -12,23 +19,41 @@ BEGIN
         'lw_evaluation_owner', 'lw_evaluation_migration', 'lw_evaluation_runtime',
         'lw_resource_owner', 'lw_resource_migration', 'lw_resource_runtime'
     ] LOOP
-        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
+        expected_login := role_name NOT LIKE '%_owner';
+        SELECT
+            rolsuper, rolinherit, rolcreaterole, rolcreatedb,
+            rolcanlogin, rolreplication, rolbypassrls
+          INTO
+            role_superuser, role_inherit, role_create_role,
+            role_create_db, role_can_login, role_replication, role_bypass_rls
+          FROM pg_roles
+         WHERE rolname = role_name;
+
+        IF NOT FOUND THEN
             EXECUTE format('CREATE ROLE %I', role_name);
-        END IF;
-        IF role_name LIKE '%_owner' THEN
-            EXECUTE format('ALTER ROLE %I NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS', role_name);
+
+            -- A role created by the bounded deployment identity is already
+            -- NOSUPERUSER by default. Do not spell NOSUPERUSER here: on
+            -- PostgreSQL, a non-superuser cannot change that attribute on an
+            -- existing role, even when it has CREATEROLE. The later
+            -- validation still rejects any pre-existing superuser role.
+            IF role_name LIKE '%_owner' THEN
+                EXECUTE format('ALTER ROLE %I NOLOGIN NOINHERIT NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS', role_name);
+            ELSE
+                EXECUTE format('ALTER ROLE %I LOGIN NOINHERIT NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS', role_name);
+            END IF;
+            EXECUTE format('ALTER ROLE %I RESET ALL', role_name);
         ELSE
-            EXECUTE format('ALTER ROLE %I LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS', role_name);
+            IF role_superuser
+                OR role_inherit
+                OR role_create_role
+                OR role_create_db
+                OR role_can_login IS DISTINCT FROM expected_login
+                OR role_replication
+                OR role_bypass_rls THEN
+                RAISE EXCEPTION 'PLATFORM_BOOTSTRAP_ROLE_ATTRIBUTE_MISMATCH: %', role_name;
+            END IF;
         END IF;
-        EXECUTE format('ALTER ROLE %I RESET ALL', role_name);
-        FOR parent_role IN
-            SELECT parent.rolname FROM pg_auth_members membership
-            JOIN pg_roles parent ON parent.oid = membership.roleid
-            JOIN pg_roles member ON member.oid = membership.member
-            WHERE member.rolname = role_name
-        LOOP
-            EXECUTE format('REVOKE %I FROM %I', parent_role, role_name);
-        END LOOP;
     END LOOP;
 END
 $bootstrap$;
@@ -47,7 +72,16 @@ BEGIN
             'lw_control_owner', 'lw_access_owner', 'lw_environment_owner',
             'lw_agent_owner', 'lw_evaluation_owner', 'lw_resource_owner'
         ] LOOP
-            EXECUTE format('GRANT %I TO %I', owner_role, current_user);
+            IF NOT EXISTS (
+                SELECT 1
+                  FROM pg_auth_members membership
+                  JOIN pg_roles parent ON parent.oid = membership.roleid
+                  JOIN pg_roles member ON member.oid = membership.member
+                 WHERE parent.rolname = owner_role
+                   AND member.rolname = current_user
+            ) THEN
+                EXECUTE format('GRANT %I TO %I', owner_role, current_user);
+            END IF;
         END LOOP;
     END IF;
 END
@@ -77,12 +111,69 @@ REVOKE ALL ON SCHEMA platform_meta, shared_audit, control, access, environment, 
 GRANT USAGE ON SCHEMA platform_meta TO lw_release_coordinator;
 GRANT USAGE ON SCHEMA shared_audit TO lw_audit_projection;
 
-GRANT lw_control_owner TO lw_control_migration;
-GRANT lw_access_owner TO lw_access_migration;
-GRANT lw_environment_owner TO lw_environment_migration;
-GRANT lw_agent_owner TO lw_agent_migration;
-GRANT lw_evaluation_owner TO lw_evaluation_migration;
-GRANT lw_resource_owner TO lw_resource_migration;
+DO $migration_memberships$
+DECLARE
+    membership_pair text[];
+BEGIN
+    FOREACH membership_pair SLICE 1 IN ARRAY ARRAY[
+        ARRAY['lw_control_owner', 'lw_control_migration'],
+        ARRAY['lw_access_owner', 'lw_access_migration'],
+        ARRAY['lw_environment_owner', 'lw_environment_migration'],
+        ARRAY['lw_agent_owner', 'lw_agent_migration'],
+        ARRAY['lw_evaluation_owner', 'lw_evaluation_migration'],
+        ARRAY['lw_resource_owner', 'lw_resource_migration']
+    ] LOOP
+        IF NOT EXISTS (
+            SELECT 1
+              FROM pg_auth_members membership
+              JOIN pg_roles parent ON parent.oid = membership.roleid
+              JOIN pg_roles member ON member.oid = membership.member
+             WHERE parent.rolname = membership_pair[1]
+               AND member.rolname = membership_pair[2]
+        ) THEN
+            EXECUTE format('GRANT %I TO %I', membership_pair[1], membership_pair[2]);
+        END IF;
+    END LOOP;
+END
+$migration_memberships$;
+
+DO $membership_contract$
+DECLARE
+    unexpected_membership text;
+BEGIN
+    SELECT parent.rolname || '->' || member.rolname
+      INTO unexpected_membership
+      FROM pg_auth_members membership
+      JOIN pg_roles parent ON parent.oid = membership.roleid
+      JOIN pg_roles member ON member.oid = membership.member
+     WHERE parent.rolname LIKE 'lw_%'
+       AND (
+           (parent.rolname = 'lw_control_owner'
+            AND member.rolname NOT IN ('lw_control_migration', 'postgres-admin'))
+        OR (parent.rolname = 'lw_access_owner'
+            AND member.rolname NOT IN ('lw_access_migration', 'postgres-admin'))
+        OR (parent.rolname = 'lw_environment_owner'
+            AND member.rolname NOT IN ('lw_environment_migration', 'postgres-admin'))
+        OR (parent.rolname = 'lw_agent_owner'
+            AND member.rolname NOT IN ('lw_agent_migration', 'postgres-admin'))
+        OR (parent.rolname = 'lw_evaluation_owner'
+            AND member.rolname NOT IN ('lw_evaluation_migration', 'postgres-admin'))
+        OR (parent.rolname = 'lw_resource_owner'
+            AND member.rolname NOT IN ('lw_resource_migration', 'postgres-admin'))
+        OR (parent.rolname IN ('lw_release_coordinator', 'lw_audit_projection')
+            AND member.rolname <> 'postgres-admin')
+        OR parent.rolname NOT IN (
+            'lw_control_owner', 'lw_access_owner', 'lw_environment_owner',
+            'lw_agent_owner', 'lw_evaluation_owner', 'lw_resource_owner',
+            'lw_release_coordinator', 'lw_audit_projection'
+        )
+       )
+     LIMIT 1;
+    IF FOUND THEN
+        RAISE EXCEPTION 'PLATFORM_BOOTSTRAP_MEMBERSHIP_CONTRACT_INVALID: %', unexpected_membership;
+    END IF;
+END
+$membership_contract$;
 
 GRANT USAGE ON SCHEMA control TO lw_control_migration, lw_control_runtime;
 GRANT USAGE ON SCHEMA access TO lw_access_migration, lw_access_runtime;
@@ -91,20 +182,55 @@ GRANT USAGE ON SCHEMA agent TO lw_agent_migration, lw_agent_runtime;
 GRANT USAGE ON SCHEMA evaluation TO lw_evaluation_migration, lw_evaluation_runtime;
 GRANT USAGE ON SCHEMA resource TO lw_resource_migration, lw_resource_runtime;
 
-ALTER ROLE lw_release_coordinator SET search_path = platform_meta, pg_catalog;
-ALTER ROLE lw_audit_projection SET search_path = shared_audit, pg_catalog;
-ALTER ROLE lw_control_migration SET search_path = control, pg_catalog;
-ALTER ROLE lw_control_runtime SET search_path = control, pg_catalog;
-ALTER ROLE lw_access_migration SET search_path = access, pg_catalog;
-ALTER ROLE lw_access_runtime SET search_path = access, pg_catalog;
-ALTER ROLE lw_environment_migration SET search_path = environment, pg_catalog;
-ALTER ROLE lw_environment_runtime SET search_path = environment, pg_catalog;
-ALTER ROLE lw_agent_migration SET search_path = agent, pg_catalog;
-ALTER ROLE lw_agent_runtime SET search_path = agent, pg_catalog;
-ALTER ROLE lw_evaluation_migration SET search_path = evaluation, pg_catalog;
-ALTER ROLE lw_evaluation_runtime SET search_path = evaluation, pg_catalog;
-ALTER ROLE lw_resource_migration SET search_path = resource, pg_catalog;
-ALTER ROLE lw_resource_runtime SET search_path = resource, pg_catalog;
+DO $role_configuration$
+DECLARE
+    role_configuration text[];
+    role_name text;
+    expected_configuration text[];
+BEGIN
+    FOREACH role_name IN ARRAY ARRAY[
+        'lw_release_coordinator', 'lw_audit_projection',
+        'lw_control_owner', 'lw_access_owner', 'lw_environment_owner',
+        'lw_agent_owner', 'lw_evaluation_owner', 'lw_resource_owner',
+        'lw_control_migration', 'lw_control_runtime',
+        'lw_access_migration', 'lw_access_runtime',
+        'lw_environment_migration', 'lw_environment_runtime',
+        'lw_agent_migration', 'lw_agent_runtime',
+        'lw_evaluation_migration', 'lw_evaluation_runtime',
+        'lw_resource_migration', 'lw_resource_runtime'
+    ] LOOP
+        IF role_name LIKE '%_owner' THEN
+            expected_configuration := ARRAY[]::text[];
+        ELSE
+            expected_configuration := ARRAY[
+                CASE role_name
+                    WHEN 'lw_release_coordinator' THEN 'search_path=platform_meta, pg_catalog'
+                    WHEN 'lw_audit_projection' THEN 'search_path=shared_audit, pg_catalog'
+                    WHEN 'lw_control_migration' THEN 'search_path=control, pg_catalog'
+                    WHEN 'lw_control_runtime' THEN 'search_path=control, pg_catalog'
+                    WHEN 'lw_access_migration' THEN 'search_path=access, pg_catalog'
+                    WHEN 'lw_access_runtime' THEN 'search_path=access, pg_catalog'
+                    WHEN 'lw_environment_migration' THEN 'search_path=environment, pg_catalog'
+                    WHEN 'lw_environment_runtime' THEN 'search_path=environment, pg_catalog'
+                    WHEN 'lw_agent_migration' THEN 'search_path=agent, pg_catalog'
+                    WHEN 'lw_agent_runtime' THEN 'search_path=agent, pg_catalog'
+                    WHEN 'lw_evaluation_migration' THEN 'search_path=evaluation, pg_catalog'
+                    WHEN 'lw_evaluation_runtime' THEN 'search_path=evaluation, pg_catalog'
+                    WHEN 'lw_resource_migration' THEN 'search_path=resource, pg_catalog'
+                    WHEN 'lw_resource_runtime' THEN 'search_path=resource, pg_catalog'
+                END
+            ];
+        END IF;
+        SELECT COALESCE(rolconfig, ARRAY[]::text[])
+          INTO role_configuration
+          FROM pg_roles
+         WHERE rolname = role_name;
+        IF role_configuration IS DISTINCT FROM expected_configuration THEN
+            RAISE EXCEPTION 'PLATFORM_BOOTSTRAP_ROLE_CONFIGURATION_MISMATCH: %', role_name;
+        END IF;
+    END LOOP;
+END
+$role_configuration$;
 
 ALTER DEFAULT PRIVILEGES FOR ROLE lw_control_owner IN SCHEMA control REVOKE ALL ON TABLES FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES FOR ROLE lw_control_owner IN SCHEMA control GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO lw_control_runtime;
