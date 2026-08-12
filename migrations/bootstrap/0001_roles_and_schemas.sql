@@ -1,3 +1,9 @@
+-- Keep the CREATEROLE issuer's unavoidable ADMIN-only management edge
+-- deterministic; never add implicit INHERIT or SET access to newly-created
+-- platform roles. PostgreSQL still records the ADMIN-only edge for the
+-- creating role, which the membership contract below explicitly constrains.
+SET createrole_self_grant = '';
+
 DO $bootstrap$
 DECLARE
     role_name text;
@@ -38,11 +44,33 @@ BEGIN
             -- existing role, even when it has CREATEROLE. The later
             -- validation still rejects any pre-existing superuser role.
             IF role_name LIKE '%_owner' THEN
-                EXECUTE format('ALTER ROLE %I NOLOGIN NOINHERIT NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS', role_name);
+                EXECUTE format('ALTER ROLE %I NOLOGIN NOINHERIT NOCREATEDB NOCREATEROLE', role_name);
             ELSE
-                EXECUTE format('ALTER ROLE %I LOGIN NOINHERIT NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS', role_name);
+                EXECUTE format('ALTER ROLE %I LOGIN NOINHERIT NOCREATEDB NOCREATEROLE', role_name);
             END IF;
             EXECUTE format('ALTER ROLE %I RESET ALL', role_name);
+            IF role_name NOT LIKE '%_owner' THEN
+                EXECUTE format(
+                    'ALTER ROLE %I SET search_path = %I, pg_catalog',
+                    role_name,
+                    CASE role_name
+                        WHEN 'lw_release_coordinator' THEN 'platform_meta'
+                        WHEN 'lw_audit_projection' THEN 'shared_audit'
+                        WHEN 'lw_control_migration' THEN 'control'
+                        WHEN 'lw_control_runtime' THEN 'control'
+                        WHEN 'lw_access_migration' THEN 'access'
+                        WHEN 'lw_access_runtime' THEN 'access'
+                        WHEN 'lw_environment_migration' THEN 'environment'
+                        WHEN 'lw_environment_runtime' THEN 'environment'
+                        WHEN 'lw_agent_migration' THEN 'agent'
+                        WHEN 'lw_agent_runtime' THEN 'agent'
+                        WHEN 'lw_evaluation_migration' THEN 'evaluation'
+                        WHEN 'lw_evaluation_runtime' THEN 'evaluation'
+                        WHEN 'lw_resource_migration' THEN 'resource'
+                        WHEN 'lw_resource_runtime' THEN 'resource'
+                    END
+                );
+            END IF;
         ELSE
             IF role_superuser
                 OR role_inherit
@@ -70,7 +98,10 @@ BEGIN
         FOREACH owner_role IN ARRAY ARRAY[
             'lw_release_coordinator', 'lw_audit_projection',
             'lw_control_owner', 'lw_access_owner', 'lw_environment_owner',
-            'lw_agent_owner', 'lw_evaluation_owner', 'lw_resource_owner'
+            'lw_agent_owner', 'lw_evaluation_owner', 'lw_resource_owner',
+            'lw_control_migration', 'lw_access_migration',
+            'lw_environment_migration', 'lw_agent_migration',
+            'lw_evaluation_migration', 'lw_resource_migration'
         ] LOOP
             IF NOT EXISTS (
                 SELECT 1
@@ -79,8 +110,13 @@ BEGIN
                   JOIN pg_roles member ON member.oid = membership.member
                  WHERE parent.rolname = owner_role
                    AND member.rolname = current_user
+                   AND membership.set_option
             ) THEN
-                EXECUTE format('GRANT %I TO %I', owner_role, current_user);
+                EXECUTE format(
+                    'GRANT %I TO %I WITH INHERIT FALSE, SET TRUE',
+                    owner_role,
+                    current_user
+                );
             END IF;
         END LOOP;
     END IF;
@@ -116,18 +152,54 @@ CREATE SCHEMA IF NOT EXISTS agent AUTHORIZATION lw_agent_owner;
 CREATE SCHEMA IF NOT EXISTS evaluation AUTHORIZATION lw_evaluation_owner;
 CREATE SCHEMA IF NOT EXISTS resource AUTHORIZATION lw_resource_owner;
 
-ALTER SCHEMA platform_meta OWNER TO lw_release_coordinator;
-ALTER SCHEMA shared_audit OWNER TO lw_audit_projection;
-ALTER SCHEMA control OWNER TO lw_control_owner;
-ALTER SCHEMA access OWNER TO lw_access_owner;
-ALTER SCHEMA environment OWNER TO lw_environment_owner;
-ALTER SCHEMA agent OWNER TO lw_agent_owner;
-ALTER SCHEMA evaluation OWNER TO lw_evaluation_owner;
-ALTER SCHEMA resource OWNER TO lw_resource_owner;
+DO $schema_owner_contract$
+DECLARE
+    schema_pair text[];
+    actual_owner oid;
+    expected_owner oid;
+BEGIN
+    FOREACH schema_pair SLICE 1 IN ARRAY ARRAY[
+        ARRAY['platform_meta', 'lw_release_coordinator'],
+        ARRAY['shared_audit', 'lw_audit_projection'],
+        ARRAY['control', 'lw_control_owner'],
+        ARRAY['access', 'lw_access_owner'],
+        ARRAY['environment', 'lw_environment_owner'],
+        ARRAY['agent', 'lw_agent_owner'],
+        ARRAY['evaluation', 'lw_evaluation_owner'],
+        ARRAY['resource', 'lw_resource_owner']
+    ] LOOP
+        SELECT oid INTO expected_owner FROM pg_roles WHERE rolname = schema_pair[2];
+        SELECT nspowner INTO actual_owner FROM pg_namespace WHERE nspname = schema_pair[1];
+        IF NOT FOUND OR actual_owner IS DISTINCT FROM expected_owner THEN
+            RAISE EXCEPTION 'PLATFORM_BOOTSTRAP_SCHEMA_OWNER_INVALID: %', schema_pair[1];
+        END IF;
+    END LOOP;
+END
+$schema_owner_contract$;
 
-REVOKE ALL ON SCHEMA platform_meta, shared_audit, control, access, environment, agent, evaluation, resource FROM PUBLIC;
-GRANT USAGE ON SCHEMA platform_meta TO lw_release_coordinator;
-GRANT USAGE ON SCHEMA shared_audit TO lw_audit_projection;
+DO $schema_privileges$
+DECLARE
+    schema_pair text[];
+BEGIN
+    FOREACH schema_pair SLICE 1 IN ARRAY ARRAY[
+        ARRAY['platform_meta', 'lw_release_coordinator'],
+        ARRAY['shared_audit', 'lw_audit_projection'],
+        ARRAY['control', 'lw_control_owner'],
+        ARRAY['access', 'lw_access_owner'],
+        ARRAY['environment', 'lw_environment_owner'],
+        ARRAY['agent', 'lw_agent_owner'],
+        ARRAY['evaluation', 'lw_evaluation_owner'],
+        ARRAY['resource', 'lw_resource_owner']
+    ] LOOP
+        EXECUTE format('SET LOCAL ROLE %I', schema_pair[2]);
+        EXECUTE format('REVOKE ALL ON SCHEMA %I FROM PUBLIC', schema_pair[1]);
+        IF schema_pair[1] IN ('platform_meta', 'shared_audit') THEN
+            EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', schema_pair[1], schema_pair[2]);
+        END IF;
+        EXECUTE 'RESET ROLE';
+    END LOOP;
+END
+$schema_privileges$;
 
 DO $migration_memberships$
 DECLARE
@@ -148,8 +220,13 @@ BEGIN
               JOIN pg_roles member ON member.oid = membership.member
              WHERE parent.rolname = membership_pair[1]
                AND member.rolname = membership_pair[2]
+               AND membership.set_option
         ) THEN
-            EXECUTE format('GRANT %I TO %I', membership_pair[1], membership_pair[2]);
+            EXECUTE format(
+                'GRANT %I TO %I WITH INHERIT FALSE, SET TRUE',
+                membership_pair[1],
+                membership_pair[2]
+            );
         END IF;
     END LOOP;
 END
@@ -163,28 +240,35 @@ BEGIN
       INTO unexpected_membership
       FROM pg_auth_members membership
       JOIN pg_roles parent ON parent.oid = membership.roleid
-      JOIN pg_roles member ON member.oid = membership.member
+     JOIN pg_roles member ON member.oid = membership.member
      WHERE parent.rolname LIKE 'lw_%'
-       AND (
-           (parent.rolname = 'lw_control_owner'
-            AND member.rolname NOT IN ('lw_control_migration', 'postgres-admin'))
-        OR (parent.rolname = 'lw_access_owner'
-            AND member.rolname NOT IN ('lw_access_migration', 'postgres-admin'))
-        OR (parent.rolname = 'lw_environment_owner'
-            AND member.rolname NOT IN ('lw_environment_migration', 'postgres-admin'))
-        OR (parent.rolname = 'lw_agent_owner'
-            AND member.rolname NOT IN ('lw_agent_migration', 'postgres-admin'))
-        OR (parent.rolname = 'lw_evaluation_owner'
-            AND member.rolname NOT IN ('lw_evaluation_migration', 'postgres-admin'))
-        OR (parent.rolname = 'lw_resource_owner'
-            AND member.rolname NOT IN ('lw_resource_migration', 'postgres-admin'))
-        OR (parent.rolname IN ('lw_release_coordinator', 'lw_audit_projection')
-            AND member.rolname <> 'postgres-admin')
-        OR parent.rolname NOT IN (
-            'lw_control_owner', 'lw_access_owner', 'lw_environment_owner',
-            'lw_agent_owner', 'lw_evaluation_owner', 'lw_resource_owner',
-            'lw_release_coordinator', 'lw_audit_projection'
-        )
+       AND NOT (
+           parent.rolname IN (
+               'lw_release_coordinator', 'lw_audit_projection',
+               'lw_control_owner', 'lw_access_owner', 'lw_environment_owner',
+               'lw_agent_owner', 'lw_evaluation_owner', 'lw_resource_owner',
+               'lw_control_migration', 'lw_access_migration',
+               'lw_environment_migration', 'lw_agent_migration',
+               'lw_evaluation_migration', 'lw_resource_migration',
+               'lw_control_runtime', 'lw_access_runtime',
+               'lw_environment_runtime', 'lw_agent_runtime',
+               'lw_evaluation_runtime', 'lw_resource_runtime'
+           )
+           AND (
+               (member.rolname = 'postgres-admin'
+                AND membership.admin_option
+                AND NOT membership.inherit_option
+                AND NOT membership.set_option)
+            OR (member.rolname = 'postgres-admin'
+                AND membership.set_option
+                AND NOT membership.inherit_option)
+            OR (parent.rolname IN ('lw_control_owner', 'lw_access_owner',
+                                   'lw_environment_owner', 'lw_agent_owner',
+                                   'lw_evaluation_owner', 'lw_resource_owner')
+                AND member.rolname = replace(parent.rolname, '_owner', '_migration')
+                AND membership.set_option
+                AND NOT membership.inherit_option)
+           )
        )
      LIMIT 1;
     IF FOUND THEN
@@ -193,12 +277,69 @@ BEGIN
 END
 $membership_contract$;
 
-GRANT USAGE ON SCHEMA control TO lw_control_migration, lw_control_runtime;
-GRANT USAGE ON SCHEMA access TO lw_access_migration, lw_access_runtime;
-GRANT USAGE ON SCHEMA environment TO lw_environment_migration, lw_environment_runtime;
-GRANT USAGE ON SCHEMA agent TO lw_agent_migration, lw_agent_runtime;
-GRANT USAGE ON SCHEMA evaluation TO lw_evaluation_migration, lw_evaluation_runtime;
-GRANT USAGE ON SCHEMA resource TO lw_resource_migration, lw_resource_runtime;
+DO $membership_option_contract$
+DECLARE
+    membership_pair text[];
+BEGIN
+    FOREACH membership_pair SLICE 1 IN ARRAY ARRAY[
+        ARRAY['lw_release_coordinator', 'postgres-admin'],
+        ARRAY['lw_audit_projection', 'postgres-admin'],
+        ARRAY['lw_control_owner', 'postgres-admin'],
+        ARRAY['lw_access_owner', 'postgres-admin'],
+        ARRAY['lw_environment_owner', 'postgres-admin'],
+        ARRAY['lw_agent_owner', 'postgres-admin'],
+        ARRAY['lw_evaluation_owner', 'postgres-admin'],
+        ARRAY['lw_resource_owner', 'postgres-admin'],
+        ARRAY['lw_control_migration', 'postgres-admin'],
+        ARRAY['lw_access_migration', 'postgres-admin'],
+        ARRAY['lw_environment_migration', 'postgres-admin'],
+        ARRAY['lw_agent_migration', 'postgres-admin'],
+        ARRAY['lw_evaluation_migration', 'postgres-admin'],
+        ARRAY['lw_resource_migration', 'postgres-admin'],
+        ARRAY['lw_control_owner', 'lw_control_migration'],
+        ARRAY['lw_access_owner', 'lw_access_migration'],
+        ARRAY['lw_environment_owner', 'lw_environment_migration'],
+        ARRAY['lw_agent_owner', 'lw_agent_migration'],
+        ARRAY['lw_evaluation_owner', 'lw_evaluation_migration'],
+        ARRAY['lw_resource_owner', 'lw_resource_migration']
+    ] LOOP
+        IF NOT EXISTS (
+            SELECT 1
+              FROM pg_auth_members membership
+              JOIN pg_roles parent ON parent.oid = membership.roleid
+              JOIN pg_roles member ON member.oid = membership.member
+             WHERE parent.rolname = membership_pair[1]
+               AND member.rolname = membership_pair[2]
+               AND membership.set_option
+        ) THEN
+            RAISE EXCEPTION 'PLATFORM_BOOTSTRAP_MEMBERSHIP_OPTION_INVALID: %->%',
+                membership_pair[1], membership_pair[2];
+        END IF;
+    END LOOP;
+END
+$membership_option_contract$;
+
+DO $schema_runtime_privileges$
+DECLARE
+    schema_pair text[];
+BEGIN
+    FOREACH schema_pair SLICE 1 IN ARRAY ARRAY[
+        ARRAY['control', 'lw_control_owner', 'lw_control_migration', 'lw_control_runtime'],
+        ARRAY['access', 'lw_access_owner', 'lw_access_migration', 'lw_access_runtime'],
+        ARRAY['environment', 'lw_environment_owner', 'lw_environment_migration', 'lw_environment_runtime'],
+        ARRAY['agent', 'lw_agent_owner', 'lw_agent_migration', 'lw_agent_runtime'],
+        ARRAY['evaluation', 'lw_evaluation_owner', 'lw_evaluation_migration', 'lw_evaluation_runtime'],
+        ARRAY['resource', 'lw_resource_owner', 'lw_resource_migration', 'lw_resource_runtime']
+    ] LOOP
+        EXECUTE format('SET LOCAL ROLE %I', schema_pair[2]);
+        EXECUTE format(
+            'GRANT USAGE ON SCHEMA %I TO %I, %I',
+            schema_pair[1], schema_pair[3], schema_pair[4]
+        );
+        EXECUTE 'RESET ROLE';
+    END LOOP;
+END
+$schema_runtime_privileges$;
 
 DO $role_configuration$
 DECLARE
@@ -250,44 +391,46 @@ BEGIN
 END
 $role_configuration$;
 
-ALTER DEFAULT PRIVILEGES FOR ROLE lw_control_owner IN SCHEMA control REVOKE ALL ON TABLES FROM PUBLIC;
-ALTER DEFAULT PRIVILEGES FOR ROLE lw_control_owner IN SCHEMA control GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO lw_control_runtime;
-ALTER DEFAULT PRIVILEGES FOR ROLE lw_control_owner IN SCHEMA control REVOKE ALL ON SEQUENCES FROM PUBLIC;
-ALTER DEFAULT PRIVILEGES FOR ROLE lw_control_owner IN SCHEMA control GRANT USAGE, SELECT ON SEQUENCES TO lw_control_runtime;
-ALTER DEFAULT PRIVILEGES FOR ROLE lw_access_owner IN SCHEMA access REVOKE ALL ON TABLES FROM PUBLIC;
-ALTER DEFAULT PRIVILEGES FOR ROLE lw_access_owner IN SCHEMA access GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO lw_access_runtime;
-ALTER DEFAULT PRIVILEGES FOR ROLE lw_access_owner IN SCHEMA access REVOKE ALL ON SEQUENCES FROM PUBLIC;
-ALTER DEFAULT PRIVILEGES FOR ROLE lw_access_owner IN SCHEMA access GRANT USAGE, SELECT ON SEQUENCES TO lw_access_runtime;
-ALTER DEFAULT PRIVILEGES FOR ROLE lw_environment_owner IN SCHEMA environment REVOKE ALL ON TABLES FROM PUBLIC;
-ALTER DEFAULT PRIVILEGES FOR ROLE lw_environment_owner IN SCHEMA environment GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO lw_environment_runtime;
-ALTER DEFAULT PRIVILEGES FOR ROLE lw_environment_owner IN SCHEMA environment REVOKE ALL ON SEQUENCES FROM PUBLIC;
-ALTER DEFAULT PRIVILEGES FOR ROLE lw_environment_owner IN SCHEMA environment GRANT USAGE, SELECT ON SEQUENCES TO lw_environment_runtime;
-ALTER DEFAULT PRIVILEGES FOR ROLE lw_agent_owner IN SCHEMA agent REVOKE ALL ON TABLES FROM PUBLIC;
-ALTER DEFAULT PRIVILEGES FOR ROLE lw_agent_owner IN SCHEMA agent GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO lw_agent_runtime;
-ALTER DEFAULT PRIVILEGES FOR ROLE lw_agent_owner IN SCHEMA agent REVOKE ALL ON SEQUENCES FROM PUBLIC;
-ALTER DEFAULT PRIVILEGES FOR ROLE lw_agent_owner IN SCHEMA agent GRANT USAGE, SELECT ON SEQUENCES TO lw_agent_runtime;
-ALTER DEFAULT PRIVILEGES FOR ROLE lw_evaluation_owner IN SCHEMA evaluation REVOKE ALL ON TABLES FROM PUBLIC;
-ALTER DEFAULT PRIVILEGES FOR ROLE lw_evaluation_owner IN SCHEMA evaluation GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO lw_evaluation_runtime;
-ALTER DEFAULT PRIVILEGES FOR ROLE lw_evaluation_owner IN SCHEMA evaluation REVOKE ALL ON SEQUENCES FROM PUBLIC;
-ALTER DEFAULT PRIVILEGES FOR ROLE lw_evaluation_owner IN SCHEMA evaluation GRANT USAGE, SELECT ON SEQUENCES TO lw_evaluation_runtime;
-ALTER DEFAULT PRIVILEGES FOR ROLE lw_resource_owner IN SCHEMA resource REVOKE ALL ON TABLES FROM PUBLIC;
-ALTER DEFAULT PRIVILEGES FOR ROLE lw_resource_owner IN SCHEMA resource GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO lw_resource_runtime;
-ALTER DEFAULT PRIVILEGES FOR ROLE lw_resource_owner IN SCHEMA resource REVOKE ALL ON SEQUENCES FROM PUBLIC;
-ALTER DEFAULT PRIVILEGES FOR ROLE lw_resource_owner IN SCHEMA resource GRANT USAGE, SELECT ON SEQUENCES TO lw_resource_runtime;
+DO $object_privileges$
+DECLARE
+    object_pair text[];
+BEGIN
+    FOREACH object_pair SLICE 1 IN ARRAY ARRAY[
+        ARRAY['control', 'lw_control_owner', 'lw_control_runtime'],
+        ARRAY['access', 'lw_access_owner', 'lw_access_runtime'],
+        ARRAY['environment', 'lw_environment_owner', 'lw_environment_runtime'],
+        ARRAY['agent', 'lw_agent_owner', 'lw_agent_runtime'],
+        ARRAY['evaluation', 'lw_evaluation_owner', 'lw_evaluation_runtime'],
+        ARRAY['resource', 'lw_resource_owner', 'lw_resource_runtime']
+    ] LOOP
+        EXECUTE format('SET LOCAL ROLE %I', object_pair[2]);
+        EXECUTE format(
+            'ALTER DEFAULT PRIVILEGES IN SCHEMA %I REVOKE ALL ON TABLES FROM PUBLIC',
+            object_pair[1]
+        );
+        EXECUTE format(
+            'ALTER DEFAULT PRIVILEGES IN SCHEMA %I GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %I',
+            object_pair[1], object_pair[3]
+        );
+        EXECUTE format(
+            'ALTER DEFAULT PRIVILEGES IN SCHEMA %I REVOKE ALL ON SEQUENCES FROM PUBLIC',
+            object_pair[1]
+        );
+        EXECUTE format(
+            'ALTER DEFAULT PRIVILEGES IN SCHEMA %I GRANT USAGE, SELECT ON SEQUENCES TO %I',
+            object_pair[1], object_pair[3]
+        );
+        EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA %I FROM PUBLIC', object_pair[1]);
+        EXECUTE format(
+            'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA %I TO %I',
+            object_pair[1], object_pair[3]
+        );
+        EXECUTE 'RESET ROLE';
+    END LOOP;
+END
+$object_privileges$;
 
-REVOKE ALL ON ALL SEQUENCES IN SCHEMA control FROM PUBLIC;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA control TO lw_control_runtime;
-REVOKE ALL ON ALL SEQUENCES IN SCHEMA access FROM PUBLIC;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA access TO lw_access_runtime;
-REVOKE ALL ON ALL SEQUENCES IN SCHEMA environment FROM PUBLIC;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA environment TO lw_environment_runtime;
-REVOKE ALL ON ALL SEQUENCES IN SCHEMA agent FROM PUBLIC;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA agent TO lw_agent_runtime;
-REVOKE ALL ON ALL SEQUENCES IN SCHEMA evaluation FROM PUBLIC;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA evaluation TO lw_evaluation_runtime;
-REVOKE ALL ON ALL SEQUENCES IN SCHEMA resource FROM PUBLIC;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA resource TO lw_resource_runtime;
-
+SET ROLE lw_release_coordinator;
 CREATE TABLE IF NOT EXISTS platform_meta.release_attempts (
     attempt_id text PRIMARY KEY,
     release_id text NOT NULL,
@@ -305,9 +448,8 @@ CREATE TABLE IF NOT EXISTS platform_meta.release_attempts (
     resolution_id text,
     CHECK ((state = 'running' AND finished_at IS NULL) OR state <> 'running')
 );
-ALTER TABLE platform_meta.release_attempts OWNER TO lw_release_coordinator;
-REVOKE ALL ON platform_meta.release_attempts FROM PUBLIC;
-
+RESET ROLE;
+SET ROLE lw_audit_projection;
 CREATE TABLE IF NOT EXISTS shared_audit.audit_records (
     event_id uuid PRIMARY KEY,
     source_domain text NOT NULL,
@@ -325,21 +467,48 @@ CREATE TABLE IF NOT EXISTS shared_audit.projection_offsets (
     diagnostic text,
     updated_at timestamptz NOT NULL DEFAULT now()
 );
-ALTER TABLE shared_audit.audit_records OWNER TO lw_audit_projection;
-ALTER TABLE shared_audit.projection_offsets OWNER TO lw_audit_projection;
+RESET ROLE;
+DO $table_owner_contract$
+DECLARE
+    table_pair text[];
+    actual_owner oid;
+    expected_owner oid;
+BEGIN
+    FOREACH table_pair SLICE 1 IN ARRAY ARRAY[
+        ARRAY['platform_meta', 'release_attempts', 'lw_release_coordinator'],
+        ARRAY['shared_audit', 'audit_records', 'lw_audit_projection'],
+        ARRAY['shared_audit', 'projection_offsets', 'lw_audit_projection']
+    ] LOOP
+        SELECT oid INTO expected_owner FROM pg_roles WHERE rolname = table_pair[3];
+        SELECT relowner INTO actual_owner
+          FROM pg_class relation
+          JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+         WHERE namespace.nspname = table_pair[1]
+           AND relation.relname = table_pair[2]
+           AND relation.relkind IN ('r', 'p');
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'PLATFORM_BOOTSTRAP_TABLE_OWNER_INVALID: %.%', table_pair[1], table_pair[2];
+        ELSIF actual_owner IS DISTINCT FROM expected_owner THEN
+            RAISE EXCEPTION 'PLATFORM_BOOTSTRAP_TABLE_OWNER_INVALID: %.%', table_pair[1], table_pair[2];
+        END IF;
+    END LOOP;
+END
+$table_owner_contract$;
+SET ROLE lw_release_coordinator;
+REVOKE ALL ON platform_meta.release_attempts FROM PUBLIC;
+RESET ROLE;
+SET ROLE lw_audit_projection;
 REVOKE ALL ON ALL TABLES IN SCHEMA shared_audit FROM PUBLIC;
+RESET ROLE;
 
 DO $history$
 DECLARE
     domain_name text;
     migration_role text;
     runtime_role text;
-    deployment_role text;
     history_exists boolean;
-    deployment_has_migration boolean;
     migration_has_create boolean;
     table_owner oid;
-    deployment_oid oid;
     migration_oid oid;
     runtime_oid oid;
     table_acl aclitem[];
@@ -347,9 +516,6 @@ BEGIN
     IF current_user <> 'postgres-admin' THEN
         RAISE EXCEPTION 'PLATFORM_BOOTSTRAP_MIGRATION_IDENTITY_INVALID';
     END IF;
-    deployment_role := current_user;
-    SELECT oid INTO deployment_oid FROM pg_roles WHERE rolname = deployment_role;
-
     FOREACH domain_name IN ARRAY ARRAY['control', 'access', 'environment', 'agent', 'evaluation', 'resource'] LOOP
         migration_role := format('lw_%s_migration', domain_name);
         runtime_role := format('lw_%s_runtime', domain_name);
@@ -358,28 +524,24 @@ BEGIN
         IF migration_oid IS NULL OR runtime_oid IS NULL THEN
             RAISE EXCEPTION 'PLATFORM_BOOTSTRAP_SCHEMA_MIGRATIONS_ROLE_INVALID: %', domain_name;
         END IF;
-        history_exists := to_regclass(format('%I.schema_migrations', domain_name)) IS NOT NULL;
+        SELECT EXISTS (
+            SELECT 1
+              FROM pg_class relation
+              JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+             WHERE namespace.nspname = domain_name
+               AND relation.relname = 'schema_migrations'
+               AND relation.relkind IN ('r', 'p')
+        ) INTO history_exists;
 
         IF NOT history_exists THEN
-            -- A new history table is created and transferred while the
-            -- bounded deployment identity has a transaction-local grant to
-            -- the migration role. The membership is revoked before the
-            -- bootstrap transaction continues; adopted tables never pass
-            -- through this path.
-            SELECT EXISTS (
-                SELECT 1
-                  FROM pg_auth_members membership
-                 WHERE membership.roleid = migration_oid
-                   AND membership.member = deployment_oid
-            ) INTO deployment_has_migration;
-            IF NOT deployment_has_migration THEN
-                EXECUTE format('GRANT %I TO %I', migration_role, deployment_role);
-            END IF;
             SELECT has_schema_privilege(migration_role, domain_name, 'CREATE')
               INTO migration_has_create;
             IF NOT migration_has_create THEN
+                EXECUTE format('SET LOCAL ROLE lw_%I_owner', domain_name);
                 EXECUTE format('GRANT CREATE ON SCHEMA %I TO %I', domain_name, migration_role);
+                EXECUTE 'RESET ROLE';
             END IF;
+            EXECUTE format('SET LOCAL ROLE %I', migration_role);
             EXECUTE format(
                 'CREATE TABLE %I.schema_migrations (
                     migration_id bigint PRIMARY KEY CHECK (migration_id > 0),
@@ -394,12 +556,11 @@ BEGIN
             );
             EXECUTE format('REVOKE ALL ON %I.schema_migrations FROM PUBLIC', domain_name);
             EXECUTE format('GRANT SELECT ON %I.schema_migrations TO %I', domain_name, runtime_role);
-            EXECUTE format('ALTER TABLE %I.schema_migrations OWNER TO %I', domain_name, migration_role);
+            EXECUTE 'RESET ROLE';
             IF NOT migration_has_create THEN
+                EXECUTE format('SET LOCAL ROLE lw_%I_owner', domain_name);
                 EXECUTE format('REVOKE CREATE ON SCHEMA %I FROM %I', domain_name, migration_role);
-            END IF;
-            IF NOT deployment_has_migration THEN
-                EXECUTE format('REVOKE %I FROM %I', migration_role, deployment_role);
+                EXECUTE 'RESET ROLE';
             END IF;
         END IF;
 
@@ -440,3 +601,5 @@ BEGIN
     END LOOP;
 END
 $history$;
+
+RESET createrole_self_grant;
