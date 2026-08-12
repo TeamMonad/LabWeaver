@@ -105,6 +105,10 @@ fn browser_router(state: Arc<AppState>) -> Router {
     telemetry::instrument_http(router, "access-service", "browser-api")
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the browser surface is intentionally enumerated in one auditable router"
+)]
 fn browser_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/auth/login", get(login))
