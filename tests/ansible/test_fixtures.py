@@ -224,6 +224,10 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("Require Resource workload to be ready when adopted", playbook)
         self.assertIn("NATS_AUTHORITY_ROTATION_NATS_READBACK_FAILED", playbook)
         self.assertIn("NATS_AUTHORITY_ROTATION_RESOURCE_READBACK_FAILED", playbook)
+        self.assertIn(
+            "hostvars['localhost'].nats_rotation_expected_application_deployments | int",
+            playbook,
+        )
         readiness = playbook.split(
             "- name: Require NATS and every affected workload to be ready",
             maxsplit=1,

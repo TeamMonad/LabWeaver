@@ -560,7 +560,9 @@
       ansible.builtin.assert:
         that:
           - nats_rotation_readback.results[0].resources | length == 1
-          - nats_rotation_readback.results[1].resources | length == hostvars['localhost'].nats_rotation_expected_application_deployments
+          - >-
+            nats_rotation_readback.results[1].resources | length
+            == (hostvars['localhost'].nats_rotation_expected_application_deployments | int)
           - >-
             (nats_rotation_readback.results[2].resources | length == 0)
             == (hostvars['localhost'].nats_rotation_resource_bootstrap | default(false) | bool)
@@ -614,7 +616,7 @@
                'run_id': lookup('ansible.builtin.env', 'LABWEAVER_RUN_ID'),
                'source_commit': lookup('ansible.builtin.env', 'LABWEAVER_COMMIT_SHA'),
                'nats_ready_replicas': 1,
-               'application_ready_deployments': hostvars['localhost'].nats_rotation_expected_application_deployments,
+               'application_ready_deployments': hostvars['localhost'].nats_rotation_expected_application_deployments | int,
                'resource_bootstrap': hostvars['localhost'].nats_rotation_resource_bootstrap | default(false) | bool,
                'resource_ready_replicas': 0 if (hostvars['localhost'].nats_rotation_resource_bootstrap | default(false) | bool) else 1,
                'resource_secret_adopted': true
