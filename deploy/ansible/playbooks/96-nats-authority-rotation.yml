@@ -455,6 +455,7 @@
     - name: Validate the Resource stream identity
       ansible.builtin.set_fact:
         nats_rotation_resource_stream: "{{ nats_rotation_resource_stream_after.stdout | from_json }}"
+      when: not ansible_check_mode
 
     - name: Require the bounded Resource stream contract
       ansible.builtin.assert:
@@ -466,6 +467,7 @@
             == ['labweaver.resource.request.approved.v1',
                 'labweaver.resource.request.submitted.v1']
         fail_msg: NATS_AUTHORITY_ROTATION_RESOURCE_STREAM_INVALID
+      when: not ansible_check_mode
 
     - name: Apply only reviewed NATS-bearing application objects
       ansible.builtin.command:

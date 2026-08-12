@@ -175,6 +175,8 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("Wait for replacement NATS administrator transport", playbook)
         self.assertIn("LABWEAVER_RESOURCE", playbook)
         self.assertIn("NATS_AUTHORITY_ROTATION_RESOURCE_STREAM_INVALID", playbook)
+        self.assertIn("nats_rotation_resource_stream_after.stdout | from_json", playbook)
+        self.assertIn("when: not ansible_check_mode", playbook)
         self.assertNotIn("ansible.builtin.shell", playbook)
         self.assertNotRegex(playbook, r"\bkubectl\s+delete\b")
         self.assertNotRegex(playbook, r"\bDROP\s+(?:DATABASE|SCHEMA)\b")
