@@ -101,7 +101,12 @@ async fn main() -> Result<(), StartupError> {
     reason = "the browser surface is intentionally enumerated in one auditable router"
 )]
 fn browser_router(state: Arc<AppState>) -> Router {
-    let router = Router::new()
+    let router = browser_routes().with_state(state);
+    telemetry::instrument_http(router, "access-service", "browser-api")
+}
+
+fn browser_routes() -> Router<Arc<AppState>> {
+    Router::new()
         .route("/auth/login", get(login))
         .route("/auth/callback", get(callback))
         .route("/auth/backchannel-logout", post(backchannel_logout))
@@ -138,10 +143,6 @@ fn browser_router(state: Arc<AppState>) -> Router {
         )
         .route("/connect/console/{opaque}", get(console::connect))
         .route(
-            "/api/v1/courses/{*control_path}",
-            axum::routing::any(proxy::forward_control),
-        )
-        .route(
             "/api/v1/environments",
             axum::routing::any(proxy::forward_environment),
         )
@@ -161,6 +162,7 @@ fn browser_router(state: Arc<AppState>) -> Router {
             "/api/v1/courses/{course_id}/me/evaluation-results/{run_id}",
             get(proxy::forward_evaluation),
         )
+        .merge(control_browser_router())
         .route(
             "/api/v1/environments/{environment_id}",
             axum::routing::any(proxy::forward_environment),
@@ -214,8 +216,6 @@ fn browser_router(state: Arc<AppState>) -> Router {
             axum::routing::any(proxy::forward_runtime),
         )
         .merge(resource_browser_router())
-        .with_state(state);
-    telemetry::instrument_http(router, "access-service", "browser-api")
 }
 
 fn resource_browser_router() -> Router<Arc<AppState>> {
@@ -240,6 +240,94 @@ fn resource_browser_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/resource-leases/{lease_id}/{action}",
             post(proxy::forward_resource),
+        )
+}
+
+fn control_browser_router() -> Router<Arc<AppState>> {
+    Router::new()
+        .route(
+            "/api/v1/courses/{course_id}/problem-package-uploads",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/problem-package-uploads/{upload_id}/complete",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/problem-packages/{package_id}",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/llm-egress-policies",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/llm-egress-policies/active",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/agent-runs",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/work-agent-runs",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/agent-runs/{run_id}",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/agent-runs/{run_id}/cancel",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/agent-runs/{run_id}/tracks/{track}/retry",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/environment-candidates/{candidate_id}",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/environment-candidates/{candidate_id}/decisions",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/evaluation-candidates/{candidate_id}",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/evaluation-candidates/{candidate_id}/decisions",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/evaluation-releases",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/evaluation-releases/{release_id}",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/evaluation-releases/{release_id}/withdraw",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/environment-template-releases",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/environment-template-releases/{release_id}",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/environment-template-releases/{release_id}/withdraw",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/events",
+            axum::routing::any(proxy::forward_control),
         )
 }
 
@@ -1381,4 +1469,14 @@ enum StartupError {
     Database(#[from] sqlx::Error),
     #[error("LW_AUTH_STARTUP_FAILED")]
     Io(#[from] std::io::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::browser_routes;
+
+    #[test]
+    fn browser_routes_register_without_conflicts() {
+        let _router = browser_routes();
+    }
 }
