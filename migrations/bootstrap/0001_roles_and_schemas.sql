@@ -333,24 +333,110 @@ DO $history$
 DECLARE
     domain_name text;
     migration_role text;
+    runtime_role text;
+    deployment_role text;
+    history_exists boolean;
+    deployment_has_migration boolean;
+    migration_has_create boolean;
+    table_owner oid;
+    deployment_oid oid;
+    migration_oid oid;
+    runtime_oid oid;
+    table_acl aclitem[];
 BEGIN
+    IF current_user <> 'postgres-admin' THEN
+        RAISE EXCEPTION 'PLATFORM_BOOTSTRAP_MIGRATION_IDENTITY_INVALID';
+    END IF;
+    deployment_role := current_user;
+    SELECT oid INTO deployment_oid FROM pg_roles WHERE rolname = deployment_role;
+
     FOREACH domain_name IN ARRAY ARRAY['control', 'access', 'environment', 'agent', 'evaluation', 'resource'] LOOP
         migration_role := format('lw_%s_migration', domain_name);
-        EXECUTE format(
-            'CREATE TABLE IF NOT EXISTS %I.schema_migrations (
-                migration_id bigint PRIMARY KEY CHECK (migration_id > 0),
-                filename text NOT NULL UNIQUE,
-                sha256 text NOT NULL CHECK (sha256 ~ ''^[0-9a-f]{64}$''),
-                applied_at timestamptz NOT NULL DEFAULT now(),
-                outcome text NOT NULL CHECK (outcome = ''applied''),
-                executor_identity text NOT NULL,
-                release_id text NOT NULL,
-                catalog_sha256 text NOT NULL CHECK (catalog_sha256 ~ ''^[0-9a-f]{64}$'')
-            )', domain_name
-        );
-        EXECUTE format('ALTER TABLE %I.schema_migrations OWNER TO %I', domain_name, migration_role);
-        EXECUTE format('REVOKE ALL ON %I.schema_migrations FROM PUBLIC', domain_name);
-        EXECUTE format('GRANT SELECT ON %I.schema_migrations TO lw_%s_runtime', domain_name, domain_name);
+        runtime_role := format('lw_%s_runtime', domain_name);
+        SELECT oid INTO migration_oid FROM pg_roles WHERE rolname = migration_role;
+        SELECT oid INTO runtime_oid FROM pg_roles WHERE rolname = runtime_role;
+        IF migration_oid IS NULL OR runtime_oid IS NULL THEN
+            RAISE EXCEPTION 'PLATFORM_BOOTSTRAP_SCHEMA_MIGRATIONS_ROLE_INVALID: %', domain_name;
+        END IF;
+        history_exists := to_regclass(format('%I.schema_migrations', domain_name)) IS NOT NULL;
+
+        IF NOT history_exists THEN
+            -- A new history table is created and transferred while the
+            -- bounded deployment identity has a transaction-local grant to
+            -- the migration role. The membership is revoked before the
+            -- bootstrap transaction continues; adopted tables never pass
+            -- through this path.
+            SELECT EXISTS (
+                SELECT 1
+                  FROM pg_auth_members membership
+                 WHERE membership.roleid = migration_oid
+                   AND membership.member = deployment_oid
+            ) INTO deployment_has_migration;
+            IF NOT deployment_has_migration THEN
+                EXECUTE format('GRANT %I TO %I', migration_role, deployment_role);
+            END IF;
+            SELECT has_schema_privilege(migration_role, domain_name, 'CREATE')
+              INTO migration_has_create;
+            IF NOT migration_has_create THEN
+                EXECUTE format('GRANT CREATE ON SCHEMA %I TO %I', domain_name, migration_role);
+            END IF;
+            EXECUTE format(
+                'CREATE TABLE %I.schema_migrations (
+                    migration_id bigint PRIMARY KEY CHECK (migration_id > 0),
+                    filename text NOT NULL UNIQUE,
+                    sha256 text NOT NULL CHECK (sha256 ~ ''^[0-9a-f]{64}$''),
+                    applied_at timestamptz NOT NULL DEFAULT now(),
+                    outcome text NOT NULL CHECK (outcome = ''applied''),
+                    executor_identity text NOT NULL,
+                    release_id text NOT NULL,
+                    catalog_sha256 text NOT NULL CHECK (catalog_sha256 ~ ''^[0-9a-f]{64}$'')
+                )', domain_name
+            );
+            EXECUTE format('REVOKE ALL ON %I.schema_migrations FROM PUBLIC', domain_name);
+            EXECUTE format('GRANT SELECT ON %I.schema_migrations TO %I', domain_name, runtime_role);
+            EXECUTE format('ALTER TABLE %I.schema_migrations OWNER TO %I', domain_name, migration_role);
+            IF NOT migration_has_create THEN
+                EXECUTE format('REVOKE CREATE ON SCHEMA %I FROM %I', domain_name, migration_role);
+            END IF;
+            IF NOT deployment_has_migration THEN
+                EXECUTE format('REVOKE %I FROM %I', migration_role, deployment_role);
+            END IF;
+        END IF;
+
+        SELECT c.relowner, c.relacl
+          INTO table_owner, table_acl
+          FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = domain_name
+           AND c.relname = 'schema_migrations'
+           AND c.relkind IN ('r', 'p');
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'PLATFORM_BOOTSTRAP_SCHEMA_MIGRATIONS_MISSING: %', domain_name;
+        ELSIF table_owner <> migration_oid THEN
+            -- Adoption must not rewrite an existing table as the bounded
+            -- deployment role. Validate its immutable owner and narrow ACL;
+            -- any drift is a stable blocker for the operator to repair.
+            RAISE EXCEPTION 'PLATFORM_BOOTSTRAP_SCHEMA_MIGRATIONS_OWNER_INVALID: %', domain_name;
+        END IF;
+        IF table_owner = migration_oid THEN
+            IF table_acl IS NULL
+               OR EXISTS (
+                   SELECT 1
+                     FROM aclexplode(table_acl) grant_entry
+                    WHERE grant_entry.grantee NOT IN (table_owner, runtime_oid)
+                       OR (grant_entry.grantee = runtime_oid
+                           AND (grant_entry.privilege_type <> 'SELECT' OR grant_entry.is_grantable))
+               )
+               OR NOT EXISTS (
+                   SELECT 1
+                     FROM aclexplode(table_acl) grant_entry
+                    WHERE grant_entry.grantee = runtime_oid
+                      AND grant_entry.privilege_type = 'SELECT'
+                      AND NOT grant_entry.is_grantable
+               ) THEN
+                RAISE EXCEPTION 'PLATFORM_BOOTSTRAP_SCHEMA_MIGRATIONS_ACL_INVALID: %', domain_name;
+            END IF;
+        END IF;
     END LOOP;
 END
 $history$;
