@@ -213,7 +213,7 @@ class NatsAuthorityRotationTests(unittest.TestCase):
                         f"{identity}-{filename}".encode()
                     )
 
-            for identity in ROTATION.PLATFORM_ROTATION_IDENTITIES:
+            for identity in (*ROTATION.PLATFORM_ROTATION_IDENTITIES, "resource-service"):
                 directory = platform_identities / identity
                 directory.mkdir(parents=True)
                 for filename in ROTATION.PLATFORM_SECRET_KEYS.values():
@@ -303,6 +303,10 @@ class NatsAuthorityRotationTests(unittest.TestCase):
                                     key: "old"
                                     for key in ROTATION.NATS_SECRET_KEYS
                                 },
+                                **{
+                                    key: "old-platform"
+                                    for key in ROTATION.PLATFORM_SECRET_KEYS
+                                },
                                 "database-url": "preserved",
                             },
                         }
@@ -344,6 +348,12 @@ class NatsAuthorityRotationTests(unittest.TestCase):
                     self.assertNotEqual(document["data"]["nats.creds"], "old")
                 if document["metadata"]["name"] in ROTATION.PLATFORM_ROTATION_IDENTITIES.values():
                     self.assertNotEqual(document["data"]["tls.crt"], "old-platform")
+            rendered_resource = list(
+                yaml.safe_load_all((output / "resource-bundle.yaml").read_text())
+            )
+            resource_secret = rendered_resource[0]
+            self.assertNotEqual(resource_secret["data"]["nats.creds"], "old")
+            self.assertNotEqual(resource_secret["data"]["tls.crt"], "old-platform")
 
     def test_rotation_refuses_non_private_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

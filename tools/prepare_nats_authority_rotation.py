@@ -391,6 +391,10 @@ def prepare(
         _object(resource_bundle, "Secret", "resource-service-secrets"),
         clients / "resource-service",
     )
+    _replace_platform_identity(
+        _object(resource_bundle, "Secret", "resource-service-secrets"),
+        platform_identities / "resource-service",
+    )
 
     admin_claims = _credential_claims(
         clients / NATS_ADMIN_USER / "nats.creds"
