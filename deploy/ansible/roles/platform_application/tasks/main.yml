@@ -582,6 +582,12 @@
         == platform_application_data_services | length
     fail_msg: PLATFORM_APPLICATION_DATA_ENDPOINT_INVALID
 
+- name: Canonicalize adopted data-service host mappings
+  ansible.builtin.replace:
+    path: /etc/hosts
+    regexp: '^[0-9.]+\s+(?:postgres|nats|minio)\.labweaver-data\.svc\s*$\n?'
+    replace: ''
+
 - name: Bind controller tools to retained service identities
   ansible.builtin.blockinfile:
     path: /etc/hosts
@@ -679,7 +685,7 @@
       {{ (platform_application_postgres_service_source.content | b64decode)
          | regex_replace('(?m)^hostaddr=.*\\n?', '')
          | regex_replace('(?m)^port=.*$', 'port=' ~ (platform_application_postgres_forward_port | string))
-         | regex_replace('(?m)^host=.*$', 'hostaddr=127.0.0.1' ~ '\\n' ~
+         | regex_replace('(?m)^host=.*$', 'hostaddr=127.0.0.1' ~ '\n' ~
              'host=' ~ platform_application_postgres_forward_hostname) }}
   when: platform_application_postgres_forward_enabled | bool
   no_log: true

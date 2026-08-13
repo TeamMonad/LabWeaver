@@ -747,6 +747,14 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("Require the adopted PostgreSQL port-forward endpoint", tasks)
         self.assertIn("platform_application_postgres_effective_service_file", tasks)
         self.assertIn("hostaddr=127.0.0.1", tasks)
+        self.assertIn(r"'\n' ~", tasks)
+        self.assertNotIn(r"'\\n' ~", tasks)
+        self.assertIn("Canonicalize adopted data-service host mappings", tasks)
+        self.assertIn("(?:postgres|nats|minio)", tasks)
+        self.assertLess(
+            tasks.index("Canonicalize adopted data-service host mappings"),
+            tasks.index("Bind controller tools to retained service identities"),
+        )
         self.assertIn("Restart the adopted PostgreSQL port-forward", handlers)
         self.assertIn("platform_application_postgres_forward_service_name", handlers)
 
