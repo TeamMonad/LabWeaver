@@ -162,6 +162,15 @@ validation used for the workload bundle apply. The reset deliberately excludes
 `labweaver-data` and `labweaver-build` from namespace deletion and clears only
 their LabWeaver schemas, streams and buckets.
 
+The retained-database adoption path also normalizes only the bounded
+`postgres-admin` membership edges for the fourteen reviewed owner/migration
+roles and six runtime administration roles. Owner/migration edges preserve the
+exact `INHERIT=false, SET=true` contract; runtime edges preserve the
+`ADMIN=true, INHERIT=false, SET=false` contract. Each group is read back, and
+the task does not alter runtime role attributes, schemas, tables, data, or
+database objects. In `--check` mode this normalization is skipped; a missing,
+extra, or misconfigured edge remains a stable blocking diagnostic.
+
 The same playbook first installs checksum-locked administration clients. NSC is
 installed on the approved router only for private NATS operator/account/user
 authoring; NATS CLI, PostgreSQL client, MinIO client, BuildKit client and the

@@ -8,6 +8,7 @@ ALTER ROLE lw_{{ domain }}_runtime PASSWORD :'lw_{{ domain }}_password';
 {% endfor %}
 {% for domain in platform_application_domains %}
 {% set domain_catalog = (catalog.domains | selectattr('name', 'equalto', domain) | list | first) %}
+SET ROLE lw_{{ domain }}_migration;
 DO $verify_{{ domain }}$
 DECLARE
     history_count bigint;
@@ -53,12 +54,15 @@ BEGIN
 {% endfor %}
 END
 $verify_{{ domain }}$;
+RESET ROLE;
 
 {% for migration in domain_catalog.migrations %}
+SET ROLE lw_{{ domain }}_migration;
 SELECT NOT EXISTS (
     SELECT 1 FROM {{ domain }}.schema_migrations
     WHERE migration_id = {{ migration.id }}
 ) AS apply_{{ domain }}_{{ migration.id }} \gset
+RESET ROLE;
 \if :apply_{{ domain }}_{{ migration.id }}
 SET ROLE lw_{{ domain }}_owner;
 SET search_path TO {{ domain }}, pg_catalog;
@@ -76,6 +80,8 @@ RESET ROLE;
 \endif
 {% endfor %}
 
+RESET ROLE;
+SET ROLE lw_{{ domain }}_migration;
 DO $complete_{{ domain }}$
 BEGIN
     IF (SELECT count(*) FROM {{ domain }}.schema_migrations) <> {{ domain_catalog.migrations | length }}{% for migration in domain_catalog.migrations %}
@@ -91,5 +97,6 @@ BEGIN
     END IF;
 END
 $complete_{{ domain }}$;
+RESET ROLE;
 {% endfor %}
 COMMIT;

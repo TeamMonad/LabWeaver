@@ -70,6 +70,9 @@ class AnsibleFixtureTests(unittest.TestCase):
         reset = (ROOT / "deploy/ansible/roles/platform_reset/defaults/main.yml").read_text(
             encoding="utf-8"
         )
+        foundation_defaults = (
+            ROOT / "deploy/ansible/roles/platform_foundation/defaults/main.yml"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("labweaver_preflight_scope: platform-foundation", playbook)
         self.assertIn("- import_playbook: 91-platform-admin-tools.yml", playbook)
@@ -78,6 +81,16 @@ class AnsibleFixtureTests(unittest.TestCase):
         ).read_text(encoding="utf-8"))
         self.assertIn("PLATFORM_FOUNDATION_BUNDLE_KEYS_INVALID", tasks)
         self.assertIn("platform_foundation_postgres_admin_role", tasks)
+        self.assertIn("platform_foundation_postgres_admin_memberships", foundation_defaults)
+        self.assertIn("platform_foundation_postgres_admin_runtime_memberships", foundation_defaults)
+        self.assertIn("Normalize bounded PostgreSQL deployment-admin memberships", tasks)
+        self.assertIn("Normalize bounded PostgreSQL runtime-admin memberships", tasks)
+        self.assertIn("PLATFORM_FOUNDATION_POSTGRES_ADMIN_MEMBERSHIP_INVALID", tasks)
+        self.assertIn("WITH ADMIN FALSE, INHERIT FALSE, SET TRUE", tasks)
+        self.assertIn("WITH ADMIN TRUE, INHERIT FALSE, SET FALSE", tasks)
+        self.assertIn("DO $$", tasks)
+        self.assertIn("REVOKE %I FROM %I", tasks)
+        self.assertIn("not ansible_check_mode", tasks)
         self.assertIn("kubernetes.core.k8s_exec", tasks)
         self.assertIn("PLATFORM_FOUNDATION_POSTGRES_ADMIN_ROLE_INVALID", tasks)
         self.assertIn("platform_foundation_postgres_database", tasks)
@@ -723,6 +736,8 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertNotIn("count(*) FROM {{ domain }}.schema_migrations) <> 1", adoption)
         self.assertIn("PLATFORM_APPLICATION_RETAINED_BASELINE_IDENTITY_INVALID", tasks)
         self.assertIn("platform_application_retained_baseline_sha256", defaults)
+        self.assertIn("SET ROLE lw_{{ domain }}_migration", adoption)
+        self.assertIn("RESET ROLE", adoption)
 
     def test_platform_application_owns_a_reconnectable_postgres_port_forward(self) -> None:
         defaults = (
@@ -1762,6 +1777,17 @@ class AnsibleFixtureTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("current_user = 'postgres-admin'", bootstrap)
+        deployment_admin = bootstrap.split("$deployment_admin$", 2)[1]
+        self.assertIn("'lw_resource_owner'", deployment_admin)
+        for migration_role in (
+            "lw_control_migration",
+            "lw_access_migration",
+            "lw_environment_migration",
+            "lw_agent_migration",
+            "lw_evaluation_migration",
+            "lw_resource_migration",
+        ):
+            self.assertIn(migration_role, deployment_admin)
         self.assertIn("PLATFORM_BOOTSTRAP_ROLE_ATTRIBUTE_MISMATCH", bootstrap)
         self.assertIn("PLATFORM_BOOTSTRAP_MEMBERSHIP_CONTRACT_INVALID", bootstrap)
         self.assertIn("PLATFORM_BOOTSTRAP_ROLE_CONFIGURATION_MISMATCH", bootstrap)
