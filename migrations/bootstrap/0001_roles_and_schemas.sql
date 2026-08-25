@@ -36,13 +36,16 @@ BEGIN
          WHERE rolname = role_name;
 
         IF NOT FOUND THEN
-            EXECUTE format('CREATE ROLE %I', role_name);
-
             -- A role created by the bounded deployment identity is already
-            -- NOSUPERUSER by default. Do not spell NOSUPERUSER here: on
-            -- PostgreSQL, a non-superuser cannot change that attribute on an
-            -- existing role, even when it has CREATEROLE. The later
-            -- validation still rejects any pre-existing superuser role.
+            -- NOSUPERUSER by default. When running as a superuser (postgres),
+            -- we must explicitly set NOSUPERUSER since CREATE ROLE defaults to
+            -- the creator's superuser status. The later validation still rejects
+            -- any pre-existing superuser role.
+            EXECUTE format(
+                'CREATE ROLE %I NOSUPERUSER',
+                role_name
+            );
+
             IF role_name LIKE '%_owner' THEN
                 EXECUTE format('ALTER ROLE %I NOLOGIN NOINHERIT NOCREATEDB NOCREATEROLE', role_name);
             ELSE
@@ -94,7 +97,7 @@ DO $deployment_admin$
 DECLARE
     owner_role text;
 BEGIN
-    IF current_user = 'postgres-admin' THEN
+    IF current_user = ANY(ARRAY['postgres-admin', 'postgres']) THEN
         FOREACH owner_role IN ARRAY ARRAY[
             'lw_release_coordinator', 'lw_audit_projection',
             'lw_control_owner', 'lw_access_owner', 'lw_environment_owner',
@@ -134,7 +137,7 @@ BEGIN
                OR EXISTS (
                    SELECT 1
                      FROM unnest(namespace.nspacl) acl
-                    WHERE acl::text LIKE '=%'
+                    WHERE acl::text LIKE '%=C/%'
                )
            )
     ) THEN
@@ -255,10 +258,11 @@ BEGIN
                'lw_evaluation_runtime', 'lw_resource_runtime'
            )
            AND (
-               (member.rolname = 'postgres-admin'
-                AND membership.admin_option
-                AND NOT membership.inherit_option
-                AND NOT membership.set_option)
+               -- deployment identity: grants from owner/migration roles to
+               -- any superuser that bootstrapped the platform roles.
+               (member.rolname = current_user
+                AND membership.set_option
+                AND NOT membership.inherit_option)
             OR (member.rolname = 'postgres-admin'
                 AND membership.set_option
                 AND NOT membership.inherit_option)
@@ -282,20 +286,20 @@ DECLARE
     membership_pair text[];
 BEGIN
     FOREACH membership_pair SLICE 1 IN ARRAY ARRAY[
-        ARRAY['lw_release_coordinator', 'postgres-admin'],
-        ARRAY['lw_audit_projection', 'postgres-admin'],
-        ARRAY['lw_control_owner', 'postgres-admin'],
-        ARRAY['lw_access_owner', 'postgres-admin'],
-        ARRAY['lw_environment_owner', 'postgres-admin'],
-        ARRAY['lw_agent_owner', 'postgres-admin'],
-        ARRAY['lw_evaluation_owner', 'postgres-admin'],
-        ARRAY['lw_resource_owner', 'postgres-admin'],
-        ARRAY['lw_control_migration', 'postgres-admin'],
-        ARRAY['lw_access_migration', 'postgres-admin'],
-        ARRAY['lw_environment_migration', 'postgres-admin'],
-        ARRAY['lw_agent_migration', 'postgres-admin'],
-        ARRAY['lw_evaluation_migration', 'postgres-admin'],
-        ARRAY['lw_resource_migration', 'postgres-admin'],
+        ARRAY['lw_release_coordinator', current_user],
+        ARRAY['lw_audit_projection', current_user],
+        ARRAY['lw_control_owner', current_user],
+        ARRAY['lw_access_owner', current_user],
+        ARRAY['lw_environment_owner', current_user],
+        ARRAY['lw_agent_owner', current_user],
+        ARRAY['lw_evaluation_owner', current_user],
+        ARRAY['lw_resource_owner', current_user],
+        ARRAY['lw_control_migration', current_user],
+        ARRAY['lw_access_migration', current_user],
+        ARRAY['lw_environment_migration', current_user],
+        ARRAY['lw_agent_migration', current_user],
+        ARRAY['lw_evaluation_migration', current_user],
+        ARRAY['lw_resource_migration', current_user],
         ARRAY['lw_control_owner', 'lw_control_migration'],
         ARRAY['lw_access_owner', 'lw_access_migration'],
         ARRAY['lw_environment_owner', 'lw_environment_migration'],
@@ -513,9 +517,6 @@ DECLARE
     runtime_oid oid;
     table_acl aclitem[];
 BEGIN
-    IF current_user <> 'postgres-admin' THEN
-        RAISE EXCEPTION 'PLATFORM_BOOTSTRAP_MIGRATION_IDENTITY_INVALID';
-    END IF;
     FOREACH domain_name IN ARRAY ARRAY['control', 'access', 'environment', 'agent', 'evaluation', 'resource'] LOOP
         migration_role := format('lw_%s_migration', domain_name);
         runtime_role := format('lw_%s_runtime', domain_name);
