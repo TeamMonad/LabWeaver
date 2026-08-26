@@ -64,7 +64,6 @@ def _put_minio(url: str, data: bytes, headers: dict[str, str]) -> None:
 
 
 from validate_resource_replay_inputs import ReplayInputError, validate
-from validate_resource_replay_inputs import ReplayInputError, validate
 
 
 class ReplayError(Exception):
@@ -355,19 +354,51 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
         replay_policy(replay["policy"], arguments.run_id),
         "policy",
     )
+    # For container runtimes, Claude needs a build-context archive (tar-based
+    # media type) in the problem package so it can copy its identity fields for
+    # the EnvironmentSpec. The markdown material is sent to the LLM as text;
+    # the tar.gz provides a valid Dockerfile for the build executor.
+    import io, tarfile
+
+    upload_files = [{"path": material["relativePath"], "sizeBytes": len(material_bytes), "sha256": material["sha256"], "mediaType": material["mediaType"]}]
+    upload_payload_map = {material["relativePath"]: material_bytes}
+
+    if profile["runtimeKind"] == "container":
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+            dockerfile = b"FROM ubuntu:24.04\nCMD [\"bash\"]\n"
+            info = tarfile.TarInfo(name="Dockerfile")
+            info.size = len(dockerfile)
+            tf.addfile(info, io.BytesIO(dockerfile))
+        build_ctx_bytes = buf.getvalue()
+        ctx_path = "build-context.tar.gz"
+        upload_files.append({
+            "path": ctx_path,
+            "sizeBytes": len(build_ctx_bytes),
+            "sha256": hashlib.sha256(build_ctx_bytes).hexdigest(),
+            "mediaType": "application/gzip",
+        })
+        upload_payload_map[ctx_path] = build_ctx_bytes
+
     _phase("upload")
     upload, upload_headers = teacher.request("POST", f"/api/v1/courses/{course_id}/problem-package-uploads", {
-        "files": [{"path": material["relativePath"], "sizeBytes": len(material_bytes), "sha256": material["sha256"], "mediaType": material["mediaType"]}],
+        "files": upload_files,
         "retentionPolicyRevision": 1,
     }, "upload")
     target = require(upload, "uploadTargets", "LW_RESOURCE_REPLAY_UPLOAD_INVALID")
-    if not isinstance(target, list) or len(target) != 1 or not isinstance(target[0], dict):
+    if not isinstance(target, list) or len(target) != len(upload_files):
         raise ReplayError("LW_RESOURCE_REPLAY_UPLOAD_INVALID")
-    upload_target = target[0]
     _phase("upload-put")
-    upload_url = upload_target["uploadUrl"]
-    minio_headers = upload_target.get("requiredHeaders", {})
-    _put_minio(upload_url, material_bytes, minio_headers)
+    for upload_target in target:
+        if not isinstance(upload_target, dict):
+            raise ReplayError("LW_RESOURCE_REPLAY_UPLOAD_INVALID")
+        tpath = upload_target["path"]
+        payload = upload_payload_map.get(tpath)
+        if payload is None:
+            raise ReplayError("LW_RESOURCE_REPLAY_UPLOAD_TARGET_MISMATCH")
+        upload_url = upload_target["uploadUrl"]
+        minio_headers = upload_target.get("requiredHeaders", {})
+        _put_minio(upload_url, payload, minio_headers)
     _phase("complete-upload")
     package, _ = teacher.request(
         "POST",
