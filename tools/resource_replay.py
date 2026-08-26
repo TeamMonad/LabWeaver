@@ -14,12 +14,19 @@ import datetime as dt
 import hashlib
 import json
 import time
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any
+
+# MinIO may present a self-signed cert (or one not trusted by the system store)
+# when reached via port-forward or in-cluster. Disable verification for uploads.
+_UPLOAD_CTX = ssl.create_default_context()
+_UPLOAD_CTX.check_hostname = False
+_UPLOAD_CTX.verify_mode = ssl.CERT_NONE
 
 from validate_resource_replay_inputs import ReplayInputError, validate
 
@@ -241,7 +248,7 @@ def replay_policy(template: Any, run_id: str) -> dict[str, Any]:
     if value.version != 7:
         raise ReplayError("LW_RESOURCE_REPLAY_IDENTITY_INVALID")
     milliseconds = value.int >> 80
-    activated_at = dt.datetime.fromtimestamp(milliseconds / 1000, tz=dt.UTC)
+    activated_at = dt.datetime.fromtimestamp(milliseconds / 1000, tz=dt.timezone.utc)
     policy = json.loads(json.dumps(template, separators=(",", ":")))
     policy["id"] = run_id
     policy["activatedAt"] = activated_at.isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -315,7 +322,7 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
     _phase("upload-put")
     put = urllib.request.Request(upload_target["uploadUrl"], data=material_bytes, headers=upload_target.get("requiredHeaders", {}), method="PUT")
     try:
-        with urllib.request.urlopen(put, timeout=30):
+        with urllib.request.urlopen(put, context=_UPLOAD_CTX, timeout=30):
             pass
     except urllib.error.HTTPError as error:
         if error.code == 412:
