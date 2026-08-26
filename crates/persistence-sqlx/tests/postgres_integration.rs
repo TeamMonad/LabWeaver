@@ -40,7 +40,7 @@ async fn bootstrap_migrate_and_enforce_domain_boundaries() -> Result<(), Box<dyn
         .max_connections(2)
         .connect(&provisioner_url)
         .await?;
-    let _ = MigrationCoordinator::bootstrap(&provisioner, &catalog, &root).await?;
+    MigrationCoordinator::bootstrap(&provisioner, &catalog, &root).await?;
 
     sqlx::query("ALTER ROLE lw_control_runtime SUPERUSER CREATEROLE INHERIT")
         .execute(&provisioner)
@@ -49,7 +49,7 @@ async fn bootstrap_migrate_and_enforce_domain_boundaries() -> Result<(), Box<dyn
         .execute(&provisioner)
         .await?;
 
-    let _ = MigrationCoordinator::bootstrap(&provisioner, &catalog, &root).await?;
+    MigrationCoordinator::bootstrap(&provisioner, &catalog, &root).await?;
     let memberships: i64 = sqlx::query_scalar(
         "SELECT count(*)::bigint FROM pg_auth_members membership \
          JOIN pg_roles parent ON parent.oid = membership.roleid \
