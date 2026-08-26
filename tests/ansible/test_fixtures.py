@@ -1776,7 +1776,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         bootstrap = (ROOT / "migrations/bootstrap/0001_roles_and_schemas.sql").read_text(
             encoding="utf-8"
         )
-        self.assertIn("current_user = 'postgres-admin'", bootstrap)
+        self.assertIn("ANY(ARRAY['postgres-admin', 'postgres'])", bootstrap)
         deployment_admin = bootstrap.split("$deployment_admin$", 2)[1]
         self.assertIn("'lw_resource_owner'", deployment_admin)
         for migration_role in (
