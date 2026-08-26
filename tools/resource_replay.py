@@ -364,9 +364,14 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
     upload_payload_map = {material["relativePath"]: material_bytes}
 
     if profile["runtimeKind"] == "container":
+        # The build executor validates that the Dockerfile's FROM line ends with
+        # @{base_image_digest}. The agent-service LLM generates base_image_digest
+        # from its environment prompt template, which uses this default value when
+        # no other base image is specified in the material.
+        BASE_IMAGE_DIGEST = "sha256:3c83a6678bc9c3e730a6982dee4c41d1c85dbef7d4ef350c4ca76463101af9b3"
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-            dockerfile = b"FROM ubuntu:24.04\nCMD [\"bash\"]\n"
+            dockerfile = f'FROM ubuntu:24.04@{BASE_IMAGE_DIGEST}\nCMD ["bash"]\n'.encode()
             info = tarfile.TarInfo(name="Dockerfile")
             info.size = len(dockerfile)
             tf.addfile(info, io.BytesIO(dockerfile))
@@ -376,7 +381,7 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
             "path": ctx_path,
             "sizeBytes": len(build_ctx_bytes),
             "sha256": hashlib.sha256(build_ctx_bytes).hexdigest(),
-            "mediaType": "application/gzip",
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
         })
         upload_payload_map[ctx_path] = build_ctx_bytes
 
