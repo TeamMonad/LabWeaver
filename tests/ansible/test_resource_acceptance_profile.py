@@ -306,7 +306,7 @@ class ResourceAcceptanceProfileTests(unittest.TestCase):
         replay_driver = (ROOT / "tools/resource_replay.py").read_text(encoding="utf-8")
         self.assertIn('headers["Origin"] = self.base_url', replay_driver)
         self.assertIn("LW_RESOURCE_REPLAY_UPLOAD_HTTP_", replay_driver)
-        self.assertIn("if error.code == 412", replay_driver)
+        self.assertIn("if resp.status == 412", replay_driver)
         self.assertIn("def replay_policy", replay_driver)
         self.assertIn('policy["id"] = run_id', replay_driver)
         self.assertIn("def upload_manifest_sha256", replay_driver)
