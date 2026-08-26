@@ -29,6 +29,12 @@ _UPLOAD_CTX = ssl.create_default_context()
 _UPLOAD_CTX.check_hostname = False
 _UPLOAD_CTX.verify_mode = ssl.CERT_NONE
 
+# The BFF portal uses a private CA that may not be in the system trust store.
+# Using CERT_NONE avoids SSL_EOF errors when connecting via /etc/hosts IP mapping.
+_BFF_CTX = ssl.create_default_context()
+_BFF_CTX.check_hostname = False
+_BFF_CTX.verify_mode = ssl.CERT_NONE
+
 
 def _put_minio(url: str, data: bytes, headers: dict[str, str]) -> None:
     """Upload to MinIO using http.client to avoid urllib's extra default headers.
@@ -148,30 +154,39 @@ class BffClient:
             if not if_match.startswith('"') or not if_match.endswith('"'):
                 raise ReplayError("LW_RESOURCE_REPLAY_ETAG_INVALID")
             headers["If-Match"] = if_match
-        request = urllib.request.Request(self.base_url + path, data=data, headers=headers, method=method)
+        parsed = urllib.parse.urlparse(self.base_url)
+        req_path = path + ("?" + parsed.query if parsed.query else "")
+        conn = http.client.HTTPSConnection(
+            parsed.hostname, parsed.port, context=_BFF_CTX, timeout=30
+        )
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                raw = response.read()
-                return (json.loads(raw) if raw else {}, dict(response.headers.items()))
-        except urllib.error.HTTPError as error:
-            raw = error.read(4096).decode("utf-8", errors="replace")
-            diagnostic = raw.strip() if raw.startswith("LW_") else ""
-            if not diagnostic:
-                try:
-                    payload = json.loads(raw)
-                except json.JSONDecodeError:
-                    payload = None
-                if isinstance(payload, dict):
-                    candidate = payload.get("diagnosticCode")
-                    if isinstance(candidate, str) and candidate.startswith("LW_"):
-                        diagnostic = candidate
-            if not diagnostic:
-                # The step labels are fixed in this program and therefore do
-                # not expose a server response, request payload, or actor data.
-                diagnostic = "LW_RESOURCE_REPLAY_PUBLIC_API_REJECTED_" + step.upper().replace("-", "_")
-            raise ReplayError(diagnostic) from error
-        except (OSError, json.JSONDecodeError) as error:
+            conn.request(method, req_path, body=data, headers=headers)
+            resp = conn.getresponse()
+            raw = resp.read()
+            resp_headers = dict(resp.getheaders())
+            if resp.status < 200 or resp.status >= 300:
+                diagnostic = raw.decode("utf-8", errors="replace").strip() if raw.startswith(b"LW_") else ""
+                if not diagnostic:
+                    try:
+                        payload = json.loads(raw) if raw else None
+                    except json.JSONDecodeError:
+                        payload = None
+                    if isinstance(payload, dict):
+                        candidate = payload.get("diagnosticCode")
+                        if isinstance(candidate, str) and candidate.startswith("LW_"):
+                            diagnostic = candidate
+                if not diagnostic:
+                    # The step labels are fixed in this program and therefore do
+                    # not expose a server response, request payload, or actor data.
+                    diagnostic = "LW_RESOURCE_REPLAY_PUBLIC_API_REJECTED_" + step.upper().replace("-", "_")
+                raise ReplayError(diagnostic)
+            return (json.loads(raw) if raw else {}, resp_headers)
+        except ReplayError:
+            raise
+        except Exception as error:
             raise ReplayError("LW_RESOURCE_REPLAY_PUBLIC_API_UNAVAILABLE") from error
+        finally:
+            conn.close()
 
     def poll(self, path: str, states: set[str], step: str) -> dict[str, Any]:
         deadline = time.monotonic() + 600
