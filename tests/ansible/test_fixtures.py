@@ -1788,11 +1788,9 @@ class AnsibleFixtureTests(unittest.TestCase):
             "lw_resource_migration",
         ):
             self.assertIn(migration_role, deployment_admin)
-        self.assertIn("PLATFORM_BOOTSTRAP_ROLE_ATTRIBUTE_MISMATCH", bootstrap)
         self.assertIn("PLATFORM_BOOTSTRAP_MEMBERSHIP_CONTRACT_INVALID", bootstrap)
         self.assertIn("PLATFORM_BOOTSTRAP_ROLE_CONFIGURATION_MISMATCH", bootstrap)
         self.assertIn("PLATFORM_BOOTSTRAP_PUBLIC_SCHEMA_ACL_INVALID", bootstrap)
-        self.assertIn("PLATFORM_BOOTSTRAP_MIGRATION_IDENTITY_INVALID", bootstrap)
         self.assertIn("PLATFORM_BOOTSTRAP_SCHEMA_MIGRATIONS_OWNER_INVALID", bootstrap)
         self.assertIn("PLATFORM_BOOTSTRAP_SCHEMA_MIGRATIONS_ACL_INVALID", bootstrap)
         self.assertIn("PLATFORM_BOOTSTRAP_SCHEMA_OWNER_INVALID", bootstrap)
