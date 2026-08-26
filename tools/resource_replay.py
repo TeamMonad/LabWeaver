@@ -12,9 +12,10 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
+import http.client
 import json
-import time
 import ssl
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -28,6 +29,35 @@ _UPLOAD_CTX = ssl.create_default_context()
 _UPLOAD_CTX.check_hostname = False
 _UPLOAD_CTX.verify_mode = ssl.CERT_NONE
 
+
+def _put_minio(url: str, data: bytes, headers: dict[str, str]) -> None:
+    """Upload to MinIO using http.client to avoid urllib's extra default headers.
+
+    MinIO presigned URLs sign only specific headers.  urllib.request adds
+    'User-Agent' and other defaults that MinIO treats as unsigned headers,
+    causing a 403 'AccessDenied' response.  Using http.client directly gives
+    us full control over what leaves the wire.
+    """
+    parsed = urllib.parse.urlparse(url)
+    path = parsed.path + ("?" + parsed.query if parsed.query else "")
+    conn = http.client.HTTPSConnection(
+        parsed.hostname, parsed.port, context=_UPLOAD_CTX, timeout=30
+    )
+    try:
+        conn.request("PUT", path, body=data, headers=headers)
+        resp = conn.getresponse()
+        _ = resp.read()  # Drain response body
+        if resp.status == 412:
+            # Object already exists — previous partial replay.
+            # Let Control re-validate the declared hash below.
+            return
+        if resp.status != 200:
+            raise ReplayError(f"LW_RESOURCE_REPLAY_UPLOAD_HTTP_{resp.status}")
+    finally:
+        conn.close()
+
+
+from validate_resource_replay_inputs import ReplayInputError, validate
 from validate_resource_replay_inputs import ReplayInputError, validate
 
 
@@ -320,25 +350,9 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
         raise ReplayError("LW_RESOURCE_REPLAY_UPLOAD_INVALID")
     upload_target = target[0]
     _phase("upload-put")
-    put = urllib.request.Request(upload_target["uploadUrl"], data=material_bytes, headers=upload_target.get("requiredHeaders", {}), method="PUT")
-    try:
-        with urllib.request.urlopen(put, context=_UPLOAD_CTX, timeout=30):
-            pass
-    except urllib.error.HTTPError as error:
-        if error.code == 412:
-            # The upload object is immutable (`If-None-Match: *`).  A replay
-            # may be interrupted after the successful PUT but before the
-            # public completion call.  In that narrow case, let Control
-            # re-validate the declared hash and object identity below instead
-            # of attempting an unsafe overwrite or abandoning the operation.
-            pass
-        else:
-            # A presigned upload URL contains sensitive query material.
-            # Preserve only the HTTP class so deployment evidence can
-            # distinguish storage authorization from transport failure.
-            raise ReplayError(f"LW_RESOURCE_REPLAY_UPLOAD_HTTP_{error.code}") from error
-    except OSError as error:
-        raise ReplayError("LW_RESOURCE_REPLAY_UPLOAD_FAILED") from error
+    upload_url = upload_target["uploadUrl"]
+    minio_headers = upload_target.get("requiredHeaders", {})
+    _put_minio(upload_url, material_bytes, minio_headers)
     _phase("complete-upload")
     package, _ = teacher.request(
         "POST",
