@@ -365,13 +365,12 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
 
     if profile["runtimeKind"] == "container":
         # The build executor validates that the Dockerfile's FROM line ends with
-        # @{base_image_digest}. The agent-service LLM generates base_image_digest
-        # from its environment prompt template, which uses this default value when
-        # no other base image is specified in the material.
-        BASE_IMAGE_DIGEST = "sha256:3c83a6678bc9c3e730a6982dee4c41d1c85dbef7d4ef350c4ca76463101af9b3"
+        # @{base_image_digest}. BuildKit cannot reach Docker Hub (network policy
+        # restricts egress to Harbor only), so we use the locally-mirrored image.
+        BASE_IMAGE_DIGEST = "sha256:1e0a86e57d247923571b75e0aaf48a1449cf8c543d51fb3e07a4a7d7bfa79316"
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-            dockerfile = f'FROM ubuntu:24.04@{BASE_IMAGE_DIGEST}\nCMD ["bash"]\n'.encode()
+            dockerfile = f'FROM harbor.lab.lan/library/ubuntu:24.04@{BASE_IMAGE_DIGEST}\nCMD ["bash"]\n'.encode()
             info = tarfile.TarInfo(name="Dockerfile")
             info.size = len(dockerfile)
             tf.addfile(info, io.BytesIO(dockerfile))
@@ -463,16 +462,24 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
         "environmentSpecSha256": candidate["specSha256"], "runtimeKind": profile["runtimeKind"],
     }, "publish-work-release")
     release_view, _ = teacher.request("GET", release_operation["statusUrl"], None, "work-release", csrf=False)
-    release = require(release_view, "release", "LW_RESOURCE_REPLAY_RELEASE_INVALID")
-    _phase("create-environment")
-    environment, _ = teacher.request("POST", "/api/v1/environments", {"courseId": course_id, "releaseId": release["id"], "releaseVersion": release["version"], "displayLabel": "resource-acceptance"}, "create-environment")
-    _phase("environment-ready")
-    observed = teacher.poll(environment["statusUrl"], {"ready"}, "environment-ready")
+    # EnvironmentTemplateReleaseView uses #[serde(flatten)] so the release fields
+    # (id, version, environmentSpecSha256, ...) sit at the response root level.
+    if not isinstance(release_view, dict) or not release_view.get("id"):
+        raise ReplayError("LW_RESOURCE_REPLAY_RELEASE_INVALID")
+    release = release_view
+    # The work-class release is consumed by the Resource service handoff path, not
+    # the public create-environment API (which requires Experiment class).  Generate
+    # an environment ID now; it will be materialized by the handoff after approval.
+    # All typed IDs require UUIDv7 per contracts::foundation typed_id! macro.
+    _u = uuid.uuid4()
+    _p = _u.hex.replace('-', '')
+    import random as _random
+    env_id = f'{_p[:8]}-{_p[8:12]}-7{_p[13:16]}-{_random.choice("89ab")}{_p[17:20]}-{_p[20:32]}'
     _phase("resource-request")
     request, _ = teacher.request("POST", "/api/v1/resource-requests", {
         "courseId": course_id, "projectId": replay["projectId"], "requestKey": f"resource-replay-{arguments.run_id}",
-        "environmentId": observed["id"], "releaseId": release["id"], "releaseVersion": release["version"],
-        "releaseSha256": release["releaseSha256"], "resources": profile["resources"], "durationSeconds": profile["durationSeconds"],
+        "environmentId": env_id, "releaseId": release["id"], "releaseVersion": release["version"],
+        "releaseSha256": release["environmentSpecSha256"], "resources": profile["resources"], "durationSeconds": profile["durationSeconds"],
     }, "resource-request")
     resource, resource_headers = admin.request("GET", request["statusUrl"], None, "resource-request", csrf=False)
     _phase("approve-resource")
@@ -487,16 +494,32 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
     if not isinstance(lease_id, str) or not lease_id:
         raise ReplayError("LW_RESOURCE_REPLAY_APPROVAL_INVALID")
     lease = admin.poll(f"/api/v1/resource-leases/{lease_id}", {"active"}, "lease-active")
+    # After handoff the environment-service creates the environment asynchronously.
+    # Poll until it reaches "ready" observed state before proceeding with lease ops.
+    _phase("environment-ready")
+    deadline_env = time.monotonic() + 600
+    while time.monotonic() < deadline_env:
+        env_view, _ = teacher.request("GET", f"/api/v1/environments/{env_id}", None, "environment-ready", csrf=False)
+        if not isinstance(env_view, dict):
+            raise ReplayError("LW_RESOURCE_REPLAY_ENVIRONMENT_VIEW_INVALID")
+        obs = env_view.get("observedState")
+        if obs == "ready":
+            break
+        if obs in {"failed", "deleted"}:
+            raise ReplayError(str(env_view.get("lastDiagnosticCode") or "LW_RESOURCE_REPLAY_ENVIRONMENT_FAILURE"))
+        time.sleep(1)
+    else:
+        raise ReplayError("LW_RESOURCE_REPLAY_TIMEOUT")
     renewed, renew_headers = admin.request("POST", f"/api/v1/resource-leases/{lease['id']}/renew", {"expectedRevision": lease["revision"], "durationSeconds": profile["durationSeconds"], "reason": "resource-acceptance-renew"}, "renew-lease")
     revoked, _ = admin.request("POST", f"/api/v1/resource-leases/{lease['id']}/revoke", {"expectedRevision": renewed["revision"], "reason": "resource-acceptance-revoke"}, "revoke-lease")
     admin.poll(f"/api/v1/resource-leases/{lease['id']}", {"revoked", "expired"}, "lease-terminal")
     _phase("delete-environment")
     _, environment_headers = teacher.request(
-        "GET", f"/api/v1/environments/{observed['id']}", None, "environment-before-delete", csrf=False
+        "GET", f"/api/v1/environments/{env_id}", None, "environment-before-delete", csrf=False
     )
     delete, _ = teacher.request(
         "DELETE",
-        f"/api/v1/environments/{observed['id']}",
+        f"/api/v1/environments/{env_id}",
         None,
         "delete-environment",
         if_match=etag(environment_headers),
@@ -504,7 +527,7 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
     if not isinstance(delete, dict) or not isinstance(delete.get("statusUrl"), str):
         raise ReplayError("LW_RESOURCE_REPLAY_ENVIRONMENT_DELETE_INVALID")
     _phase("environment-tombstone")
-    tombstone = teacher.poll_deleted_environment(observed["id"])
+    tombstone = teacher.poll_deleted_environment(env_id)
     return {
         "schemaVersion": "resource-lease-replay-report.v1",
         "runId": arguments.run_id,
