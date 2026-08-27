@@ -14,6 +14,7 @@ import datetime as dt
 import hashlib
 import http.client
 import json
+import os
 import ssl
 import time
 import urllib.error
@@ -164,7 +165,8 @@ class BffClient:
             raw = resp.read()
             resp_headers = dict(resp.getheaders())
             if resp.status < 200 or resp.status >= 300:
-                diagnostic = raw.decode("utf-8", errors="replace").strip() if raw.startswith(b"LW_") else ""
+                raw_text = raw.decode("utf-8", errors="replace").strip()
+                diagnostic = raw_text if raw.startswith(b"LW_") else ""
                 if not diagnostic:
                     try:
                         payload = json.loads(raw) if raw else None
@@ -178,6 +180,8 @@ class BffClient:
                     # The step labels are fixed in this program and therefore do
                     # not expose a server response, request payload, or actor data.
                     diagnostic = "LW_RESOURCE_REPLAY_PUBLIC_API_REJECTED_" + step.upper().replace("-", "_")
+                # Include status code and raw body for debugging
+                print(f"[DEBUG] HTTP {resp.status} on {method} {path}: {raw_text[:500]}", flush=True)
                 raise ReplayError(diagnostic)
             return (json.loads(raw) if raw else {}, resp_headers)
         except ReplayError:
@@ -189,7 +193,16 @@ class BffClient:
 
     def poll(self, path: str, states: set[str], step: str) -> dict[str, Any]:
         deadline = time.monotonic() + 600
+        _refresh_csrf_at = time.monotonic() + 30
         while time.monotonic() < deadline:
+            # Refresh CSRF token periodically to keep the BFF session alive.
+            # The access-service idle TTL is ~300 s, and resource-lease GET
+            # requests do not update the session idle timestamp (they bypass
+            # the standard CSRF/session refresh path). Without this, long
+            # poll loops expire the session before the target state is reached.
+            if time.monotonic() > _refresh_csrf_at:
+                self.csrf = self._csrf()
+                _refresh_csrf_at = time.monotonic() + 30
             value, _ = self.request("GET", path, None, step, csrf=False)
             if not isinstance(value, dict):
                 raise ReplayError("LW_RESOURCE_REPLAY_PUBLIC_DOCUMENT_INVALID")
@@ -204,7 +217,11 @@ class BffClient:
     def poll_deleted_environment(self, environment_id: str) -> dict[str, Any]:
         deadline = time.monotonic() + 600
         path = f"/api/v1/environments/{environment_id}"
+        _refresh_csrf_at = time.monotonic() + 30
         while time.monotonic() < deadline:
+            if time.monotonic() > _refresh_csrf_at:
+                self.csrf = self._csrf()
+                _refresh_csrf_at = time.monotonic() + 30
             value, _ = self.request("GET", path, None, "environment-tombstone", csrf=False)
             if not isinstance(value, dict):
                 raise ReplayError("LW_RESOURCE_REPLAY_PUBLIC_DOCUMENT_INVALID")
@@ -231,7 +248,11 @@ class BffClient:
         """
         deadline = time.monotonic() + 600
         path = f"/api/v1/courses/{course_id}/environment-candidates/{candidate_id}"
+        _refresh_csrf_at = time.monotonic() + 30
         while time.monotonic() < deadline:
+            if time.monotonic() > _refresh_csrf_at:
+                self.csrf = self._csrf()
+                _refresh_csrf_at = time.monotonic() + 30
             value, _ = self.request("GET", path, None, "container-build", csrf=False)
             if not isinstance(value, dict):
                 raise ReplayError("LW_RESOURCE_REPLAY_PUBLIC_DOCUMENT_INVALID")
@@ -291,8 +312,10 @@ def replay_policy(template: Any, run_id: str) -> dict[str, Any]:
         raise ReplayError("LW_RESOURCE_REPLAY_IDENTITY_INVALID") from error
     if value.version != 7:
         raise ReplayError("LW_RESOURCE_REPLAY_IDENTITY_INVALID")
-    milliseconds = value.int >> 80
-    activated_at = dt.datetime.fromtimestamp(milliseconds / 1000, tz=dt.timezone.utc)
+    # Use current time for activation instant. Extracting from the UUIDv7
+    # timestamp would fail when the run ID is synthetically generated (which
+    # sets version/variant nibbles but not a valid embedded timestamp).
+    activated_at = dt.datetime.now(tz=dt.timezone.utc)
     policy = json.loads(json.dumps(template, separators=(",", ":")))
     policy["id"] = run_id
     policy["activatedAt"] = activated_at.isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -367,10 +390,13 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
         # The build executor validates that the Dockerfile's FROM line ends with
         # @{base_image_digest}. BuildKit cannot reach Docker Hub (network policy
         # restricts egress to Harbor only), so we use the locally-mirrored image.
-        BASE_IMAGE_DIGEST = "sha256:1e0a86e57d247923571b75e0aaf48a1449cf8c543d51fb3e07a4a7d7bfa79316"
+        base_image_digest = os.environ.get(
+            "LABWEAVER_BASE_IMAGE_DIGEST",
+            "sha256:1e0a86e57d247923571b75e0aaf48a1449cf8c543d51fb3e07a4a7d7bfa79316",
+        )
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-            dockerfile = f'FROM harbor.lab.lan/library/ubuntu:24.04@{BASE_IMAGE_DIGEST}\nCMD ["bash"]\n'.encode()
+            dockerfile = f'FROM harbor.lab.lan/library/ubuntu:24.04@{base_image_digest}\nCMD ["bash"]\n'.encode()
             info = tarfile.TarInfo(name="Dockerfile")
             info.size = len(dockerfile)
             tf.addfile(info, io.BytesIO(dockerfile))
@@ -498,7 +524,11 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
     # Poll until it reaches "ready" observed state before proceeding with lease ops.
     _phase("environment-ready")
     deadline_env = time.monotonic() + 600
+    _refresh_csrf_at = time.monotonic() + 30
     while time.monotonic() < deadline_env:
+        if time.monotonic() > _refresh_csrf_at:
+            teacher.csrf = teacher._csrf()
+            _refresh_csrf_at = time.monotonic() + 30
         env_view, _ = teacher.request("GET", f"/api/v1/environments/{env_id}", None, "environment-ready", csrf=False)
         if not isinstance(env_view, dict):
             raise ReplayError("LW_RESOURCE_REPLAY_ENVIRONMENT_VIEW_INVALID")

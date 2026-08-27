@@ -143,7 +143,18 @@ async fn run_outbox(
     loop {
         tokio::select! {
             changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { return Ok(()); } }
-            _ = interval.tick() => { let _ = outbox.dispatch_once().await?; }
+            _ = interval.tick() => {
+                if let Err(ref e) = outbox.dispatch_once().await {
+                    tracing::warn!(
+                        error = e as &dyn std::error::Error,
+                        component = "outbox",
+                        event = "resource.outbox.failed",
+                        operation = "nats.publish",
+                        outcome = "will_retry",
+                    );
+                }
+            }
+
         }
     }
 }
