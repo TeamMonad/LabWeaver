@@ -918,6 +918,28 @@ impl PgResourceStore {
         }))
     }
 
+    /// Reloads a ready claim by id for handoff. Returns `None` if the claim was already
+    /// consumed by another reconciler cycle (avoids spurious crash on `.ok_or()`).
+    pub async fn refresh_ready_claim(
+        &self,
+        claim_id: contracts::CapacityClaimId,
+    ) -> Result<Option<ProvisioningCapacityClaim>, ResourceStoreError> {
+        let row = sqlx::query(
+            "SELECT c.contract AS claim_contract,r.contract AS request_contract,l.contract AS lease_contract FROM resource.capacity_claims c JOIN resource.resource_requests r ON r.request_id=c.request_id JOIN resource.resource_leases l ON l.claim_id=c.claim_id WHERE c.claim_id=$1 AND c.state='ready'",
+        )
+        .bind(claim_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        Ok(Some(ProvisioningCapacityClaim {
+            claim: decode_claim(row.try_get("claim_contract")?)?,
+            request: decode_request(row.try_get("request_contract")?)?,
+            lease: decode_lease(row.try_get("lease_contract")?)?,
+        }))
+    }
+
     /// Records ownership transfer only after Environment durably accepts the idempotent Work
     /// command. Resource retains all release responsibility before this transition.
     pub async fn mark_capacity_handed_off(

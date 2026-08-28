@@ -522,11 +522,13 @@ impl CapacityReconcileWorker {
                 )
                 .await?;
         }
-        let refreshed = self
-            .store
-            .next_ready_capacity_handoff()
-            .await?
-            .ok_or(crate::store::ResourceStoreError::CapacityClaimStateConflict)?;
+        // Use the claim we already fetched rather than querying again — a second query
+        // may return None if another reconciler cycle consumed the claim, and there is no
+        // guarantee that the same claim would be returned twice. Using `item` avoids a
+        // spurious CapacityClaimStateConflict crash.
+        let Some(refreshed) = self.store.refresh_ready_claim(item.claim.id).await? else {
+            return Ok(());
+        };
         match self.environment_handoff.handoff(&refreshed).await {
             Ok(()) => {
                 self.store

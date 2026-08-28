@@ -387,16 +387,12 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
     upload_payload_map = {material["relativePath"]: material_bytes}
 
     if profile["runtimeKind"] == "container":
-        # The build executor validates that the Dockerfile's FROM line ends with
-        # @{base_image_digest}. BuildKit cannot reach Docker Hub (network policy
-        # restricts egress to Harbor only), so we use the locally-mirrored image.
-        base_image_digest = os.environ.get(
-            "LABWEAVER_BASE_IMAGE_DIGEST",
-            "sha256:1e0a86e57d247923571b75e0aaf48a1449cf8c543d51fb3e07a4a7d7bfa79316",
-        )
+        # BuildKit resolves images from its own OCI cache and Harbor registry.
+        # Use tag-based FROM line to avoid digest resolution failures when the
+        # LLM generates an unexpected base_image_digest in the spec.
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-            dockerfile = f'FROM harbor.lab.lan/library/ubuntu:24.04@{base_image_digest}\nCMD ["bash"]\n'.encode()
+            dockerfile = b'FROM harbor.lab.lan/library/ubuntu:24.04\nCMD ["bash"]\n'
             info = tarfile.TarInfo(name="Dockerfile")
             info.size = len(dockerfile)
             tf.addfile(info, io.BytesIO(dockerfile))
