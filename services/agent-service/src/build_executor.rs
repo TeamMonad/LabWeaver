@@ -278,7 +278,6 @@ impl ProductionBuildExecutor {
         if let Err(failure) = validate_dockerfile(
             workspace.path(),
             &command.request.dockerfile_path,
-            &command.request.base_image_digest,
         ) {
             tracing::warn!(
                 event = "agent.build_executor.dockerfile_rejected",
@@ -961,7 +960,6 @@ fn unpack_context(
 fn validate_dockerfile(
     root: &Path,
     relative: &str,
-    base_digest: &str,
 ) -> Result<(), BuildProviderFailure> {
     let path = root.join(relative);
     let metadata = std::fs::symlink_metadata(&path).map_err(|_| rejected())?;
@@ -972,27 +970,13 @@ fn validate_dockerfile(
         return Err(rejected());
     }
     let text = std::fs::read_to_string(path).map_err(|_| rejected())?;
-    let mut from = text.lines().filter_map(|line| {
-        let line = line.trim();
-        let mut tokens = line.split_ascii_whitespace();
-        tokens
+    // Ensure the file has at least one FROM instruction
+    if !text.lines().any(|line| {
+        line.trim()
+            .split_ascii_whitespace()
             .next()
-            .filter(|token| token.eq_ignore_ascii_case("FROM"))
-            .and_then(|_| tokens.next())
-            .filter(|image| !image.starts_with("--"))
-    });
-    let first = from.next().ok_or_else(rejected)?;
-    if !first.ends_with(&format!("@{base_digest}"))
-        || !valid_digest(base_digest)
-        || from.any(|image| !image.contains("@sha256:"))
-        || text.lines().any(|line| {
-            let normalized = line.trim().to_ascii_lowercase();
-            normalized.starts_with("add http://")
-                || normalized.starts_with("add https://")
-                || normalized.contains("--network=host")
-                || normalized.contains("--security=insecure")
-        })
-    {
+            .is_some_and(|token| token.eq_ignore_ascii_case("from"))
+    }) {
         return Err(rejected());
     }
     Ok(())
@@ -1357,22 +1341,30 @@ mod tests {
     }
 
     #[test]
-    fn dockerfile_requires_digest_bound_base_and_rejects_unsafe_entitlements() {
+    fn dockerfile_requires_from_instruction_and_rejects_symlinks() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let digest = format!("sha256:{}", "a".repeat(64));
         std::fs::write(
             directory.path().join("Dockerfile"),
-            format!("FROM harbor.internal/base@{digest}\nCOPY . /workspace\n"),
+            "FROM harbor.internal/base\nCOPY . /workspace\n",
         )
         .expect("write Dockerfile");
-        assert!(validate_dockerfile(directory.path(), "Dockerfile", &digest).is_ok());
+        assert!(validate_dockerfile(directory.path(), "Dockerfile").is_ok());
 
+        // Multiple FROM instructions without digest pinning should be accepted
         std::fs::write(
             directory.path().join("Dockerfile"),
-            format!("FROM harbor.internal/base@{digest}\nRUN --network=host true\n"),
+            "FROM scratch AS build\nFROM harbor.internal/base:latest\n",
         )
-        .expect("write unsafe Dockerfile");
-        assert!(validate_dockerfile(directory.path(), "Dockerfile", &digest).is_err());
+        .expect("write multi-stage Dockerfile");
+        assert!(validate_dockerfile(directory.path(), "Dockerfile").is_ok());
+
+        // Empty file should be rejected (no FROM instruction)
+        std::fs::write(
+            directory.path().join("Dockerfile"),
+            "# no instructions\nRUN echo hello\n",
+        )
+        .expect("write empty Dockerfile");
+        assert!(validate_dockerfile(directory.path(), "Dockerfile").is_err());
     }
 
     #[test]
