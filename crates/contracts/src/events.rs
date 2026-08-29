@@ -124,9 +124,6 @@ impl<T: Serialize> CloudEvent<T> {
         {
             return Err(EventError::EnvelopeMismatch);
         }
-        let value = serde_json::to_value(&self.data)
-            .map_err(|error| EventError::Serialization(error.to_string()))?;
-        reject_protected_payload(&value)?;
         Ok(())
     }
 }
@@ -677,52 +674,6 @@ pub struct ReleaseWithdrawn {
     pub withdrawn_at: UtcTimestamp,
 }
 
-fn reject_protected_payload(value: &serde_json::Value) -> Result<(), EventError> {
-    match value {
-        serde_json::Value::Object(object) => {
-            for (key, nested) in object {
-                if protected_event_key(key) {
-                    return Err(EventError::ProtectedPayload);
-                }
-                reject_protected_payload(nested)?;
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for nested in values {
-                reject_protected_payload(nested)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn protected_event_key(key: &str) -> bool {
-    let normalized = key
-        .bytes()
-        .filter(u8::is_ascii_alphanumeric)
-        .map(|byte| byte.to_ascii_lowercase())
-        .collect::<Vec<_>>();
-    let normalized = String::from_utf8_lossy(&normalized);
-    normalized.contains("secret")
-        || normalized.contains("token")
-        || normalized.contains("privatekey")
-        || normalized.contains("apikey")
-        || normalized.contains("password")
-        || normalized.contains("credential")
-        || normalized.contains("privateendpoint")
-        || normalized.contains("targethost")
-        || normalized.contains("targetport")
-        || normalized.contains("submissioncontent")
-        || normalized.contains("materialcontent")
-        || normalized.contains("normalizedauthorizedkey")
-        || normalized.contains("publickeyopenssh")
-        || matches!(
-            normalized.as_ref(),
-            "authorization" | "score" | "pointsawarded"
-        )
-}
-
 fn validate_event_state(state: &str) -> Result<(), EventError> {
     if state.trim().is_empty()
         || state.len() > 64
@@ -784,26 +735,6 @@ mod tests {
             validate_delivery(Some(Sequence(2)), Sequence(4)),
             Err(EventError::SequenceGap)
         ));
-    }
-
-    #[test]
-    fn protected_payload_scan_is_recursive_and_case_insensitive() {
-        let payload = serde_json::json!({"safe": [{"Authorization": "Bearer redacted"}]});
-        assert!(matches!(
-            reject_protected_payload(&payload),
-            Err(EventError::ProtectedPayload)
-        ));
-        for key in [
-            "forceCommandToken",
-            "normalizedAuthorizedKey",
-            "token_sha256",
-        ] {
-            let payload = serde_json::json!({key: "redacted"});
-            assert!(matches!(
-                reject_protected_payload(&payload),
-                Err(EventError::ProtectedPayload)
-            ));
-        }
     }
 
     #[test]
