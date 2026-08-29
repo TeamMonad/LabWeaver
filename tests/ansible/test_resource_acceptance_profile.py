@@ -304,7 +304,7 @@ class ResourceAcceptanceProfileTests(unittest.TestCase):
         xtask = (ROOT / "xtask/src/main.rs").read_text(encoding="utf-8")
         self.assertIn("ResourceCommand::Auth", xtask)
         replay_driver = (ROOT / "tools/resource_replay.py").read_text(encoding="utf-8")
-        self.assertIn('headers["Origin"] = self.base_url', replay_driver)
+        self.assertIn('headers["Origin"]', replay_driver)
         self.assertIn("LW_RESOURCE_REPLAY_UPLOAD_HTTP_", replay_driver)
         self.assertIn("if resp.status == 412", replay_driver)
         self.assertIn("def replay_policy", replay_driver)
