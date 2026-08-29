@@ -2076,13 +2076,13 @@ impl AgentRunStoreError {
     pub const fn diagnostic_code(self) -> &'static str {
         match self {
             Self::CourseMismatch => diagnostic::ACCESS_DENIED,
-            Self::IdentityMismatch => diagnostic::CONFLICT,
+            Self::IdentityMismatch
+            | Self::LeaseLost
+            | Self::RunInProgress
+            | Self::StateConflict
+            | Self::RunNotFound => diagnostic::CONFLICT,
             Self::IdempotencyConflict => diagnostic::IDEMPOTENCY_CONFLICT,
-            Self::RunInProgress | Self::StateConflict | Self::RunNotFound => {
-                diagnostic::CONFLICT
-            }
             Self::WorkerIdentityInvalid => diagnostic::INVALID_REQUEST,
-            Self::LeaseLost => diagnostic::CONFLICT,
             Self::InvalidContract => diagnostic::CONTRACT_DOCUMENT_INVALID,
             Self::PersistenceFailed => diagnostic::DATABASE_FAILED,
         }

@@ -557,7 +557,6 @@ impl AgentBuildConsumer {
                 };
                 if resolution.validate().is_err()
                     || resolution.artifact_id != data.artifact_id
-                    || false
                     || container_build_request_id(&resolution.artifact)
                         != Some(data.build_request_id)
                 {
@@ -706,6 +705,7 @@ impl AgentBuildConsumer {
     }
 }
 
+#[allow(dead_code)]
 fn canonical_hash<T: Serialize>(value: &T) -> Result<Sha256Digest, MessagingError> {
     Sha256Digest::of_canonical(value).map_err(|_| MessagingError::Contract)
 }

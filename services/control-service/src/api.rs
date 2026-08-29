@@ -148,7 +148,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
 
 /// Serves the Control router over plain HTTP for private single-university delivery.
 ///
-/// Inner mTLS is disabled (ARC-09); NetworkPolicy / private network is the trust boundary.
+/// Inner mTLS is disabled (ARC-09); `NetworkPolicy` / private network is the trust boundary.
 pub async fn serve_mtls(
     listener: tokio::net::TcpListener,
     router: Router,
@@ -165,9 +165,7 @@ pub async fn serve_plain(
     let router = router.layer(Extension(GatewayPrincipal {
         san_uri: "spiffe://labweaver/private-single-tenant".to_owned(),
     }));
-    axum::serve(listener, router)
-        .await
-        .map_err(std::io::Error::from)
+    axum::serve(listener, router).await
 }
 
 async fn create_upload(
@@ -198,7 +196,7 @@ async fn complete_upload(
     Extension(principal): Extension<GatewayPrincipal>,
     Path((course_id, upload_id)): Path<(CourseId, UploadSessionId)>,
     headers: HeaderMap,
-    Json(request): Json<CompleteProblemPackageUploadRequest>,
+    Json(_request): Json<CompleteProblemPackageUploadRequest>,
 ) -> Result<Response, ApiError> {
     authorize(
         &state,
@@ -331,7 +329,6 @@ async fn create_agent_run_for_class(
         .await?;
     let policy = state.control.active_policy(course_id).await?;
     if package.revision != request.package_revision
-        || false
         || policy.id != request.policy_id
         || policy.revision != request.policy_revision
     {

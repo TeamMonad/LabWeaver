@@ -56,10 +56,10 @@ impl MtlsClientFileConfig {
                 && !self.client_certificate_file.is_empty()
                 && !self.client_private_key_file.is_empty()
             {
-                if let Ok(ca) = std::fs::read(&self.ca_certificate_file) {
-                    if let Ok(cert) = Certificate::from_pem(&ca) {
-                        builder = builder.add_root_certificate(cert);
-                    }
+                if let Ok(ca) = std::fs::read(&self.ca_certificate_file)
+                    && let Ok(cert) = Certificate::from_pem(&ca)
+                {
+                    builder = builder.add_root_certificate(cert);
                 }
                 if let (Ok(mut identity), Ok(key)) = (
                     std::fs::read(&self.client_certificate_file),

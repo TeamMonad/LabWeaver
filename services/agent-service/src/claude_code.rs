@@ -1957,18 +1957,19 @@ impl ClaudeCodeRuntimeError {
             Self::InputLimitExceeded | Self::BudgetExceeded => {
                 diagnostic::RESOURCE_EXHAUSTED
             }
-            Self::RuntimeUnavailable => diagnostic::PROVIDER_UNAVAILABLE,
-            Self::ExecutionFailed | Self::ToolDenied => diagnostic::PROVIDER_UNAVAILABLE,
-            Self::ProtocolInvalid => diagnostic::EVIDENCE_INVALID,
-            Self::SchemaInvalid => diagnostic::EVIDENCE_INVALID,
-            Self::EnvironmentClassMismatch => diagnostic::EVIDENCE_INVALID,
+            Self::RuntimeUnavailable
+            | Self::ExecutionFailed
+            | Self::ToolDenied
+            | Self::UpstreamUnavailable => diagnostic::PROVIDER_UNAVAILABLE,
+            Self::ProtocolInvalid
+            | Self::SchemaInvalid
+            | Self::EnvironmentClassMismatch => diagnostic::EVIDENCE_INVALID,
             Self::ProtectedField => diagnostic::ACCESS_DENIED,
             Self::OutputLimitExceeded => diagnostic::RESOURCE_EXHAUSTED,
             Self::TimedOut => diagnostic::PROVIDER_TIMEOUT,
             Self::Cancelled => diagnostic::CONFLICT,
             Self::RateLimited => diagnostic::RATE_LIMITED,
             Self::Refused => diagnostic::PROVIDER_REJECTED,
-            Self::UpstreamUnavailable => diagnostic::PROVIDER_UNAVAILABLE,
         }
     }
 }

@@ -449,7 +449,7 @@ impl ControlService {
                 )
                 .await;
         }
-        let declared_manifest = rows
+        let _declared_manifest = rows
             .iter()
             .map(|row| {
                 Ok(ProblemPackageUploadFile {

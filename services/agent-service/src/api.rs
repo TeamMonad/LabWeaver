@@ -84,9 +84,7 @@ pub async fn serve_plain(
     let router = router.layer(Extension(ControlPrincipal {
         san_uri: "spiffe://labweaver/control-service".to_owned(),
     }));
-    axum::serve(listener, router)
-        .await
-        .map_err(std::io::Error::from)
+    axum::serve(listener, router).await
 }
 
 async fn create_run(
