@@ -33,7 +33,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use contracts::;
 use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use nix::{
     errno::Errno,
@@ -789,7 +788,7 @@ mod tests {
     use std::net::Ipv4Addr;
     use std::path::PathBuf;
 
-    use contracts::;
+    use persistence_sqlx::Sha256Digest;
     use contracts::evaluation::FactAssertion;
     use serde_json::json;
     use uuid::Uuid;

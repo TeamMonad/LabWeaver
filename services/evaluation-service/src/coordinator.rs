@@ -413,7 +413,7 @@ impl FreezeCoordinator {
                     json!({
                         "kind":"pvc",
                         "workspaceRoot":"/workspace",
-                        "sourceIdentity": contracts::Sha256Digest::of_canonical(&binding.environment)
+                        "sourceIdentity": persistence_sqlx::Sha256Digest::of_canonical(&binding.environment)
                             .map_err(|_| FreezeCoordinatorError::BindingInvalid)?
                     }),
                     Some(

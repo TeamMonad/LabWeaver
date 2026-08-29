@@ -1,7 +1,6 @@
 //! Explicit Kubernetes capacity provider for Resource-owned quota shells.
 
 use std::collections::BTreeMap;
-use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -139,7 +138,6 @@ impl EnvironmentHandoffClient {
             project_id: item.request.project_id,
             release_id: item.request.target.release_id,
             release_version: item.request.target.release_version,
-            release_sha256: item.request.target.release_sha256,
             provider_binding: item.claim.provider_binding.clone(),
             capacity_binding: item.claim.id.to_string(),
             trace_id: format!("resource-handoff-{}", item.claim.id),
@@ -311,7 +309,6 @@ pub struct KubernetesQuotaShellPlan {
     pub namespace: String,
     pub claim_id: contracts::CapacityClaimId,
     pub claim_revision: contracts::Revision,
-    pub quota_plan_sha256: contracts::Sha256Digest,
     pub namespace_document: Value,
     pub quota_document: Value,
 }
@@ -364,7 +361,6 @@ impl KubernetesQuotaShellPlan {
         );
         let annotations = json!({
             "labweaver.io/capacity-claim-revision": claim.revision.get().to_string(),
-            "labweaver.io/quota-plan-sha256": claim.quota_plan_sha256.to_string(),
             "labweaver.io/provider-binding": claim.provider_binding,
         });
         let namespace_document = json!({
@@ -390,7 +386,6 @@ impl KubernetesQuotaShellPlan {
             namespace,
             claim_id: claim.id,
             claim_revision: claim.revision,
-            quota_plan_sha256: claim.quota_plan_sha256,
             namespace_document,
             quota_document,
         })
@@ -958,7 +953,6 @@ fn verify_document(actual: &Value, expected: &Value) -> Result<(), CapacityProvi
         "/metadata/labels/labweaver.io~1environment-id",
         "/metadata/labels/labweaver.io~1capacity-claim-id",
         "/metadata/annotations/labweaver.io~1capacity-claim-revision",
-        "/metadata/annotations/labweaver.io~1quota-plan-sha256",
         "/metadata/annotations/labweaver.io~1provider-binding",
     ] {
         if actual.pointer(pointer) != expected.pointer(pointer) {
@@ -1110,7 +1104,6 @@ mod tests {
                 environment_id: EnvironmentId::new(),
                 release_id: ReleaseId::new(),
                 release_version: 1,
-                release_sha256: digest(),
             },
             requested_resources: resources(),
             requested_duration_seconds: 600,
@@ -1125,10 +1118,8 @@ mod tests {
             request_id: request.id,
             approval_id: ResourceApprovalId::new(),
             provider_binding: configuration.binding.clone(),
-            policy_sha256: digest(),
             workload_resources: resources(),
             quota_resources: resources(),
-            quota_plan_sha256: digest(),
             state: contracts::resource::CapacityClaimState::Reserved,
             revision: contracts::Revision::new(1).expect("positive"),
         };
@@ -1197,7 +1188,6 @@ mod tests {
                 },
                 "annotations": {
                     "labweaver.io/capacity-claim-revision": "1",
-                    "labweaver.io/quota-plan-sha256": "digest",
                     "labweaver.io/provider-binding": "kubernetes-standard",
                 },
             }
@@ -1218,9 +1208,6 @@ mod tests {
             storage_bytes: 1024,
             gpu: None,
         }
-    }
-    fn digest() -> contracts::Sha256Digest {
-        contracts::Sha256Digest::from_str(&"a".repeat(64)).expect("digest")
     }
     fn timestamp() -> contracts::UtcTimestamp {
         contracts::UtcTimestamp::from_str("2026-07-30T00:00:00.000Z").expect("timestamp")

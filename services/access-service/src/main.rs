@@ -23,9 +23,10 @@ use axum::{
 };
 use contracts::{
     AuthSession, AuthenticatedActor, AuthorizationDecision, AuthorizationDecisionRequest,
-    AuthorizationScope, CsrfTokenResponse, OperationScopeKind, Revision, Sha256Digest,
-    UtcTimestamp, environment::EnvironmentOwnerResolutionRequest, operation_contract,
+    AuthorizationScope, CsrfTokenResponse, OperationScopeKind, Revision, UtcTimestamp,
+    environment::EnvironmentOwnerResolutionRequest, operation_contract,
 };
+use persistence_sqlx::Sha256Digest;
 
 use serde::Deserialize;
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -599,7 +600,7 @@ async fn login(State(state): State<Arc<AppState>>) -> Result<Redirect, ApiError>
             transaction_id.as_bytes(),
         )
         .map_err(|_| ApiError::internal("LW_AUTH_KEYRING_ENCRYPTION_FAILED"))?;
-    let state_hash = contracts::Sha256Digest::of_bytes(transaction.state.as_bytes()).to_string();
+    let state_hash = Sha256Digest::of_bytes(transaction.state.as_bytes()).to_string();
     sqlx::query("INSERT INTO access.oidc_transactions (transaction_id, state_sha256, encrypted_payload, encryption_key_id, expires_at) VALUES ($1,$2,$3,$4,$5)")
         .bind(transaction_id)
         .bind(state_hash)

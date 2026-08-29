@@ -58,12 +58,12 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
     let approval_id = Uuid::now_v7();
     let claim_id = Uuid::now_v7();
     let lease_id = Uuid::now_v7();
-    sqlx::query("INSERT INTO resource.resource_requests (request_id,generation,request_key,requester_id,course_id,environment_id,release_id,release_version,release_sha256,requested_cpu_millicores,requested_memory_bytes,requested_storage_bytes,requested_duration_seconds,state,revision,contract) VALUES ($1,1,'request-1',$2,$3,$4,$5,1,$6,1,1,1,60,'allocating',2,$7)")
-        .bind(request_id).bind(Uuid::now_v7()).bind(Uuid::now_v7()).bind(Uuid::now_v7()).bind(Uuid::now_v7()).bind("a".repeat(64)).bind(serde_json::json!({"request": "snapshot"})).execute(&pool).await?;
-    sqlx::query("INSERT INTO resource.resource_approvals (approval_id,request_id,request_revision,approver_id,provider_binding,policy_sha256,approved_cpu_millicores,approved_memory_bytes,approved_storage_bytes,approved_duration_seconds,reason,valid_until,contract) VALUES ($1,$2,1,$3,'kubernetes-standard',$4,1,1,1,60,'approved',now()+interval '1 hour',$5)")
-        .bind(approval_id).bind(request_id).bind(Uuid::now_v7()).bind("b".repeat(64)).bind(serde_json::json!({"approval": "snapshot"})).execute(&pool).await?;
-    sqlx::query("INSERT INTO resource.capacity_claims (claim_id,request_id,approval_id,provider_binding,policy_sha256,quota_plan_sha256,state,revision,workload_cpu_millicores,workload_memory_bytes,workload_storage_bytes,quota_cpu_millicores,quota_memory_bytes,quota_storage_bytes,contract) VALUES ($1,$2,$3,'kubernetes-standard',$4,$5,'reserved',1,1,1,1,2,2,2,$6)")
-        .bind(claim_id).bind(request_id).bind(approval_id).bind("b".repeat(64)).bind("c".repeat(64)).bind(serde_json::json!({"claim": "snapshot"})).execute(&pool).await?;
+    sqlx::query("INSERT INTO resource.resource_requests (request_id,generation,request_key,requester_id,course_id,environment_id,release_id,release_version,requested_cpu_millicores,requested_memory_bytes,requested_storage_bytes,requested_duration_seconds,state,revision,contract) VALUES ($1,1,'request-1',$2,$3,$4,$5,1,1,1,1,60,'allocating',2,$6)")
+        .bind(request_id).bind(Uuid::now_v7()).bind(Uuid::now_v7()).bind(Uuid::now_v7()).bind(Uuid::now_v7()).bind(serde_json::json!({"request": "snapshot"})).execute(&pool).await?;
+    sqlx::query("INSERT INTO resource.resource_approvals (approval_id,request_id,request_revision,approver_id,provider_binding,approved_cpu_millicores,approved_memory_bytes,approved_storage_bytes,approved_duration_seconds,reason,valid_until,contract) VALUES ($1,$2,1,$3,'kubernetes-standard',1,1,1,60,'approved',now()+interval '1 hour',$4)")
+        .bind(approval_id).bind(request_id).bind(Uuid::now_v7()).bind(serde_json::json!({"approval": "snapshot"})).execute(&pool).await?;
+    sqlx::query("INSERT INTO resource.capacity_claims (claim_id,request_id,approval_id,provider_binding,state,revision,workload_cpu_millicores,workload_memory_bytes,workload_storage_bytes,quota_cpu_millicores,quota_memory_bytes,quota_storage_bytes,contract) VALUES ($1,$2,$3,'kubernetes-standard','reserved',1,1,1,1,2,2,2,$4)")
+        .bind(claim_id).bind(request_id).bind(approval_id).bind(serde_json::json!({"claim": "snapshot"})).execute(&pool).await?;
     sqlx::query("INSERT INTO resource.resource_leases (lease_id,request_id,claim_id,state,revision,contract) VALUES ($1,$2,$3,'revoked',1,$4)")
         .bind(lease_id).bind(request_id).bind(claim_id).bind(serde_json::json!({"lease": "pending-terminal"})).execute(&pool).await?;
     let synced_revision: i64 = sqlx::query_scalar(
@@ -74,8 +74,8 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
     .await?;
     assert_eq!(synced_revision, 0);
 
-    assert!(sqlx::query("INSERT INTO resource.capacity_claims (claim_id,request_id,approval_id,provider_binding,policy_sha256,quota_plan_sha256,state,revision,workload_cpu_millicores,workload_memory_bytes,workload_storage_bytes,workload_gpu_class,quota_cpu_millicores,quota_memory_bytes,quota_storage_bytes,contract) VALUES ($1,$2,$3,'kubernetes-standard',$4,$5,'reserved',1,1,1,1,'gpu-a100',2,2,2,$6)")
-        .bind(Uuid::now_v7()).bind(Uuid::now_v7()).bind(Uuid::now_v7()).bind("b".repeat(64)).bind("c".repeat(64)).bind(serde_json::json!({})).execute(&pool).await.is_err());
+    assert!(sqlx::query("INSERT INTO resource.capacity_claims (claim_id,request_id,approval_id,provider_binding,state,revision,workload_cpu_millicores,workload_memory_bytes,workload_storage_bytes,workload_gpu_class,quota_cpu_millicores,quota_memory_bytes,quota_storage_bytes,contract) VALUES ($1,$2,$3,'kubernetes-standard','reserved',1,1,1,1,'gpu-a100',2,2,2,$4)")
+        .bind(Uuid::now_v7()).bind(Uuid::now_v7()).bind(Uuid::now_v7()).bind(serde_json::json!({})).execute(&pool).await.is_err());
     Ok(())
 }
 
@@ -102,7 +102,6 @@ async fn resource_store_commits_request_approval_claim_lease_and_renewal_as_fenc
             environment_id: EnvironmentId::new(),
             release_id: ReleaseId::new(),
             release_version: 1,
-            release_sha256: digest(),
         },
         requested_resources: resources.clone(),
         requested_duration_seconds: 600,
@@ -121,7 +120,6 @@ async fn resource_store_commits_request_approval_claim_lease_and_renewal_as_fenc
         request_revision: Revision::new(1)?,
         approver_id: ActorId::new(),
         provider_binding: "kubernetes-standard".into(),
-        policy_sha256: digest(),
         approved_resources: resources.clone(),
         approved_duration_seconds: 600,
         reason: "capacity approved".into(),
@@ -134,10 +132,8 @@ async fn resource_store_commits_request_approval_claim_lease_and_renewal_as_fenc
             request_id: request.id,
             approval_id: approval.id,
             provider_binding: approval.provider_binding.clone(),
-            policy_sha256: approval.policy_sha256,
             workload_resources: resources.clone(),
             quota_resources: resources,
-            quota_plan_sha256: digest(),
             state: contracts::resource::CapacityClaimState::Reserved,
             revision: Revision::new(1)?,
         },
@@ -438,7 +434,6 @@ fn outbox_request() -> Result<ResourceRequest, Box<dyn std::error::Error>> {
             environment_id: EnvironmentId::new(),
             release_id: ReleaseId::new(),
             release_version: 1,
-            release_sha256: digest(),
         },
         requested_resources: WorkloadResources {
             cpu_millicores: 1,

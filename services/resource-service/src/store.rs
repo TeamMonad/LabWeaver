@@ -66,7 +66,6 @@ impl PendingAllocation {
         if self.claim.request_id != request.id
             || self.claim.approval_id != approval.id
             || self.claim.provider_binding != approval.provider_binding
-            || self.claim.policy_sha256 != approval.policy_sha256
             || self.claim.workload_resources != approval.approved_resources
             || self.claim.state != CapacityClaimState::Reserved
         {
@@ -135,7 +134,7 @@ impl PgResourceStore {
         IdempotencyKey::parse(idempotency_key).map_err(|_| ResourceStoreError::IdempotencyKey)?;
         validate_trace(trace_id)?;
         let mut transaction = self.pool.begin().await?;
-        let hash = Sha256Digest::of_canonical(request)?;
+        let hash = Sha256Digest::of_canonical(request).map_err(|_| ResourceStoreError::Wire)?;
         let outcome = match IdempotencyStore::reserve(
             &mut transaction,
             Domain::Resource,
@@ -346,7 +345,8 @@ impl PgResourceStore {
         validate_trace(trace_id)?;
         let mut transaction = self.pool.begin().await?;
         let request = load_locked(&mut transaction, request_id).await?;
-        let hash = Sha256Digest::of_canonical(&(approval, &allocation.claim, allocation.lease_id))?;
+        let hash = Sha256Digest::of_canonical(&(approval, &allocation.claim, allocation.lease_id))
+            .map_err(|_| ResourceStoreError::Wire)?;
         let result = match IdempotencyStore::reserve(
             &mut transaction,
             Domain::Resource,
@@ -416,7 +416,8 @@ impl PgResourceStore {
         }
         let mut transaction = self.pool.begin().await?;
         let request = load_locked(&mut transaction, request_id).await?;
-        let hash = Sha256Digest::of_canonical(&(request_id, expected_revision, terminal))?;
+        let hash = Sha256Digest::of_canonical(&(request_id, expected_revision, terminal))
+            .map_err(|_| ResourceStoreError::Wire)?;
         let result = match IdempotencyStore::reserve(
             &mut transaction,
             Domain::Resource,
@@ -483,7 +484,8 @@ impl PgResourceStore {
         validate_trace(trace_id)?;
         let mut transaction = self.pool.begin().await?;
         let request = load_locked(&mut transaction, request_id).await?;
-        let hash = Sha256Digest::of_canonical(&(request_id, expected_revision, "retry"))?;
+        let hash = Sha256Digest::of_canonical(&(request_id, expected_revision, "retry"))
+            .map_err(|_| ResourceStoreError::Wire)?;
         let result = match IdempotencyStore::reserve(
             &mut transaction,
             Domain::Resource,
@@ -557,7 +559,8 @@ impl PgResourceStore {
         validate_trace(trace_id)?;
         let mut transaction = self.pool.begin().await?;
         let lease = load_locked_lease(&mut transaction, lease_id).await?;
-        let hash = Sha256Digest::of_canonical(&(lease_id, expected_revision, expires_at))?;
+        let hash = Sha256Digest::of_canonical(&(lease_id, expected_revision, expires_at))
+            .map_err(|_| ResourceStoreError::Wire)?;
         let result = match IdempotencyStore::reserve(
             &mut transaction,
             Domain::Resource,
@@ -616,7 +619,8 @@ impl PgResourceStore {
         validate_trace(trace_id)?;
         let mut transaction = self.pool.begin().await?;
         let lease = load_locked_lease(&mut transaction, lease_id).await?;
-        let hash = Sha256Digest::of_canonical(&(lease_id, expected_revision, &reason))?;
+        let hash = Sha256Digest::of_canonical(&(lease_id, expected_revision, &reason))
+            .map_err(|_| ResourceStoreError::Wire)?;
         let result = match IdempotencyStore::reserve(
             &mut transaction,
             Domain::Resource,
@@ -1342,11 +1346,11 @@ async fn insert_request(
 ) -> Result<(), ResourceStoreError> {
     let gpu = request.requested_resources.gpu.as_ref();
     sqlx::query(
-        "INSERT INTO resource.resource_requests (request_id,generation,request_key,requester_id,course_id,project_id,environment_id,release_id,release_version,release_sha256,requested_cpu_millicores,requested_memory_bytes,requested_storage_bytes,gpu_class,gpu_count,requested_duration_seconds,state,revision,diagnostic_code,created_at,updated_at,contract) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)",
+        "INSERT INTO resource.resource_requests (request_id,generation,request_key,requester_id,course_id,project_id,environment_id,release_id,release_version,requested_cpu_millicores,requested_memory_bytes,requested_storage_bytes,gpu_class,gpu_count,requested_duration_seconds,state,revision,diagnostic_code,created_at,updated_at,contract) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)",
     )
     .bind(request.id.as_uuid()).bind(i64::try_from(request.generation)?).bind(&request.request_key)
     .bind(request.requester_id.as_uuid()).bind(request.course_id.as_uuid()).bind(request.project_id.map(contracts::ProjectId::as_uuid))
-    .bind(request.target.environment_id.as_uuid()).bind(request.target.release_id.as_uuid()).bind(i64::try_from(request.target.release_version)?).bind(request.target.release_sha256.to_string())
+    .bind(request.target.environment_id.as_uuid()).bind(request.target.release_id.as_uuid()).bind(i64::try_from(request.target.release_version)?)
     .bind(i32::try_from(request.requested_resources.cpu_millicores)?).bind(i64::try_from(request.requested_resources.memory_bytes)?).bind(i64::try_from(request.requested_resources.storage_bytes)?)
     .bind(gpu.map(|value| value.class.as_str())).bind(gpu.map(|value| i32::try_from(value.count)).transpose()?)
     .bind(i64::try_from(request.requested_duration_seconds)?).bind(wire(request.state)?).bind(i64::try_from(request.revision.get())?).bind(&request.diagnostic_code)
@@ -1360,8 +1364,8 @@ async fn insert_approval(
     approval: &ResourceApproval,
 ) -> Result<(), ResourceStoreError> {
     let gpu = approval.approved_resources.gpu.as_ref();
-    sqlx::query("INSERT INTO resource.resource_approvals (approval_id,request_id,request_revision,approver_id,provider_binding,policy_sha256,approved_cpu_millicores,approved_memory_bytes,approved_storage_bytes,approved_gpu_class,approved_gpu_count,approved_duration_seconds,reason,valid_until,created_at,contract) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)")
-        .bind(approval.id.as_uuid()).bind(approval.request_id.as_uuid()).bind(i64::try_from(approval.request_revision.get())?).bind(approval.approver_id.as_uuid()).bind(&approval.provider_binding).bind(approval.policy_sha256.to_string())
+    sqlx::query("INSERT INTO resource.resource_approvals (approval_id,request_id,request_revision,approver_id,provider_binding,approved_cpu_millicores,approved_memory_bytes,approved_storage_bytes,approved_gpu_class,approved_gpu_count,approved_duration_seconds,reason,valid_until,created_at,contract) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)")
+        .bind(approval.id.as_uuid()).bind(approval.request_id.as_uuid()).bind(i64::try_from(approval.request_revision.get())?).bind(approval.approver_id.as_uuid()).bind(&approval.provider_binding)
         .bind(i32::try_from(approval.approved_resources.cpu_millicores)?).bind(i64::try_from(approval.approved_resources.memory_bytes)?).bind(i64::try_from(approval.approved_resources.storage_bytes)?)
         .bind(gpu.map(|value| value.class.as_str())).bind(gpu.map(|value| i32::try_from(value.count)).transpose()?).bind(i64::try_from(approval.approved_duration_seconds)?)
         .bind(&approval.reason).bind(approval.valid_until.get()).bind(approval.created_at.get()).bind(serde_json::to_value(approval)?)
@@ -1375,8 +1379,8 @@ async fn insert_claim(
 ) -> Result<(), ResourceStoreError> {
     let workload_gpu = claim.workload_resources.gpu.as_ref();
     let quota_gpu = claim.quota_resources.gpu.as_ref();
-    sqlx::query("INSERT INTO resource.capacity_claims (claim_id,request_id,approval_id,provider_binding,policy_sha256,quota_plan_sha256,state,revision,created_at,updated_at,workload_cpu_millicores,workload_memory_bytes,workload_storage_bytes,workload_gpu_class,workload_gpu_count,quota_cpu_millicores,quota_memory_bytes,quota_storage_bytes,quota_gpu_class,quota_gpu_count,contract) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,clock_timestamp(),clock_timestamp(),$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)")
-        .bind(claim.id.as_uuid()).bind(claim.request_id.as_uuid()).bind(claim.approval_id.as_uuid()).bind(&claim.provider_binding).bind(claim.policy_sha256.to_string()).bind(claim.quota_plan_sha256.to_string()).bind(wire(claim.state)?).bind(i64::try_from(claim.revision.get())?)
+    sqlx::query("INSERT INTO resource.capacity_claims (claim_id,request_id,approval_id,provider_binding,state,revision,created_at,updated_at,workload_cpu_millicores,workload_memory_bytes,workload_storage_bytes,workload_gpu_class,workload_gpu_count,quota_cpu_millicores,quota_memory_bytes,quota_storage_bytes,quota_gpu_class,quota_gpu_count,contract) VALUES ($1,$2,$3,$4,$5,$6,clock_timestamp(),clock_timestamp(),$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)")
+        .bind(claim.id.as_uuid()).bind(claim.request_id.as_uuid()).bind(claim.approval_id.as_uuid()).bind(&claim.provider_binding).bind(wire(claim.state)?).bind(i64::try_from(claim.revision.get())?)
         .bind(i32::try_from(claim.workload_resources.cpu_millicores)?).bind(i64::try_from(claim.workload_resources.memory_bytes)?).bind(i64::try_from(claim.workload_resources.storage_bytes)?)
         .bind(workload_gpu.map(|value| value.class.as_str())).bind(workload_gpu.map(|value| i32::try_from(value.count)).transpose()?)
         .bind(i32::try_from(claim.quota_resources.cpu_millicores)?).bind(i64::try_from(claim.quota_resources.memory_bytes)?).bind(i64::try_from(claim.quota_resources.storage_bytes)?)
@@ -1560,7 +1564,7 @@ async fn enqueue_request_event(
             request: request.clone(),
         },
     })?;
-    let hash = Sha256Digest::of_canonical(&payload)?;
+    let hash = Sha256Digest::of_canonical(&payload).map_err(|_| ResourceStoreError::Wire)?;
     OutboxStore::enqueue(
         transaction,
         Domain::Resource,
@@ -1603,7 +1607,7 @@ async fn enqueue_lease_event(
             request: request.clone(),
         },
     })?;
-    let hash = Sha256Digest::of_canonical(&payload)?;
+    let hash = Sha256Digest::of_canonical(&payload).map_err(|_| ResourceStoreError::Wire)?;
     OutboxStore::enqueue(
         transaction,
         Domain::Resource,
@@ -1770,10 +1774,6 @@ mod tests {
             request_id: ResourceRequestId::new(),
             approval_id: ResourceApprovalId::new(),
             provider_binding: "kubernetes-standard".into(),
-            policy_sha256: "a"
-                .repeat(64)
-                .parse::<Sha256Digest>()
-                .expect("fixed digest"),
             workload_resources: WorkloadResources {
                 cpu_millicores: 500,
                 memory_bytes: 512 * 1024 * 1024,
@@ -1786,10 +1786,6 @@ mod tests {
                 storage_bytes: 1024 * 1024 * 1024,
                 gpu: None,
             },
-            quota_plan_sha256: "b"
-                .repeat(64)
-                .parse::<Sha256Digest>()
-                .expect("fixed digest"),
             state: CapacityClaimState::Blocked,
             revision: Revision::new(4).expect("fixed revision"),
         };

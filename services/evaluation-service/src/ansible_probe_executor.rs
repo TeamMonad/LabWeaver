@@ -823,8 +823,7 @@ impl AnsibleProbeExecutorError {
 mod tests {
     use std::net::Ipv4Addr;
 
-    use contracts::;
-use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
+    use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
     use contracts::evaluation::FactAssertion;
     use reqwest::StatusCode;
     use serde_json::{Value, json};

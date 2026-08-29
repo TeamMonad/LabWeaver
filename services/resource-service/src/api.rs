@@ -19,8 +19,6 @@ use std::sync::Arc;
 
 use crate::ApprovalPolicy;
 use crate::store::{PendingAllocation, PgResourceStore, ResourceStoreError};
-use contracts::;
-use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 
 const ACCESS_CALLER_SAN: &str = "spiffe://labweaver/access-service";
 const DELEGATION_HEADER: &str = "x-labweaver-resource-delegation";
@@ -193,7 +191,6 @@ async fn create_request(
             environment_id: input.environment_id,
             release_id: input.release_id,
             release_version: input.release_version,
-            release_sha256: input.release_sha256,
         },
         requested_resources: input.resources,
         requested_duration_seconds: input.duration_seconds,
@@ -258,8 +255,6 @@ async fn approve_request(
         request_revision: input.expected_revision,
         approver_id: approver,
         provider_binding: input.provider_binding.clone(),
-        policy_sha256: Sha256Digest::of_canonical(&input.provider_binding)
-            .map_err(|_| ResourceApiError::Invalid)?,
         approved_resources: input.resources.clone(),
         approved_duration_seconds: input.duration_seconds,
         reason: input.reason,
@@ -271,11 +266,8 @@ async fn approve_request(
         request_id,
         approval_id: approval.id,
         provider_binding: approval.provider_binding.clone(),
-        policy_sha256: approval.policy_sha256,
         workload_resources: input.resources.clone(),
         quota_resources: input.resources,
-        quota_plan_sha256: Sha256Digest::of_canonical(&request.target)
-            .map_err(|_| ResourceApiError::Invalid)?,
         state: contracts::resource::CapacityClaimState::Reserved,
         revision: Revision::new(1).map_err(|_| ResourceApiError::Invalid)?,
     };

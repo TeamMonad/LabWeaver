@@ -20,7 +20,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use contracts::;
 use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 #[cfg(target_os = "linux")]
 use landlock::{

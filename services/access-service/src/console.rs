@@ -14,9 +14,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use persistence_sqlx::Sha256Digest;
 use contracts::{
-    AccessGrantId, ActorId, ConsoleCapabilityId, ConsoleSessionId, CourseId, EnvironmentId,
-    Revision, Sha256Digest,
+    AccessGrantId, ActorId, ConsoleCapabilityId, ConsoleSessionId, CourseId, EnvironmentId, Revision,
     access::{ConsoleCapability, ConsoleCapabilityAvailability, ConsoleKind, ConsoleLeaseFence},
     environment::{EnvironmentAccessSubjectKind, EnvironmentConsoleEligibilityRequest},
     http::{IssueConsoleCapabilityRequest, StrongEtag},
