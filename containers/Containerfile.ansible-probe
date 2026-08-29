@@ -39,7 +39,8 @@ ARG OPENSSH_VERSION=10.5p1
 ARG OPENSSH_SHA256=d44d28a839ea9daf969cc69150fde59910b2b39361dad81a3bd6cbd19218db11
 USER root
 RUN apk update --no-cache \
-    && apk add --no-cache build-base ca-certificates curl linux-headers openssl openssl-dev zlib-dev \
+    && apk upgrade --no-cache \
+    && apk add --no-cache build-base ca-certificates curl linux-headers openssl-dev zlib-dev \
     && curl -fsSL --retry 6 --retry-delay 3 --retry-all-errors -C - \
        -o /tmp/openssh.tar.gz "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-${OPENSSH_VERSION}.tar.gz" \
     && echo "${OPENSSH_SHA256}  /tmp/openssh.tar.gz" | sha256sum -c \
