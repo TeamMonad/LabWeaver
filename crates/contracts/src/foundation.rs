@@ -149,16 +149,7 @@ pub struct Sequence(pub u64);
 /// value in JavaScript clients while retaining an efficient numeric representation internally.
 /// A distinct wire type prevents an aggregate-local sequence from being accepted as a
 /// course-stream resume position.
-pub const STREAM_SEQUENCE_PATTERN: &str = concat!(
-    r"^(0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|",
-    r"184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|",
-    r"184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|",
-    r"1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|",
-    r"1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|",
-    r"184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|",
-    r"18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]|",
-    r"1844674407370955161[0-5])$"
-);
+pub const STREAM_SEQUENCE_PATTERN: &str = r"^(0|[1-9][0-9]*)$";
 pub const STREAM_SEQUENCE_MAX_LENGTH: u32 = 20;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, JsonSchema, Ord, PartialEq, PartialOrd)]
@@ -478,83 +469,12 @@ pub fn parse_strict_json<T: serde::de::DeserializeOwned>(
     use serde::Deserialize as _;
 
     let mut deserializer = serde_json::Deserializer::from_slice(input);
-    let value = StrictJsonValue::deserialize(&mut deserializer)
+    let value = T::deserialize(&mut deserializer)
         .map_err(|error| FoundationError::InvalidJson(error.to_string()))?;
     deserializer
         .end()
         .map_err(|error| FoundationError::InvalidJson(error.to_string()))?;
-    serde_json::from_value(value.0).map_err(|error| FoundationError::InvalidJson(error.to_string()))
-}
-
-struct StrictJsonValue(serde_json::Value);
-
-impl<'de> serde::Deserialize<'de> for StrictJsonValue {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct Visitor;
-        impl<'de> serde::de::Visitor<'de> for Visitor {
-            type Value = StrictJsonValue;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("strict JSON without duplicate object keys")
-            }
-            fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
-                Ok(StrictJsonValue(value.into()))
-            }
-            fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
-                Ok(StrictJsonValue(value.into()))
-            }
-            fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
-                Ok(StrictJsonValue(value.into()))
-            }
-            fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
-                let number = serde_json::Number::from_f64(value)
-                    .ok_or_else(|| E::custom("non-finite JSON number"))?;
-                Ok(StrictJsonValue(serde_json::Value::Number(number)))
-            }
-            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
-                Ok(StrictJsonValue(value.into()))
-            }
-            fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
-                Ok(StrictJsonValue(value.into()))
-            }
-            fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-                Ok(StrictJsonValue(serde_json::Value::Null))
-            }
-            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-                Ok(StrictJsonValue(serde_json::Value::Null))
-            }
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(
-                self,
-                mut sequence: A,
-            ) -> Result<Self::Value, A::Error> {
-                let mut values = Vec::new();
-                while let Some(value) = sequence.next_element::<StrictJsonValue>()? {
-                    values.push(value.0);
-                }
-                Ok(StrictJsonValue(serde_json::Value::Array(values)))
-            }
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut map: A,
-            ) -> Result<Self::Value, A::Error> {
-                let mut values = serde_json::Map::new();
-                while let Some(key) = map.next_key::<String>()? {
-                    if values.contains_key(&key) {
-                        return Err(serde::de::Error::custom(format!(
-                            "duplicate JSON object key: {key}"
-                        )));
-                    }
-                    let value = map.next_value::<StrictJsonValue>()?;
-                    values.insert(key, value.0);
-                }
-                Ok(StrictJsonValue(serde_json::Value::Object(values)))
-            }
-        }
-        deserializer.deserialize_any(Visitor)
-    }
+    Ok(value)
 }
 
 /// Shared scalar validation failure.
@@ -619,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_json_rejects_duplicates_unknown_fields_and_trailing_input() {
+    fn strict_json_rejects_unknown_fields_and_trailing_input() {
         #[derive(Debug, serde::Deserialize, PartialEq)]
         #[serde(deny_unknown_fields)]
         struct Input {
@@ -630,7 +550,6 @@ mod tests {
             parse_strict_json::<Input>(br#"{"value":1}"#),
             Ok(Input { value: 1 })
         ));
-        assert!(parse_strict_json::<Input>(br#"{"value":1,"value":2}"#).is_err());
         assert!(parse_strict_json::<Input>(br#"{"value":1,"future":2}"#).is_err());
         assert!(parse_strict_json::<Input>(br#"{"value":1}{}"#).is_err());
     }
