@@ -21,7 +21,7 @@ use std::{
 };
 
 use contracts::;
-use crate::hash_compat::Sha256Digest;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 #[cfg(target_os = "linux")]
 use landlock::{
     ABI, Access as _, AccessFs, CompatLevel, Compatible as _, Ruleset, RulesetAttr as _,

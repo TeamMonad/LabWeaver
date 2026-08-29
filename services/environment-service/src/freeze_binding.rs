@@ -1,7 +1,7 @@
 //! Environment-authoritative immutable submission source resolution.
 
 use std::{path::PathBuf, sync::Arc};
-use crate::hash_compat::Sha256Digest;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 
 use contracts::{
     EnvironmentId, UtcTimestamp,

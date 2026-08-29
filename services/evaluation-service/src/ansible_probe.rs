@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
 
 use contracts::;
-use crate::hash_compat::Sha256Digest;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use contracts::evaluation::FactAssertion;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

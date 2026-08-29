@@ -6,7 +6,7 @@
 )]
 
 use std::str::FromStr;
-use crate::hash_compat::Sha256Digest;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 
 use contracts::{
     ActorId, CourseId, DiagnosticCode, EnvironmentId, EventId, FrozenSubmissionId, OperationId,

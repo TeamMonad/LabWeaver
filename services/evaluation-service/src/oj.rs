@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use contracts::;
-use crate::hash_compat::Sha256Digest;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;

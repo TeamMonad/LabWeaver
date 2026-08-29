@@ -1,7 +1,7 @@
 //! Fail-closed Container release projection and protected Kubernetes resource planning.
 
 use std::str::FromStr;
-use crate::hash_compat::Sha256Digest;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1066,6 +1066,8 @@ impl PgReleaseProjectionStore {
             InboxDecision::Accepted => {
                 let contract = serde_json::to_value(&event.data)
                     .map_err(|_| ReleaseProjectionError::ContractInvalid)?;
+                // projection_sha256 is internal persistence hash (not contract hash)
+                let projection_sha256 = canonical_hash(&event.data)?;
                 sqlx::query(
                     "INSERT INTO environment.release_projections \
                      (release_id,course_id,release_version,provider_binding,projection_sha256,contract,projected_event_id,aggregate_sequence) \
@@ -1075,7 +1077,7 @@ impl PgReleaseProjectionStore {
                 .bind(event.course_id.as_uuid())
                 .bind(i64::try_from(event.data.release.version).map_err(|_| ReleaseProjectionError::IdentityMismatch)?)
                 .bind(provider_binding)
-                .bind(Sha256Digest::of_bytes(b"dummy").to_string())
+                .bind(projection_sha256.to_string())
                 .bind(contract)
                 .bind(event.id.as_uuid())
                 .execute(&mut *transaction)

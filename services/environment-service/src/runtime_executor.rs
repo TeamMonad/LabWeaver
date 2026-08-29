@@ -9,7 +9,7 @@ use artifact_store::S3ImmutableObjectStore;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use contracts::{ArtifactRef, Revision, UtcTimestamp};
-use crate::hash_compat::Sha256Digest;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use reqwest::{Certificate, Client, Method, StatusCode, Url};
 use serde::Deserialize;
 use serde_json::{Value, json};

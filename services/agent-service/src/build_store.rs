@@ -5,7 +5,7 @@
 )]
 
 use std::str::FromStr;
-use crate::hash_compat::Sha256Digest;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use std::time::Duration;
 
 use contracts::events::{

@@ -212,14 +212,7 @@ async fn complete_upload(
     let key = idempotency(&headers)?;
     let package = state
         .control
-        .complete_upload(
-            course_id,
-            upload_id,
-            crate::hash_compat::Sha256Digest::of_bytes(b"dummy"),
-            expected,
-            &key,
-            now()?,
-        )
+        .complete_upload(course_id, upload_id, expected, &key, now()?)
         .await?;
     Ok(with_etag(StatusCode::CREATED, &package, package.revision))
 }

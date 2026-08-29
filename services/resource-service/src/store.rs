@@ -18,7 +18,7 @@ use contracts::resource::{
     ResourceRequest, ResourceRequestState,
 };
 use contracts::{EventId, LeaseId, ResourceRequestId, Sequence, UtcTimestamp};
-use crate::hash_compat::Sha256Digest;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use persistence_sqlx::{
     Domain, IdempotencyDecision, IdempotencyStore, OutboxStore, PersistenceError,
 };

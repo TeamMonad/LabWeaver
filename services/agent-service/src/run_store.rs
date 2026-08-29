@@ -1,7 +1,7 @@
 //! Durable idempotent `AgentRun` orchestration over the Agent-owned `PostgreSQL` schema.
 
 use std::collections::{BTreeMap, BTreeSet};
-use crate::hash_compat::Sha256Digest;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use std::str::FromStr;
 use std::time::Duration;
 

@@ -12,8 +12,7 @@
     reason = "Resource transitions and persistence errors are documented by typed diagnostics and contracts"
 )]
 
-pub mod hash_compat;
-use crate::hash_compat::Sha256Digest;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use contracts::resource::{
     ResourceApproval, ResourceError, ResourceLease, ResourceLeaseState, ResourceRequest,
     ResourceRequestState,

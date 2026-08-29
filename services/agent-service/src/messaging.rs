@@ -15,7 +15,7 @@ use async_nats::jetstream::consumer::PullConsumer;
 use async_nats::jetstream::message::PublishMessage;
 use contracts::events::{AgentBuildRequested, CloudEvent, EVENT_CONTRACTS, subjects};
 use contracts::{EventId};
-use crate::hash_compat::Sha256Digest;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json::Value;

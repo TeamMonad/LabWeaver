@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use contracts::events::AgentBuildRequested;
 use contracts::supply_chain::ImageArtifact;
 use contracts::{BuildRequestId, ImageArtifactId, UtcTimestamp};
-use crate::hash_compat::Sha256Digest;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use uuid::Uuid;

@@ -1,7 +1,7 @@
 //! Explicit Kubernetes capacity provider for Resource-owned quota shells.
 
 use std::collections::BTreeMap;
-use crate::hash_compat::Sha256Digest;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use std::path::PathBuf;
 use std::time::Duration;
 

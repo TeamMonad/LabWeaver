@@ -4,7 +4,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use contracts::events::{CloudEvent, EVENT_CONTRACTS};
 use contracts::{EventId};
-use crate::hash_compat::Sha256Digest;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 use tokio::time::timeout;

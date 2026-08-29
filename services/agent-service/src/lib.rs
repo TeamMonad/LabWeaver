@@ -5,7 +5,6 @@
     reason = "stable diagnostics and the contracts crate document the public failure surface"
 )]
 
-pub mod hash_compat;
 pub mod api;
 pub mod build_executor;
 pub mod build_pipeline;

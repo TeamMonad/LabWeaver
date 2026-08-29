@@ -6,7 +6,7 @@
 )]
 
 use std::{str::FromStr, time::Duration};
-use crate::hash_compat::Sha256Digest;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 
 use async_nats::jetstream::message::PublishMessage;
 use contracts::{

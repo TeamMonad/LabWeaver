@@ -6,7 +6,7 @@
 )]
 
 use std::{collections::BTreeMap, fs, path::PathBuf, time::Duration};
-use crate::hash_compat::Sha256Digest;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use contracts::{

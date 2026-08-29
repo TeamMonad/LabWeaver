@@ -14,7 +14,7 @@ use contracts::authoring::{
 use contracts::diagnostic;
 use contracts::evaluation::{EvaluationSpec, evaluation_spec_schema};
 use contracts::{ArtifactRef, PolicyId, ProblemPackageId, Revision};
-use crate::hash_compat::Sha256Digest;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value, json};
 use thiserror::Error;
@@ -78,7 +78,6 @@ pub struct ImmutableEgressInput {
     package_id: ProblemPackageId,
     course_id: contracts::CourseId,
     package_revision: Revision,
-    package_manifest_sha256: Sha256Digest,
     policy_id: PolicyId,
     policy_revision: Revision,
     classifier_binding: String,
@@ -97,14 +96,12 @@ impl ImmutableEgressInput {
             return Err(EgressPreparationError::InputLimitExceeded);
         }
         let sha256 = Sha256Digest::of_bytes(&bytes);
-        let package_manifest_sha256 = Sha256Digest::of_bytes(package.id.as_uuid().as_bytes());
         Ok(Self {
             bytes: Arc::from(bytes),
             sha256,
             package_id: package.id,
             course_id: package.course_id,
             package_revision: package.revision,
-            package_manifest_sha256,
             policy_id: policy.id,
             policy_revision: policy.revision,
             classifier_binding,
@@ -136,12 +133,6 @@ impl ImmutableEgressInput {
         self.package_revision
     }
 
-    /// Returns the package manifest identity verified before egress.
-    #[must_use]
-    pub const fn package_manifest_sha256(&self) -> Sha256Digest {
-        self.package_manifest_sha256
-    }
-
     /// Returns the egress policy used to classify and encode this input.
     #[must_use]
     pub const fn policy_id(&self) -> PolicyId {
@@ -169,7 +160,6 @@ impl Debug for ImmutableEgressInput {
             .field("package_id", &self.package_id)
             .field("course_id", &self.course_id)
             .field("package_revision", &self.package_revision)
-            .field("package_manifest_sha256", &self.package_manifest_sha256)
             .field("policy_id", &self.policy_id)
             .field("policy_revision", &self.policy_revision)
             .field("classifier_binding", &self.classifier_binding)
@@ -331,7 +321,6 @@ impl ProblemPackageEgressGate {
                 store_binding: &file.object.store_binding,
                 object_version: &file.object.object_version,
                 media_type: &file.object.media_type,
-                sha256: Sha256Digest::of_bytes(file.object.artifact_id.as_uuid().as_bytes()),
                 size_bytes: file.object.size_bytes,
                 content,
             });
@@ -339,7 +328,6 @@ impl ProblemPackageEgressGate {
         let envelope = EgressEnvelope {
             package_id: package.id,
             package_revision: package.revision,
-            package_manifest_sha256: Sha256Digest::of_bytes(package.id.as_uuid().as_bytes()),
             policy_id: policy.id,
             policy_revision: policy.revision,
             classifier_binding: &classifier_binding,
@@ -363,7 +351,6 @@ impl ProblemPackageEgressGate {
 struct EgressEnvelope<'a> {
     package_id: ProblemPackageId,
     package_revision: Revision,
-    package_manifest_sha256: Sha256Digest,
     policy_id: PolicyId,
     policy_revision: Revision,
     classifier_binding: &'a str,
@@ -379,7 +366,6 @@ struct EgressFile<'a> {
     store_binding: &'a str,
     object_version: &'a str,
     media_type: &'a str,
-    sha256: Sha256Digest,
     size_bytes: u64,
     content: String,
 }
@@ -929,8 +915,6 @@ pub struct ClaudeCodeAudit {
     pub course_id: contracts::CourseId,
     /// Exact teacher package revision.
     pub package_revision: Revision,
-    /// Verified immutable package manifest identity.
-    pub package_manifest_sha256: Sha256Digest,
     /// Course egress policy identity.
     pub policy_id: PolicyId,
     /// Exact course egress policy revision.
@@ -1418,7 +1402,6 @@ impl ClaudeCodeRuntime {
             package_id: context.input.package_id,
             course_id: context.input.course_id,
             package_revision: context.input.package_revision,
-            package_manifest_sha256: context.input.package_manifest_sha256,
             policy_id: self.policy.id,
             policy_revision: self.policy.revision,
             classifier_binding: context.input.classifier_binding.clone(),
@@ -1426,6 +1409,7 @@ impl ClaudeCodeRuntime {
             runtime_binding: binding.runtime_binding.clone(),
             model: binding.model.clone(),
             claude_code_version: binding.claude_code_version.clone(),
+            // internal persistence hashes derived from deployment binding (not contract hashes)
             worker_image_sha256: Sha256Digest::of_bytes(binding.model.as_bytes()),
             runtime_config_sha256: Sha256Digest::of_bytes(binding.claude_code_version.as_bytes()),
             prompt_sha256: Sha256Digest::of_bytes(context.prompt.as_bytes()),

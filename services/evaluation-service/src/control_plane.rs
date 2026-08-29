@@ -7,7 +7,7 @@
 )]
 
 use std::{collections::BTreeSet, str::FromStr, time::Duration};
-use crate::hash_compat::Sha256Digest;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 
 use contracts::{
     ActorId, CourseId, DiagnosticCode, EvaluationReleaseId, EvaluationRunId, EvaluationStepRunId,

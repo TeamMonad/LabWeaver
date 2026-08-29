@@ -7,14 +7,13 @@
 
 pub mod api;
 pub mod clients;
-pub mod hash_compat;
 pub mod messaging;
 
 use std::collections::BTreeSet;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use crate::hash_compat::Sha256Digest;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use artifact_store::{ImmutableObjectStore, ObjectStoreError};
 use contracts::authoring::{
     AgentTrackKind, CandidateApproval, CandidateDecision, CourseLlmEgressPolicy,
@@ -118,18 +117,10 @@ pub struct EvaluationRuntimePolicy {
 }
 
 impl EvaluationRuntimePolicy {
-    fn identity(
-        &self,
-        package_sha256: Sha256Digest,
-    ) -> Result<EvaluationRuntimeIdentity, ControlError> {
+    fn identity(&self) -> Result<EvaluationRuntimeIdentity, ControlError> {
         let identity = EvaluationRuntimeIdentity {
-            source_sha256: self.source_sha256,
             provider_binding: self.provider_binding.clone(),
-            package_sha256,
-            configuration_sha256: self.configuration_sha256,
-            migration_catalog_sha256: self.migration_catalog_sha256,
             runner_image: self.runner_image.clone(),
-            runtime_artifact_sha256: self.runtime_artifact_sha256,
         };
         identity
             .validate()
@@ -185,10 +176,7 @@ impl ControlConfig {
         let retention_valid = self.retention_seconds != 0 && self.sse_retention_seconds != 0;
         let container_build_valid = self.container_build.validate();
         let virtual_machine_base_valid = self.virtual_machine_base.validate();
-        let evaluation_runtime_valid = self
-            .evaluation_runtime
-            .identity(self.evaluation_runtime.source_sha256)
-            .is_ok();
+        let evaluation_runtime_valid = self.evaluation_runtime.identity().is_ok();
         if !(package_prefix_valid
             && upload_ttl_valid
             && completion_lease_valid
@@ -427,7 +415,6 @@ impl ControlService {
         let request_hash = canonical_hash(&json!({
             "courseId": course_id,
             "uploadId": upload_id,
-            "manifestSha256": manifest_sha256,
             "expectedRevision": expected_revision,
         }))?;
         let completion_lease = match self
@@ -555,7 +542,7 @@ impl ControlService {
                 object: object.reference,
             });
         }
-        let package_manifest_sha256 = canonical_hash(&package_files)?;
+        let _package_manifest_sha256 = canonical_hash(&package_files)?;
         let session = sqlx::query(
             "SELECT retention_policy_revision FROM control.problem_package_upload_sessions \
              WHERE upload_id=$1 AND course_id=$2 AND state='completing' AND completion_lease_token=$3 AND completion_lease_expires_at>now()",
@@ -874,10 +861,7 @@ impl ControlService {
             approval_revision: Revision::new(1)
                 .map_err(|_| ControlError::PersistenceIdentityMismatch)?,
             evaluation_spec: candidate.spec,
-            runtime_identity: self
-                .config
-                .evaluation_runtime
-                .identity(Sha256Digest::of_bytes(b"dummy"))?,
+            runtime_identity: self.config.evaluation_runtime.identity()?,
             published_by,
         })
     }
@@ -1015,7 +999,7 @@ impl ControlService {
                 "environment",
                 candidate.id,
                 candidate.revision,
-                Sha256Digest::of_bytes(b"environment-spec"),
+                canonical_hash(&candidate.spec)?,
                 candidate.policy_revision,
                 self.config.environment_schema_sha256,
                 event_id,
@@ -1034,7 +1018,7 @@ impl ControlService {
                 "evaluation",
                 candidate.id,
                 candidate.revision,
-                Sha256Digest::of_bytes(b"evaluation-spec"),
+                canonical_hash(&candidate.spec)?,
                 candidate.policy_revision,
                 self.config.evaluation_schema_sha256,
                 event_id,
@@ -1137,7 +1121,7 @@ impl ControlService {
                 "environment",
                 candidate.id,
                 candidate.revision,
-                Sha256Digest::of_bytes(b"environment-spec"),
+                canonical_hash(&candidate.spec)?,
                 candidate.policy_revision,
                 self.config.environment_schema_sha256,
                 event.id,
@@ -1153,7 +1137,7 @@ impl ControlService {
                 "evaluation",
                 candidate.id,
                 candidate.revision,
-                Sha256Digest::of_bytes(b"evaluation-spec"),
+                canonical_hash(&candidate.spec)?,
                 candidate.policy_revision,
                 self.config.evaluation_schema_sha256,
                 event.id,
@@ -1524,6 +1508,10 @@ impl ControlService {
                 command
                     .validate()
                     .map_err(|_| ControlError::ContractInvalid)?;
+                // candidate_sha256 and command_sha256 are internal persistence hashes (not contract hashes)
+                // computed via canonical JSON to preserve idempotency without dummy values.
+                let candidate_sha256 = canonical_hash(&candidate.spec)?;
+                let command_sha256 = canonical_hash(&command)?;
                 sqlx::query(
                     "INSERT INTO control.container_build_projections \
                      (build_request_id,course_id,candidate_id,candidate_revision,candidate_sha256, \
@@ -1537,9 +1525,9 @@ impl ControlService {
                     i64::try_from(command.request.candidate_revision.get())
                         .map_err(|_| ControlError::ContractInvalid)?,
                 )
-                .bind(Sha256Digest::of_bytes(b"dummy").to_string())
+                .bind(candidate_sha256.to_string())
                 .bind(approval.id.as_uuid())
-                .bind(Sha256Digest::of_bytes(b"dummy").to_string())
+                .bind(command_sha256.to_string())
                 .bind(serde_json::to_value(&command).map_err(|_| ControlError::ContractInvalid)?)
                 .bind(now.get())
                 .execute(&mut *transaction)
@@ -1698,6 +1686,8 @@ impl ControlService {
         let _ = candidate_schema;
         let artifact = match &environment_candidate.spec.runtime {
             contracts::authoring::EnvironmentRuntimeSpec::Container { .. } => {
+                // candidate_sha256 is internal persistence hash (not contract hash)
+                let candidate_sha256 = canonical_hash(&environment_candidate.spec)?;
                 let projection = sqlx::query(
                     "SELECT artifacts.artifact \
                      FROM control.container_build_projections builds \
@@ -1713,6 +1703,7 @@ impl ControlService {
                     i64::try_from(request.candidate_revision.get())
                         .map_err(|_| ControlError::ReleaseCandidateMismatch)?,
                 )
+                .bind(candidate_sha256.to_string())
                 .bind(approval.id.as_uuid())
                 .fetch_optional(&mut *transaction)
                 .await
@@ -1791,7 +1782,7 @@ impl ControlService {
         .await
         .map_err(db)?;
         let event_id = EventId::new();
-        let projection_sha256 = canonical_hash(&json!({
+        let _projection_sha256 = canonical_hash(&json!({
             "release": release,
             "environmentSpec": environment_candidate.spec,
         }))?;
@@ -2308,6 +2299,8 @@ impl ControlService {
             return Err(ControlError::UploadStateConflict);
         }
         let contract = serde_json::to_value(package).map_err(|_| ControlError::ContractInvalid)?;
+        // manifest_sha256 is internal persistence hash (not contract hash) for the completed package
+        let manifest_sha256 = canonical_hash(package)?;
         sqlx::query(
             "INSERT INTO control.problem_packages \
              (package_id,course_id,revision,manifest_sha256,contract,completed_at) \
@@ -2316,7 +2309,7 @@ impl ControlService {
         .bind(package.id.as_uuid())
         .bind(package.course_id.as_uuid())
         .bind(i64_revision(package.revision)?)
-        .bind(package.manifest_sha256.to_string())
+        .bind(manifest_sha256.to_string())
         .bind(&contract)
         .bind(package.completed_at.get())
         .execute(&mut *transaction)
@@ -2358,7 +2351,7 @@ impl ControlService {
             "problem_package.completed.v1",
             package.id.as_uuid(),
             package.revision,
-            json!({"packageId":package.id,"revision":package.revision,"manifestSha256":package.manifest_sha256}),
+            json!({"packageId":package.id,"revision":package.revision,"manifestSha256":manifest_sha256}),
         )
         .await?;
         IdempotencyStore::complete(

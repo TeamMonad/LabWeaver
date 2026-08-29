@@ -5,7 +5,7 @@
 )]
 
 use std::collections::BTreeMap;
-use crate::hash_compat::Sha256Digest;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 

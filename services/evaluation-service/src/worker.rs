@@ -14,7 +14,7 @@ use std::{
 
 use artifact_store::{S3Credential, S3ImmutableObjectStore, S3StoreConfig};
 use contracts::{UtcTimestamp};
-use crate::hash_compat::Sha256Digest;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 

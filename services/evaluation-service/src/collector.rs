@@ -13,7 +13,7 @@ use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
 use contracts::submission::{FrozenFile, SubmissionManifest};
 use contracts::{PathRule};
-use crate::hash_compat::Sha256Digest;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use serde::{Deserialize, Serialize};
 
 const ARCHIVE_MEDIA_TYPE: &str = "application/vnd.labweaver.frozen-submission.v1+json";

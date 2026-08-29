@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use contracts::{UtcTimestamp};
-use crate::hash_compat::Sha256Digest;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use russh::client;
 use russh::keys::{load_openssh_certificate, load_secret_key};
 use russh_sftp::client::SftpSession;

@@ -34,7 +34,7 @@ use std::{
 };
 
 use contracts::;
-use crate::hash_compat::Sha256Digest;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use nix::{
     errno::Errno,
     sys::signal::{Signal, killpg},

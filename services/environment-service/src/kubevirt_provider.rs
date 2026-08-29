@@ -1,5 +1,5 @@
 use std::net::IpAddr;
-use crate::hash_compat::Sha256Digest;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
