@@ -1495,24 +1495,23 @@ fn persist_failed_stdout(track: AgentTrackKind, repairs: u8, stdout: &[u8]) {
     #[cfg(unix)]
     let mut file = {
         use std::os::unix::fs::OpenOptionsExt as _;
-        match std::fs::OpenOptions::new()
+        let Ok(file) = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(path)
-        {
-            Ok(file) => file,
-            Err(_) => return,
-        }
+        else {
+            return;
+        };
+        file
     };
     #[cfg(not(unix))]
-    let mut file = match std::fs::OpenOptions::new()
+    let Ok(mut file) = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
-    {
-        Ok(file) => file,
-        Err(_) => return,
+    else {
+        return;
     };
     let _ = std::io::Write::write_all(&mut file, stdout);
 }

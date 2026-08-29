@@ -38,15 +38,13 @@ FROM ${ANSIBLE_PROBE_TOOLCHAIN} AS openssh-builder
 ARG OPENSSH_VERSION=10.5p1
 ARG OPENSSH_SHA256=d44d28a839ea9daf969cc69150fde59910b2b39361dad81a3bd6cbd19218db11
 USER root
-RUN apk update --no-cache \
-    && apk upgrade --no-cache \
-    && apk add --no-cache build-base ca-certificates curl linux-headers openssl-dev zlib-dev \
+RUN apk add --no-cache build-base ca-certificates curl linux-headers openssl-dev zlib-dev \
     && curl -fsSL --retry 6 --retry-delay 3 --retry-all-errors -C - \
        -o /tmp/openssh.tar.gz "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-${OPENSSH_VERSION}.tar.gz" \
     && echo "${OPENSSH_SHA256}  /tmp/openssh.tar.gz" | sha256sum -c \
     && tar -xzf /tmp/openssh.tar.gz -C /tmp \
     && cd "/tmp/openssh-${OPENSSH_VERSION}" \
-    && ./configure --prefix=/opt/openssh \
+    && ./configure --prefix=/opt/openssh --without-openssl-header-check \
     && make -j"$(nproc)" ssh \
     && install -D -m 0755 ssh /opt/openssh/bin/ssh
 
