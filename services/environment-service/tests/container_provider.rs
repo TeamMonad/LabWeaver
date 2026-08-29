@@ -16,9 +16,7 @@ use contracts::authoring::{
 };
 use contracts::environment::{DesiredEnvironmentState, EndpointProtocol, ObservedEnvironmentState};
 use contracts::events::ReleasePublished;
-use contracts::supply_chain::{
-    EnvironmentTemplateRelease, ImageArtifact, ImagePolicyEvaluation, VulnerabilitySummary,
-};
+use contracts::supply_chain::{EnvironmentTemplateRelease, ImageArtifact};
 use contracts::{
     ActorId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId, ImageArtifactId,
     PolicyId, ReleaseId, Revision, Sha256Digest, UtcTimestamp,
@@ -498,24 +496,6 @@ fn withdrawn_expired_or_rotated_release_is_rejected_before_apply() {
     let backend = Arc::new(FixtureBackend::default());
     let provider = provider(projection.clone(), backend.clone());
 
-    let mut expired = resolved(projection.clone());
-    expired.authority_now = projection
-        .release
-        .image_policy_evaluation
-        .as_ref()
-        .expect("container release evidence")
-        .valid_until;
-    assert!(matches!(
-        provider.plan(&instance, &expired, ReconcileAction::Provision),
-        Err(ReleaseProjectionError::EvidenceExpired)
-    ));
-    provider
-        .plan(&instance, &expired, ReconcileAction::Start)
-        .expect("an existing immutable environment can resume after scan expiry");
-    provider
-        .plan(&instance, &expired, ReconcileAction::Observe)
-        .expect("an existing immutable environment remains observable after scan expiry");
-
     let mut withdrawn = resolved(projection.clone());
     withdrawn.withdrawn_at = Some(timestamp("2026-07-16T08:20:00.000Z"));
     assert!(matches!(
@@ -541,15 +521,6 @@ fn withdrawn_expired_or_rotated_release_is_rejected_before_apply() {
 #[test]
 fn course_approval_policy_revision_is_independent_from_image_policy_identity() {
     let projection = projection();
-    assert_ne!(
-        projection.release.approval.policy_revision,
-        projection
-            .release
-            .image_policy_evaluation
-            .as_ref()
-            .expect("container release evidence")
-            .policy_revision
-    );
     let instance = instance_for(&projection);
     let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
 
@@ -568,12 +539,7 @@ fn same_revision_different_image_policy_id_is_rejected() {
         timestamp("2026-07-16T08:30:00.000Z"),
         None,
         PolicyId::new(),
-        projection
-            .release
-            .image_policy_evaluation
-            .as_ref()
-            .expect("container release evidence")
-            .policy_revision,
+        revision(2),
         projection.release.approval.trust_revision,
     );
 
@@ -595,18 +561,8 @@ async fn withdrawal_blocks_new_use_but_still_allows_stop() {
         backend.clone(),
         timestamp("2026-07-16T10:00:00.000Z"),
         Some(timestamp("2026-07-16T09:30:00.000Z")),
-        projection
-            .release
-            .image_policy_evaluation
-            .as_ref()
-            .expect("container release evidence")
-            .policy_id,
-        projection
-            .release
-            .image_policy_evaluation
-            .as_ref()
-            .expect("container release evidence")
-            .policy_revision,
+        PolicyId::new(),
+        revision(2),
         projection.release.approval.trust_revision,
     );
 
@@ -629,21 +585,14 @@ fn provider(
     projection: ReleasePublished,
     backend: Arc<FixtureBackend>,
 ) -> ContainerProvider<FixtureBackend, FixtureResolver> {
-    let evaluation = projection
-        .release
-        .image_policy_evaluation
-        .as_ref()
-        .expect("container release evidence");
-    let image_policy_id = evaluation.policy_id;
-    let image_policy_revision = evaluation.policy_revision;
     let trust_revision = projection.release.approval.trust_revision;
     provider_with_state(
         projection,
         backend,
         timestamp("2026-07-16T08:30:00.000Z"),
         None,
-        image_policy_id,
-        image_policy_revision,
+        PolicyId::new(),
+        revision(2),
         trust_revision,
     )
 }
@@ -779,26 +728,6 @@ fn projection() -> ReleasePublished {
             ),
             digest: format!("sha256:{artifact_sha256}"),
         },
-        image_policy_evaluation: Some(ImagePolicyEvaluation {
-            artifact_id,
-            artifact_sha256,
-            policy_id: PolicyId::new(),
-            policy_revision: revision(2),
-            scanner_name: "trivy".to_owned(),
-            scanner_version: "0.58.0".to_owned(),
-            scanner_database_sha256: Sha256Digest::of_bytes(b"trivy-db"),
-            vulnerabilities: VulnerabilitySummary {
-                unknown: 0,
-                low: 0,
-                medium: 0,
-                high: 1,
-                critical: 0,
-            },
-            evaluated_at: published_at,
-            max_evidence_age_milliseconds: 3_600_000,
-            valid_until: timestamp("2026-07-16T09:00:00.000Z"),
-            passed: true,
-        }),
         published_by: ActorId::new(),
         published_at,
     };

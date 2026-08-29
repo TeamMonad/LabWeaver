@@ -26,7 +26,7 @@ use agent_service::run_store::{AgentRunService, ExecuteAgentRun, PostgresAgentRu
 use artifact_store::{ImmutableObjectStore, S3Credential, S3ImmutableObjectStore, S3StoreConfig};
 use async_trait::async_trait;
 use auth::{MtlsFileConfig, load_mtls_server_config};
-use contracts::{ArtifactId, ArtifactRef, PolicyId, Revision, Sha256Digest, UtcTimestamp};
+use contracts::{ArtifactId, ArtifactRef, Revision, UtcTimestamp};
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 use time::OffsetDateTime;
@@ -72,15 +72,8 @@ struct DeploymentFile {
 struct BuildFileConfig {
     provider_subject: String,
     builder_binding: String,
-    scanner_binding: String,
     registry_binding: String,
-    policy_id: PolicyId,
-    policy_revision: Revision,
-    scanner_name: String,
-    scanner_version: String,
-    scanner_database_sha256: Sha256Digest,
     registry_robot_name: String,
-    evidence_ttl_milliseconds: u64,
     stage_timeout_milliseconds: u64,
     worker_lease_seconds: u64,
     retry_delay_milliseconds: u64,
@@ -178,7 +171,6 @@ async fn run_agent_service() -> Result<(), StartupError> {
         nats,
         deployment.build.provider_subject.clone(),
         deployment.build.builder_binding.clone(),
-        deployment.build.scanner_binding.clone(),
         deployment.build.registry_binding.clone(),
         Duration::from_millis(deployment.build.stage_timeout_milliseconds),
     )
@@ -187,15 +179,8 @@ async fn run_agent_service() -> Result<(), StartupError> {
         build_provider,
         BuildPipelinePolicy {
             builder_binding: deployment.build.builder_binding.clone(),
-            scanner_binding: deployment.build.scanner_binding.clone(),
             registry_binding: deployment.build.registry_binding.clone(),
-            policy_id: deployment.build.policy_id,
-            policy_revision: deployment.build.policy_revision,
-            scanner_name: deployment.build.scanner_name.clone(),
-            scanner_version: deployment.build.scanner_version.clone(),
-            scanner_database_sha256: deployment.build.scanner_database_sha256,
             registry_robot_name: deployment.build.registry_robot_name.clone(),
-            evidence_ttl_milliseconds: deployment.build.evidence_ttl_milliseconds,
             stage_timeout: Duration::from_millis(deployment.build.stage_timeout_milliseconds),
         },
     )

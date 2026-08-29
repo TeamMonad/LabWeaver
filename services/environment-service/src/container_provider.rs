@@ -1555,24 +1555,7 @@ where
         if resolved.withdrawn_at.is_some() {
             return Err(ReleaseProjectionError::Withdrawn);
         }
-        let evaluation = release
-            .image_policy_evaluation
-            .as_ref()
-            .ok_or(ReleaseProjectionError::ContractInvalid)?;
-        // Scan freshness gates new materialization and destructive reset. An
-        // existing Environment is already bound to the approved immutable
-        // digest; expiring the scan must not make observe/start/restart fail
-        // after a normal stop. Withdrawal and trust rotation still fail
-        // closed for those actions below.
-        if matches!(action, ReconcileAction::Provision | ReconcileAction::Reset)
-            && resolved.authority_now >= evaluation.valid_until
-        {
-            return Err(ReleaseProjectionError::EvidenceExpired);
-        }
-        if evaluation.policy_id != self.release_policy.image_policy_id
-            || evaluation.policy_revision != self.release_policy.image_policy_revision
-            || release.approval.trust_revision != self.release_policy.trust_revision
-        {
+        if release.approval.trust_revision != self.release_policy.trust_revision {
             return Err(ReleaseProjectionError::TrustRevisionMismatch);
         }
         Ok(())

@@ -990,7 +990,6 @@ fn projection() -> ReleasePublished {
             base_disk: base_disk.clone(),
             format: VirtualMachineDiskFormat::Qcow2,
         },
-        image_policy_evaluation: None,
         published_by: ActorId::new(),
         published_at,
     };

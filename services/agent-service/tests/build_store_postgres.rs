@@ -14,7 +14,7 @@ use agent_service::build_pipeline::{
     BUILD_EXECUTOR_PROTOCOL_VERSION, BuildIdentity, BuildPipeline, BuildPipelinePolicy,
     BuildProviderFailure, BuildProviderFailureCode, BuildProviderRequestContext,
     BuildProviderStage, BuildSupplyChainProvider, BuiltCandidate, PrivateRegistryProject,
-    PublishedImage, ScanEvidence,
+    PublishedImage,
 };
 use agent_service::build_provider::{
     BuildExecutorBackend, BuildExecutorFenceError, BuildExecutorRequest,
@@ -31,10 +31,10 @@ use contracts::http::{
     IdempotencyKey, InternalAgentBuildCancellationRequest, InternalAgentBuildState,
     InternalAgentBuildStatusQuery,
 };
-use contracts::supply_chain::{BuildNetworkPolicy, BuildRequest, VulnerabilitySummary};
+use contracts::supply_chain::{BuildNetworkPolicy, BuildRequest};
 use contracts::{
     ActorId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId, CourseId, EventId,
-    PolicyId, Revision, Sequence, Sha256Digest, UtcTimestamp,
+    Revision, Sequence, Sha256Digest, UtcTimestamp,
 };
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::{ImageExt, runners::AsyncRunner};
@@ -51,10 +51,6 @@ struct SlowProvider {
 impl BuildSupplyChainProvider for SlowProvider {
     fn builder_binding(&self) -> &'static str {
         "buildkit-primary-v1"
-    }
-
-    fn scanner_binding(&self) -> &'static str {
-        "trivy-primary-v1"
     }
 
     fn registry_binding(&self) -> &'static str {
@@ -97,27 +93,6 @@ impl BuildSupplyChainProvider for SlowProvider {
             build_identity: identity,
             repository: command.request.output_repository.clone(),
             digest: digest(),
-        })
-    }
-
-    async fn scan_candidate(
-        &self,
-        _context: &BuildProviderRequestContext,
-        candidate: &BuiltCandidate,
-    ) -> Result<ScanEvidence, BuildProviderFailure> {
-        Ok(ScanEvidence {
-            build_identity: candidate.build_identity,
-            digest: candidate.digest.clone(),
-            scanner_name: "trivy".to_owned(),
-            scanner_version: "0.58.0".to_owned(),
-            scanner_database_sha256: Sha256Digest::of_bytes(b"trivy-db"),
-            vulnerabilities: VulnerabilitySummary {
-                unknown: 0,
-                low: 0,
-                medium: 0,
-                high: 0,
-                critical: 0,
-            },
         })
     }
 
@@ -765,15 +740,8 @@ fn command_event(
 fn policy() -> Result<BuildPipelinePolicy, Box<dyn std::error::Error>> {
     Ok(BuildPipelinePolicy {
         builder_binding: "buildkit-primary-v1".to_owned(),
-        scanner_binding: "trivy-primary-v1".to_owned(),
         registry_binding: "harbor-primary-v1".to_owned(),
-        policy_id: PolicyId::new(),
-        policy_revision: revision(1)?,
-        scanner_name: "trivy".to_owned(),
-        scanner_version: "0.58.0".to_owned(),
-        scanner_database_sha256: Sha256Digest::of_bytes(b"trivy-db"),
         registry_robot_name: "runtime-puller".to_owned(),
-        evidence_ttl_milliseconds: 3_600_000,
         stage_timeout: Duration::from_secs(1),
     })
 }

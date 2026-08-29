@@ -557,8 +557,6 @@ impl AgentBuildConsumer {
                 if resolution.validate().is_err()
                     || resolution.artifact_id != data.artifact_id
                     || resolution.artifact.content_sha256().ok() != Some(data.artifact_sha256)
-                    || canonical_hash(&resolution.policy_evaluation)?
-                        != data.policy_evaluation_sha256
                     || container_build_request_id(&resolution.artifact)
                         != Some(data.build_request_id)
                 {
@@ -579,7 +577,6 @@ impl AgentBuildConsumer {
                         event.id,
                         event.course_id,
                         &resolution.artifact,
-                        &resolution.policy_evaluation,
                     )
                     .await
                 {

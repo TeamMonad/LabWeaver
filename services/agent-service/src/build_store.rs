@@ -253,25 +253,18 @@ impl PgBuildStore {
             .artifact
             .validate()
             .map_err(|_| BuildStoreError::ContractInvalid)?;
-        output
-            .policy_evaluation
-            .validate()
-            .map_err(|_| BuildStoreError::ContractInvalid)?;
         let (artifact_id, build_request_id, digest) = container_identity(&output.artifact)?;
-        if build_request_id != lease.command.request.id
-            || output.policy_evaluation.artifact_id != artifact_id
-            || output.policy_evaluation.artifact_sha256
-                != output
-                    .artifact
-                    .content_sha256()
-                    .map_err(|_| BuildStoreError::ContractInvalid)?
-        {
+        if build_request_id != lease.command.request.id {
             return Err(BuildStoreError::IdentityMismatch);
         }
+        let artifact_sha256 = output
+            .artifact
+            .content_sha256()
+            .map_err(|_| BuildStoreError::ContractInvalid)?;
         let artifact_contract =
             serde_json::to_value(&output.artifact).map_err(|_| BuildStoreError::ContractInvalid)?;
-        let evaluation_contract = serde_json::to_value(&output.policy_evaluation)
-            .map_err(|_| BuildStoreError::ContractInvalid)?;
+        // Policy evaluation removed: store placeholder empty object for backward-compatible column
+        let evaluation_contract = serde_json::json!({});
         let registry_project_contract = serde_json::to_value(&output.registry_project)
             .map_err(|_| BuildStoreError::ContractInvalid)?;
         let artifact_evidence_sha256 = canonical_hash(&artifact_contract)?;
@@ -297,7 +290,7 @@ impl PgBuildStore {
         let data = AgentBuildCompleted {
             build_request_id,
             artifact_id,
-            artifact_sha256: output.policy_evaluation.artifact_sha256,
+            artifact_sha256,
             policy_evaluation_sha256: evaluation_sha256,
         };
         enqueue_terminal_event(

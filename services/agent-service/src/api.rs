@@ -292,23 +292,17 @@ async fn get_artifact(
     Path(artifact_id): Path<ImageArtifactId>,
 ) -> Result<Response, AgentApiError> {
     require_control(&principal)?;
-    let row = sqlx::query("SELECT contract,policy_evaluation FROM agent.image_artifacts WHERE image_artifact_id=$1 AND state='verified'")
+    let row = sqlx::query("SELECT contract FROM agent.image_artifacts WHERE image_artifact_id=$1 AND state='verified'")
         .bind(artifact_id.as_uuid()).fetch_optional(state.store.pool()).await.map_err(|_| AgentApiError::persistence())?.ok_or_else(AgentApiError::not_found)?;
     let artifact: contracts::supply_chain::ImageArtifact = serde_json::from_value(
         row.try_get::<Value, _>("contract")
             .map_err(|_| AgentApiError::contract())?,
     )
     .map_err(|_| AgentApiError::contract())?;
-    let policy_evaluation: contracts::supply_chain::ImagePolicyEvaluation = serde_json::from_value(
-        row.try_get::<Value, _>("policy_evaluation")
-            .map_err(|_| AgentApiError::contract())?,
-    )
-    .map_err(|_| AgentApiError::contract())?;
-    let resolution_sha256 = Sha256Digest::of_canonical(&serde_json::json!({"artifactId":artifact_id,"artifact":artifact,"policyEvaluation":policy_evaluation})).map_err(|_| AgentApiError::contract())?;
+    let resolution_sha256 = Sha256Digest::of_canonical(&serde_json::json!({"artifactId":artifact_id,"artifact":artifact})).map_err(|_| AgentApiError::contract())?;
     let resolution = InternalImageArtifactResolution {
         artifact_id,
         artifact,
-        policy_evaluation,
         resolution_sha256,
     };
     resolution

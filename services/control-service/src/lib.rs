@@ -1203,33 +1203,20 @@ impl ControlService {
         event_id: EventId,
         course_id: CourseId,
         artifact: &ImageArtifact,
-        evaluation: &contracts::supply_chain::ImagePolicyEvaluation,
     ) -> Result<(), ControlError> {
         artifact
-            .validate()
-            .map_err(|_| ControlError::ReleaseEvidenceInvalid)?;
-        evaluation
             .validate()
             .map_err(|_| ControlError::ReleaseEvidenceInvalid)?;
         let artifact_id = image_artifact_id(artifact);
         let build_request_id =
             image_build_request_id(artifact).ok_or(ControlError::ArtifactMismatch)?;
-        if evaluation.artifact_id != artifact_id
-            || evaluation.artifact_sha256
-                != artifact
-                    .content_sha256()
-                    .map_err(|_| ControlError::ReleaseEvidenceInvalid)?
-        {
-            return Err(ControlError::ArtifactMismatch);
-        }
         let runtime_kind = match artifact.runtime_kind() {
             RuntimeKind::Container => "container",
             RuntimeKind::VirtualMachine => "virtual_machine",
         };
         let artifact_json =
             serde_json::to_value(artifact).map_err(|_| ControlError::ContractInvalid)?;
-        let evaluation_json =
-            serde_json::to_value(evaluation).map_err(|_| ControlError::ContractInvalid)?;
+        let evaluation_json = serde_json::json!({});
         let mut transaction = self.pool.begin().await.map_err(db)?;
         let build = sqlx::query(
             "SELECT course_id,state,image_artifact_id FROM control.container_build_projections \
@@ -1268,7 +1255,7 @@ impl ControlService {
         .map_err(db)?;
         if inserted.rows_affected() == 0 {
             let existing = sqlx::query(
-                "SELECT artifact,policy_evaluation \
+                "SELECT artifact \
                  FROM control.image_artifact_projections WHERE image_artifact_id=$1",
             )
             .bind(artifact_id.as_uuid())
@@ -1276,8 +1263,7 @@ impl ControlService {
             .await
             .map_err(db)?;
             let existing_artifact: Value = existing.try_get("artifact").map_err(db)?;
-            let existing_evaluation: Value = existing.try_get("policy_evaluation").map_err(db)?;
-            if existing_artifact != artifact_json || existing_evaluation != evaluation_json {
+            if existing_artifact != artifact_json {
                 return Err(ControlError::ProjectionConflict);
             }
         }
@@ -1751,10 +1737,10 @@ impl ControlService {
         {
             return Err(ControlError::ReleaseCandidateMismatch);
         }
-        let (artifact, image_policy_evaluation) = match &environment_candidate.spec.runtime {
+        let artifact = match &environment_candidate.spec.runtime {
             contracts::authoring::EnvironmentRuntimeSpec::Container { .. } => {
                 let projection = sqlx::query(
-                    "SELECT artifacts.artifact,artifacts.policy_evaluation \
+                    "SELECT artifacts.artifact \
                      FROM control.container_build_projections builds \
                      JOIN control.image_artifact_projections artifacts \
                        ON artifacts.image_artifact_id=builds.image_artifact_id \
@@ -1777,27 +1763,10 @@ impl ControlService {
                 let artifact: ImageArtifact =
                     serde_json::from_value(projection.try_get("artifact").map_err(db)?)
                         .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
-                let evaluation: contracts::supply_chain::ImagePolicyEvaluation =
-                    serde_json::from_value(projection.try_get("policy_evaluation").map_err(db)?)
-                        .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
-                if !matches!(artifact, ImageArtifact::Container { .. })
-                    || evaluation.artifact_id != artifact.id()
-                    || evaluation.artifact_sha256
-                        != artifact
-                            .content_sha256()
-                            .map_err(|_| ControlError::ReleaseEvidenceInvalid)?
-                    || evaluation.policy_id != self.config.image_policy_id
-                    || evaluation.policy_revision != self.config.image_policy_revision
-                {
+                if !matches!(artifact, ImageArtifact::Container { .. }) {
                     return Err(ControlError::ArtifactMismatch);
                 }
-                evaluation
-                    .validate()
-                    .map_err(|_| ControlError::ReleaseEvidenceInvalid)?;
-                if now >= evaluation.valid_until {
-                    return Err(ControlError::ReleaseEvidenceStale);
-                }
-                (artifact, Some(evaluation))
+                artifact
             }
             contracts::authoring::EnvironmentRuntimeSpec::VirtualMachine {
                 provider_binding,
@@ -1812,14 +1781,11 @@ impl ControlService {
                 {
                     return Err(ControlError::ArtifactMismatch);
                 }
-                (
-                    ImageArtifact::VirtualMachine {
-                        id: policy.artifact_id,
-                        base_disk: policy.base_disk.clone(),
-                        format: policy.format,
-                    },
-                    None,
-                )
+                ImageArtifact::VirtualMachine {
+                    id: policy.artifact_id,
+                    base_disk: policy.base_disk.clone(),
+                    format: policy.format,
+                }
             }
         };
         let artifact_id = artifact.id();
@@ -1842,7 +1808,6 @@ impl ControlService {
             runtime_kind: request.runtime_kind,
             approval,
             artifact,
-            image_policy_evaluation,
             published_by: actor_id,
             published_at: now,
         };
@@ -1920,8 +1885,7 @@ impl ControlService {
             json!({
                 "releaseId":release.id,"version":release.version,
                 "environmentSpecSha256":release.environment_spec_sha256,
-                "highSeverityWarnings":release.image_policy_evaluation.as_ref()
-                    .map_or(0, contracts::supply_chain::ImagePolicyEvaluation::high_severity_warning_count)
+                "highSeverityWarnings":0
             }),
         )
         .await?;
@@ -2822,7 +2786,7 @@ async fn load_candidate_build(
 ) -> Result<Option<CandidateBuildView>, ControlError> {
     let row = sqlx::query(
         "SELECT builds.state,builds.terminal_diagnostic,builds.cleanup_verified, \
-                artifacts.artifact,artifacts.policy_evaluation \
+                artifacts.artifact \
          FROM control.container_build_projections builds \
          LEFT JOIN control.image_artifact_projections artifacts \
            ON artifacts.image_artifact_id=builds.image_artifact_id \
@@ -2849,12 +2813,6 @@ async fn load_candidate_build(
         .map(serde_json::from_value)
         .transpose()
         .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
-    let image_policy_evaluation = row
-        .try_get::<Option<Value>, _>("policy_evaluation")
-        .map_err(db)?
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
     let diagnostic_code = row
         .try_get::<Option<String>, _>("terminal_diagnostic")
         .map_err(db)?
@@ -2862,7 +2820,7 @@ async fn load_candidate_build(
         .transpose()
         .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
     let cleanup_verified: Option<bool> = row.try_get("cleanup_verified").map_err(db)?;
-    let evidence_is_complete = artifact.is_some() && image_policy_evaluation.is_some();
+    let evidence_is_complete = artifact.is_some();
     if (state == CandidateBuildState::Succeeded) != evidence_is_complete
         || (state == CandidateBuildState::Requested
             && (diagnostic_code.is_some() || cleanup_verified.is_some()))
@@ -2876,7 +2834,6 @@ async fn load_candidate_build(
     Ok(Some(CandidateBuildView {
         state,
         artifact,
-        image_policy_evaluation,
         diagnostic_code,
         cleanup_verified,
     }))

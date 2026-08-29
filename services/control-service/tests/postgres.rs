@@ -14,9 +14,7 @@ use contracts::http::{
     CreateProblemPackageUploadRequest, IdempotencyKey, ProblemPackageUploadFile,
 };
 use contracts::supply_chain::BuildNetworkPolicy;
-use contracts::supply_chain::{
-    EnvironmentTemplateRelease, ImageArtifact, ImagePolicyEvaluation, VulnerabilitySummary,
-};
+use contracts::supply_chain::{EnvironmentTemplateRelease, ImageArtifact};
 use contracts::{
     ActorId, AgentRunId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId,
     CourseId, EventId, ImageArtifactId, PolicyId, ReleaseId, Revision, Sha256Digest, UtcTimestamp,
@@ -453,7 +451,6 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
         contracts::http::CandidateBuildState::Requested
     );
     assert!(requested_build.artifact.is_none());
-    assert!(requested_build.image_policy_evaluation.is_none());
     let payload: serde_json::Value = sqlx::query_scalar(
         "SELECT payload FROM control.outbox_events WHERE subject=$1 AND aggregate_id<>$2",
     )
@@ -498,23 +495,12 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     {
         *build_request_id = build_event.data.request.id;
     }
-    let artifact_sha256 = supply_chain.artifact.content_sha256()?;
-    let evaluation = supply_chain
-        .image_policy_evaluation
-        .as_mut()
-        .ok_or("container fixture must carry image policy evidence")?;
-    evaluation.policy_id = image_policy_id;
-    evaluation.artifact_sha256 = artifact_sha256;
     assert!(matches!(
         service
             .project_artifact(
                 EventId::new(),
                 CourseId::new(),
                 &supply_chain.artifact,
-                supply_chain
-                    .image_policy_evaluation
-                    .as_ref()
-                    .ok_or("container fixture must carry image policy evidence")?,
             )
             .await,
         Err(ControlError::CourseMismatch)
@@ -524,10 +510,6 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
             EventId::new(),
             course_id,
             &supply_chain.artifact,
-            supply_chain
-                .image_policy_evaluation
-                .as_ref()
-                .ok_or("container fixture must carry image policy evidence")?,
         )
         .await?;
     let succeeded_view = service
@@ -541,10 +523,6 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     assert_eq!(
         succeeded_build.artifact,
         Some(supply_chain.artifact.clone())
-    );
-    assert_eq!(
-        succeeded_build.image_policy_evaluation,
-        supply_chain.image_policy_evaluation.clone()
     );
     let release = service
         .create_release(
@@ -658,7 +636,6 @@ fn release_fixture(
     course_id: CourseId,
 ) -> Result<EnvironmentTemplateRelease, Box<dyn std::error::Error>> {
     let published_at = "2026-07-16T08:00:00.000Z".parse::<UtcTimestamp>()?;
-    let valid_until = "2026-07-16T10:00:00.000Z".parse::<UtcTimestamp>()?;
     let artifact_sha256 = Sha256Digest::of_bytes(b"container-image");
     let candidate_id = CandidateId::new();
     let candidate_sha256 = Sha256Digest::of_bytes(b"environment-spec");
@@ -691,26 +668,6 @@ fn release_fixture(
             repository: "registry.invalid/course/environment".to_owned(),
             digest: format!("sha256:{artifact_sha256}"),
         },
-        image_policy_evaluation: Some(ImagePolicyEvaluation {
-            artifact_id,
-            artifact_sha256,
-            policy_id: PolicyId::new(),
-            policy_revision: Revision::new(1)?,
-            scanner_name: "trivy".to_owned(),
-            scanner_version: "1.0.0".to_owned(),
-            scanner_database_sha256: Sha256Digest::of_bytes(b"scanner-db"),
-            vulnerabilities: VulnerabilitySummary {
-                unknown: 0,
-                low: 0,
-                medium: 0,
-                high: 1,
-                critical: 0,
-            },
-            evaluated_at: published_at,
-            max_evidence_age_milliseconds: 7_200_000,
-            valid_until,
-            passed: true,
-        }),
         published_by: ActorId::new(),
         published_at,
     })
