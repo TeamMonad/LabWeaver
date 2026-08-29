@@ -2,8 +2,9 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use contracts::Sha256Digest;
 use serde::{Deserialize, Serialize};
+
+use crate::Sha256Digest;
 
 use crate::{Domain, PersistenceError};
 
@@ -178,7 +179,7 @@ fn reject_non_transactional_sql(file: &str, sql: &str) -> Result<(), Persistence
 #[cfg(test)]
 mod tests {
     use super::{CatalogMigration, MigrationCatalog};
-    use contracts::Sha256Digest;
+    use crate::Sha256Digest;
 
     #[test]
     fn repository_catalog_is_valid_and_deterministic() -> Result<(), Box<dyn std::error::Error>> {

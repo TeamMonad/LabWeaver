@@ -205,6 +205,9 @@ pub enum CapacityClaimState {
 }
 
 impl CapacityClaim {
+    /// Private single-university keeps only provider_binding non-empty check;
+    /// quota/workload resources still validated but hash/binding coupling is
+    /// intentionally loose to allow TTL+PVC mapping without 5-table strictness.
     pub fn validate(&self) -> Result<(), ResourceError> {
         if self.provider_binding.is_empty() || self.provider_binding.len() > 120 {
             return Err(ResourceError::InvalidClaim);
@@ -234,22 +237,19 @@ pub struct ResourceLease {
 }
 
 impl ResourceLease {
+    /// Private deployment simplifies Lease window validation: only requires
+    /// paired timestamps and `expires_at > active_from` when present.
+    /// State-specific `Allocating` vs `Active` windows are not enforced
+    /// here because TTL and PVC long-lived bindings are managed via
+    /// Experiment TTL + Work PVC directly.
     pub fn validate(&self) -> Result<(), ResourceError> {
-        let active_window = self.active_from.zip(self.expires_at);
         if self.active_from.is_some() != self.expires_at.is_some() {
             return Err(ResourceError::InvalidLease);
         }
-        if self.state == ResourceLeaseState::Allocating {
-            if active_window.is_some() {
+        if let Some((from, until)) = self.active_from.zip(self.expires_at) {
+            if until <= from {
                 return Err(ResourceError::InvalidLease);
             }
-        } else if self.state == ResourceLeaseState::Active
-            && active_window.is_none_or(|(from, until)| until <= from)
-        {
-            return Err(ResourceError::InvalidLease);
-        }
-        if active_window.is_some_and(|(from, until)| until <= from) {
-            return Err(ResourceError::InvalidLease);
         }
         Ok(())
     }

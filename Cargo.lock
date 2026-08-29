@@ -4327,6 +4327,7 @@ dependencies = [
  "auth",
  "contracts",
  "log",
+ "schemars 1.2.1",
  "serde",
  "serde_jcs",
  "serde_json",

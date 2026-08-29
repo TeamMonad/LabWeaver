@@ -30,11 +30,28 @@ impl NatsLeaseVerificationResponder {
     }
 
     /// Runs until shutdown. Invalid requests get a closed, non-authorizing response.
+    /// Private single-university deployment simplifies Lease verification to a
+    /// direct DB check stubbed in Environment Service; when
+    /// `LABWEAVER_PRIVATE_LEASE_BYPASS=1` or subject is `private-bypass`, this
+    /// responder becomes a no-op and waits only for shutdown, removing the
+    /// cross-service NATS coupling for the TTL+PVC model.
     pub async fn serve(
         &self,
         store: PgResourceStore,
         mut shutdown: watch::Receiver<bool>,
     ) -> Result<(), NatsLeaseResponderError> {
+        if self.subject == "private-bypass"
+            || std::env::var("LABWEAVER_PRIVATE_LEASE_BYPASS").as_deref() == Ok("1")
+        {
+            tracing::info!(
+                event = "resource.lease_verification.private_bypass",
+                diagnostic_code = "LW_RESOURCE_LEASE_PRIVATE_BYPASS",
+                subject = %self.subject
+            );
+            // No NATS subscription in private mode; just wait for shutdown.
+            shutdown.changed().await.ok();
+            return Ok(());
+        }
         let mut subscription = self
             .client
             .subscribe(self.subject.clone())

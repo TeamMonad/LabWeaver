@@ -1,8 +1,9 @@
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
-use contracts::Sha256Digest;
 use serde::{Deserialize, Serialize};
+
+use crate::Sha256Digest;
 use sqlx::{PgPool, Row};
 
 use crate::{CatalogDomain, PersistenceError};

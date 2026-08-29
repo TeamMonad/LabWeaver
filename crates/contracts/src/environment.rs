@@ -98,6 +98,9 @@ pub enum EnvironmentResetTarget {
 }
 
 /// Resource-authoritative Active Lease snapshot retained with the accepted operation.
+/// Private single-university deployment simplifies this to a TTL/PVC binding:
+/// `capacity_binding` maps directly to the Work PVC name and `expires_at` is
+/// the authoritative TTL; no separate capacity-shell hash is required.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EnvironmentLeaseAuthorization {

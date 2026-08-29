@@ -5,6 +5,9 @@ mod catalog;
 mod coordinator;
 mod ledger;
 mod schema;
+mod sha256;
+
+pub use sha256::{Sha256Digest, Sha256Error};
 
 pub use catalog::{CatalogDomain, CatalogMigration, MigrationCatalog};
 pub use coordinator::{
