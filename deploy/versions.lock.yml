@@ -37,8 +37,8 @@ oj_cpp17:
 ansible_probe:
   playbook_profile: linux-nginx-probe-v1
   ansible_core: 2.20.5
-  openssh_client: 10.4p1
-  openssh_client_tarball_sha256: ef6026dd2aea8d56059638d5d3262902c892ceba9f88395835e0d06d3fb63238
+  openssh_client: 10.5p1
+  openssh_client_tarball_sha256: d44d28a839ea9daf969cc69150fde59910b2b39361dad81a3bd6cbd19218db11
   toolchain: cgr.dev/chainguard/python@sha256:7b79c054afd14f566d1d52ea1d4d037267ec8570efedbc6ead779d89ba943abe
   base_runtime: cgr.dev/chainguard/python@sha256:cc8d5c94686633e8affbaf52ac4e6c739544fb8a7f69c1e7091adf1a312f30b8
 postgresql:
