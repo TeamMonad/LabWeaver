@@ -12,7 +12,7 @@ use crate::supply_chain::{BuildRequest, EnvironmentTemplateRelease};
 use crate::{
     AccessGrantId, ActorId, AgentRunId, BuildRequestId, ConsoleSessionId, CourseId, EnvironmentId,
     EvaluationReleaseId, EvaluationRunId, EvaluationStepRunId, EventId, FrozenSubmissionId,
-    GatewaySessionId, ReleaseId, Revision, Sequence, Sha256Digest, SshPublicKeyId, UtcTimestamp,
+    GatewaySessionId, ReleaseId, Revision, Sequence, SshPublicKeyId, UtcTimestamp,
 };
 
 pub const SPEC_VERSION: &str = "1.0";
@@ -403,11 +403,10 @@ pub struct AgentBuildRequested {
     pub request: BuildRequest,
     pub approval: CandidateApproval,
     pub idempotency_key: String,
-    pub command_sha256: Sha256Digest,
 }
 
 impl AgentBuildRequested {
-    /// Verifies approval, build-input and canonical command identities before execution.
+    /// Verifies approval and build-input identities before execution.
     pub fn validate(&self) -> Result<(), EventError> {
         self.request
             .validate()
@@ -416,7 +415,6 @@ impl AgentBuildRequested {
             || self.approval.id != self.request.approval_id
             || self.approval.candidate_id != self.request.candidate_id
             || self.approval.candidate_revision != self.request.candidate_revision
-            || self.approval.candidate_sha256 != self.request.candidate_sha256
             || self.idempotency_key.len() < 16
             || self.idempotency_key.len() > 128
             || !self
@@ -424,15 +422,6 @@ impl AgentBuildRequested {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
         {
-            return Err(EventError::PayloadIdentityMismatch);
-        }
-        let command_sha256 = Sha256Digest::of_canonical(&serde_json::json!({
-            "request": self.request,
-            "approval": self.approval,
-            "idempotencyKey": self.idempotency_key,
-        }))
-        .map_err(|error| EventError::Serialization(error.to_string()))?;
-        if command_sha256 != self.command_sha256 {
             return Err(EventError::PayloadIdentityMismatch);
         }
         Ok(())
@@ -445,8 +434,6 @@ impl AgentBuildRequested {
 pub struct AgentBuildCompleted {
     pub build_request_id: BuildRequestId,
     pub artifact_id: crate::ImageArtifactId,
-    pub artifact_sha256: Sha256Digest,
-    pub policy_evaluation_sha256: Sha256Digest,
 }
 
 /// Safe terminal failure emitted only after candidate-resource cleanup was attempted.
@@ -454,7 +441,6 @@ pub struct AgentBuildCompleted {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentBuildFailed {
     pub build_request_id: BuildRequestId,
-    pub command_sha256: Sha256Digest,
     pub diagnostic_code: String,
     pub retryable: bool,
     pub cleanup_verified: bool,
@@ -528,7 +514,6 @@ pub struct ConsoleSessionChanged {
 pub struct SubmissionFreezeRequested {
     pub frozen_submission_id: FrozenSubmissionId,
     pub environment_id: EnvironmentId,
-    pub manifest_sha256: Sha256Digest,
     pub frozen_by: ActorId,
 }
 
@@ -538,8 +523,6 @@ pub struct SubmissionFreezeRequested {
 pub struct SubmissionFrozen {
     /// Authoritative frozen submission contract, including object version and digest.
     pub submission: FrozenSubmission,
-    /// Environment-owned PVC or VM source identity used for both preflight and freeze.
-    pub source_identity_sha256: Sha256Digest,
 }
 
 impl SubmissionFrozen {
@@ -557,8 +540,6 @@ impl SubmissionFrozen {
 pub struct EvaluationReleasePublished {
     pub release_id: EvaluationReleaseId,
     pub revision: Revision,
-    pub evaluation_spec_sha256: Sha256Digest,
-    pub release_identity_sha256: Sha256Digest,
     pub published_by: ActorId,
 }
 
@@ -585,7 +566,7 @@ impl EvaluationRunEvent {
     }
 }
 
-/// Payload-safe step state event. Evidence is hash-only and must be read from the authority.
+/// Payload-safe step state event. Evidence must be read from the authority.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EvaluationStepRunEvent {
@@ -596,7 +577,6 @@ pub struct EvaluationStepRunEvent {
     pub state: String,
     pub attempt: u32,
     pub diagnostic_code: Option<String>,
-    pub evidence_sha256: Option<Sha256Digest>,
     pub cleanup_verified: Option<bool>,
     pub operator_actor_id: Option<ActorId>,
 }
@@ -623,8 +603,6 @@ impl EvaluationStepRunEvent {
 pub struct LabReleaseApproved {
     pub release_id: ReleaseId,
     pub version: u64,
-    pub environment_spec_sha256: Sha256Digest,
-    pub artifact_sha256: Sha256Digest,
 }
 
 /// Complete immutable runtime projection consumed by the Environment state owner.
@@ -633,11 +611,10 @@ pub struct LabReleaseApproved {
 pub struct ReleasePublished {
     pub release: EnvironmentTemplateRelease,
     pub environment_spec: EnvironmentSpec,
-    pub projection_sha256: Sha256Digest,
 }
 
 impl ReleasePublished {
-    /// Verifies the exact approved spec, artifact and projection identity.
+    /// Verifies the exact approved spec and artifact binding.
     pub fn validate(&self) -> Result<(), EventError> {
         self.release
             .validate()
@@ -645,19 +622,7 @@ impl ReleasePublished {
         self.environment_spec
             .validate()
             .map_err(|_| EventError::PayloadIdentityMismatch)?;
-        let spec_sha256 = Sha256Digest::of_canonical(&self.environment_spec)
-            .map_err(|error| EventError::Serialization(error.to_string()))?;
-        if self.environment_spec.runtime.kind() != self.release.runtime_kind
-            || spec_sha256 != self.release.environment_spec_sha256
-        {
-            return Err(EventError::PayloadIdentityMismatch);
-        }
-        let projection_sha256 = Sha256Digest::of_canonical(&serde_json::json!({
-            "release": self.release,
-            "environmentSpec": self.environment_spec,
-        }))
-        .map_err(|error| EventError::Serialization(error.to_string()))?;
-        if projection_sha256 != self.projection_sha256 {
+        if self.environment_spec.runtime.kind() != self.release.runtime_kind {
             return Err(EventError::PayloadIdentityMismatch);
         }
         Ok(())
@@ -748,10 +713,8 @@ mod tests {
     #[test]
     fn build_failure_retry_requires_verified_cleanup() {
         let build_request_id = BuildRequestId::new();
-        let command_sha256 = Sha256Digest::of_bytes(b"command");
         let unsafe_retry = AgentBuildFailed {
             build_request_id,
-            command_sha256,
             diagnostic_code: "LW_AGENT_BUILD_CLEANUP_FAILED".to_owned(),
             retryable: true,
             cleanup_verified: false,
@@ -762,7 +725,6 @@ mod tests {
         ));
         let cleaned_failure = AgentBuildFailed {
             build_request_id,
-            command_sha256,
             diagnostic_code: "LW_AGENT_BUILD_TIMEOUT".to_owned(),
             retryable: true,
             cleanup_verified: true,

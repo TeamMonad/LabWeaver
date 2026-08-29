@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::authoring::{CandidateApproval, CandidateDecision, RuntimeKind};
 use crate::{
     ActorId, AgentRunId, ArtifactRef, BuildRequestId, CandidateId, CourseId, ImageArtifactId,
-    PolicyId, ReleaseId, Revision, Sha256Digest, UtcTimestamp,
+    ReleaseId, Revision, UtcTimestamp,
 };
 
 /// Explicit BuildKit network posture.
@@ -25,7 +25,6 @@ pub struct BuildRequest {
     pub course_id: CourseId,
     pub candidate_id: CandidateId,
     pub candidate_revision: Revision,
-    pub candidate_sha256: Sha256Digest,
     pub approval_id: crate::ApprovalId,
     pub builder_binding: String,
     pub context: ArtifactRef,
@@ -78,7 +77,6 @@ impl BuildRequest {
 pub struct VirtualMachineBaseDisk {
     pub binding: String,
     pub source_registry_digest: String,
-    pub disk_sha256: Sha256Digest,
     pub capacity_bytes: u64,
 }
 
@@ -138,18 +136,6 @@ impl ImageArtifact {
         }
     }
 
-    /// Returns the immutable content identity used by a Release.
-    pub fn content_sha256(&self) -> Result<Sha256Digest, SupplyChainError> {
-        match self {
-            Self::Container { digest, .. } => digest
-                .strip_prefix("sha256:")
-                .ok_or(SupplyChainError::DigestMismatch)?
-                .parse()
-                .map_err(|_| SupplyChainError::DigestMismatch),
-            Self::VirtualMachine { base_disk, .. } => Ok(base_disk.disk_sha256),
-        }
-    }
-
     /// Validates the private registry and immutable content identity.
     pub fn validate(&self) -> Result<(), SupplyChainError> {
         match self {
@@ -188,7 +174,6 @@ pub struct EnvironmentTemplateRelease {
     pub candidate_id: CandidateId,
     pub agent_run_id: AgentRunId,
     pub candidate_revision: Revision,
-    pub environment_spec_sha256: Sha256Digest,
     pub runtime_kind: RuntimeKind,
     pub approval: CandidateApproval,
     pub artifact: ImageArtifact,
@@ -203,7 +188,6 @@ impl EnvironmentTemplateRelease {
             || self.approval.decision != CandidateDecision::Approved
             || self.approval.candidate_id != self.candidate_id
             || self.approval.candidate_revision != self.candidate_revision
-            || self.approval.candidate_sha256 != self.environment_spec_sha256
             || self.runtime_kind != self.artifact.runtime_kind()
         {
             return Err(SupplyChainError::ApprovalMismatch);
@@ -243,9 +227,12 @@ fn validate_oci_digest(value: &str) -> Result<(), SupplyChainError> {
     let Some(digest) = value.strip_prefix("sha256:") else {
         return Err(SupplyChainError::DigestMismatch);
     };
-    digest
-        .parse::<Sha256Digest>()
-        .map_err(|_| SupplyChainError::DigestMismatch)?;
+    if digest.len() != 64
+        || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || digest.bytes().any(|byte| byte.is_ascii_uppercase())
+    {
+        return Err(SupplyChainError::DigestMismatch);
+    }
     Ok(())
 }
 

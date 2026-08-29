@@ -14,12 +14,11 @@ fn resource_create_requires_project_scope() -> Result<(), Box<dyn std::error::Er
 
     let validator = jsonschema::validator_for(&schema)?;
     let value = json!({
-        "courseId": "01900000-0000-7000-8000-000000000001",
+        "courseId": "01900000-0000-7000-8000-8000-000000000001",
         "requestKey": "resource-api-contract",
         "environmentId": "01900000-0000-7000-8000-000000000002",
         "releaseId": "01900000-0000-7000-8000-000000000003",
         "releaseVersion": 1,
-        "releaseSha256": "11".repeat(32),
         "resources": {
             "cpuMillicores": 500,
             "memoryMebibytes": 512,

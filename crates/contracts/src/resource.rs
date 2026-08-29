@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ActorId, CapacityClaimId, CourseId, EnvironmentId, LeaseId, ProjectId, ReleaseId,
-    ResourceApprovalId, ResourceRequestId, Revision, Sha256Digest, UtcTimestamp,
+    ResourceApprovalId, ResourceRequestId, Revision, UtcTimestamp,
 };
 
 /// Requested or approved workload resources, independent of Kubernetes quantity syntax.
@@ -95,7 +95,6 @@ pub struct ResourceTarget {
     pub environment_id: EnvironmentId,
     pub release_id: ReleaseId,
     pub release_version: u64,
-    pub release_sha256: Sha256Digest,
 }
 
 impl ResourceTarget {
@@ -156,7 +155,6 @@ pub struct ResourceApproval {
     pub request_revision: Revision,
     pub approver_id: ActorId,
     pub provider_binding: String,
-    pub policy_sha256: Sha256Digest,
     pub approved_resources: WorkloadResources,
     pub approved_duration_seconds: u64,
     pub reason: String,
@@ -187,10 +185,8 @@ pub struct CapacityClaim {
     pub request_id: ResourceRequestId,
     pub approval_id: ResourceApprovalId,
     pub provider_binding: String,
-    pub policy_sha256: Sha256Digest,
     pub workload_resources: WorkloadResources,
     pub quota_resources: WorkloadResources,
-    pub quota_plan_sha256: Sha256Digest,
     pub state: CapacityClaimState,
     pub revision: Revision,
 }
@@ -272,7 +268,6 @@ pub struct ResourceLeaseAuthorization {
     pub project_id: Option<ProjectId>,
     pub provider_binding: String,
     pub approved_resources: WorkloadResources,
-    pub quota_plan_sha256: Sha256Digest,
     pub active_from: UtcTimestamp,
     pub expires_at: UtcTimestamp,
 }

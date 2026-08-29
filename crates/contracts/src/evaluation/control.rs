@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ActorId, ApprovalId, CandidateId, CourseId, DiagnosticCode, EvaluationReleaseId,
-    EvaluationRunId, EvaluationStepRunId, FrozenSubmissionId, Revision, Sha256Digest, UtcTimestamp,
+    EvaluationRunId, EvaluationStepRunId, FrozenSubmissionId, Revision, UtcTimestamp,
 };
 
 use super::EvaluationSpec;
@@ -17,20 +17,10 @@ pub const EVALUATION_RUN_SCHEMA_VERSION: &str = "evaluation.labweaver.io/evaluat
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EvaluationRuntimeIdentity {
-    /// Clean source tree or source bundle identity.
-    pub source_sha256: Sha256Digest,
     /// Explicit runtime provider binding chosen by Control and enforced by Evaluation.
     pub provider_binding: String,
-    /// Approved problem package identity.
-    pub package_sha256: Sha256Digest,
-    /// Effective non-secret runtime configuration identity.
-    pub configuration_sha256: Sha256Digest,
-    /// Checked-in Migration catalog identity.
-    pub migration_catalog_sha256: Sha256Digest,
     /// Digest-pinned runner image reference.
     pub runner_image: String,
-    /// Runtime artifact identity, such as the worker binary or image manifest digest.
-    pub runtime_artifact_sha256: Sha256Digest,
 }
 
 impl EvaluationRuntimeIdentity {
@@ -53,11 +43,8 @@ pub struct EvaluationRelease {
     pub course_id: CourseId,
     pub candidate_id: CandidateId,
     pub candidate_revision: Revision,
-    pub candidate_sha256: Sha256Digest,
     pub approval_id: ApprovalId,
     pub approval_revision: Revision,
-    pub approval_sha256: Sha256Digest,
-    pub evaluation_spec_sha256: Sha256Digest,
     pub evaluation_spec: EvaluationSpec,
     pub runtime_identity: EvaluationRuntimeIdentity,
     pub state: EvaluationReleaseState,
@@ -80,11 +67,6 @@ impl EvaluationRelease {
             .validate()
             .map_err(|_| EvaluationControlContractError::SpecInvalid)?;
         self.runtime_identity.validate()?;
-        let observed = Sha256Digest::of_canonical(&self.evaluation_spec)
-            .map_err(|_| EvaluationControlContractError::SpecInvalid)?;
-        if observed != self.evaluation_spec_sha256 {
-            return Err(EvaluationControlContractError::IdentityMismatch);
-        }
         match self.state {
             EvaluationReleaseState::Active
                 if self.withdrawn_at.is_none() && self.withdrawal_diagnostic_code.is_none() =>
@@ -101,24 +83,6 @@ impl EvaluationRelease {
             }
         }
     }
-
-    /// Returns the canonical release identity used by runs and evidence envelopes.
-    pub fn release_identity_sha256(&self) -> Result<Sha256Digest, EvaluationControlContractError> {
-        self.validate()?;
-        Sha256Digest::of_canonical(&serde_json::json!({
-            "id": self.id,
-            "courseId": self.course_id,
-            "candidateId": self.candidate_id,
-            "candidateRevision": self.candidate_revision,
-            "candidateSha256": self.candidate_sha256,
-            "approvalId": self.approval_id,
-            "approvalRevision": self.approval_revision,
-            "approvalSha256": self.approval_sha256,
-            "evaluationSpecSha256": self.evaluation_spec_sha256,
-            "runtimeIdentity": self.runtime_identity,
-        }))
-        .map_err(|_| EvaluationControlContractError::IdentityMismatch)
-    }
 }
 
 /// Public release lifecycle.
@@ -133,10 +97,6 @@ pub enum EvaluationReleaseState {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EvaluationRunIdentity {
-    pub release_identity_sha256: Sha256Digest,
-    pub evaluation_spec_sha256: Sha256Digest,
-    pub frozen_submission_sha256: Sha256Digest,
-    pub source_identity_sha256: Sha256Digest,
     pub runtime_identity: EvaluationRuntimeIdentity,
     pub trace_id: String,
 }
@@ -375,8 +335,6 @@ pub struct EvaluationStepRun {
     pub awarded_score: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostic_code: Option<DiagnosticCode>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub evidence_sha256: Option<Sha256Digest>,
     pub cleanup_verified: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<UtcTimestamp>,
@@ -498,7 +456,6 @@ pub struct EvaluationStepCompletion {
     pub awarded_score: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostic_code: Option<DiagnosticCode>,
-    pub evidence_sha256: Sha256Digest,
     pub cleanup_verified: bool,
 }
 

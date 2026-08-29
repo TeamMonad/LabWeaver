@@ -9,8 +9,7 @@ use crate::access::{ConsoleKind, ConsoleLeaseFence};
 use crate::authoring::{EnvironmentClass, RuntimeKind, TerminalSpec};
 use crate::{
     ActorId, CapacityClaimId, CourseId, DiagnosticCode, EndpointId, EnvironmentId, LeaseId,
-    OperationId, ProjectId, ReleaseId, ResourceRequestId, Revision, Sha256Digest, StreamSequence,
-    UtcTimestamp,
+    OperationId, ProjectId, ReleaseId, ResourceRequestId, Revision, StreamSequence, UtcTimestamp,
 };
 
 /// Requested steady state.
@@ -163,7 +162,6 @@ pub struct ResourceWorkHandoff {
     pub project_id: Option<ProjectId>,
     pub release_id: ReleaseId,
     pub release_version: u64,
-    pub release_sha256: Sha256Digest,
     pub provider_binding: String,
     pub capacity_binding: String,
     pub trace_id: String,
@@ -544,9 +542,6 @@ pub struct EnvironmentEndpoint {
     pub protocol: EndpointProtocol,
     pub revision: Revision,
     pub health: EndpointHealth,
-    /// SHA-256 of the OpenSSH host-key fingerprint string observed by the
-    /// runtime executor. Required for SSH and absent for non-SSH endpoints.
-    pub ssh_host_key_identity_sha256: Option<crate::Sha256Digest>,
     pub observed_at: UtcTimestamp,
 }
 
@@ -711,10 +706,7 @@ impl EnvironmentInstance {
             && (self.observed_generation != self.generation
                 || self.endpoints.is_empty()
                 || self.endpoints.iter().any(|endpoint| {
-                    endpoint.health != EndpointHealth::Healthy
-                        || endpoint.revision != self.revision
-                        || (endpoint.protocol == EndpointProtocol::Ssh)
-                            != endpoint.ssh_host_key_identity_sha256.is_some()
+                    endpoint.health != EndpointHealth::Healthy || endpoint.revision != self.revision
                 }))
         {
             return Err(EnvironmentError::ReadyWithoutHealthyEndpoint);
@@ -1068,11 +1060,7 @@ impl EnvironmentEndpointEligibility {
             || self.environment_revision != request.expected_revision
             || self.eligibility_expires_at <= now
             || requested != returned
-            || self.endpoints.iter().any(|endpoint| {
-                endpoint.health != EndpointHealth::Healthy
-                    || (endpoint.protocol == EndpointProtocol::Ssh)
-                        != endpoint.ssh_host_key_identity_sha256.is_some()
-            })
+            || self.endpoints.iter().any(|endpoint| endpoint.health != EndpointHealth::Healthy)
         {
             return Err(EnvironmentError::EndpointEligibilityInvalid);
         }
@@ -1145,7 +1133,7 @@ mod tests {
     use crate::authoring::{EnvironmentClass, RuntimeKind, TerminalSpec};
     use crate::{
         ActorId, CapacityClaimId, CourseId, EnvironmentId, LeaseId, ReleaseId, ResourceRequestId,
-        Revision, Sha256Digest, UtcTimestamp,
+        Revision, UtcTimestamp,
     };
 
     const STATES: [ObservedEnvironmentState; 12] = [
@@ -1389,7 +1377,6 @@ mod tests {
             project_id: None,
             release_id: ReleaseId::new(),
             release_version: 1,
-            release_sha256: Sha256Digest::of_bytes(b"release"),
             provider_binding: "kubernetes-standard".to_owned(),
             capacity_binding: "claim-123".to_owned(),
             trace_id: "resource-handoff-123".to_owned(),

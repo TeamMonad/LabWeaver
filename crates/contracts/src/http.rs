@@ -9,7 +9,7 @@ use crate::{
     AccessGrantId, ActorId, ApprovalId, BuildRequestId, CandidateId, CourseId, DiagnosticCode,
     EndpointId, EnvironmentId, EvaluationReleaseId, EvaluationRunId, EvaluationStepRunId, EventId,
     ImageArtifactId, LeaseId, OperationId, PlatformRole, ProblemPackageId, ProjectId, ReleaseId,
-    ResourceRequestId, Revision, Sha256Digest, StreamSequence, UploadSessionId, UtcTimestamp,
+    ResourceRequestId, Revision, StreamSequence, UploadSessionId, UtcTimestamp,
 };
 
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -49,8 +49,6 @@ pub struct CreateResourceRequest {
     pub environment_id: EnvironmentId,
     pub release_id: ReleaseId,
     pub release_version: u64,
-    /// Immutable release document identity expected by Environment at handoff.
-    pub release_sha256: Sha256Digest,
     pub resources: crate::resource::WorkloadResources,
     pub duration_seconds: u64,
 }
@@ -99,7 +97,6 @@ pub struct ResourceOperationAccepted {
 pub struct ProblemPackageUploadFile {
     pub path: String,
     pub size_bytes: u64,
-    pub sha256: Sha256Digest,
     pub media_type: String,
 }
 
@@ -134,7 +131,6 @@ pub struct ProblemPackageUploadSession {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CompleteProblemPackageUploadRequest {
-    pub manifest_sha256: Sha256Digest,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -142,7 +138,6 @@ pub struct CompleteProblemPackageUploadRequest {
 pub struct CreateAgentRunRequest {
     pub package_id: ProblemPackageId,
     pub package_revision: Revision,
-    pub package_sha256: Sha256Digest,
     pub policy_id: crate::PolicyId,
     pub policy_revision: Revision,
     pub requested_runtime: crate::authoring::RuntimeKind,
@@ -156,7 +151,6 @@ pub struct CreateAgentRunRequest {
 pub struct CreateWorkAgentRunRequest {
     pub package_id: ProblemPackageId,
     pub package_revision: Revision,
-    pub package_sha256: Sha256Digest,
     pub policy_id: crate::PolicyId,
     pub policy_revision: Revision,
     pub requested_runtime: crate::authoring::RuntimeKind,
@@ -167,7 +161,6 @@ impl From<CreateWorkAgentRunRequest> for CreateAgentRunRequest {
         Self {
             package_id: value.package_id,
             package_revision: value.package_revision,
-            package_sha256: value.package_sha256,
             policy_id: value.policy_id,
             policy_revision: value.policy_revision,
             requested_runtime: value.requested_runtime,
@@ -179,9 +172,7 @@ impl From<CreateWorkAgentRunRequest> for CreateAgentRunRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CandidateDecisionRequest {
     pub candidate_revision: Revision,
-    pub candidate_sha256: Sha256Digest,
     pub policy_revision: Revision,
-    pub schema_sha256: Sha256Digest,
     pub trust_revision: Revision,
     pub decision: crate::authoring::CandidateDecision,
     pub reason: String,
@@ -233,7 +224,6 @@ pub struct EvaluationCandidateView {
 pub struct CreateEvaluationReleaseRequest {
     pub candidate_id: CandidateId,
     pub candidate_revision: Revision,
-    pub evaluation_spec_sha256: Sha256Digest,
     pub approval_id: ApprovalId,
 }
 
@@ -274,7 +264,6 @@ pub struct InternalWithdrawEvaluationReleaseRequest {
 pub struct CreateEnvironmentTemplateReleaseRequest {
     pub candidate_id: CandidateId,
     pub candidate_revision: Revision,
-    pub environment_spec_sha256: Sha256Digest,
     pub runtime_kind: crate::authoring::RuntimeKind,
     pub approval_id: ApprovalId,
 }
@@ -332,7 +321,6 @@ pub enum InternalAgentBuildState {
 pub struct InternalAgentBuildCancellationRequest {
     pub course_id: CourseId,
     pub build_request_id: BuildRequestId,
-    pub command_sha256: Sha256Digest,
     pub expected_state: InternalAgentBuildState,
     pub expected_revision: Revision,
     pub actor_id: ActorId,
@@ -346,7 +334,6 @@ pub struct InternalAgentBuildCancellationRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InternalAgentBuildStatusQuery {
     pub course_id: CourseId,
-    pub command_sha256: Sha256Digest,
 }
 
 /// Durable result returned for an accepted or exactly replayed build cancellation.
@@ -355,7 +342,6 @@ pub struct InternalAgentBuildStatusQuery {
 pub struct InternalAgentBuildCancellationResult {
     pub course_id: CourseId,
     pub build_request_id: BuildRequestId,
-    pub command_sha256: Sha256Digest,
     pub state: InternalAgentBuildState,
     pub revision: Revision,
     pub cancellation_requested: bool,
@@ -371,12 +357,10 @@ pub struct InternalAgentRunOutcome {
     pub environment_candidate: Option<crate::authoring::EnvironmentCandidate>,
     /// Validated Evaluation candidate, if that track succeeded.
     pub evaluation_candidate: Option<crate::authoring::EvaluationCandidate>,
-    /// Canonical hash over this response, excluding this field.
-    pub outcome_sha256: Sha256Digest,
 }
 
 impl InternalAgentRunOutcome {
-    /// Validates parent identities and canonical response identity.
+    /// Validates parent identities.
     pub fn validate(&self) -> Result<(), HttpContractError> {
         if self
             .environment_candidate
@@ -389,15 +373,6 @@ impl InternalAgentRunOutcome {
         {
             return Err(HttpContractError::InvalidInternalIdentity);
         }
-        let canonical = Sha256Digest::of_canonical(&serde_json::json!({
-            "run": self.run,
-            "environmentCandidate": self.environment_candidate,
-            "evaluationCandidate": self.evaluation_candidate,
-        }))
-        .map_err(|_| HttpContractError::InvalidInternalIdentity)?;
-        if canonical != self.outcome_sha256 {
-            return Err(HttpContractError::InvalidInternalIdentity);
-        }
         Ok(())
     }
 }
@@ -408,7 +383,13 @@ impl InternalAgentRunOutcome {
 pub struct InternalImageArtifactResolution {
     pub artifact_id: ImageArtifactId,
     pub artifact: crate::supply_chain::ImageArtifact,
-    pub resolution_sha256: Sha256Digest,
+}
+
+impl InternalImageArtifactResolution {
+    /// Verifies exact artifact ID.
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        Ok(())
+    }
 }
 
 /// Control-to-Evaluation command that publishes one approved immutable `EvaluationSpec`.
@@ -418,10 +399,8 @@ pub struct InternalPublishEvaluationReleaseRequest {
     pub course_id: CourseId,
     pub candidate_id: CandidateId,
     pub candidate_revision: Revision,
-    pub candidate_sha256: Sha256Digest,
     pub approval_id: ApprovalId,
     pub approval_revision: Revision,
-    pub approval_sha256: Sha256Digest,
     pub evaluation_spec: crate::evaluation::EvaluationSpec,
     pub runtime_identity: crate::evaluation::EvaluationRuntimeIdentity,
     pub published_by: ActorId,
@@ -489,21 +468,6 @@ impl InternalCompleteEvaluationStepRequest {
         self.runtime_identity
             .validate()
             .map_err(|_| HttpContractError::InvalidEvaluationControl)
-    }
-}
-
-impl InternalImageArtifactResolution {
-    /// Verifies exact artifact ID and canonical response identity.
-    pub fn validate(&self) -> Result<(), HttpContractError> {
-        let canonical = Sha256Digest::of_canonical(&serde_json::json!({
-            "artifactId": self.artifact_id,
-            "artifact": self.artifact,
-        }))
-        .map_err(|_| HttpContractError::InvalidInternalIdentity)?;
-        if canonical != self.resolution_sha256 {
-            return Err(HttpContractError::InvalidInternalIdentity);
-        }
-        Ok(())
     }
 }
 

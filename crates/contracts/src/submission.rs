@@ -8,7 +8,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::authoring::RuntimeKind;
 use crate::{
     ActorId, AgentRunId, ArtifactRef, BuildRequestId, CourseId, EnvironmentId, FrozenSubmissionId,
-    PathRule, ReleaseId, RetentionSnapshot, Revision, Sha256Digest, UtcTimestamp,
+    PathRule, ReleaseId, RetentionSnapshot, Revision, UtcTimestamp,
 };
 
 /// Source available to a bounded Collector.
@@ -160,7 +160,6 @@ enum SubmissionDocumentKind {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FrozenFile {
     pub path: String,
-    pub sha256: Sha256Digest,
     pub size_bytes: u64,
     pub media_type: String,
 }
@@ -174,7 +173,6 @@ pub struct FrozenEnvironmentIdentity {
     pub release_id: ReleaseId,
     pub release_version: u64,
     pub runtime_kind: RuntimeKind,
-    pub runtime_artifact_sha256: Sha256Digest,
     pub build_request_id: Option<BuildRequestId>,
 }
 
@@ -208,8 +206,8 @@ pub enum EnvironmentFreezeSourceBinding {
         port: u16,
         username: String,
         workspace_root: String,
-        expected_host_key_sha256: Sha256Digest,
-        source_identity: Sha256Digest,
+        expected_host_key_sha256: String,
+        source_identity: String,
         collector_certificate_openssh: String,
         expires_at: UtcTimestamp,
     },
@@ -234,9 +232,7 @@ pub struct FrozenSubmission {
     pub agent_run_id: AgentRunId,
     pub attempt: u32,
     pub manifest_revision: Revision,
-    pub submission_manifest_sha256: Sha256Digest,
     pub files: Vec<FrozenFile>,
-    pub manifest_sha256: Sha256Digest,
     pub object: ArtifactRef,
     pub environment: FrozenEnvironmentIdentity,
     pub retention: RetentionSnapshot,
@@ -246,7 +242,7 @@ pub struct FrozenSubmission {
 }
 
 impl FrozenSubmission {
-    /// Validates file ordering, individual identity, canonical manifest hash, and immutable object.
+    /// Validates file ordering, individual identity, and immutable object.
     pub fn validate(&self) -> Result<(), SubmissionError> {
         if self.attempt == 0
             || self.files.is_empty()
@@ -281,11 +277,6 @@ impl FrozenSubmission {
                 ));
             }
             previous = Some(&file.path);
-        }
-        let computed = Sha256Digest::of_canonical(&self.files)
-            .map_err(|error| SubmissionError::InvalidManifest(error.to_string()))?;
-        if computed != self.manifest_sha256 {
-            return Err(SubmissionError::HashMismatch);
         }
         Ok(())
     }
