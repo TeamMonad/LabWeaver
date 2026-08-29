@@ -304,13 +304,17 @@ async fn retry_generation_changes_every_remote_stage_identity() {
 }
 
 #[tokio::test]
-async fn critical_vulnerability_blocks_publication_then_cleans_up() {
+async fn critical_vulnerability_is_allowed_after_owner_exception_and_publication_continues() {
+    // Owner-approved Sprint 2 exception (2026-08-10, #126): the base image
+    // carries critical CVEs with no fixed version. The scan evidence still
+    // records them for audit, but the build proceeds to publish instead of
+    // failing closed on `critical > 0`.
     let provider = FakeProvider {
         critical: 1,
         ..FakeProvider::default()
     };
     let calls = provider.clone();
-    let error = pipeline(provider)
+    let result = pipeline(provider)
         .execute(
             &command(60_000),
             now(),
@@ -318,13 +322,19 @@ async fn critical_vulnerability_blocks_publication_then_cleans_up() {
             &BuildCancellation::new(),
         )
         .await
-        .expect_err("Critical must block");
+        .expect("Critical must not block after the owner exception");
 
-    assert_eq!(error.code, BuildFailureCode::CriticalVulnerability);
-    assert!(error.cleanup_verified);
+    assert_eq!(result.policy_evaluation.vulnerabilities.critical, 1);
+    assert!(result.policy_evaluation.passed);
     assert_eq!(
         calls.calls(),
-        vec![Call::EnsurePrivate, Call::Build, Call::Scan, Call::Cleanup]
+        vec![
+            Call::EnsurePrivate,
+            Call::Build,
+            Call::Scan,
+            Call::Publish,
+            Call::Cleanup
+        ]
     );
 }
 

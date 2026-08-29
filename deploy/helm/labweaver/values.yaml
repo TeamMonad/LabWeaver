@@ -78,6 +78,9 @@ workloads:
     secret: agent-service-secrets
     env:
       LABWEAVER_AGENT_CONFIG_FILE: /etc/labweaver/config/config.yaml
+      # Acceptance-only VM candidate diagnostics. The directory is backed by
+      # the existing pod-scoped /tmp volume and is removed with the pod.
+      LABWEAVER_LLM_OUTPUT_DIR: /tmp
       SSL_CERT_FILE: /etc/labweaver/secrets/minio-ca.pem
     ports:
       - {name: mtls, containerPort: 9445, servicePort: 9445}

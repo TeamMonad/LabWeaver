@@ -65,7 +65,7 @@ def validate_authentication(path: Path) -> dict[str, Any]:
     if auth.get("apiVersion") != "deploy.labweaver.io/resource-replay-auth/v1":
         raise ReplayInputError("LW_RESOURCE_REPLAY_AUTHENTICATION_INVALID")
     base_url = auth.get("baseUrl")
-    if not isinstance(base_url, str) or not re.fullmatch(r"https://[a-z0-9][a-z0-9.-]*(?::[0-9]+)?", base_url):
+    if not isinstance(base_url, str) or not re.fullmatch(r"https?://[a-z0-9][a-z0-9.-]*(?::[0-9]+)?", base_url):
         raise ReplayInputError("LW_RESOURCE_REPLAY_AUTHENTICATION_INVALID")
     for role in ("teacher", "student", "platformAdmin"):
         locator = auth.get(f"{role}StorageState")

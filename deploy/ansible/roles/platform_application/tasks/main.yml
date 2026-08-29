@@ -130,6 +130,7 @@
     that:
       - platform_application_postgres_forward_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
       - platform_application_postgres_forward_kubernetes_service is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - platform_application_postgres_forward_hostname is match('^[a-z0-9][a-z0-9.-]+$')
       - platform_application_postgres_forward_service_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?\\.service$')
       - platform_application_postgres_forward_port | int > 1024
       - platform_application_postgres_forward_port | int < 65536
@@ -157,6 +158,80 @@
     state: started
     timeout: 30
   when: platform_application_postgres_forward_enabled | bool
+
+- name: Validate the NATS port-forward contract
+  ansible.builtin.assert:
+    that:
+      - platform_application_nats_forward_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - platform_application_nats_forward_kubernetes_service is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - platform_application_nats_forward_hostname is match('^[a-z0-9][a-z0-9.-]+$')
+      - platform_application_nats_forward_hostname == 'nats.labweaver-data.svc'
+      - platform_application_nats_forward_address == '127.0.0.1'
+      - platform_application_nats_forward_address is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
+      - platform_application_nats_forward_service_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?\\.service$')
+      - platform_application_nats_forward_port | int > 1024
+      - platform_application_nats_forward_port | int < 65536
+    fail_msg: PLATFORM_APPLICATION_NATS_FORWARD_INPUT_INVALID
+  when: platform_application_nats_forward_enabled | bool
+
+- name: Install the persistent NATS port-forward
+  ansible.builtin.template:
+    src: nats-port-forward.service.j2
+    dest: /etc/systemd/system/{{ platform_application_nats_forward_service_name }}
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart the adopted NATS port-forward
+  when: platform_application_nats_forward_enabled | bool
+
+- name: Apply the NATS port-forward before JetStream adoption
+  ansible.builtin.meta: flush_handlers
+  when: platform_application_nats_forward_enabled | bool
+
+- name: Require the adopted NATS port-forward endpoint
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ platform_application_nats_forward_port }}"
+    state: started
+    timeout: 30
+  when: platform_application_nats_forward_enabled | bool
+
+- name: Validate the MinIO port-forward contract
+  ansible.builtin.assert:
+    that:
+      - platform_application_minio_forward_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - platform_application_minio_forward_kubernetes_service is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - platform_application_minio_forward_hostname is match('^[a-z0-9][a-z0-9.-]+$')
+      - platform_application_minio_forward_hostname == 'minio.labweaver-data.svc'
+      - platform_application_minio_forward_address == '127.0.0.1'
+      - platform_application_minio_forward_address is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
+      - platform_application_minio_forward_service_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?\.service$')
+      - platform_application_minio_forward_port | int > 1024
+      - platform_application_minio_forward_port | int < 65536
+    fail_msg: PLATFORM_APPLICATION_MINIO_FORWARD_INPUT_INVALID
+  when: platform_application_minio_forward_enabled | bool
+
+- name: Install the persistent MinIO port-forward
+  ansible.builtin.template:
+    src: minio-port-forward.service.j2
+    dest: /etc/systemd/system/{{ platform_application_minio_forward_service_name }}
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart the adopted MinIO port-forward
+  when: platform_application_minio_forward_enabled | bool
+
+- name: Apply the MinIO port-forward before bucket adoption
+  ansible.builtin.meta: flush_handlers
+  when: platform_application_minio_forward_enabled | bool
+
+- name: Require the adopted MinIO port-forward endpoint
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ platform_application_minio_forward_port }}"
+    state: started
+    timeout: 30
+  when: platform_application_minio_forward_enabled | bool
 
 - name: Validate controller-owned reviewed inputs
   ansible.builtin.stat:
@@ -212,6 +287,16 @@
          | from_yaml_all
          | selectattr('oidc', 'defined')
          | first }}
+  no_log: true
+
+- name: Require the current Access Service configuration schema before mutation
+  ansible.builtin.assert:
+    that:
+      - platform_application_access_configuration.grants is mapping
+      - platform_application_access_configuration.grants.max_console_sessions is defined
+      - platform_application_access_configuration.grants.environment_state_stream == 'LABWEAVER_ENVIRONMENT_COMMANDS'
+      - platform_application_access_configuration.grants.environment_state_consumer == 'access-environment-state-v1'
+    fail_msg: PLATFORM_APPLICATION_ACCESS_CONFIGURATION_SCHEMA_INVALID
   no_log: true
 
 - name: Select reviewed NATS and Evaluation configuration objects
@@ -413,6 +498,7 @@
     stdin_add_newline: false
   delegate_to: localhost
   become: false
+  check_mode: false
   changed_when: false
   no_log: true
 
@@ -456,6 +542,7 @@
       - -o
       - jsonpath={.metadata.uid}
   register: platform_application_cluster_uid
+  check_mode: false
   changed_when: false
 
 - name: Create bounded application report directory
@@ -481,6 +568,7 @@
       - --output=jsonpath={.items[0].endpoints[0].addresses[0]}
   loop: "{{ platform_application_data_services }}"
   register: platform_application_data_endpoints
+  check_mode: false
   changed_when: false
 
 - name: Require one valid retained endpoint per data service
@@ -493,6 +581,12 @@
         | list | length
         == platform_application_data_services | length
     fail_msg: PLATFORM_APPLICATION_DATA_ENDPOINT_INVALID
+
+- name: Canonicalize adopted data-service host mappings
+  ansible.builtin.replace:
+    path: /etc/hosts
+    regexp: '^[0-9.]+\s+(?:postgres|nats|minio)\.labweaver-data\.svc\s*$\n?'
+    replace: ''
 
 - name: Bind controller tools to retained service identities
   ansible.builtin.blockinfile:
@@ -509,15 +603,38 @@
   ansible.builtin.replace:
     path: /etc/hosts
     regexp: '^[0-9.]+\s+nats\.labweaver-data\.svc$'
-    replace: "{{ platform_application_nats_controller_address }} nats.labweaver-data.svc"
-  when: platform_application_nats_controller_address | length > 0
+    replace: >-
+      {{ (platform_application_nats_forward_address
+          if platform_application_nats_forward_enabled | bool
+          else platform_application_nats_controller_address)
+         ~ ' ' ~ platform_application_nats_forward_hostname }}
+  when: >-
+    platform_application_nats_forward_enabled | bool
+    or platform_application_nats_controller_address | length > 0
 
 - name: Apply the explicitly approved controller-side MinIO transport override
   ansible.builtin.replace:
     path: /etc/hosts
     regexp: '^[0-9.]+\s+minio\.labweaver-data\.svc$'
-    replace: "{{ platform_application_minio_controller_address }} minio.labweaver-data.svc"
-  when: platform_application_minio_controller_address | length > 0
+    replace: >-
+      {{ (platform_application_minio_forward_address
+          if platform_application_minio_forward_enabled | bool
+          else platform_application_minio_controller_address)
+         ~ ' ' ~ platform_application_minio_forward_hostname }}
+  when: >-
+    platform_application_minio_forward_enabled | bool
+    or platform_application_minio_controller_address | length > 0
+
+- name: Bind the effective MinIO administration endpoint
+  ansible.builtin.set_fact:
+    platform_application_minio_effective_endpoint: >-
+      {{ ('https://' ~ platform_application_minio_forward_hostname ~ ':' ~
+          (platform_application_minio_forward_port | string) ~ '/')
+         if platform_application_minio_forward_enabled | bool
+         else (('https://' ~ platform_application_minio_forward_hostname ~ ':' ~
+                (platform_application_minio_controller_port | string) ~ '/')
+               if platform_application_minio_controller_address | length > 0
+               else platform_application_minio_endpoint) }}
 
 - name: Create isolated MinIO administration configuration
   ansible.builtin.file:
@@ -526,6 +643,7 @@
     owner: root
     group: root
     mode: "0700"
+  check_mode: false
 
 - name: Authenticate retained MinIO administration
   # mc parses any argument starting with '-' as a flag, which breaks aliases
@@ -538,12 +656,13 @@
     mode: "0600"
     content: >-
       {{ {'version': '10', 'aliases': {platform_application_minio_alias: {
-           'url': platform_application_minio_endpoint,
+           'url': platform_application_minio_effective_endpoint,
            'accessKey': platform_application_minio_username,
            'secretKey': platform_application_minio_password,
            'api': 'S3v4',
            'path': 'on'}}} | to_nice_json }}
   no_log: true
+  check_mode: false
 
 - name: Probe retained PostgreSQL database identity
   ansible.builtin.slurp:
@@ -553,7 +672,28 @@
 
 - name: Bind effective PostgreSQL service identity
   ansible.builtin.set_fact:
+    platform_application_postgres_effective_service_file: >-
+      {{ platform_application_report_root }}/{{ platform_application_run_id }}/postgres-service.conf
+
+- name: Bind PostgreSQL service through the adopted controller forward
+  ansible.builtin.copy:
+    dest: "{{ platform_application_postgres_effective_service_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+    content: >-
+      {{ (platform_application_postgres_service_source.content | b64decode)
+         | regex_replace('(?m)^hostaddr=.*\\n?', '')
+         | regex_replace('(?m)^port=.*$', 'port=' ~ (platform_application_postgres_forward_port | string))
+         | regex_replace('(?m)^host=.*$', 'hostaddr=127.0.0.1' ~ '\n' ~
+             'host=' ~ platform_application_postgres_forward_hostname) }}
+  when: platform_application_postgres_forward_enabled | bool
+  no_log: true
+
+- name: Bind PostgreSQL service without a controller forward
+  ansible.builtin.set_fact:
     platform_application_postgres_effective_service_file: "{{ platform_application_postgres_service_file }}"
+  when: not (platform_application_postgres_forward_enabled | bool)
 
 - name: Probe retained PostgreSQL database identity
   ansible.builtin.command:
@@ -569,6 +709,7 @@
     PGSSLCERT: "{{ platform_application_postgres_client_certificate_file }}"
     PGSSLKEY: "{{ platform_application_postgres_client_private_key_file }}"
   register: platform_application_postgres_identity
+  check_mode: false
   changed_when: false
   retries: 6
   delay: 2
@@ -646,7 +787,8 @@
   ansible.builtin.set_fact:
     platform_application_nats_probe_server: >-
       {{ ('tls://nats.labweaver-data.svc:' ~ platform_application_nats_controller_port)
-         if platform_application_nats_controller_address | length > 0
+         if platform_application_nats_forward_enabled | bool
+            or platform_application_nats_controller_address | length > 0
          else platform_application_nats_server }}
 
 - name: Probe retained JetStream
@@ -665,6 +807,7 @@
       - "{{ platform_application_nats_client_private_key_file }}"
       - account
       - info
+  check_mode: false
   changed_when: false
 
 - name: Inspect exact Sprint 2 streams without mutation
@@ -687,6 +830,7 @@
       - --json
   loop: "{{ platform_application_nats_streams }}"
   register: platform_application_stream_info_before
+  check_mode: false
   failed_when: false
   changed_when: false
 
@@ -769,7 +913,17 @@
       - --json
   loop: "{{ platform_application_nats_streams }}"
   register: platform_application_stream_info_after
+  check_mode: false
+  failed_when: false
   changed_when: false
+
+- name: Reject failed Sprint 2 stream readback outside check mode
+  ansible.builtin.assert:
+    that: item.rc == 0
+    fail_msg: PLATFORM_APPLICATION_STREAM_READBACK_FAILED
+  loop: "{{ platform_application_stream_info_after.results }}"
+  when: not ansible_check_mode
+  no_log: true
 
 - name: Validate retained or created stream identities
   ansible.builtin.assert:
@@ -781,6 +935,7 @@
       - (item.stdout | from_json).config.discard == 'old'
     fail_msg: PLATFORM_APPLICATION_STREAM_CONFLICT
   loop: "{{ platform_application_stream_info_after.results }}"
+  when: item.rc == 0
   no_log: true
 
 - name: Inspect exact Sprint 2 durable consumers without mutation
@@ -804,6 +959,7 @@
       - --json
   loop: "{{ platform_application_nats_consumers }}"
   register: platform_application_consumer_info_before
+  check_mode: false
   failed_when: false
   changed_when: false
 
@@ -845,7 +1001,17 @@
       - --json
   loop: "{{ platform_application_nats_consumers }}"
   register: platform_application_consumer_info_after
+  check_mode: false
+  failed_when: false
   changed_when: false
+
+- name: Reject failed Sprint 2 consumer readback outside check mode
+  ansible.builtin.assert:
+    that: item.rc == 0
+    fail_msg: PLATFORM_APPLICATION_CONSUMER_READBACK_FAILED
+  loop: "{{ platform_application_consumer_info_after.results }}"
+  when: not ansible_check_mode
+  no_log: true
 
 - name: Validate retained or created consumer identities
   ansible.builtin.assert:
@@ -861,6 +1027,7 @@
              else [])) | sort == item.item.filters | sort
     fail_msg: PLATFORM_APPLICATION_CONSUMER_CONFLICT
   loop: "{{ platform_application_consumer_info_after.results }}"
+  when: item.rc == 0
   no_log: true
 
 - name: Inspect the immutable artifact bucket without mutation
@@ -870,11 +1037,18 @@
       - ls
       - "{{ platform_application_minio_alias }}/{{ platform_application_minio_bucket }}"
   register: platform_application_minio_bucket_before
+  check_mode: false
   changed_when: false
   failed_when: false
   environment:
     MC_CONFIG_DIR: "{{ platform_application_report_root }}/{{ platform_application_run_id }}/mc"
     SSL_CERT_FILE: "{{ platform_application_minio_ca_file }}"
+    HTTP_PROXY: ""
+    HTTPS_PROXY: ""
+    http_proxy: ""
+    https_proxy: ""
+    ALL_PROXY: ""
+    all_proxy: ""
   no_log: true
 
 - name: Create the immutable artifact bucket only when missing
@@ -890,6 +1064,12 @@
   environment:
     MC_CONFIG_DIR: "{{ platform_application_report_root }}/{{ platform_application_run_id }}/mc"
     SSL_CERT_FILE: "{{ platform_application_minio_ca_file }}"
+    HTTP_PROXY: ""
+    HTTPS_PROXY: ""
+    http_proxy: ""
+    https_proxy: ""
+    ALL_PROXY: ""
+    all_proxy: ""
   no_log: false
 
 - name: Enable versioning without removing existing objects
@@ -903,6 +1083,12 @@
   environment:
     MC_CONFIG_DIR: "{{ platform_application_report_root }}/{{ platform_application_run_id }}/mc"
     SSL_CERT_FILE: "{{ platform_application_minio_ca_file }}"
+    HTTP_PROXY: ""
+    HTTPS_PROXY: ""
+    http_proxy: ""
+    https_proxy: ""
+    ALL_PROXY: ""
+    all_proxy: ""
   no_log: true
 
 - name: Verify immutable artifact bucket versioning
@@ -914,9 +1100,16 @@
       - "{{ platform_application_minio_alias }}/{{ platform_application_minio_bucket }}"
       - --json
   register: platform_application_minio_version
+  check_mode: false
   environment:
     MC_CONFIG_DIR: "{{ platform_application_report_root }}/{{ platform_application_run_id }}/mc"
     SSL_CERT_FILE: "{{ platform_application_minio_ca_file }}"
+    HTTP_PROXY: ""
+    HTTPS_PROXY: ""
+    http_proxy: ""
+    https_proxy: ""
+    ALL_PROXY: ""
+    all_proxy: ""
   changed_when: false
   failed_when: >-
     platform_application_minio_version.rc != 0 or
@@ -946,6 +1139,7 @@
     validate_certs: true
     ca_path: "{{ platform_application_harbor_ca_file }}"
     return_content: true
+  check_mode: false
   register: platform_application_harbor_project_info
   failed_when: platform_application_harbor_project_info.status != 200 or platform_application_harbor_project_info.json | length > 1
   no_log: true
@@ -976,6 +1170,7 @@
     validate_certs: true
     ca_path: "{{ platform_application_harbor_ca_file }}"
     return_content: true
+  check_mode: false
   register: platform_application_harbor_project_verified
   failed_when: >-
     platform_application_harbor_project_verified.status != 200 or
@@ -990,23 +1185,70 @@
   changed_when: false
   no_log: true
 
-- name: Create Harbor trust directories on every Kubernetes node
+- name: Probe the retained Kubernetes node CA trust implementation
+  ansible.builtin.shell:
+    cmd: |
+      export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      if command -v update-ca-trust >/dev/null 2>&1; then
+        printf 'rhel\n'
+      elif command -v update-ca-certificates >/dev/null 2>&1; then
+        printf 'debian\n'
+      else
+        printf 'unsupported\n'
+        exit 127
+      fi
+  register: platform_application_ca_trust_probes
+  delegate_to: "{{ item }}"
+  become: true
+  loop: "{{ groups['k8s_cluster'] }}"
+  check_mode: false
+  changed_when: false
+
+- name: Require a supported Kubernetes node CA trust implementation
+  ansible.builtin.assert:
+    that:
+      - item.rc == 0
+      - item.stdout | trim in ['rhel', 'debian']
+    fail_msg: PLATFORM_APPLICATION_CA_TRUST_IMPLEMENTATION_UNSUPPORTED
+  loop: "{{ platform_application_ca_trust_probes.results }}"
+
+- name: Bind the retained Kubernetes node CA trust layout
+  ansible.builtin.set_fact:
+    platform_application_node_ca_trust_anchors_dir: >-
+      {{ '/etc/pki/ca-trust/source/anchors'
+         if (item.stdout | trim) == 'rhel'
+         else '/usr/local/share/ca-certificates' }}
+    platform_application_node_ca_trust_refresh_argv: >-
+      {{ ['update-ca-trust', 'extract']
+         if (item.stdout | trim) == 'rhel'
+         else ['update-ca-certificates'] }}
+  delegate_to: "{{ item.item }}"
+  delegate_facts: true
+  loop: "{{ platform_application_ca_trust_probes.results }}"
+
+- name: Create system CA trust directories on every Kubernetes node
   ansible.builtin.file:
-    path: "{{ item.1 }}"
+    path: "{{ hostvars[item].platform_application_node_ca_trust_anchors_dir }}"
     state: directory
     owner: root
     group: root
     mode: "0755"
-  delegate_to: "{{ item.0 }}"
-  loop: >-
-    {{ groups['k8s_cluster']
-       | product([platform_application_ca_trust_anchors_dir,
-                  '/etc/containers/certs.d/' + platform_application_harbor_registry])
-       | list }}
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['k8s_cluster'] }}"
+
+- name: Create Harbor container runtime trust directories on every Kubernetes node
+  ansible.builtin.file:
+    path: "/etc/containers/certs.d/{{ platform_application_harbor_registry }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['k8s_cluster'] }}"
 
 - name: Install the adopted Harbor CA in every Kubernetes node system trust
   ansible.builtin.copy:
-    dest: "{{ platform_application_ca_trust_anchors_dir }}/labweaver-harbor.crt"
+    dest: "{{ hostvars[item].platform_application_node_ca_trust_anchors_dir }}/labweaver-harbor.crt"
     owner: root
     group: root
     mode: "0644"
@@ -1036,6 +1278,7 @@
     mode: "0600"
     content: |
       {{ platform_application_keycloak_endpoint_address }} {{ platform_application_keycloak_hostname }}
+  check_mode: false
 
 - name: Stage the reviewed Keycloak realm on the execution host
   ansible.builtin.copy:
@@ -1045,6 +1288,7 @@
     group: root
     mode: "0600"
   no_log: true
+  check_mode: false
 
 - name: Build an isolated Keycloak administration truststore
   ansible.builtin.command:
@@ -1062,6 +1306,7 @@
       - "{{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak-truststore.p12.tmp"
       - -storepass
       - "{{ platform_application_keycloak_truststore_password }}"
+  check_mode: false
   changed_when: true
   no_log: true
 
@@ -1072,6 +1317,7 @@
       - -f
       - "{{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak-truststore.p12.tmp"
       - "{{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak-truststore.p12"
+  check_mode: false
   changed_when: true
   no_log: true
 
@@ -1086,6 +1332,7 @@
       - "{{ platform_application_keycloak_truststore_password }}"
       - --config
       - "{{ platform_application_keycloak_config }}"
+  check_mode: false
   changed_when: false
   no_log: true
 
@@ -1108,6 +1355,7 @@
   environment:
     JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak.hosts"
   register: platform_application_keycloak_authentication
+  check_mode: false
   changed_when: false
   failed_when: >-
     platform_application_keycloak_authentication.rc != 0 or
@@ -1160,6 +1408,7 @@
   environment:
     JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak.hosts"
   register: platform_application_keycloak_authorization
+  check_mode: false
   changed_when: false
   failed_when: >-
     platform_application_keycloak_authorization.rc != 0 or
@@ -1180,6 +1429,7 @@
   environment:
     JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak.hosts"
   failed_when: false
+  check_mode: false
   changed_when: false
   no_log: true
 
@@ -1288,6 +1538,7 @@
   register: platform_application_keycloak_realm_after
   environment:
     JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak.hosts"
+  check_mode: false
   changed_when: false
   no_log: true
 
@@ -1319,6 +1570,7 @@
   register: platform_application_keycloak_client
   environment:
     JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak.hosts"
+  check_mode: false
   changed_when: false
   no_log: true
 
@@ -1339,6 +1591,7 @@
   register: platform_application_keycloak_roles
   environment:
     JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak.hosts"
+  check_mode: false
   changed_when: false
   no_log: true
 
@@ -1359,7 +1612,61 @@
   register: platform_application_keycloak_users
   environment:
     JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak.hosts"
+  check_mode: false
   changed_when: false
+  no_log: true
+
+- name: Refresh retained Keycloak administration before managed identity updates
+  ansible.builtin.command:
+    argv:
+      - "{{ platform_application_kcadm }}"
+      - config
+      - credentials
+      - --server
+      - "{{ platform_application_keycloak_server }}"
+      - --realm
+      - "{{ platform_application_keycloak_admin_realm }}"
+      - --user
+      - "{{ platform_application_keycloak_username }}"
+      - --password
+      - "{{ platform_application_keycloak_password }}"
+      - --config
+      - "{{ platform_application_keycloak_config }}"
+  environment:
+    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak.hosts"
+  register: platform_application_keycloak_refresh
+  check_mode: false
+  changed_when: false
+  failed_when: >-
+    platform_application_keycloak_refresh.rc != 0 or
+    platform_application_keycloak_refresh.stderr is search('HTTP [45][0-9][0-9]')
+  no_log: true
+
+- name: Load the refreshed isolated Keycloak administration session
+  ansible.builtin.slurp:
+    src: "{{ platform_application_keycloak_config }}"
+  register: platform_application_keycloak_refreshed_session_file
+  changed_when: false
+  no_log: true
+
+- name: Bind the refreshed Keycloak administration token explicitly
+  ansible.builtin.set_fact:
+    platform_application_keycloak_admin_token: >-
+      {{
+        ((platform_application_keycloak_refreshed_session_file.content | b64decode | from_json)
+          .get('endpoints', {})
+          .get(platform_application_keycloak_server, {})
+          .get(platform_application_keycloak_admin_realm, {})
+          .get('token', ''))
+      }}
+  no_log: true
+
+- name: Require the refreshed Keycloak administration token
+  ansible.builtin.assert:
+    that:
+      - platform_application_keycloak_admin_token is string
+      - platform_application_keycloak_admin_token.split('.') | length == 3
+    fail_msg: PLATFORM_APPLICATION_KEYCLOAK_REFRESHED_TOKEN_INVALID
   no_log: true
 
 - name: Reconcile the managed Sprint 2 OIDC client without replacing the realm
@@ -1713,7 +2020,9 @@
 - name: Install the Sprint 2 portal authority on the retained router
   ansible.builtin.copy:
     src: "{{ platform_application_portal_tls_ca_file }}"
-    dest: "{{ platform_application_ca_trust_anchors_dir }}/labweaver-platform-portal.crt"
+    dest: >-
+      {{ hostvars[groups['routers'] | first].platform_application_node_ca_trust_anchors_dir
+         }}/labweaver-platform-portal.crt
     owner: root
     group: root
     mode: "0644"
@@ -1982,11 +2291,18 @@
 - name: Require the permanent evaluation runner namespace default deny
   ansible.builtin.assert:
     that:
-      - platform_application_evaluation_default_deny.resources | length == 1
-      - platform_application_evaluation_default_deny.resources[0].spec.podSelector == {}
-      - platform_application_evaluation_default_deny.resources[0].spec.policyTypes | sort == ['Egress', 'Ingress']
-      - platform_application_evaluation_default_deny.resources[0].spec.ingress | default([]) == []
-      - platform_application_evaluation_default_deny.resources[0].spec.egress | default([]) == []
+      - >-
+        (
+          ansible_check_mode and
+          platform_application_evaluation_default_deny.resources | length == 0
+        ) or
+        (
+          platform_application_evaluation_default_deny.resources | length == 1 and
+          platform_application_evaluation_default_deny.resources[0].spec.podSelector == {} and
+          platform_application_evaluation_default_deny.resources[0].spec.policyTypes | sort == ['Egress', 'Ingress'] and
+          platform_application_evaluation_default_deny.resources[0].spec.ingress | default([]) == [] and
+          platform_application_evaluation_default_deny.resources[0].spec.egress | default([]) == []
+        )
     fail_msg: PLATFORM_APPLICATION_EVALUATION_DEFAULT_DENY_INVALID
 
 - name: Reconcile the permanent ansible probe namespace default deny
@@ -2022,11 +2338,18 @@
 - name: Require the permanent ansible probe namespace default deny
   ansible.builtin.assert:
     that:
-      - platform_application_probe_default_deny.resources | length == 1
-      - platform_application_probe_default_deny.resources[0].spec.podSelector == {}
-      - platform_application_probe_default_deny.resources[0].spec.policyTypes | sort == ['Egress', 'Ingress']
-      - platform_application_probe_default_deny.resources[0].spec.ingress | default([]) == []
-      - platform_application_probe_default_deny.resources[0].spec.egress | default([]) == []
+      - >-
+        (
+          ansible_check_mode and
+          platform_application_probe_default_deny.resources | length == 0
+        ) or
+        (
+          platform_application_probe_default_deny.resources | length == 1 and
+          platform_application_probe_default_deny.resources[0].spec.podSelector == {} and
+          platform_application_probe_default_deny.resources[0].spec.policyTypes | sort == ['Egress', 'Ingress'] and
+          platform_application_probe_default_deny.resources[0].spec.ingress | default([]) == [] and
+          platform_application_probe_default_deny.resources[0].spec.egress | default([]) == []
+        )
     fail_msg: PLATFORM_APPLICATION_PROBE_DEFAULT_DENY_INVALID
 
 - name: Require the evaluation worker to use the platform image pull identity
@@ -2313,6 +2636,8 @@
       - "deployment/{{ item }}"
       - "--timeout={{ platform_application_rollout_timeout }}"
   loop: "{{ platform_application_workloads }}"
+  when: not ansible_check_mode
+  check_mode: false
   changed_when: false
 
 - name: Read back exact deployment image set
@@ -2330,6 +2655,8 @@
       - -o
       - json
   register: platform_application_deployments
+  when: not ansible_check_mode
+  check_mode: false
   changed_when: false
 
 - name: Require exact workload count and digest-only images
@@ -2344,6 +2671,7 @@
         | select('match', '^.+@sha256:[0-9a-f]{64}$') | list | length
         == platform_application_workloads | length
     fail_msg: PLATFORM_APPLICATION_DEPLOYMENT_READBACK_INVALID
+  when: not ansible_check_mode
 
 - name: Read back the adopted portal route
   ansible.builtin.command:
@@ -2358,7 +2686,10 @@
       - "{{ platform_application_portal_route_name }}"
       - --output=json
   register: platform_application_portal_route
-  when: platform_application_portal_route_name | length > 0
+  when:
+    - platform_application_portal_route_name | length > 0
+    - not ansible_check_mode
+  check_mode: false
   changed_when: false
 
 - name: Require the adopted portal route accepted and resolved
@@ -2375,7 +2706,9 @@
         | selectattr('type', 'equalto', 'ResolvedRefs')
         | selectattr('status', 'equalto', 'True') | list | length > 0
     fail_msg: PLATFORM_APPLICATION_PORTAL_ROUTE_INVALID
-  when: platform_application_portal_route_name | length > 0
+  when:
+    - platform_application_portal_route_name | length > 0
+    - not ansible_check_mode
 
 - name: Read back the object store web proxy configuration
   ansible.builtin.command:
@@ -2390,7 +2723,10 @@
       - "{{ platform_application_release_name }}-object-store-ca"
       - --output=json
   register: platform_application_object_store_proxy
-  when: platform_application_object_store_route_enabled
+  when:
+    - platform_application_object_store_route_enabled
+    - not ansible_check_mode
+  check_mode: false
   changed_when: false
 
 - name: Require the verified object store web proxy configuration
@@ -2401,7 +2737,9 @@
       - "'proxy_request_buffering off;' in (platform_application_object_store_proxy.stdout | from_json).data['object-store.conf']"
       - "'proxy_set_header Host $http_host;' in (platform_application_object_store_proxy.stdout | from_json).data['object-store.conf']"
     fail_msg: PLATFORM_APPLICATION_OBJECT_STORE_ROUTE_INVALID
-  when: platform_application_object_store_route_enabled
+  when:
+    - platform_application_object_store_route_enabled
+    - not ansible_check_mode
 
 - name: Wait for the OpenSSH Gateway shared load balancer address
   kubernetes.core.k8s_info:
@@ -2417,7 +2755,9 @@
     - platform_application_ssh_service.resources[0].status.loadBalancer.ingress[0].ip | default('') == platform_application_ssh_load_balancer_ip
   retries: 30
   delay: 2
-  when: platform_application_ssh_load_balancer_ip | length > 0
+  when:
+    - platform_application_ssh_load_balancer_ip | length > 0
+    - not ansible_check_mode
 
 - name: Require the exact OpenSSH Gateway shared Service contract
   ansible.builtin.assert:
@@ -2427,7 +2767,9 @@
       - platform_application_ssh_service.resources[0].metadata.annotations['metallb.io/allow-shared-ip'] == platform_application_ssh_shared_ip_key
       - platform_application_ssh_service.resources[0].spec.ports | selectattr('port', 'equalto', 2222) | list | length == 1
     fail_msg: PLATFORM_APPLICATION_SSH_LOAD_BALANCER_INVALID
-  when: platform_application_ssh_load_balancer_ip | length > 0
+  when:
+    - platform_application_ssh_load_balancer_ip | length > 0
+    - not ansible_check_mode
 
 - name: Read final Helm revision
   ansible.builtin.command:
@@ -2444,6 +2786,7 @@
       - --output
       - json
   register: platform_application_helm_history
+  check_mode: false
   changed_when: false
 
 - name: Hash application identity inputs

@@ -4,6 +4,47 @@ This document records current repository and connected-runtime facts. Design
 documents, fixtures, health endpoints and reports from another source identity
 are not completion evidence.
 
+## #126 v3 bounded acceptance window (2026-08-11)
+
+The current window is **blocked before deployment**. The frozen runtime source
+commit was `68cb6f15f27d542747f967d7175498ba0f8eb31c`, with Run ID
+`019fef14-1cd0-70bd-8b5a-e8bcf43cdff3` and independent testflight ID
+`019fef14-3922-784d-9e9e-858ad7d6a983`. No prior package, image digest,
+deployment manifest, configuration bundle or connected report is part of this
+identity.
+
+The VM Agent implementation in that commit captures bounded provider stdout
+only under the explicit pod-scoped `LABWEAVER_LLM_OUTPUT_DIR`, logs a schema
+repair diagnostic only for schema-invalid output, and leaves provider error,
+timeout and output-limit failures terminal. Local evidence passed `cargo fmt`,
+workspace Clippy, the Agent runtime regression suite (21 passed, 2 ignored),
+Agent module tests (5 passed), telemetry tests (6 passed), frontend lint and
+typecheck. Full `cargo test --workspace` then passed, including the Agent,
+Environment, Contracts, Control, Evaluation and Resource test suites; the two
+billable/externally configured tests remained explicitly ignored.
+`cargo xtask test --suite contract` also passed, including generated schema and
+web contract checks.
+The changed local integration entry was also attempted and stopped with
+`LW_INTEGRATION_DOCKER_API_FAILED` while Docker timed out contacting the
+configured Quay registry; no connected cluster action was taken.
+
+Two bounded platform package attempts were made against the frozen source.
+Both stopped before any build, scan or publish at the controller-side Buildx
+read of the pinned Harbor Trivy DB manifest with `EOF`; no platform package
+manifest or new image digest exists. A later read-only six-attempt probe did
+read the same digest, but that does not upgrade either failed package attempt
+or authorize a third attempt. The controller must separately repair and verify
+the Buildx-to-Harbor CA/auth/OCI-HEAD path before a new Owner-authorized
+candidate can be started.
+
+The retained `labweaver-system/kc-probe` is independently `ImagePullBackOff`
+as the default ServiceAccount cannot pull the private `base-gateway-runtime`
+image. This remains an explicit blocker for D's deployment/readback Verify and
+cannot be silently ignored. Because package identity was not produced, Ansible
+reconcile, Container/VM execution, AccessGrant matrix, console evidence,
+Playwright, rollback Verify and Release Gate v3 were not started. See the
+sanitized v3 handoff under `.private/handoffs/` for the bounded operation record.
+
 ## Sprint 3 Rust fault-localization logging (#165)
 
 The internal `labweaver.log.v1` formatter, schema, strict HTTP correlation
@@ -51,6 +92,7 @@ Sprint-end acceptance Issue.
 
 | Capability | State | Current evidence and boundary |
 | --- | --- | --- |
+| #126 验收前置（Keycloak 集成） | v1 集群已修复并验证 | 2026-08-09/10 修复：① `identity-allow` NP / `identity-gateway-ingress` CNP 放行 `labweaver-system`；② `labweaver-web` scope mappings + `roles-v2`（token 含嵌套 realm_access.roles）；③ audience mapper `id.token.claim=false`（BFF 会话建立）；④ artifact-store 显式 `ca_bundle_file`（minio 私有 CA 绕过 native roots）；⑤ agent prompt 真实 base digest + LLM egress tar 元数据透传 + Dockerfile 命名。业务链已打通至"候选审批→build"：LLM policy、问题包（含 tar 构建上下文）、agent run 多次 Succeeded、spec 正确（base digest/tar 上下文匹配）。**当前 Blocked**：buildctl（v0.31.1 Go/musl 静态）在 glibc 环境 Segfault（musl 环境 Solve 正常）——根因确定，修复方案（musl 容器/tonic 替代）见交接 §20.9；随后 Container/KubeVirt 环境、生命周期、access-negative、Playwright 全流程、Release Gate 未闭合。 |
 | Container xterm ConsoleCapability (#131) | implemented; locally verified; connected blocked | Additive capability/session migration, strict BFF/Origin/CSRF/ETag/idempotency issuance, atomic redemption, metadata lifecycle events, cancellation registry, Environment-authoritative `TerminalSpec`/Lease validation, mTLS proxy chain, unique Ready Pod selection, fixed `runtime` PTY, binary I/O, bounded resize/output and Sprint 3 Web reuse are implemented. Contract generation, focused Rust/Web tests, static deployment checks and local integration are merge evidence. No shared-cluster PTY, connected revocation/control-loss or Release Gate evidence is claimed; #126 owns it. |
 | KubeVirt noVNC ConsoleCapability (#124) | implemented; locally verified; connected blocked | Reuses the generic capability/session/proxy foundation and noVNC UI. Runtime-tagged Environment eligibility, kind-safe one-time consumption, per-connection revision/Lease/release checks, a dedicated mTLS KubeVirt console executor, fixed VMI namespace/name/UID/label fencing, bounded RFB relay and least-privilege deployment policy are implemented. Local contract, Rust, Web and deployment checks are merge evidence; real browser-to-VMI, connected revoke/expiry/stop/delete and Release Gate remain #126 scope. |
 | Web console Fixture preview | implemented; Fixture-verified | `pnpm --dir web preview:console:fixture` builds and serves the EX3-derived deterministic browser preview without a backend. It is visibly marked Fixture, renders only Fixture state, and is documented in `docs/testing/fixture-console-preview.md`. It is layout/state-machine evidence only, not Access proxy, Container, KubeVirt, connected-runtime, or Release Gate evidence. |
@@ -449,3 +491,25 @@ PR #147 still requires the appropriate human core/security review and resolved
 review threads; it is not a connected acceptance or release pass. The author
 must not approve or merge the PR. No Tag, formal release or `main` merge is
 included.
+
+## #126 v1 集群验收执行状态（2026-08-10，工作区 commit 8bfc6f4）
+
+Sprint-end 验收 Issue #126 的 v1 集群执行在本轮（2026-08-10，DDL 22:00）推进如下，结论以实测证据为准：
+
+### 已完成（有集群证据）
+- **§3 build 链架构改造上线**：agent-service/build-executor 使用 bollard BuildkitDaemon gRPC 直连 buildkit（bollard-dg3 镜像），digest 从 BuildKit history 提取；control-service 使用 projfix3（含 retry 投影修复）。配套集群配置：control schema ec5089a9、buildkit registry-ca=harbor-ca、robot tag:create、outbound-ca 追加 harbor-ca。
+- **build 链到 scan 全部执行成功**（solve/push/digest/persist/scan），scan 门禁正确拒绝 critical 漏洞（LW_AGENT_BUILD_CRITICAL_VULNERABILITY——perl-base 3 CVE，无修复版本；用户接受为已知限制）。
+- **Playwright teacher 黄金路径 4/4 通过**（3 角色 Keycloak 真实登录 + sprint2-flow.live.spec）。
+- **access-negative 授权层**：student 越权创建/审批均 403 LW_AUTH_SCOPE_DENIED。
+- **trivy-db 已上线 Harbor**（f98b56ab digest，oras 经 63 中转）。
+
+### 阻塞（证据在 .private/handoffs/issue126-v2-execution-handoff-20260810.md）
+- **Container release/环境（验收1b）与依赖链（submission-freeze/access-grant/cleanup）**：release 门禁 LW_RELEASE_ARTIFACT_NOT_AUTHORITATIVE 强制 build succeeded，而 build 因产物 critical 漏洞被安全门禁拒绝——用户已接受 critical 为已知限制，但平台门禁不放行（fail-closed 正确）。
+- **KubeVirt（验收2，P0）**：LLM 生成的 virtual_machine EnvironmentSpec 连续 3 次 LW_LLM_SCHEMA_INVALID（非偶发，需 prompt/模型引导）。
+- **rollback-drill（验收7）**：`--check` 暴露 Ansible 部署源与运行时漂移（模板缺 evaluationRuntime/evaluation_service 等），直接重跑会破坏 control-service；需先同步 inventory。
+- **Release Gate（验收8）**：输入不完整（依赖 build 产物与 verify），本轮无法执行。
+
+### 证据归档
+- Playwright 报告/trace：`.private/issue126-v2/playwright-live/`
+- rollback-drill 集群状态备份：`.private/issue126-v2/rollback-backup/`
+- 完整交接：`.private/handoffs/issue126-v2-execution-handoff-20260810.md`

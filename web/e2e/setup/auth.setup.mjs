@@ -28,7 +28,7 @@ const actors = Object.freeze([
     usernameVariable: 'LABWEAVER_PLATFORM_ADMIN_USERNAME',
     passwordFileVariable: 'LABWEAVER_PLATFORM_ADMIN_PASSWORD_FILE',
     destination: path.join(authDir, 'platform-admin.json'),
-    landingPath: '/admin',
+    landingPath: '/admin/policies',
     entryLabel: '管理入口',
     heading: '管理员工作台',
   }),

@@ -27,6 +27,10 @@ deployment for every PR.
 
 WorkConfig, Resource approval, Tailnet, OpenAI Runtime,
 multi-provider routing, Sigstore, Kyverno and Packer are outside this matrix.
+The 2026-08-11 #126 v3 window is currently blocked before the Container build
+exit condition: no package manifest or new image digest was produced after two
+bounded Buildx/Harbor Trivy DB `EOF` failures. This is not connected runtime,
+browser or Release Gate evidence.
 The #123 row is local E2 only until D Verify runs the connected identity.
 The #140 row is planned connected coverage; its current evidence is local E1
 and remains blocked by #123 merge/deploy plus D Verify.

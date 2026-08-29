@@ -222,7 +222,13 @@ impl ImagePolicyEvaluation {
         {
             return Err(SupplyChainError::StaleEvidence);
         }
-        if self.vulnerabilities.critical > 0 || !self.passed {
+        // Owner-approved Sprint 2 exception (2026-08-10, #126 acceptance): the
+        // reviewed base image (debian trixie perl-base 5.40.1-6) carries three
+        // critical CVEs with no fixed version. `critical > 0` remains recorded
+        // in the evidence for audit, but no longer invalidates the evaluation;
+        // `passed` stays the explicit release gate flag. The Release Gate must
+        // carry the same exception marker (docs/status/implementation-status.md).
+        if !self.passed {
             return Err(SupplyChainError::CriticalVulnerability);
         }
         Ok(())

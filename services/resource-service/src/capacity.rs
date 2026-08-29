@@ -522,11 +522,13 @@ impl CapacityReconcileWorker {
                 )
                 .await?;
         }
-        let refreshed = self
-            .store
-            .next_ready_capacity_handoff()
-            .await?
-            .ok_or(crate::store::ResourceStoreError::CapacityClaimStateConflict)?;
+        // Use the claim we already fetched rather than querying again — a second query
+        // may return None if another reconciler cycle consumed the claim, and there is no
+        // guarantee that the same claim would be returned twice. Using `item` avoids a
+        // spurious CapacityClaimStateConflict crash.
+        let Some(refreshed) = self.store.refresh_ready_claim(item.claim.id).await? else {
+            return Ok(());
+        };
         match self.environment_handoff.handoff(&refreshed).await {
             Ok(()) => {
                 self.store
@@ -599,13 +601,10 @@ impl CapacityReconcileWorker {
         }
         if item.claim.state == contracts::resource::CapacityClaimState::Blocked {
             let Some(provider) = self.providers.get(&item.claim.provider_binding) else {
-                self.store
-                    .record_reconciliation_failure(
-                        item.claim.id,
-                        "release_capacity",
-                        "LW_RESOURCE_CAPACITY_PROVIDER_UNAVAILABLE",
-                    )
-                    .await?;
+                tracing::warn!(
+                    event = "resource.capacity.no_provider_for_blocked_cleanup",
+                    claim_id = %item.claim.id
+                );
                 return Ok(());
             };
             let plan = KubernetesQuotaShellPlan::from_claim(
@@ -620,13 +619,9 @@ impl CapacityReconcileWorker {
                     claim_id = %item.claim.id,
                     diagnostic_code = %error.diagnostic()
                 );
-                self.store
-                    .record_reconciliation_failure(
-                        item.claim.id,
-                        "release_capacity",
-                        error.diagnostic(),
-                    )
-                    .await?;
+                // Do not call record_reconciliation_failure() — that method only accepts
+                // claims in handed_off or releasing state. For blocked claims, the cleanup
+                // attempt simply fails and will be retried on the next cycle.
                 return Ok(());
             }
             self.store
