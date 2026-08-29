@@ -246,11 +246,10 @@ impl ResourceLease {
         if self.active_from.is_some() != self.expires_at.is_some() {
             return Err(ResourceError::InvalidLease);
         }
-        if let Some((from, until)) = self.active_from.zip(self.expires_at) {
-            if until <= from {
+        if let Some((from, until)) = self.active_from.zip(self.expires_at)
+            && until <= from {
                 return Err(ResourceError::InvalidLease);
             }
-        }
         Ok(())
     }
 }

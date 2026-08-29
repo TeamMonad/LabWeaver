@@ -391,10 +391,8 @@ pub fn validate_relative_path(path: &str) -> Result<(), FoundationError> {
 pub fn parse_strict_json<T: serde::de::DeserializeOwned>(
     input: &[u8],
 ) -> Result<T, FoundationError> {
-    use serde::Deserialize as _;
-
     let mut deserializer = serde_json::Deserializer::from_slice(input);
-    let value = T::deserialize(&mut deserializer)
+    let value = <T as serde::Deserialize>::deserialize(&mut deserializer)
         .map_err(|error| FoundationError::InvalidJson(error.to_string()))?;
     deserializer
         .end()

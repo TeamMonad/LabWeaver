@@ -821,7 +821,6 @@ pub enum OperationScopeKind {
 
 /// Explicit authorization policy for a catalog operation is now co-located with
 /// the transport contract so there is a single `OPERATIONS` table.
-
 const TEACHER: &[PlatformRole] = &[PlatformRole::Teacher];
 const TEACHER_OR_STUDENT: &[PlatformRole] = &[PlatformRole::Teacher, PlatformRole::Student];
 const PLATFORM_ADMIN: &[PlatformRole] = &[PlatformRole::PlatformAdmin];
