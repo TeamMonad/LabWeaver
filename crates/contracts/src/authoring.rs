@@ -899,16 +899,16 @@ pub enum AuthoringError {
 }
 
 impl AuthoringError {
-    /// Returns the stable blocking diagnostic.
+    /// Returns the stable blocking diagnostic (coarse-grained with detail in `detail`).
     #[must_use]
     pub const fn diagnostic_code(&self) -> &'static str {
         match self {
-            Self::RuntimeBindingRequired => diagnostic::AGENT_RUNTIME_BINDING_REQUIRED,
-            Self::ModelRequired => diagnostic::LLM_MODEL_REQUIRED,
-            Self::RuntimeIdentityInvalid => diagnostic::AGENT_RUNTIME_IDENTITY_INVALID,
-            Self::InvalidBudget | Self::HardDenyClassesModified => diagnostic::LLM_EGRESS_DENIED,
-            Self::PackageHashMismatch => diagnostic::SUBMISSION_HASH_MISMATCH,
-            Self::InvalidEnvironmentSpec(_) => diagnostic::ENV_PROVIDER_BINDING_REQUIRED,
+            Self::RuntimeBindingRequired => diagnostic::INVALID_REQUEST,
+            Self::ModelRequired => diagnostic::INVALID_REQUEST,
+            Self::RuntimeIdentityInvalid => diagnostic::INVALID_REQUEST,
+            Self::InvalidBudget | Self::HardDenyClassesModified => diagnostic::ACCESS_DENIED,
+            Self::PackageHashMismatch => diagnostic::HASH_MISMATCH,
+            Self::InvalidEnvironmentSpec(_) => diagnostic::INVALID_REQUEST,
             Self::InvalidPackage(_) | Self::InvalidArtifactReference | Self::InvalidAgentRun(_) => {
                 diagnostic::CONTRACT_DOCUMENT_INVALID
             }

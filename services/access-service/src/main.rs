@@ -24,7 +24,7 @@ use axum::{
 use contracts::{
     AuthSession, AuthenticatedActor, AuthorizationDecision, AuthorizationDecisionRequest,
     AuthorizationScope, CsrfTokenResponse, OperationScopeKind, Revision, Sha256Digest,
-    UtcTimestamp, environment::EnvironmentOwnerResolutionRequest, operation_authorization,
+    UtcTimestamp, environment::EnvironmentOwnerResolutionRequest, operation_contract,
 };
 
 use serde::Deserialize;
@@ -743,7 +743,7 @@ async fn authorization_decision(
     require_service_identity(&state.pool, &principal.san_uri, now)
         .await
         .map_err(ApiError::from)?;
-    let policy = operation_authorization(&request.operation_id)
+    let policy = operation_contract(&request.operation_id)
         .ok_or_else(|| ApiError::forbidden("LW_AUTH_SCOPE_DENIED"))?;
     if !scope_matches_kind(&request.scope, policy.scope) {
         return Err(ApiError::forbidden("LW_AUTH_SCOPE_DENIED"));

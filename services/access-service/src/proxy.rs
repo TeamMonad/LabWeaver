@@ -629,7 +629,7 @@ async fn authorize_resource_scope(
     let memberships = auth::load_membership_snapshot(&state.pool, session.actor_id)
         .await
         .map_err(ApiError::from)?;
-    let policy = contracts::operation_authorization(operation_id)
+    let policy = contracts::operation_contract(operation_id)
         .ok_or_else(|| ApiError::forbidden("LW_AUTH_SCOPE_DENIED"))?;
     auth::authorize(
         &auth::AuthorizationContext {
@@ -1028,7 +1028,7 @@ async fn authorize_environment_course(
     let memberships = auth::load_membership_snapshot(&state.pool, session.actor_id)
         .await
         .map_err(ApiError::from)?;
-    let policy = contracts::operation_authorization(operation_id)
+    let policy = contracts::operation_contract(operation_id)
         .ok_or_else(|| ApiError::forbidden("LW_AUTH_SCOPE_DENIED"))?;
     auth::authorize(
         &auth::AuthorizationContext {

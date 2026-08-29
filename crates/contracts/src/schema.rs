@@ -6,9 +6,7 @@ use schemars::{Schema, schema_for};
 use serde_json::{Value, json};
 
 use crate::events::{self, CloudEvent};
-use crate::http::{
-    ApiSurface, Method, MutationContract, OPERATIONS, OperationScopeKind, operation_authorization,
-};
+use crate::http::{ApiSurface, Method, MutationContract, OPERATIONS, OperationScopeKind};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GeneratedArtifact {
@@ -789,11 +787,8 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 "oneTime": true
             });
         }
-        let authorization = operation_authorization(operation.operation_id).ok_or_else(|| {
-            GenerationError::Contract("operation authorization metadata is missing".to_owned())
-        })?;
-        operation_json["x-labweaver-allowed-roles"] = json!(authorization.allowed_roles);
-        operation_json["x-labweaver-scope"] = json!(match authorization.scope {
+        operation_json["x-labweaver-allowed-roles"] = json!(operation.allowed_roles);
+        operation_json["x-labweaver-scope"] = json!(match operation.scope {
             OperationScopeKind::Global => "global",
             OperationScopeKind::Course => "course",
             OperationScopeKind::Project => "project",
