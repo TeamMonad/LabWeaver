@@ -5,6 +5,7 @@
 )]
 
 use std::collections::BTreeMap;
+use crate::hash_compat::Sha256Digest;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -14,9 +15,7 @@ use contracts::submission::{
     FrozenEnvironmentIdentity, FrozenSubmission, SubmissionManifest, SubmissionSource,
 };
 use contracts::{
-    ActorId, AgentRunId, CourseId, FrozenSubmissionId, RetentionClass, RetentionSnapshot, Revision,
-    Sha256Digest,
-};
+    ActorId, AgentRunId, CourseId, FrozenSubmissionId, RetentionClass, RetentionSnapshot, Revision};
 use serde::{Deserialize, Serialize};
 
 use crate::collector::{CollectError, SnapshotCollector, SnapshotSource, SnapshotTransport};

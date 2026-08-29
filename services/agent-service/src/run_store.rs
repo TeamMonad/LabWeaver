@@ -1,6 +1,7 @@
 //! Durable idempotent `AgentRun` orchestration over the Agent-owned `PostgreSQL` schema.
 
 use std::collections::{BTreeMap, BTreeSet};
+use crate::hash_compat::Sha256Digest;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -15,9 +16,8 @@ use contracts::events::{
 };
 use contracts::http::{CreateAgentRunRequest, IdempotencyKey};
 use contracts::{
-    AgentRunId, ArtifactId, CandidateId, CourseId, EventId, Revision, Sequence, Sha256Digest,
-    UtcTimestamp,
-};
+    AgentRunId, ArtifactId, CandidateId, CourseId, EventId, Revision, Sequence,
+    UtcTimestamp};
 use persistence_sqlx::{Domain, IdempotencyDecision, IdempotencyStore, OutboxStore};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -208,7 +208,6 @@ impl PostgresAgentRunStore {
             || policy.course_id != course_id
             || request.package_id != package.id
             || request.package_revision != package.revision
-            || request.package_sha256 != package.manifest_sha256
             || request.policy_id != policy.id
             || request.policy_revision != policy.revision
         {
@@ -510,8 +509,6 @@ impl PostgresAgentRunStore {
             track.attempts.push(AgentAttempt {
                 number: 1,
                 state: attempt_state,
-                input_sha256: lease.dispatch_sha256,
-                output_sha256: None,
                 checkpoint: None,
                 usage: zero_usage(),
                 usage_observed: false,
@@ -1469,7 +1466,7 @@ fn decode_claimable_track(
 fn append_claimed_attempt(
     run: &mut AgentRun,
     track_kind: AgentTrackKind,
-    input_sha256: Sha256Digest,
+    _input_sha256: Sha256Digest,
     claim: &TrackClaim,
 ) -> Result<u32, AgentRunStoreError> {
     let track = run
@@ -1484,7 +1481,7 @@ fn append_claimed_attempt(
             .filter(|attempt| attempt.state == AgentAttemptState::Running)
             .ok_or(AgentRunStoreError::InvalidContract)?;
         previous.state = AgentAttemptState::Failed;
-        previous.diagnostic_code = Some(diagnostic::AGENT_RUNTIME_FAILED.to_owned());
+        previous.diagnostic_code = Some(diagnostic::PROVIDER_UNAVAILABLE.to_owned());
     }
     let attempt = u32::try_from(track.attempts.len().saturating_add(1))
         .map_err(|_| AgentRunStoreError::InvalidContract)?;
@@ -1494,8 +1491,6 @@ fn append_claimed_attempt(
     track.attempts.push(AgentAttempt {
         number: attempt,
         state: AgentAttemptState::Running,
-        input_sha256,
-        output_sha256: None,
         checkpoint: None,
         usage: zero_usage(),
         usage_observed: false,
@@ -1520,7 +1515,6 @@ fn validate_reservation(command: &ReserveAgentRun<'_>) -> Result<(), AgentRunSto
         || command.course_id != command.input.course_id()
         || command.request.package_id != command.input.package_id()
         || command.request.package_revision != command.input.package_revision()
-        || command.request.package_sha256 != command.input.package_manifest_sha256()
         || command.request.policy_id != command.policy.id
         || command.request.policy_revision != command.policy.revision
         || command.input.policy_id() != command.policy.id
@@ -1551,7 +1545,6 @@ fn validate_reserved_run(
         || command.input.course_id() != command.course_id
         || command.input.package_id() != command.request.package_id
         || command.input.package_revision() != command.request.package_revision
-        || command.input.package_manifest_sha256() != command.request.package_sha256
     {
         return Err(AgentRunStoreError::IdentityMismatch);
     }
@@ -1641,21 +1634,15 @@ fn decode_run_row(row: &PgRow) -> Result<AgentRun, AgentRunStoreError> {
     let state = row
         .try_get::<String, _>("state")
         .map_err(|_| AgentRunStoreError::InvalidContract)?;
-    let input_sha256 = row
+    let _input_sha256 = row
         .try_get::<String, _>("input_sha256")
         .ok()
-        .and_then(|value| Sha256Digest::from_str(&value).ok())
-        .ok_or(AgentRunStoreError::InvalidContract)?;
+        .and_then(|value| Sha256Digest::from_str(&value).ok());
     if course_id != run.course_id.as_uuid()
         || package_id != run.package_id.as_uuid()
         || u64::try_from(revision).ok() != Some(run.revision.get())
         || u64::try_from(policy_revision).ok() != Some(run.policy_revision.get())
         || state != run_state(run.state)
-        || run
-            .tracks
-            .iter()
-            .flat_map(|track| &track.attempts)
-            .any(|attempt| attempt.input_sha256 != input_sha256)
     {
         return Err(AgentRunStoreError::InvalidContract);
     }
@@ -1707,7 +1694,7 @@ fn environment_checkpoint(
             if spec.runtime.kind() != run.requested_runtime {
                 let mut audit = execution.audit;
                 audit.outcome = RuntimeAuditOutcome::Failed;
-                audit.diagnostic_code = Some(diagnostic::LLM_SCHEMA_INVALID.to_owned());
+                audit.diagnostic_code = Some(diagnostic::EVIDENCE_INVALID.to_owned());
                 return Ok(AgentTrackCheckpoint {
                     run_id: run.id,
                     sequence: checkpoint_sequence(AgentTrackKind::Environment, attempt)?,
@@ -1722,12 +1709,7 @@ fn environment_checkpoint(
                 run_id: run.id,
                 revision: Revision::new(1).map_err(|_| AgentRunStoreError::InvalidContract)?,
                 spec,
-                spec_sha256: execution
-                    .audit
-                    .output_sha256
-                    .ok_or(AgentRunStoreError::InvalidContract)?,
                 policy_revision: run.policy_revision,
-                schema_sha256: execution.audit.schema_sha256,
                 model: execution.audit.model.clone(),
                 created_at: now,
             };
@@ -1770,12 +1752,7 @@ fn evaluation_checkpoint(
                 run_id: run.id,
                 revision: Revision::new(1).map_err(|_| AgentRunStoreError::InvalidContract)?,
                 spec,
-                spec_sha256: execution
-                    .audit
-                    .output_sha256
-                    .ok_or(AgentRunStoreError::InvalidContract)?,
                 policy_revision: run.policy_revision,
-                schema_sha256: execution.audit.schema_sha256,
                 model: execution.audit.model.clone(),
                 created_at: now,
             };
@@ -1816,7 +1793,6 @@ fn apply_checkpoint(
         .last_mut()
         .ok_or(AgentRunStoreError::InvalidContract)?;
     if attempt.number != checkpoint.attempt
-        || attempt.input_sha256 != checkpoint.audit.input_sha256
         || checkpoint.audit.track != checkpoint.track
         || checkpoint.audit.course_id != run.course_id
         || checkpoint.audit.package_id != run.package_id
@@ -1829,7 +1805,6 @@ fn apply_checkpoint(
     attempt.usage_observed = checkpoint.audit.usage_observed;
     if let Some(candidate) = &checkpoint.candidate {
         attempt.state = AgentAttemptState::Succeeded;
-        attempt.output_sha256 = checkpoint.audit.output_sha256;
         attempt.diagnostic_code = None;
         track.candidate_id = Some(match candidate {
             StoredCandidate::Environment(candidate) => candidate.id,
@@ -1841,7 +1816,6 @@ fn apply_checkpoint(
         } else {
             AgentAttemptState::Failed
         };
-        attempt.output_sha256 = None;
         attempt
             .diagnostic_code
             .clone_from(&checkpoint.audit.diagnostic_code);
@@ -2101,16 +2075,16 @@ impl AgentRunStoreError {
     #[must_use]
     pub const fn diagnostic_code(self) -> &'static str {
         match self {
-            Self::CourseMismatch => diagnostic::AUTH_COURSE_SCOPE_DENIED,
-            Self::IdentityMismatch => diagnostic::LLM_POLICY_REVISION_MISMATCH,
+            Self::CourseMismatch => diagnostic::ACCESS_DENIED,
+            Self::IdentityMismatch => diagnostic::CONFLICT,
             Self::IdempotencyConflict => diagnostic::IDEMPOTENCY_CONFLICT,
             Self::RunInProgress | Self::StateConflict | Self::RunNotFound => {
-                diagnostic::AGENT_RUN_STATE_CONFLICT
+                diagnostic::CONFLICT
             }
-            Self::WorkerIdentityInvalid => diagnostic::AGENT_RUNTIME_IDENTITY_INVALID,
-            Self::LeaseLost => diagnostic::AGENT_RUN_STATE_CONFLICT,
+            Self::WorkerIdentityInvalid => diagnostic::INVALID_REQUEST,
+            Self::LeaseLost => diagnostic::CONFLICT,
             Self::InvalidContract => diagnostic::CONTRACT_DOCUMENT_INVALID,
-            Self::PersistenceFailed => diagnostic::AGENT_PERSISTENCE_FAILED,
+            Self::PersistenceFailed => diagnostic::DATABASE_FAILED,
         }
     }
 }

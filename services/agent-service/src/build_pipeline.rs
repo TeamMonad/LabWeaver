@@ -12,7 +12,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use contracts::events::AgentBuildRequested;
 use contracts::supply_chain::ImageArtifact;
-use contracts::{BuildRequestId, ImageArtifactId, Sha256Digest, UtcTimestamp};
+use contracts::{BuildRequestId, ImageArtifactId, UtcTimestamp};
+use crate::hash_compat::Sha256Digest;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use uuid::Uuid;
@@ -296,7 +297,7 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
                 true,
             ));
         }
-        let identity = BuildIdentity(command.command_sha256);
+        let identity = BuildIdentity(Sha256Digest::of_bytes(command.request.id.as_uuid().as_bytes()));
         let execution_timeout = Duration::from_millis(command.request.max_duration_milliseconds);
         if fence.deadline_at
             != add_milliseconds(started_at, command.request.max_duration_milliseconds)?

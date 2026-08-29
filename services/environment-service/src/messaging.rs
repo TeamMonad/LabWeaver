@@ -16,7 +16,8 @@ use contracts::environment::{
 use contracts::events::{
     CloudEvent, EVENT_CONTRACTS, ReleasePublished, ReleaseWithdrawn, subjects,
 };
-use contracts::{EnvironmentId, EventId, OperationId, Revision, Sha256Digest};
+use contracts::{EnvironmentId, EventId, OperationId, Revision};
+use crate::hash_compat::Sha256Digest;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

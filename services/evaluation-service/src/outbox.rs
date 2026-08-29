@@ -6,10 +6,11 @@
 )]
 
 use std::{str::FromStr, time::Duration};
+use crate::hash_compat::Sha256Digest;
 
 use async_nats::jetstream::message::PublishMessage;
 use contracts::{
-    EventId, Sha256Digest,
+    EventId,
     events::{CloudEvent, EVENT_CONTRACTS},
 };
 use serde_json::Value;

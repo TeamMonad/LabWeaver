@@ -13,7 +13,8 @@ use std::{
 };
 
 use artifact_store::{S3Credential, S3ImmutableObjectStore, S3StoreConfig};
-use contracts::{Sha256Digest, UtcTimestamp};
+use contracts::{UtcTimestamp};
+use crate::hash_compat::Sha256Digest;
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 

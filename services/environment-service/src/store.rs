@@ -1,4 +1,5 @@
 use std::str::FromStr;
+use crate::hash_compat::Sha256Digest;
 use std::time::Duration;
 
 use contracts::environment::{
@@ -11,8 +12,7 @@ use contracts::events::{
 };
 use contracts::http::{EnvironmentOperationAccepted, IdempotencyKey};
 use contracts::{
-    CourseId, EnvironmentId, EventId, OperationId, Revision, Sequence, Sha256Digest, UtcTimestamp,
-};
+    CourseId, EnvironmentId, EventId, OperationId, Revision, Sequence, UtcTimestamp};
 use persistence_sqlx::{
     Domain, IdempotencyDecision, IdempotencyStore, InboxDecision, InboxStore, OutboxStore,
     PersistenceError,

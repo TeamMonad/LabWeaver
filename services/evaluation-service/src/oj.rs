@@ -6,7 +6,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use contracts::Sha256Digest;
+use contracts::;
+use crate::hash_compat::Sha256Digest;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;

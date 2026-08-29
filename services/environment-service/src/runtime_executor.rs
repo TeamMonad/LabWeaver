@@ -8,7 +8,8 @@ use std::time::Duration;
 use artifact_store::S3ImmutableObjectStore;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use contracts::{ArtifactRef, Revision, Sha256Digest, UtcTimestamp};
+use contracts::{ArtifactRef, Revision, UtcTimestamp};
+use crate::hash_compat::Sha256Digest;
 use reqwest::{Certificate, Client, Method, StatusCode, Url};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -822,7 +823,7 @@ impl KubernetesContainerExecutor {
                 rejected()
             })?;
         self.objects
-            .put_versioned_immutable(&key, &bytes, sha256, CLEANUP_MEDIA_TYPE)
+            .put_versioned_immutable(&key, &bytes, CLEANUP_MEDIA_TYPE)
             .await
             .map(|object| object.reference)
             .map_err(|_error| {

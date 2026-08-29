@@ -5,6 +5,7 @@
     reason = "the public contract crate and focused contract document own field-level wire documentation"
 )]
 
+mod hash_compat;
 mod api;
 mod container_provider;
 mod freeze_binding;

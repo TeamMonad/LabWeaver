@@ -5,14 +5,14 @@
 )]
 
 use std::str::FromStr;
+use crate::hash_compat::Sha256Digest;
 use std::time::Duration;
 
 use contracts::events::{CloudEvent, EVENT_CONTRACTS, SPEC_VERSION, SubmissionFrozen, subjects};
 use contracts::submission::FrozenSubmission;
 use contracts::{
-    CourseId, EnvironmentId, EventId, FrozenSubmissionId, Revision, Sequence, Sha256Digest,
-    UtcTimestamp,
-};
+    CourseId, EnvironmentId, EventId, FrozenSubmissionId, Revision, Sequence,
+    UtcTimestamp};
 use persistence_sqlx::{Domain, OutboxStore};
 use serde_json::Value;
 use sqlx::{PgPool, Row};

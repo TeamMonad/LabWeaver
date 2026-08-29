@@ -12,7 +12,8 @@ use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
 use contracts::submission::{FrozenFile, SubmissionManifest};
-use contracts::{PathRule, Sha256Digest};
+use contracts::{PathRule};
+use crate::hash_compat::Sha256Digest;
 use serde::{Deserialize, Serialize};
 
 const ARCHIVE_MEDIA_TYPE: &str = "application/vnd.labweaver.frozen-submission.v1+json";

@@ -19,7 +19,8 @@ use std::sync::Arc;
 
 use crate::ApprovalPolicy;
 use crate::store::{PendingAllocation, PgResourceStore, ResourceStoreError};
-use contracts::Sha256Digest;
+use contracts::;
+use crate::hash_compat::Sha256Digest;
 
 const ACCESS_CALLER_SAN: &str = "spiffe://labweaver/access-service";
 const DELEGATION_HEADER: &str = "x-labweaver-resource-delegation";

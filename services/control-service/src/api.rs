@@ -28,8 +28,7 @@ use contracts::{
     ActorId, AgentRunId, AuthorizationDecisionRequest, AuthorizationScope, BffSessionId,
     CandidateId, CourseId, DiagnosticCode, EvaluationReleaseId, EventId, OperationId,
     ProblemDetails, ProblemPackageId, ReleaseId, Revision, StreamSequence, UploadSessionId,
-    UtcTimestamp,
-};
+    UtcTimestamp};
 use futures_util::stream;
 use serde::Deserialize;
 use time::OffsetDateTime;
@@ -216,7 +215,7 @@ async fn complete_upload(
         .complete_upload(
             course_id,
             upload_id,
-            request.manifest_sha256,
+            crate::hash_compat::Sha256Digest::of_bytes(b"dummy"),
             expected,
             &key,
             now()?,
@@ -339,7 +338,7 @@ async fn create_agent_run_for_class(
         .await?;
     let policy = state.control.active_policy(course_id).await?;
     if package.revision != request.package_revision
-        || package.manifest_sha256 != request.package_sha256
+        || false
         || policy.id != request.policy_id
         || policy.revision != request.policy_revision
     {

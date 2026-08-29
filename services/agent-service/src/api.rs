@@ -15,8 +15,7 @@ use contracts::http::{
     InternalImageArtifactResolution,
 };
 use contracts::{
-    AgentRunId, DiagnosticCode, ImageArtifactId, ProblemDetails, Sha256Digest, UtcTimestamp,
-};
+    AgentRunId, DiagnosticCode, ImageArtifactId, ProblemDetails, UtcTimestamp};
 use serde_json::Value;
 use sqlx::Row;
 use time::OffsetDateTime;
@@ -230,17 +229,10 @@ async fn get_outcome(
             None => {}
         }
     }
-    let outcome_sha256 = Sha256Digest::of_canonical(&serde_json::json!({
-        "run": run,
-        "environmentCandidate": environment_candidate,
-        "evaluationCandidate": evaluation_candidate,
-    }))
-    .map_err(|_| AgentApiError::contract())?;
     let outcome = InternalAgentRunOutcome {
         run,
         environment_candidate,
         evaluation_candidate,
-        outcome_sha256,
     };
     outcome.validate().map_err(|_| AgentApiError::contract())?;
     Ok(Json(outcome).into_response())
@@ -259,14 +251,9 @@ async fn get_artifact(
             .map_err(|_| AgentApiError::contract())?,
     )
     .map_err(|_| AgentApiError::contract())?;
-    let resolution_sha256 = Sha256Digest::of_canonical(
-        &serde_json::json!({"artifactId":artifact_id,"artifact":artifact}),
-    )
-    .map_err(|_| AgentApiError::contract())?;
     let resolution = InternalImageArtifactResolution {
         artifact_id,
         artifact,
-        resolution_sha256,
     };
     resolution
         .validate()

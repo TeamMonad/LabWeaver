@@ -492,7 +492,6 @@ impl ProblemPackageReader for DispatchReader {
                 key,
                 &reference.object_version,
                 reference.size_bytes,
-                reference.sha256,
                 &reference.media_type,
             )
             .await

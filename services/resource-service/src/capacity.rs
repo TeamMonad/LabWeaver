@@ -1,6 +1,7 @@
 //! Explicit Kubernetes capacity provider for Resource-owned quota shells.
 
 use std::collections::BTreeMap;
+use crate::hash_compat::Sha256Digest;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -1084,8 +1085,7 @@ mod tests {
 
     use contracts::resource::{ResourceTarget, WorkloadResources};
     use contracts::{
-        ActorId, CourseId, EnvironmentId, ReleaseId, ResourceApprovalId, ResourceRequestId,
-    };
+        ActorId, CourseId, EnvironmentId, ReleaseId, ResourceApprovalId, ResourceRequestId};
 
     use super::*;
 

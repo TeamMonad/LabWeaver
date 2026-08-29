@@ -4,6 +4,7 @@ pub mod ansible_probe;
 pub mod ansible_probe_executor;
 pub mod ansible_probe_job;
 pub mod ansible_probe_worker;
+pub mod hash_compat;
 pub mod api;
 pub mod collector;
 pub mod command_store;

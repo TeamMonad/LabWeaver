@@ -18,8 +18,7 @@ use contracts::http::{
 };
 use contracts::{
     AgentRunId, AuthorizationDecision, AuthorizationDecisionRequest, BuildRequestId,
-    EvaluationReleaseId, ImageArtifactId,
-};
+    EvaluationReleaseId, ImageArtifactId};
 use reqwest::{Certificate, Identity, StatusCode, Url};
 use serde::Deserialize;
 use thiserror::Error;

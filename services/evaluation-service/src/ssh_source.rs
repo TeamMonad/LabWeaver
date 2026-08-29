@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use contracts::{Sha256Digest, UtcTimestamp};
+use contracts::{UtcTimestamp};
+use crate::hash_compat::Sha256Digest;
 use russh::client;
 use russh::keys::{load_openssh_certificate, load_secret_key};
 use russh_sftp::client::SftpSession;
@@ -500,7 +501,7 @@ mod tests {
         SshSnapshotConfig, host_key_identity, private_ip, safe_remote_root,
         ssh_client_configuration, validate_certificate,
     };
-    use contracts::{Sha256Digest, UtcTimestamp};
+    use contracts::{UtcTimestamp};
     use russh::keys::ssh_key::{PrivateKey, certificate, private::Ed25519Keypair};
     use std::net::{IpAddr, Ipv4Addr};
     use std::path::PathBuf;

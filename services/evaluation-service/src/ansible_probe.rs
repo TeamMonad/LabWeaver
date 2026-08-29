@@ -11,7 +11,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
 
-use contracts::Sha256Digest;
+use contracts::;
+use crate::hash_compat::Sha256Digest;
 use contracts::evaluation::FactAssertion;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

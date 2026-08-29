@@ -6,14 +6,14 @@
 )]
 
 use std::str::FromStr;
+use crate::hash_compat::Sha256Digest;
 
 use contracts::{
     ActorId, CourseId, DiagnosticCode, EnvironmentId, EventId, FrozenSubmissionId, OperationId,
-    Revision, Sequence, Sha256Digest, UtcTimestamp,
+    Revision, Sequence, UtcTimestamp,
     events::{
         CloudEvent, EVENT_CONTRACTS, EventContract, SPEC_VERSION, SubmissionFreezeRequested,
-        subjects,
-    },
+        subjects},
     http::OperationAccepted,
     submission::SubmissionManifest,
 };

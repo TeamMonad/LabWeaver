@@ -20,7 +20,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use contracts::Sha256Digest;
+use contracts::;
+use crate::hash_compat::Sha256Digest;
 #[cfg(target_os = "linux")]
 use landlock::{
     ABI, Access as _, AccessFs, CompatLevel, Compatible as _, Ruleset, RulesetAttr as _,

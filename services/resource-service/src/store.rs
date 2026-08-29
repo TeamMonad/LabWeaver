@@ -17,7 +17,8 @@ use contracts::resource::{
     CapacityClaim, CapacityClaimState, ResourceApproval, ResourceLease, ResourceLeaseState,
     ResourceRequest, ResourceRequestState,
 };
-use contracts::{EventId, LeaseId, ResourceRequestId, Sequence, Sha256Digest, UtcTimestamp};
+use contracts::{EventId, LeaseId, ResourceRequestId, Sequence, UtcTimestamp};
+use crate::hash_compat::Sha256Digest;
 use persistence_sqlx::{
     Domain, IdempotencyDecision, IdempotencyStore, OutboxStore, PersistenceError,
 };
@@ -1758,8 +1759,7 @@ pub enum ResourceStoreError {
 mod tests {
     use contracts::resource::{CapacityClaim, CapacityClaimState, WorkloadResources};
     use contracts::{
-        CapacityClaimId, ResourceApprovalId, ResourceRequestId, Revision, Sha256Digest,
-    };
+        CapacityClaimId, ResourceApprovalId, ResourceRequestId, Revision};
 
     use super::transition_claim;
 

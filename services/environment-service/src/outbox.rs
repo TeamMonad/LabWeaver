@@ -3,7 +3,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use contracts::events::{CloudEvent, EVENT_CONTRACTS};
-use contracts::{EventId, Sha256Digest};
+use contracts::{EventId};
+use crate::hash_compat::Sha256Digest;
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 use tokio::time::timeout;

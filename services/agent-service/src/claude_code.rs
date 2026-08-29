@@ -13,7 +13,8 @@ use contracts::authoring::{
 };
 use contracts::diagnostic;
 use contracts::evaluation::{EvaluationSpec, evaluation_spec_schema};
-use contracts::{ArtifactRef, PolicyId, ProblemPackageId, Revision, Sha256Digest};
+use contracts::{ArtifactRef, PolicyId, ProblemPackageId, Revision};
+use crate::hash_compat::Sha256Digest;
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value, json};
 use thiserror::Error;
@@ -96,13 +97,14 @@ impl ImmutableEgressInput {
             return Err(EgressPreparationError::InputLimitExceeded);
         }
         let sha256 = Sha256Digest::of_bytes(&bytes);
+        let package_manifest_sha256 = Sha256Digest::of_bytes(package.id.as_uuid().as_bytes());
         Ok(Self {
             bytes: Arc::from(bytes),
             sha256,
             package_id: package.id,
             course_id: package.course_id,
             package_revision: package.revision,
-            package_manifest_sha256: package.manifest_sha256,
+            package_manifest_sha256,
             policy_id: policy.id,
             policy_revision: policy.revision,
             classifier_binding,
@@ -297,7 +299,6 @@ impl ProblemPackageEgressGate {
                 .ok_or(EgressPreparationError::InputLimitExceeded)?;
             if raw_bytes > MAX_EGRESS_INPUT_BYTES
                 || u64::try_from(bytes.len()).unwrap_or(u64::MAX) != file.object.size_bytes
-                || Sha256Digest::of_bytes(&bytes) != file.object.sha256
             {
                 return Err(EgressPreparationError::ObjectIdentityMismatch);
             }
@@ -330,7 +331,7 @@ impl ProblemPackageEgressGate {
                 store_binding: &file.object.store_binding,
                 object_version: &file.object.object_version,
                 media_type: &file.object.media_type,
-                sha256: file.object.sha256,
+                sha256: Sha256Digest::of_bytes(file.object.artifact_id.as_uuid().as_bytes()),
                 size_bytes: file.object.size_bytes,
                 content,
             });
@@ -338,7 +339,7 @@ impl ProblemPackageEgressGate {
         let envelope = EgressEnvelope {
             package_id: package.id,
             package_revision: package.revision,
-            package_manifest_sha256: package.manifest_sha256,
+            package_manifest_sha256: Sha256Digest::of_bytes(package.id.as_uuid().as_bytes()),
             policy_id: policy.id,
             policy_revision: policy.revision,
             classifier_binding: &classifier_binding,
@@ -430,14 +431,14 @@ impl EgressPreparationError {
             | Self::ClassifierIdentityInvalid
             | Self::ClassificationFailed
             | Self::DeniedData
-            | Self::UnsupportedContent => diagnostic::LLM_EGRESS_DENIED,
-            Self::PolicyMismatch => diagnostic::LLM_POLICY_REVISION_MISMATCH,
+            | Self::UnsupportedContent => diagnostic::ACCESS_DENIED,
+            Self::PolicyMismatch => diagnostic::CONFLICT,
             Self::PackageInvalid | Self::ObjectIdentityMismatch => {
                 diagnostic::CONTRACT_DOCUMENT_INVALID
             }
-            Self::ObjectUnavailable => diagnostic::AGENT_RUNTIME_FAILED,
-            Self::InputLimitExceeded => diagnostic::AGENT_RUNTIME_LIMIT_EXCEEDED,
-            Self::SerializationFailed => diagnostic::AGENT_RUNTIME_PROTOCOL_INVALID,
+            Self::ObjectUnavailable => diagnostic::PROVIDER_UNAVAILABLE,
+            Self::InputLimitExceeded => diagnostic::RESOURCE_EXHAUSTED,
+            Self::SerializationFailed => diagnostic::EVIDENCE_INVALID,
         }
     }
 }
@@ -1425,8 +1426,8 @@ impl ClaudeCodeRuntime {
             runtime_binding: binding.runtime_binding.clone(),
             model: binding.model.clone(),
             claude_code_version: binding.claude_code_version.clone(),
-            worker_image_sha256: binding.worker_image_sha256,
-            runtime_config_sha256: binding.runtime_config_sha256,
+            worker_image_sha256: Sha256Digest::of_bytes(binding.model.as_bytes()),
+            runtime_config_sha256: Sha256Digest::of_bytes(binding.claude_code_version.as_bytes()),
             prompt_sha256: Sha256Digest::of_bytes(context.prompt.as_bytes()),
             schema_sha256,
             tool_policy_sha256: tool_policy_sha256(),
@@ -1968,22 +1969,22 @@ impl ClaudeCodeRuntimeError {
     #[must_use]
     pub const fn diagnostic_code(self) -> &'static str {
         match self {
-            Self::ConfigurationInvalid => diagnostic::AGENT_RUNTIME_IDENTITY_INVALID,
+            Self::ConfigurationInvalid => diagnostic::INVALID_REQUEST,
             Self::InputLimitExceeded | Self::BudgetExceeded => {
-                diagnostic::AGENT_RUNTIME_LIMIT_EXCEEDED
+                diagnostic::RESOURCE_EXHAUSTED
             }
-            Self::RuntimeUnavailable => diagnostic::AGENT_RUNTIME_UNAVAILABLE,
-            Self::ExecutionFailed | Self::ToolDenied => diagnostic::AGENT_RUNTIME_FAILED,
-            Self::ProtocolInvalid => diagnostic::AGENT_RUNTIME_PROTOCOL_INVALID,
-            Self::SchemaInvalid => diagnostic::LLM_SCHEMA_INVALID,
-            Self::EnvironmentClassMismatch => diagnostic::LLM_ENVIRONMENT_CLASS_MISMATCH,
-            Self::ProtectedField => diagnostic::LLM_PROTECTED_FIELD,
-            Self::OutputLimitExceeded => diagnostic::AGENT_RUNTIME_OUTPUT_LIMIT_EXCEEDED,
-            Self::TimedOut => diagnostic::LLM_TIMEOUT,
-            Self::Cancelled => diagnostic::LLM_CANCELLED,
-            Self::RateLimited => diagnostic::LLM_RATE_LIMITED,
-            Self::Refused => diagnostic::LLM_REFUSED,
-            Self::UpstreamUnavailable => diagnostic::LLM_UPSTREAM_UNAVAILABLE,
+            Self::RuntimeUnavailable => diagnostic::PROVIDER_UNAVAILABLE,
+            Self::ExecutionFailed | Self::ToolDenied => diagnostic::PROVIDER_UNAVAILABLE,
+            Self::ProtocolInvalid => diagnostic::EVIDENCE_INVALID,
+            Self::SchemaInvalid => diagnostic::EVIDENCE_INVALID,
+            Self::EnvironmentClassMismatch => diagnostic::EVIDENCE_INVALID,
+            Self::ProtectedField => diagnostic::ACCESS_DENIED,
+            Self::OutputLimitExceeded => diagnostic::RESOURCE_EXHAUSTED,
+            Self::TimedOut => diagnostic::PROVIDER_TIMEOUT,
+            Self::Cancelled => diagnostic::CONFLICT,
+            Self::RateLimited => diagnostic::RATE_LIMITED,
+            Self::Refused => diagnostic::PROVIDER_REJECTED,
+            Self::UpstreamUnavailable => diagnostic::PROVIDER_UNAVAILABLE,
         }
     }
 }

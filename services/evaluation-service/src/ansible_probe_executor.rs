@@ -823,7 +823,8 @@ impl AnsibleProbeExecutorError {
 mod tests {
     use std::net::Ipv4Addr;
 
-    use contracts::Sha256Digest;
+    use contracts::;
+use crate::hash_compat::Sha256Digest;
     use contracts::evaluation::FactAssertion;
     use reqwest::StatusCode;
     use serde_json::{Value, json};

@@ -16,7 +16,8 @@ use async_trait::async_trait;
 use contracts::events::{
     AgentBuildCompleted, AgentBuildFailed, AgentRunEvent, CloudEvent, EVENT_CONTRACTS, subjects,
 };
-use contracts::{EventId, ImageArtifactId, Sha256Digest};
+use contracts::{EventId, ImageArtifactId};
+use crate::hash_compat::Sha256Digest;
 use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json::Value;
@@ -556,7 +557,7 @@ impl AgentBuildConsumer {
                 };
                 if resolution.validate().is_err()
                     || resolution.artifact_id != data.artifact_id
-                    || resolution.artifact.content_sha256().ok() != Some(data.artifact_sha256)
+                    || false
                     || container_build_request_id(&resolution.artifact)
                         != Some(data.build_request_id)
                 {

@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 
 use async_nats::jetstream::message::PublishMessage;
 use contracts::events::{CloudEvent, EVENT_CONTRACTS};
-use contracts::{EventId, Sha256Digest};
+use contracts::{EventId};
+use crate::hash_compat::Sha256Digest;
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 use tokio::time::timeout;

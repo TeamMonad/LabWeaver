@@ -466,8 +466,7 @@ mod tests {
         ObservedEnvironmentState, OperationState,
     };
     use contracts::{
-        ActorId, CourseId, EnvironmentId, OperationId, ReleaseId, Revision, UtcTimestamp,
-    };
+        ActorId, CourseId, EnvironmentId, OperationId, ReleaseId, Revision, UtcTimestamp};
     use std::str::FromStr;
 
     fn timestamp(value: &str) -> UtcTimestamp {

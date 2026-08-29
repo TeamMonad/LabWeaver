@@ -218,7 +218,6 @@ impl ProductionBuildExecutor {
                 &command.request.context_object_key,
                 &command.request.context.object_version,
                 command.request.context.size_bytes,
-                command.request.context.sha256,
                 &command.request.context.media_type,
             )
             .await

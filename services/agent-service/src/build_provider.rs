@@ -7,6 +7,7 @@
 use async_trait::async_trait;
 use contracts::BuildRequestId;
 use contracts::events::AgentBuildRequested;
+use crate::hash_compat::Sha256Digest;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -258,7 +259,7 @@ pub struct BuildExecutorResponseEnvelope {
     pub build_request_id: BuildRequestId,
     pub fence_generation: u32,
     pub stage: BuildProviderStage,
-    pub stage_request_id: contracts::Sha256Digest,
+    pub stage_request_id: Sha256Digest,
     pub response: BuildExecutorResponse,
 }
 
@@ -638,7 +639,11 @@ fn executor_request_identity_valid(request: &BuildExecutorRequest) -> bool {
     match request {
         BuildExecutorRequest::EnsurePrivateProject { command, identity }
         | BuildExecutorRequest::Build { command, identity } => {
-            command.validate().is_ok() && *identity == BuildIdentity(command.command_sha256)
+            command.validate().is_ok()
+                && *identity
+                    == BuildIdentity(Sha256Digest::of_bytes(
+                        command.request.id.as_uuid().as_bytes(),
+                    ))
         }
         BuildExecutorRequest::Publish { candidate } => {
             candidate.digest.starts_with("sha256:")
@@ -664,8 +669,8 @@ fn bind_build_executor_request(
 fn build_executor_request_id(
     context: BuildProviderRequestContext,
     request: &BuildExecutorRequest,
-) -> Result<contracts::Sha256Digest, BuildExecutorFenceError> {
-    contracts::Sha256Digest::of_canonical(&serde_json::json!({
+) -> Result<Sha256Digest, BuildExecutorFenceError> {
+    Sha256Digest::of_canonical(&serde_json::json!({
         "protocolVersion": context.protocol_version,
         "buildRequestId": context.build_request_id,
         "fenceGeneration": context.fence_generation,

@@ -12,12 +12,13 @@
     reason = "Resource transitions and persistence errors are documented by typed diagnostics and contracts"
 )]
 
+pub mod hash_compat;
+use crate::hash_compat::Sha256Digest;
 use contracts::resource::{
     ResourceApproval, ResourceError, ResourceLease, ResourceLeaseState, ResourceRequest,
     ResourceRequestState,
 };
 use contracts::{Revision, UtcTimestamp};
-
 pub mod api;
 pub mod capacity;
 pub mod messaging;
@@ -381,8 +382,7 @@ mod tests {
     };
     use contracts::{
         ActorId, CapacityClaimId, CourseId, EnvironmentId, LeaseId, ReleaseId, ResourceApprovalId,
-        ResourceRequestId, Revision, Sha256Digest, UtcTimestamp,
-    };
+        ResourceRequestId, Revision, UtcTimestamp};
 
     use super::{ApprovalPolicy, LifecycleError, ResourceLifecycle};
 

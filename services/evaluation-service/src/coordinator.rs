@@ -6,14 +6,14 @@
 )]
 
 use std::{collections::BTreeMap, fs, path::PathBuf, time::Duration};
+use crate::hash_compat::Sha256Digest;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use contracts::{
     DiagnosticCode, PolicyId, RetentionClass, RetentionDisposition, RetentionSnapshot, Revision,
     UtcTimestamp,
     submission::{
-        EnvironmentFreezeBinding, EnvironmentFreezeBindingRequest, EnvironmentFreezeSourceBinding,
-    },
+        EnvironmentFreezeBinding, EnvironmentFreezeBindingRequest, EnvironmentFreezeSourceBinding},
 };
 use rand::random;
 use reqwest::{Certificate, Client, Identity, Method, StatusCode, Url};

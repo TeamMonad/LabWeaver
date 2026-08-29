@@ -7,16 +7,16 @@
 )]
 
 use std::{collections::BTreeSet, str::FromStr, time::Duration};
+use crate::hash_compat::Sha256Digest;
 
 use contracts::{
     ActorId, CourseId, DiagnosticCode, EvaluationReleaseId, EvaluationRunId, EvaluationStepRunId,
-    EventId, Revision, Sequence, Sha256Digest, UtcTimestamp,
+    EventId, Revision, Sequence, UtcTimestamp,
     evaluation::{
         EVALUATION_RELEASE_SCHEMA_VERSION, EVALUATION_RUN_SCHEMA_VERSION, EvaluationRelease,
         EvaluationReleaseState, EvaluationRun, EvaluationRunState, EvaluationRuntimeIdentity,
         EvaluationStepCompletion, EvaluationStepFailurePolicy, EvaluationStepRole,
-        EvaluationStepRun, EvaluationStepRunState, StudentEvaluationResult,
-    },
+        EvaluationStepRun, EvaluationStepRunState, StudentEvaluationResult},
     events::{
         CloudEvent, EVENT_CONTRACTS, EvaluationReleasePublished, EvaluationRunEvent,
         EvaluationStepRunEvent, EventContract, SPEC_VERSION, subjects,

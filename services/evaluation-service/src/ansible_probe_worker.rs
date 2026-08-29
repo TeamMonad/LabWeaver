@@ -33,7 +33,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use contracts::Sha256Digest;
+use contracts::;
+use crate::hash_compat::Sha256Digest;
 use nix::{
     errno::Errno,
     sys::signal::{Signal, killpg},
@@ -788,7 +789,7 @@ mod tests {
     use std::net::Ipv4Addr;
     use std::path::PathBuf;
 
-    use contracts::Sha256Digest;
+    use contracts::;
     use contracts::evaluation::FactAssertion;
     use serde_json::json;
     use uuid::Uuid;
