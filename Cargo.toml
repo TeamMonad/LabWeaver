@@ -74,6 +74,7 @@ tempfile = "3.27.0"
 time = { version = "=0.3.41", features = ["formatting", "parsing", "serde"] }
 tokio = { version = "1.45.1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12"] }
+tokio-util = { version = "0.7.18", features = ["full"] }
 tower = { version = "0.5.2", features = ["util"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt", "json"] }

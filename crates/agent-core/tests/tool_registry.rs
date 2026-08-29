@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use agent_core::{
     AgentContext, AgentEvent, AgentRun, AgentState, AgentTool, AgentToolError, ToolAuditOutcome,
     ToolBinding, ToolCancellation, ToolDescriptor, ToolExecutionError, ToolExecutionFailureCode,
-    ToolOutput, ToolRegistry, ToolRetryPolicy, ToolRisk, TransitionOutcome,
+    ToolOutput, ToolRegistry, ToolRisk, TransitionOutcome,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -62,7 +62,7 @@ impl AgentTool for TestTool {
 }
 
 #[tokio::test]
-async fn explicitly_bound_tool_executes_with_hash_only_audit() -> Result<(), Box<dyn Error>> {
+async fn explicitly_bound_tool_executes_with_simplified_audit() -> Result<(), Box<dyn Error>> {
     let (tool, calls) = test_tool("read_problem_package", "1", ToolRisk::Low, false)?;
     let binding = binding_for(&tool)?;
     let registry = ToolRegistry::new(vec![tool], vec![binding])?;
@@ -78,26 +78,14 @@ async fn explicitly_bound_tool_executes_with_hash_only_audit() -> Result<(), Box
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(execution.audit().tool_name(), "read_problem_package");
     assert_eq!(execution.audit().tool_version(), Some("1"));
-    assert_eq!(execution.audit().input_sha256().len(), 64);
-    assert_eq!(execution.audit().output_sha256().map(str::len), Some(64));
     assert_eq!(execution.audit().risk(), Some(ToolRisk::Low));
     assert_eq!(execution.audit().outcome(), ToolAuditOutcome::Succeeded);
-    assert_eq!(execution.audit().candidate_revision(), "candidate-r1");
-    assert_eq!(execution.audit().idempotency_key(), "run-1-attempt-1");
     assert_eq!(execution.audit().attempt(), 1);
     assert_eq!(
         execution.audit().timeout_millis(),
         Some(TEST_TIMEOUT_MILLIS)
     );
-    assert_eq!(
-        execution.audit().retry_policy(),
-        Some(ToolRetryPolicy::Never)
-    );
     assert!(execution.audit().diagnostic_code().is_none());
-    assert_eq!(
-        execution.audit().capability_sha256().map(str::len),
-        Some(64)
-    );
     assert_eq!(execution.audit().run_id(), "run-1");
     assert_eq!(execution.audit().actor_id(), "teacher-1");
     Ok(())
@@ -127,8 +115,6 @@ async fn unbound_tool_is_rejected_before_execution() -> Result<(), Box<dyn Error
     assert_eq!(error.audit().tool_version(), None);
     assert_eq!(error.audit().risk(), None);
     assert_eq!(error.audit().timeout_millis(), None);
-    assert_eq!(error.audit().retry_policy(), None);
-    assert_eq!(error.audit().input_sha256().len(), 64);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     Ok(())
 }
@@ -159,7 +145,6 @@ async fn invalid_or_injected_input_is_rejected_before_execution() -> Result<(), 
         "run-3",
         ToolAuditOutcome::Rejected,
         "LW_AGENT_TOOL_INPUT_REJECTED",
-        false,
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     Ok(())
@@ -183,7 +168,6 @@ async fn elevated_tool_is_fail_closed_without_approval_contract() -> Result<(), 
         "run-4",
         ToolAuditOutcome::Rejected,
         "LW_AGENT_TOOL_APPROVAL_REQUIRED",
-        false,
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     Ok(())
@@ -211,7 +195,6 @@ async fn tool_failure_preserves_stable_diagnostic() -> Result<(), Box<dyn Error>
         "run-failure",
         ToolAuditOutcome::Failed,
         "LW_AGENT_TOOL_EXECUTION_FAILED",
-        false,
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     Ok(())
@@ -279,7 +262,6 @@ fn registry_rejects_duplicate_missing_and_version_conflicts() -> Result<(), Box<
             "missing",
             "1",
             ToolRisk::Low,
-            "0".repeat(64),
             TEST_TIMEOUT_MILLIS,
         )?],
     )?;
@@ -294,9 +276,10 @@ fn registry_rejects_duplicate_missing_and_version_conflicts() -> Result<(), Box<
         "same",
         "1",
         ToolRisk::Low,
-        descriptor.capability_sha256(),
         TEST_TIMEOUT_MILLIS,
     )?;
+    // silence unused warning for descriptor
+    let _ = descriptor.version();
     let error = registry_error(vec![tool], vec![binding])?;
     assert_eq!(error.diagnostic_code(), "LW_AGENT_TOOL_VERSION_MISMATCH");
     Ok(())
@@ -309,7 +292,6 @@ fn execution_control_identity_and_timeout_are_required() -> Result<(), Box<dyn E
         descriptor.name(),
         descriptor.version(),
         descriptor.risk(),
-        descriptor.capability_sha256(),
         0,
     ) else {
         return Err("zero Tool timeout unexpectedly passed".into());
@@ -330,30 +312,17 @@ fn execution_control_identity_and_timeout_are_required() -> Result<(), Box<dyn E
 }
 
 #[test]
-fn binding_rejects_risk_downgrade_and_capability_change() -> Result<(), Box<dyn Error>> {
+fn binding_rejects_risk_downgrade() -> Result<(), Box<dyn Error>> {
     let expected = test_descriptor("bound_capability", "1", ToolRisk::High)?;
     let binding = ToolBinding::new(
         expected.name(),
         expected.version(),
         expected.risk(),
-        expected.capability_sha256(),
         TEST_TIMEOUT_MILLIS,
     )?;
     let (downgraded, _) = test_tool("bound_capability", "1", ToolRisk::Low, false)?;
     let error = registry_error(vec![downgraded], vec![binding])?;
     assert_eq!(error.diagnostic_code(), "LW_AGENT_TOOL_RISK_MISMATCH");
-
-    let expected = descriptor_with_alternate_output_schema()?;
-    let binding = ToolBinding::new(
-        expected.name(),
-        expected.version(),
-        expected.risk(),
-        expected.capability_sha256(),
-        TEST_TIMEOUT_MILLIS,
-    )?;
-    let (changed, _) = test_tool("bound_capability", "1", ToolRisk::Low, false)?;
-    let error = registry_error(vec![changed], vec![binding])?;
-    assert_eq!(error.diagnostic_code(), "LW_AGENT_TOOL_CAPABILITY_MISMATCH");
     Ok(())
 }
 
@@ -372,7 +341,6 @@ fn invalid_output_schema_is_rejected_at_registration() -> Result<(), Box<dyn Err
         descriptor.name(),
         descriptor.version(),
         descriptor.risk(),
-        descriptor.capability_sha256(),
         TEST_TIMEOUT_MILLIS,
     )?;
     let tool = Arc::new(TestTool {
@@ -389,7 +357,7 @@ fn invalid_output_schema_is_rejected_at_registration() -> Result<(), Box<dyn Err
 }
 
 #[tokio::test]
-async fn incompatible_tool_output_fails_with_audited_hash() -> Result<(), Box<dyn Error>> {
+async fn incompatible_tool_output_fails_with_audit() -> Result<(), Box<dyn Error>> {
     for (behavior, expected_diagnostic) in [
         (
             TestBehavior::WrongOutputVersion,
@@ -414,7 +382,6 @@ async fn incompatible_tool_output_fails_with_audited_hash() -> Result<(), Box<dy
             "run-output",
             ToolAuditOutcome::Failed,
             expected_diagnostic,
-            true,
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
@@ -438,7 +405,6 @@ async fn pending_tool_times_out_without_retry() -> Result<(), Box<dyn Error>> {
     assert_eq!(error.audit().outcome(), ToolAuditOutcome::Failed);
     assert_eq!(error.audit().timeout_millis(), Some(10));
     assert_eq!(error.audit().attempt(), 1);
-    assert_eq!(error.audit().retry_policy(), Some(ToolRetryPolicy::Never));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     Ok(())
 }
@@ -568,27 +534,6 @@ fn test_descriptor(
     )
 }
 
-fn descriptor_with_alternate_output_schema() -> Result<ToolDescriptor, AgentToolError> {
-    ToolDescriptor::new(
-        "bound_capability",
-        "1",
-        ToolRisk::Low,
-        json!({
-            "type": "object",
-            "properties": { "value": { "type": "string" } },
-            "required": ["value"],
-            "additionalProperties": false
-        }),
-        "test-output/v1",
-        json!({
-            "type": "object",
-            "properties": { "echo": { "type": "string" } },
-            "required": ["echo"],
-            "additionalProperties": false
-        }),
-    )
-}
-
 fn binding_for(tool: &Arc<dyn AgentTool>) -> Result<ToolBinding, AgentToolError> {
     binding_for_timeout(tool, TEST_TIMEOUT_MILLIS)
 }
@@ -602,7 +547,6 @@ fn binding_for_timeout(
         descriptor.name(),
         descriptor.version(),
         descriptor.risk(),
-        descriptor.capability_sha256(),
         timeout_millis,
     )
 }
@@ -622,22 +566,15 @@ fn assert_bound_failure_audit(
     run_id: &str,
     outcome: ToolAuditOutcome,
     diagnostic_code: &str,
-    has_output: bool,
 ) {
     assert_eq!(audit.run_id(), run_id);
     assert_eq!(audit.actor_id(), "teacher-1");
-    assert_eq!(audit.candidate_revision(), "candidate-r1");
-    assert_eq!(audit.idempotency_key(), format!("{run_id}-attempt-1"));
     assert_eq!(audit.tool_version(), Some("1"));
     assert!(audit.risk().is_some());
-    assert_eq!(audit.capability_sha256().map(str::len), Some(64));
-    assert_eq!(audit.input_sha256().len(), 64);
-    assert_eq!(audit.output_sha256().is_some(), has_output);
     assert_eq!(audit.outcome(), outcome);
     assert_eq!(audit.diagnostic_code(), Some(diagnostic_code));
     assert_eq!(audit.attempt(), 1);
     assert_eq!(audit.timeout_millis(), Some(TEST_TIMEOUT_MILLIS));
-    assert_eq!(audit.retry_policy(), Some(ToolRetryPolicy::Never));
 }
 
 fn registry_error(

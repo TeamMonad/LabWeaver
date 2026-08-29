@@ -5,10 +5,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tokio::sync::watch;
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 
 /// Security risk declared by an Agent Tool implementation.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -28,14 +27,6 @@ impl ToolRisk {
     pub const fn requires_approval(self) -> bool {
         matches!(self, Self::Elevated | Self::High)
     }
-
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Low => "low",
-            Self::Elevated => "elevated",
-            Self::High => "high",
-        }
-    }
 }
 
 /// Registry retry policy fixed by the Tool binding.
@@ -54,7 +45,6 @@ pub struct ToolDescriptor {
     input_schema: Value,
     output_schema_version: String,
     output_schema: Value,
-    capability_sha256: String,
 }
 
 impl ToolDescriptor {
@@ -82,14 +72,6 @@ impl ToolDescriptor {
                 detail: "tool name, version, and output schema version are required".to_owned(),
             });
         }
-        let capability_sha256 = capability_hash(
-            &name,
-            &version,
-            risk,
-            &input_schema,
-            &output_schema_version,
-            &output_schema,
-        );
         Ok(Self {
             name,
             version,
@@ -97,7 +79,6 @@ impl ToolDescriptor {
             input_schema,
             output_schema_version,
             output_schema,
-            capability_sha256,
         })
     }
 
@@ -137,10 +118,10 @@ impl ToolDescriptor {
         &self.output_schema
     }
 
-    /// Returns the SHA-256 identity of the complete capability contract.
+    /// Returns a simple capability identity for debugging (`name@version`).
     #[must_use]
-    pub fn capability_sha256(&self) -> &str {
-        &self.capability_sha256
+    pub fn capability_id(&self) -> String {
+        format!("{}@{}", self.name, self.version)
     }
 }
 
@@ -150,7 +131,6 @@ pub struct ToolBinding {
     name: String,
     version: String,
     risk: ToolRisk,
-    capability_sha256: String,
     timeout_millis: u64,
     retry_policy: ToolRetryPolicy,
 }
@@ -160,24 +140,18 @@ impl ToolBinding {
     ///
     /// # Errors
     ///
-    /// Returns a stable diagnostic when identity fields or the capability SHA-256 are invalid.
+    /// Returns a stable diagnostic when identity fields or timeout are invalid.
     pub fn new(
         name: impl Into<String>,
         version: impl Into<String>,
         risk: ToolRisk,
-        capability_sha256: impl Into<String>,
         timeout_millis: u64,
     ) -> Result<Self, AgentToolError> {
         let name = name.into();
         let version = version.into();
-        let capability_sha256 = capability_sha256.into();
-        if name.trim().is_empty()
-            || version.trim().is_empty()
-            || !is_sha256(&capability_sha256)
-            || timeout_millis == 0
-        {
+        if name.trim().is_empty() || version.trim().is_empty() || timeout_millis == 0 {
             return Err(AgentToolError::InvalidBinding {
-                detail: "binding name, version, risk, capability SHA-256, and non-zero timeout are required"
+                detail: "binding name, version, risk, and non-zero timeout are required"
                     .to_owned(),
             });
         }
@@ -185,7 +159,6 @@ impl ToolBinding {
             name,
             version,
             risk,
-            capability_sha256,
             timeout_millis,
             retry_policy: ToolRetryPolicy::Never,
         })
@@ -209,12 +182,6 @@ impl ToolBinding {
         self.risk
     }
 
-    /// Returns the expected complete capability identity.
-    #[must_use]
-    pub fn capability_sha256(&self) -> &str {
-        &self.capability_sha256
-    }
-
     /// Returns the maximum wall time for one dispatch attempt.
     #[must_use]
     pub const fn timeout_millis(&self) -> u64 {
@@ -231,35 +198,31 @@ impl ToolBinding {
 /// Cooperative cancellation handle owned by the authoritative dispatch boundary.
 #[derive(Clone, Debug)]
 pub struct ToolCancellation {
-    sender: watch::Sender<bool>,
+    token: CancellationToken,
 }
 
 impl ToolCancellation {
     /// Creates an active cancellation handle.
     #[must_use]
     pub fn new() -> Self {
-        let (sender, _) = watch::channel(false);
-        Self { sender }
+        Self {
+            token: CancellationToken::new(),
+        }
     }
 
     /// Requests cancellation. Repeated cancellation is idempotent.
     pub fn cancel(&self) {
-        self.sender.send_replace(true);
+        self.token.cancel();
     }
 
     /// Reports whether cancellation was already requested.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        *self.sender.borrow()
+        self.token.is_cancelled()
     }
 
     async fn cancelled(&self) {
-        let mut receiver = self.sender.subscribe();
-        while !*receiver.borrow() {
-            if receiver.changed().await.is_err() {
-                return;
-            }
-        }
+        self.token.cancelled().await;
     }
 }
 
@@ -400,24 +363,18 @@ pub enum ToolAuditOutcome {
     Cancelled,
 }
 
-/// Hash-only audit evidence for one Tool dispatch attempt.
+/// Simplified audit evidence for one Tool dispatch attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolAudit {
     run_id: String,
     actor_id: String,
-    candidate_revision: String,
-    idempotency_key: String,
     tool_name: String,
     tool_version: Option<String>,
     risk: Option<ToolRisk>,
-    capability_sha256: Option<String>,
-    input_sha256: String,
-    output_sha256: Option<String>,
     outcome: ToolAuditOutcome,
     diagnostic_code: Option<String>,
     attempt: u8,
     timeout_millis: Option<u64>,
-    retry_policy: Option<ToolRetryPolicy>,
 }
 
 impl ToolAudit {
@@ -431,18 +388,6 @@ impl ToolAudit {
     #[must_use]
     pub fn actor_id(&self) -> &str {
         &self.actor_id
-    }
-
-    /// Returns the immutable candidate revision attached to the attempt.
-    #[must_use]
-    pub fn candidate_revision(&self) -> &str {
-        &self.candidate_revision
-    }
-
-    /// Returns the idempotency key reserved for the attempt.
-    #[must_use]
-    pub fn idempotency_key(&self) -> &str {
-        &self.idempotency_key
     }
 
     /// Returns the exact Tool name.
@@ -461,24 +406,6 @@ impl ToolAudit {
     #[must_use]
     pub const fn risk(&self) -> Option<ToolRisk> {
         self.risk
-    }
-
-    /// Returns the bound complete capability identity, or `None` for unbound attempts.
-    #[must_use]
-    pub fn capability_sha256(&self) -> Option<&str> {
-        self.capability_sha256.as_deref()
-    }
-
-    /// Returns the SHA-256 of structured Tool input.
-    #[must_use]
-    pub fn input_sha256(&self) -> &str {
-        &self.input_sha256
-    }
-
-    /// Returns the SHA-256 of structured Tool output when the implementation returned one.
-    #[must_use]
-    pub fn output_sha256(&self) -> Option<&str> {
-        self.output_sha256.as_deref()
     }
 
     /// Returns the dispatch result without exposing input or output payloads.
@@ -503,12 +430,6 @@ impl ToolAudit {
     #[must_use]
     pub const fn timeout_millis(&self) -> Option<u64> {
         self.timeout_millis
-    }
-
-    /// Returns the bound retry policy, or `None` when no binding exists.
-    #[must_use]
-    pub const fn retry_policy(&self) -> Option<ToolRetryPolicy> {
-        self.retry_policy
     }
 }
 
@@ -555,7 +476,7 @@ impl ToolExecution {
         &self.output
     }
 
-    /// Returns hash-only audit evidence.
+    /// Returns audit evidence.
     #[must_use]
     pub const fn audit(&self) -> &ToolAudit {
         &self.audit
@@ -634,7 +555,6 @@ struct RegisteredTool {
     input_validator: jsonschema::Validator,
     output_validator: jsonschema::Validator,
     timeout_millis: u64,
-    retry_policy: ToolRetryPolicy,
     implementation: Arc<dyn AgentTool>,
 }
 
@@ -648,7 +568,7 @@ impl ToolRegistry {
     ///
     /// # Errors
     ///
-    /// Rejects duplicate tools or bindings, missing implementations, capability conflicts, and
+    /// Rejects duplicate tools or bindings, missing implementations, version/risk conflicts, and
     /// invalid input/output schemas.
     pub fn new(
         implementations: Vec<Arc<dyn AgentTool>>,
@@ -698,13 +618,6 @@ impl ToolRegistry {
                     actual: descriptor.risk(),
                 });
             }
-            if descriptor.capability_sha256() != binding.capability_sha256() {
-                return Err(AgentToolError::CapabilityMismatch {
-                    name: binding.name().to_owned(),
-                    expected: binding.capability_sha256().to_owned(),
-                    actual: descriptor.capability_sha256().to_owned(),
-                });
-            }
             let input_validator =
                 jsonschema::validator_for(descriptor.input_schema()).map_err(|error| {
                     AgentToolError::InvalidInputSchema {
@@ -726,7 +639,6 @@ impl ToolRegistry {
                     input_validator,
                     output_validator,
                     timeout_millis: binding.timeout_millis(),
-                    retry_policy: binding.retry_policy(),
                     implementation,
                 },
             );
@@ -744,8 +656,8 @@ impl ToolRegistry {
     ///
     /// # Errors
     ///
-    /// Every rejection or failure returns payload-free audit evidence with the root-cause
-    /// diagnostic. Unbound attempts cannot name a version, risk, or capability because no binding
+    /// Every rejection or failure returns audit evidence with the root-cause
+    /// diagnostic. Unbound attempts cannot name a version or risk because no binding
     /// exists; all bound attempts include that exact identity.
     pub async fn execute(
         &self,
@@ -753,7 +665,6 @@ impl ToolRegistry {
         context: &AgentContext,
         input: Value,
     ) -> Result<ToolExecution, ToolDispatchFailure> {
-        let input_sha256 = hash_json(&input);
         let Some(registered) = self.tools.get(name) else {
             return Err(dispatch_failure(
                 AgentToolError::UnboundTool {
@@ -762,21 +673,18 @@ impl ToolRegistry {
                 context,
                 name,
                 None,
-                &input_sha256,
-                None,
                 ToolAuditOutcome::Rejected,
             ));
         };
-        Self::validate_dispatch(name, context, &input, &input_sha256, registered)?;
-        let output = execute_once(name, context, input, &input_sha256, registered).await?;
-        validate_output(name, context, output, input_sha256, registered)
+        Self::validate_dispatch(name, context, &input, registered)?;
+        let output = execute_once(name, context, input, registered).await?;
+        validate_output(name, context, output, registered)
     }
 
     fn validate_dispatch(
         name: &str,
         context: &AgentContext,
         input: &Value,
-        input_sha256: &str,
         registered: &RegisteredTool,
     ) -> Result<(), ToolDispatchFailure> {
         if context.cancellation().is_cancelled() {
@@ -786,8 +694,6 @@ impl ToolRegistry {
                 },
                 context,
                 registered,
-                input_sha256,
-                None,
                 ToolAuditOutcome::Cancelled,
             ));
         }
@@ -798,8 +704,6 @@ impl ToolRegistry {
                 },
                 context,
                 registered,
-                input_sha256,
-                None,
                 ToolAuditOutcome::Rejected,
             ));
         }
@@ -811,8 +715,6 @@ impl ToolRegistry {
                 },
                 context,
                 registered,
-                input_sha256,
-                None,
                 ToolAuditOutcome::Rejected,
             ));
         }
@@ -824,7 +726,6 @@ async fn execute_once(
     name: &str,
     context: &AgentContext,
     input: Value,
-    input_sha256: &str,
     registered: &RegisteredTool,
 ) -> Result<ToolOutput, ToolDispatchFailure> {
     let execution = timeout(
@@ -837,8 +738,6 @@ async fn execute_once(
             AgentToolError::DispatchCancelled { name: name.to_owned() },
             context,
             registered,
-            input_sha256,
-            None,
             ToolAuditOutcome::Cancelled,
         )),
         result = execution => match result {
@@ -849,8 +748,6 @@ async fn execute_once(
                 },
                 context,
                 registered,
-                input_sha256,
-                None,
                 ToolAuditOutcome::Failed,
             )),
             Ok(Err(error)) => Err(bound_dispatch_failure(
@@ -860,8 +757,6 @@ async fn execute_once(
                 },
                 context,
                 registered,
-                input_sha256,
-                None,
                 ToolAuditOutcome::Failed,
             )),
             Ok(Ok(output)) => Ok(output),
@@ -873,10 +768,8 @@ fn validate_output(
     name: &str,
     context: &AgentContext,
     output: ToolOutput,
-    input_sha256: String,
     registered: &RegisteredTool,
 ) -> Result<ToolExecution, ToolDispatchFailure> {
-    let output_sha256 = hash_tool_output(&output);
     if output.schema_version() != registered.descriptor.output_schema_version() {
         return Err(bound_dispatch_failure(
             AgentToolError::OutputVersionMismatch {
@@ -886,8 +779,6 @@ fn validate_output(
             },
             context,
             registered,
-            &input_sha256,
-            Some(output_sha256),
             ToolAuditOutcome::Failed,
         ));
     }
@@ -899,13 +790,11 @@ fn validate_output(
             },
             context,
             registered,
-            &input_sha256,
-            Some(output_sha256),
             ToolAuditOutcome::Failed,
         ));
     }
     Ok(ToolExecution {
-        audit: successful_audit(context, registered, input_sha256, output_sha256),
+        audit: successful_audit(context, registered),
         output,
     })
 }
@@ -913,25 +802,17 @@ fn validate_output(
 fn successful_audit(
     context: &AgentContext,
     registered: &RegisteredTool,
-    input_sha256: String,
-    output_sha256: String,
 ) -> ToolAudit {
     ToolAudit {
         run_id: context.run_id().to_owned(),
         actor_id: context.actor_id().to_owned(),
-        candidate_revision: context.candidate_revision().to_owned(),
-        idempotency_key: context.idempotency_key().to_owned(),
         tool_name: registered.descriptor.name().to_owned(),
         tool_version: Some(registered.descriptor.version().to_owned()),
         risk: Some(registered.descriptor.risk()),
-        capability_sha256: Some(registered.descriptor.capability_sha256().to_owned()),
-        input_sha256,
-        output_sha256: Some(output_sha256),
         outcome: ToolAuditOutcome::Succeeded,
         diagnostic_code: None,
         attempt: 1,
         timeout_millis: Some(registered.timeout_millis),
-        retry_policy: Some(registered.retry_policy),
     }
 }
 
@@ -939,8 +820,6 @@ fn bound_dispatch_failure(
     error: AgentToolError,
     context: &AgentContext,
     registered: &RegisteredTool,
-    input_sha256: &str,
-    output_sha256: Option<String>,
     outcome: ToolAuditOutcome,
 ) -> ToolDispatchFailure {
     dispatch_failure(
@@ -948,8 +827,6 @@ fn bound_dispatch_failure(
         context,
         registered.descriptor.name(),
         Some(registered),
-        input_sha256,
-        output_sha256,
         outcome,
     )
 }
@@ -959,8 +836,6 @@ fn dispatch_failure(
     context: &AgentContext,
     tool_name: &str,
     registered: Option<&RegisteredTool>,
-    input_sha256: &str,
-    output_sha256: Option<String>,
     outcome: ToolAuditOutcome,
 ) -> ToolDispatchFailure {
     let diagnostic_code = error.diagnostic_code().to_owned();
@@ -969,107 +844,15 @@ fn dispatch_failure(
         audit: Box::new(ToolAudit {
             run_id: context.run_id().to_owned(),
             actor_id: context.actor_id().to_owned(),
-            candidate_revision: context.candidate_revision().to_owned(),
-            idempotency_key: context.idempotency_key().to_owned(),
             tool_name: tool_name.to_owned(),
             tool_version: registered.map(|value| value.descriptor.version().to_owned()),
             risk: registered.map(|value| value.descriptor.risk()),
-            capability_sha256: registered
-                .map(|value| value.descriptor.capability_sha256().to_owned()),
-            input_sha256: input_sha256.to_owned(),
-            output_sha256,
             outcome,
             diagnostic_code: Some(diagnostic_code),
             attempt: 1,
             timeout_millis: registered.map(|value| value.timeout_millis),
-            retry_policy: registered.map(|value| value.retry_policy),
         }),
     }
-}
-
-fn capability_hash(
-    name: &str,
-    version: &str,
-    risk: ToolRisk,
-    input_schema: &Value,
-    output_schema_version: &str,
-    output_schema: &Value,
-) -> String {
-    hash_json(&Value::Array(vec![
-        Value::String(name.to_owned()),
-        Value::String(version.to_owned()),
-        Value::String(risk.as_str().to_owned()),
-        input_schema.clone(),
-        Value::String(output_schema_version.to_owned()),
-        output_schema.clone(),
-    ]))
-}
-
-fn hash_tool_output(output: &ToolOutput) -> String {
-    hash_json(&Value::Array(vec![
-        Value::String(output.schema_version().to_owned()),
-        output.payload().clone(),
-    ]))
-}
-
-fn hash_json(value: &Value) -> String {
-    let mut hasher = Sha256::new();
-    hash_json_value(&mut hasher, value);
-    format!("{:x}", hasher.finalize())
-}
-
-fn hash_json_value(hasher: &mut Sha256, value: &Value) {
-    match value {
-        Value::Null => hasher.update(b"null"),
-        Value::Bool(value) => {
-            hasher.update(if *value {
-                b"true".as_slice()
-            } else {
-                b"false".as_slice()
-            });
-        }
-        Value::Number(value) => {
-            hasher.update(b"number");
-            hash_bytes(hasher, value.to_string().as_bytes());
-        }
-        Value::String(value) => {
-            hasher.update(b"string");
-            hash_bytes(hasher, value.as_bytes());
-        }
-        Value::Array(values) => {
-            hasher.update(b"array");
-            hash_length(hasher, values.len());
-            for value in values {
-                hash_json_value(hasher, value);
-            }
-        }
-        Value::Object(values) => {
-            hasher.update(b"object");
-            hash_length(hasher, values.len());
-            let mut keys = values.keys().collect::<Vec<_>>();
-            keys.sort_unstable();
-            for key in keys {
-                hash_bytes(hasher, key.as_bytes());
-                hash_json_value(hasher, &values[key]);
-            }
-        }
-    }
-}
-
-fn hash_bytes(hasher: &mut Sha256, bytes: &[u8]) {
-    hash_length(hasher, bytes.len());
-    hasher.update(bytes);
-}
-
-fn hash_length(hasher: &mut Sha256, length: usize) {
-    hasher.update(length.to_be_bytes());
-}
-
-fn is_sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 /// Stable fail-fast diagnostics for Tool registration and dispatch.
@@ -1132,16 +915,6 @@ pub enum AgentToolError {
         expected: ToolRisk,
         /// Risk declared by the implementation.
         actual: ToolRisk,
-    },
-    /// Installed implementation changed a bound input/output capability contract.
-    #[error("Tool capability mismatch for {name}: expected {expected}, got {actual}")]
-    CapabilityMismatch {
-        /// Tool name.
-        name: String,
-        /// SHA-256 fixed by the binding.
-        expected: String,
-        /// SHA-256 calculated from the implementation descriptor.
-        actual: String,
     },
     /// Tool input schema cannot be compiled.
     #[error("invalid input schema for Tool {name}: {detail}")]
@@ -1235,7 +1008,6 @@ impl AgentToolError {
             Self::MissingImplementation { .. } => "LW_AGENT_TOOL_IMPLEMENTATION_MISSING",
             Self::VersionMismatch { .. } => "LW_AGENT_TOOL_VERSION_MISMATCH",
             Self::RiskMismatch { .. } => "LW_AGENT_TOOL_RISK_MISMATCH",
-            Self::CapabilityMismatch { .. } => "LW_AGENT_TOOL_CAPABILITY_MISMATCH",
             Self::InvalidInputSchema { .. } => "LW_AGENT_TOOL_INPUT_SCHEMA_INVALID",
             Self::InvalidOutputSchema { .. } => "LW_AGENT_TOOL_OUTPUT_SCHEMA_INVALID",
             Self::UnboundTool { .. } => "LW_AGENT_TOOL_UNBOUND",
