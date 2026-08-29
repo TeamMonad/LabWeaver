@@ -26,8 +26,14 @@ pub(super) fn validate_for_gate(
 ) -> Result<(), AppError> {
     let value = read_and_validate_schema(root, report)?;
     validate_key_identity(&value)?;
-    let source_commit = value.get("sourceCommit").and_then(Value::as_str).unwrap_or_default();
-    let run_id = value.get("runId").and_then(Value::as_str).unwrap_or_default();
+    let source_commit = value
+        .get("sourceCommit")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let run_id = value
+        .get("runId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     if source_commit != expected.source_commit || run_id != expected.run_id.to_string() {
         return Err(error(
             "LW_CONSOLE_EVIDENCE_IDENTITY_MISMATCH",
@@ -60,9 +66,18 @@ fn read_and_validate_schema(root: &Path, report: &Path) -> Result<Value, AppErro
 }
 
 fn validate_key_identity(value: &Value) -> Result<(), AppError> {
-    let source = value.get("sourceCommit").and_then(Value::as_str).unwrap_or_default();
-    let run = value.get("runId").and_then(Value::as_str).unwrap_or_default();
-    let package = value.get("packageIdentity").and_then(Value::as_str).unwrap_or_default();
+    let source = value
+        .get("sourceCommit")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let run = value
+        .get("runId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let package = value
+        .get("packageIdentity")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     if source.is_empty() || run.is_empty() || package.is_empty() {
         return Err(error(
             "LW_CONSOLE_EVIDENCE_IDENTITY_MISSING",
@@ -157,12 +172,16 @@ pub(crate) mod tests {
         )?;
         let error = validate_report(root, Path::new("artifacts/evidence/console.json"))
             .expect_err("missing identity must fail");
-        assert_eq!(error.diagnostic_code(), "LW_CONSOLE_EVIDENCE_SCHEMA_INVALID");
+        assert_eq!(
+            error.diagnostic_code(),
+            "LW_CONSOLE_EVIDENCE_SCHEMA_INVALID"
+        );
         Ok(())
     }
 
     #[test]
-    fn report_rejects_identity_mismatch_and_escaped_path() -> Result<(), Box<dyn std::error::Error>> {
+    fn report_rejects_identity_mismatch_and_escaped_path() -> Result<(), Box<dyn std::error::Error>>
+    {
         let temporary = tempdir()?;
         let root = temporary.path();
         fs::create_dir_all(root.join("schemas/results"))?;
@@ -184,10 +203,16 @@ pub(crate) mod tests {
             },
         )
         .expect_err("cross-candidate evidence must fail");
-        assert_eq!(error.diagnostic_code(), "LW_CONSOLE_EVIDENCE_IDENTITY_MISMATCH");
+        assert_eq!(
+            error.diagnostic_code(),
+            "LW_CONSOLE_EVIDENCE_IDENTITY_MISMATCH"
+        );
         let error = validate_report(root, Path::new("../console.json"))
             .expect_err("escaped locator must fail");
-        assert_eq!(error.diagnostic_code(), "LW_CONSOLE_EVIDENCE_LOCATOR_INVALID");
+        assert_eq!(
+            error.diagnostic_code(),
+            "LW_CONSOLE_EVIDENCE_LOCATOR_INVALID"
+        );
         Ok(())
     }
 

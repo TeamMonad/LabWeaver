@@ -1,23 +1,6 @@
 {
-  "$defs": {
-    "Sha256Digest": {
-      "description": "Canonical lowercase SHA-256 digest.",
-      "maxLength": 64,
-      "minLength": 64,
-      "pattern": "^[0-9a-f]{64}$",
-      "type": "string"
-    }
-  },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "properties": {
-    "manifestSha256": {
-      "$ref": "#/$defs/Sha256Digest"
-    }
-  },
-  "required": [
-    "manifestSha256"
-  ],
   "title": "CompleteProblemPackageUploadRequest",
   "type": "object"
 }

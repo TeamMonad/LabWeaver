@@ -278,7 +278,10 @@ fn validate_resource_deployment_manifest(root: &Path, input: &GateInput) -> Resu
         )
     })?;
     let run_id = input.run_id.to_string();
-    if value.get("sourceCommit").and_then(serde_json::Value::as_str) != Some(input.source_commit.as_str())
+    if value
+        .get("sourceCommit")
+        .and_then(serde_json::Value::as_str)
+        != Some(input.source_commit.as_str())
         || value.get("runId").and_then(serde_json::Value::as_str) != Some(run_id.as_str())
     {
         return Err(gate(
@@ -310,7 +313,10 @@ fn validate_deployment_manifest(root: &Path, input: &GateInput) -> Result<(), Ap
         )
     })?;
     let run_id = input.run_id.to_string();
-    if value.get("source_commit").and_then(serde_json::Value::as_str) != Some(input.source_commit.as_str())
+    if value
+        .get("source_commit")
+        .and_then(serde_json::Value::as_str)
+        != Some(input.source_commit.as_str())
         || value.get("run_id").and_then(serde_json::Value::as_str) != Some(run_id.as_str())
     {
         return Err(gate(
@@ -520,7 +526,9 @@ mod tests {
         for name in REQUIRED_CHECKS {
             let path = format!("artifacts/evidence/{name}.json");
             let evidence = match name {
-                "container-xterm-console" | "kubevirt-novnc-console" => console_report(&commit, run_id),
+                "container-xterm-console" | "kubevirt-novnc-console" => {
+                    console_report(&commit, run_id)
+                }
                 _ => json!({}),
             };
             write(root, &path, &serde_json::to_string_pretty(&evidence)?)?;
@@ -554,25 +562,42 @@ mod tests {
             &serde_json::to_string_pretty(&input)?,
         )?;
         run_with_locator(root, "artifacts/gate-input.json")?;
-        assert!(root.join(format!("artifacts/release-gate/{run_id}.json")).is_file());
+        assert!(
+            root.join(format!("artifacts/release-gate/{run_id}.json"))
+                .is_file()
+        );
 
         // missing evidence file is blocked (not per-file hash mismatch)
         fs::remove_file(root.join("artifacts/evidence/access-negative.json"))?;
-        let error = run_with_locator(root, "artifacts/gate-input.json").expect_err("missing file must fail");
-        assert_eq!(error.diagnostic_code(), "LW_RELEASE_GATE_EVIDENCE_LOCATOR_INVALID");
+        let error = run_with_locator(root, "artifacts/gate-input.json")
+            .expect_err("missing file must fail");
+        assert_eq!(
+            error.diagnostic_code(),
+            "LW_RELEASE_GATE_EVIDENCE_LOCATOR_INVALID"
+        );
 
         // source_commit mismatch
         let mut mismatch = input.clone();
-        mismatch["sourceCommit"] = Value::String("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned());
-        write(root, "artifacts/gate-input-mismatch.json", &serde_json::to_string_pretty(&mismatch)?)?;
-        let error = run_with_locator(root, "artifacts/gate-input-mismatch.json").expect_err("mismatch must fail");
-        assert_eq!(error.diagnostic_code(), "LW_RELEASE_GATE_SOURCE_IDENTITY_MISMATCH");
+        mismatch["sourceCommit"] =
+            Value::String("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned());
+        write(
+            root,
+            "artifacts/gate-input-mismatch.json",
+            &serde_json::to_string_pretty(&mismatch)?,
+        )?;
+        let error = run_with_locator(root, "artifacts/gate-input-mismatch.json")
+            .expect_err("mismatch must fail");
+        assert_eq!(
+            error.diagnostic_code(),
+            "LW_RELEASE_GATE_SOURCE_IDENTITY_MISMATCH"
+        );
 
         // dirty worktree
         fs::write(root.join("artifacts/evidence/access-negative.json"), "{}")?;
         fs::write(root.join("dirty.txt"), "dirty")?;
         git(root, &["add", "dirty.txt"])?;
-        let error = run_with_locator(root, "artifacts/gate-input.json").expect_err("dirty must fail");
+        let error =
+            run_with_locator(root, "artifacts/gate-input.json").expect_err("dirty must fail");
         assert_eq!(error.diagnostic_code(), "LW_RELEASE_GATE_SOURCE_DIRTY");
         Ok(())
     }
@@ -623,7 +648,9 @@ mod tests {
 
     fn write(root: &Path, relative: &str, value: &str) -> std::io::Result<()> {
         let path = root.join(relative);
-        if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         fs::write(path, value)
     }
 
@@ -632,14 +659,23 @@ mod tests {
         for entry in fs::read_dir(source)? {
             let entry = entry?;
             let destination = target.join(entry.file_name());
-            if entry.file_type()?.is_dir() { copy_tree(&entry.path(), &destination)?; } else { fs::copy(entry.path(), destination)?; }
+            if entry.file_type()?.is_dir() {
+                copy_tree(&entry.path(), &destination)?;
+            } else {
+                fs::copy(entry.path(), destination)?;
+            }
         }
         Ok(())
     }
 
     fn git(root: &Path, arguments: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
-        let output = Command::new("git").args(arguments).current_dir(root).output()?;
-        if !output.status.success() { return Err(String::from_utf8_lossy(&output.stderr).into_owned().into()); }
+        let output = Command::new("git")
+            .args(arguments)
+            .current_dir(root)
+            .output()?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
+        }
         Ok(String::from_utf8(output.stdout)?.trim().to_owned())
     }
 }

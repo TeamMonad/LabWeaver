@@ -11,9 +11,6 @@
         "approval": {
           "$ref": "#/$defs/CandidateApproval"
         },
-        "commandSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
         "idempotencyKey": {
           "type": "string"
         },
@@ -24,8 +21,7 @@
       "required": [
         "request",
         "approval",
-        "idempotencyKey",
-        "commandSha256"
+        "idempotencyKey"
       ],
       "type": "object"
     },
@@ -53,10 +49,6 @@
           "description": "Immutable backend object version.",
           "type": "string"
         },
-        "sha256": {
-          "$ref": "#/$defs/Sha256Digest",
-          "description": "Exact content digest."
-        },
         "sizeBytes": {
           "description": "Raw object length.",
           "format": "uint64",
@@ -72,7 +64,6 @@
         "artifactId",
         "storeBinding",
         "objectVersion",
-        "sha256",
         "sizeBytes",
         "mediaType"
       ],
@@ -135,9 +126,6 @@
         "candidateRevision": {
           "$ref": "#/$defs/Revision"
         },
-        "candidateSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
         "context": {
           "$ref": "#/$defs/ArtifactRef"
         },
@@ -184,7 +172,6 @@
         "courseId",
         "candidateId",
         "candidateRevision",
-        "candidateSha256",
         "approvalId",
         "builderBinding",
         "context",
@@ -217,9 +204,6 @@
         "candidateRevision": {
           "$ref": "#/$defs/Revision"
         },
-        "candidateSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
         "decidedAt": {
           "$ref": "#/$defs/UtcTimestamp"
         },
@@ -235,9 +219,6 @@
         "reason": {
           "type": "string"
         },
-        "schemaSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
         "trustRevision": {
           "$ref": "#/$defs/Revision"
         }
@@ -246,9 +227,7 @@
         "id",
         "candidateId",
         "candidateRevision",
-        "candidateSha256",
         "policyRevision",
-        "schemaSha256",
         "trustRevision",
         "actorId",
         "decision",
@@ -289,13 +268,6 @@
       "format": "uint64",
       "minimum": 0,
       "type": "integer"
-    },
-    "Sha256Digest": {
-      "description": "Canonical lowercase SHA-256 digest.",
-      "maxLength": 64,
-      "minLength": 64,
-      "pattern": "^[0-9a-f]{64}$",
-      "type": "string"
     },
     "UtcTimestamp": {
       "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",

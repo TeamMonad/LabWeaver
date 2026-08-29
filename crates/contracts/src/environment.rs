@@ -1063,7 +1063,10 @@ impl EnvironmentEndpointEligibility {
             || self.environment_revision != request.expected_revision
             || self.eligibility_expires_at <= now
             || requested != returned
-            || self.endpoints.iter().any(|endpoint| endpoint.health != EndpointHealth::Healthy)
+            || self
+                .endpoints
+                .iter()
+                .any(|endpoint| endpoint.health != EndpointHealth::Healthy)
         {
             return Err(EnvironmentError::EndpointEligibilityInvalid);
         }

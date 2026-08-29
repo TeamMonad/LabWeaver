@@ -497,20 +497,12 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     }
     assert!(matches!(
         service
-            .project_artifact(
-                EventId::new(),
-                CourseId::new(),
-                &supply_chain.artifact,
-            )
+            .project_artifact(EventId::new(), CourseId::new(), &supply_chain.artifact,)
             .await,
         Err(ControlError::CourseMismatch)
     ));
     service
-        .project_artifact(
-            EventId::new(),
-            course_id,
-            &supply_chain.artifact,
-        )
+        .project_artifact(EventId::new(), course_id, &supply_chain.artifact)
         .await?;
     let succeeded_view = service
         .environment_candidate_view(course_id, environment_candidate.id)

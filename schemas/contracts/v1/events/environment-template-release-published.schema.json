@@ -32,10 +32,6 @@
           "description": "Immutable backend object version.",
           "type": "string"
         },
-        "sha256": {
-          "$ref": "#/$defs/Sha256Digest",
-          "description": "Exact content digest."
-        },
         "sizeBytes": {
           "description": "Raw object length.",
           "format": "uint64",
@@ -51,7 +47,6 @@
         "artifactId",
         "storeBinding",
         "objectVersion",
-        "sha256",
         "sizeBytes",
         "mediaType"
       ],
@@ -74,9 +69,6 @@
         "candidateRevision": {
           "$ref": "#/$defs/Revision"
         },
-        "candidateSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
         "decidedAt": {
           "$ref": "#/$defs/UtcTimestamp"
         },
@@ -92,9 +84,6 @@
         "reason": {
           "type": "string"
         },
-        "schemaSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
         "trustRevision": {
           "$ref": "#/$defs/Revision"
         }
@@ -103,9 +92,7 @@
         "id",
         "candidateId",
         "candidateRevision",
-        "candidateSha256",
         "policyRevision",
-        "schemaSha256",
         "trustRevision",
         "actorId",
         "decision",
@@ -366,22 +353,8 @@
         "courseId": {
           "$ref": "#/$defs/CourseId"
         },
-        "environmentSpecSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
         "id": {
           "$ref": "#/$defs/ReleaseId"
-        },
-        "imagePolicyEvaluation": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ImagePolicyEvaluation"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Container-only Trivy evidence. VM releases bind a deployment-owned CDI base disk instead\nand must not fabricate vulnerability counts for an imported guest disk."
         },
         "publishedAt": {
           "$ref": "#/$defs/UtcTimestamp"
@@ -405,7 +378,6 @@
         "candidateId",
         "agentRunId",
         "candidateRevision",
-        "environmentSpecSha256",
         "runtimeKind",
         "approval",
         "artifact",
@@ -480,65 +452,6 @@
     "ImageArtifactId": {
       "description": "Strongly typed UUIDv7 identifier for `ImageArtifactId`.",
       "type": "string"
-    },
-    "ImagePolicyEvaluation": {
-      "additionalProperties": false,
-      "description": "Deterministic digest-bound Trivy evaluation.",
-      "properties": {
-        "artifactId": {
-          "$ref": "#/$defs/ImageArtifactId"
-        },
-        "artifactSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
-        "evaluatedAt": {
-          "$ref": "#/$defs/UtcTimestamp"
-        },
-        "maxEvidenceAgeMilliseconds": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "passed": {
-          "type": "boolean"
-        },
-        "policyId": {
-          "$ref": "#/$defs/PolicyId"
-        },
-        "policyRevision": {
-          "$ref": "#/$defs/Revision"
-        },
-        "scannerDatabaseSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
-        "scannerName": {
-          "type": "string"
-        },
-        "scannerVersion": {
-          "type": "string"
-        },
-        "validUntil": {
-          "$ref": "#/$defs/UtcTimestamp"
-        },
-        "vulnerabilities": {
-          "$ref": "#/$defs/VulnerabilitySummary"
-        }
-      },
-      "required": [
-        "artifactId",
-        "artifactSha256",
-        "policyId",
-        "policyRevision",
-        "scannerName",
-        "scannerVersion",
-        "scannerDatabaseSha256",
-        "vulnerabilities",
-        "evaluatedAt",
-        "maxEvidenceAgeMilliseconds",
-        "validUntil",
-        "passed"
-      ],
-      "type": "object"
     },
     "NetworkPolicySpec": {
       "description": "Network egress posture for a published environment.",
@@ -615,17 +528,13 @@
         "environmentSpec": {
           "$ref": "#/$defs/EnvironmentSpec"
         },
-        "projectionSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
         "release": {
           "$ref": "#/$defs/EnvironmentTemplateRelease"
         }
       },
       "required": [
         "release",
-        "environmentSpec",
-        "projectionSha256"
+        "environmentSpec"
       ],
       "type": "object"
     },
@@ -743,13 +652,6 @@
       "minimum": 0,
       "type": "integer"
     },
-    "Sha256Digest": {
-      "description": "Canonical lowercase SHA-256 digest.",
-      "maxLength": 64,
-      "minLength": 64,
-      "pattern": "^[0-9a-f]{64}$",
-      "type": "string"
-    },
     "TerminalSpec": {
       "additionalProperties": false,
       "description": "Bounded direct-exec terminal owned by an immutable Container release.",
@@ -790,9 +692,6 @@
           "minimum": 0,
           "type": "integer"
         },
-        "diskSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
         "sourceRegistryDigest": {
           "type": "string"
         }
@@ -800,7 +699,6 @@
       "required": [
         "binding",
         "sourceRegistryDigest",
-        "diskSha256",
         "capacityBytes"
       ],
       "type": "object"
@@ -812,45 +710,6 @@
         "raw"
       ],
       "type": "string"
-    },
-    "VulnerabilitySummary": {
-      "additionalProperties": false,
-      "description": "Vulnerability counts by severity.",
-      "properties": {
-        "critical": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "high": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "low": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "medium": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "unknown": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "unknown",
-        "low",
-        "medium",
-        "high",
-        "critical"
-      ],
-      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

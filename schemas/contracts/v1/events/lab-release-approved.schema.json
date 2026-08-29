@@ -11,12 +11,6 @@
     "LabReleaseApproved": {
       "additionalProperties": false,
       "properties": {
-        "artifactSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
-        "environmentSpecSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
         "releaseId": {
           "$ref": "#/$defs/ReleaseId"
         },
@@ -28,9 +22,7 @@
       },
       "required": [
         "releaseId",
-        "version",
-        "environmentSpecSha256",
-        "artifactSha256"
+        "version"
       ],
       "type": "object"
     },
@@ -49,13 +41,6 @@
       "format": "uint64",
       "minimum": 0,
       "type": "integer"
-    },
-    "Sha256Digest": {
-      "description": "Canonical lowercase SHA-256 digest.",
-      "maxLength": 64,
-      "minLength": 64,
-      "pattern": "^[0-9a-f]{64}$",
-      "type": "string"
     },
     "UtcTimestamp": {
       "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",

@@ -29,7 +29,6 @@ use contracts::{
     submission::FrozenSubmission,
 };
 
-
 use crate::{
     EvaluationControlStoreError, EvaluationReleaseReservation, EvaluationRunReservation,
     FreezeCommandStoreError, PgFreezeCommandStore, PgFreezeStore, SubmissionFreezeCommand,
@@ -586,7 +585,9 @@ pub async fn serve_evaluation_plain(
     let router = router.layer(Extension(GatewayPrincipal {
         san_uri: "spiffe://labweaver/private-single-tenant".to_owned(),
     }));
-    axum::serve(listener, router).await.map_err(std::io::Error::from)
+    axum::serve(listener, router)
+        .await
+        .map_err(std::io::Error::from)
 }
 
 #[derive(Debug, thiserror::Error)]

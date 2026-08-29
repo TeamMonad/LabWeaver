@@ -678,8 +678,7 @@ fn scan_image(
     // Trivy removed: return placeholder report with zero vulnerabilities
     let scan_path = scan_path(run_dir, component);
     let scan_bytes = b"{\"Results\":[]}".to_vec();
-    fs::write(&scan_path, &scan_bytes)
-        .map_err(|error| io_error("write Trivy report", error))?;
+    fs::write(&scan_path, &scan_bytes).map_err(|error| io_error("write Trivy report", error))?;
     Ok((scan_bytes, 0, 0))
 }
 

@@ -85,7 +85,9 @@ pub async fn serve_plain(
     let router = router.layer(Extension(ControlPrincipal {
         san_uri: "spiffe://labweaver/control-service".to_owned(),
     }));
-    axum::serve(listener, router).await.map_err(std::io::Error::from)
+    axum::serve(listener, router)
+        .await
+        .map_err(std::io::Error::from)
 }
 
 async fn create_run(
@@ -257,7 +259,10 @@ async fn get_artifact(
             .map_err(|_| AgentApiError::contract())?,
     )
     .map_err(|_| AgentApiError::contract())?;
-    let resolution_sha256 = Sha256Digest::of_canonical(&serde_json::json!({"artifactId":artifact_id,"artifact":artifact})).map_err(|_| AgentApiError::contract())?;
+    let resolution_sha256 = Sha256Digest::of_canonical(
+        &serde_json::json!({"artifactId":artifact_id,"artifact":artifact}),
+    )
+    .map_err(|_| AgentApiError::contract())?;
     let resolution = InternalImageArtifactResolution {
         artifact_id,
         artifact,

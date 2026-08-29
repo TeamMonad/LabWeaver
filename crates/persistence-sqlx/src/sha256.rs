@@ -23,7 +23,8 @@ impl Sha256Digest {
     }
 
     pub fn of_canonical<T: Serialize>(value: &T) -> Result<Self, Sha256Error> {
-        let bytes = serde_jcs::to_vec(value).map_err(|error| Sha256Error::CanonicalJson(error.to_string()))?;
+        let bytes = serde_jcs::to_vec(value)
+            .map_err(|error| Sha256Error::CanonicalJson(error.to_string()))?;
         Ok(Self::of_bytes(&bytes))
     }
 }

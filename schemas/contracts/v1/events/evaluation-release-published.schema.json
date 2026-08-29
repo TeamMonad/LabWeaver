@@ -16,17 +16,11 @@
       "additionalProperties": false,
       "description": "Payload-safe publication event for an immutable Evaluation release.",
       "properties": {
-        "evaluationSpecSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
         "publishedBy": {
           "$ref": "#/$defs/ActorId"
         },
         "releaseId": {
           "$ref": "#/$defs/EvaluationReleaseId"
-        },
-        "releaseIdentitySha256": {
-          "$ref": "#/$defs/Sha256Digest"
         },
         "revision": {
           "$ref": "#/$defs/Revision"
@@ -35,8 +29,6 @@
       "required": [
         "releaseId",
         "revision",
-        "evaluationSpecSha256",
-        "releaseIdentitySha256",
         "publishedBy"
       ],
       "type": "object"
@@ -56,13 +48,6 @@
       "format": "uint64",
       "minimum": 0,
       "type": "integer"
-    },
-    "Sha256Digest": {
-      "description": "Canonical lowercase SHA-256 digest.",
-      "maxLength": 64,
-      "minLength": 64,
-      "pattern": "^[0-9a-f]{64}$",
-      "type": "string"
     },
     "UtcTimestamp": {
       "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",

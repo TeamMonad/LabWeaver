@@ -151,8 +151,7 @@ impl ToolBinding {
         let version = version.into();
         if name.trim().is_empty() || version.trim().is_empty() || timeout_millis == 0 {
             return Err(AgentToolError::InvalidBinding {
-                detail: "binding name, version, risk, and non-zero timeout are required"
-                    .to_owned(),
+                detail: "binding name, version, risk, and non-zero timeout are required".to_owned(),
             });
         }
         Ok(Self {
@@ -799,10 +798,7 @@ fn validate_output(
     })
 }
 
-fn successful_audit(
-    context: &AgentContext,
-    registered: &RegisteredTool,
-) -> ToolAudit {
+fn successful_audit(context: &AgentContext, registered: &RegisteredTool) -> ToolAudit {
     ToolAudit {
         run_id: context.run_id().to_owned(),
         actor_id: context.actor_id().to_owned(),

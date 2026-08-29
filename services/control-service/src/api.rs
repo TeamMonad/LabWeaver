@@ -166,7 +166,9 @@ pub async fn serve_plain(
     let router = router.layer(Extension(GatewayPrincipal {
         san_uri: "spiffe://labweaver/private-single-tenant".to_owned(),
     }));
-    axum::serve(listener, router).await.map_err(std::io::Error::from)
+    axum::serve(listener, router)
+        .await
+        .map_err(std::io::Error::from)
 }
 
 async fn create_upload(

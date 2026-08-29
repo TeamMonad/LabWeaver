@@ -20,8 +20,8 @@ use contracts::authoring::{CandidateApproval, CandidateDecision};
 use contracts::events::AgentBuildRequested;
 use contracts::supply_chain::{BuildNetworkPolicy, BuildRequest, ImageArtifact};
 use contracts::{
-    ActorId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId, CourseId,
-    Revision, Sha256Digest, UtcTimestamp,
+    ActorId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId, CourseId, Revision,
+    Sha256Digest, UtcTimestamp,
 };
 use uuid::Uuid;
 

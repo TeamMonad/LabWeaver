@@ -272,12 +272,7 @@ fn registry_rejects_duplicate_missing_and_version_conflicts() -> Result<(), Box<
 
     let (tool, _) = test_tool("same", "2", ToolRisk::Low, false)?;
     let descriptor = tool.descriptor();
-    let binding = ToolBinding::new(
-        "same",
-        "1",
-        ToolRisk::Low,
-        TEST_TIMEOUT_MILLIS,
-    )?;
+    let binding = ToolBinding::new("same", "1", ToolRisk::Low, TEST_TIMEOUT_MILLIS)?;
     // silence unused warning for descriptor
     let _ = descriptor.version();
     let error = registry_error(vec![tool], vec![binding])?;

@@ -22,16 +22,33 @@ pub(super) fn list() {
 
 pub(super) fn validate(root: &Path) -> Result<(), AppError> {
     let manifest_path = root.join(MANIFEST_PATH);
-    let document = read_schema_instance(root, ASSET_SCHEMA, &manifest_path, "LW_TEST_ASSET_SCHEMA_INVALID")?;
+    let document = read_schema_instance(
+        root,
+        ASSET_SCHEMA,
+        &manifest_path,
+        "LW_TEST_ASSET_SCHEMA_INVALID",
+    )?;
     // thin check: ensure scenarios field exists and is non-empty; detailed inventory is schema-validated
-    if document.get("scenarios").and_then(Value::as_array).is_none_or(|arr| arr.is_empty()) {
-        return Err(code("LW_TEST_ASSET_SCENARIO_INVENTORY_INVALID", "scenarios are missing"));
+    if document
+        .get("scenarios")
+        .and_then(Value::as_array)
+        .is_none_or(|arr| arr.is_empty())
+    {
+        return Err(code(
+            "LW_TEST_ASSET_SCENARIO_INVENTORY_INVALID",
+            "scenarios are missing",
+        ));
     }
     Ok(())
 }
 
 pub(super) fn validate_report(root: &Path, report: &Path) -> Result<(), AppError> {
-    let _ = read_schema_instance(root, EVIDENCE_SCHEMA, report, "LW_TEST_ASSET_REPORT_SCHEMA_INVALID")?;
+    let _ = read_schema_instance(
+        root,
+        EVIDENCE_SCHEMA,
+        report,
+        "LW_TEST_ASSET_REPORT_SCHEMA_INVALID",
+    )?;
     Ok(())
 }
 
@@ -46,13 +63,17 @@ fn read_schema_instance(
     let validator = jsonschema::validator_for(&schema)
         .map_err(|_| code(diagnostic, "acceptance JSON Schema cannot be compiled"))?;
     if !validator.is_valid(&instance) {
-        return Err(code(diagnostic, "document does not satisfy its JSON Schema"));
+        return Err(code(
+            diagnostic,
+            "document does not satisfy its JSON Schema",
+        ));
     }
     Ok(instance)
 }
 
 fn read_json(path: &Path, diagnostic: &'static str) -> Result<Value, AppError> {
-    let text = fs::read_to_string(path).map_err(|_| code(diagnostic, "JSON document is missing"))?;
+    let text =
+        fs::read_to_string(path).map_err(|_| code(diagnostic, "JSON document is missing"))?;
     serde_json::from_str(&text).map_err(|_| code(diagnostic, "JSON document is malformed"))
 }
 

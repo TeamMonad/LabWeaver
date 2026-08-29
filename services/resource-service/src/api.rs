@@ -120,26 +120,21 @@ pub async fn serve_plain(
                     )
                         .into_response();
                 };
-                let delegation = match auth::decode_resource_delegation(
-                    delegation_key.as_slice(),
-                    token,
-                ) {
-                    Ok(delegation) => delegation,
-                    Err(_error) => {
-                        tracing::warn!(
-                            event = "resource.delegation.denied",
-                            diagnostic_code = "LW_AUTH_RESOURCE_DELEGATION_INVALID",
-                            error_kind = "delegation",
-                            failure_stage = "delegation_validation",
-                            retryable = false
-                        );
-                        return (
-                            StatusCode::FORBIDDEN,
-                            "LW_AUTH_RESOURCE_DELEGATION_INVALID",
-                        )
-                            .into_response();
-                    }
-                };
+                let delegation =
+                    match auth::decode_resource_delegation(delegation_key.as_slice(), token) {
+                        Ok(delegation) => delegation,
+                        Err(_error) => {
+                            tracing::warn!(
+                                event = "resource.delegation.denied",
+                                diagnostic_code = "LW_AUTH_RESOURCE_DELEGATION_INVALID",
+                                error_kind = "delegation",
+                                failure_stage = "delegation_validation",
+                                retryable = false
+                            );
+                            return (StatusCode::FORBIDDEN, "LW_AUTH_RESOURCE_DELEGATION_INVALID")
+                                .into_response();
+                        }
+                    };
                 request.extensions_mut().insert(ResourceCallerPrincipal {
                     san_uri: ACCESS_CALLER_SAN.to_owned(),
                     actor_id: delegation.actor_id,
@@ -150,7 +145,9 @@ pub async fn serve_plain(
             }
         },
     ));
-    axum::serve(listener, service).await.map_err(std::io::Error::from)
+    axum::serve(listener, service)
+        .await
+        .map_err(std::io::Error::from)
 }
 
 #[derive(Debug, Deserialize)]

@@ -42,8 +42,8 @@ impl NatsBuildSupplyChainProvider {
             || request_timeout.is_zero()
             || request_timeout > Duration::from_hours(1)
             || [builder_binding.as_str(), registry_binding.as_str()]
-            .iter()
-            .any(|binding| !valid_token(binding))
+                .iter()
+                .any(|binding| !valid_token(binding))
         {
             return Err(configuration_failure());
         }

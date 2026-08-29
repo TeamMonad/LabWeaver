@@ -502,15 +502,6 @@
               "format": "uuid",
               "type": "string"
             }
-          },
-          {
-            "in": "query",
-            "name": "commandSha256",
-            "required": true,
-            "schema": {
-              "pattern": "^[0-9a-f]{64}$",
-              "type": "string"
-            }
           }
         ],
         "responses": {
@@ -539,7 +530,7 @@
             "serviceMtls": []
           }
         ],
-        "summary": "Read the Agent-owned build state and revision for an exact course and command hash"
+        "summary": "Read the Agent-owned build state and revision for an exact course"
       }
     },
     "/internal/v1/build-requests/{buildRequestId}/cancel": {
@@ -605,7 +596,7 @@
             "serviceMtls": []
           }
         ],
-        "summary": "Request one actor-attributed build cancellation at an exact course, command hash, state and revision"
+        "summary": "Request one actor-attributed build cancellation at an exact course, state and revision"
       }
     },
     "/internal/v1/environments/{environmentId}/endpoint-eligibility:resolve": {

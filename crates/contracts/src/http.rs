@@ -130,8 +130,7 @@ pub struct ProblemPackageUploadSession {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CompleteProblemPackageUploadRequest {
-}
+pub struct CompleteProblemPackageUploadRequest {}
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

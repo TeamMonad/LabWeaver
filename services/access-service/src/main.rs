@@ -560,7 +560,9 @@ async fn serve_internal_plain(
     let router = router.layer(Extension(MtlsPrincipal {
         san_uri: "spiffe://labweaver/private-single-tenant".to_owned(),
     }));
-    axum::serve(listener, router).await.map_err(StartupError::from)
+    axum::serve(listener, router)
+        .await
+        .map_err(StartupError::from)
 }
 
 fn load_deployment() -> Result<AccessAuthFile, StartupError> {

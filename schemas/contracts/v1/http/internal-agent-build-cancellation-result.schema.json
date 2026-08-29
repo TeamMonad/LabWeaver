@@ -24,13 +24,6 @@
       "format": "uint64",
       "minimum": 1,
       "type": "integer"
-    },
-    "Sha256Digest": {
-      "description": "Canonical lowercase SHA-256 digest.",
-      "maxLength": 64,
-      "minLength": 64,
-      "pattern": "^[0-9a-f]{64}$",
-      "type": "string"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -42,9 +35,6 @@
     },
     "cancellationRequested": {
       "type": "boolean"
-    },
-    "commandSha256": {
-      "$ref": "#/$defs/Sha256Digest"
     },
     "courseId": {
       "$ref": "#/$defs/CourseId"
@@ -59,7 +49,6 @@
   "required": [
     "courseId",
     "buildRequestId",
-    "commandSha256",
     "state",
     "revision",
     "cancellationRequested"

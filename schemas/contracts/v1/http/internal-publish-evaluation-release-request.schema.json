@@ -463,18 +463,6 @@
       "additionalProperties": false,
       "description": "Immutable build and deployment identity that must match every run using the release.",
       "properties": {
-        "configurationSha256": {
-          "$ref": "#/$defs/Sha256Digest",
-          "description": "Effective non-secret runtime configuration identity."
-        },
-        "migrationCatalogSha256": {
-          "$ref": "#/$defs/Sha256Digest",
-          "description": "Checked-in Migration catalog identity."
-        },
-        "packageSha256": {
-          "$ref": "#/$defs/Sha256Digest",
-          "description": "Approved problem package identity."
-        },
         "providerBinding": {
           "description": "Explicit runtime provider binding chosen by Control and enforced by Evaluation.",
           "type": "string"
@@ -482,24 +470,11 @@
         "runnerImage": {
           "description": "Digest-pinned runner image reference.",
           "type": "string"
-        },
-        "runtimeArtifactSha256": {
-          "$ref": "#/$defs/Sha256Digest",
-          "description": "Runtime artifact identity, such as the worker binary or image manifest digest."
-        },
-        "sourceSha256": {
-          "$ref": "#/$defs/Sha256Digest",
-          "description": "Clean source tree or source bundle identity."
         }
       },
       "required": [
-        "sourceSha256",
         "providerBinding",
-        "packageSha256",
-        "configurationSha256",
-        "migrationCatalogSha256",
-        "runnerImage",
-        "runtimeArtifactSha256"
+        "runnerImage"
       ],
       "type": "object"
     },
@@ -808,13 +783,6 @@
       ],
       "type": "object"
     },
-    "Sha256Digest": {
-      "description": "Canonical lowercase SHA-256 digest.",
-      "maxLength": 64,
-      "minLength": 64,
-      "pattern": "^[0-9a-f]{64}$",
-      "type": "string"
-    },
     "SubmissionSpec": {
       "additionalProperties": false,
       "description": "Submission collection boundary used before evaluation starts.",
@@ -869,17 +837,11 @@
     "approvalRevision": {
       "$ref": "#/$defs/Revision"
     },
-    "approvalSha256": {
-      "$ref": "#/$defs/Sha256Digest"
-    },
     "candidateId": {
       "$ref": "#/$defs/CandidateId"
     },
     "candidateRevision": {
       "$ref": "#/$defs/Revision"
-    },
-    "candidateSha256": {
-      "$ref": "#/$defs/Sha256Digest"
     },
     "courseId": {
       "$ref": "#/$defs/CourseId"
@@ -898,10 +860,8 @@
     "courseId",
     "candidateId",
     "candidateRevision",
-    "candidateSha256",
     "approvalId",
     "approvalRevision",
-    "approvalSha256",
     "evaluationSpec",
     "runtimeIdentity",
     "publishedBy"

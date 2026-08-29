@@ -573,11 +573,7 @@ impl AgentBuildConsumer {
                     return Ok(());
                 }
                 match control
-                    .project_artifact(
-                        event.id,
-                        event.course_id,
-                        &resolution.artifact,
-                    )
+                    .project_artifact(event.id, event.course_id, &resolution.artifact)
                     .await
                 {
                     Ok(()) => message

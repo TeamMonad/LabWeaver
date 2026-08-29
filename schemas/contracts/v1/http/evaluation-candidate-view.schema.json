@@ -135,9 +135,6 @@
         "candidateRevision": {
           "$ref": "#/$defs/Revision"
         },
-        "candidateSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
         "decidedAt": {
           "$ref": "#/$defs/UtcTimestamp"
         },
@@ -153,9 +150,6 @@
         "reason": {
           "type": "string"
         },
-        "schemaSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
         "trustRevision": {
           "$ref": "#/$defs/Revision"
         }
@@ -164,9 +158,7 @@
         "id",
         "candidateId",
         "candidateRevision",
-        "candidateSha256",
         "policyRevision",
-        "schemaSha256",
         "trustRevision",
         "actorId",
         "decision",
@@ -520,14 +512,8 @@
         "runId": {
           "$ref": "#/$defs/AgentRunId"
         },
-        "schemaSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
         "spec": {
           "$ref": "#/$defs/EvaluationSpec"
-        },
-        "specSha256": {
-          "$ref": "#/$defs/Sha256Digest"
         }
       },
       "required": [
@@ -535,9 +521,7 @@
         "runId",
         "revision",
         "spec",
-        "specSha256",
         "policyRevision",
-        "schemaSha256",
         "model",
         "createdAt"
       ],
@@ -870,13 +854,6 @@
         "max"
       ],
       "type": "object"
-    },
-    "Sha256Digest": {
-      "description": "Canonical lowercase SHA-256 digest.",
-      "maxLength": 64,
-      "minLength": 64,
-      "pattern": "^[0-9a-f]{64}$",
-      "type": "string"
     },
     "SubmissionSpec": {
       "additionalProperties": false,
