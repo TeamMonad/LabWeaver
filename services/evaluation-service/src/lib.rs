@@ -21,7 +21,7 @@ pub mod ssh_source;
 pub mod worker;
 
 pub use ansible_probe_worker::{AnsibleProbeWorkerError, run_ansible_probe_worker};
-pub use api::{EvaluationApiState, evaluation_api_router, serve_evaluation_mtls};
+pub use api::{EvaluationApiState, evaluation_api_router, serve_evaluation_mtls, serve_evaluation_plain};
 pub use collector::{
     CollectError, CollectorLimits, FrozenArchive, PreflightReport, PvcSnapshotSource,
     SnapshotCollector, SnapshotSource, SnapshotTransport, SourceEntry, SourceKind, SourceMetadata,

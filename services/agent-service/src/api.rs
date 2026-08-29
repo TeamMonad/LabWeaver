@@ -3,7 +3,6 @@
 
 use std::sync::Arc;
 
-use auth::extract_mtls_principal;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -18,9 +17,6 @@ use contracts::http::{
 use contracts::{
     AgentRunId, DiagnosticCode, ImageArtifactId, ProblemDetails, Sha256Digest, UtcTimestamp,
 };
-use hyper_util::rt::{TokioExecutor, TokioIo};
-use hyper_util::server::conn::auto::Builder as HyperBuilder;
-use hyper_util::service::TowerToHyperService;
 use serde_json::Value;
 use sqlx::Row;
 use time::OffsetDateTime;
@@ -73,61 +69,23 @@ pub fn router(state: Arc<AgentApiState>) -> Router {
     telemetry::instrument_http(router, "agent-service", "agent-api")
 }
 
-/// Serves internal Agent routes only after CA verification and exact Control URI SAN extraction.
+/// Serves internal Agent routes over plain HTTP for private single-university delivery.
 pub async fn serve_mtls(
     listener: tokio::net::TcpListener,
     router: Router,
-    mtls: auth::MtlsServerConfig,
+    _mtls: (),
 ) -> Result<(), std::io::Error> {
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::clone(&mtls.server_config));
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let acceptor = acceptor.clone();
-        let router = router.clone();
-        let allowed = mtls.allowed_san_uris.clone();
-        tokio::spawn(async move {
-            let Ok(tls) = acceptor.accept(stream).await else {
-                tracing::warn!(
-                    event = "agent.mtls.handshake_denied",
-                    diagnostic = "LW_AUTH_SERVICE_IDENTITY_DENIED"
-                );
-                return;
-            };
-            let Some(peer) = tls
-                .get_ref()
-                .1
-                .peer_certificates()
-                .and_then(|certificates| certificates.first())
-            else {
-                tracing::warn!(
-                    event = "agent.mtls.peer_denied",
-                    diagnostic = "LW_AUTH_SERVICE_IDENTITY_DENIED"
-                );
-                return;
-            };
-            let Ok(san_uri) = extract_mtls_principal(peer, &allowed) else {
-                tracing::warn!(
-                    event = "agent.mtls.peer_denied",
-                    diagnostic = "LW_AUTH_SERVICE_IDENTITY_DENIED"
-                );
-                return;
-            };
-            let service = router.layer(Extension(ControlPrincipal { san_uri }));
-            if HyperBuilder::new(TokioExecutor::new())
-                .serve_connection_with_upgrades(
-                    TokioIo::new(tls),
-                    TowerToHyperService::new(service),
-                )
-                .await
-                .is_err()
-            {
-                tracing::warn!(
-                    event = "agent.mtls.connection_failed",
-                    diagnostic = "LW_AGENT_CONNECTION_FAILED"
-                );
-            }
-        });
-    }
+    serve_plain(listener, router).await
+}
+
+pub async fn serve_plain(
+    listener: tokio::net::TcpListener,
+    router: Router,
+) -> Result<(), std::io::Error> {
+    let router = router.layer(Extension(ControlPrincipal {
+        san_uri: "spiffe://labweaver/control-service".to_owned(),
+    }));
+    axum::serve(listener, router).await.map_err(std::io::Error::from)
 }
 
 async fn create_run(

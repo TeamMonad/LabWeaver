@@ -8,7 +8,6 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
-use auth::extract_mtls_principal;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -32,9 +31,6 @@ use contracts::{
     UtcTimestamp,
 };
 use futures_util::stream;
-use hyper_util::rt::{TokioExecutor, TokioIo};
-use hyper_util::server::conn::auto::Builder as HyperBuilder;
-use hyper_util::service::TowerToHyperService;
 use serde::Deserialize;
 use time::OffsetDateTime;
 
@@ -56,10 +52,10 @@ pub struct ApiState {
     pub evaluation: EvaluationClient,
 }
 
-/// Verified URI SAN injected by the mTLS accept loop.
+/// Caller principal for private single-tenant deployment (plain HTTP, no cert verification).
 #[derive(Clone, Debug)]
 pub struct GatewayPrincipal {
-    /// Exact allowlisted URI SAN from the verified client certificate.
+    /// Fixed URI SAN for private deployment.
     pub san_uri: String,
 }
 
@@ -151,61 +147,26 @@ pub fn router(state: Arc<ApiState>) -> Router {
     telemetry::instrument_http(router, "control-service", "control-api")
 }
 
-/// Serves the Control router only after CA verification and exact Gateway URI SAN extraction.
+/// Serves the Control router over plain HTTP for private single-university delivery.
+///
+/// Inner mTLS is disabled (ARC-09); NetworkPolicy / private network is the trust boundary.
 pub async fn serve_mtls(
     listener: tokio::net::TcpListener,
     router: Router,
-    mtls: auth::MtlsServerConfig,
+    _mtls: (),
 ) -> Result<(), std::io::Error> {
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::clone(&mtls.server_config));
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let acceptor = acceptor.clone();
-        let router = router.clone();
-        let allowed = mtls.allowed_san_uris.clone();
-        tokio::spawn(async move {
-            let Ok(tls) = acceptor.accept(stream).await else {
-                tracing::warn!(
-                    event = "control.mtls.handshake_denied",
-                    diagnostic = "LW_AUTH_SERVICE_IDENTITY_DENIED"
-                );
-                return;
-            };
-            let Some(peer) = tls
-                .get_ref()
-                .1
-                .peer_certificates()
-                .and_then(|certificates| certificates.first())
-            else {
-                tracing::warn!(
-                    event = "control.mtls.peer_denied",
-                    diagnostic = "LW_AUTH_SERVICE_IDENTITY_DENIED"
-                );
-                return;
-            };
-            let Ok(san_uri) = extract_mtls_principal(peer, &allowed) else {
-                tracing::warn!(
-                    event = "control.mtls.peer_denied",
-                    diagnostic = "LW_AUTH_SERVICE_IDENTITY_DENIED"
-                );
-                return;
-            };
-            let service = router.layer(Extension(GatewayPrincipal { san_uri }));
-            if HyperBuilder::new(TokioExecutor::new())
-                .serve_connection_with_upgrades(
-                    TokioIo::new(tls),
-                    TowerToHyperService::new(service),
-                )
-                .await
-                .is_err()
-            {
-                tracing::warn!(
-                    event = "control.mtls.connection_failed",
-                    diagnostic = "LW_CONTROL_CONNECTION_FAILED"
-                );
-            }
-        });
-    }
+    serve_plain(listener, router).await
+}
+
+/// Plain-HTTP serving with a fixed private-tenant principal.
+pub async fn serve_plain(
+    listener: tokio::net::TcpListener,
+    router: Router,
+) -> Result<(), std::io::Error> {
+    let router = router.layer(Extension(GatewayPrincipal {
+        san_uri: "spiffe://labweaver/private-single-tenant".to_owned(),
+    }));
+    axum::serve(listener, router).await.map_err(std::io::Error::from)
 }
 
 async fn create_upload(

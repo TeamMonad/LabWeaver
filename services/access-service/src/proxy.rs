@@ -60,7 +60,7 @@ impl ResourceGatewayProxy {
     ) -> Result<Self, ControlGatewayError> {
         let base_uri = Url::parse(&config.base_uri).map_err(|_| ControlGatewayError::Config)?;
         let host = base_uri.host_str().ok_or(ControlGatewayError::Config)?;
-        if base_uri.scheme() != "https"
+        if !matches!(base_uri.scheme(), "http" | "https")
             || base_uri.host_str().is_none()
             || base_uri.path() != "/"
             || base_uri.query().is_some()
@@ -77,13 +77,28 @@ impl ResourceGatewayProxy {
         {
             return Err(ControlGatewayError::Config);
         }
+        if delegation_key.len() < 32 {
+            return Err(ControlGatewayError::Config);
+        }
+        if base_uri.scheme() == "http" {
+            let client = Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(Duration::from_secs(3))
+                .timeout(Duration::from_millis(config.timeout_milliseconds))
+                .build()
+                .map_err(|_| ControlGatewayError::Certificate)?;
+            return Ok(Self {
+                client,
+                base_uri,
+                delegation_key: delegation_key.to_vec(),
+                max_request_bytes: config.max_request_bytes,
+                max_response_bytes: config.max_response_bytes,
+            });
+        }
         let roots = Certificate::from_pem_bundle(ca_certificate_pem)
             .map_err(|_| ControlGatewayError::Certificate)?;
         if roots.is_empty() {
             return Err(ControlGatewayError::Certificate);
-        }
-        if delegation_key.len() < 32 {
-            return Err(ControlGatewayError::Config);
         }
         let mut identity_pem =
             Vec::with_capacity(client_certificate_pem.len() + client_private_key_pem.len() + 1);
@@ -142,7 +157,7 @@ impl ControlGatewayProxy {
     ) -> Result<Self, ControlGatewayError> {
         let base_uri = Url::parse(&config.base_uri).map_err(|_| ControlGatewayError::Config)?;
         let host = base_uri.host_str().ok_or(ControlGatewayError::Config)?;
-        if base_uri.scheme() != "https"
+        if !matches!(base_uri.scheme(), "http" | "https")
             || base_uri.path() != "/"
             || base_uri.query().is_some()
             || base_uri.fragment().is_some()
@@ -157,6 +172,20 @@ impl ControlGatewayProxy {
                 .is_ok_and(|address| address.is_loopback())
         {
             return Err(ControlGatewayError::Config);
+        }
+        // Private single-university: plain HTTP without client certs is permitted.
+        if base_uri.scheme() == "http" {
+            let client = Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(Duration::from_millis(config.timeout_milliseconds))
+                .build()
+                .map_err(|_| ControlGatewayError::Certificate)?;
+            return Ok(Self {
+                client,
+                base_uri,
+                max_request_bytes: config.max_request_bytes,
+                max_response_bytes: config.max_response_bytes,
+            });
         }
         let roots = Certificate::from_pem_bundle(ca_certificate_pem)
             .map_err(|_| ControlGatewayError::Certificate)?;

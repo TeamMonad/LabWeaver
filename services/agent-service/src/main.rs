@@ -6,7 +6,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_service::api::{AgentApiState, router, serve_mtls};
+use agent_service::api::{AgentApiState, router, serve_plain};
 use agent_service::build_executor::{ProductionBuildExecutor, ProductionBuildExecutorConfig};
 use agent_service::build_pipeline::{BuildPipeline, BuildPipelinePolicy};
 use agent_service::build_provider::NatsBuildSupplyChainProvider;
@@ -25,7 +25,7 @@ use agent_service::messaging::{
 use agent_service::run_store::{AgentRunService, ExecuteAgentRun, PostgresAgentRunStore};
 use artifact_store::{ImmutableObjectStore, S3Credential, S3ImmutableObjectStore, S3StoreConfig};
 use async_trait::async_trait;
-use auth::{MtlsFileConfig, load_mtls_server_config};
+use auth::MtlsFileConfig;
 use contracts::{ArtifactId, ArtifactRef, Revision, UtcTimestamp};
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
@@ -227,7 +227,6 @@ async fn run_agent_service() -> Result<(), StartupError> {
     let bind = SocketAddr::from_str(&deployment.control_mtls.bind_addr)
         .map_err(|_| StartupError::Configuration)?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
-    let mtls = load_mtls_server_config(&deployment.control_mtls)?;
     let worker = Worker {
         store,
         objects,
@@ -239,7 +238,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
         poll_interval: Duration::from_millis(deployment.poll_interval_milliseconds),
     };
     tokio::select! {
-        result = serve_mtls(listener, router(state), mtls) => result?,
+        result = serve_plain(listener, router(state)) => result?,
         result = worker.run() => result?,
         result = build_command_loop(build_consumer, build_store) => result?,
         result = build_worker_loop(
@@ -608,8 +607,6 @@ enum StartupError {
     Database(#[from] sqlx::Error),
     #[error(transparent)]
     Telemetry(#[from] telemetry::TelemetryError),
-    #[error(transparent)]
-    Mtls(#[from] auth::MtlsError),
     #[error(transparent)]
     ObjectStore(#[from] artifact_store::ObjectStoreError),
     #[error(transparent)]

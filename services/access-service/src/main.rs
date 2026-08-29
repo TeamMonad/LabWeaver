@@ -11,9 +11,8 @@ use auth::{
     KeyRing, OidcProvider, OidcTransaction, RoleMappings, TransportSecurityMode, authorize,
     build_backchannel_logout_authorizer, build_bearer_authorizer, cleanup_expired_auth_state,
     consume_backchannel_logout, consume_oidc_transaction, create_bff_session,
-    extract_mtls_principal, extract_platform_roles, load_bff_session, load_logout_hint,
-    load_membership_snapshot, load_mtls_server_config, no_redirect_http_client,
-    require_service_identity, revoke_bff_session, upsert_actor,
+    extract_platform_roles, load_bff_session, load_logout_hint, load_membership_snapshot,
+    no_redirect_http_client, require_service_identity, revoke_bff_session, upsert_actor,
 };
 use axum::{
     Json, Router,
@@ -27,11 +26,7 @@ use contracts::{
     AuthorizationScope, CsrfTokenResponse, OperationScopeKind, Revision, Sha256Digest,
     UtcTimestamp, environment::EnvironmentOwnerResolutionRequest, operation_authorization,
 };
-use hyper_util::{
-    rt::{TokioExecutor, TokioIo},
-    server::conn::auto::Builder as HyperBuilder,
-    service::TowerToHyperService,
-};
+
 use serde::Deserialize;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use time::{Duration, OffsetDateTime};
@@ -80,10 +75,9 @@ async fn main() -> Result<(), StartupError> {
     let internal_router = internal_router(Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let internal_listener = tokio::net::TcpListener::bind(internal_bind).await?;
-    let mtls = load_mtls_server_config(&state.deployment.internal_mtls)?;
     let result = tokio::select! {
         result = axum::serve(listener, router) => result.map_err(StartupError::from),
-        result = serve_internal_mtls(internal_listener, internal_router, mtls) => result,
+        result = serve_internal_plain(internal_listener, internal_router) => result,
         result = auth_cleanup_loop(Arc::clone(&state)) => result,
         result = grants::activation_loop(Arc::clone(&state)) => result.map_err(StartupError::from),
         result = grants::maintenance_loop(Arc::clone(&state)) => result.map_err(StartupError::from),
@@ -559,78 +553,14 @@ async fn auth_cleanup_loop(state: Arc<AppState>) -> Result<(), StartupError> {
     }
 }
 
-async fn serve_internal_mtls(
+async fn serve_internal_plain(
     listener: tokio::net::TcpListener,
     router: Router,
-    mtls: auth::MtlsServerConfig,
 ) -> Result<(), StartupError> {
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::clone(&mtls.server_config));
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let acceptor = acceptor.clone();
-        let router = router.clone();
-        let allowed_san_uris = mtls.allowed_san_uris.clone();
-        tokio::spawn(async move {
-            let tls = match acceptor.accept(stream).await {
-                Ok(tls) => tls,
-                Err(_error) => {
-                    metrics::counter!("labweaver_auth_mtls_handshakes", "result" => "denied")
-                        .increment(1);
-                    tracing::warn!(
-                        event = "auth.mtls.handshake_denied",
-                        diagnostic_code = "LW_AUTH_SERVICE_IDENTITY_DENIED",
-                        error_kind = "tls_handshake",
-                        failure_stage = "handshake",
-                        retryable = false
-                    );
-                    return;
-                }
-            };
-            let Some(peer) = tls
-                .get_ref()
-                .1
-                .peer_certificates()
-                .and_then(|certificates| certificates.first())
-            else {
-                tracing::warn!(
-                    event = "auth.mtls.peer_denied",
-                    diagnostic = "LW_AUTH_SERVICE_IDENTITY_DENIED"
-                );
-                return;
-            };
-            let san_uri = match extract_mtls_principal(peer, &allowed_san_uris) {
-                Ok(principal) => principal,
-                Err(_error) => {
-                    metrics::counter!("labweaver_auth_mtls_handshakes", "result" => "denied")
-                        .increment(1);
-                    tracing::warn!(
-                        event = "auth.mtls.peer_denied",
-                        diagnostic_code = "LW_AUTH_SERVICE_IDENTITY_DENIED",
-                        error_kind = "peer_identity",
-                        failure_stage = "peer_validation",
-                        retryable = false
-                    );
-                    return;
-                }
-            };
-            metrics::counter!("labweaver_auth_mtls_handshakes", "result" => "accepted")
-                .increment(1);
-            let service = router.layer(Extension(MtlsPrincipal { san_uri }));
-            let io = TokioIo::new(tls);
-            if let Err(_error) = HyperBuilder::new(TokioExecutor::new())
-                .serve_connection_with_upgrades(io, TowerToHyperService::new(service))
-                .await
-            {
-                tracing::warn!(
-                    event = "auth.mtls.connection_failed",
-                    diagnostic_code = "LW_AUTH_SERVICE_IDENTITY_DENIED",
-                    error_kind = "connection",
-                    failure_stage = "serve_connection",
-                    retryable = true
-                );
-            }
-        });
-    }
+    let router = router.layer(Extension(MtlsPrincipal {
+        san_uri: "spiffe://labweaver/private-single-tenant".to_owned(),
+    }));
+    axum::serve(listener, router).await.map_err(StartupError::from)
 }
 
 fn load_deployment() -> Result<AccessAuthFile, StartupError> {
@@ -1457,8 +1387,6 @@ enum StartupError {
     Provider(#[from] auth::OidcProviderError),
     #[error("LW_AUTH_STARTUP_FAILED")]
     Crypto(#[from] auth::CryptoError),
-    #[error("LW_AUTH_STARTUP_FAILED")]
-    Mtls(#[from] auth::MtlsError),
     #[error("LW_AUTH_STARTUP_FAILED")]
     OwnerResolver(#[from] auth::OwnerResolverClientError),
     #[error("LW_AUTH_STARTUP_FAILED")]
