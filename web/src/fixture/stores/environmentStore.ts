@@ -9,7 +9,7 @@ import type {
   OperationAccepted,
   ObservedEnvironmentState,
 } from '@/generated/contracts'
-import { nowIso } from '../utils/clock'
+import { addHoursIso, nowIso } from '../utils/clock'
 import { nextStreamSequence, nextUuid7 } from '../utils/identity'
 import { nextRevision } from '../utils/sequence'
 import { appendEvent } from './eventLog'
@@ -141,7 +141,6 @@ export const LIFECYCLE_FAILURE_ENV_ID = 'env-lifecycle-failure'
 function createEnvironmentInternal(options: CreateEnvironmentOptions): StoredEnvironment {
   const id = options.id ?? nextUuid7('env')
   const revision = nextRevision()
-  const now = nowIso()
   const instance: EnvironmentInstanceSchema = {
     id,
     courseId: options.courseId,
@@ -157,7 +156,10 @@ function createEnvironmentInternal(options: CreateEnvironmentOptions): StoredEnv
     observedState: options.observedState,
     failedPhase: options.failedPhase ?? null,
     lastDiagnosticCode: options.lastDiagnosticCode ?? null,
-    eligibilityExpiresAt: now,
+    // A newly created environment must retain a real eligibility window. Using
+    // `now` here made every newly issued AccessGrant clamp to an already
+    // expired timestamp even though its state was `active`.
+    eligibilityExpiresAt: addHoursIso(24),
     endpoints: [],
     operation: createEnvironmentOperation(id),
     providerBinding: PROVIDER_BINDING,

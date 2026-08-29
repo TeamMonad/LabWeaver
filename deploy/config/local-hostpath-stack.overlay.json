@@ -9,6 +9,13 @@
     "mode": "local-hostpath",
     "releaseEligible": false,
     "writePolicy": {"apply": false, "delete": false},
+    "fixtureDemoPolicy": {
+      "namespace": "labweaver-local-demo",
+      "releaseName": "labweaver-fixture-demo",
+      "apply": true,
+      "delete": true,
+      "releaseEligible": false
+    },
     "namespaces": {
       "data": "labweaver-local-data",
       "identity": "labweaver-local-identity",

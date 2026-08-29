@@ -1,0 +1,246 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://labweaver.invalid/schemas/results/demo-video-manifest.v1.schema.json",
+  "title": "DemoVideoManifestV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "status", "cut", "releaseEligible", "sourceCommit", "runId",
+    "identity", "createdAt", "video", "subtitles", "scenes", "rehearsals",
+    "releaseGate", "privacy", "knownLimits", "goNoGo", "checksums"
+  ],
+  "properties": {
+    "schemaVersion": {"const": "demo-video-manifest.v1"},
+    "status": {"enum": ["rendered", "verified"]},
+    "cut": {"enum": ["preview", "final"]},
+    "releaseEligible": {"type": "boolean"},
+    "sourceCommit": {"$ref": "#/$defs/commit"},
+    "runId": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/uuid"}]},
+    "identity": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/identity"}]},
+    "createdAt": {"type": "string", "format": "date-time"},
+    "video": {"$ref": "#/$defs/video"},
+    "subtitles": {
+      "type": "array", "minItems": 2, "maxItems": 2,
+      "items": {"$ref": "#/$defs/subtitle"}
+    },
+    "scenes": {
+      "type": "array", "minItems": 8, "maxItems": 8,
+      "items": {"$ref": "#/$defs/scene"}
+    },
+    "rehearsals": {
+      "type": "array", "minItems": 1, "maxItems": 3,
+      "items": {"$ref": "#/$defs/rehearsal"}
+    },
+    "releaseGate": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/releaseGate"}]},
+    "privacy": {"$ref": "#/$defs/privacy"},
+    "knownLimits": {
+      "type": "array", "minItems": 1, "maxItems": 20,
+      "items": {"type": "string", "minLength": 1, "maxLength": 500}
+    },
+    "goNoGo": {
+      "type": "object", "additionalProperties": false,
+      "required": ["outcome", "diagnostic"],
+      "properties": {
+        "outcome": {"enum": ["blocked", "go"]},
+        "diagnostic": {"type": "string", "pattern": "^LW_[A-Z0-9_]+$"}
+      }
+    },
+    "checksums": {
+      "type": "array", "minItems": 11, "uniqueItems": true,
+      "items": {"$ref": "#/$defs/fileEvidence"}
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"cut": {"const": "preview"}}, "required": ["cut"]},
+      "then": {
+        "properties": {
+          "releaseEligible": {"const": false},
+          "runId": {"type": "null"},
+          "identity": {"type": "null"},
+          "releaseGate": {"type": "null"},
+          "goNoGo": {
+            "type": "object",
+            "properties": {
+              "outcome": {"const": "blocked"},
+              "diagnostic": {"const": "LW_DEMO_VIDEO_CONNECTED_EVIDENCE_PENDING"}
+            }
+          },
+          "privacy": {"type": "object", "properties": {"automatedScan": {"enum": ["pending", "passed"]}, "humanReview": {"enum": ["pending", "passed"]}}},
+          "scenes": {"type": "array", "items": {"type": "object", "properties": {"profile": {"const": "fixture-preview"}}}}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"cut": {"const": "preview"}, "status": {"const": "rendered"}},
+        "required": ["cut", "status"]
+      },
+      "then": {"properties": {
+        "rehearsals": {"type": "array", "minItems": 1, "maxItems": 1},
+        "privacy": {"type": "object", "properties": {"automatedScan": {"const": "pending"}}}
+      }}
+    },
+    {
+      "if": {
+        "properties": {"cut": {"const": "preview"}, "status": {"const": "verified"}},
+        "required": ["cut", "status"]
+      },
+      "then": {"properties": {
+        "rehearsals": {"type": "array", "minItems": 2, "maxItems": 2},
+        "privacy": {"type": "object", "properties": {"automatedScan": {"const": "passed"}}}
+      }}
+    },
+    {
+      "if": {
+        "properties": {"cut": {"const": "final"}, "status": {"const": "rendered"}},
+        "required": ["cut", "status"]
+      },
+      "then": {
+        "properties": {
+          "releaseEligible": {"const": false},
+          "runId": {"$ref": "#/$defs/uuid"},
+          "identity": {"$ref": "#/$defs/identity"},
+          "releaseGate": {"$ref": "#/$defs/releaseGate"},
+          "goNoGo": {
+            "type": "object",
+            "properties": {
+              "outcome": {"const": "blocked"},
+              "diagnostic": {"const": "LW_DEMO_VIDEO_D_VERIFY_PENDING"}
+            }
+          },
+          "privacy": {"type": "object", "properties": {"automatedScan": {"const": "pending"}, "humanReview": {"const": "pending"}}},
+          "scenes": {"type": "array", "items": {"type": "object", "properties": {"profile": {"const": "connected-final"}}}},
+          "rehearsals": {"type": "array", "minItems": 2, "maxItems": 2}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"cut": {"const": "final"}, "status": {"const": "verified"}},
+        "required": ["cut", "status"]
+      },
+      "then": {
+        "properties": {
+          "releaseEligible": {"const": true},
+          "runId": {"$ref": "#/$defs/uuid"},
+          "identity": {"$ref": "#/$defs/identity"},
+          "releaseGate": {"allOf": [{"$ref": "#/$defs/releaseGate"}, {"type": "object", "properties": {"dVerify": {"const": "passed"}}}]},
+          "goNoGo": {"type": "object", "properties": {"outcome": {"const": "go"}, "diagnostic": {"const": "LW_DEMO_VIDEO_RELEASE_VERIFIED"}}},
+          "privacy": {"type": "object", "properties": {"automatedScan": {"const": "passed"}, "humanReview": {"const": "passed"}}},
+          "scenes": {"type": "array", "items": {"type": "object", "properties": {"profile": {"const": "connected-final"}}}},
+          "rehearsals": {"type": "array", "minItems": 3, "maxItems": 3}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sceneId": {
+      "enum": [
+        "opening", "teacher-authoring", "admin-resource", "student-container",
+        "student-kubevirt", "submission-freeze", "access-revoke", "cleanup"
+      ]
+    },
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "uuid": {"type": "string", "format": "uuid"},
+    "locator": {
+      "type": "string", "minLength": 1, "maxLength": 500,
+      "pattern": "^(?:artifacts/demo-video|tools/demo-video/captions)/(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+    },
+    "fileEvidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "sha256", "bytes"],
+      "properties": {
+        "path": {"$ref": "#/$defs/locator"},
+        "sha256": {"$ref": "#/$defs/digest"},
+        "bytes": {"type": "integer", "minimum": 1}
+      }
+    },
+    "identity": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "packageSha256", "configurationSha256", "migrationCatalogSha256",
+        "deploymentSha256", "imageDigests", "runtimeArtifacts"
+      ],
+      "properties": {
+        "packageSha256": {"$ref": "#/$defs/digest"},
+        "configurationSha256": {"$ref": "#/$defs/digest"},
+        "migrationCatalogSha256": {"$ref": "#/$defs/digest"},
+        "deploymentSha256": {"$ref": "#/$defs/digest"},
+        "imageDigests": {"type": "array", "minItems": 8, "uniqueItems": true, "items": {"$ref": "#/$defs/digest"}},
+        "runtimeArtifacts": {"type": "array", "minItems": 2, "uniqueItems": true, "items": {"$ref": "#/$defs/digest"}}
+      }
+    },
+    "video": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "sha256", "bytes", "width", "height", "fps", "codec", "audioStreams", "durationSeconds"],
+      "properties": {
+        "path": {"$ref": "#/$defs/locator"}, "sha256": {"$ref": "#/$defs/digest"}, "bytes": {"type": "integer", "minimum": 1},
+        "width": {"const": 1920}, "height": {"const": 1080}, "fps": {"const": 60},
+        "codec": {"const": "h264"}, "audioStreams": {"const": 0},
+        "durationSeconds": {"type": "number", "minimum": 180, "maximum": 300}
+      }
+    },
+    "subtitle": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "sha256", "bytes", "language", "format", "lastCueSeconds"],
+      "properties": {
+        "path": {"$ref": "#/$defs/locator"}, "sha256": {"$ref": "#/$defs/digest"}, "bytes": {"type": "integer", "minimum": 1},
+        "language": {"enum": ["zh-CN", "en-US"]}, "format": {"const": "srt"},
+        "lastCueSeconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 300}
+      }
+    },
+    "scene": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sceneId", "role", "profile", "receipt", "clip", "screenshot", "fromFrame", "durationInFrames"],
+      "properties": {
+        "sceneId": {"$ref": "#/$defs/sceneId"},
+        "role": {"enum": ["system", "teacher", "platform-admin", "student"]},
+        "profile": {"enum": ["fixture-preview", "connected-final"]},
+        "receipt": {"$ref": "#/$defs/fileEvidence"},
+        "clip": {"$ref": "#/$defs/fileEvidence"},
+        "screenshot": {"$ref": "#/$defs/fileEvidence"},
+        "fromFrame": {"type": "integer", "minimum": 0},
+        "durationInFrames": {"type": "integer", "minimum": 1}
+      }
+    },
+    "rehearsal": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "mode", "status", "completedAt", "evidenceSha256"],
+      "properties": {
+        "id": {"enum": ["fixture-flow", "fixture-playback", "connected-final-playback"]},
+        "mode": {"enum": ["fixture", "playback", "connected-final"]},
+        "status": {"const": "passed"},
+        "completedAt": {"type": "string", "format": "date-time"},
+        "evidenceSha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "releaseGate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "sha256", "bytes", "status", "sourceCommit", "runId", "dVerify"],
+      "properties": {
+        "path": {"$ref": "#/$defs/locator"}, "sha256": {"$ref": "#/$defs/digest"}, "bytes": {"type": "integer", "minimum": 1},
+        "status": {"const": "passed"}, "sourceCommit": {"$ref": "#/$defs/commit"},
+        "runId": {"$ref": "#/$defs/uuid"}, "dVerify": {"enum": ["pending", "passed"]}
+      }
+    },
+    "privacy": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "automatedScan", "humanReview", "containsSecrets", "containsRawUserContent",
+        "containsTerminalTranscript", "containsAbsolutePaths"
+      ],
+      "properties": {
+        "automatedScan": {"enum": ["pending", "passed"]},
+        "humanReview": {"enum": ["pending", "passed"]},
+        "containsSecrets": {"const": false}, "containsRawUserContent": {"const": false},
+        "containsTerminalTranscript": {
+          "const": false,
+          "description": "Whether manifest metadata contains a terminal transcript; video pixels are reviewed separately."
+        },
+        "containsAbsolutePaths": {"const": false}
+      }
+    }
+  }
+}

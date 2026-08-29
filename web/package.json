@@ -10,6 +10,7 @@
     "build:fixture": "cross-env VITE_DATA_MODE=fixture VITE_API_AUTH_MODE=bearer VITE_OIDC_AUTHORITY=http://localhost:4173/oidc VITE_OIDC_CLIENT_ID=labweaver-fixture VITE_OIDC_REDIRECT_URI=http://localhost:4173/auth/callback VITE_OIDC_POST_LOGOUT_REDIRECT_URI=http://localhost:4173/ vite build --mode e2e-fixture",
     "preview:fixture": "cross-env VITE_DATA_MODE=fixture vite preview --port 4173",
     "preview:console:fixture": "pnpm build:fixture && pnpm preview:fixture",
+    "auth:fixture": "node scripts/write-fixture-auth.mjs",
     "verify:production-bundle": "node scripts/verify-production-bundle.mjs",
     "preview": "vite preview",
     "lint": "eslint . --max-warnings=0",

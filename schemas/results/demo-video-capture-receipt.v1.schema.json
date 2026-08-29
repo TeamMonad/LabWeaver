@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://labweaver.invalid/schemas/results/demo-video-capture-receipt.v1.schema.json",
+  "title": "DemoVideoCaptureReceiptV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "sceneId", "role", "profile", "releaseEligible",
+    "sourceCommit", "runId", "identity", "clip", "trace", "screenshot",
+    "browser", "viewport", "capturedAt", "privacy"
+  ],
+  "properties": {
+    "schemaVersion": {"const": "demo-video-capture-receipt.v1"},
+    "sceneId": {"$ref": "#/$defs/sceneId"},
+    "role": {"enum": ["system", "teacher", "platform-admin", "student"]},
+    "profile": {"enum": ["fixture-preview", "connected-final"]},
+    "releaseEligible": {"type": "boolean"},
+    "sourceCommit": {"$ref": "#/$defs/commit"},
+    "runId": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/uuid"}]},
+    "identity": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/identity"}]},
+    "clip": {"$ref": "#/$defs/videoEvidence"},
+    "trace": {"$ref": "#/$defs/fileEvidence"},
+    "screenshot": {"$ref": "#/$defs/fileEvidence"},
+    "browser": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "playwrightVersion"],
+      "properties": {
+        "name": {"const": "chromium"},
+        "version": {"type": "string", "minLength": 1, "maxLength": 50},
+        "playwrightVersion": {"type": "string", "minLength": 1, "maxLength": 50}
+      }
+    },
+    "viewport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width", "height"],
+      "properties": {
+        "width": {"const": 1920},
+        "height": {"const": 1080}
+      }
+    },
+    "capturedAt": {"type": "string", "format": "date-time"},
+    "privacy": {"$ref": "#/$defs/privacy"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"profile": {"const": "fixture-preview"}}, "required": ["profile"]},
+      "then": {
+        "properties": {
+          "releaseEligible": {"const": false},
+          "runId": {"type": "null"},
+          "identity": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"profile": {"const": "connected-final"}}, "required": ["profile"]},
+      "then": {
+        "properties": {
+          "releaseEligible": {"const": true},
+          "runId": {"$ref": "#/$defs/uuid"},
+          "identity": {"$ref": "#/$defs/identity"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sceneId": {
+      "enum": [
+        "opening", "teacher-authoring", "admin-resource", "student-container",
+        "student-kubevirt", "submission-freeze", "access-revoke", "cleanup"
+      ]
+    },
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "uuid": {"type": "string", "format": "uuid"},
+    "locator": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500,
+      "pattern": "^artifacts/demo-video/(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+    },
+    "fileEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "bytes"],
+      "properties": {
+        "path": {"$ref": "#/$defs/locator"},
+        "sha256": {"$ref": "#/$defs/digest"},
+        "bytes": {"type": "integer", "minimum": 1}
+      }
+    },
+    "videoEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "bytes", "durationSeconds"],
+      "properties": {
+        "path": {"$ref": "#/$defs/locator"},
+        "sha256": {"$ref": "#/$defs/digest"},
+        "bytes": {"type": "integer", "minimum": 1},
+        "durationSeconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 900}
+      }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "packageSha256", "configurationSha256", "migrationCatalogSha256",
+        "deploymentSha256", "imageDigests", "runtimeArtifacts"
+      ],
+      "properties": {
+        "packageSha256": {"$ref": "#/$defs/digest"},
+        "configurationSha256": {"$ref": "#/$defs/digest"},
+        "migrationCatalogSha256": {"$ref": "#/$defs/digest"},
+        "deploymentSha256": {"$ref": "#/$defs/digest"},
+        "imageDigests": {
+          "type": "array", "minItems": 8, "uniqueItems": true,
+          "items": {"$ref": "#/$defs/digest"}
+        },
+        "runtimeArtifacts": {
+          "type": "array", "minItems": 2, "uniqueItems": true,
+          "items": {"$ref": "#/$defs/digest"}
+        }
+      }
+    },
+    "privacy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "automatedScan", "humanReview", "containsSecrets", "containsRawUserContent",
+        "containsTerminalTranscript", "containsAbsolutePaths"
+      ],
+      "properties": {
+        "automatedScan": {"const": "passed"},
+        "humanReview": {"enum": ["pending", "passed"]},
+        "containsSecrets": {"const": false},
+        "containsRawUserContent": {"const": false},
+        "containsTerminalTranscript": {
+          "const": false,
+          "description": "Whether receipt metadata contains a terminal transcript; captured pixels are reviewed separately."
+        },
+        "containsAbsolutePaths": {"const": false}
+      }
+    }
+  }
+}

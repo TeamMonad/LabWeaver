@@ -61,6 +61,47 @@ decision. Real HTTP-to-NATS-to-Worker-to-Provider evidence remains owned by
 Sprint-end acceptance Issue #126 under its frozen identity and independent D
 Verify.
 
+## Release demo video (#128)
+
+The versioned capture and edit pipeline is implemented in `tools/demo-video`.
+It uses eight fixed Playwright scene IDs, repository-relative evidence
+locators, strict capture/manifest Schemas, Remotion, FFprobe and external
+`zh-CN`/`en-US` SRT files. The complete Fixture preview is visibly labelled
+`Fixture preview / not release evidence` and remains `releaseEligible: false`.
+The capture source identity `6316c60557ad52edaf78d7b15b0679a5107dab84` has one
+machine-verified 270-second preview: 1920×1080, 60 fps, H.264, zero audio
+streams and video SHA-256
+`92e33d242c5cb200c47dad20fdecbc4a4dda58c3ab83f4d5329ed16041cea9b8`.
+The former 840-second cut was invalidated because short source clips looped to
+fill fixed scene allocations. The replacement plays each capture exactly once,
+then keeps its final screenshot behind 21 distinct platform/step explanations;
+media looping is disabled and encoded in the chunk provenance hash. Its first
+two Fixture rehearsals, seek/checksum verification and representative-frame
+review passed. Human frame-by-frame privacy review and the connected-final
+rehearsal have not run.
+
+Current formal state: **blocked**. A public final cannot be resolved until #126
+provides all eight connected shots from one frozen source/package/configuration/
+migration/deployment/image/runtime/Run identity, a passing Release Gate v3
+report, D Verify and a completed frame-by-frame privacy review. #128 consumes
+those outputs and does not open another package, deployment, Resource replay,
+connected Playwright or Release Gate window. The existing PPT and its source
+are unchanged and are not #128 deliverables.
+
+If #126 is delayed, the complete Fixture cut remains an on-time, unlisted Demo
+deliverable with its non-release label and `releaseEligible: false` boundary
+intact. It is not promoted to connected or release evidence.
+
+The Docker Desktop Fixture preview has a separate non-release deployment path.
+`tools/demo-video local-cluster` owns only the labelled
+`labweaver-local-demo` namespace and `labweaver-fixture-demo` Helm release,
+requires a clean commit and the exact Docker Desktop contexts, deploys one
+non-root/no-token/read-only Web Pod, then records
+`demo-video-local-cluster-report.v1`. Its `demo` action refreshes deterministic
+role state, captures the eight Fixture scenes sequentially and renders with one
+GPU-backed worker. This path remains `releaseEligible: false`; it does not
+deploy application services or change the #126/KubeVirt final blocker.
+
 ## Local integration candidate gate (#150)
 
 The local Docker-first integration entry point is implemented at
@@ -311,7 +352,8 @@ Release Gate v3 requires a Resource deployment manifest, immutable
 `resource-service` identity and `resource-lease` connected evidence. v1 reports
 remain legacy and cannot close #142. The connected replay, real Container/VM
 evidence and Release Gate are owned exclusively by Sprint-end acceptance Issue
-#126; ordinary development PRs must stop at local and CI evidence. #142 remains
+Issue #126 owns that evidence; ordinary development PRs must stop at local and
+CI evidence. #142 remains
 implemented locally and cannot be marked Done or release-ready until #126
 supplies the connected evidence.
 
