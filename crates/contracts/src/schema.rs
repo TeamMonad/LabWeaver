@@ -114,10 +114,6 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::supply_chain::ImageArtifact
     );
     document!(
-        "schemas/contracts/v1/image-policy-evaluation.schema.json",
-        crate::supply_chain::ImagePolicyEvaluation
-    );
-    document!(
         "schemas/contracts/v1/environment-template-release.schema.json",
         crate::supply_chain::EnvironmentTemplateRelease
     );

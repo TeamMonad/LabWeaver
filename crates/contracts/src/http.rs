@@ -204,7 +204,6 @@ pub enum CandidateBuildState {
 pub struct CandidateBuildView {
     pub state: CandidateBuildState,
     pub artifact: Option<crate::supply_chain::ImageArtifact>,
-    pub image_policy_evaluation: Option<crate::supply_chain::ImagePolicyEvaluation>,
     pub diagnostic_code: Option<DiagnosticCode>,
     pub cleanup_verified: Option<bool>,
 }
@@ -409,7 +408,6 @@ impl InternalAgentRunOutcome {
 pub struct InternalImageArtifactResolution {
     pub artifact_id: ImageArtifactId,
     pub artifact: crate::supply_chain::ImageArtifact,
-    pub policy_evaluation: crate::supply_chain::ImagePolicyEvaluation,
     pub resolution_sha256: Sha256Digest,
 }
 
@@ -497,13 +495,9 @@ impl InternalCompleteEvaluationStepRequest {
 impl InternalImageArtifactResolution {
     /// Verifies exact artifact ID and canonical response identity.
     pub fn validate(&self) -> Result<(), HttpContractError> {
-        if self.policy_evaluation.artifact_id != self.artifact_id {
-            return Err(HttpContractError::InvalidInternalIdentity);
-        }
         let canonical = Sha256Digest::of_canonical(&serde_json::json!({
             "artifactId": self.artifact_id,
             "artifact": self.artifact,
-            "policyEvaluation": self.policy_evaluation,
         }))
         .map_err(|_| HttpContractError::InvalidInternalIdentity)?;
         if canonical != self.resolution_sha256 {
