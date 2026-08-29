@@ -674,17 +674,17 @@ impl EnvironmentInstance {
         if let Some(target) = &self.operation.reset_target {
             validate_reset_target(self, target)?;
         }
-        if let Some(authorization) = &self.operation.lease_authorization {
-            if self.class != EnvironmentClass::Work
+        if let Some(authorization) = &self.operation.lease_authorization
+            && (self.class != EnvironmentClass::Work
                 || Some(authorization.lease_id) != self.lease_id
                 || authorization.environment_id != self.id
                 || authorization.course_id != self.course_id
                 || authorization.owner_actor_id != self.owner_id
-                || Some(authorization.capacity_binding.as_str()) != self.capacity_binding.as_deref()
-                || authorization.active_from >= authorization.expires_at
-            {
-                return Err(EnvironmentError::LeaseAuthorizationInvalid);
-            }
+                || Some(authorization.capacity_binding.as_str())
+                    != self.capacity_binding.as_deref()
+                || authorization.active_from >= authorization.expires_at)
+        {
+            return Err(EnvironmentError::LeaseAuthorizationInvalid);
         }
         match self.operation.kind {
             EnvironmentOperationKind::Restart if !self.operation.preserve_mutable_disk => {

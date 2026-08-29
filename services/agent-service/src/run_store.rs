@@ -2029,7 +2029,7 @@ fn validate_worker(worker_id: &str, lease_duration: Duration) -> Result<(), Agen
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
         || lease_duration.is_zero()
-        || lease_duration > Duration::from_secs(3_600)
+        || lease_duration > Duration::from_hours(1)
     {
         return Err(AgentRunStoreError::WorkerIdentityInvalid);
     }

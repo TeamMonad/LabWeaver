@@ -136,9 +136,9 @@ impl ReconcileWorker {
             .checked_add(Duration::from_secs(1))
             .ok_or(ReconcileWorkerError::InvalidConfiguration)?;
         if lease_duration.is_zero()
-            || lease_duration > Duration::from_secs(300)
+            || lease_duration > Duration::from_mins(5)
             || retry_delay.is_zero()
-            || retry_delay > Duration::from_secs(300)
+            || retry_delay > Duration::from_mins(5)
             || lease_duration < minimum_lease
             || !is_millisecond_duration(lease_duration)
             || !is_millisecond_duration(retry_delay)
@@ -307,7 +307,7 @@ impl Reconciler {
         registry: ProviderRegistry,
         provider_timeout: Duration,
     ) -> Result<Self, ReconcileError> {
-        if provider_timeout.is_zero() || provider_timeout > Duration::from_secs(300) {
+        if provider_timeout.is_zero() || provider_timeout > Duration::from_mins(5) {
             return Err(ReconcileError::InvalidTimeout);
         }
         Ok(Self {
@@ -442,7 +442,7 @@ fn add_duration(
 }
 
 const fn is_millisecond_duration(duration: Duration) -> bool {
-    duration.subsec_nanos() % 1_000_000 == 0
+    duration.subsec_nanos().is_multiple_of(1_000_000)
 }
 
 #[derive(Debug, thiserror::Error)]

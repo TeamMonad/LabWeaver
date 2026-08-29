@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::collector::{CollectError, SnapshotCollector, SnapshotSource, SnapshotTransport};
 use crate::freeze_store::{BeginFreeze, FreezeStoreError, PgFreezeStore};
 
-const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(15 * 60);
+const DEFAULT_LEASE_TTL: Duration = Duration::from_mins(15);
 
 /// Internal authenticated command produced from an approved `SubmissionManifest` projection.
 #[derive(Clone, Debug, Deserialize, Serialize)]

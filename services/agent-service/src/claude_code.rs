@@ -1369,13 +1369,13 @@ impl ClaudeCodeRuntime {
                 .map(CandidateDocument::Evaluation),
         }
         .map_err(|_| failure_with_audit(ClaudeCodeRuntimeError::SchemaInvalid, audit.clone()))?;
-        if let CandidateDocument::Environment(spec) = &document {
-            if spec.class != expected_environment_class {
-                return Err(failure_with_audit(
-                    ClaudeCodeRuntimeError::EnvironmentClassMismatch,
-                    audit,
-                ));
-            }
+        if let CandidateDocument::Environment(spec) = &document
+            && spec.class != expected_environment_class
+        {
+            return Err(failure_with_audit(
+                ClaudeCodeRuntimeError::EnvironmentClassMismatch,
+                audit,
+            ));
         }
         let output_sha256 = Sha256Digest::of_canonical(&output).map_err(|_| {
             failure_with_audit(ClaudeCodeRuntimeError::ProtocolInvalid, audit.clone())
@@ -1495,24 +1495,23 @@ fn persist_failed_stdout(track: AgentTrackKind, repairs: u8, stdout: &[u8]) {
     #[cfg(unix)]
     let mut file = {
         use std::os::unix::fs::OpenOptionsExt as _;
-        match std::fs::OpenOptions::new()
+        let Ok(file) = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(path)
-        {
-            Ok(file) => file,
-            Err(_) => return,
-        }
+        else {
+            return;
+        };
+        file
     };
     #[cfg(not(unix))]
-    let mut file = match std::fs::OpenOptions::new()
+    let Ok(mut file) = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
-    {
-        Ok(file) => file,
-        Err(_) => return,
+    else {
+        return;
     };
     let _ = std::io::Write::write_all(&mut file, stdout);
 }

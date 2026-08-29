@@ -1096,7 +1096,7 @@ fn validate_worker(worker_id: &str, duration: Duration) -> Result<(), Environmen
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
         || duration.is_zero()
-        || duration > Duration::from_secs(300)
+        || duration > Duration::from_mins(5)
     {
         return Err(EnvironmentStoreError::InvalidLease);
     }
@@ -1105,8 +1105,8 @@ fn validate_worker(worker_id: &str, duration: Duration) -> Result<(), Environmen
 
 fn lease_milliseconds(duration: Duration) -> Result<i64, EnvironmentStoreError> {
     if duration.is_zero()
-        || duration > Duration::from_secs(300)
-        || duration.subsec_nanos() % 1_000_000 != 0
+        || duration > Duration::from_mins(5)
+        || !duration.subsec_nanos().is_multiple_of(1_000_000)
     {
         return Err(EnvironmentStoreError::InvalidLease);
     }

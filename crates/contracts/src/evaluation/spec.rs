@@ -814,18 +814,18 @@ impl CheckerSpec {
         runner: &DeterministicRunnerSpec,
         step_id: &str,
     ) -> Result<(), EvaluationSpecError> {
-        if let Self::JsonSchema { schema_ref } = self {
-            if schema_ref.trim().is_empty() {
-                return Err(invalid_checker(step_id, "json_schema requires schemaRef"));
-            }
+        if let Self::JsonSchema { schema_ref } = self
+            && schema_ref.trim().is_empty()
+        {
+            return Err(invalid_checker(step_id, "json_schema requires schemaRef"));
         }
-        if let Self::ServiceState { service, .. } = self {
-            if service.trim().is_empty() {
-                return Err(invalid_checker(
-                    step_id,
-                    "service_state requires a service name",
-                ));
-            }
+        if let Self::ServiceState { service, .. } = self
+            && service.trim().is_empty()
+        {
+            return Err(invalid_checker(
+                step_id,
+                "service_state requires a service name",
+            ));
         }
 
         let compatible = matches!(

@@ -299,7 +299,7 @@ pub struct UtcTimestamp(OffsetDateTime);
 impl UtcTimestamp {
     /// Creates an exact UTC millisecond timestamp without a string round trip.
     pub fn from_utc(value: OffsetDateTime) -> Result<Self, FoundationError> {
-        if value.offset() != UtcOffset::UTC || value.nanosecond() % 1_000_000 != 0 {
+        if value.offset() != UtcOffset::UTC || !value.nanosecond().is_multiple_of(1_000_000) {
             return Err(FoundationError::InvalidTimestamp);
         }
         Ok(Self(value))
@@ -342,7 +342,7 @@ impl FromStr for UtcTimestamp {
         }
         let parsed = OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
             .map_err(|_| FoundationError::InvalidTimestamp)?;
-        if parsed.nanosecond() % 1_000_000 != 0 {
+        if !parsed.nanosecond().is_multiple_of(1_000_000) {
             return Err(FoundationError::InvalidTimestamp);
         }
         Ok(Self(parsed))

@@ -539,10 +539,10 @@ impl DockerSession {
         if let Err(error) = remove_docker_network(&self.docker, &self.network) {
             first_error.get_or_insert(error);
         }
-        if let Err(error) = fs::remove_dir_all(&self.env_dir) {
-            if error.kind() != ErrorKind::NotFound {
-                first_error.get_or_insert(integration_io("remove local private directory", error));
-            }
+        if let Err(error) = fs::remove_dir_all(&self.env_dir)
+            && error.kind() != ErrorKind::NotFound
+        {
+            first_error.get_or_insert(integration_io("remove local private directory", error));
         }
         first_error.map_or(Ok(()), Err)
     }
@@ -921,13 +921,13 @@ fn http_probe(
             format!("{role} returned a non-success status"),
         ));
     }
-    if let Some(expected_body) = expected_body {
-        if !response.contains(expected_body) {
-            return Err(integration_error(
-                "LW_INTEGRATION_HTTP_PROBE_CONTRACT_MISMATCH",
-                format!("{role} response omitted {expected_body}"),
-            ));
-        }
+    if let Some(expected_body) = expected_body
+        && !response.contains(expected_body)
+    {
+        return Err(integration_error(
+            "LW_INTEGRATION_HTTP_PROBE_CONTRACT_MISMATCH",
+            format!("{role} response omitted {expected_body}"),
+        ));
     }
     Ok(())
 }
@@ -1181,10 +1181,10 @@ impl KindSession {
                 self.kubeconfig.to_string_lossy().into_owned(),
             ],
         );
-        if let Err(error) = fs::remove_file(&self.kubeconfig) {
-            if error.kind() != ErrorKind::NotFound {
-                return Err(integration_io("remove kind kubeconfig", error));
-            }
+        if let Err(error) = fs::remove_file(&self.kubeconfig)
+            && error.kind() != ErrorKind::NotFound
+        {
+            return Err(integration_io("remove kind kubeconfig", error));
         }
         result.map(|_| ())
     }

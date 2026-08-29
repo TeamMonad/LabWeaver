@@ -57,14 +57,13 @@ impl BuildRequest {
         crate::validate_relative_path(&self.dockerfile_path)
             .map_err(|_| SupplyChainError::IncompleteBuildRequest)?;
         validate_oci_digest(&self.base_image_digest)?;
-        if let BuildNetworkPolicy::Restricted { allowed_registries } = &self.network {
-            if allowed_registries.is_empty()
+        if let BuildNetworkPolicy::Restricted { allowed_registries } = &self.network
+            && (allowed_registries.is_empty()
                 || allowed_registries
                     .iter()
-                    .any(|registry| registry.trim().is_empty())
-            {
-                return Err(SupplyChainError::IncompleteBuildRequest);
-            }
+                    .any(|registry| registry.trim().is_empty()))
+        {
+            return Err(SupplyChainError::IncompleteBuildRequest);
         }
         Ok(())
     }

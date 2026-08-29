@@ -378,26 +378,28 @@ impl ProductionBuildExecutor {
         let password = self.harbor_password.clone();
         // bollard's buildkit drivers do not produce `Send` futures; drive the
         // solve on a dedicated blocking thread and bridge the result back.
-        let outcome = tokio::task::spawn_blocking(move || {
-            let mut credentials = std::collections::HashMap::new();
-            let host: &'static str = Box::leak(registry_host.into_boxed_str());
-            credentials.insert(
-                host,
-                DockerCredentials {
-                    username: Some(username),
-                    password: Some(password),
-                    ..Default::default()
-                },
-            );
-            block_on(daemon.registry(
-                output,
-                frontend,
-                ImageBuildLoadInput::Upload(context),
-                Some(credentials),
-            ))
-        })
-        .await
-        .map_err(|_| unavailable())?;
+        let outcome: Result<_, Box<bollard::grpc::error::GrpcError>> =
+            tokio::task::spawn_blocking(move || {
+                let mut credentials = std::collections::HashMap::new();
+                let host: &'static str = Box::leak(registry_host.into_boxed_str());
+                credentials.insert(
+                    host,
+                    DockerCredentials {
+                        username: Some(username),
+                        password: Some(password),
+                        ..Default::default()
+                    },
+                );
+                block_on(daemon.registry(
+                    output,
+                    frontend,
+                    ImageBuildLoadInput::Upload(context),
+                    Some(credentials),
+                ))
+                .map_err(Box::new)
+            })
+            .await
+            .map_err(|_| unavailable())?;
         if let Err(error) = outcome {
             tracing::error!(
                 event = "agent.build_executor.buildkit_solve_failed",

@@ -251,7 +251,7 @@ fn request_rejects_public_ip_loopback_non_ssh_port_and_root_user()
 -> Result<(), Box<dyn std::error::Error>> {
     for host in [
         Ipv4Addr::new(8, 8, 8, 8),
-        Ipv4Addr::new(127, 0, 0, 1),
+        Ipv4Addr::LOCALHOST,
         Ipv4Addr::new(169, 254, 1, 1),
     ] {
         let mut value = request();

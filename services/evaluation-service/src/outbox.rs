@@ -29,7 +29,7 @@ impl EvaluationOutboxDispatcher {
         client: async_nats::Client,
         publish_timeout: Duration,
     ) -> Result<Self, EvaluationOutboxError> {
-        if publish_timeout.is_zero() || publish_timeout > Duration::from_secs(300) {
+        if publish_timeout.is_zero() || publish_timeout > Duration::from_mins(5) {
             return Err(EvaluationOutboxError::ConfigurationInvalid);
         }
         Ok(Self {

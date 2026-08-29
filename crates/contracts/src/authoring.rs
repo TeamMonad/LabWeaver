@@ -457,12 +457,12 @@ impl EnvironmentSpec {
                 ));
             }
         }
-        if let NetworkPolicySpec::Restricted { policy_binding } = &self.network {
-            if policy_binding.trim().is_empty() {
-                return Err(AuthoringError::InvalidEnvironmentSpec(
-                    "restricted network policy requires an explicit binding".to_owned(),
-                ));
-            }
+        if let NetworkPolicySpec::Restricted { policy_binding } = &self.network
+            && policy_binding.trim().is_empty()
+        {
+            return Err(AuthoringError::InvalidEnvironmentSpec(
+                "restricted network policy requires an explicit binding".to_owned(),
+            ));
         }
         match &self.runtime {
             EnvironmentRuntimeSpec::Container {

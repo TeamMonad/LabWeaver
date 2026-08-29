@@ -1024,10 +1024,10 @@ fn develop_trivy_database() -> (String, String) {
     let expected = std::env::var("LABWEAVER_TRIVY_DATABASE_DIGEST")
         .ok()
         .filter(|value| !value.trim().is_empty());
-    if let (Some(reference), Some(expected)) = (reference, expected) {
-        if validate_trivy_database_reference(&reference, &expected).is_ok() {
-            return (reference, expected);
-        }
+    if let (Some(reference), Some(expected)) = (reference, expected)
+        && validate_trivy_database_reference(&reference, &expected).is_ok()
+    {
+        return (reference, expected);
     }
     (
         DEVELOP_TRIVY_DATABASE_REFERENCE.to_owned(),
@@ -1123,23 +1123,73 @@ fn verify_tools(lock: &VersionLock) -> Result<(), AppError> {
 
 #[cfg(target_os = "linux")]
 fn verify_rust_toolchain(root: &Path, platform: &PlatformImageLock) -> Result<(), AppError> {
+    verify_rust_toolchain_inputs(
+        root,
+        &platform.rust_toolchain,
+        &platform.bases.rust_builder,
+        &platform.bases.gateway_builder,
+    )
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn verify_rust_toolchain_inputs(
+    root: &Path,
+    rust_toolchain: &str,
+    rust_builder: &str,
+    gateway_builder: &str,
+) -> Result<(), AppError> {
     let toolchain = fs::read_to_string(root.join("rust-toolchain.toml"))
         .map_err(|error| io_error("read Rust toolchain lock", error))?;
-    let expected = format!("channel = \"{}\"", platform.rust_toolchain);
+    let workspace = fs::read_to_string(root.join("Cargo.toml"))
+        .map_err(|error| io_error("read Rust workspace manifest", error))?;
+    let expected = format!("channel = \"{rust_toolchain}\"");
+    let expected_msrv = format!("rust-version = \"{rust_toolchain}\"");
     let channels = toolchain
         .lines()
         .map(str::trim)
         .filter(|line| line.starts_with("channel"))
         .collect::<Vec<_>>();
-    let builder_marker = format!("rust:{}-", platform.rust_toolchain);
+    let builder_marker = format!("rust:{rust_toolchain}-");
+    let toolchain_argument = format!("ARG RUST_TOOLCHAIN={rust_toolchain}");
+    let controller_toolchain = format!("{rust_toolchain}-x86_64-unknown-linux-gnu");
+    let build_inputs = [
+        ("containers/Containerfile.rust", toolchain_argument.as_str()),
+        ("access-gateway/Dockerfile", toolchain_argument.as_str()),
+        (
+            "containers/Containerfile.ansible-probe",
+            toolchain_argument.as_str(),
+        ),
+        (
+            "containers/Containerfile.oj-cpp17",
+            toolchain_argument.as_str(),
+        ),
+        (
+            "containers/Containerfile.controller",
+            controller_toolchain.as_str(),
+        ),
+        ("tools/xtask-container.sh", rust_toolchain),
+    ];
     if channels != [expected.as_str()]
-        || !platform.bases.rust_builder.contains(&builder_marker)
-        || !platform.bases.gateway_builder.contains(&builder_marker)
+        || !workspace
+            .lines()
+            .any(|line| line.trim() == expected_msrv.as_str())
+        || !rust_builder.contains(&builder_marker)
+        || !gateway_builder.contains(&builder_marker)
     {
         return Err(AppError::PlatformImage {
             code: "LW_PACKAGE_RUST_TOOLCHAIN_IDENTITY_MISMATCH",
-            detail: "rust-toolchain.toml and both locked Rust builder images must use the same explicit version".to_owned(),
+            detail: "Rust workspace, toolchain lock and locked builder images must use the same explicit version".to_owned(),
         });
+    }
+    for (path, marker) in build_inputs {
+        let content = fs::read_to_string(root.join(path))
+            .map_err(|error| io_error("read Rust build input", error))?;
+        if !content.contains(marker) {
+            return Err(AppError::PlatformImage {
+                code: "LW_PACKAGE_RUST_TOOLCHAIN_IDENTITY_MISMATCH",
+                detail: format!("{path} does not use the locked Rust toolchain"),
+            });
+        }
     }
     Ok(())
 }
@@ -1659,6 +1709,66 @@ mod tests {
             std::fs::read_to_string(root.join("access-gateway/Dockerfile"))?
                 .contains("RUSTUP_TOOLCHAIN=${RUST_TOOLCHAIN}")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn rust_toolchain_identity_is_consistent_across_active_build_inputs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let lock: serde_yaml::Value = serde_yaml::from_str(&std::fs::read_to_string(
+            root.join("deploy/versions.lock.yml"),
+        )?)?;
+        let rust_toolchain = lock
+            .get("platform_images")
+            .and_then(|value| value.get("rust_toolchain"))
+            .and_then(serde_yaml::Value::as_str)
+            .ok_or("platform Rust toolchain must be a string")?;
+        let bases = lock
+            .get("platform_images")
+            .and_then(|value| value.get("bases"))
+            .ok_or("platform base image locks must exist")?;
+        let rust_builder = bases
+            .get("rust_builder")
+            .and_then(serde_yaml::Value::as_str)
+            .ok_or("Rust builder lock must be a string")?;
+        let gateway_builder = bases
+            .get("gateway_builder")
+            .and_then(serde_yaml::Value::as_str)
+            .ok_or("gateway builder lock must be a string")?;
+        verify_rust_toolchain_inputs(&root, rust_toolchain, rust_builder, gateway_builder)?;
+        Ok(())
+    }
+
+    #[test]
+    fn rust_toolchain_identity_mismatch_has_a_stable_diagnostic()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        std::fs::write(
+            root.path().join("rust-toolchain.toml"),
+            "[toolchain]\nchannel = \"1.97.1\"\n",
+        )?;
+        std::fs::write(
+            root.path().join("Cargo.toml"),
+            "[workspace.package]\nrust-version = \"1.96.0\"\n",
+        )?;
+        let result = verify_rust_toolchain_inputs(
+            root.path(),
+            "1.97.1",
+            "docker.io/library/rust:1.97.1-bookworm@sha256:locked",
+            "docker.io/library/rust:1.97.1-alpine3.21@sha256:locked",
+        );
+        let error = match result {
+            Ok(()) => return Err("mixed Rust toolchain identity must fail closed".into()),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            AppError::PlatformImage {
+                code: "LW_PACKAGE_RUST_TOOLCHAIN_IDENTITY_MISMATCH",
+                ..
+            }
+        ));
         Ok(())
     }
 

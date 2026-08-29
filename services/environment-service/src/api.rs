@@ -39,7 +39,7 @@ const EVALUATION_SERVICE_SAN: &str = "spiffe://labweaver/evaluation-service";
 const RESOURCE_SERVICE_SAN: &str = "spiffe://labweaver/resource-service";
 const ACTOR_HEADER: &str = "x-labweaver-actor-id";
 const SESSION_HEADER: &str = "x-labweaver-session-id";
-const OPERATION_DEADLINE: Duration = Duration::from_secs(15 * 60);
+const OPERATION_DEADLINE: Duration = Duration::from_mins(15);
 
 /// Environment-owned dependencies used by the public API.
 #[derive(Clone)]
@@ -865,7 +865,7 @@ mod tests {
     fn command_identity_is_bounded_and_deadline_uses_contract_time()
     -> Result<(), Box<dyn std::error::Error>> {
         let now: UtcTimestamp = "2026-07-19T00:00:00.000Z".parse()?;
-        let deadline = add_duration(now, Duration::from_secs(900))?;
+        let deadline = add_duration(now, Duration::from_mins(15))?;
         assert_eq!(deadline.to_string(), "2026-07-19T00:15:00.000Z");
         Ok(())
     }

@@ -158,7 +158,7 @@ async fn outbox_loop(
     outbox: ControlOutboxDispatcher,
     interval: Duration,
 ) -> Result<(), StartupError> {
-    if interval.is_zero() || interval > Duration::from_secs(60) {
+    if interval.is_zero() || interval > Duration::from_mins(1) {
         return Err(StartupError::Configuration);
     }
     let mut ticker = tokio::time::interval(interval);

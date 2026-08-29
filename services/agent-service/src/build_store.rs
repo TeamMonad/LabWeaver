@@ -144,8 +144,8 @@ impl PgBuildStore {
     ) -> Result<Option<BuildCommandLease>, BuildStoreError> {
         if !valid_worker_id(worker_id)
             || lease_duration.is_zero()
-            || lease_duration > Duration::from_secs(300)
-            || lease_duration.subsec_nanos() % 1_000_000 != 0
+            || lease_duration > Duration::from_mins(5)
+            || !lease_duration.subsec_nanos().is_multiple_of(1_000_000)
         {
             return Err(BuildStoreError::ConfigurationInvalid);
         }
@@ -211,8 +211,8 @@ impl PgBuildStore {
     ) -> Result<bool, BuildStoreError> {
         if !valid_worker_id(&lease.worker_id)
             || lease_duration.is_zero()
-            || lease_duration > Duration::from_secs(300)
-            || lease_duration.subsec_nanos() % 1_000_000 != 0
+            || lease_duration > Duration::from_mins(5)
+            || !lease_duration.subsec_nanos().is_multiple_of(1_000_000)
         {
             return Err(BuildStoreError::ConfigurationInvalid);
         }
@@ -367,7 +367,7 @@ impl PgBuildStore {
         if !error.retryable
             || !error.cleanup_verified
             || retry_delay.is_zero()
-            || retry_delay.subsec_nanos() % 1_000_000 != 0
+            || !retry_delay.subsec_nanos().is_multiple_of(1_000_000)
         {
             return Err(BuildStoreError::RetryUnsafe);
         }

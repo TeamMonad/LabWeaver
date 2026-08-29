@@ -818,10 +818,10 @@ async fn authorization_decision(
     if !scope_matches_kind(&request.scope, policy.scope) {
         return Err(ApiError::forbidden("LW_AUTH_SCOPE_DENIED"));
     }
-    if let AuthorizationScope::Service { service_id } = &request.scope {
-        if service_id != &principal.san_uri {
-            return Err(ApiError::forbidden("LW_AUTH_SERVICE_IDENTITY_DENIED"));
-        }
+    if let AuthorizationScope::Service { service_id } = &request.scope
+        && service_id != &principal.san_uri
+    {
+        return Err(ApiError::forbidden("LW_AUTH_SERVICE_IDENTITY_DENIED"));
     }
     let session_id = request.session_id.as_uuid();
     let session = load_bff_session(
@@ -1026,10 +1026,10 @@ fn effective_session_scopes(
         {
             revision = Revision::new(revision.get().max(membership.revision.get()))
                 .map_err(|_| ApiError::internal("LW_AUTH_MEMBERSHIP_UNAVAILABLE"))?;
-            if let Some(member_expiry) = membership.expires_at {
-                if member_expiry.get() < expiry.get() {
-                    expiry = member_expiry;
-                }
+            if let Some(member_expiry) = membership.expires_at
+                && member_expiry.get() < expiry.get()
+            {
+                expiry = member_expiry;
             }
             scopes.push(AuthorizationScope::Course {
                 course_id: membership.course_id,
@@ -1044,10 +1044,10 @@ fn effective_session_scopes(
         {
             revision = Revision::new(revision.get().max(membership.revision.get()))
                 .map_err(|_| ApiError::internal("LW_AUTH_MEMBERSHIP_UNAVAILABLE"))?;
-            if let Some(member_expiry) = membership.expires_at {
-                if member_expiry.get() < expiry.get() {
-                    expiry = member_expiry;
-                }
+            if let Some(member_expiry) = membership.expires_at
+                && member_expiry.get() < expiry.get()
+            {
+                expiry = member_expiry;
             }
             scopes.push(AuthorizationScope::Project {
                 course_id: membership.course_id,

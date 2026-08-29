@@ -41,7 +41,7 @@ where
         publisher: P,
         publish_timeout: Duration,
     ) -> Result<Self, OutboxDispatchError> {
-        if publish_timeout.is_zero() || publish_timeout > Duration::from_secs(300) {
+        if publish_timeout.is_zero() || publish_timeout > Duration::from_mins(5) {
             return Err(OutboxDispatchError::InvalidConfiguration);
         }
         Ok(Self {
