@@ -601,13 +601,10 @@ impl CapacityReconcileWorker {
         }
         if item.claim.state == contracts::resource::CapacityClaimState::Blocked {
             let Some(provider) = self.providers.get(&item.claim.provider_binding) else {
-                self.store
-                    .record_reconciliation_failure(
-                        item.claim.id,
-                        "release_capacity",
-                        "LW_RESOURCE_CAPACITY_PROVIDER_UNAVAILABLE",
-                    )
-                    .await?;
+                tracing::warn!(
+                    event = "resource.capacity.no_provider_for_blocked_cleanup",
+                    claim_id = %item.claim.id
+                );
                 return Ok(());
             };
             let plan = KubernetesQuotaShellPlan::from_claim(
@@ -622,13 +619,9 @@ impl CapacityReconcileWorker {
                     claim_id = %item.claim.id,
                     diagnostic_code = %error.diagnostic()
                 );
-                self.store
-                    .record_reconciliation_failure(
-                        item.claim.id,
-                        "release_capacity",
-                        error.diagnostic(),
-                    )
-                    .await?;
+                // Do not call record_reconciliation_failure() — that method only accepts
+                // claims in handed_off or releasing state. For blocked claims, the cleanup
+                // attempt simply fails and will be retried on the next cycle.
                 return Ok(());
             }
             self.store

@@ -275,10 +275,9 @@ impl ProductionBuildExecutor {
             );
             return Err(failure);
         }
-        if let Err(failure) = validate_dockerfile(
-            workspace.path(),
-            &command.request.dockerfile_path,
-        ) {
+        if let Err(failure) =
+            validate_dockerfile(workspace.path(), &command.request.dockerfile_path)
+        {
             tracing::warn!(
                 event = "agent.build_executor.dockerfile_rejected",
                 component = "build-executor",
@@ -957,10 +956,7 @@ fn unpack_context(
     Ok(())
 }
 
-fn validate_dockerfile(
-    root: &Path,
-    relative: &str,
-) -> Result<(), BuildProviderFailure> {
+fn validate_dockerfile(root: &Path, relative: &str) -> Result<(), BuildProviderFailure> {
     let path = root.join(relative);
     let metadata = std::fs::symlink_metadata(&path).map_err(|_| rejected())?;
     if !metadata.is_file()
