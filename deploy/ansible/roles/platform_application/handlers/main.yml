@@ -1,12 +1,18 @@
 ---
 - name: Refresh retained router trust
-  ansible.builtin.command: "{{ platform_application_ca_trust_refresh_command }}"
+  ansible.builtin.command:
+    argv: "{{ hostvars[groups['routers'] | first].platform_application_node_ca_trust_refresh_argv }}"
+  environment:
+    PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   changed_when: true
   delegate_to: "{{ groups['routers'] | first }}"
   become: true
 
 - name: Refresh Kubernetes node Harbor trust
-  ansible.builtin.command: "{{ platform_application_ca_trust_refresh_command }}"
+  ansible.builtin.command:
+    argv: "{{ hostvars[item].platform_application_node_ca_trust_refresh_argv }}"
+  environment:
+    PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   changed_when: true
   delegate_to: "{{ item }}"
   become: true
@@ -15,6 +21,22 @@
 - name: Restart the adopted PostgreSQL port-forward
   ansible.builtin.systemd_service:
     name: "{{ platform_application_postgres_forward_service_name }}"
+    enabled: true
+    state: restarted
+    daemon_reload: true
+  become: true
+
+- name: Restart the adopted NATS port-forward
+  ansible.builtin.systemd_service:
+    name: "{{ platform_application_nats_forward_service_name }}"
+    enabled: true
+    state: restarted
+    daemon_reload: true
+  become: true
+
+- name: Restart the adopted MinIO port-forward
+  ansible.builtin.systemd_service:
+    name: "{{ platform_application_minio_forward_service_name }}"
     enabled: true
     state: restarted
     daemon_reload: true

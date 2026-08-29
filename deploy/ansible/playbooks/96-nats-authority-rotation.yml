@@ -151,6 +151,79 @@
           {{ lookup('ansible.builtin.file',
                     nats_rotation_output ~ '/rotation-record.json') | from_json }}
 
+    - name: Create the root-only rollback directory
+      ansible.builtin.file:
+        path: "{{ nats_rotation_output }}/rollback"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Load the complete replacement application object set
+      ansible.builtin.set_fact:
+        nats_rotation_application_bundle_objects: >-
+          {{ lookup('ansible.builtin.file',
+                    nats_rotation_output ~ '/application-bundle.yaml')
+             | from_yaml_all | list }}
+
+    - name: Require a complete application rollback object set
+      ansible.builtin.assert:
+        that:
+          - nats_rotation_application_bundle_objects | length > 0
+          - >-
+            nats_rotation_application_bundle_objects
+            | selectattr('apiVersion', 'equalto', 'v1') | list | length
+            == nats_rotation_application_bundle_objects | length
+          - >-
+            nats_rotation_application_bundle_objects
+            | selectattr('kind', 'in', ['ConfigMap', 'Secret']) | list | length
+            == nats_rotation_application_bundle_objects | length
+          - >-
+            nats_rotation_application_bundle_objects
+            | map(attribute='metadata.namespace') | unique | list
+            == ['labweaver-system']
+          - >-
+            nats_rotation_application_bundle_objects
+            | map(attribute='metadata.name') | unique | list | length
+            == nats_rotation_application_bundle_objects | length
+        fail_msg: NATS_AUTHORITY_ROTATION_APPLICATION_BUNDLE_INVALID
+      no_log: true
+
+    - name: Read every current application object for rollback
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ nats_rotation_kubeconfig }}"
+        api_version: v1
+        kind: "{{ item.kind }}"
+        namespace: "{{ item.metadata.namespace }}"
+        name: "{{ item.metadata.name }}"
+      loop: "{{ nats_rotation_application_bundle_objects }}"
+      loop_control:
+        label: "{{ item.kind }}/{{ item.metadata.name }}"
+      register: nats_rotation_current_application_objects
+      no_log: true
+
+    - name: Require a complete application rollback surface
+      ansible.builtin.assert:
+        that:
+          - >-
+            nats_rotation_current_application_objects.results
+            | map(attribute='resources') | map('length') | min == 1
+        fail_msg: NATS_AUTHORITY_ROTATION_APPLICATION_ROLLBACK_SURFACE_INCOMPLETE
+      no_log: true
+
+    - name: Preserve the complete root-only application rollback surface
+      ansible.builtin.copy:
+        dest: "{{ nats_rotation_output }}/rollback/application-objects.yaml"
+        content: >-
+          {{ (nats_rotation_current_application_objects.results
+              | map(attribute='resources') | map('first') | list)
+             | to_nice_yaml(indent=2, explicit_start=true) }}
+        owner: root
+        group: root
+        mode: "0600"
+        force: false
+      no_log: true
+
     - name: Verify authority and complete identity coverage
       ansible.builtin.assert:
         that:
@@ -160,17 +233,11 @@
           - nats_rotation_record.system_account_public is match('^A[A-Z2-7]{55}$')
           - nats_rotation_record.workloads_account_public == nats_rotation_expected_workloads_account
           - nats_rotation_record.identities | length == 10
-          - nats_rotation_record.identities | map(attribute='identity') | sort == nats_rotation_expected_identities
+          - >-
+            (nats_rotation_record.identities | map(attribute='identity') | sort)
+            == (nats_rotation_expected_identities | sort)
           - nats_rotation_record.identities | map(attribute='issuer') | unique | list == [nats_rotation_expected_workloads_account]
         fail_msg: NATS_AUTHORITY_ROTATION_IDENTITY_INVALID
-
-    - name: Create the root-only rollback directory
-      ansible.builtin.file:
-        path: "{{ nats_rotation_output }}/rollback"
-        state: directory
-        owner: root
-        group: root
-        mode: "0700"
 
     - name: Read current NATS configuration for rollback
       kubernetes.core.k8s_info:
@@ -196,21 +263,76 @@
       register: nats_rotation_current_secrets
       no_log: true
 
+    - name: Read the current Resource workload for bootstrap classification
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ nats_rotation_kubeconfig }}"
+        api_version: apps/v1
+        kind: Deployment
+        namespace: labweaver-system
+        name: resource-service
+      register: nats_rotation_current_resource_deployment
+      no_log: true
+
+    - name: Read the current application deployment set for stable readback
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ nats_rotation_kubeconfig }}"
+        api_version: apps/v1
+        kind: Deployment
+        namespace: labweaver-system
+        label_selectors:
+          - app.kubernetes.io/instance=labweaver
+      register: nats_rotation_current_application_deployments
+      no_log: true
+
+    - name: Classify the Resource initial-bootstrap state
+      ansible.builtin.set_fact:
+        nats_rotation_resource_secret_present: >-
+          {{ nats_rotation_current_secrets.results[-1].resources | length == 1 }}
+        nats_rotation_resource_workload_present: >-
+          {{ nats_rotation_current_resource_deployment.resources | length == 1 }}
+        nats_rotation_resource_bootstrap: >-
+          {{ nats_rotation_current_secrets.results[-1].resources | length == 0
+             and nats_rotation_current_resource_deployment.resources | length == 0 }}
+        nats_rotation_expected_application_deployments: >-
+          {{ nats_rotation_current_application_deployments.resources | length }}
+
+    - name: Reject an ambiguous Resource rollback surface
+      ansible.builtin.assert:
+        that:
+          - >-
+            nats_rotation_resource_secret_present
+            == nats_rotation_resource_workload_present
+        fail_msg: NATS_AUTHORITY_ROTATION_RESOURCE_SURFACE_AMBIGUOUS
+      no_log: true
+
     - name: Require a complete pre-rotation rollback surface
       ansible.builtin.assert:
         that:
           - nats_rotation_current_config.resources | length == 1
-          - nats_rotation_current_secrets.results | map(attribute='resources') | map('length') | min == 1
+          - >-
+            nats_rotation_current_secrets.results[:-1]
+            | map(attribute='resources') | map('length') | min == 1
+          - >-
+            nats_rotation_resource_bootstrap
+            or nats_rotation_resource_secret_present
         fail_msg: NATS_AUTHORITY_ROTATION_ROLLBACK_SURFACE_INCOMPLETE
       no_log: true
+
+    - name: Collect only existing objects for the encrypted rollback surface
+      ansible.builtin.set_fact:
+        nats_rotation_existing_secret_objects: >-
+          {{ nats_rotation_current_secrets.results
+             | selectattr('resources')
+             | map(attribute='resources')
+             | map('first')
+             | list }}
 
     - name: Preserve the encrypted Kubernetes rollback surface
       ansible.builtin.copy:
         dest: "{{ nats_rotation_output }}/rollback/kubernetes-objects.yaml"
         content: >-
           {{ ([nats_rotation_current_config.resources[0]]
-              + (nats_rotation_current_secrets.results
-                 | map(attribute='resources') | map('first') | list))
+              + nats_rotation_existing_secret_objects)
              | to_nice_yaml(indent=2, explicit_start=true) }}
         owner: root
         group: root
@@ -335,6 +457,7 @@
     - name: Validate the Resource stream identity
       ansible.builtin.set_fact:
         nats_rotation_resource_stream: "{{ nats_rotation_resource_stream_after.stdout | from_json }}"
+      when: not ansible_check_mode
 
     - name: Require the bounded Resource stream contract
       ansible.builtin.assert:
@@ -346,6 +469,7 @@
             == ['labweaver.resource.request.approved.v1',
                 'labweaver.resource.request.submitted.v1']
         fail_msg: NATS_AUTHORITY_ROTATION_RESOURCE_STREAM_INVALID
+      when: not ansible_check_mode
 
     - name: Apply only reviewed NATS-bearing application objects
       ansible.builtin.command:
@@ -358,10 +482,23 @@
           - --field-manager=labweaver-nats-authority-rotation
           - --force-conflicts
           - --filename
-          - "{{ item }}"
-      loop:
-        - "{{ nats_rotation_output }}/application-bundle.yaml"
-        - "{{ nats_rotation_output }}/resource-bundle.yaml"
+          - "{{ nats_rotation_output }}/application-bundle.yaml"
+      changed_when: true
+      no_log: true
+
+    - name: Apply reviewed Resource NATS-bearing objects when Resource is adopted
+      ansible.builtin.command:
+        argv:
+          - "{{ nats_rotation_kubectl }}"
+          - --kubeconfig
+          - "{{ nats_rotation_kubeconfig }}"
+          - apply
+          - --server-side
+          - --field-manager=labweaver-nats-authority-rotation
+          - --force-conflicts
+          - --filename
+          - "{{ nats_rotation_output }}/resource-bundle.yaml"
+      when: not (hostvars['localhost'].nats_rotation_resource_bootstrap | default(false) | bool)
       changed_when: true
       no_log: true
 
@@ -380,6 +517,9 @@
           - --patch
           - "{{ nats_rotation_rollout_patch }}"
       loop: "{{ nats_rotation_deployments }}"
+      when: >-
+        item != 'resource-service'
+        or not (hostvars['localhost'].nats_rotation_resource_bootstrap | default(false) | bool)
       changed_when: true
 
     - name: Wait for every affected workload to adopt the replacement authority
@@ -395,6 +535,9 @@
           - "deployment/{{ item }}"
           - --timeout=10m
       loop: "{{ nats_rotation_deployments }}"
+      when: >-
+        item != 'resource-service'
+        or not (hostvars['localhost'].nats_rotation_resource_bootstrap | default(false) | bool)
       changed_when: false
 
     - name: Verify replacement administrator JWT and mutual TLS
@@ -424,18 +567,56 @@
         - {api_version: apps/v1, kind: StatefulSet, namespace: labweaver-data, name: nats}
         - {api_version: apps/v1, kind: Deployment, namespace: labweaver-system, selectors: ['app.kubernetes.io/instance=labweaver']}
         - {api_version: apps/v1, kind: Deployment, namespace: labweaver-system, name: resource-service}
+        - {api_version: v1, kind: Secret, namespace: labweaver-system, name: resource-service-secrets}
       register: nats_rotation_readback
+      no_log: true
 
     - name: Require NATS and every affected workload to be ready
       ansible.builtin.assert:
         that:
           - nats_rotation_readback.results[0].resources | length == 1
-          - nats_rotation_readback.results[0].resources[0].status.readyReplicas | default(0) == 1
-          - nats_rotation_readback.results[1].resources | length == 10
-          - nats_rotation_readback.results[1].resources | map(attribute='status.readyReplicas') | map('default', 0, true) | map('int') | min == 1
-          - nats_rotation_readback.results[2].resources | length == 1
-          - nats_rotation_readback.results[2].resources[0].status.readyReplicas | default(0) == 1
+          - >-
+            nats_rotation_readback.results[1].resources | length
+            == (hostvars['localhost'].nats_rotation_expected_application_deployments | int)
+          - >-
+            (nats_rotation_readback.results[2].resources | length == 0)
+            == (hostvars['localhost'].nats_rotation_resource_bootstrap | default(false) | bool)
+          - >-
+            (nats_rotation_readback.results[3].resources | length == 1)
+            == (not (hostvars['localhost'].nats_rotation_resource_bootstrap | default(false) | bool))
         fail_msg: NATS_AUTHORITY_ROTATION_READBACK_FAILED
+      no_log: true
+
+    - name: Require NATS StatefulSet to be ready
+      ansible.builtin.assert:
+        that:
+          - item.status.readyReplicas | default(0, true) | int == 1
+        fail_msg: NATS_AUTHORITY_ROTATION_NATS_READBACK_FAILED
+      loop: "{{ nats_rotation_readback.results[0].resources }}"
+      loop_control:
+        label: nats
+      no_log: true
+
+    - name: Require every affected workload to be ready
+      ansible.builtin.assert:
+        that:
+          - item.status.readyReplicas | default(0, true) | int == 1
+        fail_msg: NATS_AUTHORITY_ROTATION_WORKLOAD_READBACK_FAILED
+      loop: "{{ nats_rotation_readback.results[1].resources }}"
+      loop_control:
+        label: "{{ item.metadata.name | default('unknown') }}"
+      no_log: true
+
+    - name: Require Resource workload to be ready when adopted
+      ansible.builtin.assert:
+        that:
+          - item.status.readyReplicas | default(0, true) | int == 1
+        fail_msg: NATS_AUTHORITY_ROTATION_RESOURCE_READBACK_FAILED
+      loop: "{{ nats_rotation_readback.results[2].resources }}"
+      loop_control:
+        label: resource-service
+      when: not (hostvars['localhost'].nats_rotation_resource_bootstrap | default(false) | bool)
+      no_log: true
 
     - name: Write the non-secret deployment record
       ansible.builtin.copy:
@@ -447,8 +628,10 @@
                'run_id': lookup('ansible.builtin.env', 'LABWEAVER_RUN_ID'),
                'source_commit': lookup('ansible.builtin.env', 'LABWEAVER_COMMIT_SHA'),
                'nats_ready_replicas': 1,
-               'application_ready_deployments': 10,
-               'resource_ready_replicas': 1
+               'application_ready_deployments': hostvars['localhost'].nats_rotation_expected_application_deployments | int,
+               'resource_bootstrap': hostvars['localhost'].nats_rotation_resource_bootstrap | default(false) | bool,
+               'resource_ready_replicas': 0 if (hostvars['localhost'].nats_rotation_resource_bootstrap | default(false) | bool) else 1,
+               'resource_secret_adopted': not (hostvars['localhost'].nats_rotation_resource_bootstrap | default(false) | bool)
              } | to_nice_json }}
         owner: root
         group: root

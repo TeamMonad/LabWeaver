@@ -28,6 +28,17 @@ For the current Sprint, Issue #126 is that sole acceptance owner; development
 Issues and PRs, including #142/#147, must not start shared-cluster deployment,
 Resource replay, connected E2E or Release Gate commands.
 
+### Issue #126 v3 window result (2026-08-11)
+
+The v3 window froze source `68cb6f15f27d542747f967d7175498ba0f8eb31c`, Run ID
+`019fef14-1cd0-70bd-8b5a-e8bcf43cdff3` and testflight ID
+`019fef14-3922-784d-9e9e-858ad7d6a983`. The two allowed platform package
+attempts both failed before build/scan/publish with the controller Buildx
+Trivy DB manifest read diagnostic `EOF`. No connected deployment or replay was
+started after that blocker, and the later six-read diagnostic probe is not
+release evidence. The window is `Blocked`; the next operation requires a
+separate Platform/DevOps repair and explicit Owner authorization.
+
 ### Issue #165 observability verification
 
 The #165 local gate validates `labweaver.log.v1` against

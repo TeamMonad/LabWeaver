@@ -162,6 +162,15 @@ validation used for the workload bundle apply. The reset deliberately excludes
 `labweaver-data` and `labweaver-build` from namespace deletion and clears only
 their LabWeaver schemas, streams and buckets.
 
+The retained-database adoption path also normalizes only the bounded
+`postgres-admin` membership edges for the fourteen reviewed owner/migration
+roles and six runtime administration roles. Owner/migration edges preserve the
+exact `INHERIT=false, SET=true` contract; runtime edges preserve the
+`ADMIN=true, INHERIT=false, SET=false` contract. Each group is read back, and
+the task does not alter runtime role attributes, schemas, tables, data, or
+database objects. In `--check` mode this normalization is skipped; a missing,
+extra, or misconfigured edge remains a stable blocking diagnostic.
+
 The same playbook first installs checksum-locked administration clients. NSC is
 installed on the approved router only for private NATS operator/account/user
 authoring; NATS CLI, PostgreSQL client, MinIO client, BuildKit client and the
@@ -238,6 +247,16 @@ The controller supplies all source/output locations through the
 application image identity: it applies only the reviewed NATS-bearing
 ConfigMap/Secret objects and binds the replacement operator public ID to the
 affected Pod templates.
+If Sprint 2 Resource is intentionally not deployed yet, the playbook accepts
+only the explicit initial-bootstrap state in which both
+`resource-service-secrets` and the `resource-service` Deployment are absent. It
+does not apply the authority-owned Resource bundle or patch the absent
+Deployment; `94-resource-application.yml` must subsequently create and verify
+the Resource Deployment and its Secret as a separate operation. When the
+Resource Deployment is already adopted, the rotation applies the Resource
+bundle and requires both the Deployment and Secret to remain present. Any
+one-sided state (Secret without Deployment or Deployment without Secret)
+remains a hard rollback-surface failure.
 Every private input and generated file is root-owned mode `0600`, while
 directories are mode `0700`.
 
@@ -279,6 +298,44 @@ baseline SQL is applied, the role checks `current_database()` against
 `PLATFORM_APPLICATION_POSTGRES_DATABASE_IDENTITY_MISMATCH` on drift. This keeps
 the six domain schemas and the runtime `database-url` in one authoritative
 database without resetting retained PostgreSQL state.
+
+The v1 controller does not have a route to the Kubernetes Service CIDR, so
+`platform_application_postgres_forward_enabled` defaults to `true`. The
+application role owns `labweaver-postgres-forward.service`, waits for its
+loopback endpoint on `15432`, binds libpq's `hostaddr` to that loopback while
+retaining the service hostname for `verify-full` certificate validation, and
+only then probes the database. An operator may
+set `LABWEAVER_POSTGRES_FORWARD_ENABLED=false` only when the controller's
+Service-CIDR route has been independently verified; an unreachable in-cluster
+PostgreSQL address is not an accepted fallback.
+
+The same controller limitation applies to retained NATS administration.
+`platform_application_nats_forward_enabled` therefore defaults to `true`; the
+role owns `labweaver-nats-forward.service`, waits for its loopback endpoint on
+`4222`, and maps the reviewed `nats.labweaver-data.svc` name to loopback for
+the TLS-preserving NATS probes. The NATS forward is an administration
+transport only; workload NATS configuration and provider selection remain the
+reviewed bundle values. Set `LABWEAVER_NATS_FORWARD_ENABLED=false` only after
+independently verifying a controller Service-CIDR route.
+
+The same controller limitation applies to retained MinIO administration.
+`platform_application_minio_forward_enabled` defaults to `true`; the role owns
+`labweaver-minio-forward.service`, waits for its loopback endpoint on `19000`,
+and maps the reviewed `minio.labweaver-data.svc` name to loopback for the
+TLS-preserving bucket and versioning probes. The MinIO forward is an
+administration transport only: workload object-store endpoints and provider
+bindings remain the reviewed bundle values. Set
+`LABWEAVER_MINIO_FORWARD_ENABLED=false` only after independently verifying a
+controller Service-CIDR route. A connected `--check` wrapper may instead create
+an explicitly bounded temporary `kubectl port-forward` and pass the matching
+controller address/port overrides; it must remove that process and restore the
+host mapping before returning.
+
+For a connected candidate operation, the inventory, controller lock, Ansible
+configuration, collections and vault locator come from the approved controller.
+The playbook and role implementation come from the frozen candidate source
+checkout. This prevents an older controller role from silently masking a fix
+when the package and private configuration are bound to a newer source commit.
 When the retained Keycloak public hostname rejects traffic routed through the
 node-facing address, private Helm values may bind only `access-service` to the
 retained in-cluster identity Gateway through

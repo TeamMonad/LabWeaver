@@ -2618,7 +2618,7 @@ async fn insert_candidate(
         .fetch_one(&mut **transaction)
         .await
         .map_err(db)?;
-        let matches = existing
+        let content_matches = existing
             .try_get::<String, _>("candidate_kind")
             .map_err(db)?
             == kind
@@ -2633,13 +2633,23 @@ async fn insert_candidate(
             && existing.try_get::<i64, _>("policy_revision").map_err(db)?
                 == i64_revision(policy_revision)?
             && existing.try_get::<String, _>("schema_sha256").map_err(db)?
-                == schema_sha256.to_string()
-            && existing
-                .try_get::<Uuid, _>("projected_event_id")
-                .map_err(db)?
-                == event_id.as_uuid();
-        if !matches {
+                == schema_sha256.to_string();
+        if !content_matches {
             return Err(ControlError::ProjectionConflict);
+        }
+        let prior_event: Uuid = existing.try_get("projected_event_id").map_err(db)?;
+        // A retried run publishes a fresh completion event for the same
+        // immutable candidate; refresh the projection source instead of
+        // treating the differing event identity as a conflict.
+        if prior_event != event_id.as_uuid() {
+            sqlx::query(
+                "UPDATE control.candidates SET projected_event_id=$2 WHERE candidate_id=$1",
+            )
+            .bind(candidate_id.as_uuid())
+            .bind(event_id.as_uuid())
+            .execute(&mut **transaction)
+            .await
+            .map_err(db)?;
         }
         return Ok(());
     }

@@ -335,7 +335,7 @@ fn pinned_toolchain_container_is_in_ci_and_version_lock() -> Result<(), Box<dyn 
     let containerfile = std::fs::read_to_string(root.join("containers/Containerfile.oj-cpp17"))?;
     let versions = std::fs::read_to_string(root.join("deploy/versions.lock.yml"))?;
     let workflow = std::fs::read_to_string(root.join(".github/workflows/platform-images.yml"))?;
-    let runtime = "cgr.dev/chainguard/gcc-glibc@sha256:43d1e8014e4b3075c60b45f30dd72dd783a67c32fd95849bb6c4870f0a16276c";
+    let runtime = "cgr.dev/chainguard/gcc-glibc@sha256:8c43994421c12e300ea5d227c774822e5d7aa45feaeb8e5721f4b5023d7ebfc5";
     assert!(containerfile.contains(runtime));
     assert!(containerfile.contains("io.labweaver.toolchain-profile=\"cpp17-approved-v1\""));
     assert!(versions.contains(runtime));

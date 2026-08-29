@@ -17,6 +17,28 @@
       - platform_foundation_lock.platform_foundation.minio is match('^[^\s]+@sha256:[0-9a-f]{64}$')
       - platform_foundation_postgres_database is match('^[a-z][a-z0-9_]{0,62}$')
       - platform_foundation_postgres_admin_role is match('^[a-z][a-z0-9-]{0,62}$')
+      - platform_foundation_postgres_admin_memberships | length == 14
+      - platform_foundation_postgres_admin_memberships | unique | length == 14
+      - >-
+        platform_foundation_postgres_admin_memberships
+        | select('match', '^lw_[a-z]+_(owner|migration)$') | list | length == 14
+      - platform_foundation_postgres_admin_owner_memberships | length == 8
+      - platform_foundation_postgres_admin_owner_memberships | unique | length == 8
+      - >-
+        platform_foundation_postgres_admin_owner_memberships
+        | select('match', '^lw_(release_coordinator|audit_projection|[a-z]+_owner)$')
+        | list | length == 8
+      - platform_foundation_postgres_admin_migration_memberships | length == 6
+      - platform_foundation_postgres_admin_migration_memberships | unique | length == 6
+      - >-
+        platform_foundation_postgres_admin_migration_memberships
+        | select('match', '^lw_(control|access|environment|agent|evaluation|resource)_migration$')
+        | list | length == 6
+      - platform_foundation_postgres_admin_runtime_memberships | length == 6
+      - platform_foundation_postgres_admin_runtime_memberships | unique | length == 6
+      - >-
+        platform_foundation_postgres_admin_runtime_memberships
+        | select('match', '^lw_[a-z]+_runtime$') | list | length == 6
     fail_msg: PLATFORM_FOUNDATION_INPUT_INVALID
 
 - name: Inspect controlled foundation inputs
@@ -303,4 +325,151 @@
       - (platform_foundation_postgres_admin_verified.stdout | trim)
         == (platform_foundation_postgres_admin_role ~ '|false|true|true|true|true')
     fail_msg: PLATFORM_FOUNDATION_POSTGRES_ADMIN_ROLE_INVALID
+  no_log: true
+
+- name: Read bounded PostgreSQL deployment-admin memberships before normalization
+  kubernetes.core.k8s_exec:
+    kubeconfig: "{{ platform_foundation_kubeconfig }}"
+    namespace: "{{ platform_foundation_namespace }}"
+    pod: postgres-0
+    container: postgres
+    command: >-
+      psql -U postgres -d {{ platform_foundation_postgres_database }} -Atqc
+      "SELECT count(DISTINCT parent.rolname) || '|' ||
+      count(DISTINCT parent.rolname) FILTER (WHERE membership.admin_option = false
+      AND membership.inherit_option = false AND membership.set_option = true) || '|' ||
+      count(*) FROM pg_auth_members membership
+      JOIN pg_roles parent ON parent.oid = membership.roleid
+      JOIN pg_roles member ON member.oid = membership.member
+      WHERE member.rolname = '{{ platform_foundation_postgres_admin_role }}'
+      AND parent.rolname = ANY(ARRAY[
+      {% for membership in platform_foundation_postgres_admin_memberships %}'{{ membership }}'{% if not loop.last %}, {% endif %}{% endfor %}
+      ]::text[])"
+  register: platform_foundation_postgres_admin_memberships_before
+  changed_when: false
+  no_log: true
+
+- name: Read bounded PostgreSQL runtime-admin memberships before normalization
+  kubernetes.core.k8s_exec:
+    kubeconfig: "{{ platform_foundation_kubeconfig }}"
+    namespace: "{{ platform_foundation_namespace }}"
+    pod: postgres-0
+    container: postgres
+    command: >-
+      psql -U postgres -d {{ platform_foundation_postgres_database }} -Atqc
+      "SELECT count(DISTINCT parent.rolname) || '|' ||
+      count(DISTINCT parent.rolname) FILTER (WHERE membership.admin_option = true
+      AND membership.inherit_option = false AND membership.set_option = false) || '|' ||
+      count(*) FROM pg_auth_members membership
+      JOIN pg_roles parent ON parent.oid = membership.roleid
+      JOIN pg_roles member ON member.oid = membership.member
+      WHERE member.rolname = '{{ platform_foundation_postgres_admin_role }}'
+      AND parent.rolname = ANY(ARRAY[
+      {% for membership in platform_foundation_postgres_admin_runtime_memberships %}'{{ membership }}'{% if not loop.last %}, {% endif %}{% endfor %}
+      ]::text[])"
+  register: platform_foundation_postgres_admin_runtime_memberships_before
+  changed_when: false
+  no_log: true
+
+- name: Normalize bounded PostgreSQL deployment-admin memberships
+  kubernetes.core.k8s_exec:
+    kubeconfig: "{{ platform_foundation_kubeconfig }}"
+    namespace: "{{ platform_foundation_namespace }}"
+    pod: postgres-0
+    container: postgres
+    command: >-
+      psql -U postgres -d {{ platform_foundation_postgres_database }} -v ON_ERROR_STOP=1
+      -c "DO $$ DECLARE role_name text; BEGIN
+      FOREACH role_name IN ARRAY ARRAY[
+      {% for membership in platform_foundation_postgres_admin_memberships %}'{{ membership }}'{% if not loop.last %}, {% endif %}{% endfor %}
+      ] LOOP
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
+      EXECUTE format('REVOKE %I FROM %I', role_name, '{{ platform_foundation_postgres_admin_role }}');
+      EXECUTE format('GRANT %I TO %I WITH ADMIN FALSE, INHERIT FALSE, SET TRUE', role_name, '{{ platform_foundation_postgres_admin_role }}');
+      END IF; END LOOP; END $$;"
+  when: >-
+    not ansible_check_mode and (
+    platform_foundation_postgres_admin_memberships_before.stdout | trim
+    not in ['0|0|0', '14|14|14'])
+  changed_when: true
+  no_log: true
+
+- name: Normalize bounded PostgreSQL runtime-admin memberships
+  kubernetes.core.k8s_exec:
+    kubeconfig: "{{ platform_foundation_kubeconfig }}"
+    namespace: "{{ platform_foundation_namespace }}"
+    pod: postgres-0
+    container: postgres
+    command: >-
+      psql -U postgres -d {{ platform_foundation_postgres_database }} -v ON_ERROR_STOP=1
+      -c "DO $$ DECLARE role_name text; BEGIN
+      FOREACH role_name IN ARRAY ARRAY[
+      {% for membership in platform_foundation_postgres_admin_runtime_memberships %}'{{ membership }}'{% if not loop.last %}, {% endif %}{% endfor %}
+      ] LOOP
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
+      EXECUTE format('REVOKE %I FROM %I', role_name, '{{ platform_foundation_postgres_admin_role }}');
+      EXECUTE format('GRANT %I TO %I WITH ADMIN TRUE, INHERIT FALSE, SET FALSE', role_name, '{{ platform_foundation_postgres_admin_role }}');
+      END IF; END LOOP; END $$;"
+  when: >-
+    not ansible_check_mode and (
+    platform_foundation_postgres_admin_runtime_memberships_before.stdout | trim
+    not in ['0|0|0', '6|6|6'])
+  changed_when: true
+  no_log: true
+
+- name: Read normalized PostgreSQL deployment-admin memberships
+  kubernetes.core.k8s_exec:
+    kubeconfig: "{{ platform_foundation_kubeconfig }}"
+    namespace: "{{ platform_foundation_namespace }}"
+    pod: postgres-0
+    container: postgres
+    command: >-
+      psql -U postgres -d {{ platform_foundation_postgres_database }} -Atqc
+      "SELECT count(DISTINCT parent.rolname) || '|' ||
+      count(DISTINCT parent.rolname) FILTER (WHERE membership.admin_option = false
+      AND membership.inherit_option = false AND membership.set_option = true) || '|' ||
+      count(*) FROM pg_auth_members membership
+      JOIN pg_roles parent ON parent.oid = membership.roleid
+      JOIN pg_roles member ON member.oid = membership.member
+      WHERE member.rolname = '{{ platform_foundation_postgres_admin_role }}'
+      AND parent.rolname = ANY(ARRAY[
+      {% for membership in platform_foundation_postgres_admin_memberships %}'{{ membership }}'{% if not loop.last %}, {% endif %}{% endfor %}
+      ]::text[])"
+  register: platform_foundation_postgres_admin_memberships_readback
+  changed_when: false
+  no_log: true
+
+- name: Read normalized PostgreSQL runtime-admin memberships
+  kubernetes.core.k8s_exec:
+    kubeconfig: "{{ platform_foundation_kubeconfig }}"
+    namespace: "{{ platform_foundation_namespace }}"
+    pod: postgres-0
+    container: postgres
+    command: >-
+      psql -U postgres -d {{ platform_foundation_postgres_database }} -Atqc
+      "SELECT count(DISTINCT parent.rolname) || '|' ||
+      count(DISTINCT parent.rolname) FILTER (WHERE membership.admin_option = true
+      AND membership.inherit_option = false AND membership.set_option = false) || '|' ||
+      count(*) FROM pg_auth_members membership
+      JOIN pg_roles parent ON parent.oid = membership.roleid
+      JOIN pg_roles member ON member.oid = membership.member
+      WHERE member.rolname = '{{ platform_foundation_postgres_admin_role }}'
+      AND parent.rolname = ANY(ARRAY[
+      {% for membership in platform_foundation_postgres_admin_runtime_memberships %}'{{ membership }}'{% if not loop.last %}, {% endif %}{% endfor %}
+      ]::text[])"
+  register: platform_foundation_postgres_admin_runtime_memberships_readback
+  changed_when: false
+  no_log: true
+
+- name: Require an empty or exact PostgreSQL deployment-admin membership set
+  ansible.builtin.assert:
+    that:
+      - >-
+        platform_foundation_postgres_admin_memberships_readback.stdout | trim
+        in ['0|0|0', '14|14|14']
+      - >-
+        platform_foundation_postgres_admin_runtime_memberships_readback.stdout | trim
+        in ['0|0|0', '6|6|6']
+    fail_msg: PLATFORM_FOUNDATION_POSTGRES_ADMIN_MEMBERSHIP_INVALID
+  when: not ansible_check_mode
   no_log: true

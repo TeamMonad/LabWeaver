@@ -49,7 +49,9 @@ enum FakeMode {
     ProtectedField,
     BudgetExceeded,
     EvaluationFails,
+    RepairThenSuccess,
     ProcessFailure,
+    OutputLimitExceeded,
     Cancelled,
     TimedOut,
     RateLimited,
@@ -62,6 +64,7 @@ struct FakeProcess {
     commands: Mutex<Vec<ClaudeCodeCommand>>,
     active: AtomicUsize,
     max_active: AtomicUsize,
+    total_calls: AtomicUsize,
 }
 
 struct StaticPackageReader {
@@ -110,7 +113,12 @@ impl FakeProcess {
             commands: Mutex::new(Vec::new()),
             active: AtomicUsize::new(0),
             max_active: AtomicUsize::new(0),
+            total_calls: AtomicUsize::new(0),
         }
+    }
+
+    fn total_calls(&self) -> usize {
+        self.total_calls.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn commands(&self) -> std::sync::MutexGuard<'_, Vec<ClaudeCodeCommand>> {
@@ -122,6 +130,10 @@ impl FakeProcess {
 
     fn max_active(&self) -> usize {
         self.max_active.load(Ordering::SeqCst)
+    }
+
+    fn next_call_number(&self) -> usize {
+        self.total_calls.fetch_add(1, Ordering::SeqCst) + 1
     }
 }
 
@@ -145,6 +157,7 @@ impl ClaudeCodeProcess for FakeProcess {
             .last()
             .is_some_and(|prompt| prompt.contains("EvaluationSpec"));
         self.commands().push(command);
+        let call_number = self.next_call_number();
 
         let slow = matches!(self.mode, FakeMode::SlowSuccess | FakeMode::SlowFullSuccess);
         if slow {
@@ -158,6 +171,9 @@ impl ClaudeCodeProcess for FakeProcess {
         }
         if matches!(self.mode, FakeMode::TimedOut) {
             return Err(ClaudeCodeProcessError::TimedOut);
+        }
+        if matches!(self.mode, FakeMode::OutputLimitExceeded) {
+            return Err(ClaudeCodeProcessError::OutputLimitExceeded);
         }
         let classified_stderr = match self.mode {
             FakeMode::RateLimited => Some(b"status code: 429 private-provider-detail".as_slice()),
@@ -199,6 +215,10 @@ impl ClaudeCodeProcess for FakeProcess {
         if matches!(self.mode, FakeMode::ProtectedField) {
             output["metadata"] = json!({"Final_Score": 100});
         }
+        if matches!(self.mode, FakeMode::RepairThenSuccess) && !evaluation_track && call_number == 1
+        {
+            corrupt_source_registry_digest(&mut output);
+        }
         let usage = if matches!(self.mode, FakeMode::BudgetExceeded) {
             json!({"input_tokens": 2_000_000, "output_tokens": 10})
         } else {
@@ -233,6 +253,15 @@ impl ClaudeCodeProcess for FakeProcess {
             self.active.fetch_sub(1, Ordering::SeqCst);
         }
         Ok(output)
+    }
+}
+
+fn corrupt_source_registry_digest(output: &mut Value) {
+    let source = output
+        .pointer_mut("/runtime/base_disk/sourceRegistryDigest")
+        .map(Value::take);
+    if let Some(source) = source {
+        output["runtime"]["base_disk"]["source_registry_digest"] = source;
     }
 }
 
@@ -1363,6 +1392,26 @@ async fn work_intent_rejects_an_experiment_candidate_without_defaulting()
 }
 
 #[tokio::test]
+async fn virtual_machine_schema_repair_recovers_from_the_first_invalid_response()
+-> Result<(), Box<dyn Error>> {
+    let (runtime, process, policy) = runtime(FakeMode::RepairThenSuccess)?;
+    let execution = runtime
+        .generate(
+            AgentTrackKind::Environment,
+            input(&policy).await?,
+            RunCancellation::new(),
+        )
+        .await?;
+
+    let CandidateDocument::Environment(spec) = execution.document else {
+        return Err("VM repair returned a non-environment candidate".into());
+    };
+    assert_eq!(spec.runtime.kind(), RuntimeKind::VirtualMachine);
+    assert_eq!(process.total_calls(), 2);
+    Ok(())
+}
+
+#[tokio::test]
 async fn evaluation_prompt_enforces_supported_schema_variants_and_semantics()
 -> Result<(), Box<dyn Error>> {
     let (runtime, process, policy) = runtime(FakeMode::FullSuccess)?;
@@ -1426,7 +1475,7 @@ async fn environment_prompt_preserves_mixed_case_variant_contract() -> Result<()
     for required in [
         "runtime variant properties are exactly provider_binding",
         "Container security requires rootFilesystemPolicy read_only_required",
-        "virtual_machine requires mutable_required",
+        "virtual_machine requires rootFilesystemPolicy mutable_required",
         "\"build_context\"",
         "\"base_image_digest\"",
         "\"service_port\":8080",
@@ -1569,7 +1618,7 @@ async fn tokio_process_clears_inheritance_and_isolates_invocation_directories()
 
 #[tokio::test]
 async fn markdown_or_non_json_candidate_result_is_rejected() -> Result<(), Box<dyn Error>> {
-    let (runtime, _, policy) = runtime(FakeMode::InvalidCandidateJson)?;
+    let (runtime, process, policy) = runtime(FakeMode::InvalidCandidateJson)?;
     let result = runtime
         .generate(
             AgentTrackKind::Environment,
@@ -1580,6 +1629,27 @@ async fn markdown_or_non_json_candidate_result_is_rejected() -> Result<(), Box<d
     let failure = expected_failure(result, "non-JSON candidate result was accepted")?;
     assert_diagnostic(&failure, "LW_LLM_SCHEMA_INVALID");
     assert!(failure.audit().output_sha256.is_none());
+    // The schema repair loop must retry up to budget.max_schema_repairs (2):
+    // one initial attempt plus two repair attempts, all producing the same
+    // schema-invalid candidate.
+    assert_eq!(process.total_calls(), 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn output_limit_is_terminal_and_is_not_retried_as_schema_repair() -> Result<(), Box<dyn Error>>
+{
+    let (runtime, process, policy) = runtime(FakeMode::OutputLimitExceeded)?;
+    let result = runtime
+        .generate(
+            AgentTrackKind::Environment,
+            input(&policy).await?,
+            RunCancellation::new(),
+        )
+        .await;
+    let failure = expected_failure(result, "truncated output must fail closed")?;
+    assert_diagnostic(&failure, "LW_AGENT_RUNTIME_OUTPUT_LIMIT_EXCEEDED");
+    assert_eq!(process.total_calls(), 1);
     Ok(())
 }
 
@@ -1671,5 +1741,22 @@ async fn dual_tracks_preserve_environment_success_when_evaluation_fails()
     let failure = expected_failure(outcome.evaluation, "evaluation error remains independent")?;
     assert_diagnostic(&failure, "LW_LLM_UPSTREAM_UNAVAILABLE");
     assert_eq!(process.commands().len(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_error_response_is_terminal_and_not_mislabeled_as_schema_invalid()
+-> Result<(), Box<dyn Error>> {
+    let (runtime, process, policy) = runtime(FakeMode::EvaluationFails)?;
+    let result = runtime
+        .generate(
+            AgentTrackKind::Evaluation,
+            input(&policy).await?,
+            RunCancellation::new(),
+        )
+        .await;
+    let failure = expected_failure(result, "provider error response must fail closed")?;
+    assert_diagnostic(&failure, "LW_LLM_UPSTREAM_UNAVAILABLE");
+    assert_eq!(process.total_calls(), 1);
     Ok(())
 }
