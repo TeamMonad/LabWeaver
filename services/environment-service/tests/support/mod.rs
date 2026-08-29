@@ -62,7 +62,6 @@ pub fn ready_instance() -> EnvironmentInstance {
             protocol: EndpointProtocol::Https,
             revision: revision(2),
             health: EndpointHealth::Healthy,
-            ssh_host_key_identity_sha256: None,
             observed_at: timestamp("2026-07-14T00:01:00.000Z"),
         }],
         last_diagnostic_code: None,

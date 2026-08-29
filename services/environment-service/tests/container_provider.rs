@@ -19,8 +19,9 @@ use contracts::events::ReleasePublished;
 use contracts::supply_chain::{EnvironmentTemplateRelease, ImageArtifact};
 use contracts::{
     ActorId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId, ImageArtifactId,
-    PolicyId, ReleaseId, Revision, Sha256Digest, UtcTimestamp,
+    PolicyId, ReleaseId, Revision, UtcTimestamp,
 };
+use persistence_sqlx::Sha256Digest;
 use environment_service::{
     CONTAINER_BACKEND_PROTOCOL_VERSION, ContainerApplyObservation, ContainerBackendFence,
     ContainerProvider, ContainerProviderBackend, ContainerProviderConfiguration,
@@ -122,7 +123,6 @@ impl ContainerProviderBackend for FixtureBackend {
             artifact_id: ArtifactId::new(),
             store_binding: "environment-cleanup-evidence-v1".to_owned(),
             object_version: plan.plan_sha256.to_string(),
-            sha256: Sha256Digest::of_bytes(plan.namespace.as_bytes()),
             size_bytes: 1,
             media_type: "application/json".to_owned(),
         })
@@ -334,14 +334,6 @@ fn deny_all_container_network_keeps_ingress_and_egress_isolation() {
 fn allow_all_container_network_leaves_egress_unisolated() {
     let mut projection = projection();
     projection.environment_spec.network = NetworkPolicySpec::AllowAll;
-    let spec_sha256 = Sha256Digest::of_canonical(&projection.environment_spec).expect("spec hash");
-    projection.release.environment_spec_sha256 = spec_sha256;
-    projection.release.approval.candidate_sha256 = spec_sha256;
-    projection.projection_sha256 = Sha256Digest::of_canonical(&json!({
-        "release": &projection.release,
-        "environmentSpec": &projection.environment_spec,
-    }))
-    .expect("projection hash");
     projection
         .validate()
         .expect("allow_all container projection");
@@ -376,14 +368,6 @@ fn allow_all_container_network_leaves_egress_unisolated() {
 fn non_http_container_entry_cannot_be_projected_as_a_gateway_endpoint() {
     let mut projection = projection();
     projection.environment_spec.entries[0].protocol = EndpointProtocol::Ssh;
-    let spec_sha256 = Sha256Digest::of_canonical(&projection.environment_spec).expect("spec hash");
-    projection.release.environment_spec_sha256 = spec_sha256;
-    projection.release.approval.candidate_sha256 = spec_sha256;
-    projection.projection_sha256 = Sha256Digest::of_canonical(&json!({
-        "release": &projection.release,
-        "environmentSpec": &projection.environment_spec,
-    }))
-    .expect("projection hash");
     projection.validate().expect("internally valid projection");
     let instance = instance_for(&projection);
     let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
@@ -401,11 +385,6 @@ fn release_from_a_different_harbor_prefix_is_rejected() {
         panic!("fixture must use a container artifact");
     };
     *repository = repository.replacen("labweaver-system", "unreviewed-project", 1);
-    projection.projection_sha256 = Sha256Digest::of_canonical(&json!({
-        "release": &projection.release,
-        "environmentSpec": &projection.environment_spec,
-    }))
-    .expect("projection hash");
     projection.validate().expect("internally valid projection");
     let instance = instance_for(&projection);
     let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
@@ -692,12 +671,11 @@ fn projection() -> ReleasePublished {
         }
     }))
     .expect("valid EnvironmentSpec");
-    let environment_spec_sha256 = Sha256Digest::of_canonical(&environment_spec).expect("spec hash");
-    let artifact_sha256 = Sha256Digest::of_bytes(b"container-image");
     let artifact_id = ImageArtifactId::new();
     let course_id = contracts::CourseId::new();
     let candidate_id = CandidateId::new();
     let published_at = timestamp("2026-07-16T08:00:00.000Z");
+    let artifact_sha256 = Sha256Digest::of_bytes(b"container-image");
     let release = EnvironmentTemplateRelease {
         id: ReleaseId::new(),
         course_id,
@@ -705,15 +683,12 @@ fn projection() -> ReleasePublished {
         candidate_id,
         agent_run_id: contracts::AgentRunId::new(),
         candidate_revision: revision(1),
-        environment_spec_sha256,
         runtime_kind: RuntimeKind::Container,
         approval: CandidateApproval {
             id: ApprovalId::new(),
             candidate_id,
             candidate_revision: revision(1),
-            candidate_sha256: environment_spec_sha256,
             policy_revision: revision(7),
-            schema_sha256: Sha256Digest::of_bytes(b"schema"),
             trust_revision: revision(1),
             actor_id: ActorId::new(),
             decision: CandidateDecision::Approved,
@@ -731,15 +706,9 @@ fn projection() -> ReleasePublished {
         published_by: ActorId::new(),
         published_at,
     };
-    let projection_sha256 = Sha256Digest::of_canonical(&json!({
-        "release": &release,
-        "environmentSpec": &environment_spec,
-    }))
-    .expect("projection hash");
     let projection = ReleasePublished {
         release,
         environment_spec,
-        projection_sha256,
     };
     projection.validate().expect("valid projection");
     projection
@@ -750,7 +719,6 @@ fn artifact_ref(media_type: &str) -> ArtifactRef {
         artifact_id: ArtifactId::new(),
         store_binding: "artifact-store-v1".to_owned(),
         object_version: "version-1".to_owned(),
-        sha256: Sha256Digest::of_bytes(media_type.as_bytes()),
         size_bytes: 128,
         media_type: media_type.to_owned(),
     }

@@ -24,8 +24,9 @@ use contracts::supply_chain::{
 };
 use contracts::{
     ActorId, ApprovalId, ArtifactId, ArtifactRef, CandidateId, ImageArtifactId, PolicyId,
-    ReleaseId, Revision, Sha256Digest, UtcTimestamp,
+    ReleaseId, Revision, UtcTimestamp,
 };
+use persistence_sqlx::Sha256Digest;
 use environment_service::{
     ContainerReleaseResolver, EnvironmentProvider, KUBEVIRT_BACKEND_PROTOCOL_VERSION,
     KubeVirtBackendFence, KubeVirtCleanupPlan, KubeVirtObservationStore,
@@ -253,7 +254,6 @@ impl KubeVirtProviderBackend for FixtureBackend {
             artifact_id: ArtifactId::new(),
             store_binding: "environment-cleanup-evidence-v1".to_owned(),
             object_version: plan.plan_sha256.to_string(),
-            sha256: Sha256Digest::of_bytes(plan.namespace.as_bytes()),
             size_bytes: 1,
             media_type: "application/json".to_owned(),
         })
@@ -311,7 +311,7 @@ fn plan_is_deterministic_private_and_digest_bound() {
         data_volume
             .document
             .pointer("/metadata/annotations/labweaver.io~1base-disk-sha256"),
-        Some(&json!(first.base_disk.disk_sha256.to_string()))
+        Some(&json!(first.base_disk.capacity_bytes.to_string()))
     );
     assert_eq!(
         data_volume
@@ -927,7 +927,6 @@ fn projection() -> ReleasePublished {
             "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
         )
         .to_owned(),
-        disk_sha256: Sha256Digest::of_bytes(b"vm-base-disk"),
         capacity_bytes: 10_737_418_240,
     };
     let environment_spec: EnvironmentSpec = serde_json::from_value(json!({
@@ -958,7 +957,6 @@ fn projection() -> ReleasePublished {
         }
     }))
     .expect("valid EnvironmentSpec");
-    let environment_spec_sha256 = Sha256Digest::of_canonical(&environment_spec).expect("spec hash");
     let artifact_id = ImageArtifactId::new();
     let course_id = contracts::CourseId::new();
     let candidate_id = CandidateId::new();
@@ -970,15 +968,12 @@ fn projection() -> ReleasePublished {
         candidate_id,
         agent_run_id: contracts::AgentRunId::new(),
         candidate_revision: revision(1),
-        environment_spec_sha256,
         runtime_kind: RuntimeKind::VirtualMachine,
         approval: CandidateApproval {
             id: ApprovalId::new(),
             candidate_id,
             candidate_revision: revision(1),
-            candidate_sha256: environment_spec_sha256,
             policy_revision: revision(1),
-            schema_sha256: Sha256Digest::of_bytes(b"schema"),
             trust_revision: revision(1),
             actor_id: ActorId::new(),
             decision: CandidateDecision::Approved,
@@ -993,30 +988,15 @@ fn projection() -> ReleasePublished {
         published_by: ActorId::new(),
         published_at,
     };
-    let projection_sha256 = Sha256Digest::of_canonical(&json!({
-        "release": &release,
-        "environmentSpec": &environment_spec,
-    }))
-    .expect("projection hash");
     let projection = ReleasePublished {
         release,
         environment_spec,
-        projection_sha256,
     };
     projection.validate().expect("valid projection");
     projection
 }
 
 fn rebind_projection(projection: &mut ReleasePublished) {
-    let environment_spec_sha256 =
-        Sha256Digest::of_canonical(&projection.environment_spec).expect("environment spec hash");
-    projection.release.environment_spec_sha256 = environment_spec_sha256;
-    projection.release.approval.candidate_sha256 = environment_spec_sha256;
-    projection.projection_sha256 = Sha256Digest::of_canonical(&json!({
-        "release": &projection.release,
-        "environmentSpec": &projection.environment_spec,
-    }))
-    .expect("release projection hash");
     projection.validate().expect("valid rebound projection");
 }
 
