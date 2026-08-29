@@ -24,7 +24,7 @@
 7. [用户角色、旅程与用户故事](#7-用户角色旅程与用户故事)
 8. [范围分级与非目标](#8-范围分级与非目标)
 9. [成功指标与验收口径](#9-成功指标与验收口径)
-10. [四次 Sprint 计划](#10-四次-sprint-计划)
+10. [四次 long-term single-university private deployment phase 计划](#10-四次-sprint-计划)
 11. [四人分工与协作机制](#11-四人分工与协作机制)
 12. [详细 Backlog](#12-详细-backlog)
 13. [测试计划](#13-测试计划)
@@ -138,7 +138,7 @@ LabWeaver 将题面、材料和自然语言意图转换为经过验证的环境�
 
 | 决策 | 已确认选择                               | 方案中的具体落实                                                              |
 | ---- | ---------------------------------------- | ----------------------------------------------------------------------------- |
-| D01  | A：最终必须真实启动 KubeVirt VM          | Sprint 1 完成 KVM/KubeVirt Spike；最终演示真实 Linux 系统 VM                  |
+| D01  | A：最终必须真实启动 KubeVirt VM          | long-term single-university private deployment phase 1 完成 KVM/KubeVirt Spike；最终演示真实 Linux 系统 VM                  |
 | D02  | A：有 Kubernetes 管理员权限              | Ansible 可安装 KubeVirt、Kyverno、NATS、MinIO、Keycloak 等组件                |
 | D03  | 测试与演示使用 Mock GPU/云容量           | 真实 CPU/内存在现有集群分配；GPU、云节点扩容使用 FixtureCapacityProvider      |
 | D04  | 自实现统一评测模型                       | 删除 OpenJudge 依赖；使用 EvaluationSpec + Runner/Checker/Generator/Collector |
@@ -428,7 +428,7 @@ LLM 不可以：
 4. Ansible 一键安装、验证、升级、回滚和清理。
 5. Playwright HTML Report、Trace、截图、录像和可重复演示脚本。
 6. 完整开发、测试、部署和运维文档。
-7. Git、CI、Release、四次 Sprint 证据。
+7. Git、CI、Release、四次 long-term single-university private deployment phase 证据。
 
 ## 8.2 P1：主要加分项
 
@@ -499,7 +499,7 @@ LLM 不可以：
 
 ## 9.3 Definition of Ready
 
-任务进入 Sprint 前必须：
+任务进入 long-term single-university private deployment phase 前必须：
 
 - 有用户价值和验收条件；
 - 外部组件可用或已有 Fixture；
@@ -520,13 +520,13 @@ LLM 不可以：
 
 ---
 
-# 10. 四次 Sprint 计划
+# 10. 四次 long-term single-university private deployment phase 计划
 
-## 10.1 Sprint 1：需求、统一模型与基础设施 Spike
+## 10.1 long-term single-university private deployment phase 1：需求、统一模型与基础设施 Spike
 
 **时间：2026-07-11 至 2026-07-13**
 
-### Sprint Goal
+### long-term single-university private deployment phase Goal
 
 完成课程第一次汇报所需材料，冻结统一领域模型、微服务边界、EvaluationSpec v1alpha1，并证明真实 KubeVirt VM 可运行。
 
@@ -539,7 +539,7 @@ LLM 不可以：
 | 前端工程师（辅助 1）    | Vue 3、OIDC Mock、角色导航、YAML 编辑器、实验/工作列表、Tailnet 接入向导静态页面                                             | Monaco YAML 校验和 Diff 页面；接入向导可操作                |
 | 测试工程师（辅助 2）    | 影响地图、旅程、3C、Playwright 骨架、KubeVirt/StorageClass/Headscale Preflight、测试数据                                     | 需求文档；真实 VM 启停记录；首个 Playwright Trace；测试矩阵 |
 
-### Sprint Review 验收
+### long-term single-university private deployment phase Review 验收
 
 ```bash
 cargo build --workspace
@@ -556,18 +556,18 @@ kubectl get vm,vmi -A
 4. 前端可显示实验和工作环境；
 5. GitHub Project、Issue、分支和第一批 PR。
 
-### Sprint 1 输出
+### long-term single-university private deployment phase 1 输出
 
 - Tag：`v0.1-foundation`
-- 第一次汇报：头脑风暴、影响地图、用户旅程、Simple Story、3C、拆分、估算、排序、Sprint 1 Review/Retro、Sprint 2 Planning。
+- 第一次汇报：头脑风暴、影响地图、用户旅程、Simple Story、3C、拆分、估算、排序、long-term single-university private deployment phase 1 Review/Retro、long-term single-university private deployment phase 2 Planning。
 
 ---
 
-## 10.2 Sprint 2：环境、构建与工件收集闭环
+## 10.2 long-term single-university private deployment phase 2：环境、构建与工件收集闭环
 
 **时间：2026-07-13 至 2026-07-16**
 
-### Sprint Goal
+### long-term single-university private deployment phase Goal
 
 完成“教师材料 → Agent 环境 → 教师审批 → 学生启动容器/VM → 收集不可变结果”的纵向链路。
 
@@ -580,7 +580,7 @@ kubectl get vm,vmi -A
 | 前端工程师（辅助 1）    | 教师材料上传、YAML Diff/审批、环境控制台、Tailnet 设备状态、code-server/SSH/VNC 入口                                | 教师和学生真实流程；接入错误有明确提示         |
 | 测试工程师（辅助 2）    | Runtime/Access Provider 契约、工件 Collector、Headscale Policy allow/deny、Ansible 幂等、Playwright 角色登录状态    | 集成测试、Tailnet 负例和 Playwright 第一条流程 |
 
-### Sprint Review 验收
+### long-term single-university private deployment phase Review 验收
 
 1. 教师上传题面和材料；
 2. Agent 生成容器或 VM 环境 YAML；
@@ -591,18 +591,18 @@ kubectl get vm,vmi -A
 7. BuildKit/Ansible 执行后再次运行为幂等；
 8. 提交时按 SubmissionManifest 上传 MinIO，包含哈希和环境摘要。
 
-### Sprint 2 输出
+### long-term single-university private deployment phase 2 输出
 
 - Tag：`v0.2-environment`
 - 第二次汇报：不少于 5 分钟，现场演示环境闭环和本轮 Review/Retro。
 
 ---
 
-## 10.3 Sprint 3：统一评测、资源审批和双场景演示
+## 10.3 long-term single-university private deployment phase 3：统一评测、资源审批和双场景演示
 
 **时间：2026-07-16 至 2026-07-20**
 
-### Sprint Goal
+### long-term single-university private deployment phase Goal
 
 完成统一 EvaluationSpec 引擎，跑通 OJ 类编程题和 Linux 系统实验；完成资源申请、管理员审批、Mock GPU/云容量、租约和回收。
 
@@ -615,7 +615,7 @@ kubectl get vm,vmi -A
 | 前端工程师（辅助 1）    | Evaluation YAML、时间线、证据、LLM Review、资源审批、访问授权状态和租约页面                       | 完整操作路径和状态可视化                     |
 | 测试工程师（辅助 2）    | 变异错解、差分测试、系统故障样例、Agent 黄金集、AccessGrant 过期、Playwright 多角色流程和失败注入 | 自动化报告、Trace 和缺陷清单                 |
 
-### Sprint Review 验收
+### long-term single-university private deployment phase Review 验收
 
 #### OJ 类实验
 
@@ -642,18 +642,18 @@ kubectl get vm,vmi -A
 - 创建 Quota/Lease；
 - 到期后自动 Releasing/Expired。
 
-### Sprint 3 输出
+### long-term single-university private deployment phase 3 输出
 
 - Tag：`v0.3-feature-complete`
-- 第二份周报；功能冻结；Sprint 4 只做缺陷、文档、测试和演示。
+- 第二份周报；功能冻结；long-term single-university private deployment phase 4 只做缺陷、文档、测试和演示。
 
 ---
 
-## 10.4 Sprint 4：生产硬化、Ansible 部署和最终交付
+## 10.4 long-term single-university private deployment phase 4：生产硬化、Ansible 部署和最终交付
 
 **时间：2026-07-20 至 2026-07-24**
 
-### Sprint Goal
+### long-term single-university private deployment phase Goal
 
 从空白平台命名空间完成可重复部署，完成全部文档、测试、故障降级、Release 和 19 分钟演示。
 
@@ -676,7 +676,7 @@ cargo xtask demo replay
 cargo xtask demo reset --yes
 ```
 
-### Sprint 4 输出
+### long-term single-university private deployment phase 4 输出
 
 - Release：`LabWeaver 1.0`
 - Tag：`v1.0.0`
@@ -762,7 +762,7 @@ cargo xtask demo reset --yes
 昨天完成：Issue/PR/可运行证据
 今天目标：一个可验收结果
 阻塞：需要谁、需要什么、最晚何时解除
-范围风险：是否影响本 Sprint Goal
+范围风险：是否影响本 long-term single-university private deployment phase Goal
 ```
 
 每天下午在 GitHub Project 更新：状态、剩余估算、阻塞和演示证据。
@@ -773,10 +773,10 @@ cargo xtask demo reset --yes
 
 > SP 使用 Fibonacci。8 SP 以上必须进一步拆分；表中 8/13 SP 表示 Epic，实际在 GitHub 中拆成多个 Issue。
 
-| ID          | 任务                                          | 主责       | Sprint | SP | 依赖                 | 验收摘要                              |
+| ID          | 任务                                          | 主责       | long-term single-university private deployment phase | SP | 依赖                 | 验收摘要                              |
 | ----------- | --------------------------------------------- | ---------- | -----: | -: | -------------------- | ------------------------------------- |
 | REQ-01      | 影响地图、用户旅程、Simple Story、3C          | 测试       |     S1 |  5 | 无                   | 文档评审通过                          |
-| PM-01       | Milestone、Backlog、DoR/DoD、风险表           | 架构       |     S1 |  3 | REQ-01               | 四 Sprint 可追踪                      |
+| PM-01       | Milestone、Backlog、DoR/DoD、风险表           | 架构       |     S1 |  3 | REQ-01               | 四 long-term single-university private deployment phase 可追踪                      |
 | ARC-01      | C4、微服务边界、数据所有权、ADR               | 架构       |     S1 |  5 | 无                   | 评审通过                              |
 | CORE-01     | Experiment/Work × Container/VM 领域模型      | 架构       |     S1 |  5 | ARC-01               | 状态机测试                            |
 | CORE-02     | EvaluationSpec v1alpha1 Schema                | Agent      |     S1 |  8 | ARC-01               | OJ/Linux 示例均通过 Schema            |
@@ -1028,7 +1028,7 @@ docs/
 - 每个配置项有默认值、是否敏感、示例和影响；
 - 每个故障有症状、诊断命令、恢复和清理；
 - API/Schema 由代码自动生成，避免手工漂移；
-- 每个 Sprint Review 同步更新文档状态。
+- 每个 long-term single-university private deployment phase Review 同步更新文档状态。
 
 ---
 
@@ -1091,9 +1091,9 @@ format/lint
 
 | Milestone                 | Tag                       |
 | ------------------------- | ------------------------- |
-| Sprint 1 Foundation       | `v0.1-foundation`       |
-| Sprint 2 Environment      | `v0.2-environment`      |
-| Sprint 3 Feature Complete | `v0.3-feature-complete` |
+| long-term single-university private deployment phase 1 Foundation       | `v0.1-foundation`       |
+| long-term single-university private deployment phase 2 Environment      | `v0.2-environment`      |
+| long-term single-university private deployment phase 3 Feature Complete | `v0.3-feature-complete` |
 | Final Release             | `v1.0.0`                |
 
 最终展示：
@@ -1120,7 +1120,7 @@ git tag --list
 | 13:30–15:20 | 工作环境安装软件、CPU/GPU 申请、管理员审批、Mock 回收         |
 | 15:20–16:40 | Tailnet 外部接入、权限拒绝、Ansible 一键部署                  |
 | 16:40–17:50 | Playwright Trace 重放、测试、安全、Agent 黄金集               |
-| 17:50–19:00 | Git、四次 Sprint、四人贡献和总结                              |
+| 17:50–19:00 | Git、四次 long-term single-university private deployment phase、四人贡献和总结                              |
 
 ## 16.2 OJ 类主演示
 
@@ -1174,7 +1174,7 @@ git tag --list
 
 | ID  | 风险                               | 级别 | 最晚决策点 | 应对                                                                                           |
 | --- | ---------------------------------- | ---- | ---------- | ---------------------------------------------------------------------------------------------- |
-| R1  | KubeVirt 节点缺少 KVM 或存储能力   | 高   | 7/12       | Preflight；固定可用节点；预构建 VM 镜像；不等到 Sprint 3                                       |
+| R1  | KubeVirt 节点缺少 KVM 或存储能力   | 高   | 7/12       | Preflight；固定可用节点；预构建 VM 镜像；不等到 long-term single-university private deployment phase 3                                       |
 | R2  | 统一评测模型过度泛化               | 高   | 7/13       | P0 只实现 OJ + Linux；其他类型只保留 Schema 扩展点                                             |
 | R3  | Agent 生成标程/SPJ 错误            | 高   | 全程       | 差分、变异、固定 Seed、教师审批；绝不自动发布                                                  |
 | R4  | 学生任意软件破坏安全               | 高   | 7/15       | 仅 Work 环境；受控 BuildKit/Ansible；Kyverno；管理员策略；审计                                 |
@@ -1200,7 +1200,7 @@ git tag --list
 
 # 18. 待核验的环境参数
 
-这些不是产品取舍，而是 Sprint 1 必须填入 Inventory/配置的实际参数：
+这些不是产品取舍，而是 long-term single-university private deployment phase 1 必须填入 Inventory/配置的实际参数：
 
 | 参数                    | 需要确认的具体值                                            | 默认处理                                                               |
 | ----------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------- |

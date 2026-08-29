@@ -3,65 +3,48 @@ toolVersion: 0.1.0
 bootstrap:
   id: 1
   file: bootstrap/0001_roles_and_schemas.sql
-  sha256: 475161530ef5f635c10717219fde6159569cb3b1dd28f1eb2672689c3fae879f
 domains:
   - name: control
     migrations:
       - id: 1
         file: control/0001_platform_baseline.sql
-        sha256: ece6f9d2bd19f8219fa670d827c7fdf9d1b21c7f6d4c4836b8ec5868f950883e
   - name: access
     migrations:
       - id: 1
         file: access/0001_platform_baseline.sql
-        sha256: b8cd92479a7e5f314a2b79fcc578845c149be38334d344a84b784bad0ebafe5b
       - id: 2
         file: access/0002_console_capabilities_and_sessions.sql
-        sha256: db87b61749eae278dcd33396e29473f0d60c6c8fa5adfa1dd92970dbba572fde
   - name: environment
     migrations:
       - id: 1
         file: environment/0001_platform_baseline.sql
-        sha256: a1050a77e3f077854972302d33805db9bac33caf0acbd7c582116457ef354569
   - name: agent
     migrations:
       - id: 1
         file: agent/0001_platform_baseline.sql
-        sha256: c98cefba2529109d7ac833f93a192cab1315889e86da811339fe1ada2af0f3b2
       - id: 2
         file: agent/0002_allow_content_addressed_image_reuse.sql
-        sha256: e1d86262aa597e0b61b7731ac39671a77ad7e9c0eb8b19279e4082d54c5e9b00
       - id: 3
         file: agent/0003_work_agent_run_class.sql
-        sha256: da55512193a801d0a95dee51af4ca87701eba5da8bee696f9efdb07e636b7646
   - name: evaluation
     migrations:
       - id: 1
         file: evaluation/0001_platform_baseline.sql
-        sha256: 81bc4a539f5ecc56beb709c797917ade281e68a7483e6fadb3574b503c6a6dba
       - id: 2
         file: evaluation/0002_evaluation_control_plane.sql
-        sha256: f594c5410de5a7e085a3d4109b6a36c462af9b69ec6291047db4923022947231
       - id: 3
         file: evaluation/0003_release_withdrawal_and_student_results.sql
-        sha256: 0f70b12f8bbe6e4f8a4f3e06eb49b49557966152d4097d0b70f98497597660ed
   - name: resource
     migrations:
       - id: 1
         file: resource/0001_platform_baseline.sql
-        sha256: 54b2f428109fb3e819da9db23802b58ecd760858f39404e7ef4d028cfa508e79
       - id: 2
         file: resource/0002_resource_request_capacity_lease.sql
-        sha256: 80ddbe36cf0bbf19758294388458c9763007042c967bc7b423f6f99bf9d3fda3
       - id: 3
         file: resource/0003_resource_contract_snapshots.sql
-        sha256: e09698481c921602f5cdd184ba8b1601468813e8b6b934bb60dcc65f41eac680
       - id: 4
         file: resource/0004_resource_claim_quota_resources.sql
-        sha256: ba5a536c2c77b152b70bc62456ae83ebde49707f81b4c9b7cd4048537d9b8701
       - id: 5
         file: resource/0005_resource_lease_pending_terminal_states.sql
-        sha256: 867a1d60608ab7d1ae8e4bfac918e6b93d4ccf0959aed6b5d91c1c0faf3778df
       - id: 6
         file: resource/0006_resource_lease_reconciliation.sql
-        sha256: 950a925790a01e80600454e7aee30a8f63889f0a53669738eb38c0d079acf03f

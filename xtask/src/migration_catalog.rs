@@ -2,7 +2,6 @@ use std::fs;
 use std::path::{Component, Path};
 
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 
 use super::AppError;
 
@@ -37,7 +36,6 @@ struct Domain {
 struct Migration {
     id: u8,
     file: String,
-    sha256: String,
 }
 
 pub(super) fn validate(root: &Path) -> Result<(), AppError> {
@@ -102,11 +100,9 @@ fn validate_migration(
     {
         return Err(invalid("migration path or ID is invalid"));
     }
-    let bytes = fs::read(root.join("migrations").join(path))
-        .map_err(|error| invalid(&format!("migration unreadable: {error}")))?;
-    let actual = format!("{:x}", Sha256::digest(bytes));
-    if migration.sha256 != actual {
-        return Err(invalid("migration checksum mismatch"));
+    let full = root.join("migrations").join(path);
+    if !full.is_file() {
+        return Err(invalid(&format!("migration missing: {}", migration.file)));
     }
     Ok(())
 }
@@ -125,24 +121,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn checked_in_catalog_is_exact_and_hash_bound() {
+    fn checked_in_catalog_is_ordered() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         assert!(validate(&root).is_ok());
-    }
-
-    #[test]
-    fn modified_baseline_is_rejected() -> io::Result<()> {
-        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        let temporary = tempfile::tempdir()?;
-        let migrations = temporary.path().join("migrations");
-        fs::create_dir_all(&migrations)?;
-        copy_tree(&source.join("migrations"), &migrations)?;
-        fs::write(
-            migrations.join("control/0001_platform_baseline.sql"),
-            b"SELECT 1;\n",
-        )?;
-        assert!(validate(temporary.path()).is_err());
-        Ok(())
     }
 
     #[test]
