@@ -2,8 +2,8 @@
 
 use std::net::Ipv4Addr;
 
-use contracts::Sha256Digest;
 use contracts::evaluation::FactAssertion;
+use persistence_sqlx::Sha256Digest;
 use evaluation_service::ansible_probe::{
     ANSIBLE_PROBE_EVIDENCE_RECEIPT_SCHEMA_VERSION, ANSIBLE_PROBE_EVIDENCE_SCHEMA_VERSION,
     ANSIBLE_PROBE_EXECUTION_SCHEMA_VERSION, AnsibleProbeAssertionStatus, AnsibleProbeError,

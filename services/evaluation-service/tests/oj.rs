@@ -1,8 +1,8 @@
 //! Deterministic OJ checker, aggregation, and evidence-boundary tests.
 
-use std::str::FromStr;
+use std::str::FromStr as _;
 
-use contracts::Sha256Digest;
+use persistence_sqlx::Sha256Digest;
 use evaluation_service::oj::{
     OJ_EVIDENCE_SCHEMA_VERSION, OjCaseBinding, OjCaseEvidence, OjCaseStatus, OjCheckerKind,
     OjError, OjExecutionEvidence, OjExecutionLimits, OjExecutionPhase, OjExecutionRequest,

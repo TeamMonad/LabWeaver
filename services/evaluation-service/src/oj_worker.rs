@@ -452,6 +452,12 @@ pub fn run_oj_compile_exec() -> Result<(), OjWorkerError> {
     }
 }
 
+#[cfg(not(unix))]
+#[allow(clippy::missing_errors_doc)]
+pub fn run_oj_compile_exec() -> Result<(), OjWorkerError> {
+    Err(OjWorkerError::ProcessSpawn)
+}
+
 fn create_helper_ready(path: &Path) -> Result<fs::File, OjWorkerError> {
     fs::OpenOptions::new()
         .write(true)

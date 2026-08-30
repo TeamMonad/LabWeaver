@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use contracts::Sha256Digest;
+use persistence_sqlx::Sha256Digest;
 use evaluation_service::{
     oj::{
         OjCaseBinding, OjCheckerKind, OjExecutionLimits, OjExecutionPhase, OjExecutionRequest,

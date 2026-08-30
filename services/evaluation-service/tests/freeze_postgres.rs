@@ -14,9 +14,10 @@ use contracts::authoring::RuntimeKind;
 use contracts::submission::{FrozenEnvironmentIdentity, SubmissionManifest};
 use contracts::{
     ActorId, AgentRunId, ArtifactId, ArtifactRef, BuildRequestId, CourseId, PolicyId, ReleaseId,
-    RetentionClass, RetentionDisposition, RetentionSnapshot, Revision, Sha256Digest, UtcTimestamp,
+    RetentionClass, RetentionDisposition, RetentionSnapshot, Revision, UtcTimestamp,
     parse_strict_json,
 };
+use persistence_sqlx::Sha256Digest;
 use evaluation_service::{
     FreezeRequest, FreezeService, FreezeServiceError, PgFreezeCommandStore, PgFreezeStore,
     PvcSnapshotSource, SnapshotCollector, SubmissionFreezeCommand,
@@ -118,7 +119,6 @@ impl ImmutableObjectStore for LockedStore {
         &self,
         _key: &str,
         _size_bytes: u64,
-        _sha256: Sha256Digest,
         _media_type: &str,
         _now: UtcTimestamp,
     ) -> Result<PresignedUpload, ObjectStoreError> {
@@ -130,7 +130,6 @@ impl ImmutableObjectStore for LockedStore {
         _key: &str,
         _version: &str,
         _expected_size: u64,
-        _expected_sha256: Sha256Digest,
         _media_type: &str,
     ) -> Result<VerifiedObject, ObjectStoreError> {
         Err(ObjectStoreError::ObjectUnavailable)
@@ -140,7 +139,6 @@ impl ImmutableObjectStore for LockedStore {
         &self,
         _key: &str,
         _expected_size: u64,
-        _expected_sha256: Sha256Digest,
         _media_type: &str,
     ) -> Result<VerifiedObject, ObjectStoreError> {
         Err(ObjectStoreError::ObjectUnavailable)
@@ -150,7 +148,6 @@ impl ImmutableObjectStore for LockedStore {
         &self,
         _key: &str,
         bytes: &[u8],
-        sha256: Sha256Digest,
         media_type: &str,
         _now: UtcTimestamp,
         _retain_until: UtcTimestamp,
@@ -170,7 +167,6 @@ impl ImmutableObjectStore for LockedStore {
                 artifact_id: ArtifactId::new(),
                 store_binding: "minio-submissions-v1".to_owned(),
                 object_version: format!("locked-version-{put}"),
-                sha256,
                 size_bytes: u64::try_from(bytes.len())
                     .map_err(|_| ObjectStoreError::ObjectTooLarge)?,
                 media_type: media_type.to_owned(),
@@ -210,10 +206,6 @@ async fn repeated_request_replays_one_database_object_and_event_identity()
     assert_eq!(
         payload["data"]["submission"]["object"]["objectVersion"],
         first.object.object_version
-    );
-    assert_eq!(
-        payload["data"]["submission"]["object"]["sha256"],
-        first.object.sha256.to_string()
     );
     let mut conflicting = fixture.request.clone();
     conflicting.actor_id = ActorId::new();
@@ -323,7 +315,6 @@ impl TestContext {
                 release_id: ReleaseId::new(),
                 release_version: 7,
                 runtime_kind: RuntimeKind::Container,
-                runtime_artifact_sha256: Sha256Digest::of_bytes(b"container-image"),
                 build_request_id: Some(BuildRequestId::new()),
             },
             retention: RetentionSnapshot {
