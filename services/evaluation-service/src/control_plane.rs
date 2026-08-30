@@ -1,5 +1,10 @@
 //! PostgreSQL-authoritative Evaluation release, run and `StepRun` control plane.
-#![allow(clippy::needless_pass_by_value, clippy::useless_conversion, clippy::all, dead_code, unused, 
+#![allow(
+    clippy::needless_pass_by_value,
+    clippy::useless_conversion,
+    clippy::all,
+    dead_code,
+    unused,
     unused_imports,
     missing_docs,
     clippy::missing_errors_doc,
@@ -170,7 +175,8 @@ impl PgEvaluationControlStore {
             withdrawn_at: None,
             withdrawal_diagnostic_code: None,
         };
-        let release_identity_sha256 = Sha256Digest::of_canonical(&release).map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+        let release_identity_sha256 = Sha256Digest::of_canonical(&release)
+            .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
         let contract = serde_json::to_value(&release)
             .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
         sqlx::query(
@@ -198,14 +204,7 @@ impl PgEvaluationControlStore {
         .execute(&mut *transaction)
         .await
         .map_err(map_unique)?;
-        enqueue_release_published(
-            &mut transaction,
-            &release,
-    
-            now,
-            trace_id,
-        )
-        .await?;
+        enqueue_release_published(&mut transaction, &release, now, trace_id).await?;
         IdempotencyStore::complete(
             &mut transaction,
             Domain::Evaluation,
@@ -938,9 +937,7 @@ impl PgEvaluationControlStore {
         .bind(&worker_san_uri)
         .bind(&run.identity.runtime_identity.provider_binding)
         .bind(&run.identity.runtime_identity.runner_image)
-        .bind(
-            Sha256Digest::of_bytes(b"runtime-artifact").to_string(),
-        )
+        .bind(Sha256Digest::of_bytes(b"runtime-artifact").to_string())
         .bind(runtime_identity_sha256.to_string())
         .bind(lease_token)
         .bind(lease_expires_at)
@@ -1198,8 +1195,7 @@ async fn verify_frozen_submission(
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or(EvaluationControlStoreError::FrozenSubmissionNotFound)?;
-    if row.try_get::<Uuid, _>("course_id")? != request.course_id.as_uuid()
-    {
+    if row.try_get::<Uuid, _>("course_id")? != request.course_id.as_uuid() {
         return Err(EvaluationControlStoreError::IdentityMismatch);
     }
     Ok(())

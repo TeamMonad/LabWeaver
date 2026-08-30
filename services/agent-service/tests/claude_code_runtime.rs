@@ -25,11 +25,11 @@ use contracts::authoring::{
 };
 use contracts::evaluation::EvaluationSpec;
 use contracts::http::{CreateAgentRunRequest, IdempotencyKey};
-use persistence_sqlx::Sha256Digest;
 use contracts::{
     ArtifactId, ArtifactRef, CourseId, PolicyId, RetentionClass, RetentionDisposition,
     RetentionSnapshot, Revision, UtcTimestamp,
 };
+use persistence_sqlx::Sha256Digest;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};

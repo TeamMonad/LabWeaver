@@ -17,11 +17,11 @@ use contracts::{
     RetentionClass, RetentionDisposition, RetentionSnapshot, Revision, UtcTimestamp,
     parse_strict_json,
 };
-use persistence_sqlx::Sha256Digest;
 use evaluation_service::{
     FreezeRequest, FreezeService, FreezeServiceError, PgFreezeCommandStore, PgFreezeStore,
     PvcSnapshotSource, SnapshotCollector, SubmissionFreezeCommand,
 };
+use persistence_sqlx::Sha256Digest;
 use sqlx::postgres::PgPoolOptions;
 use tempfile::tempdir;
 use testcontainers::{ImageExt, runners::AsyncRunner};

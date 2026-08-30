@@ -18,11 +18,11 @@ use contracts::{
         InternalPublishEvaluationReleaseRequest, InternalWithdrawEvaluationReleaseRequest,
     },
 };
-use persistence_sqlx::Sha256Digest;
 use evaluation_service::{
     EvaluationControlStoreError, EvaluationReleaseReservation, EvaluationRunReservation,
     EvaluationStepLease, PgEvaluationControlStore,
 };
+use persistence_sqlx::Sha256Digest;
 use sqlx::Row;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::{ImageExt, runners::AsyncRunner};

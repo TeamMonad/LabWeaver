@@ -19,8 +19,8 @@ use contracts::{
     ActorId, AgentRunId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId,
     CourseId, EventId, ImageArtifactId, PolicyId, ReleaseId, Revision, UtcTimestamp,
 };
-use persistence_sqlx::Sha256Digest;
 use control_service::{ContainerBuildPolicy, ControlConfig, ControlError, ControlService};
+use persistence_sqlx::Sha256Digest;
 use sqlx::{Row, postgres::PgPoolOptions};
 use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;

@@ -1,5 +1,10 @@
 //! Real `PostgreSQL` proof for build lease heartbeat, live cancellation, cleanup, and Outbox.
-#![allow(unused_imports, clippy::all, clippy::pedantic, dead_code, unused, 
+#![allow(
+    unused_imports,
+    clippy::all,
+    clippy::pedantic,
+    dead_code,
+    unused,
     clippy::expect_used,
     clippy::too_many_lines,
     reason = "one live database test keeps the complete lease and uses fixed validated fixtures"
@@ -32,11 +37,11 @@ use contracts::http::{
     InternalAgentBuildStatusQuery,
 };
 use contracts::supply_chain::{BuildNetworkPolicy, BuildRequest};
-use persistence_sqlx::Sha256Digest;
 use contracts::{
     ActorId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId, CourseId, EventId,
     Revision, Sequence, UtcTimestamp,
 };
+use persistence_sqlx::Sha256Digest;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;

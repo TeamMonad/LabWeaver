@@ -13,11 +13,13 @@ use contracts::authoring::{
 use contracts::events::{AgentRunEvent, CloudEvent, DATA_SCHEMA_BASE, SPEC_VERSION, subjects};
 use contracts::http::InternalAgentRunOutcome;
 use contracts::supply_chain::BuildNetworkPolicy;
-use contracts::{AgentRunId, CourseId, EventId, PolicyId, ProblemPackageId, Revision, Sequence, UtcTimestamp};
-use persistence_sqlx::Sha256Digest;
+use contracts::{
+    AgentRunId, CourseId, EventId, PolicyId, ProblemPackageId, Revision, Sequence, UtcTimestamp,
+};
 use control_service::clients::DownstreamError;
 use control_service::messaging::{AgentAuthority, AgentRunConsumer};
 use control_service::{ContainerBuildPolicy, ControlConfig, ControlService};
+use persistence_sqlx::Sha256Digest;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::{GenericImage, ImageExt, runners::AsyncRunner};

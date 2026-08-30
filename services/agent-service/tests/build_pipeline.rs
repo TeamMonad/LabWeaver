@@ -1,5 +1,10 @@
 //! Deterministic build-pipeline acceptance and failure-path tests.
-#![allow(unused_imports, clippy::all, clippy::pedantic, dead_code, unused, 
+#![allow(
+    unused_imports,
+    clippy::all,
+    clippy::pedantic,
+    dead_code,
+    unused,
     clippy::expect_used,
     clippy::panic,
     reason = "test fixtures use explicit assertion messages for invalid setup"
@@ -16,7 +21,6 @@ use agent_service::build_pipeline::{
     PublishedImage,
 };
 use async_trait::async_trait;
-use persistence_sqlx::Sha256Digest;
 use contracts::authoring::{CandidateApproval, CandidateDecision};
 use contracts::events::AgentBuildRequested;
 use contracts::supply_chain::{BuildNetworkPolicy, BuildRequest, ImageArtifact};
@@ -24,6 +28,7 @@ use contracts::{
     ActorId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId, CourseId, Revision,
     UtcTimestamp,
 };
+use persistence_sqlx::Sha256Digest;
 use uuid::Uuid;
 
 const DIGEST_HEX: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -176,14 +181,14 @@ async fn successful_build_preserves_digest_identity() {
         .await
         .expect("same command succeeds deterministically");
 
-    assert_eq!(first.build_identity, BuildIdentity(persistence_sqlx::Sha256Digest::of_bytes(b"command")));
+    assert_eq!(
+        first.build_identity,
+        BuildIdentity(persistence_sqlx::Sha256Digest::of_bytes(b"command"))
+    );
     assert!(first.registry_project.private);
     assert!(first.registry_project.storage_quota_bytes > 0);
     assert_eq!(first.build_identity, second.build_identity);
-    assert_eq!(
-        first.artifact.id(),
-        second.artifact.id()
-    );
+    assert_eq!(first.artifact.id(), second.artifact.id());
     assert!(matches!(first.artifact, ImageArtifact::Container { .. }));
     assert_eq!(
         calls

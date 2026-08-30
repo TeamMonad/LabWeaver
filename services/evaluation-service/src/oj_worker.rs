@@ -1,14 +1,22 @@
 //! Shell-free C++17 worker executed only inside the isolated OJ Kubernetes Job.
-#![allow(clippy::needless_pass_by_value, clippy::useless_conversion, clippy::all, dead_code, unused, 
+#![allow(
+    clippy::needless_pass_by_value,
+    clippy::useless_conversion,
+    clippy::all,
+    dead_code,
+    unused,
     unused_imports,
     missing_docs,
     clippy::too_many_lines,
     reason = "the closed worker path is intentionally explicit and stable diagnostics define failures"
 )]
 
+#[cfg(unix)]
+use std::ffi::CString;
+#[cfg(unix)]
+use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::{
-    env,
-    fs,
+    env, fs,
     io::Write as _,
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
@@ -18,10 +26,6 @@ use std::{
     },
     time::{Duration, Instant},
 };
-#[cfg(unix)]
-use std::ffi::CString;
-#[cfg(unix)]
-use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 
 #[cfg(target_os = "linux")]
 use landlock::{

@@ -5,11 +5,9 @@ use std::time::Duration;
 use contracts::events::{
     CloudEvent, DATA_SCHEMA_BASE, LabReleaseApproved, ReleaseWithdrawn, SPEC_VERSION, subjects,
 };
-use contracts::{
-    ActorId, CourseId, EventId, ReleaseId, Revision, Sequence, UtcTimestamp,
-};
-use persistence_sqlx::Sha256Digest;
+use contracts::{ActorId, CourseId, EventId, ReleaseId, Revision, Sequence, UtcTimestamp};
 use control_service::messaging::ControlOutboxDispatcher;
+use persistence_sqlx::Sha256Digest;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::{GenericImage, ImageExt, runners::AsyncRunner};

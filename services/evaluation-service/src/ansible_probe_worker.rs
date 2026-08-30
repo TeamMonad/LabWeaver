@@ -14,7 +14,12 @@
 //! `linux-nginx-probe-v1` runs against one host (the target IPv4) and contains
 //! exactly one task named `labweaver_probe_facts` whose per-host result carries
 //! a flat `labweaver_probe_facts` object of fact name to boolean or string.
-#![allow(clippy::needless_pass_by_value, clippy::useless_conversion, clippy::all, dead_code, unused, 
+#![allow(
+    clippy::needless_pass_by_value,
+    clippy::useless_conversion,
+    clippy::all,
+    dead_code,
+    unused,
     dead_code,
     unused_variables,
     unused_imports,
@@ -26,6 +31,8 @@
     reason = "the closed worker path is intentionally explicit and stable diagnostics define failures"
 )]
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt as _;
 use std::{
     env, fs,
     io::Write as _,
@@ -37,8 +44,6 @@ use std::{
     },
     time::{Duration, Instant},
 };
-#[cfg(unix)]
-use std::os::unix::process::CommandExt as _;
 
 #[cfg(unix)]
 #[cfg(unix)]
@@ -702,9 +707,9 @@ async fn execute_process(
             (status, stdout, stderr, false)
         } else {
             #[cfg(unix)]
-    {
-        kill_process_group(child_id)?;
-    }
+            {
+                kill_process_group(child_id)?;
+            }
             let status = child
                 .wait()
                 .await
@@ -727,8 +732,6 @@ async fn execute_process(
 #[cfg(unix)]
 #[cfg(unix)]
 fn kill_process_group(process_id: u32) -> Result<(), AnsibleProbeWorkerError> {
-
-
     let process_group =
         Pid::from_raw(i32::try_from(process_id).map_err(|_| AnsibleProbeWorkerError::ProcessIo)?);
     match killpg(process_group, Signal::SIGKILL) {
