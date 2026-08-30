@@ -3067,7 +3067,8 @@ pub enum ControlError {
 #[cfg(test)]
 mod tests {
     use contracts::http::{CreateProblemPackageUploadRequest, ProblemPackageUploadFile};
-    use contracts::{PolicyId, Revision, Sha256Digest};
+    use contracts::{PolicyId, Revision};
+    use persistence_sqlx::Sha256Digest;
 
     use contracts::supply_chain::BuildNetworkPolicy;
 
@@ -3111,7 +3112,6 @@ mod tests {
                         "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
                     )
                     .to_owned(),
-                    disk_sha256: Sha256Digest::of_bytes(b"vm-disk"),
                     capacity_bytes: 10_737_418_240,
                 },
                 format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
@@ -3133,7 +3133,6 @@ mod tests {
         let file = ProblemPackageUploadFile {
             path: "statement.md".to_owned(),
             size_bytes: 64,
-            sha256: Sha256Digest::of_bytes(b"x"),
             media_type: "text/markdown".to_owned(),
         };
         let request = CreateProblemPackageUploadRequest {

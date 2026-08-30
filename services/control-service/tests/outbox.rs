@@ -6,8 +6,9 @@ use contracts::events::{
     CloudEvent, DATA_SCHEMA_BASE, LabReleaseApproved, ReleaseWithdrawn, SPEC_VERSION, subjects,
 };
 use contracts::{
-    ActorId, CourseId, EventId, ReleaseId, Revision, Sequence, Sha256Digest, UtcTimestamp,
+    ActorId, CourseId, EventId, ReleaseId, Revision, Sequence, UtcTimestamp,
 };
+use persistence_sqlx::Sha256Digest;
 use control_service::messaging::ControlOutboxDispatcher;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::core::{IntoContainerPort, WaitFor};
@@ -50,7 +51,7 @@ async fn release_and_withdrawal_are_marked_published_only_after_jetstream_ack()
     let published_id = EventId::new();
     let withdrawn_id = EventId::new();
     let now = "2026-07-16T08:00:00.000Z".parse::<UtcTimestamp>()?;
-    let digest = Sha256Digest::of_bytes(b"release-artifact");
+    let _digest = Sha256Digest::of_bytes(b"release-artifact");
     let published = CloudEvent {
         specversion: SPEC_VERSION.to_owned(),
         id: published_id,
@@ -69,8 +70,6 @@ async fn release_and_withdrawal_are_marked_published_only_after_jetstream_ack()
         data: LabReleaseApproved {
             release_id,
             version: 1,
-            environment_spec_sha256: digest,
-            artifact_sha256: digest,
         },
     };
     let withdrawn = CloudEvent {

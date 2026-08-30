@@ -13,10 +13,8 @@ use contracts::authoring::{
 use contracts::events::{AgentRunEvent, CloudEvent, DATA_SCHEMA_BASE, SPEC_VERSION, subjects};
 use contracts::http::InternalAgentRunOutcome;
 use contracts::supply_chain::BuildNetworkPolicy;
-use contracts::{
-    AgentRunId, CourseId, EventId, PolicyId, ProblemPackageId, Revision, Sequence, Sha256Digest,
-    UtcTimestamp,
-};
+use contracts::{AgentRunId, CourseId, EventId, PolicyId, ProblemPackageId, Revision, Sequence, UtcTimestamp};
+use persistence_sqlx::Sha256Digest;
 use control_service::clients::DownstreamError;
 use control_service::messaging::{AgentAuthority, AgentRunConsumer};
 use control_service::{ContainerBuildPolicy, ControlConfig, ControlService};
@@ -233,8 +231,6 @@ fn failed_outcome(
         track.attempts.push(AgentAttempt {
             number: 1,
             state: AgentAttemptState::Failed,
-            input_sha256: Sha256Digest::of_bytes(b"input"),
-            output_sha256: None,
             checkpoint: None,
             usage: LlmUsage {
                 input_tokens: 0,
@@ -247,16 +243,10 @@ fn failed_outcome(
         });
     }
     run.validate()?;
-    let outcome_sha256 = Sha256Digest::of_canonical(&serde_json::json!({
-        "run": run,
-        "environmentCandidate": null,
-        "evaluationCandidate": null,
-    }))?;
     let outcome = InternalAgentRunOutcome {
         run,
         environment_candidate: None,
         evaluation_candidate: None,
-        outcome_sha256,
     };
     outcome.validate()?;
     Ok(outcome)
@@ -330,7 +320,6 @@ impl ImmutableObjectStore for UnusedObjects {
         &self,
         _: &str,
         _: u64,
-        _: Sha256Digest,
         _: &str,
         _: UtcTimestamp,
     ) -> Result<PresignedUpload, ObjectStoreError> {
@@ -342,7 +331,6 @@ impl ImmutableObjectStore for UnusedObjects {
         _: &str,
         _: &str,
         _: u64,
-        _: Sha256Digest,
         _: &str,
     ) -> Result<VerifiedObject, ObjectStoreError> {
         Err(ObjectStoreError::ObjectUnavailable)
@@ -352,7 +340,6 @@ impl ImmutableObjectStore for UnusedObjects {
         &self,
         _: &str,
         _: u64,
-        _: Sha256Digest,
         _: &str,
     ) -> Result<VerifiedObject, ObjectStoreError> {
         Err(ObjectStoreError::ObjectUnavailable)
@@ -398,7 +385,7 @@ fn config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
                     "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
                 )
                 .to_owned(),
-                disk_sha256: Sha256Digest::of_bytes(b"vm-disk"),
+
                 capacity_bytes: 10_737_418_240,
             },
             format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
