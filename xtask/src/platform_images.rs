@@ -943,6 +943,7 @@ fn validate_trivy_database_reference(reference: &str, expected: &str) -> Result<
     Ok(())
 }
 
+#[allow(dead_code)]
 #[cfg(target_os = "linux")]
 fn vulnerability_counts(bytes: &[u8]) -> Result<(u64, u64, u64), AppError> {
     let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|error| AppError::Io {
