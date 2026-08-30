@@ -806,7 +806,6 @@ impl KubernetesContainerExecutor {
         document: Value,
     ) -> Result<ArtifactRef, ProviderFailure> {
         let bytes = serde_json::to_vec(&document).map_err(|_| invalid_observation())?;
-        let sha256 = Sha256Digest::of_bytes(&bytes);
         let key = self
             .objects
             .scoped_key(&format!("cleanup/{environment_id}/{request_id}.json"))

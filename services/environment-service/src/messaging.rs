@@ -17,8 +17,8 @@ use contracts::events::{
     CloudEvent, EVENT_CONTRACTS, ReleasePublished, ReleaseWithdrawn, subjects,
 };
 use contracts::{EnvironmentId, EventId, OperationId, Revision};
-use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use futures_util::StreamExt;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -147,6 +147,7 @@ impl NatsResourceLeaseVerifier {
         })
     }
 
+    #[allow(clippy::expect_used)]
     pub(crate) async fn verify(
         &self,
         request: EnvironmentLeaseVerificationRequest,

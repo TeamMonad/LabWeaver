@@ -297,7 +297,9 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
                 true,
             ));
         }
-        let identity = BuildIdentity(Sha256Digest::of_bytes(command.request.id.as_uuid().as_bytes()));
+        let identity = BuildIdentity(Sha256Digest::of_bytes(
+            command.request.id.as_uuid().as_bytes(),
+        ));
         let execution_timeout = Duration::from_millis(command.request.max_duration_milliseconds);
         if fence.deadline_at
             != add_milliseconds(started_at, command.request.max_duration_milliseconds)?

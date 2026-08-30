@@ -1954,16 +1954,14 @@ impl ClaudeCodeRuntimeError {
     pub const fn diagnostic_code(self) -> &'static str {
         match self {
             Self::ConfigurationInvalid => diagnostic::INVALID_REQUEST,
-            Self::InputLimitExceeded | Self::BudgetExceeded => {
-                diagnostic::RESOURCE_EXHAUSTED
-            }
+            Self::InputLimitExceeded | Self::BudgetExceeded => diagnostic::RESOURCE_EXHAUSTED,
             Self::RuntimeUnavailable
             | Self::ExecutionFailed
             | Self::ToolDenied
             | Self::UpstreamUnavailable => diagnostic::PROVIDER_UNAVAILABLE,
-            Self::ProtocolInvalid
-            | Self::SchemaInvalid
-            | Self::EnvironmentClassMismatch => diagnostic::EVIDENCE_INVALID,
+            Self::ProtocolInvalid | Self::SchemaInvalid | Self::EnvironmentClassMismatch => {
+                diagnostic::EVIDENCE_INVALID
+            }
             Self::ProtectedField => diagnostic::ACCESS_DENIED,
             Self::OutputLimitExceeded => diagnostic::RESOURCE_EXHAUSTED,
             Self::TimedOut => diagnostic::PROVIDER_TIMEOUT,

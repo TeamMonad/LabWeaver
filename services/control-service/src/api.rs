@@ -28,7 +28,8 @@ use contracts::{
     ActorId, AgentRunId, AuthorizationDecisionRequest, AuthorizationScope, BffSessionId,
     CandidateId, CourseId, DiagnosticCode, EvaluationReleaseId, EventId, OperationId,
     ProblemDetails, ProblemPackageId, ReleaseId, Revision, StreamSequence, UploadSessionId,
-    UtcTimestamp};
+    UtcTimestamp,
+};
 use futures_util::stream;
 use serde::Deserialize;
 use time::OffsetDateTime;

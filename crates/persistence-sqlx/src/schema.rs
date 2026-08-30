@@ -172,7 +172,9 @@ impl SchemaVerifier {
                     SchemaStatus::Unknown
                 };
             }
-            if Sha256Digest::from_str(&hash).ok() != Some(migration.sha256) {
+            if let Some(expected) = &migration.sha256
+                && Sha256Digest::from_str(&hash).ok().as_ref() != Some(expected)
+            {
                 return SchemaStatus::ChecksumMismatch;
             }
             if outcome != "applied" {

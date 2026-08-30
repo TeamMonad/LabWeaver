@@ -21,13 +21,13 @@ use contracts::{
     ActorId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId, ImageArtifactId,
     PolicyId, ReleaseId, Revision, UtcTimestamp,
 };
-use persistence_sqlx::Sha256Digest;
 use environment_service::{
     CONTAINER_BACKEND_PROTOCOL_VERSION, ContainerApplyObservation, ContainerBackendFence,
     ContainerProvider, ContainerProviderBackend, ContainerProviderConfiguration,
     ContainerReleasePolicy, ContainerReleaseResolver, ContainerResourcePlan, EnvironmentProvider,
     ProviderFailure, ReconcileAction, ReleaseProjectionError, ResolvedContainerRelease,
 };
+use persistence_sqlx::Sha256Digest;
 use serde_json::json;
 
 #[derive(Clone)]

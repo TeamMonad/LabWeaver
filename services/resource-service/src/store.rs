@@ -1762,8 +1762,7 @@ pub enum ResourceStoreError {
 )]
 mod tests {
     use contracts::resource::{CapacityClaim, CapacityClaimState, WorkloadResources};
-    use contracts::{
-        CapacityClaimId, ResourceApprovalId, ResourceRequestId, Revision};
+    use contracts::{CapacityClaimId, ResourceApprovalId, ResourceRequestId, Revision};
 
     use super::transition_claim;
 

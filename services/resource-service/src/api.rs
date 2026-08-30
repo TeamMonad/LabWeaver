@@ -89,7 +89,7 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
 
 /// Serves Resource API routes over plain HTTP for private single-university delivery.
 ///
-/// The outer gateway mTLS is optionally kept at the edge; inner hops are behind NetworkPolicy.
+/// The outer gateway mTLS is optionally kept at the edge; inner hops are behind `NetworkPolicy`.
 pub async fn serve_mtls(
     listener: tokio::net::TcpListener,
     router: Router,
@@ -144,9 +144,7 @@ pub async fn serve_plain(
             }
         },
     ));
-    axum::serve(listener, service)
-        .await
-        .map_err(std::io::Error::from)
+    axum::serve(listener, service).await
 }
 
 #[derive(Debug, Deserialize)]

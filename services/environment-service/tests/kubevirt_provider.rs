@@ -26,7 +26,6 @@ use contracts::{
     ActorId, ApprovalId, ArtifactId, ArtifactRef, CandidateId, ImageArtifactId, PolicyId,
     ReleaseId, Revision, UtcTimestamp,
 };
-use persistence_sqlx::Sha256Digest;
 use environment_service::{
     ContainerReleaseResolver, EnvironmentProvider, KUBEVIRT_BACKEND_PROTOCOL_VERSION,
     KubeVirtBackendFence, KubeVirtCleanupPlan, KubeVirtObservationStore,
@@ -36,6 +35,7 @@ use environment_service::{
     KubeVirtStorageBinding, ProviderFailure, ReconcileAction, ReleaseProjectionError,
     ResolvedContainerRelease,
 };
+use persistence_sqlx::Sha256Digest;
 use serde_json::json;
 use uuid::Uuid;
 

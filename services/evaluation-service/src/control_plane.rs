@@ -6,8 +6,8 @@
     reason = "the transaction fences and state derivation are intentionally colocated"
 )]
 
-use std::{collections::BTreeSet, str::FromStr, time::Duration};
-use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
+use persistence_sqlx::Sha256Digest;
+use std::{collections::BTreeSet, str::FromStr, time::Duration}; // internal persistence hash, not contract hash
 
 use contracts::{
     ActorId, CourseId, DiagnosticCode, EvaluationReleaseId, EvaluationRunId, EvaluationStepRunId,
@@ -16,7 +16,8 @@ use contracts::{
         EVALUATION_RELEASE_SCHEMA_VERSION, EVALUATION_RUN_SCHEMA_VERSION, EvaluationRelease,
         EvaluationReleaseState, EvaluationRun, EvaluationRunState, EvaluationRuntimeIdentity,
         EvaluationStepCompletion, EvaluationStepFailurePolicy, EvaluationStepRole,
-        EvaluationStepRun, EvaluationStepRunState, StudentEvaluationResult},
+        EvaluationStepRun, EvaluationStepRunState, StudentEvaluationResult,
+    },
     events::{
         CloudEvent, EVENT_CONTRACTS, EvaluationReleasePublished, EvaluationRunEvent,
         EvaluationStepRunEvent, EventContract, SPEC_VERSION, subjects,

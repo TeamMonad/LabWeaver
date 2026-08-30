@@ -4,15 +4,15 @@
     reason = "the versioned contracts and stable diagnostics define the external surface"
 )]
 
-use std::str::FromStr;
 use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
+use std::str::FromStr;
 use std::time::Duration;
 
 use contracts::events::{CloudEvent, EVENT_CONTRACTS, SPEC_VERSION, SubmissionFrozen, subjects};
 use contracts::submission::FrozenSubmission;
 use contracts::{
-    CourseId, EnvironmentId, EventId, FrozenSubmissionId, Revision, Sequence,
-    UtcTimestamp};
+    CourseId, EnvironmentId, EventId, FrozenSubmissionId, Revision, Sequence, UtcTimestamp,
+};
 use persistence_sqlx::{Domain, OutboxStore};
 use serde_json::Value;
 use sqlx::{PgPool, Row};

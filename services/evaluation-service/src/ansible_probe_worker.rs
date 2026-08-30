@@ -33,12 +33,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use nix::{
     errno::Errno,
     sys::signal::{Signal, killpg},
     unistd::Pid,
 };
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use russh::client;
 use russh::keys::ssh_key::{Certificate, PrivateKey};
 use serde_json::Value;
@@ -788,8 +788,8 @@ mod tests {
     use std::net::Ipv4Addr;
     use std::path::PathBuf;
 
-    use persistence_sqlx::Sha256Digest;
     use contracts::evaluation::FactAssertion;
+    use persistence_sqlx::Sha256Digest;
     use serde_json::json;
     use uuid::Uuid;
 

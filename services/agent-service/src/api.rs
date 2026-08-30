@@ -14,8 +14,7 @@ use contracts::http::{
     InternalAgentRunMutationRequest, InternalAgentRunOutcome, InternalCreateAgentRunRequest,
     InternalImageArtifactResolution,
 };
-use contracts::{
-    AgentRunId, DiagnosticCode, ImageArtifactId, ProblemDetails, UtcTimestamp};
+use contracts::{AgentRunId, DiagnosticCode, ImageArtifactId, ProblemDetails, UtcTimestamp};
 use serde_json::Value;
 use sqlx::Row;
 use time::OffsetDateTime;

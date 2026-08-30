@@ -4,8 +4,8 @@
     reason = "the versioned contracts and stable diagnostics define the external surface"
 )]
 
-use std::collections::BTreeMap;
 use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -15,7 +15,8 @@ use contracts::submission::{
     FrozenEnvironmentIdentity, FrozenSubmission, SubmissionManifest, SubmissionSource,
 };
 use contracts::{
-    ActorId, AgentRunId, CourseId, FrozenSubmissionId, RetentionClass, RetentionSnapshot, Revision};
+    ActorId, AgentRunId, CourseId, FrozenSubmissionId, RetentionClass, RetentionSnapshot, Revision,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::collector::{CollectError, SnapshotCollector, SnapshotSource, SnapshotTransport};

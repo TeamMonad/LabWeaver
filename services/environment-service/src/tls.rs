@@ -5,6 +5,7 @@ use tokio::net::TcpListener;
 
 use crate::resolver::VerifiedCallerIdentity;
 
+#[allow(clippy::expect_used, clippy::missing_panics_doc)]
 /// Stub config for private single-university deployment (plain HTTP, no mTLS).
 #[derive(Clone, Debug, Default)]
 pub struct MtlsConfig;
@@ -22,7 +23,8 @@ impl MtlsConfig {
 
 /// Serves the owner resolver over plain HTTP and injects a private-tenant caller identity.
 ///
-/// The previous mTLS handshake is stubbed out; NetworkPolicy is the trust boundary.
+/// The previous mTLS handshake is stubbed out; `NetworkPolicy` is the trust boundary.
+#[allow(clippy::expect_used, clippy::missing_panics_doc)]
 pub async fn serve_owner_resolver_mtls<F>(
     listener: TcpListener,
     router: Router,
@@ -37,9 +39,8 @@ where
         "spiffe://labweaver/environment-service".to_owned(),
     ])
     .unwrap_or_else(|_| {
-        // Fallback dummy if validation fails (should not happen).
-        VerifiedCallerIdentity::from_mtls_peer_sans(vec!["private".to_owned()])
-            .expect("dummy SAN must be valid")
+        VerifiedCallerIdentity::from_mtls_peer_sans(vec!["spiffe://labweaver/private".to_owned()])
+            .expect("private SAN must be valid")
     });
     let router = router.layer(Extension(identity));
     tokio::select! {

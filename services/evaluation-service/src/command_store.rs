@@ -5,15 +5,16 @@
     reason = "the internal queue is documented by ADR 0010 and stable diagnostics"
 )]
 
-use std::str::FromStr;
-use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
+use persistence_sqlx::Sha256Digest;
+use std::str::FromStr; // internal persistence hash, not contract hash
 
 use contracts::{
     ActorId, CourseId, DiagnosticCode, EnvironmentId, EventId, FrozenSubmissionId, OperationId,
     Revision, Sequence, UtcTimestamp,
     events::{
         CloudEvent, EVENT_CONTRACTS, EventContract, SPEC_VERSION, SubmissionFreezeRequested,
-        subjects},
+        subjects,
+    },
     http::OperationAccepted,
     submission::SubmissionManifest,
 };

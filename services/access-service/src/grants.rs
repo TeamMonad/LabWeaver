@@ -11,8 +11,8 @@ use axum::{
 };
 use contracts::{
     AccessGrantId, ActorId, ConsoleSessionId, CourseId, EndpointGrantId, EndpointId, EnvironmentId,
-    EventId, GatewaySessionId, PlatformRole, Revision, Sequence, SshPublicKeyId,
-    StreamSequence, UtcTimestamp,
+    EventId, GatewaySessionId, PlatformRole, Revision, Sequence, SshPublicKeyId, StreamSequence,
+    UtcTimestamp,
     access::{
         AccessGrant, AccessGrantSnapshot, AccessGrantState, AuthorizationDecision,
         AuthorizationDecisionSummary, CloseGatewaySessionRequest, CreateGatewaySessionRequest,
@@ -34,11 +34,11 @@ use contracts::{
     },
 };
 use futures_util::StreamExt;
+use persistence_sqlx::Sha256Digest;
 use rand::RngCore;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use persistence_sqlx::Sha256Digest;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use time::OffsetDateTime;

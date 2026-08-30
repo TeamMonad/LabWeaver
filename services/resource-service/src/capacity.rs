@@ -1079,7 +1079,8 @@ mod tests {
 
     use contracts::resource::{ResourceTarget, WorkloadResources};
     use contracts::{
-        ActorId, CourseId, EnvironmentId, ReleaseId, ResourceApprovalId, ResourceRequestId};
+        ActorId, CourseId, EnvironmentId, ReleaseId, ResourceApprovalId, ResourceRequestId,
+    };
 
     use super::*;
 

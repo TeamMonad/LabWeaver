@@ -441,10 +441,20 @@ impl MigrationCoordinator {
             );
             let migration_id = i64::try_from(migration.id)
                 .map_err(|_| PersistenceError::Catalog("Migration ID exceeds BIGINT".to_owned()))?;
+            let observed_sha256 = migration.sha256.as_ref().map_or_else(
+                || {
+                    let path =
+                        MigrationCatalog::migration_path(root, &migration.file).and_then(|p| {
+                            std::fs::read(p).map_err(|e| PersistenceError::Catalog(e.to_string()))
+                        });
+                    path.map(|bytes| Sha256Digest::of_bytes(&bytes).to_string())
+                },
+                |h| Ok(h.to_string()),
+            )?;
             sqlx::query(&history)
                 .bind(migration_id)
                 .bind(&migration.file)
-                .bind(migration.sha256.to_string())
+                .bind(observed_sha256)
                 .bind(&self.identity.job_id)
                 .bind(&self.identity.release_id)
                 .bind(catalog_hash.to_string())

@@ -4,8 +4,8 @@
     reason = "stable diagnostics and the contracts crate document the public integration surface"
 )]
 
-use std::str::FromStr;
 use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
+use std::str::FromStr;
 use std::time::Duration;
 
 use contracts::events::{
@@ -18,8 +18,8 @@ use contracts::http::{
 };
 use contracts::supply_chain::ImageArtifact;
 use contracts::{
-    BuildRequestId, CourseId, EventId, ImageArtifactId, Revision, Sequence,
-    UtcTimestamp};
+    BuildRequestId, CourseId, EventId, ImageArtifactId, Revision, Sequence, UtcTimestamp,
+};
 use persistence_sqlx::{
     Domain, IdempotencyDecision, IdempotencyStore, InboxDecision, InboxStore, OutboxStore,
 };

@@ -7,8 +7,8 @@
 use async_trait::async_trait;
 use contracts::BuildRequestId;
 use contracts::events::AgentBuildRequested;
-use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use futures_util::StreamExt;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{PgPool, Row};

@@ -1,7 +1,7 @@
 //! Durable idempotent `AgentRun` orchestration over the Agent-owned `PostgreSQL` schema.
 
-use std::collections::{BTreeMap, BTreeSet};
 use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -16,8 +16,8 @@ use contracts::events::{
 };
 use contracts::http::{CreateAgentRunRequest, IdempotencyKey};
 use contracts::{
-    AgentRunId, ArtifactId, CandidateId, CourseId, EventId, Revision, Sequence,
-    UtcTimestamp};
+    AgentRunId, ArtifactId, CandidateId, CourseId, EventId, Revision, Sequence, UtcTimestamp,
+};
 use persistence_sqlx::{Domain, IdempotencyDecision, IdempotencyStore, OutboxStore};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

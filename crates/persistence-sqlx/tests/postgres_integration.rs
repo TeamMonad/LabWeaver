@@ -9,7 +9,8 @@ use auth::{
     create_bff_session, load_bff_session, load_logout_hint, load_membership_snapshot,
     require_service_identity, revoke_bff_session, upsert_actor,
 };
-use contracts::{PlatformRole, Sha256Digest};
+use contracts::PlatformRole;
+use persistence_sqlx::Sha256Digest;
 use persistence_sqlx::{
     Domain, IdempotencyDecision, IdempotencyStore, InboxDecision, InboxStore, MigrationCatalog,
     MigrationCoordinator, MigrationIdentity, OutboxStore, SchemaStatus, SchemaVerifier,

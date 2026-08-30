@@ -1,5 +1,5 @@
-use std::net::IpAddr;
 use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
+use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,8 +15,7 @@ use contracts::environment::{
     EndpointHealth, EnvironmentEndpoint, EnvironmentInstance, ObservedEnvironmentState,
 };
 use contracts::supply_chain::{ImageArtifact, VirtualMachineBaseDisk, VirtualMachineDiskFormat};
-use contracts::{
-    ArtifactRef, EndpointId, EnvironmentId, OperationId, Revision, UtcTimestamp};
+use contracts::{ArtifactRef, EndpointId, EnvironmentId, OperationId, Revision, UtcTimestamp};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1982,7 +1981,7 @@ fn ready_observation(
             protocol: contracts::environment::EndpointProtocol::Ssh,
             revision,
             health: EndpointHealth::Healthy,
-            
+
             observed_at: observed.observed_at,
         }],
         cleanup_evidence: None,
@@ -2127,7 +2126,6 @@ fn valid_guest_user(value: &str) -> bool {
 
 fn valid_artifact_ref(artifact: &ArtifactRef) -> bool {
     artifact.size_bytes > 0
-        
         && !artifact.store_binding.trim().is_empty()
         && !artifact.object_version.trim().is_empty()
         && !artifact.media_type.trim().is_empty()

@@ -17,8 +17,8 @@ use contracts::events::{
     AgentBuildCompleted, AgentBuildFailed, AgentRunEvent, CloudEvent, EVENT_CONTRACTS, subjects,
 };
 use contracts::{EventId, ImageArtifactId};
-use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use futures_util::StreamExt;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::{PgPool, Row};

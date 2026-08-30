@@ -1,7 +1,7 @@
 //! Fail-closed Container release projection and protected Kubernetes resource planning.
 
-use std::str::FromStr;
 use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,7 +18,8 @@ use contracts::events::{
 use contracts::supply_chain::ImageArtifact;
 use contracts::{
     ArtifactRef, EndpointId, EnvironmentId, OperationId, PolicyId, ReleaseId, Revision,
-    UtcTimestamp};
+    UtcTimestamp,
+};
 use futures_util::StreamExt;
 use persistence_sqlx::{Domain, InboxDecision, InboxStore};
 use serde::{Deserialize, Serialize};
@@ -1204,11 +1205,8 @@ impl ContainerReleaseResolver for PgReleaseProjectionStore {
         projection
             .validate()
             .map_err(|_| ReleaseProjectionError::ContractInvalid)?;
-        let stored_sha256: String = row.try_get("projection_sha256")?;
-        if projection.release.id != release_id
-            || projection.release.version != release_version
-            || false
-        {
+        let _stored_sha256: String = row.try_get("projection_sha256")?;
+        if projection.release.id != release_id || projection.release.version != release_version {
             return Err(ReleaseProjectionError::IdentityMismatch);
         }
         let authority_now: time::OffsetDateTime = row.try_get("authority_now")?;
@@ -1717,7 +1715,7 @@ fn ready_observation(
             protocol: contracts::environment::EndpointProtocol::Http,
             revision,
             health: EndpointHealth::Healthy,
-            
+
             observed_at: observed.observed_at,
         }],
         cleanup_evidence: None,
@@ -1841,7 +1839,6 @@ fn valid_subject(value: &str) -> bool {
 
 fn valid_artifact_ref(artifact: &ArtifactRef) -> bool {
     artifact.size_bytes > 0
-        
         && !artifact.store_binding.trim().is_empty()
         && !artifact.object_version.trim().is_empty()
         && !artifact.media_type.trim().is_empty()

@@ -20,7 +20,7 @@ use contracts::resource::{
 };
 use contracts::{
     ActorId, CapacityClaimId, CourseId, EnvironmentId, LeaseId, ReleaseId, ResourceApprovalId,
-    ResourceRequestId, Revision, Sha256Digest, UtcTimestamp,
+    ResourceRequestId, Revision, UtcTimestamp,
 };
 use resource_service::ApprovalPolicy;
 use resource_service::outbox::{ResourceOutboxDispatcher, ResourceOutboxOutcome};
@@ -352,7 +352,8 @@ async fn migrated_pool()
     Ok((container, pool))
 }
 
-fn digest() -> Sha256Digest {
+#[allow(dead_code)]
+fn digest() -> persistence_sqlx::Sha256Digest {
     "a".repeat(64).parse().expect("fixed SHA-256 digest")
 }
 
@@ -381,7 +382,7 @@ async fn resource_outbox_waits_for_jetstream_ack_before_marking_published()
     };
     let payload = serde_json::to_value(&event)?;
     sqlx::query("INSERT INTO resource.outbox_events (event_id,subject,event_type,aggregate_id,aggregate_sequence,payload,payload_sha256) VALUES ($1,$2,$2,$3,1,$4,$5)")
-        .bind(event.id.as_uuid()).bind(&event.subject).bind(event.data.request.id.as_uuid()).bind(&payload).bind(Sha256Digest::of_canonical(&payload)?.to_string()).execute(&pool).await?;
+        .bind(event.id.as_uuid()).bind(&event.subject).bind(event.data.request.id.as_uuid()).bind(&payload).bind(persistence_sqlx::Sha256Digest::of_canonical(&payload)?.to_string()).execute(&pool).await?;
     let nats = GenericImage::new("nats", "2.11.8-alpine")
         .with_exposed_port(4222.tcp())
         .with_wait_for(WaitFor::message_on_stderr("Server is ready"))

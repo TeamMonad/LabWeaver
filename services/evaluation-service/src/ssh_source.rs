@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use contracts::{UtcTimestamp};
+use contracts::UtcTimestamp;
 use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use russh::client;
 use russh::keys::{load_openssh_certificate, load_secret_key};
@@ -501,7 +501,7 @@ mod tests {
         SshSnapshotConfig, host_key_identity, private_ip, safe_remote_root,
         ssh_client_configuration, validate_certificate,
     };
-    use contracts::{UtcTimestamp};
+    use contracts::UtcTimestamp;
     use russh::keys::ssh_key::{PrivateKey, certificate, private::Ed25519Keypair};
     use std::net::{IpAddr, Ipv4Addr};
     use std::path::PathBuf;

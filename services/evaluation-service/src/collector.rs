@@ -11,8 +11,8 @@ use base64::engine::general_purpose::STANDARD;
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
+use contracts::PathRule;
 use contracts::submission::{FrozenFile, SubmissionManifest};
-use contracts::{PathRule};
 use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use serde::{Deserialize, Serialize};
 

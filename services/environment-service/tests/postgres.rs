@@ -25,7 +25,6 @@ use contracts::{
     ActorId, ArtifactId, ArtifactRef, CourseId, EndpointId, EnvironmentId, EventId, OperationId,
     ReleaseId, Revision, Sequence, UtcTimestamp,
 };
-use persistence_sqlx::Sha256Digest;
 use environment_service::{
     CONTAINER_BACKEND_PROTOCOL_VERSION, ContainerApplyObservation, ContainerBackendFence,
     ContainerExecutorBackend, ContainerExecutorFenceError, ContainerExecutorRequest,
@@ -43,6 +42,7 @@ use environment_service::{
     ReconcileAction, ReconcileWorker, ReconcileWorkerOutcome, Reconciler,
     ReleaseProjectionDecision, apply_provider_observation,
 };
+use persistence_sqlx::Sha256Digest;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;

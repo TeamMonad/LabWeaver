@@ -380,7 +380,8 @@ mod tests {
     };
     use contracts::{
         ActorId, CapacityClaimId, CourseId, EnvironmentId, LeaseId, ReleaseId, ResourceApprovalId,
-        ResourceRequestId, Revision, UtcTimestamp};
+        ResourceRequestId, Revision, UtcTimestamp,
+    };
 
     use super::{ApprovalPolicy, LifecycleError, ResourceLifecycle};
 

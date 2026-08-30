@@ -13,10 +13,10 @@ use std::time::Instant;
 use async_nats::jetstream::AckKind;
 use async_nats::jetstream::consumer::PullConsumer;
 use async_nats::jetstream::message::PublishMessage;
+use contracts::EventId;
 use contracts::events::{AgentBuildRequested, CloudEvent, EVENT_CONTRACTS, subjects};
-use contracts::{EventId};
-use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use futures_util::StreamExt;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::{PgPool, Row};

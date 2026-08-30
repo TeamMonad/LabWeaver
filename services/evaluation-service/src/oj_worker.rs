@@ -20,7 +20,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 #[cfg(target_os = "linux")]
 use landlock::{
     ABI, Access as _, AccessFs, CompatLevel, Compatible as _, Ruleset, RulesetAttr as _,
@@ -33,6 +32,7 @@ use nix::{
     sys::signal::{Signal, killpg},
     unistd::{Pid, execv},
 };
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use tokio::{
     io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _},
     process::Command,

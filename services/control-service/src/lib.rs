@@ -13,7 +13,6 @@ use std::collections::BTreeSet;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use artifact_store::{ImmutableObjectStore, ObjectStoreError};
 use contracts::authoring::{
     AgentTrackKind, CandidateApproval, CandidateDecision, CourseLlmEgressPolicy,
@@ -40,6 +39,7 @@ use contracts::{
     ImageArtifactId, PolicyId, ProblemPackageId, ReleaseId, RetentionClass, RetentionDisposition,
     RetentionSnapshot, Revision, Sequence, UploadSessionId, UtcTimestamp,
 };
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use persistence_sqlx::{
     Domain, IdempotencyDecision, IdempotencyStore, InboxDecision, InboxStore, OutboxStore,
 };
