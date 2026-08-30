@@ -3,9 +3,8 @@
 use agent_service::run_store::{AgentRunStoreError, PostgresAgentRunStore};
 use contracts::authoring::{AgentRun, AgentRunState, AgentTrack, AgentTrackKind, RuntimeKind};
 use contracts::http::IdempotencyKey;
-use contracts::{
-    AgentRunId, CourseId, PolicyId, ProblemPackageId, Revision, Sha256Digest, UtcTimestamp,
-};
+use contracts::{AgentRunId, CourseId, PolicyId, ProblemPackageId, Revision, UtcTimestamp};
+use persistence_sqlx::Sha256Digest;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;

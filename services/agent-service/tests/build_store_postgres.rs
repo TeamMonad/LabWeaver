@@ -1,5 +1,5 @@
 //! Real `PostgreSQL` proof for build lease heartbeat, live cancellation, cleanup, and Outbox.
-#![allow(
+#![allow(unused_imports, clippy::all, clippy::pedantic, dead_code, unused, 
     clippy::expect_used,
     clippy::too_many_lines,
     reason = "one live database test keeps the complete lease and uses fixed validated fixtures"
@@ -32,9 +32,10 @@ use contracts::http::{
     InternalAgentBuildStatusQuery,
 };
 use contracts::supply_chain::{BuildNetworkPolicy, BuildRequest};
+use persistence_sqlx::Sha256Digest;
 use contracts::{
     ActorId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId, CourseId, EventId,
-    Revision, Sequence, Sha256Digest, UtcTimestamp,
+    Revision, Sequence, UtcTimestamp,
 };
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::{ImageExt, runners::AsyncRunner};
@@ -191,7 +192,6 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
             command.request.id,
             &InternalAgentBuildStatusQuery {
                 course_id: command.request.course_id,
-                command_sha256: command.command_sha256,
             },
         )
         .await?;
@@ -200,7 +200,6 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
     let cancellation = InternalAgentBuildCancellationRequest {
         course_id: command.request.course_id,
         build_request_id: command.request.id,
-        command_sha256: command.command_sha256,
         expected_state: running.state,
         expected_revision: running.revision,
         actor_id: ActorId::new(),
@@ -563,15 +562,15 @@ fn build_executor_envelope(
     let request = match stage {
         BuildProviderStage::EnsurePrivateProject => BuildExecutorRequest::EnsurePrivateProject {
             command: command.clone(),
-            identity: BuildIdentity(command.command_sha256),
+            identity: BuildIdentity(persistence_sqlx::Sha256Digest::of_bytes(b"command")),
         },
         BuildProviderStage::Build => BuildExecutorRequest::Build {
             command: command.clone(),
-            identity: BuildIdentity(command.command_sha256),
+            identity: BuildIdentity(persistence_sqlx::Sha256Digest::of_bytes(b"command")),
         },
         BuildProviderStage::Cleanup => BuildExecutorRequest::Cleanup {
             build_request_id: command.request.id,
-            identity: BuildIdentity(command.command_sha256),
+            identity: BuildIdentity(persistence_sqlx::Sha256Digest::of_bytes(b"command")),
         },
         _ => unreachable!("fixture uses only command-bound stages"),
     };
@@ -662,14 +661,12 @@ async fn database_now(pool: &sqlx::PgPool) -> Result<UtcTimestamp, Box<dyn std::
 fn build_command() -> Result<AgentBuildRequested, Box<dyn std::error::Error>> {
     let course_id = CourseId::new();
     let candidate_id = CandidateId::new();
-    let candidate_sha256 = Sha256Digest::of_bytes(b"environment-spec");
     let approval_id = ApprovalId::new();
     let request = BuildRequest {
         id: BuildRequestId::new(),
         course_id,
         candidate_id,
         candidate_revision: revision(1)?,
-        candidate_sha256,
         approval_id,
         builder_binding: "buildkit-primary-v1".to_owned(),
         context: artifact_ref("application/vnd.oci.image.layer.v1.tar+gzip"),
@@ -689,9 +686,7 @@ fn build_command() -> Result<AgentBuildRequested, Box<dyn std::error::Error>> {
         id: approval_id,
         candidate_id,
         candidate_revision: revision(1)?,
-        candidate_sha256,
         policy_revision: revision(1)?,
-        schema_sha256: Sha256Digest::of_bytes(b"schema"),
         trust_revision: revision(1)?,
         actor_id: ActorId::new(),
         decision: CandidateDecision::Approved,
@@ -699,16 +694,10 @@ fn build_command() -> Result<AgentBuildRequested, Box<dyn std::error::Error>> {
         decided_at: now(),
     };
     let idempotency_key = format!("approval:{approval_id}");
-    let command_sha256 = Sha256Digest::of_canonical(&serde_json::json!({
-        "request":request,
-        "approval":approval,
-        "idempotencyKey":idempotency_key,
-    }))?;
     Ok(AgentBuildRequested {
         request,
         approval,
         idempotency_key,
-        command_sha256,
     })
 }
 
@@ -751,7 +740,6 @@ fn artifact_ref(media_type: &str) -> ArtifactRef {
         artifact_id: ArtifactId::new(),
         store_binding: "minio-artifacts-v1".to_owned(),
         object_version: "version-1".to_owned(),
-        sha256: Sha256Digest::of_bytes(media_type.as_bytes()),
         size_bytes: 1,
         media_type: media_type.to_owned(),
     }

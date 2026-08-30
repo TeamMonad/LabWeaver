@@ -502,6 +502,7 @@ mod tests {
         ssh_client_configuration, validate_certificate,
     };
     use contracts::UtcTimestamp;
+    use persistence_sqlx::Sha256Digest;
     use russh::keys::ssh_key::{PrivateKey, certificate, private::Ed25519Keypair};
     use std::net::{IpAddr, Ipv4Addr};
     use std::path::PathBuf;

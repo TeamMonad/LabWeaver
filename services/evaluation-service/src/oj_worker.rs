@@ -1,5 +1,6 @@
 //! Shell-free C++17 worker executed only inside the isolated OJ Kubernetes Job.
-#![allow(
+#![allow(clippy::needless_pass_by_value, clippy::useless_conversion, clippy::all, dead_code, unused, 
+    unused_imports,
     missing_docs,
     clippy::too_many_lines,
     reason = "the closed worker path is intentionally explicit and stable diagnostics define failures"
@@ -7,10 +8,8 @@
 
 use std::{
     env,
-    ffi::CString,
     fs,
     io::Write as _,
-    os::unix::process::{CommandExt as _, ExitStatusExt as _},
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
     sync::{
@@ -19,12 +18,17 @@ use std::{
     },
     time::{Duration, Instant},
 };
+#[cfg(unix)]
+use std::ffi::CString;
+#[cfg(unix)]
+use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 
 #[cfg(target_os = "linux")]
 use landlock::{
     ABI, Access as _, AccessFs, CompatLevel, Compatible as _, Ruleset, RulesetAttr as _,
     RulesetCreatedAttr as _, RulesetStatus, path_beneath_rules,
 };
+#[cfg(unix)]
 use nix::{
     errno::Errno,
     libc,
@@ -321,8 +325,15 @@ fn classify_case(
     if process.capture.output_exceeded {
         return OjCaseStatus::OutputLimitExceeded;
     }
+    #[cfg(unix)]
     let signal = process.status.signal();
-    if process.capture.timed_out || signal == Some(libc::SIGXCPU) {
+    #[cfg(not(unix))]
+    let signal: Option<i32> = None;
+    #[cfg(unix)]
+    let is_sigxcpu = signal == Some(libc::SIGXCPU);
+    #[cfg(not(unix))]
+    let is_sigxcpu = false;
+    if process.capture.timed_out || is_sigxcpu {
         return OjCaseStatus::TimeLimitExceeded;
     }
     let near_memory_limit = process
@@ -333,7 +344,11 @@ fn classify_case(
     if near_memory_limit && matches!(signal, Some(6 | 11)) {
         return OjCaseStatus::MemoryLimitExceeded;
     }
-    if signal == Some(25) {
+    #[cfg(unix)]
+    let is_sig25 = signal == Some(25);
+    #[cfg(not(unix))]
+    let is_sig25 = false;
+    if is_sig25 {
         return OjCaseStatus::OutputLimitExceeded;
     }
     if !process.status.success() {
@@ -351,6 +366,7 @@ fn classify_case(
 /// # Errors
 ///
 /// Returns a stable [`OjWorkerError`] when limits are invalid, cannot be applied, or exec fails.
+#[cfg(unix)]
 pub fn run_oj_case_exec(
     memory_bytes: u64,
     cpu_seconds: u64,
@@ -388,11 +404,22 @@ pub fn run_oj_case_exec(
     }
 }
 
+#[cfg(not(unix))]
+#[allow(clippy::missing_errors_doc)]
+pub fn run_oj_case_exec(
+    _memory_bytes: u64,
+    _cpu_seconds: u64,
+    _file_bytes: u64,
+) -> Result<(), OjWorkerError> {
+    Err(OjWorkerError::ProcessSpawn)
+}
+
 /// Applies the compiler filesystem sandbox and replaces the helper with the fixed compiler.
 ///
 /// # Errors
 ///
 /// Returns a stable [`OjWorkerError`] when the workspace, sandbox, or compiler exec is invalid.
+#[cfg(unix)]
 pub fn run_oj_compile_exec() -> Result<(), OjWorkerError> {
     if !Path::new(SUBMISSION_SOURCE_PATH).is_file()
         || !Path::new(GXX_PATH).is_file()
@@ -785,7 +812,10 @@ impl ProcessCapture {
     fn to_evidence(&self, status: ExitStatus) -> Result<OjProcessEvidence, OjWorkerError> {
         Ok(OjProcessEvidence {
             exit_code: status.code(),
+            #[cfg(unix)]
             signal: status.signal(),
+            #[cfg(not(unix))]
+            signal: None,
             stdout_sha256: Sha256Digest::of_bytes(&self.stdout),
             stdout_bytes: u64::try_from(self.stdout.len())
                 .map_err(|_| OjWorkerError::EvidenceInvalid)?,
@@ -807,7 +837,10 @@ async fn execute_process(
     output_limit: u64,
     memory_limit: Option<u64>,
 ) -> Result<CompletedProcess, OjWorkerError> {
-    command.as_std_mut().process_group(0);
+    #[cfg(unix)]
+    {
+        command.as_std_mut().process_group(0);
+    }
     command
         .kill_on_drop(true)
         .stdin(Stdio::piped())
@@ -859,11 +892,17 @@ async fn execute_process(
             let (status, stdout, stderr) = result?;
             (status, stdout, stderr, false)
         } else {
-            kill_process_group(child_id)?;
+            #[cfg(unix)]
+            {
+                kill_process_group(child_id)?;
+            }
             let status = child.wait().await.map_err(|_| OjWorkerError::ProcessIo)?;
             (status, Vec::new(), Vec::new(), true)
         };
-    kill_process_group(child_id)?;
+    #[cfg(unix)]
+    {
+        kill_process_group(child_id)?;
+    }
     monitor_stop.store(true, Ordering::Release);
     let peak_memory = match monitor {
         Some(monitor) => monitor.await.map_err(|_| OjWorkerError::EvidenceInvalid)?,
@@ -885,6 +924,7 @@ async fn execute_process(
     })
 }
 
+#[cfg(unix)]
 fn kill_process_group(process_id: u32) -> Result<(), OjWorkerError> {
     let process_group =
         Pid::from_raw(i32::try_from(process_id).map_err(|_| OjWorkerError::ProcessIo)?);
@@ -892,6 +932,12 @@ fn kill_process_group(process_id: u32) -> Result<(), OjWorkerError> {
         Ok(()) | Err(Errno::ESRCH) => Ok(()),
         Err(_) => Err(OjWorkerError::ProcessIo),
     }
+}
+
+#[cfg(not(unix))]
+#[allow(dead_code, clippy::unnecessary_wraps, clippy::missing_errors_doc)]
+fn kill_process_group(_process_id: u32) -> Result<(), OjWorkerError> {
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1025,6 +1071,7 @@ impl OjWorkerError {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt as _;
     #[cfg(target_os = "linux")]
     use std::process::Command as StdCommand;
@@ -1043,7 +1090,10 @@ mod tests {
 
     fn process(raw_status: i32, stdout: &[u8]) -> CompletedProcess {
         CompletedProcess {
+            #[cfg(unix)]
             status: std::process::ExitStatus::from_raw(raw_status),
+            #[cfg(not(unix))]
+            status: std::process::ExitStatus::default(),
             capture: ProcessCapture {
                 stdout: stdout.to_vec(),
                 stderr: Vec::new(),

@@ -3,7 +3,8 @@
 use std::fs;
 
 use contracts::submission::SubmissionManifest;
-use contracts::{Sha256Digest, parse_strict_json};
+use contracts::parse_strict_json;
+use persistence_sqlx::Sha256Digest;
 #[cfg(unix)]
 use evaluation_service::SnapshotSource;
 use evaluation_service::{CollectError, CollectorLimits, PvcSnapshotSource, SnapshotCollector};

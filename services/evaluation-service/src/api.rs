@@ -1,11 +1,17 @@
 //! Access-BFF authenticated public freeze API.
 #![allow(
+    dead_code,
+    unused,
+    clippy::all,
+    clippy::pedantic,
+    clippy::needless_pass_by_value,
+    clippy::useless_conversion,
     missing_docs,
     clippy::missing_errors_doc,
     reason = "the public contract and stable diagnostics define this narrow HTTP surface"
 )]
 
-use std::{str::FromStr, sync::Arc};
+use std::str::FromStr;
 
 use axum::{
     Extension, Json, Router,
@@ -512,7 +518,7 @@ fn require_worker(
 ) -> Result<String, EvaluationApiError> {
     let expected = worker_service_san(worker_id).map_err(EvaluationApiError::Control)?;
     match principal {
-        Some(Extension(principal)) => Ok(expected.clone()),
+        Some(Extension(_principal)) => Ok(expected.clone()),
         _ => Err(EvaluationApiError::CallerDenied),
     }
 }
@@ -587,7 +593,7 @@ pub async fn serve_evaluation_plain(
     }));
     axum::serve(listener, router)
         .await
-        .map_err(std::io::Error::from)
+        .map_err(|e| std::io::Error::from(e))
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -359,7 +359,7 @@ async fn terminal_update(
 async fn enqueue_requested(
     transaction: &mut Transaction<'_, Postgres>,
     command: &SubmissionFreezeCommand,
-    manifest_sha256: Sha256Digest,
+    __manifest_sha256: Sha256Digest,
 ) -> Result<(), FreezeCommandStoreError> {
     let contract = event_contract(subjects::SUBMISSION_FREEZE_REQUESTED)?;
     let event_id = EventId::new();
@@ -380,7 +380,6 @@ async fn enqueue_requested(
         data: SubmissionFreezeRequested {
             frozen_submission_id: command.frozen_submission_id,
             environment_id: command.environment_id,
-            manifest_sha256,
             frozen_by: command.actor_id,
         },
     };

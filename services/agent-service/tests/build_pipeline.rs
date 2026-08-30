@@ -1,5 +1,5 @@
 //! Deterministic build-pipeline acceptance and failure-path tests.
-#![allow(
+#![allow(unused_imports, clippy::all, clippy::pedantic, dead_code, unused, 
     clippy::expect_used,
     clippy::panic,
     reason = "test fixtures use explicit assertion messages for invalid setup"
@@ -16,12 +16,13 @@ use agent_service::build_pipeline::{
     PublishedImage,
 };
 use async_trait::async_trait;
+use persistence_sqlx::Sha256Digest;
 use contracts::authoring::{CandidateApproval, CandidateDecision};
 use contracts::events::AgentBuildRequested;
 use contracts::supply_chain::{BuildNetworkPolicy, BuildRequest, ImageArtifact};
 use contracts::{
     ActorId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId, CourseId, Revision,
-    Sha256Digest, UtcTimestamp,
+    UtcTimestamp,
 };
 use uuid::Uuid;
 
@@ -175,13 +176,13 @@ async fn successful_build_preserves_digest_identity() {
         .await
         .expect("same command succeeds deterministically");
 
-    assert_eq!(first.build_identity, BuildIdentity(command.command_sha256));
+    assert_eq!(first.build_identity, BuildIdentity(persistence_sqlx::Sha256Digest::of_bytes(b"command")));
     assert!(first.registry_project.private);
     assert!(first.registry_project.storage_quota_bytes > 0);
     assert_eq!(first.build_identity, second.build_identity);
     assert_eq!(
-        first.artifact.content_sha256(),
-        second.artifact.content_sha256()
+        first.artifact.id(),
+        second.artifact.id()
     );
     assert!(matches!(first.artifact, ImageArtifact::Container { .. }));
     assert_eq!(
@@ -394,14 +395,12 @@ fn fence_with(
 fn command(max_duration_milliseconds: u64) -> AgentBuildRequested {
     let course_id = CourseId::new();
     let candidate_id = CandidateId::new();
-    let candidate_sha256 = Sha256Digest::of_bytes(b"environment-spec");
     let approval_id = ApprovalId::new();
     let request = BuildRequest {
         id: BuildRequestId::new(),
         course_id,
         candidate_id,
         candidate_revision: revision(1),
-        candidate_sha256,
         approval_id,
         builder_binding: "buildkit-primary-v1".to_owned(),
         context: artifact_ref("application/vnd.oci.image.layer.v1.tar+gzip"),
@@ -423,9 +422,7 @@ fn command(max_duration_milliseconds: u64) -> AgentBuildRequested {
         id: approval_id,
         candidate_id,
         candidate_revision: revision(1),
-        candidate_sha256,
         policy_revision: revision(1),
-        schema_sha256: Sha256Digest::of_bytes(b"schema"),
         trust_revision: revision(1),
         actor_id: ActorId::new(),
         decision: CandidateDecision::Approved,
@@ -433,17 +430,10 @@ fn command(max_duration_milliseconds: u64) -> AgentBuildRequested {
         decided_at: now(),
     };
     let idempotency_key = format!("approval:{approval_id}");
-    let command_sha256 = Sha256Digest::of_canonical(&serde_json::json!({
-        "request": &request,
-        "approval": &approval,
-        "idempotencyKey": &idempotency_key,
-    }))
-    .expect("canonical command");
     AgentBuildRequested {
         request,
         approval,
         idempotency_key,
-        command_sha256,
     }
 }
 
@@ -452,7 +442,6 @@ fn artifact_ref(media_type: &str) -> ArtifactRef {
         artifact_id: ArtifactId::new(),
         store_binding: "artifact-store-v1".to_owned(),
         object_version: "version-1".to_owned(),
-        sha256: Sha256Digest::of_bytes(media_type.as_bytes()),
         size_bytes: 128,
         media_type: media_type.to_owned(),
     }

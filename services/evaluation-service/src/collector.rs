@@ -433,7 +433,6 @@ async fn collect_snapshot(
         }
         files.push(FrozenFile {
             path: path.clone(),
-            sha256: Sha256Digest::of_bytes(&bytes),
             size_bytes,
             media_type: "application/octet-stream".to_owned(),
         });

@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use agent_service::messaging::AgentOutboxDispatcher;
 use contracts::events::{AgentRunEvent, CloudEvent, DATA_SCHEMA_BASE, SPEC_VERSION, subjects};
-use contracts::{AgentRunId, CourseId, EventId, Revision, Sequence, Sha256Digest, UtcTimestamp};
+use contracts::{AgentRunId, CourseId, EventId, Revision, Sequence, UtcTimestamp};
+use persistence_sqlx::Sha256Digest;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::{GenericImage, ImageExt, runners::AsyncRunner};

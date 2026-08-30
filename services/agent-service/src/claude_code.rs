@@ -1954,7 +1954,9 @@ impl ClaudeCodeRuntimeError {
     pub const fn diagnostic_code(self) -> &'static str {
         match self {
             Self::ConfigurationInvalid => diagnostic::INVALID_REQUEST,
-            Self::InputLimitExceeded | Self::BudgetExceeded => diagnostic::RESOURCE_EXHAUSTED,
+            Self::InputLimitExceeded | Self::BudgetExceeded | Self::OutputLimitExceeded => {
+                diagnostic::RESOURCE_EXHAUSTED
+            }
             Self::RuntimeUnavailable
             | Self::ExecutionFailed
             | Self::ToolDenied
@@ -1963,7 +1965,6 @@ impl ClaudeCodeRuntimeError {
                 diagnostic::EVIDENCE_INVALID
             }
             Self::ProtectedField => diagnostic::ACCESS_DENIED,
-            Self::OutputLimitExceeded => diagnostic::RESOURCE_EXHAUSTED,
             Self::TimedOut => diagnostic::PROVIDER_TIMEOUT,
             Self::Cancelled => diagnostic::CONFLICT,
             Self::RateLimited => diagnostic::RATE_LIMITED,

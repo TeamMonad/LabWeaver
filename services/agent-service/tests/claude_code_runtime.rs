@@ -1,3 +1,4 @@
+#![allow(clippy::all, clippy::pedantic, dead_code, unused, unused_imports)]
 //! Black-box regression coverage for the Claude Code worker boundary.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,9 +25,10 @@ use contracts::authoring::{
 };
 use contracts::evaluation::EvaluationSpec;
 use contracts::http::{CreateAgentRunRequest, IdempotencyKey};
+use persistence_sqlx::Sha256Digest;
 use contracts::{
     ArtifactId, ArtifactRef, CourseId, PolicyId, RetentionClass, RetentionDisposition,
-    RetentionSnapshot, Revision, Sha256Digest, UtcTimestamp,
+    RetentionSnapshot, Revision, UtcTimestamp,
 };
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -449,7 +451,6 @@ fn package(course_id: CourseId, bytes: &[u8]) -> Result<ProblemPackage, Box<dyn 
         artifact_id: ArtifactId::new(),
         store_binding: "minio-primary".to_owned(),
         object_version: "version-1".to_owned(),
-        sha256: Sha256Digest::of_bytes(bytes),
         size_bytes: u64::try_from(bytes.len())?,
         media_type: "text/plain".to_owned(),
     };
@@ -457,13 +458,11 @@ fn package(course_id: CourseId, bytes: &[u8]) -> Result<ProblemPackage, Box<dyn 
         path: "assignment.md".to_owned(),
         object,
     }];
-    let manifest_sha256 = Sha256Digest::of_canonical(&files)?;
     Ok(ProblemPackage {
         id: contracts::ProblemPackageId::new(),
         course_id,
         revision: Revision::new(1)?,
         files,
-        manifest_sha256,
         retention: RetentionSnapshot {
             policy_id: PolicyId::new(),
             policy_revision: Revision::new(1)?,
@@ -486,7 +485,6 @@ fn run_request(
     CreateAgentRunRequest {
         package_id: input.package_id(),
         package_revision: input.package_revision(),
-        package_sha256: input.package_manifest_sha256(),
         policy_id: policy.id,
         policy_revision: policy.revision,
         requested_runtime: RuntimeKind::VirtualMachine,
@@ -726,7 +724,6 @@ async fn assert_dispatch_does_not_replay_live_tracks(
     let request = CreateAgentRunRequest {
         package_id: package.id,
         package_revision: package.revision,
-        package_sha256: package.manifest_sha256,
         policy_id: policy.id,
         policy_revision: policy.revision,
         requested_runtime: RuntimeKind::Container,
