@@ -396,6 +396,7 @@ fn gate(code: &'static str, detail: &str) -> AppError {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use std::fs;
     use std::path::Path;
@@ -434,6 +435,7 @@ mod tests {
     ];
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn same_identity_connected_evidence_passes() -> Result<(), Box<dyn std::error::Error>> {
         let temporary = tempdir()?;
         let root = temporary.path();
