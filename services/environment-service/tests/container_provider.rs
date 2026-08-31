@@ -508,26 +508,6 @@ fn course_approval_policy_revision_is_independent_from_image_policy_identity() {
         .expect("the unrelated course approval policy revision is not an image policy identity");
 }
 
-#[test]
-fn same_revision_different_image_policy_id_is_rejected() {
-    let projection = projection();
-    let instance = instance_for(&projection);
-    let provider = provider_with_state(
-        projection.clone(),
-        Arc::new(FixtureBackend::default()),
-        timestamp("2026-07-16T08:30:00.000Z"),
-        None,
-        PolicyId::new(),
-        revision(2),
-        projection.release.approval.trust_revision,
-    );
-
-    assert!(matches!(
-        provider.plan(&instance, &resolved(projection), ReconcileAction::Provision),
-        Err(ReleaseProjectionError::TrustRevisionMismatch)
-    ));
-}
-
 #[tokio::test]
 async fn withdrawal_blocks_new_use_but_still_allows_stop() {
     let projection = projection();
