@@ -943,45 +943,6 @@ fn validate_trivy_database_reference(reference: &str, expected: &str) -> Result<
     Ok(())
 }
 
-#[allow(dead_code)]
-#[cfg(target_os = "linux")]
-fn vulnerability_counts(bytes: &[u8]) -> Result<(u64, u64, u64), AppError> {
-    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|error| AppError::Io {
-        role: "parse Trivy report",
-        detail: error.to_string(),
-    })?;
-    let mut critical = 0;
-    let mut high = 0;
-    let mut secrets = 0;
-    for result in value
-        .get("Results")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        for vulnerability in result
-            .get("Vulnerabilities")
-            .and_then(serde_json::Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            match vulnerability
-                .get("Severity")
-                .and_then(serde_json::Value::as_str)
-            {
-                Some("CRITICAL") => critical += 1,
-                Some("HIGH") => high += 1,
-                _ => {}
-            }
-        }
-        secrets += result
-            .get("Secrets")
-            .and_then(serde_json::Value::as_array)
-            .map_or(0, |items| u64::try_from(items.len()).unwrap_or(u64::MAX));
-    }
-    Ok((critical, high, secrets))
-}
-
 #[cfg(target_os = "linux")]
 fn verify_tools(lock: &VersionLock) -> Result<(), AppError> {
     let platform = &lock.platform_images;
