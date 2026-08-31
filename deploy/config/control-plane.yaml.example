@@ -74,7 +74,6 @@ control:
     baseDisk:
       binding: "ubuntu-24.04-v1"
       sourceRegistryDigest: "docker://quay.io/containerdisks/ubuntu@sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
-      diskSha256: "ffe6203da54deeb6db5d2a98a83f9ec8e55f149d3f7ba622e1abe5fa966ee3d6"
       capacityBytes: 10737418240
     format: "qcow2"
   evaluationRuntime:

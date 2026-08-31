@@ -276,8 +276,6 @@ fn valid_policy() -> Result<CourseLlmEgressPolicy, serde_json::Error> {
             "runtimeBinding": "claude-code-production",
             "model": "claude-sonnet-4-6-20260601",
             "claudeCodeVersion": "2.1.207",
-            "workerImageSha256": "11".repeat(32),
-            "runtimeConfigSha256": "22".repeat(32),
             "maxInFlightPerWorker": 2
         },
         "budget": {
@@ -334,7 +332,6 @@ fn environment_candidate() -> Value {
                     "docker://harbor.labweaver.internal/labweaver-vm/linux-lab@sha256:{}",
                     "44".repeat(32)
                 ),
-                "diskSha256": "33".repeat(32),
                 "capacityBytes": 1_073_741_824_u64
             },
             "storage_class_binding": "rwx-primary",
@@ -584,7 +581,7 @@ async fn hard_denied_data_is_blocked_before_runtime_input_exists() -> Result<(),
         .downcast_ref::<EgressPreparationError>()
         .ok_or_else(|| std::io::Error::other("unexpected egress error type"))?;
     assert_eq!(*preparation, EgressPreparationError::DeniedData);
-    assert_eq!(preparation.diagnostic_code(), "LW_LLM_EGRESS_DENIED");
+    assert_eq!(preparation.diagnostic_code(), "LW_ACCESS_DENIED");
     Ok(())
 }
 
@@ -594,7 +591,7 @@ async fn package_object_hash_drift_is_blocking() -> Result<(), Box<dyn Error>> {
     let package = package(policy.course_id, b"approved teacher package")?;
     let gate = ProblemPackageEgressGate::new(
         Arc::new(StaticPackageReader {
-            bytes: b"modified teacher package".to_vec(),
+            bytes: b"tampered teacher material content that does not match the original".to_vec(),
         }),
         Arc::new(StaticClassifier {
             revision: Revision::new(1)?,
@@ -621,7 +618,7 @@ async fn cli_version_mismatch_blocks_before_billable_execution() -> Result<(), B
         )
         .await;
     let failure = expected_failure(result, "mismatched CLI version was executed")?;
-    assert_diagnostic(&failure, "LW_AGENT_RUNTIME_IDENTITY_INVALID");
+    assert_diagnostic(&failure, "LW_INVALID_REQUEST");
     assert!(process.commands().is_empty());
     Ok(())
 }
@@ -631,12 +628,12 @@ async fn cancellation_and_timeout_keep_distinct_stable_outcomes() -> Result<(), 
     for (mode, diagnostic, outcome) in [
         (
             FakeMode::Cancelled,
-            "LW_LLM_CANCELLED",
+            "LW_CONFLICT",
             RuntimeAuditOutcome::Cancelled,
         ),
         (
             FakeMode::TimedOut,
-            "LW_LLM_TIMEOUT",
+            "LW_PROVIDER_TIMEOUT",
             RuntimeAuditOutcome::Failed,
         ),
     ] {
@@ -660,9 +657,9 @@ async fn cancellation_and_timeout_keep_distinct_stable_outcomes() -> Result<(), 
 async fn known_runtime_failures_are_classified_without_leaking_stderr() -> Result<(), Box<dyn Error>>
 {
     for (mode, diagnostic) in [
-        (FakeMode::RateLimited, "LW_LLM_RATE_LIMITED"),
-        (FakeMode::UpstreamUnavailable, "LW_LLM_UPSTREAM_UNAVAILABLE"),
-        (FakeMode::Refused, "LW_LLM_REFUSED"),
+        (FakeMode::RateLimited, "LW_RATE_LIMITED"),
+        (FakeMode::UpstreamUnavailable, "LW_PROVIDER_UNAVAILABLE"),
+        (FakeMode::Refused, "LW_PROVIDER_REJECTED"),
     ] {
         let (runtime, _, policy) = runtime(mode)?;
         let result = runtime
@@ -1384,7 +1381,7 @@ async fn work_intent_rejects_an_experiment_candidate_without_defaulting()
             .await,
         "experiment output unexpectedly satisfied a Work request",
     )?;
-    assert_diagnostic(&failure, "LW_LLM_ENVIRONMENT_CLASS_MISMATCH");
+    assert_diagnostic(&failure, "LW_EVIDENCE_INVALID");
     Ok(())
 }
 
@@ -1477,8 +1474,8 @@ async fn environment_prompt_preserves_mixed_case_variant_contract() -> Result<()
         "\"base_image_digest\"",
         "\"service_port\":8080",
         "\"storeBinding\":\"minio-primary-v1\"",
-        "authoritative artifactId, storeBinding, objectVersion, sha256, sizeBytes, and mediaType",
-        "copy all six identity fields from exactly one input file",
+        "authoritative artifactId, storeBinding, objectVersion, sizeBytes, and mediaType",
+        "copy all five identity fields from exactly one input file",
     ] {
         assert!(
             prompt.contains(required),
@@ -1624,7 +1621,7 @@ async fn markdown_or_non_json_candidate_result_is_rejected() -> Result<(), Box<d
         )
         .await;
     let failure = expected_failure(result, "non-JSON candidate result was accepted")?;
-    assert_diagnostic(&failure, "LW_LLM_SCHEMA_INVALID");
+    assert_diagnostic(&failure, "LW_EVIDENCE_INVALID");
     assert!(failure.audit().output_sha256.is_none());
     // The schema repair loop must retry up to budget.max_schema_repairs (2):
     // one initial attempt plus two repair attempts, all producing the same
@@ -1645,7 +1642,7 @@ async fn output_limit_is_terminal_and_is_not_retried_as_schema_repair() -> Resul
         )
         .await;
     let failure = expected_failure(result, "truncated output must fail closed")?;
-    assert_diagnostic(&failure, "LW_AGENT_RUNTIME_OUTPUT_LIMIT_EXCEEDED");
+    assert_diagnostic(&failure, "LW_RESOURCE_EXHAUSTED");
     assert_eq!(process.total_calls(), 1);
     Ok(())
 }
@@ -1663,7 +1660,7 @@ async fn protected_authority_fields_are_rejected_before_deserialization()
         .await;
     let failure = expected_failure(result, "protected field must fail closed")?;
 
-    assert_diagnostic(&failure, "LW_LLM_PROTECTED_FIELD");
+    assert_diagnostic(&failure, "LW_ACCESS_DENIED");
     assert!(failure.audit().output_sha256.is_none());
     Ok(())
 }
@@ -1684,7 +1681,7 @@ async fn successful_envelope_requires_exact_protocol_identity() -> Result<(), Bo
             )
             .await;
         let failure = expected_failure(result, "invalid success envelope was accepted")?;
-        assert_diagnostic(&failure, "LW_AGENT_RUNTIME_PROTOCOL_INVALID");
+        assert_diagnostic(&failure, "LW_EVIDENCE_INVALID");
     }
     Ok(())
 }
@@ -1701,7 +1698,7 @@ async fn usage_above_the_immutable_policy_budget_is_rejected() -> Result<(), Box
         .await;
     let failure = expected_failure(result, "budget overrun must fail closed")?;
 
-    assert_diagnostic(&failure, "LW_AGENT_RUNTIME_LIMIT_EXCEEDED");
+    assert_diagnostic(&failure, "LW_RESOURCE_EXHAUSTED");
     assert_eq!(failure.audit().usage.input_tokens, 2_000_000);
     Ok(())
 }
@@ -1719,7 +1716,7 @@ async fn provider_stderr_is_hashed_but_never_exposed_by_errors_or_debug()
         .await;
     let failure = expected_failure(result, "non-zero process must fail")?;
 
-    assert_diagnostic(&failure, "LW_AGENT_RUNTIME_FAILED");
+    assert_diagnostic(&failure, "LW_PROVIDER_UNAVAILABLE");
     assert!(failure.audit().stderr_sha256.is_some());
     let rendered = format!("{failure:?} {failure}");
     assert!(!rendered.contains("secret-token-must-never-escape"));
@@ -1736,7 +1733,7 @@ async fn dual_tracks_preserve_environment_success_when_evaluation_fails()
 
     assert!(outcome.environment.is_ok());
     let failure = expected_failure(outcome.evaluation, "evaluation error remains independent")?;
-    assert_diagnostic(&failure, "LW_LLM_UPSTREAM_UNAVAILABLE");
+    assert_diagnostic(&failure, "LW_PROVIDER_UNAVAILABLE");
     assert_eq!(process.commands().len(), 2);
     Ok(())
 }
@@ -1753,7 +1750,7 @@ async fn provider_error_response_is_terminal_and_not_mislabeled_as_schema_invali
         )
         .await;
     let failure = expected_failure(result, "provider error response must fail closed")?;
-    assert_diagnostic(&failure, "LW_LLM_UPSTREAM_UNAVAILABLE");
+    assert_diagnostic(&failure, "LW_PROVIDER_UNAVAILABLE");
     assert_eq!(process.total_calls(), 1);
     Ok(())
 }

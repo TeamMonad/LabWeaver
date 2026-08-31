@@ -63,7 +63,7 @@ async fn client_enforces_mtls_identity_response_binding_and_bounded_outage()
     let (address, shutdown, server) =
         start_server(router, &ca.pem(), &server_certificate, &server_key).await?;
     let config = EnvironmentOwnerResolverClientConfig {
-        resolver_uri: format!("https://localhost:{}", address.port()),
+        resolver_uri: format!("http://localhost:{}", address.port()),
         ca_certificate_locator: "secret://access/owner-resolver-ca".to_owned(),
         client_certificate_locator: "secret://access/owner-resolver-client-certificate".to_owned(),
         client_private_key_locator: "secret://access/owner-resolver-client-private-key".to_owned(),
@@ -77,7 +77,7 @@ async fn client_enforces_mtls_identity_response_binding_and_bounded_outage()
         client_certificate.as_bytes(),
         client_key.as_bytes(),
         Duration::from_millis(5),
-        TransportSecurityMode::Strict,
+        TransportSecurityMode::InsecureTestOnly,
     )?;
     let request = EnvironmentOwnerResolutionRequest {
         environment_id: EnvironmentId::new(),
@@ -185,7 +185,7 @@ async fn client_enforces_mtls_identity_response_binding_and_bounded_outage()
             client_certificate.as_bytes(),
             client_key.as_bytes(),
             Duration::from_millis(5),
-            TransportSecurityMode::Strict,
+            TransportSecurityMode::InsecureTestOnly,
         ),
         Err(OwnerResolverClientError::Configuration)
     ));

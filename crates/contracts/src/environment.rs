@@ -1095,7 +1095,10 @@ impl EnvironmentOwnerResolverClientConfig {
             self.client_certificate_locator.as_str(),
             self.client_private_key_locator.as_str(),
         ];
-        let resolver_authority = self.resolver_uri.strip_prefix("https://");
+        let resolver_authority = self
+            .resolver_uri
+            .strip_prefix("https://")
+            .or_else(|| self.resolver_uri.strip_prefix("http://"));
         if resolver_authority.is_none_or(|authority| {
             authority.is_empty()
                 || authority.contains('@')
