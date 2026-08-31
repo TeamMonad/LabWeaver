@@ -122,9 +122,6 @@ async fn issue_48_migrations_enforce_fencing_and_monotonic_course_sequences()
     let session = service
         .create_upload(course, &request, &create_key, now)
         .await?;
-    let mut declared_files = request.files.clone();
-    declared_files.sort_by(|left, right| left.path.cmp(&right.path));
-    let manifest = Sha256Digest::of_canonical(&declared_files)?;
     let complete_key = IdempotencyKey::parse("issue-48-complete-upload")?;
     let package = service
         .complete_upload(course, session.id, session.revision, &complete_key, now)
@@ -163,7 +160,6 @@ async fn issue_48_migrations_enforce_fencing_and_monotonic_course_sequences()
     let recovery_request_hash = Sha256Digest::of_canonical(&serde_json::json!({
         "courseId": recovery_course,
         "uploadId": recovery_session.id,
-        "manifestSha256": manifest,
         "expectedRevision": recovery_session.revision,
     }))?;
     sqlx::query(

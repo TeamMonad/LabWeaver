@@ -1673,6 +1673,9 @@ impl ControlService {
             .map_err(db)?
             .parse()
             .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+        let spec_sha256 = candidate
+            .try_get::<String, _>("content_sha256")
+            .map_err(db)?;
         let active_policy = sqlx::query_scalar::<_, i64>("SELECT revision FROM control.course_llm_policies WHERE course_id=$1 AND superseded_at IS NULL")
             .bind(course_id.as_uuid()).fetch_optional(&mut *transaction).await.map_err(db)?.ok_or(ControlError::PolicyNotFound)?;
         if !approval.is_release_eligible(
@@ -1774,7 +1777,7 @@ impl ControlService {
         .bind(next_version)
         .bind(release.candidate_id.as_uuid())
         .bind(i64_revision(release.candidate_revision)?)
-        .bind(release.version.to_string())
+        .bind(&spec_sha256)
         .bind(artifact_id.as_uuid())
         .bind(&contract)
         .bind(now.get())
@@ -1831,7 +1834,7 @@ impl ControlService {
             Revision::new(release.version).map_err(|_| ControlError::ContractInvalid)?,
             json!({
                 "releaseId":release.id,"version":release.version,
-                "environmentSpecSha256":release.version,
+                "environmentSpecSha256":spec_sha256,
                 "highSeverityWarnings":0
             }),
         )
