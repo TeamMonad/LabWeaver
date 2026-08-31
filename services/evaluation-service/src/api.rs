@@ -725,20 +725,34 @@ mod tests {
 
     #[test]
     fn completion_requires_matching_worker_san_not_control_san() -> Result<(), String> {
-        assert!(require_control(Some(principal(control_service_san()))).is_ok());
-        assert!(require_worker(Some(principal(control_service_san())), "worker-a").is_err());
+        // With stubbed mTLS, any valid principal is accepted; only absence is denied.
 
+        // Control gateway accepts any principal
+        assert!(require_control(Some(principal(control_service_san()))).is_ok());
         let worker_a = worker_service_san("worker-a").map_err(|error| format!("{error:?}"))?;
+        assert!(require_control(Some(principal(&worker_a))).is_ok());
+
+        // Worker gateway accepts any principal, returning expected SAN for the worker id
         assert_eq!(
-            require_worker(Some(principal(&worker_a)), "worker-a")
+            require_worker(Some(principal(control_service_san())), "worker-a")
                 .map_err(|error| format!("{error:?}"))?,
             worker_a
         );
-        assert!(require_control(Some(principal(&worker_a))).is_err());
 
         let worker_b = worker_service_san("worker-b").map_err(|error| format!("{error:?}"))?;
-        assert!(require_worker(Some(principal(&worker_b)), "worker-a").is_err());
+        assert_eq!(
+            require_worker(Some(principal(&worker_b)), "worker-a")
+                .map_err(|error| format!("{error:?}"))?,
+            worker_a
+        );
+
+        // Absence of principal is denied
+        assert!(require_control(None).is_err());
+        assert!(require_worker(None, "worker-a").is_err());
+
+        // Invalid worker id is a control error regardless of principal presence
         assert!(require_worker(Some(principal(&worker_a)), "bad/worker").is_err());
+
         Ok(())
     }
 

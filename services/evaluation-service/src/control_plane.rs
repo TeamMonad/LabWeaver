@@ -183,7 +183,7 @@ impl PgEvaluationControlStore {
             "INSERT INTO evaluation.evaluation_releases \
              (release_id,course_id,candidate_id,candidate_revision,candidate_sha256,approval_id,\
               approval_revision,approval_sha256,evaluation_spec_sha256,runtime_identity_sha256,\
-      state,revision,contract,published_by,published_at,updated_at) \
+              release_identity_sha256,state,revision,contract,published_by,published_at,updated_at) \
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'active',$12,$13,$14,$15,$15)",
         )
         .bind(release.id.as_uuid())
