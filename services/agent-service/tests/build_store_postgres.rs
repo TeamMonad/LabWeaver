@@ -567,15 +567,21 @@ fn build_executor_envelope(
     let request = match stage {
         BuildProviderStage::EnsurePrivateProject => BuildExecutorRequest::EnsurePrivateProject {
             command: command.clone(),
-            identity: BuildIdentity(persistence_sqlx::Sha256Digest::of_bytes(b"command")),
+            identity: BuildIdentity(persistence_sqlx::Sha256Digest::of_bytes(
+                command.request.id.as_uuid().as_bytes(),
+            )),
         },
         BuildProviderStage::Build => BuildExecutorRequest::Build {
             command: command.clone(),
-            identity: BuildIdentity(persistence_sqlx::Sha256Digest::of_bytes(b"command")),
+            identity: BuildIdentity(persistence_sqlx::Sha256Digest::of_bytes(
+                command.request.id.as_uuid().as_bytes(),
+            )),
         },
         BuildProviderStage::Cleanup => BuildExecutorRequest::Cleanup {
             build_request_id: command.request.id,
-            identity: BuildIdentity(persistence_sqlx::Sha256Digest::of_bytes(b"command")),
+            identity: BuildIdentity(persistence_sqlx::Sha256Digest::of_bytes(
+                command.request.id.as_uuid().as_bytes(),
+            )),
         },
         _ => unreachable!("fixture uses only command-bound stages"),
     };
