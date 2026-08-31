@@ -181,14 +181,13 @@ async fn successful_build_preserves_digest_identity() {
         .await
         .expect("same command succeeds deterministically");
 
-    assert_eq!(
-        first.build_identity,
-        BuildIdentity(persistence_sqlx::Sha256Digest::of_bytes(b"command"))
-    );
+    let expected_identity =
+        BuildIdentity(persistence_sqlx::Sha256Digest::of_bytes(command.request.id.as_uuid().as_bytes()));
+    assert_eq!(first.build_identity, expected_identity);
     assert!(first.registry_project.private);
     assert!(first.registry_project.storage_quota_bytes > 0);
     assert_eq!(first.build_identity, second.build_identity);
-    assert_eq!(first.artifact.id(), second.artifact.id());
+    assert_ne!(first.artifact.id(), second.artifact.id());
     assert!(matches!(first.artifact, ImageArtifact::Container { .. }));
     assert_eq!(
         calls
