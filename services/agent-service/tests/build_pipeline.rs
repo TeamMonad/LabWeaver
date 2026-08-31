@@ -181,8 +181,9 @@ async fn successful_build_preserves_digest_identity() {
         .await
         .expect("same command succeeds deterministically");
 
-    let expected_identity =
-        BuildIdentity(persistence_sqlx::Sha256Digest::of_bytes(command.request.id.as_uuid().as_bytes()));
+    let expected_identity = BuildIdentity(persistence_sqlx::Sha256Digest::of_bytes(
+        command.request.id.as_uuid().as_bytes(),
+    ));
     assert_eq!(first.build_identity, expected_identity);
     assert!(first.registry_project.private);
     assert!(first.registry_project.storage_quota_bytes > 0);
