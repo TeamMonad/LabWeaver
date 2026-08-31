@@ -25,8 +25,6 @@ executor:
   buildkitCaFile: "/etc/labweaver/secrets/buildkit-ca.pem"
   buildkitClientCertificateFile: "/etc/labweaver/secrets/buildkit-client.crt"
   buildkitClientPrivateKeyFile: "/etc/labweaver/secrets/buildkit-client.key"
-  trivyPath: "/usr/local/bin/trivy"
-  trivyCacheDirectory: "/tmp/trivy-cache"
   dockerConfigDirectory: "/tmp/docker"
   workDirectory: "/tmp/builds"
   maxUnpackedContextBytes: 536870912
@@ -37,7 +35,3 @@ executor:
   harborPasswordFile: "/etc/labweaver/secrets/harbor-password"
   projectStorageQuotaBytes: 10737418240
   robotSubject: "platform-build-executor"
-  scannerName: "trivy"
-  scannerVersion: "0.72.0"
-  scannerDatabaseRepository: "harbor.example.invalid/labweaver-system/trivy-db@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-  scannerDatabaseSha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

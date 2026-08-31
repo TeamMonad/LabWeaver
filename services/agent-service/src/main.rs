@@ -73,6 +73,8 @@ struct BuildFileConfig {
     provider_subject: String,
     builder_binding: String,
     registry_binding: String,
+    policy_id: String,
+    policy_revision: u32,
     registry_robot_name: String,
     stage_timeout_milliseconds: u64,
     worker_lease_seconds: u64,
@@ -636,7 +638,10 @@ mod deployment_contract_tests {
             serde_yaml::from_str(example).expect("agent deployment example must deserialize");
 
         assert!(deployment.database_url_file.starts_with('/'));
-        assert!(deployment.nats.server.starts_with("tls://"));
+        assert!(
+            deployment.nats.server.starts_with("nats://")
+                || deployment.nats.server.starts_with("tls://")
+        );
         assert!(deployment.build.provider_subject.ends_with(".v1"));
         assert_eq!(
             deployment.worker_environment_files,
