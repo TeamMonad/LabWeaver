@@ -1922,8 +1922,6 @@ mod tests {
                     "artifactId": "00000000-0000-7000-8000-000000000001",
                     "storeBinding": "minio-primary-v1",
                     "objectVersion": "1",
-                    "sha256":
-                        "d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5",
                     "sizeBytes": 1,
                     "mediaType": "application/vnd.labweaver.build-context.v1+tar"
                 },
@@ -1942,8 +1940,6 @@ mod tests {
                         "docker://quay.io/containerdisks/ubuntu@",
                         "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
                     ),
-                    "diskSha256":
-                        "d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5",
                     "capacityBytes": 10_737_418_240_u64
                 },
                 "storage_class_binding": "vm-rwo-primary-v1",
