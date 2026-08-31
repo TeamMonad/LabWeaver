@@ -67,6 +67,7 @@ struct DeploymentFile {
     nats: NatsFileConfig,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BuildFileConfig {
