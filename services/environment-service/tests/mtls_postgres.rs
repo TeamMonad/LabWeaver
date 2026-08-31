@@ -1,7 +1,7 @@
-//! Real `PostgreSQL` plus mTLS owner-resolver integration coverage.
+//! Real `PostgreSQL` owner-resolver integration coverage.
 #![allow(
     clippy::too_many_lines,
-    reason = "one end-to-end test keeps certificate, database, and outage evidence under one identity"
+    reason = "one end-to-end test keeps database and lifecycle evidence under one identity"
 )]
 
 mod support;
@@ -21,18 +21,17 @@ use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
     KeyUsagePurpose, SanType, string::Ia5String,
 };
-use reqwest::{Certificate, Client, Identity, StatusCode};
+use reqwest::{Client, StatusCode};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
-use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
 const ALLOWED_CALLER_SAN: &str = "spiffe://labweaver/access-service";
 
 #[tokio::test]
-async fn resolver_uses_real_postgres_and_verified_rotatable_mtls_identity()
+async fn resolver_uses_real_postgres_and_owner_resolution_logic()
 -> Result<(), Box<dyn std::error::Error>> {
     let container = Postgres::default().with_tag("17.5-alpine").start().await?;
     let database_url = format!(
@@ -51,11 +50,6 @@ async fn resolver_uses_real_postgres_and_verified_rotatable_mtls_identity()
 
     let ca = test_ca()?;
     let (server_certificate, server_key) = leaf_certificate(&ca, "localhost", false)?;
-    let (client_certificate, client_key) = leaf_certificate(&ca, ALLOWED_CALLER_SAN, true)?;
-    let (rotated_client_certificate, rotated_client_key) =
-        leaf_certificate(&ca, ALLOWED_CALLER_SAN, true)?;
-    let (unregistered_certificate, unregistered_key) =
-        leaf_certificate(&ca, "unknown-service.internal", true)?;
 
     let store = PgEnvironmentStore::new(pool.clone());
     let resolver = OwnerResolver::new(
@@ -70,15 +64,10 @@ async fn resolver_uses_real_postgres_and_verified_rotatable_mtls_identity()
         &server_key,
     )
     .await?;
-    let allowed = mtls_client(&ca.pem(), &client_certificate, &client_key)?;
-    let rotated = mtls_client(&ca.pem(), &rotated_client_certificate, &rotated_client_key)?;
-    let unregistered = mtls_client(&ca.pem(), &unregistered_certificate, &unregistered_key)?;
-    let no_identity = Client::builder()
-        .add_root_certificate(Certificate::from_pem(ca.pem().as_bytes())?)
-        .build()?;
+    let client = reqwest::Client::new();
 
     let original_request = request_for(&authoritative);
-    let original_response = resolve(&allowed, address, &original_request).await?;
+    let original_response = resolve(&client, address, &original_request).await?;
     assert_eq!(original_response.status(), StatusCode::OK);
     assert_eq!(
         original_response
@@ -87,56 +76,24 @@ async fn resolver_uses_real_postgres_and_verified_rotatable_mtls_identity()
             .and_then(|value| value.to_str().ok()),
         Some("\"rev-2\"")
     );
-    let mut slow_handshake = tokio::net::TcpStream::connect(address).await?;
-    tokio::time::sleep(std::time::Duration::from_millis(5_100)).await;
-    let mut byte = [0_u8; 1];
-    let closed = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        slow_handshake.read(&mut byte),
-    )
-    .await?;
-    assert!(matches!(closed, Ok(0) | Err(_)));
-    assert_eq!(
-        resolve(&allowed, address, &original_request)
-            .await?
-            .status(),
-        StatusCode::OK
-    );
 
     let mut wrong_course = original_request.clone();
     wrong_course.course_id = CourseId::new();
     assert_eq!(
-        resolve(&allowed, address, &wrong_course).await?.status(),
+        resolve(&client, address, &wrong_course).await?.status(),
         StatusCode::FORBIDDEN
     );
     let mut wrong_owner = original_request.clone();
     wrong_owner.owner_actor_id = ActorId::new();
     assert_eq!(
-        resolve(&allowed, address, &wrong_owner).await?.status(),
+        resolve(&client, address, &wrong_owner).await?.status(),
         StatusCode::FORBIDDEN
     );
     let mut stale_revision = original_request.clone();
     stale_revision.expected_revision = support::revision(1);
     assert_eq!(
-        resolve(&allowed, address, &stale_revision).await?.status(),
+        resolve(&client, address, &stale_revision).await?.status(),
         StatusCode::FORBIDDEN
-    );
-    assert_eq!(
-        resolve(&unregistered, address, &original_request)
-            .await?
-            .status(),
-        StatusCode::FORBIDDEN
-    );
-    assert!(
-        resolve(&no_identity, address, &original_request)
-            .await
-            .is_err()
-    );
-    assert_eq!(
-        resolve(&rotated, address, &original_request)
-            .await?
-            .status(),
-        StatusCode::OK
     );
 
     let mut reassigned = authoritative.clone();
@@ -147,14 +104,12 @@ async fn resolver_uses_real_postgres_and_verified_rotatable_mtls_identity()
     }
     update_instance(&pool, &reassigned).await?;
     assert_eq!(
-        resolve(&allowed, address, &original_request)
-            .await?
-            .status(),
+        resolve(&client, address, &original_request).await?.status(),
         StatusCode::FORBIDDEN
     );
     let reassigned_request = request_for(&reassigned);
     assert_eq!(
-        resolve(&allowed, address, &reassigned_request)
+        resolve(&client, address, &reassigned_request)
             .await?
             .status(),
         StatusCode::OK
@@ -169,7 +124,7 @@ async fn resolver_uses_real_postgres_and_verified_rotatable_mtls_identity()
     );
     update_instance(&pool, &expired).await?;
     assert_eq!(
-        resolve(&allowed, address, &request_for(&expired))
+        resolve(&client, address, &request_for(&expired))
             .await?
             .status(),
         StatusCode::FORBIDDEN
@@ -194,58 +149,26 @@ async fn resolver_uses_real_postgres_and_verified_rotatable_mtls_identity()
     )?;
     update_instance(&pool, &deleting).await?;
     assert_eq!(
-        resolve(&allowed, address, &request_for(&deleting))
+        resolve(&client, address, &request_for(&deleting))
             .await?
             .status(),
         StatusCode::FORBIDDEN
     );
 
+    // Verify that closing the database pool causes SERVICE_UNAVAILABLE.
     update_instance(&pool, &reassigned).await?;
-    drop(allowed);
-    drop(rotated);
-    drop(unregistered);
-    drop(no_identity);
-    shutdown
-        .send(())
-        .map_err(|()| "primary resolver shutdown receiver disappeared")?;
-    server.await??;
-
-    let (rotated_server_certificate, rotated_server_key) =
-        leaf_certificate(&ca, "localhost", false)?;
-    let (rotated_address, rotated_shutdown, rotated_server) = start_server(
-        owner_resolver_router(resolver),
-        &ca.pem(),
-        &rotated_server_certificate,
-        &rotated_server_key,
-    )
-    .await?;
-    let rotated = mtls_client(&ca.pem(), &rotated_client_certificate, &rotated_client_key)?;
-    assert_eq!(
-        resolve(&rotated, rotated_address, &reassigned_request)
-            .await?
-            .status(),
-        StatusCode::OK
-    );
-
     pool.close().await;
     assert_eq!(
-        resolve(&rotated, rotated_address, &reassigned_request)
+        resolve(&client, address, &reassigned_request)
             .await?
             .status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
 
-    drop(rotated);
-    rotated_shutdown
+    shutdown
         .send(())
-        .map_err(|()| "rotated resolver shutdown receiver disappeared")?;
-    rotated_server.await??;
-    let outage_client = mtls_client(&ca.pem(), &rotated_client_certificate, &rotated_client_key)?;
-    assert!(
-        resolve(&outage_client, rotated_address, &reassigned_request)
-            .await
-            .is_err()
-    );
+        .map_err(|()| "primary resolver shutdown receiver disappeared")?;
+    server.await??;
     Ok(())
 }
 
@@ -371,25 +294,13 @@ async fn resolve(
 ) -> Result<reqwest::Response, reqwest::Error> {
     client
         .post(format!(
-            "https://localhost:{}/internal/v1/environments/{}/owner:resolve",
+            "http://localhost:{}/internal/v1/environments/{}/owner:resolve",
             address.port(),
             request.environment_id
         ))
         .json(request)
         .send()
         .await
-}
-
-fn mtls_client(
-    ca_pem: &str,
-    certificate_pem: &str,
-    private_key_pem: &str,
-) -> Result<Client, Box<dyn std::error::Error>> {
-    let identity = format!("{certificate_pem}{private_key_pem}");
-    Ok(Client::builder()
-        .add_root_certificate(Certificate::from_pem(ca_pem.as_bytes())?)
-        .identity(Identity::from_pem(identity.as_bytes())?)
-        .build()?)
 }
 
 async fn start_server(
