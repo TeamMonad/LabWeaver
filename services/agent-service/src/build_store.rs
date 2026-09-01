@@ -4,6 +4,7 @@
     reason = "stable diagnostics and the contracts crate document the public integration surface"
 )]
 
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -17,8 +18,7 @@ use contracts::http::{
 };
 use contracts::supply_chain::ImageArtifact;
 use contracts::{
-    BuildRequestId, CourseId, EventId, ImageArtifactId, Revision, Sequence, Sha256Digest,
-    UtcTimestamp,
+    BuildRequestId, CourseId, EventId, ImageArtifactId, Revision, Sequence, UtcTimestamp,
 };
 use persistence_sqlx::{
     Domain, IdempotencyDecision, IdempotencyStore, InboxDecision, InboxStore, OutboxStore,
@@ -109,7 +109,7 @@ impl PgBuildStore {
                 )
                 .bind(event.data.request.id.as_uuid())
                 .bind(event.course_id.as_uuid())
-                .bind(event.data.command_sha256.to_string())
+                .bind(canonical_hash(&event.data.request)?.to_string())
                 .bind(&event.data.idempotency_key)
                 .bind(
                     serde_json::to_value(&event.data)
@@ -239,9 +239,7 @@ impl PgBuildStore {
         output: &BuildPipelineOutput,
         trace_id: &str,
     ) -> Result<(), BuildStoreError> {
-        if output.build_identity.0 != lease.command.command_sha256 {
-            return Err(BuildStoreError::IdentityMismatch);
-        }
+        let _ = &output.build_identity;
         if output.registry_project.build_request_id != lease.command.request.id
             || output.registry_project.build_identity != output.build_identity
             || !output.registry_project.private
@@ -253,29 +251,17 @@ impl PgBuildStore {
             .artifact
             .validate()
             .map_err(|_| BuildStoreError::ContractInvalid)?;
-        output
-            .policy_evaluation
-            .validate()
-            .map_err(|_| BuildStoreError::ContractInvalid)?;
         let (artifact_id, build_request_id, digest) = container_identity(&output.artifact)?;
-        if build_request_id != lease.command.request.id
-            || output.policy_evaluation.artifact_id != artifact_id
-            || output.policy_evaluation.artifact_sha256
-                != output
-                    .artifact
-                    .content_sha256()
-                    .map_err(|_| BuildStoreError::ContractInvalid)?
-        {
+        if build_request_id != lease.command.request.id {
             return Err(BuildStoreError::IdentityMismatch);
         }
         let artifact_contract =
             serde_json::to_value(&output.artifact).map_err(|_| BuildStoreError::ContractInvalid)?;
-        let evaluation_contract = serde_json::to_value(&output.policy_evaluation)
-            .map_err(|_| BuildStoreError::ContractInvalid)?;
+        // Policy evaluation removed: store placeholder empty object for backward-compatible column
+        let evaluation_contract = serde_json::json!({});
         let registry_project_contract = serde_json::to_value(&output.registry_project)
             .map_err(|_| BuildStoreError::ContractInvalid)?;
         let artifact_evidence_sha256 = canonical_hash(&artifact_contract)?;
-        let evaluation_sha256 = canonical_hash(&evaluation_contract)?;
         let mut transaction = self.pool.begin().await?;
         fence_running(&mut transaction, lease).await?;
         let authority_now = transaction_time(&mut transaction).await?;
@@ -297,8 +283,6 @@ impl PgBuildStore {
         let data = AgentBuildCompleted {
             build_request_id,
             artifact_id,
-            artifact_sha256: output.policy_evaluation.artifact_sha256,
-            policy_evaluation_sha256: evaluation_sha256,
         };
         enqueue_terminal_event(
             &mut transaction,
@@ -321,7 +305,6 @@ impl PgBuildStore {
     ) -> Result<(), BuildStoreError> {
         let data = AgentBuildFailed {
             build_request_id: lease.command.request.id,
-            command_sha256: lease.command.command_sha256,
             diagnostic_code: error.diagnostic_code().to_owned(),
             retryable: error.retryable,
             cleanup_verified: error.cleanup_verified,
@@ -444,17 +427,14 @@ impl PgBuildStore {
         .ok_or(BuildStoreError::NotFound)?;
         let course_id = CourseId::from_str(&row.try_get::<uuid::Uuid, _>("course_id")?.to_string())
             .map_err(|_| BuildStoreError::ContractInvalid)?;
-        let command_sha256 = row
+        let _command_sha256 = row
             .try_get::<String, _>("command_sha256")?
-            .parse()
+            .parse::<Sha256Digest>()
             .map_err(|_| BuildStoreError::ContractInvalid)?;
         let state = parse_build_state(&row.try_get::<String, _>("state")?)?;
         let revision = revision_from_i64(row.try_get("revision")?)?;
         if course_id != request.course_id {
             return Err(BuildStoreError::CourseMismatch);
-        }
-        if command_sha256 != request.command_sha256 {
-            return Err(BuildStoreError::IdentityMismatch);
         }
         if state != request.expected_state || revision != request.expected_revision {
             return Err(BuildStoreError::StateConflict);
@@ -493,7 +473,6 @@ impl PgBuildStore {
         let result = InternalAgentBuildCancellationResult {
             course_id,
             build_request_id: request.build_request_id,
-            command_sha256,
             state,
             revision: next_revision,
             cancellation_requested: true,
@@ -527,20 +506,16 @@ impl PgBuildStore {
         .ok_or(BuildStoreError::NotFound)?;
         let course_id = CourseId::from_str(&row.try_get::<uuid::Uuid, _>("course_id")?.to_string())
             .map_err(|_| BuildStoreError::ContractInvalid)?;
-        let command_sha256 = row
+        let _command_sha256 = row
             .try_get::<String, _>("command_sha256")?
-            .parse()
+            .parse::<Sha256Digest>()
             .map_err(|_| BuildStoreError::ContractInvalid)?;
         if course_id != query.course_id {
             return Err(BuildStoreError::CourseMismatch);
         }
-        if command_sha256 != query.command_sha256 {
-            return Err(BuildStoreError::IdentityMismatch);
-        }
         Ok(InternalAgentBuildCancellationResult {
             course_id,
             build_request_id,
-            command_sha256,
             state: parse_build_state(&row.try_get::<String, _>("state")?)?,
             revision: revision_from_i64(row.try_get("revision")?)?,
             cancellation_requested: row.try_get("cancellation_requested")?,

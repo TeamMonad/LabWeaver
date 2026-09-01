@@ -18,7 +18,7 @@
 3. [Codex Agent 协作协议](#3-codex-agent-协作协议)
 4. [固定的每日 Scrum 节奏](#4-固定的每日-scrum-节奏)
 5. [四人逐日详细工作计划](#5-四人逐日详细工作计划)
-6. [四个 Sprint 的退出门禁](#6-四个-sprint-的退出门禁)
+6. [四个 long-term single-university private deployment phase 的退出门禁](#6-四个-sprint-的退出门禁)
 7. [范围控制和延期处理规则](#7-范围控制和延期处理规则)
 8. [每日执行检查表](#8-每日执行检查表)
 
@@ -26,7 +26,7 @@
 
 # 1. 计划概览
 
-本计划从 **2026 年 7 月 11 日启动，到 7 月 24 日发布 `v1.0.0`**，覆盖四个 Sprint、四名成员和 14 个自然日。角色、Sprint 目标、Backlog 编号、范围冻结点和验收口径来自项目计划 v2.1；服务边界、代码目录、实现顺序和安全约束来自生产级技术实现方案 v2.1。
+本计划从 **2026 年 7 月 11 日启动，到 7 月 24 日发布 `v1.0.0`**，覆盖四个 long-term single-university private deployment phase、四名成员和 14 个自然日。角色、long-term single-university private deployment phase 目标、Backlog 编号、范围冻结点和验收口径来自项目计划 v2.1；服务边界、代码目录、实现顺序和安全约束来自生产级技术实现方案 v2.1。
 
 四人总投入约 **134.5 人时**：
 
@@ -50,7 +50,7 @@ Codex Agent 不作为“第五名成员”。每个任务始终有一个人类 O
 | 字段 | 可选值 |
 |---|---|
 | Workflow Status | Backlog / Ready / In Progress / Draft PR / In Review / Verify / Done / Blocked |
-| Sprint | S1 Foundation / S2 Environment / S3 Evaluation / S4 Release |
+| long-term single-university private deployment phase | S1 Foundation / S2 Environment / S3 Evaluation / S4 Release |
 | Priority | P0 / P1 / P2 |
 | Area | Architecture / Access / Environment / Agent / Evaluation / Resource / Web / Test / Deploy / Docs |
 | Owner | A / B / C / D |
@@ -302,7 +302,7 @@ deploy/ansible/AGENTS.md
 
 ## 4.1 每日开始
 
-每人在自己的 Sprint Parent Issue 下评论：
+每人在自己的 long-term single-university private deployment phase Parent Issue 下评论：
 
 ```text
 昨天完成：
@@ -351,13 +351,13 @@ deploy/ansible/AGENTS.md
 
 # 5. 四人逐日详细工作计划
 
-## 5.1 7 月 11 日，周六——Sprint 1 Day 1：仓库和项目治理启动
+## 5.1 7 月 11 日，周六——long-term single-university private deployment phase 1 Day 1：仓库和项目治理启动
 
 ### A：架构工程师 / PM（3 小时，C1+C2）
 
 负责 `PM-01a`、`ARC-01a`、`API-01a`。
 
-- 创建四个 Milestone、Project 字段、Labels、Issue/PR 模板和 Sprint Parent Issues；
+- 创建四个 Milestone、Project 字段、Labels、Issue/PR 模板和 long-term single-university private deployment phase Parent Issues；
 - 建立 Cargo Workspace、基础 Crate 和各 Axum Service 空壳；
 - 建立 `main`、`develop` 保护规则和 `CODEOWNERS`；
 - 创建 C4、服务边界、数据所有权和 ADR 目录；
@@ -429,7 +429,7 @@ pnpm build
 
 ---
 
-## 5.2 7 月 12 日，周日——Sprint 1 Day 2：关键 Contract 和真实 VM Spike
+## 5.2 7 月 12 日，周日——long-term single-university private deployment phase 1 Day 2：关键 Contract 和真实 VM Spike
 
 ### A（3 小时，C1+C2）
 
@@ -500,14 +500,14 @@ cargo test -p agent-core
 
 ---
 
-## 5.3 7 月 13 日，周一——Sprint 1 Review、接口冻结和 `v0.1-foundation`
+## 5.3 7 月 13 日，周一——long-term single-university private deployment phase 1 Review、接口冻结和 `v0.1-foundation`
 
 ### A（2 小时，C0+C1）
 
-- 主持 Sprint Review 和 Retro；
+- 主持 long-term single-university private deployment phase Review 和 Retro；
 - 合并 S1 PR，解决接口冲突；
 - 冻结关键 Trait、事件 Subject、状态机和目录；
-- 更新 Project、风险表和 Sprint 2 Ready 队列；
+- 更新 Project、风险表和 long-term single-university private deployment phase 2 Ready 队列；
 - 创建并推送 Tag `v0.1-foundation`。
 
 ### B（2 小时，C1+C2）
@@ -527,10 +527,10 @@ cargo test -p agent-core
 
 - 执行 S1 全量测试；
 - 归档 VM 日志、Playwright Trace 和测试报告；
-- 编写 Sprint 1 Review/Retro 文档；
-- 创建 Sprint 2 测试子 Issue。
+- 编写 long-term single-university private deployment phase 1 Review/Retro 文档；
+- 创建 long-term single-university private deployment phase 2 测试子 Issue。
 
-### Sprint 1 验收
+### long-term single-university private deployment phase 1 验收
 
 ```bash
 cargo build --workspace
@@ -541,7 +541,7 @@ kubectl get vm,vmi -A
 
 ---
 
-## 5.4 7 月 14 日，周二——Sprint 2 Day 1：容器环境纵向切片
+## 5.4 7 月 14 日，周二——long-term single-university private deployment phase 2 Day 1：容器环境纵向切片
 
 ### A（2.5 小时，C1+C2）
 
@@ -600,7 +600,7 @@ kubectl get vm,vmi -A
 
 ---
 
-## 5.5 7 月 15 日，周三——Sprint 2 Day 2：OIDC、Tailnet、KubeVirt 和 Collector
+## 5.5 7 月 15 日，周三——long-term single-university private deployment phase 2 Day 2：OIDC、Tailnet、KubeVirt 和 Collector
 
 ### A（3 小时，C1+C2）
 
@@ -654,7 +654,7 @@ kubectl get vm,vmi -A
 
 ---
 
-## 5.6 7 月 16 日，周四——Sprint 2 Review 和 `v0.2-environment`
+## 5.6 7 月 16 日，周四——long-term single-university private deployment phase 2 Review 和 `v0.2-environment`
 
 ### A（2 小时，C0+C1）
 
@@ -680,10 +680,10 @@ kubectl get vm,vmi -A
 
 - 执行 Container、VM、Collector、Access 全量测试；
 - 验证重复 Reconcile 和重复提交不产生重复资源；
-- 生成 Sprint 2 Playwright Trace 和缺陷清单；
+- 生成 long-term single-university private deployment phase 2 Playwright Trace 和缺陷清单；
 - 主持环境闭环验收。
 
-### Sprint 2 验收
+### long-term single-university private deployment phase 2 验收
 
 必须演示：
 
@@ -700,7 +700,7 @@ kubectl get vm,vmi -A
 
 ---
 
-## 5.7 7 月 17 日，周五——Sprint 3 Day 1：Evaluation DAG 和 Program Runner
+## 5.7 7 月 17 日，周五——long-term single-university private deployment phase 3 Day 1：Evaluation DAG 和 Program Runner
 
 ### A（3 小时，C1+C2）
 
@@ -752,7 +752,7 @@ kubectl get vm,vmi -A
 
 ---
 
-## 5.8 7 月 18 日，周六——Sprint 3 Day 2：Checker、Linux Probe 和资源审批
+## 5.8 7 月 18 日，周六——long-term single-university private deployment phase 3 Day 2：Checker、Linux Probe 和资源审批
 
 ### A（3 小时，C1+C2）
 
@@ -803,7 +803,7 @@ kubectl get vm,vmi -A
 
 ---
 
-## 5.9 7 月 19 日，周日——Sprint 3 Day 3：LLM Review、Mock Capacity 和多角色 E2E
+## 5.9 7 月 19 日，周日——long-term single-university private deployment phase 3 Day 3：LLM Review、Mock Capacity 和多角色 E2E
 
 ### A（2 小时，C1+C2）
 
@@ -850,11 +850,11 @@ kubectl get vm,vmi -A
 
 ---
 
-## 5.10 7 月 20 日，周一——Sprint 3 Review、功能冻结和 `v0.3-feature-complete`
+## 5.10 7 月 20 日，周一——long-term single-university private deployment phase 3 Review、功能冻结和 `v0.3-feature-complete`
 
 ### A（1.5 小时，C0+C1）
 
-- 主持 Sprint Review；
+- 主持 long-term single-university private deployment phase Review；
 - 关闭或降级所有功能型阻塞项；
 - 冻结 API、事件、Runner 类型和用户功能；
 - 建立 S4 缺陷、部署、文档和演示队列；
@@ -880,7 +880,7 @@ kubectl get vm,vmi -A
 - 把失败分为 Release Blocker、Must Fix、Known Issue；
 - 验证所有关键 Issue 都有 Evidence。
 
-### Sprint 3 验收
+### long-term single-university private deployment phase 3 验收
 
 ```text
 OJ：错误解失败、正确解通过、LLM 仅建议
@@ -893,7 +893,7 @@ Access：未授权和过期访问失败
 
 ---
 
-## 5.11 7 月 21 日，周二——Sprint 4 Day 1：Ansible、Helm、安全硬化
+## 5.11 7 月 21 日，周二——long-term single-university private deployment phase 4 Day 1：Ansible、Helm、安全硬化
 
 ### A（3 小时，C1+C2）
 
@@ -940,7 +940,7 @@ Access：未授权和过期访问失败
 
 ---
 
-## 5.12 7 月 22 日，周三——Sprint 4 Day 2：升级回滚、Trace、权限负例和文档走读
+## 5.12 7 月 22 日，周三——long-term single-university private deployment phase 4 Day 2：升级回滚、Trace、权限负例和文档走读
 
 ### A（2.5 小时，C1+C2）
 
@@ -985,7 +985,7 @@ cargo xtask test --suite e2e
 
 ---
 
-## 5.13 7 月 23 日，周四——Sprint 4 Day 3：Release Candidate 和三次完整彩排
+## 5.13 7 月 23 日，周四——long-term single-university private deployment phase 4 Day 3：Release Candidate 和三次完整彩排
 
 ### A（2 小时，C0+C1）
 
@@ -1029,7 +1029,7 @@ cargo xtask test --suite e2e
 
 ---
 
-## 5.14 7 月 24 日，周五——Sprint 4 Review、`v1.0.0` 发布和最终展示
+## 5.14 7 月 24 日，周五——long-term single-university private deployment phase 4 Review、`v1.0.0` 发布和最终展示
 
 ### A（1.5 小时，C0）
 
@@ -1037,7 +1037,7 @@ cargo xtask test --suite e2e
 - 创建并审批 `release/v1.0.0 → main` PR；
 - 确认 Release Notes、SBOM、已知问题和回滚步骤；
 - 创建 GitHub Release 和 Tag `v1.0.0`；
-- 负责最终 Presentation 的架构、Git 和 Sprint 部分。
+- 负责最终 Presentation 的架构、Git 和 long-term single-university private deployment phase 部分。
 
 ### B（1 小时，C0+C1）
 
@@ -1081,25 +1081,25 @@ git tag --list
 
 ---
 
-# 6. 四个 Sprint 的退出门禁
+# 6. 四个 long-term single-university private deployment phase 的退出门禁
 
-| 日期 | Sprint | 必须满足 |
+| 日期 | long-term single-university private deployment phase | 必须满足 |
 |---|---|---|
 | 7/13 | S1 Foundation | 真实 VM Running；Schema 通过；Workspace/前端构建；Tag `v0.1-foundation` |
 | 7/16 | S2 Environment | 容器和 VM 环境闭环；Tailnet 授权；不可变快照；Tag `v0.2-environment` |
 | 7/20 | S3 Feature Complete | OJ、Linux、Resource、Access 三条主线通过；Tag `v0.3-feature-complete` |
 | 7/24 | S4 Release | Ansible、测试、Trace、三次彩排、Release 和 Tag `v1.0.0` |
 
-## 6.1 Sprint Review 固定议程
+## 6.1 long-term single-university private deployment phase Review 固定议程
 
 ```text
-1. Sprint Goal 是否完成
+1. long-term single-university private deployment phase Goal 是否完成
 2. 演示可运行增量
 3. 展示测试、日志、Trace 或截图
 4. 检查未完成 Issue 和范围变化
 5. 记录技术债与风险
 6. Retro：保留、停止、开始
-7. 下一 Sprint 只将符合 DoR 的任务放入 Ready
+7. 下一 long-term single-university private deployment phase 只将符合 DoR 的任务放入 Ready
 ```
 
 ## 6.2 Release Blocker 判定
@@ -1181,7 +1181,7 @@ git tag --list
 ## 8.1 成员日开始检查表
 
 ```markdown
-- [ ] 今日唯一目标已写入 Sprint Parent Issue
+- [ ] 今日唯一目标已写入 long-term single-university private deployment phase Parent Issue
 - [ ] 当前 Issue 处于 Ready
 - [ ] 验收条件明确
 - [ ] Reviewer 已指定
@@ -1232,4 +1232,4 @@ git tag --list
 
 ## 结论
 
-该计划将 LabWeaver 的课程目标、生产级技术边界、GitHub Scrum 治理和 Codex Agent 协作方式统一到一个可执行的两周工作流中。四名成员每天都有明确 Owner、Issue、分支、PR、验收命令和证据要求；每个 Sprint 都有可运行的退出门禁；范围冻结、降级顺序和 Release Blocker 则保证团队在有限投入下优先完成真实 KubeVirt、统一评测、安全接入、自动化测试和可重复部署的核心闭环。
+该计划将 LabWeaver 的课程目标、生产级技术边界、GitHub Scrum 治理和 Codex Agent 协作方式统一到一个可执行的两周工作流中。四名成员每天都有明确 Owner、Issue、分支、PR、验收命令和证据要求；每个 long-term single-university private deployment phase 都有可运行的退出门禁；范围冻结、降级顺序和 Release Blocker 则保证团队在有限投入下优先完成真实 KubeVirt、统一评测、安全接入、自动化测试和可重复部署的核心闭环。

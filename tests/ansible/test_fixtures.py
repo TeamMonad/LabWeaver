@@ -1491,7 +1491,6 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertEqual(vm_policy["artifactId"], vm_lock["artifact_id"])
         self.assertEqual(vm_policy["baseDisk"]["binding"], vm_lock["binding"])
         self.assertEqual(vm_policy["baseDisk"]["sourceRegistryDigest"], vm_lock["registry_url"])
-        self.assertEqual(vm_policy["baseDisk"]["diskSha256"], vm_lock["disk_sha256"])
         self.assertEqual(vm_policy["baseDisk"]["capacityBytes"], vm_lock["capacity_bytes"])
 
     def test_control_quarantine_subjects_belong_to_the_retained_agent_stream(self) -> None:

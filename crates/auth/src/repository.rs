@@ -1,5 +1,6 @@
 //! `PostgreSQL` compare-and-consume operations for one-time OIDC state.
 
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -9,6 +10,12 @@ use contracts::{
     ActorId, CourseId, CourseMembership, MembershipState, PlatformRole, ProjectId,
     ProjectMembership, Revision, UtcTimestamp,
 };
+
+fn hex_sha256(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    format!("{:x}", hasher.finalize())
+}
 
 /// Local actor row created from a verified OIDC issuer/subject pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -257,7 +264,7 @@ pub async fn upsert_actor(
     issuer: &str,
     subject: &str,
 ) -> Result<LocalActor, RepositoryError> {
-    let subject_hash = contracts::Sha256Digest::of_bytes(subject.as_bytes()).to_string();
+    let subject_hash = hex_sha256(subject.as_bytes());
     let actor_id = Uuid::now_v7();
     let row = sqlx::query(
         "INSERT INTO access.actors (actor_id, issuer, subject_sha256) VALUES ($1, $2, $3) \
@@ -297,7 +304,7 @@ pub async fn create_bff_session(
     let oidc_sid_sha256 = input
         .oidc_sid
         .as_deref()
-        .map(|sid| contracts::Sha256Digest::of_bytes(sid.as_bytes()).to_string());
+        .map(|sid| hex_sha256(sid.as_bytes()));
     sqlx::query(
         "INSERT INTO access.bff_sessions \
          (session_id, actor_id, platform_roles, oidc_sid_sha256, authorization_revision, issued_at, expires_at, idle_expires_at, \
@@ -443,7 +450,7 @@ pub async fn revoke_bff_sessions_by_sid(
     sid: &str,
     now: OffsetDateTime,
 ) -> Result<u64, RepositoryError> {
-    let sid = contracts::Sha256Digest::of_bytes(sid.as_bytes()).to_string();
+    let sid = hex_sha256(sid.as_bytes());
     let result = sqlx::query(
         "UPDATE access.bff_sessions SET revoked_at = $2, revoke_diagnostic = 'LW_AUTH_SESSION_REVOKED' \
          WHERE oidc_sid_sha256 = $1 AND revoked_at IS NULL",
@@ -468,8 +475,8 @@ pub async fn consume_backchannel_logout(
     if issuer.is_empty() || jti.is_empty() || sid.is_empty() || expires_at <= now {
         return Err(RepositoryError::LogoutReplay);
     }
-    let jti_hash = contracts::Sha256Digest::of_bytes(jti.as_bytes()).to_string();
-    let sid_hash = contracts::Sha256Digest::of_bytes(sid.as_bytes()).to_string();
+    let jti_hash = hex_sha256(jti.as_bytes());
+    let sid_hash = hex_sha256(sid.as_bytes());
     let mut transaction = pool.begin().await?;
     let reservation = sqlx::query(
         "INSERT INTO access.backchannel_logout_events \
@@ -505,7 +512,7 @@ pub async fn consume_oidc_transaction(
     state: &str,
     now: OffsetDateTime,
 ) -> Result<OidcTransaction, RepositoryError> {
-    let hash = contracts::Sha256Digest::of_bytes(state.as_bytes()).to_string();
+    let hash = hex_sha256(state.as_bytes());
     let mut tx = pool.begin().await?;
     let row = sqlx::query(
         "SELECT transaction_id, encrypted_payload, encryption_key_id FROM access.oidc_transactions \

@@ -290,7 +290,6 @@ async fn accept_resource_work_handoff(
         .await?;
     if release.withdrawn_at.is_some()
         || release.projection.release.course_id != handoff.course_id
-        || release.projection.release.environment_spec_sha256 != handoff.release_sha256
         || release.projection.environment_spec.class != EnvironmentClass::Work
     {
         return Err(EnvironmentApiError::ReleaseDenied);

@@ -5,7 +5,7 @@
     reason = "the reviewed configuration and stable diagnostics define this internal boundary"
 )]
 
-use std::{collections::BTreeMap, fs, path::PathBuf, time::Duration};
+use std::{collections::BTreeMap, fs, path::PathBuf, time::Duration}; // internal persistence hash, not contract hash
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use contracts::{
@@ -413,7 +413,7 @@ impl FreezeCoordinator {
                     json!({
                         "kind":"pvc",
                         "workspaceRoot":"/workspace",
-                        "sourceIdentity": contracts::Sha256Digest::of_canonical(&binding.environment)
+                        "sourceIdentity": persistence_sqlx::Sha256Digest::of_canonical(&binding.environment)
                             .map_err(|_| FreezeCoordinatorError::BindingInvalid)?
                     }),
                     Some(

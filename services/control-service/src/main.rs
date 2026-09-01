@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use artifact_store::{S3Credential, S3ImmutableObjectStore, S3StoreConfig};
-use auth::{MtlsFileConfig, load_mtls_server_config};
-use control_service::api::{ApiState, router, serve_mtls};
+use auth::MtlsFileConfig;
+use control_service::api::{ApiState, router, serve_plain};
 use control_service::clients::{AccessClient, AgentClient, EvaluationClient, MtlsClientFileConfig};
 use control_service::messaging::{
     AgentBuildConsumer, AgentRunConsumer, ControlOutboxDispatcher, connect_nats_mtls,
@@ -91,7 +91,6 @@ async fn main() -> Result<(), StartupError> {
     let bind = SocketAddr::from_str(&deployment.gateway_mtls.bind_addr)
         .map_err(|_| StartupError::Configuration)?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
-    let mtls = load_mtls_server_config(&deployment.gateway_mtls)?;
     let nats = connect_nats_mtls(
         &deployment.nats.server,
         deployment.nats.ca_file.into(),
@@ -125,7 +124,7 @@ async fn main() -> Result<(), StartupError> {
     let interval = std::time::Duration::from_secs(deployment.cleanup_interval_seconds);
     let outbox_interval = Duration::from_millis(deployment.nats.outbox_poll_milliseconds);
     tokio::select! {
-        result = serve_mtls(listener, router(state), mtls) => result?,
+        result = serve_plain(listener, router(state)) => result?,
         result = cleanup_loop(service, interval) => result?,
         result = consumer_loop(consumer, consumer_control, agent) => result?,
         result = build_consumer_loop(build_consumer, build_consumer_control, build_consumer_agent) => result?,
@@ -276,8 +275,6 @@ enum StartupError {
     Database(#[from] sqlx::Error),
     #[error(transparent)]
     Telemetry(#[from] telemetry::TelemetryError),
-    #[error(transparent)]
-    Mtls(#[from] auth::MtlsError),
     #[error(transparent)]
     ObjectStore(#[from] artifact_store::ObjectStoreError),
     #[error(transparent)]

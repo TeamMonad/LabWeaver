@@ -14,14 +14,13 @@ use contracts::http::{
     CreateProblemPackageUploadRequest, IdempotencyKey, ProblemPackageUploadFile,
 };
 use contracts::supply_chain::BuildNetworkPolicy;
-use contracts::supply_chain::{
-    EnvironmentTemplateRelease, ImageArtifact, ImagePolicyEvaluation, VulnerabilitySummary,
-};
+use contracts::supply_chain::{EnvironmentTemplateRelease, ImageArtifact};
 use contracts::{
     ActorId, AgentRunId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId,
-    CourseId, EventId, ImageArtifactId, PolicyId, ReleaseId, Revision, Sha256Digest, UtcTimestamp,
+    CourseId, EventId, ImageArtifactId, PolicyId, ReleaseId, Revision, UtcTimestamp,
 };
 use control_service::{ContainerBuildPolicy, ControlConfig, ControlError, ControlService};
+use persistence_sqlx::Sha256Digest;
 use sqlx::{Row, postgres::PgPoolOptions};
 use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
@@ -123,19 +122,9 @@ async fn issue_48_migrations_enforce_fencing_and_monotonic_course_sequences()
     let session = service
         .create_upload(course, &request, &create_key, now)
         .await?;
-    let mut declared_files = request.files.clone();
-    declared_files.sort_by(|left, right| left.path.cmp(&right.path));
-    let manifest = Sha256Digest::of_canonical(&declared_files)?;
     let complete_key = IdempotencyKey::parse("issue-48-complete-upload")?;
     let package = service
-        .complete_upload(
-            course,
-            session.id,
-            manifest,
-            session.revision,
-            &complete_key,
-            now,
-        )
+        .complete_upload(course, session.id, session.revision, &complete_key, now)
         .await?;
     package.validate()?;
     let mut replays = Vec::new();
@@ -144,7 +133,7 @@ async fn issue_48_migrations_enforce_fencing_and_monotonic_course_sequences()
         let key = complete_key.clone();
         replays.push(tokio::spawn(async move {
             service
-                .complete_upload(course, session.id, manifest, session.revision, &key, now)
+                .complete_upload(course, session.id, session.revision, &key, now)
                 .await
         }));
     }
@@ -171,7 +160,6 @@ async fn issue_48_migrations_enforce_fencing_and_monotonic_course_sequences()
     let recovery_request_hash = Sha256Digest::of_canonical(&serde_json::json!({
         "courseId": recovery_course,
         "uploadId": recovery_session.id,
-        "manifestSha256": manifest,
         "expectedRevision": recovery_session.revision,
     }))?;
     sqlx::query(
@@ -199,7 +187,6 @@ async fn issue_48_migrations_enforce_fencing_and_monotonic_course_sequences()
         .complete_upload(
             recovery_course,
             recovery_session.id,
-            manifest,
             recovery_session.revision,
             &recovery_key,
             now,
@@ -225,7 +212,6 @@ async fn issue_48_migrations_enforce_fencing_and_monotonic_course_sequences()
             .complete_upload(
                 failing_session.course_id,
                 failing_session.id,
-                manifest,
                 failing_session.revision,
                 &IdempotencyKey::parse("issue-48-failing-complete")?,
                 now,
@@ -275,7 +261,6 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     let config = control_config()?;
     let evaluation_schema = config.evaluation_schema_sha256;
     let environment_schema = config.environment_schema_sha256;
-    let image_policy_id = config.image_policy_id;
     let service = ControlService::new(
         pool.clone(),
         Arc::new(FixtureObjects { fail_second: false }),
@@ -310,9 +295,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     .await?;
     let request = CandidateDecisionRequest {
         candidate_revision: Revision::new(1)?,
-        candidate_sha256,
         policy_revision: Revision::new(1)?,
-        schema_sha256: evaluation_schema,
         trust_revision: Revision::new(1)?,
         decision: CandidateDecision::Approved,
         reason: "reviewed evaluation candidate".to_owned(),
@@ -374,7 +357,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     .bind(build_context.artifact_id.as_uuid())
     .bind(&build_context.object_version)
     .bind(i64::try_from(build_context.size_bytes)?)
-    .bind(build_context.sha256.to_string())
+    .bind(Sha256Digest::of_bytes(b"context").to_string())
     .bind(&build_context.media_type)
     .execute(&pool)
     .await?;
@@ -386,7 +369,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     )
     .bind(environment_candidate.id.as_uuid())
     .bind(course_id.as_uuid())
-    .bind(environment_candidate.spec_sha256.to_string())
+    .bind(Sha256Digest::of_bytes(b"spec").to_string())
     .bind(serde_json::to_value(&environment_candidate)?)
     .bind(environment_schema.to_string())
     .bind(Uuid::now_v7())
@@ -394,9 +377,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     .await?;
     let environment_decision = CandidateDecisionRequest {
         candidate_revision: environment_candidate.revision,
-        candidate_sha256: environment_candidate.spec_sha256,
         policy_revision: environment_candidate.policy_revision,
-        schema_sha256: environment_candidate.schema_sha256,
         trust_revision: Revision::new(1)?,
         decision: CandidateDecision::Approved,
         reason: "reviewed container candidate".to_owned(),
@@ -453,7 +434,6 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
         contracts::http::CandidateBuildState::Requested
     );
     assert!(requested_build.artifact.is_none());
-    assert!(requested_build.image_policy_evaluation.is_none());
     let payload: serde_json::Value = sqlx::query_scalar(
         "SELECT payload FROM control.outbox_events WHERE subject=$1 AND aggregate_id<>$2",
     )
@@ -490,7 +470,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     let mut supply_chain = release_fixture(course_id)?;
     supply_chain.candidate_id = environment_candidate.id;
     supply_chain.candidate_revision = environment_candidate.revision;
-    supply_chain.environment_spec_sha256 = environment_candidate.spec_sha256;
+
     supply_chain.approval = approval.clone();
     if let ImageArtifact::Container {
         build_request_id, ..
@@ -498,37 +478,14 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     {
         *build_request_id = build_event.data.request.id;
     }
-    let artifact_sha256 = supply_chain.artifact.content_sha256()?;
-    let evaluation = supply_chain
-        .image_policy_evaluation
-        .as_mut()
-        .ok_or("container fixture must carry image policy evidence")?;
-    evaluation.policy_id = image_policy_id;
-    evaluation.artifact_sha256 = artifact_sha256;
     assert!(matches!(
         service
-            .project_artifact(
-                EventId::new(),
-                CourseId::new(),
-                &supply_chain.artifact,
-                supply_chain
-                    .image_policy_evaluation
-                    .as_ref()
-                    .ok_or("container fixture must carry image policy evidence")?,
-            )
+            .project_artifact(EventId::new(), CourseId::new(), &supply_chain.artifact,)
             .await,
         Err(ControlError::CourseMismatch)
     ));
     service
-        .project_artifact(
-            EventId::new(),
-            course_id,
-            &supply_chain.artifact,
-            supply_chain
-                .image_policy_evaluation
-                .as_ref()
-                .ok_or("container fixture must carry image policy evidence")?,
-        )
+        .project_artifact(EventId::new(), course_id, &supply_chain.artifact)
         .await?;
     let succeeded_view = service
         .environment_candidate_view(course_id, environment_candidate.id)
@@ -542,17 +499,12 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
         succeeded_build.artifact,
         Some(supply_chain.artifact.clone())
     );
-    assert_eq!(
-        succeeded_build.image_policy_evaluation,
-        supply_chain.image_policy_evaluation.clone()
-    );
     let release = service
         .create_release(
             course_id,
             &CreateEnvironmentTemplateReleaseRequest {
                 candidate_id: environment_candidate.id,
                 candidate_revision: environment_candidate.revision,
-                environment_spec_sha256: environment_candidate.spec_sha256,
                 runtime_kind: contracts::authoring::RuntimeKind::Container,
                 approval_id: approval.id,
             },
@@ -599,7 +551,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
 }
 
 fn environment_candidate(
-    schema_sha256: Sha256Digest,
+    _schema_sha256: Sha256Digest,
 ) -> Result<EnvironmentCandidate, Box<dyn std::error::Error>> {
     let spec: EnvironmentSpec = serde_json::from_value(serde_json::json!({
         "apiVersion":"environment.labweaver.io/v1",
@@ -623,7 +575,6 @@ fn environment_candidate(
                 "artifactId":ArtifactId::new(),
                 "storeBinding":"approved-context-v1",
                 "objectVersion":"version-1",
-                "sha256":Sha256Digest::of_bytes(b"context"),
                 "sizeBytes":7,
                 "mediaType":"application/vnd.oci.image.layer.v1.tar+gzip"
             },
@@ -638,15 +589,13 @@ fn environment_candidate(
             "disposition":"delete"
         }
     }))?;
-    let spec_sha256 = Sha256Digest::of_canonical(&spec)?;
+    let _spec_sha256 = Sha256Digest::of_canonical(&spec)?;
     let candidate = EnvironmentCandidate {
         id: CandidateId::new(),
         run_id: AgentRunId::new(),
         revision: Revision::new(1)?,
         spec,
-        spec_sha256,
         policy_revision: Revision::new(1)?,
-        schema_sha256,
         model: "fixture-provider-v1".to_owned(),
         created_at: "2026-07-16T08:00:00.000Z".parse()?,
     };
@@ -658,10 +607,8 @@ fn release_fixture(
     course_id: CourseId,
 ) -> Result<EnvironmentTemplateRelease, Box<dyn std::error::Error>> {
     let published_at = "2026-07-16T08:00:00.000Z".parse::<UtcTimestamp>()?;
-    let valid_until = "2026-07-16T10:00:00.000Z".parse::<UtcTimestamp>()?;
     let artifact_sha256 = Sha256Digest::of_bytes(b"container-image");
     let candidate_id = CandidateId::new();
-    let candidate_sha256 = Sha256Digest::of_bytes(b"environment-spec");
     let artifact_id = ImageArtifactId::new();
     Ok(EnvironmentTemplateRelease {
         id: ReleaseId::new(),
@@ -670,15 +617,12 @@ fn release_fixture(
         candidate_id,
         agent_run_id: AgentRunId::new(),
         candidate_revision: Revision::new(1)?,
-        environment_spec_sha256: candidate_sha256,
         runtime_kind: contracts::authoring::RuntimeKind::Container,
         approval: contracts::authoring::CandidateApproval {
             id: ApprovalId::new(),
             candidate_id,
             candidate_revision: Revision::new(1)?,
-            candidate_sha256,
             policy_revision: Revision::new(1)?,
-            schema_sha256: Sha256Digest::of_bytes(b"environment"),
             trust_revision: Revision::new(1)?,
             actor_id: ActorId::new(),
             decision: CandidateDecision::Approved,
@@ -691,26 +635,6 @@ fn release_fixture(
             repository: "registry.invalid/course/environment".to_owned(),
             digest: format!("sha256:{artifact_sha256}"),
         },
-        image_policy_evaluation: Some(ImagePolicyEvaluation {
-            artifact_id,
-            artifact_sha256,
-            policy_id: PolicyId::new(),
-            policy_revision: Revision::new(1)?,
-            scanner_name: "trivy".to_owned(),
-            scanner_version: "1.0.0".to_owned(),
-            scanner_database_sha256: Sha256Digest::of_bytes(b"scanner-db"),
-            vulnerabilities: VulnerabilitySummary {
-                unknown: 0,
-                low: 0,
-                medium: 0,
-                high: 1,
-                critical: 0,
-            },
-            evaluated_at: published_at,
-            max_evidence_age_milliseconds: 7_200_000,
-            valid_until,
-            passed: true,
-        }),
         published_by: ActorId::new(),
         published_at,
     })
@@ -722,13 +646,11 @@ fn upload_request() -> Result<CreateProblemPackageUploadRequest, Box<dyn std::er
             ProblemPackageUploadFile {
                 path: "statement.md".to_owned(),
                 size_bytes: 9,
-                sha256: Sha256Digest::of_bytes(b"statement"),
                 media_type: "text/markdown".to_owned(),
             },
             ProblemPackageUploadFile {
                 path: "starter/main.rs".to_owned(),
                 size_bytes: 7,
-                sha256: Sha256Digest::of_bytes(b"starter"),
                 media_type: "text/plain".to_owned(),
             },
         ],
@@ -771,7 +693,7 @@ fn control_config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
                     "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
                 )
                 .to_owned(),
-                disk_sha256: Sha256Digest::of_bytes(b"vm-disk"),
+
                 capacity_bytes: 10_737_418_240,
             },
             format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
@@ -797,7 +719,6 @@ impl ImmutableObjectStore for FixtureObjects {
         &self,
         key: &str,
         _: u64,
-        _: Sha256Digest,
         _: &str,
         now: UtcTimestamp,
     ) -> Result<PresignedUpload, ObjectStoreError> {
@@ -814,23 +735,21 @@ impl ImmutableObjectStore for FixtureObjects {
         key: &str,
         version: &str,
         size: u64,
-        sha256: Sha256Digest,
         media_type: &str,
     ) -> Result<VerifiedObject, ObjectStoreError> {
-        Ok(verified(key, version, size, sha256, media_type))
+        Ok(verified(key, version, size, media_type))
     }
 
     async fn freeze_current(
         &self,
         key: &str,
         size: u64,
-        sha256: Sha256Digest,
         media_type: &str,
     ) -> Result<VerifiedObject, ObjectStoreError> {
         if self.fail_second && key.ends_with("00001") {
             return Err(ObjectStoreError::ObjectIdentityMismatch);
         }
-        Ok(verified(key, "version-1", size, sha256, media_type))
+        Ok(verified(key, "version-1", size, media_type))
     }
 
     async fn delete_orphan(&self, _: &str, _: &str) -> Result<(), ObjectStoreError> {
@@ -838,19 +757,12 @@ impl ImmutableObjectStore for FixtureObjects {
     }
 }
 
-fn verified(
-    _: &str,
-    version: &str,
-    size: u64,
-    sha256: Sha256Digest,
-    media_type: &str,
-) -> VerifiedObject {
+fn verified(_: &str, version: &str, size: u64, media_type: &str) -> VerifiedObject {
     VerifiedObject {
         reference: ArtifactRef {
             artifact_id: ArtifactId::new(),
             store_binding: "fixture-v1".to_owned(),
             object_version: version.to_owned(),
-            sha256,
             size_bytes: size,
             media_type: media_type.to_owned(),
         },

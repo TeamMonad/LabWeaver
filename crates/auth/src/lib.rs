@@ -17,8 +17,6 @@ pub mod crypto;
 pub mod csrf;
 /// Bearer JWT verifier with JWKS rotation.
 pub mod jwt;
-/// Internal mTLS server configuration and service-principal extraction.
-pub mod mtls;
 /// One-time OIDC Authorization Code + PKCE transaction values.
 pub mod oidc;
 /// Environment-authoritative owner resolver mTLS client.
@@ -40,7 +38,6 @@ pub use jwt::{
     BackchannelLogoutClaims, BearerClaims, JwtVerifierError, build_backchannel_logout_authorizer,
     build_bearer_authorizer,
 };
-pub use mtls::{MtlsError, MtlsServerConfig, extract_mtls_principal, load_mtls_server_config};
 pub use oidc::{OidcTransaction, OidcTransactionError};
 pub use owner_resolver::{EnvironmentOwnerResolverClient, OwnerResolverClientError};
 pub use provider::{

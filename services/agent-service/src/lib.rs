@@ -1,5 +1,6 @@
 //! Agent Service runtime adapters and orchestration.
 #![allow(
+    missing_docs,
     clippy::missing_errors_doc,
     reason = "stable diagnostics and the contracts crate document the public failure surface"
 )]

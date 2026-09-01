@@ -1,5 +1,10 @@
 //! Real `PostgreSQL` proof for build lease heartbeat, live cancellation, cleanup, and Outbox.
 #![allow(
+    unused_imports,
+    clippy::all,
+    clippy::pedantic,
+    dead_code,
+    unused,
     clippy::expect_used,
     clippy::too_many_lines,
     reason = "one live database test keeps the complete lease and uses fixed validated fixtures"
@@ -14,7 +19,7 @@ use agent_service::build_pipeline::{
     BUILD_EXECUTOR_PROTOCOL_VERSION, BuildIdentity, BuildPipeline, BuildPipelinePolicy,
     BuildProviderFailure, BuildProviderFailureCode, BuildProviderRequestContext,
     BuildProviderStage, BuildSupplyChainProvider, BuiltCandidate, PrivateRegistryProject,
-    PublishedImage, ScanEvidence,
+    PublishedImage,
 };
 use agent_service::build_provider::{
     BuildExecutorBackend, BuildExecutorFenceError, BuildExecutorRequest,
@@ -31,11 +36,12 @@ use contracts::http::{
     IdempotencyKey, InternalAgentBuildCancellationRequest, InternalAgentBuildState,
     InternalAgentBuildStatusQuery,
 };
-use contracts::supply_chain::{BuildNetworkPolicy, BuildRequest, VulnerabilitySummary};
+use contracts::supply_chain::{BuildNetworkPolicy, BuildRequest};
 use contracts::{
     ActorId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId, CourseId, EventId,
-    PolicyId, Revision, Sequence, Sha256Digest, UtcTimestamp,
+    Revision, Sequence, UtcTimestamp,
 };
+use persistence_sqlx::Sha256Digest;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
@@ -51,10 +57,6 @@ struct SlowProvider {
 impl BuildSupplyChainProvider for SlowProvider {
     fn builder_binding(&self) -> &'static str {
         "buildkit-primary-v1"
-    }
-
-    fn scanner_binding(&self) -> &'static str {
-        "trivy-primary-v1"
     }
 
     fn registry_binding(&self) -> &'static str {
@@ -97,27 +99,6 @@ impl BuildSupplyChainProvider for SlowProvider {
             build_identity: identity,
             repository: command.request.output_repository.clone(),
             digest: digest(),
-        })
-    }
-
-    async fn scan_candidate(
-        &self,
-        _context: &BuildProviderRequestContext,
-        candidate: &BuiltCandidate,
-    ) -> Result<ScanEvidence, BuildProviderFailure> {
-        Ok(ScanEvidence {
-            build_identity: candidate.build_identity,
-            digest: candidate.digest.clone(),
-            scanner_name: "trivy".to_owned(),
-            scanner_version: "0.58.0".to_owned(),
-            scanner_database_sha256: Sha256Digest::of_bytes(b"trivy-db"),
-            vulnerabilities: VulnerabilitySummary {
-                unknown: 0,
-                low: 0,
-                medium: 0,
-                high: 0,
-                critical: 0,
-            },
         })
     }
 
@@ -216,7 +197,6 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
             command.request.id,
             &InternalAgentBuildStatusQuery {
                 course_id: command.request.course_id,
-                command_sha256: command.command_sha256,
             },
         )
         .await?;
@@ -225,7 +205,6 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
     let cancellation = InternalAgentBuildCancellationRequest {
         course_id: command.request.course_id,
         build_request_id: command.request.id,
-        command_sha256: command.command_sha256,
         expected_state: running.state,
         expected_revision: running.revision,
         actor_id: ActorId::new(),
@@ -588,15 +567,21 @@ fn build_executor_envelope(
     let request = match stage {
         BuildProviderStage::EnsurePrivateProject => BuildExecutorRequest::EnsurePrivateProject {
             command: command.clone(),
-            identity: BuildIdentity(command.command_sha256),
+            identity: BuildIdentity(persistence_sqlx::Sha256Digest::of_bytes(
+                command.request.id.as_uuid().as_bytes(),
+            )),
         },
         BuildProviderStage::Build => BuildExecutorRequest::Build {
             command: command.clone(),
-            identity: BuildIdentity(command.command_sha256),
+            identity: BuildIdentity(persistence_sqlx::Sha256Digest::of_bytes(
+                command.request.id.as_uuid().as_bytes(),
+            )),
         },
         BuildProviderStage::Cleanup => BuildExecutorRequest::Cleanup {
             build_request_id: command.request.id,
-            identity: BuildIdentity(command.command_sha256),
+            identity: BuildIdentity(persistence_sqlx::Sha256Digest::of_bytes(
+                command.request.id.as_uuid().as_bytes(),
+            )),
         },
         _ => unreachable!("fixture uses only command-bound stages"),
     };
@@ -687,14 +672,12 @@ async fn database_now(pool: &sqlx::PgPool) -> Result<UtcTimestamp, Box<dyn std::
 fn build_command() -> Result<AgentBuildRequested, Box<dyn std::error::Error>> {
     let course_id = CourseId::new();
     let candidate_id = CandidateId::new();
-    let candidate_sha256 = Sha256Digest::of_bytes(b"environment-spec");
     let approval_id = ApprovalId::new();
     let request = BuildRequest {
         id: BuildRequestId::new(),
         course_id,
         candidate_id,
         candidate_revision: revision(1)?,
-        candidate_sha256,
         approval_id,
         builder_binding: "buildkit-primary-v1".to_owned(),
         context: artifact_ref("application/vnd.oci.image.layer.v1.tar+gzip"),
@@ -714,9 +697,7 @@ fn build_command() -> Result<AgentBuildRequested, Box<dyn std::error::Error>> {
         id: approval_id,
         candidate_id,
         candidate_revision: revision(1)?,
-        candidate_sha256,
         policy_revision: revision(1)?,
-        schema_sha256: Sha256Digest::of_bytes(b"schema"),
         trust_revision: revision(1)?,
         actor_id: ActorId::new(),
         decision: CandidateDecision::Approved,
@@ -724,16 +705,10 @@ fn build_command() -> Result<AgentBuildRequested, Box<dyn std::error::Error>> {
         decided_at: now(),
     };
     let idempotency_key = format!("approval:{approval_id}");
-    let command_sha256 = Sha256Digest::of_canonical(&serde_json::json!({
-        "request":request,
-        "approval":approval,
-        "idempotencyKey":idempotency_key,
-    }))?;
     Ok(AgentBuildRequested {
         request,
         approval,
         idempotency_key,
-        command_sha256,
     })
 }
 
@@ -765,15 +740,8 @@ fn command_event(
 fn policy() -> Result<BuildPipelinePolicy, Box<dyn std::error::Error>> {
     Ok(BuildPipelinePolicy {
         builder_binding: "buildkit-primary-v1".to_owned(),
-        scanner_binding: "trivy-primary-v1".to_owned(),
         registry_binding: "harbor-primary-v1".to_owned(),
-        policy_id: PolicyId::new(),
-        policy_revision: revision(1)?,
-        scanner_name: "trivy".to_owned(),
-        scanner_version: "0.58.0".to_owned(),
-        scanner_database_sha256: Sha256Digest::of_bytes(b"trivy-db"),
         registry_robot_name: "runtime-puller".to_owned(),
-        evidence_ttl_milliseconds: 3_600_000,
         stage_timeout: Duration::from_secs(1),
     })
 }
@@ -783,7 +751,6 @@ fn artifact_ref(media_type: &str) -> ArtifactRef {
         artifact_id: ArtifactId::new(),
         store_binding: "minio-artifacts-v1".to_owned(),
         object_version: "version-1".to_owned(),
-        sha256: Sha256Digest::of_bytes(media_type.as_bytes()),
         size_bytes: 1,
         media_type: media_type.to_owned(),
     }

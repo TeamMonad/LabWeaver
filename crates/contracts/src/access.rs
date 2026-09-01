@@ -686,9 +686,6 @@ pub struct GatewaySession {
     /// Environment-owned in-cluster SSH Service DNS name. This is returned only
     /// to the mTLS-authenticated Gateway and never to the browser grant model.
     pub target_host: String,
-    /// Environment-authoritative digest of the exact OpenSSH host-key
-    /// fingerprint expected from the selected target.
-    pub target_ssh_host_key_identity_sha256: crate::Sha256Digest,
     pub gateway_identity: String,
     pub connection_id: String,
     pub revision: Revision,
@@ -915,9 +912,6 @@ mod tests {
             ssh_public_key_id: SshPublicKeyId::new(),
             target_alias: "lw-abcdefghijklmnopqrst".to_owned(),
             target_host: format!("ssh.lw-env-{}.svc", uuid::Uuid::now_v7()),
-            target_ssh_host_key_identity_sha256: crate::Sha256Digest::of_bytes(
-                b"SHA256:target-host-key",
-            ),
             gateway_identity: "spiffe://labweaver/gateway".to_owned(),
             connection_id: "connection-1".to_owned(),
             revision: revision(3),

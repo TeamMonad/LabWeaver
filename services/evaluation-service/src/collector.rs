@@ -11,8 +11,9 @@ use base64::engine::general_purpose::STANDARD;
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
+use contracts::PathRule;
 use contracts::submission::{FrozenFile, SubmissionManifest};
-use contracts::{PathRule, Sha256Digest};
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use serde::{Deserialize, Serialize};
 
 const ARCHIVE_MEDIA_TYPE: &str = "application/vnd.labweaver.frozen-submission.v1+json";
@@ -432,7 +433,6 @@ async fn collect_snapshot(
         }
         files.push(FrozenFile {
             path: path.clone(),
-            sha256: Sha256Digest::of_bytes(&bytes),
             size_bytes,
             media_type: "application/octet-stream".to_owned(),
         });

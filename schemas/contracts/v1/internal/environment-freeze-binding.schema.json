@@ -43,7 +43,7 @@
               "type": "string"
             },
             "expectedHostKeySha256": {
-              "$ref": "#/$defs/Sha256Digest"
+              "type": "string"
             },
             "expiresAt": {
               "$ref": "#/$defs/UtcTimestamp"
@@ -65,7 +65,7 @@
               "type": "integer"
             },
             "sourceIdentity": {
-              "$ref": "#/$defs/Sha256Digest"
+              "type": "string"
             },
             "username": {
               "type": "string"
@@ -122,9 +122,6 @@
           "minimum": 0,
           "type": "integer"
         },
-        "runtimeArtifactSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
         "runtimeKind": {
           "$ref": "#/$defs/RuntimeKind"
         }
@@ -134,8 +131,7 @@
         "environmentRevision",
         "releaseId",
         "releaseVersion",
-        "runtimeKind",
-        "runtimeArtifactSha256"
+        "runtimeKind"
       ],
       "type": "object"
     },
@@ -155,13 +151,6 @@
         "container",
         "virtual_machine"
       ],
-      "type": "string"
-    },
-    "Sha256Digest": {
-      "description": "Canonical lowercase SHA-256 digest.",
-      "maxLength": 64,
-      "minLength": 64,
-      "pattern": "^[0-9a-f]{64}$",
       "type": "string"
     },
     "UtcTimestamp": {

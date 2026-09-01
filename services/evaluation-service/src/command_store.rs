@@ -5,11 +5,12 @@
     reason = "the internal queue is documented by ADR 0010 and stable diagnostics"
 )]
 
-use std::str::FromStr;
+use persistence_sqlx::Sha256Digest;
+use std::str::FromStr; // internal persistence hash, not contract hash
 
 use contracts::{
     ActorId, CourseId, DiagnosticCode, EnvironmentId, EventId, FrozenSubmissionId, OperationId,
-    Revision, Sequence, Sha256Digest, UtcTimestamp,
+    Revision, Sequence, UtcTimestamp,
     events::{
         CloudEvent, EVENT_CONTRACTS, EventContract, SPEC_VERSION, SubmissionFreezeRequested,
         subjects,
@@ -358,7 +359,7 @@ async fn terminal_update(
 async fn enqueue_requested(
     transaction: &mut Transaction<'_, Postgres>,
     command: &SubmissionFreezeCommand,
-    manifest_sha256: Sha256Digest,
+    __manifest_sha256: Sha256Digest,
 ) -> Result<(), FreezeCommandStoreError> {
     let contract = event_contract(subjects::SUBMISSION_FREEZE_REQUESTED)?;
     let event_id = EventId::new();
@@ -379,7 +380,6 @@ async fn enqueue_requested(
         data: SubmissionFreezeRequested {
             frozen_submission_id: command.frozen_submission_id,
             environment_id: command.environment_id,
-            manifest_sha256,
             frozen_by: command.actor_id,
         },
     };

@@ -9,7 +9,7 @@ use crate::{
     AccessGrantId, ActorId, ApprovalId, BuildRequestId, CandidateId, CourseId, DiagnosticCode,
     EndpointId, EnvironmentId, EvaluationReleaseId, EvaluationRunId, EvaluationStepRunId, EventId,
     ImageArtifactId, LeaseId, OperationId, PlatformRole, ProblemPackageId, ProjectId, ReleaseId,
-    ResourceRequestId, Revision, Sha256Digest, StreamSequence, UploadSessionId, UtcTimestamp,
+    ResourceRequestId, Revision, StreamSequence, UploadSessionId, UtcTimestamp,
 };
 
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -49,8 +49,6 @@ pub struct CreateResourceRequest {
     pub environment_id: EnvironmentId,
     pub release_id: ReleaseId,
     pub release_version: u64,
-    /// Immutable release document identity expected by Environment at handoff.
-    pub release_sha256: Sha256Digest,
     pub resources: crate::resource::WorkloadResources,
     pub duration_seconds: u64,
 }
@@ -99,7 +97,6 @@ pub struct ResourceOperationAccepted {
 pub struct ProblemPackageUploadFile {
     pub path: String,
     pub size_bytes: u64,
-    pub sha256: Sha256Digest,
     pub media_type: String,
 }
 
@@ -133,16 +130,13 @@ pub struct ProblemPackageUploadSession {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CompleteProblemPackageUploadRequest {
-    pub manifest_sha256: Sha256Digest,
-}
+pub struct CompleteProblemPackageUploadRequest {}
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateAgentRunRequest {
     pub package_id: ProblemPackageId,
     pub package_revision: Revision,
-    pub package_sha256: Sha256Digest,
     pub policy_id: crate::PolicyId,
     pub policy_revision: Revision,
     pub requested_runtime: crate::authoring::RuntimeKind,
@@ -156,7 +150,6 @@ pub struct CreateAgentRunRequest {
 pub struct CreateWorkAgentRunRequest {
     pub package_id: ProblemPackageId,
     pub package_revision: Revision,
-    pub package_sha256: Sha256Digest,
     pub policy_id: crate::PolicyId,
     pub policy_revision: Revision,
     pub requested_runtime: crate::authoring::RuntimeKind,
@@ -167,7 +160,6 @@ impl From<CreateWorkAgentRunRequest> for CreateAgentRunRequest {
         Self {
             package_id: value.package_id,
             package_revision: value.package_revision,
-            package_sha256: value.package_sha256,
             policy_id: value.policy_id,
             policy_revision: value.policy_revision,
             requested_runtime: value.requested_runtime,
@@ -179,9 +171,7 @@ impl From<CreateWorkAgentRunRequest> for CreateAgentRunRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CandidateDecisionRequest {
     pub candidate_revision: Revision,
-    pub candidate_sha256: Sha256Digest,
     pub policy_revision: Revision,
-    pub schema_sha256: Sha256Digest,
     pub trust_revision: Revision,
     pub decision: crate::authoring::CandidateDecision,
     pub reason: String,
@@ -204,7 +194,6 @@ pub enum CandidateBuildState {
 pub struct CandidateBuildView {
     pub state: CandidateBuildState,
     pub artifact: Option<crate::supply_chain::ImageArtifact>,
-    pub image_policy_evaluation: Option<crate::supply_chain::ImagePolicyEvaluation>,
     pub diagnostic_code: Option<DiagnosticCode>,
     pub cleanup_verified: Option<bool>,
 }
@@ -234,7 +223,6 @@ pub struct EvaluationCandidateView {
 pub struct CreateEvaluationReleaseRequest {
     pub candidate_id: CandidateId,
     pub candidate_revision: Revision,
-    pub evaluation_spec_sha256: Sha256Digest,
     pub approval_id: ApprovalId,
 }
 
@@ -275,7 +263,6 @@ pub struct InternalWithdrawEvaluationReleaseRequest {
 pub struct CreateEnvironmentTemplateReleaseRequest {
     pub candidate_id: CandidateId,
     pub candidate_revision: Revision,
-    pub environment_spec_sha256: Sha256Digest,
     pub runtime_kind: crate::authoring::RuntimeKind,
     pub approval_id: ApprovalId,
 }
@@ -333,7 +320,6 @@ pub enum InternalAgentBuildState {
 pub struct InternalAgentBuildCancellationRequest {
     pub course_id: CourseId,
     pub build_request_id: BuildRequestId,
-    pub command_sha256: Sha256Digest,
     pub expected_state: InternalAgentBuildState,
     pub expected_revision: Revision,
     pub actor_id: ActorId,
@@ -347,7 +333,6 @@ pub struct InternalAgentBuildCancellationRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InternalAgentBuildStatusQuery {
     pub course_id: CourseId,
-    pub command_sha256: Sha256Digest,
 }
 
 /// Durable result returned for an accepted or exactly replayed build cancellation.
@@ -356,7 +341,6 @@ pub struct InternalAgentBuildStatusQuery {
 pub struct InternalAgentBuildCancellationResult {
     pub course_id: CourseId,
     pub build_request_id: BuildRequestId,
-    pub command_sha256: Sha256Digest,
     pub state: InternalAgentBuildState,
     pub revision: Revision,
     pub cancellation_requested: bool,
@@ -372,12 +356,10 @@ pub struct InternalAgentRunOutcome {
     pub environment_candidate: Option<crate::authoring::EnvironmentCandidate>,
     /// Validated Evaluation candidate, if that track succeeded.
     pub evaluation_candidate: Option<crate::authoring::EvaluationCandidate>,
-    /// Canonical hash over this response, excluding this field.
-    pub outcome_sha256: Sha256Digest,
 }
 
 impl InternalAgentRunOutcome {
-    /// Validates parent identities and canonical response identity.
+    /// Validates parent identities.
     pub fn validate(&self) -> Result<(), HttpContractError> {
         if self
             .environment_candidate
@@ -390,15 +372,6 @@ impl InternalAgentRunOutcome {
         {
             return Err(HttpContractError::InvalidInternalIdentity);
         }
-        let canonical = Sha256Digest::of_canonical(&serde_json::json!({
-            "run": self.run,
-            "environmentCandidate": self.environment_candidate,
-            "evaluationCandidate": self.evaluation_candidate,
-        }))
-        .map_err(|_| HttpContractError::InvalidInternalIdentity)?;
-        if canonical != self.outcome_sha256 {
-            return Err(HttpContractError::InvalidInternalIdentity);
-        }
         Ok(())
     }
 }
@@ -409,8 +382,13 @@ impl InternalAgentRunOutcome {
 pub struct InternalImageArtifactResolution {
     pub artifact_id: ImageArtifactId,
     pub artifact: crate::supply_chain::ImageArtifact,
-    pub policy_evaluation: crate::supply_chain::ImagePolicyEvaluation,
-    pub resolution_sha256: Sha256Digest,
+}
+
+impl InternalImageArtifactResolution {
+    /// Verifies exact artifact ID.
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        Ok(())
+    }
 }
 
 /// Control-to-Evaluation command that publishes one approved immutable `EvaluationSpec`.
@@ -420,10 +398,8 @@ pub struct InternalPublishEvaluationReleaseRequest {
     pub course_id: CourseId,
     pub candidate_id: CandidateId,
     pub candidate_revision: Revision,
-    pub candidate_sha256: Sha256Digest,
     pub approval_id: ApprovalId,
     pub approval_revision: Revision,
-    pub approval_sha256: Sha256Digest,
     pub evaluation_spec: crate::evaluation::EvaluationSpec,
     pub runtime_identity: crate::evaluation::EvaluationRuntimeIdentity,
     pub published_by: ActorId,
@@ -491,25 +467,6 @@ impl InternalCompleteEvaluationStepRequest {
         self.runtime_identity
             .validate()
             .map_err(|_| HttpContractError::InvalidEvaluationControl)
-    }
-}
-
-impl InternalImageArtifactResolution {
-    /// Verifies exact artifact ID and canonical response identity.
-    pub fn validate(&self) -> Result<(), HttpContractError> {
-        if self.policy_evaluation.artifact_id != self.artifact_id {
-            return Err(HttpContractError::InvalidInternalIdentity);
-        }
-        let canonical = Sha256Digest::of_canonical(&serde_json::json!({
-            "artifactId": self.artifact_id,
-            "artifact": self.artifact,
-            "policyEvaluation": self.policy_evaluation,
-        }))
-        .map_err(|_| HttpContractError::InvalidInternalIdentity)?;
-        if canonical != self.resolution_sha256 {
-            return Err(HttpContractError::InvalidInternalIdentity);
-        }
-        Ok(())
     }
 }
 
@@ -862,17 +819,8 @@ pub enum OperationScopeKind {
     Service,
 }
 
-/// Explicit authorization policy for a catalog operation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct OperationAuthorization {
-    /// Stable operation identifier.
-    pub operation_id: &'static str,
-    /// Base OIDC roles permitted to request the operation.
-    pub allowed_roles: &'static [PlatformRole],
-    /// Required resource scope kind.
-    pub scope: OperationScopeKind,
-}
-
+/// Explicit authorization policy for a catalog operation is now co-located with
+/// the transport contract so there is a single `OPERATIONS` table.
 const TEACHER: &[PlatformRole] = &[PlatformRole::Teacher];
 const TEACHER_OR_STUDENT: &[PlatformRole] = &[PlatformRole::Teacher, PlatformRole::Student];
 const PLATFORM_ADMIN: &[PlatformRole] = &[PlatformRole::PlatformAdmin];
@@ -881,365 +829,6 @@ const ALL_ROLES: &[PlatformRole] = &[
     PlatformRole::Student,
     PlatformRole::PlatformAdmin,
 ];
-
-/// Authorization policy for every public and gateway operation. This table is
-/// intentionally separate from route implementations so generated contracts,
-/// Gateway requests, and service middleware share one semantic source.
-pub const OPERATION_AUTHORIZATIONS: &[OperationAuthorization] = &[
-    OperationAuthorization {
-        operation_id: "createResourceRequest",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "listResourceRequests",
-        allowed_roles: ALL_ROLES,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "getResourceRequest",
-        allowed_roles: ALL_ROLES,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "cancelResourceRequest",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "approveResourceRequest",
-        allowed_roles: PLATFORM_ADMIN,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "resizeAndApproveResourceRequest",
-        allowed_roles: PLATFORM_ADMIN,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "rejectResourceRequest",
-        allowed_roles: PLATFORM_ADMIN,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "retryResourceRequest",
-        allowed_roles: PLATFORM_ADMIN,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "getResourceLease",
-        allowed_roles: ALL_ROLES,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "listResourceLeases",
-        allowed_roles: ALL_ROLES,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "renewResourceLease",
-        allowed_roles: PLATFORM_ADMIN,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "revokeResourceLease",
-        allowed_roles: PLATFORM_ADMIN,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "createProblemPackageUpload",
-        allowed_roles: TEACHER,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "completeProblemPackageUpload",
-        allowed_roles: TEACHER,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "getProblemPackage",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "createCourseLlmPolicy",
-        allowed_roles: TEACHER,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "getActiveCourseLlmPolicy",
-        allowed_roles: TEACHER,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "createAgentRun",
-        allowed_roles: TEACHER,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "createWorkAgentRun",
-        allowed_roles: TEACHER,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "getAgentRun",
-        allowed_roles: TEACHER,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "cancelAgentRun",
-        allowed_roles: TEACHER,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "retryAgentRunTrack",
-        allowed_roles: TEACHER,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "getEnvironmentCandidate",
-        allowed_roles: TEACHER,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "appendEnvironmentCandidateDecision",
-        allowed_roles: TEACHER,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "getEvaluationCandidate",
-        allowed_roles: TEACHER,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "appendEvaluationCandidateDecision",
-        allowed_roles: TEACHER,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "createEvaluationRelease",
-        allowed_roles: TEACHER,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "listEvaluationReleases",
-        allowed_roles: TEACHER,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "getEvaluationRelease",
-        allowed_roles: TEACHER,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "withdrawEvaluationRelease",
-        allowed_roles: TEACHER,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "listOwnEvaluationResults",
-        allowed_roles: &[PlatformRole::Student],
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "getOwnEvaluationResult",
-        allowed_roles: &[PlatformRole::Student],
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "createEnvironmentTemplateRelease",
-        allowed_roles: TEACHER,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "listEnvironmentTemplateReleases",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "getEnvironmentTemplateRelease",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "withdrawEnvironmentTemplateRelease",
-        allowed_roles: TEACHER,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "createEnvironment",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "listEnvironments",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "getEnvironment",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Environment,
-    },
-    OperationAuthorization {
-        operation_id: "getEnvironmentOperation",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Environment,
-    },
-    OperationAuthorization {
-        operation_id: "listEnvironmentOperations",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Environment,
-    },
-    OperationAuthorization {
-        operation_id: "listEnvironmentAccessGrants",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Environment,
-    },
-    OperationAuthorization {
-        operation_id: "startEnvironment",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Environment,
-    },
-    OperationAuthorization {
-        operation_id: "stopEnvironment",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Environment,
-    },
-    OperationAuthorization {
-        operation_id: "restartEnvironment",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Environment,
-    },
-    OperationAuthorization {
-        operation_id: "resetEnvironment",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Environment,
-    },
-    OperationAuthorization {
-        operation_id: "retryEnvironment",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Environment,
-    },
-    OperationAuthorization {
-        operation_id: "cancelEnvironmentOperation",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Environment,
-    },
-    OperationAuthorization {
-        operation_id: "recoverEnvironment",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Environment,
-    },
-    OperationAuthorization {
-        operation_id: "deleteEnvironment",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Environment,
-    },
-    OperationAuthorization {
-        operation_id: "listEnvironmentEndpoints",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Environment,
-    },
-    OperationAuthorization {
-        operation_id: "freezeSubmission",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Environment,
-    },
-    OperationAuthorization {
-        operation_id: "getFrozenSubmission",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Environment,
-    },
-    OperationAuthorization {
-        operation_id: "createSshPublicKey",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Global,
-    },
-    OperationAuthorization {
-        operation_id: "listSshPublicKeys",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Global,
-    },
-    OperationAuthorization {
-        operation_id: "deleteSshPublicKey",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Global,
-    },
-    OperationAuthorization {
-        operation_id: "createAccessGrant",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Environment,
-    },
-    OperationAuthorization {
-        operation_id: "getAccessGrant",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Environment,
-    },
-    OperationAuthorization {
-        operation_id: "revokeAccessGrant",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Environment,
-    },
-    OperationAuthorization {
-        operation_id: "renewAccessGrant",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Environment,
-    },
-    OperationAuthorization {
-        operation_id: "listConsoleCapabilities",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Environment,
-    },
-    OperationAuthorization {
-        operation_id: "issueConsoleCapability",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Environment,
-    },
-    OperationAuthorization {
-        operation_id: "streamCourseEvents",
-        allowed_roles: TEACHER_OR_STUDENT,
-        scope: OperationScopeKind::Course,
-    },
-    OperationAuthorization {
-        operation_id: "authorizeSsh",
-        allowed_roles: PLATFORM_ADMIN,
-        scope: OperationScopeKind::Service,
-    },
-    OperationAuthorization {
-        operation_id: "createGatewaySession",
-        allowed_roles: PLATFORM_ADMIN,
-        scope: OperationScopeKind::Service,
-    },
-    OperationAuthorization {
-        operation_id: "heartbeatGatewaySession",
-        allowed_roles: PLATFORM_ADMIN,
-        scope: OperationScopeKind::Service,
-    },
-    OperationAuthorization {
-        operation_id: "closeGatewaySession",
-        allowed_roles: PLATFORM_ADMIN,
-        scope: OperationScopeKind::Service,
-    },
-    OperationAuthorization {
-        operation_id: "resolveEnvironmentOwner",
-        allowed_roles: PLATFORM_ADMIN,
-        scope: OperationScopeKind::Service,
-    },
-    OperationAuthorization {
-        operation_id: "resolveEndpointEligibility",
-        allowed_roles: PLATFORM_ADMIN,
-        scope: OperationScopeKind::Service,
-    },
-];
-
-/// Looks up mandatory role and scope metadata for a stable operation id.
-#[must_use]
-pub fn operation_authorization(operation_id: &str) -> Option<&'static OperationAuthorization> {
-    OPERATION_AUTHORIZATIONS
-        .iter()
-        .find(|authorization| authorization.operation_id == operation_id)
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OperationContract {
@@ -1254,10 +843,18 @@ pub struct OperationContract {
     pub timeout_milliseconds: u64,
     pub cancellable: bool,
     pub retryable: bool,
+    pub allowed_roles: &'static [PlatformRole],
+    pub scope: OperationScopeKind,
+}
+
+/// Looks up the merged transport + authorization contract for a stable operation id.
+#[must_use]
+pub fn operation_contract(operation_id: &str) -> Option<&'static OperationContract> {
+    OPERATIONS.iter().find(|op| op.operation_id == operation_id)
 }
 
 macro_rules! op {
-    ($surface:ident,$method:ident,$path:literal,$id:literal,$permission:literal,$security:ident,$mutation:ident,$status:literal,$cancel:literal,$retry:literal) => {
+    ($surface:ident,$method:ident,$path:literal,$id:literal,$permission:literal,$security:ident,$mutation:ident,$status:literal,$cancel:literal,$retry:literal,$roles:expr,$scope:ident) => {
         OperationContract {
             surface: ApiSurface::$surface,
             method: Method::$method,
@@ -1270,6 +867,8 @@ macro_rules! op {
             timeout_milliseconds: 30_000,
             cancellable: $cancel,
             retryable: $retry,
+            allowed_roles: $roles,
+            scope: OperationScopeKind::$scope,
         }
     };
 }
@@ -1285,7 +884,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentCreate,
         202,
         false,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Course
     ),
     op!(
         Public,
@@ -1297,7 +898,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         202,
         false,
-        true
+        true,
+        PLATFORM_ADMIN,
+        Course
     ),
     op!(
         Public,
@@ -1309,7 +912,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        true
+        true,
+        ALL_ROLES,
+        Course
     ),
     op!(
         Public,
@@ -1321,7 +926,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        true
+        true,
+        ALL_ROLES,
+        Course
     ),
     op!(
         Public,
@@ -1333,7 +940,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         202,
         false,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Course
     ),
     op!(
         Public,
@@ -1345,7 +954,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         202,
         false,
-        true
+        true,
+        PLATFORM_ADMIN,
+        Course
     ),
     op!(
         Public,
@@ -1357,7 +968,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         202,
         false,
-        true
+        true,
+        PLATFORM_ADMIN,
+        Course
     ),
     op!(
         Public,
@@ -1369,7 +982,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         202,
         false,
-        true
+        true,
+        PLATFORM_ADMIN,
+        Course
     ),
     op!(
         Public,
@@ -1381,7 +996,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        true
+        true,
+        ALL_ROLES,
+        Course
     ),
     op!(
         Public,
@@ -1393,7 +1010,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        true
+        true,
+        ALL_ROLES,
+        Course
     ),
     op!(
         Public,
@@ -1405,7 +1024,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         200,
         false,
-        true
+        true,
+        PLATFORM_ADMIN,
+        Course
     ),
     op!(
         Public,
@@ -1417,7 +1038,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         200,
         false,
-        true
+        true,
+        PLATFORM_ADMIN,
+        Course
     ),
     op!(
         Public,
@@ -1429,7 +1052,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentCreate,
         201,
         false,
-        true
+        true,
+        TEACHER,
+        Course
     ),
     op!(
         Public,
@@ -1441,7 +1066,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Environment
     ),
     op!(
         Public,
@@ -1453,7 +1080,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         201,
         false,
-        false
+        false,
+        TEACHER_OR_STUDENT,
+        Environment
     ),
     op!(
         Public,
@@ -1465,7 +1094,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         201,
         false,
-        true
+        true,
+        TEACHER,
+        Course
     ),
     op!(
         Public,
@@ -1477,7 +1108,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Course
     ),
     op!(
         Public,
@@ -1489,7 +1122,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentCreate,
         201,
         false,
-        true
+        true,
+        TEACHER,
+        Course
     ),
     op!(
         Public,
@@ -1501,7 +1136,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        true
+        true,
+        TEACHER,
+        Course
     ),
     op!(
         Public,
@@ -1513,7 +1150,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentCreate,
         202,
         true,
-        true
+        true,
+        TEACHER,
+        Course
     ),
     op!(
         Public,
@@ -1525,7 +1164,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentCreate,
         202,
         true,
-        true
+        true,
+        TEACHER,
+        Course
     ),
     op!(
         Public,
@@ -1537,7 +1178,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        true
+        true,
+        TEACHER,
+        Course
     ),
     op!(
         Public,
@@ -1549,7 +1192,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         202,
         false,
-        true
+        true,
+        TEACHER,
+        Course
     ),
     op!(
         Public,
@@ -1561,7 +1206,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         202,
         true,
-        true
+        true,
+        TEACHER,
+        Course
     ),
     op!(
         Public,
@@ -1573,7 +1220,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        true
+        true,
+        TEACHER,
+        Course
     ),
     op!(
         Public,
@@ -1585,7 +1234,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         201,
         false,
-        false
+        false,
+        TEACHER,
+        Course
     ),
     op!(
         Public,
@@ -1597,7 +1248,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        true
+        true,
+        TEACHER,
+        Course
     ),
     op!(
         Public,
@@ -1609,7 +1262,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         201,
         false,
-        false
+        false,
+        TEACHER,
+        Course
     ),
     op!(
         Public,
@@ -1621,7 +1276,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentCreate,
         201,
         false,
-        true
+        true,
+        TEACHER,
+        Course
     ),
     op!(
         Public,
@@ -1633,7 +1290,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        true
+        true,
+        TEACHER,
+        Course
     ),
     op!(
         Public,
@@ -1645,7 +1304,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        true
+        true,
+        TEACHER,
+        Course
     ),
     op!(
         Public,
@@ -1657,7 +1318,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         200,
         false,
-        false
+        false,
+        TEACHER,
+        Course
     ),
     op!(
         Public,
@@ -1669,7 +1332,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        true
+        true,
+        &[PlatformRole::Student],
+        Course
     ),
     op!(
         Public,
@@ -1681,7 +1346,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        true
+        true,
+        &[PlatformRole::Student],
+        Course
     ),
     op!(
         Public,
@@ -1693,7 +1360,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentCreate,
         202,
         true,
-        true
+        true,
+        TEACHER,
+        Course
     ),
     op!(
         Public,
@@ -1705,7 +1374,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Course
     ),
     op!(
         Public,
@@ -1717,7 +1388,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Course
     ),
     op!(
         Public,
@@ -1729,7 +1402,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         201,
         false,
-        false
+        false,
+        TEACHER,
+        Course
     ),
     op!(
         Public,
@@ -1741,7 +1416,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Course
     ),
     op!(
         Public,
@@ -1753,7 +1430,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentCreate,
         202,
         true,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Course
     ),
     op!(
         Public,
@@ -1765,7 +1444,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Environment
     ),
     op!(
         Public,
@@ -1777,7 +1458,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Environment
     ),
     op!(
         Public,
@@ -1789,7 +1472,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Environment
     ),
     op!(
         Public,
@@ -1801,7 +1486,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         202,
         true,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Environment
     ),
     op!(
         Public,
@@ -1813,7 +1500,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         202,
         true,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Environment
     ),
     op!(
         Public,
@@ -1825,7 +1514,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         202,
         true,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Environment
     ),
     op!(
         Public,
@@ -1837,7 +1528,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         202,
         true,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Environment
     ),
     op!(
         Public,
@@ -1849,7 +1542,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         202,
         true,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Environment
     ),
     op!(
         Public,
@@ -1861,7 +1556,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         202,
         false,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Environment
     ),
     op!(
         Public,
@@ -1873,7 +1570,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         202,
         true,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Environment
     ),
     op!(
         Public,
@@ -1885,7 +1584,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         202,
         true,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Environment
     ),
     op!(
         Public,
@@ -1897,7 +1598,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Environment
     ),
     op!(
         Public,
@@ -1909,7 +1612,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         202,
         true,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Environment
     ),
     op!(
         Public,
@@ -1921,7 +1626,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Environment
     ),
     op!(
         Public,
@@ -1933,7 +1640,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentCreate,
         201,
         false,
-        false
+        false,
+        TEACHER_OR_STUDENT,
+        Global
     ),
     op!(
         Public,
@@ -1945,7 +1654,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Global
     ),
     op!(
         Public,
@@ -1957,7 +1668,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         204,
         false,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Global
     ),
     op!(
         Public,
@@ -1969,7 +1682,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Environment
     ),
     op!(
         Public,
@@ -1981,7 +1696,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentCreate,
         201,
         false,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Environment
     ),
     op!(
         Public,
@@ -1993,7 +1710,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Environment
     ),
     op!(
         Public,
@@ -2005,7 +1724,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         202,
         false,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Environment
     ),
     op!(
         Public,
@@ -2017,7 +1738,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         200,
         false,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Environment
     ),
     op!(
         Public,
@@ -2029,7 +1752,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        true
+        true,
+        TEACHER_OR_STUDENT,
+        Course
     ),
     op!(
         GatewayInternal,
@@ -2041,7 +1766,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        true
+        true,
+        PLATFORM_ADMIN,
+        Service
     ),
     op!(
         GatewayInternal,
@@ -2053,7 +1780,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        true
+        true,
+        PLATFORM_ADMIN,
+        Service
     ),
     op!(
         GatewayInternal,
@@ -2065,7 +1794,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         None,
         200,
         false,
-        false
+        false,
+        PLATFORM_ADMIN,
+        Service
     ),
     op!(
         GatewayInternal,
@@ -2077,7 +1808,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentCreate,
         201,
         false,
-        true
+        true,
+        PLATFORM_ADMIN,
+        Service
     ),
     op!(
         GatewayInternal,
@@ -2089,7 +1822,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         204,
         false,
-        true
+        true,
+        PLATFORM_ADMIN,
+        Service
     ),
     op!(
         GatewayInternal,
@@ -2101,7 +1836,9 @@ pub const OPERATIONS: &[OperationContract] = &[
         IdempotentRevisioned,
         204,
         false,
-        true
+        true,
+        PLATFORM_ADMIN,
+        Service
     ),
 ];
 
@@ -2122,17 +1859,12 @@ pub fn validate_operation_catalog() -> Result<(), HttpContractError> {
         if operation.mutation != MutationContract::None && operation.method == Method::Get {
             return Err(HttpContractError::InvalidOperationCatalog);
         }
-        let authorization = operation_authorization(operation.operation_id)
-            .ok_or(HttpContractError::InvalidOperationCatalog)?;
-        if authorization.allowed_roles.is_empty()
+        if operation.allowed_roles.is_empty()
             || (operation.security == Security::ServiceMtls
-                && authorization.scope != OperationScopeKind::Service)
+                && operation.scope != OperationScopeKind::Service)
         {
             return Err(HttpContractError::InvalidOperationCatalog);
         }
-    }
-    if OPERATION_AUTHORIZATIONS.len() != OPERATIONS.len() {
-        return Err(HttpContractError::InvalidOperationCatalog);
     }
     Ok(())
 }

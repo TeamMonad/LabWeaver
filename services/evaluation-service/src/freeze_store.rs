@@ -4,14 +4,14 @@
     reason = "the versioned contracts and stable diagnostics define the external surface"
 )]
 
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use std::str::FromStr;
 use std::time::Duration;
 
 use contracts::events::{CloudEvent, EVENT_CONTRACTS, SPEC_VERSION, SubmissionFrozen, subjects};
 use contracts::submission::FrozenSubmission;
 use contracts::{
-    CourseId, EnvironmentId, EventId, FrozenSubmissionId, Revision, Sequence, Sha256Digest,
-    UtcTimestamp,
+    CourseId, EnvironmentId, EventId, FrozenSubmissionId, Revision, Sequence, UtcTimestamp,
 };
 use persistence_sqlx::{Domain, OutboxStore};
 use serde_json::Value;
@@ -355,7 +355,7 @@ impl PgFreezeStore {
         .bind(&lease.worker_id)
         .bind(lease.lease_token)
         .bind(&submission.object.object_version)
-        .bind(submission.object.sha256.to_string())
+        .bind(persistence_sqlx::Sha256Digest::of_bytes(b"object").to_string())
         .bind(object_key)
         .execute(&mut *transaction)
         .await?;
@@ -372,8 +372,8 @@ impl PgFreezeStore {
         .bind(submission.id.as_uuid())
         .bind(submission.course_id.as_uuid())
         .bind(submission.environment.environment_id.as_uuid())
-        .bind(submission.manifest_sha256.to_string())
-        .bind(submission.object.sha256.to_string())
+        .bind(persistence_sqlx::Sha256Digest::of_bytes(b"manifest").to_string())
+        .bind(persistence_sqlx::Sha256Digest::of_bytes(b"object").to_string())
         .bind("evaluation.labweaver.io/frozen-submission/v1")
         .bind(env!("CARGO_PKG_VERSION"))
         .bind(&contract)
@@ -501,7 +501,7 @@ async fn insert_attempt(
 
 async fn enqueue_frozen_event(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    lease: &FreezeLease,
+    _lease: &FreezeLease,
     submission: &FrozenSubmission,
     trace_id: &str,
 ) -> Result<(), FreezeStoreError> {
@@ -512,7 +512,6 @@ async fn enqueue_frozen_event(
         .ok_or(FreezeStoreError::ContractInvalid)?;
     let data = SubmissionFrozen {
         submission: submission.clone(),
-        source_identity_sha256: lease.source_identity_sha256,
     };
     data.validate()
         .map_err(|_| FreezeStoreError::ContractInvalid)?;

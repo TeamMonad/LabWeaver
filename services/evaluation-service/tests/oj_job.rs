@@ -2,7 +2,6 @@
 
 use std::path::Path;
 
-use contracts::Sha256Digest;
 use evaluation_service::{
     oj::{
         OjCaseBinding, OjCheckerKind, OjExecutionLimits, OjExecutionPhase, OjExecutionRequest,
@@ -10,6 +9,7 @@ use evaluation_service::{
     },
     oj_job::{OjJobBinding, OjJobError, OjJobResources},
 };
+use persistence_sqlx::Sha256Digest;
 use serde_json::Value;
 use uuid::Uuid;
 

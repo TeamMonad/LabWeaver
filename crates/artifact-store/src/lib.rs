@@ -12,9 +12,7 @@ use aws_sdk_s3::error::ProvideErrorMetadata as _;
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::{ByteStream, DateTime};
 use aws_sdk_s3::types::ObjectLockMode;
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
-use contracts::{ArtifactId, ArtifactRef, Sha256Digest, UtcTimestamp};
+use contracts::{ArtifactId, ArtifactRef, UtcTimestamp};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
@@ -116,7 +114,6 @@ pub trait ImmutableObjectStore: Send + Sync {
         &self,
         key: &str,
         size_bytes: u64,
-        sha256: Sha256Digest,
         media_type: &str,
         now: UtcTimestamp,
     ) -> Result<PresignedUpload, ObjectStoreError>;
@@ -127,7 +124,6 @@ pub trait ImmutableObjectStore: Send + Sync {
         key: &str,
         version: &str,
         expected_size: u64,
-        expected_sha256: Sha256Digest,
         media_type: &str,
     ) -> Result<VerifiedObject, ObjectStoreError>;
 
@@ -136,7 +132,6 @@ pub trait ImmutableObjectStore: Send + Sync {
         &self,
         key: &str,
         expected_size: u64,
-        expected_sha256: Sha256Digest,
         media_type: &str,
     ) -> Result<VerifiedObject, ObjectStoreError>;
 
@@ -145,7 +140,6 @@ pub trait ImmutableObjectStore: Send + Sync {
         &self,
         _key: &str,
         _bytes: &[u8],
-        _sha256: Sha256Digest,
         _media_type: &str,
         _now: UtcTimestamp,
         _retain_until: UtcTimestamp,
@@ -273,7 +267,6 @@ impl S3ImmutableObjectStore {
         &self,
         key: &str,
         bytes: &[u8],
-        sha256: Sha256Digest,
         media_type: &str,
     ) -> Result<VerifiedObject, ObjectStoreError> {
         self.validate_key(key)?;
@@ -281,13 +274,10 @@ impl S3ImmutableObjectStore {
             u64::try_from(bytes.len()).map_err(|_| ObjectStoreError::ObjectTooLarge)?;
         if bytes.is_empty()
             || size_bytes > self.config.max_object_bytes
-            || Sha256Digest::of_bytes(bytes) != sha256
             || media_type.trim().is_empty()
         {
             return Err(ObjectStoreError::ObjectIdentityInvalid);
         }
-        let checksum = STANDARD
-            .encode(hex_bytes(&sha256.to_string()).ok_or(ObjectStoreError::ObjectIdentityInvalid)?);
         let response = self
             .client
             .put_object()
@@ -297,9 +287,7 @@ impl S3ImmutableObjectStore {
                 i64::try_from(size_bytes).map_err(|_| ObjectStoreError::ObjectTooLarge)?,
             )
             .content_type(media_type)
-            .checksum_sha256(checksum)
             .if_none_match("*")
-            .metadata("sha256", sha256.to_string())
             .body(ByteStream::from(bytes.to_vec()))
             .send()
             .await
@@ -309,7 +297,7 @@ impl S3ImmutableObjectStore {
             .filter(|value| !value.is_empty() && *value != "null")
             .ok_or(ObjectStoreError::VersioningRequired)?
             .to_owned();
-        self.read_verified(key, &version, size_bytes, sha256, media_type)
+        self.read_verified(key, &version, size_bytes, media_type)
             .await
     }
 
@@ -332,7 +320,6 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
         &self,
         key: &str,
         size_bytes: u64,
-        sha256: Sha256Digest,
         media_type: &str,
         now: UtcTimestamp,
     ) -> Result<PresignedUpload, ObjectStoreError> {
@@ -344,8 +331,6 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
         {
             return Err(ObjectStoreError::ObjectIdentityInvalid);
         }
-        let checksum = STANDARD
-            .encode(hex_bytes(&sha256.to_string()).ok_or(ObjectStoreError::ObjectIdentityInvalid)?);
         let expires = Duration::from_secs(self.config.upload_ttl_seconds);
         let request = self
             .client
@@ -356,7 +341,6 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
                 i64::try_from(size_bytes).map_err(|_| ObjectStoreError::ObjectTooLarge)?,
             )
             .content_type(media_type)
-            .checksum_sha256(checksum)
             .if_none_match("*")
             .presigned(
                 PresigningConfig::expires_in(expires)
@@ -386,7 +370,6 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
         key: &str,
         version: &str,
         expected_size: u64,
-        expected_sha256: Sha256Digest,
         media_type: &str,
     ) -> Result<VerifiedObject, ObjectStoreError> {
         self.validate_key(key)?;
@@ -464,9 +447,7 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
             return Err(ObjectStoreError::ObjectUnavailable);
         };
         let body = body.into_bytes().to_vec();
-        if u64::try_from(body.len()).ok() != Some(expected_size)
-            || Sha256Digest::of_bytes(&body) != expected_sha256
-        {
+        if u64::try_from(body.len()).ok() != Some(expected_size) {
             return Err(ObjectStoreError::ObjectIdentityMismatch);
         }
         Ok(VerifiedObject {
@@ -474,7 +455,6 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
                 artifact_id: ArtifactId::new(),
                 store_binding: self.config.binding.clone(),
                 object_version: version.to_owned(),
-                sha256: expected_sha256,
                 size_bytes: expected_size,
                 media_type: media_type.to_owned(),
             },
@@ -486,7 +466,6 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
         &self,
         key: &str,
         expected_size: u64,
-        expected_sha256: Sha256Digest,
         media_type: &str,
     ) -> Result<VerifiedObject, ObjectStoreError> {
         self.validate_key(key)?;
@@ -503,7 +482,7 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
             .filter(|value| !value.is_empty() && *value != "null")
             .ok_or(ObjectStoreError::VersioningRequired)?
             .to_owned();
-        self.read_verified(key, &version, expected_size, expected_sha256, media_type)
+        self.read_verified(key, &version, expected_size, media_type)
             .await
     }
 
@@ -511,7 +490,6 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
         &self,
         key: &str,
         bytes: &[u8],
-        sha256: Sha256Digest,
         media_type: &str,
         now: UtcTimestamp,
         retain_until: UtcTimestamp,
@@ -521,14 +499,11 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
             u64::try_from(bytes.len()).map_err(|_| ObjectStoreError::ObjectTooLarge)?;
         if bytes.is_empty()
             || size_bytes > self.config.max_object_bytes
-            || Sha256Digest::of_bytes(bytes) != sha256
             || media_type.trim().is_empty()
             || retain_until.get() <= now.get()
         {
             return Err(ObjectStoreError::ObjectIdentityInvalid);
         }
-        let checksum = STANDARD
-            .encode(hex_bytes(&sha256.to_string()).ok_or(ObjectStoreError::ObjectIdentityInvalid)?);
         let retention = DateTime::from_nanos(retain_until.get().unix_timestamp_nanos())
             .map_err(|_| ObjectStoreError::ObjectIdentityInvalid)?;
         let response = self
@@ -540,9 +515,7 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
                 i64::try_from(size_bytes).map_err(|_| ObjectStoreError::ObjectTooLarge)?,
             )
             .content_type(media_type)
-            .checksum_sha256(checksum)
             .if_none_match("*")
-            .metadata("sha256", sha256.to_string())
             .object_lock_mode(ObjectLockMode::Governance)
             .object_lock_retain_until_date(retention)
             .body(ByteStream::from(bytes.to_vec()))
@@ -575,14 +548,10 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
             || head
                 .object_lock_retain_until_date()
                 .is_none_or(|observed| observed.as_nanos() != retention.as_nanos())
-            || head
-                .metadata()
-                .and_then(|metadata| metadata.get("sha256"))
-                .is_none_or(|observed| observed != &sha256.to_string())
         {
             return Err(ObjectStoreError::ObjectLockIdentityMismatch);
         }
-        self.read_verified(key, &version, size_bytes, sha256, media_type)
+        self.read_verified(key, &version, size_bytes, media_type)
             .await
     }
 
@@ -601,20 +570,6 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
             .map_err(|_| ObjectStoreError::DeleteFailed)?;
         Ok(())
     }
-}
-
-fn hex_bytes(value: &str) -> Option<Vec<u8>> {
-    if !value.len().is_multiple_of(2) {
-        return None;
-    }
-    value
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let text = std::str::from_utf8(pair).ok()?;
-            u8::from_str_radix(text, 16).ok()
-        })
-        .collect()
 }
 
 /// Fail-fast storage errors with stable diagnostics.
@@ -678,13 +633,13 @@ impl ObjectStoreError {
 #[cfg(test)]
 mod tests {
     use aws_sdk_s3::types::{BucketVersioningStatus, VersioningConfiguration};
-    use contracts::{Sha256Digest, UtcTimestamp};
+    use contracts::UtcTimestamp;
     use testcontainers::core::{IntoContainerPort, WaitFor};
     use testcontainers::{GenericImage, ImageExt, runners::AsyncRunner};
 
     use super::{
         BehaviorVersion, Credentials, ImmutableObjectStore, Region, S3ConfigBuilder,
-        S3ImmutableObjectStore, S3StoreConfig, hex_bytes,
+        S3ImmutableObjectStore, S3StoreConfig,
     };
 
     #[test]
@@ -705,13 +660,6 @@ mod tests {
         config.endpoint = "http://minio.internal.example".parse()?;
         assert!(config.validate().is_err());
         Ok(())
-    }
-
-    #[test]
-    fn hex_decoder_is_strict() {
-        assert_eq!(hex_bytes("00ff"), Some(vec![0, 255]));
-        assert_eq!(hex_bytes("0"), None);
-        assert_eq!(hex_bytes("zz"), None);
     }
 
     #[tokio::test]
@@ -780,13 +728,11 @@ mod tests {
             client: client.clone(),
         };
         let bytes = b"immutable teacher material";
-        let digest = Sha256Digest::of_bytes(bytes);
         let key = "problem-packages/course/upload/object";
         let presigned = store
             .presign_upload(
                 key,
                 u64::try_from(bytes.len())?,
-                digest,
                 "text/plain",
                 "2026-07-15T08:00:00.000Z".parse::<UtcTimestamp>()?,
             )
@@ -808,7 +754,7 @@ mod tests {
         );
 
         let frozen = store
-            .freeze_current(key, u64::try_from(bytes.len())?, digest, "text/plain")
+            .freeze_current(key, u64::try_from(bytes.len())?, "text/plain")
             .await?;
         assert_eq!(frozen.bytes, bytes);
         let version = frozen.reference.object_version.clone();
@@ -824,19 +770,13 @@ mod tests {
             .await?;
         assert!(
             store
-                .freeze_current(key, u64::try_from(bytes.len())?, digest, "text/plain",)
+                .freeze_current(key, u64::try_from(bytes.len())?, "text/plain",)
                 .await
                 .is_err()
         );
         assert_eq!(
             store
-                .read_verified(
-                    key,
-                    &version,
-                    u64::try_from(bytes.len())?,
-                    digest,
-                    "text/plain",
-                )
+                .read_verified(key, &version, u64::try_from(bytes.len())?, "text/plain",)
                 .await?
                 .bytes,
             bytes
@@ -844,13 +784,7 @@ mod tests {
         store.delete_orphan(key, &version).await?;
         assert!(
             store
-                .read_verified(
-                    key,
-                    &version,
-                    u64::try_from(bytes.len())?,
-                    digest,
-                    "text/plain",
-                )
+                .read_verified(key, &version, u64::try_from(bytes.len())?, "text/plain",)
                 .await
                 .is_err()
         );
@@ -860,27 +794,23 @@ mod tests {
         let now = UtcTimestamp::from_utc(observed_now)?;
         let retain_until = UtcTimestamp::from_utc(observed_now + time::Duration::seconds(60))?;
         let locked_bytes = b"immutable frozen submission";
-        let locked_digest = Sha256Digest::of_bytes(locked_bytes);
         let locked_key = "problem-packages/course/submissions/frozen";
         let locked = store
             .put_governance_locked(
                 locked_key,
                 locked_bytes,
-                locked_digest,
                 "application/vnd.labweaver.frozen-submission.v1+json",
                 now,
                 retain_until,
             )
             .await?;
         assert_eq!(locked.bytes, locked_bytes);
-        assert_eq!(locked.reference.sha256, locked_digest);
         assert!(!locked.reference.object_version.is_empty());
         assert!(
             store
                 .put_governance_locked(
                     locked_key,
                     locked_bytes,
-                    locked_digest,
                     "application/vnd.labweaver.frozen-submission.v1+json",
                     now,
                     retain_until,

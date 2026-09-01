@@ -20,10 +20,6 @@
           "description": "Immutable backend object version.",
           "type": "string"
         },
-        "sha256": {
-          "$ref": "#/$defs/Sha256Digest",
-          "description": "Exact content digest."
-        },
         "sizeBytes": {
           "description": "Raw object length.",
           "format": "uint64",
@@ -39,7 +35,6 @@
         "artifactId",
         "storeBinding",
         "objectVersion",
-        "sha256",
         "sizeBytes",
         "mediaType"
       ],
@@ -67,22 +62,12 @@
         "runtimeBinding": {
           "description": "Deployment-owned opaque runtime profile; never a credential or endpoint URL.",
           "type": "string"
-        },
-        "runtimeConfigSha256": {
-          "$ref": "#/$defs/Sha256Digest",
-          "description": "Hash of the effective sanitized Claude Code runtime configuration."
-        },
-        "workerImageSha256": {
-          "$ref": "#/$defs/Sha256Digest",
-          "description": "Immutable SHA-256 identity of the worker container image."
         }
       },
       "required": [
         "runtimeBinding",
         "model",
         "claudeCodeVersion",
-        "workerImageSha256",
-        "runtimeConfigSha256",
         "maxInFlightPerWorker"
       ],
       "type": "object"
@@ -144,9 +129,6 @@
         "packageRevision": {
           "$ref": "#/$defs/Revision"
         },
-        "packageSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
         "policyId": {
           "$ref": "#/$defs/PolicyId"
         },
@@ -160,7 +142,6 @@
       "required": [
         "packageId",
         "packageRevision",
-        "packageSha256",
         "policyId",
         "policyRevision",
         "requestedRuntime"
@@ -281,9 +262,6 @@
         "id": {
           "$ref": "#/$defs/ProblemPackageId"
         },
-        "manifestSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
         "retention": {
           "$ref": "#/$defs/RetentionSnapshot"
         },
@@ -296,7 +274,6 @@
         "courseId",
         "revision",
         "files",
-        "manifestSha256",
         "retention",
         "completedAt"
       ],
@@ -372,13 +349,6 @@
         "container",
         "virtual_machine"
       ],
-      "type": "string"
-    },
-    "Sha256Digest": {
-      "description": "Canonical lowercase SHA-256 digest.",
-      "maxLength": 64,
-      "minLength": 64,
-      "pattern": "^[0-9a-f]{64}$",
       "type": "string"
     },
     "StudentContentMode": {

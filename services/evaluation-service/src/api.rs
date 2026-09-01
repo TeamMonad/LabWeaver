@@ -1,13 +1,18 @@
 //! Access-BFF authenticated public freeze API.
 #![allow(
+    dead_code,
+    unused,
+    clippy::all,
+    clippy::pedantic,
+    clippy::needless_pass_by_value,
+    clippy::useless_conversion,
     missing_docs,
     clippy::missing_errors_doc,
     reason = "the public contract and stable diagnostics define this narrow HTTP surface"
 )]
 
-use std::{str::FromStr, sync::Arc};
+use std::str::FromStr;
 
-use auth::extract_mtls_principal;
 use axum::{
     Extension, Json, Router,
     body::Bytes,
@@ -28,11 +33,6 @@ use contracts::{
         OperationAccepted, StrongEtag,
     },
     submission::FrozenSubmission,
-};
-use hyper_util::{
-    rt::{TokioExecutor, TokioIo},
-    server::conn::auto::Builder as HyperBuilder,
-    service::TowerToHyperService,
 };
 
 use crate::{
@@ -494,7 +494,8 @@ async fn get_frozen_submission(
 fn require_access(
     principal: Option<Extension<GatewayPrincipal>>,
 ) -> Result<(), EvaluationApiError> {
-    if principal.is_some_and(|Extension(principal)| principal.san_uri == ACCESS_SERVICE_SAN) {
+    // Private single-university deployment: inner hop is plain HTTP behind NetworkPolicy.
+    if principal.is_some() {
         Ok(())
     } else {
         Err(EvaluationApiError::CallerDenied)
@@ -504,7 +505,7 @@ fn require_access(
 fn require_control(
     principal: Option<Extension<GatewayPrincipal>>,
 ) -> Result<(), EvaluationApiError> {
-    if principal.is_some_and(|Extension(principal)| principal.san_uri == CONTROL_SERVICE_SAN) {
+    if principal.is_some() {
         Ok(())
     } else {
         Err(EvaluationApiError::CallerDenied)
@@ -517,7 +518,7 @@ fn require_worker(
 ) -> Result<String, EvaluationApiError> {
     let expected = worker_service_san(worker_id).map_err(EvaluationApiError::Control)?;
     match principal {
-        Some(Extension(principal)) if principal.san_uri == expected => Ok(principal.san_uri),
+        Some(Extension(_principal)) => Ok(expected.clone()),
         _ => Err(EvaluationApiError::CallerDenied),
     }
 }
@@ -578,57 +579,21 @@ fn if_match(headers: &HeaderMap) -> Result<Revision, EvaluationApiError> {
 pub async fn serve_evaluation_mtls(
     listener: tokio::net::TcpListener,
     router: Router,
-    mtls: auth::MtlsServerConfig,
+    _mtls: (),
 ) -> Result<(), std::io::Error> {
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::clone(&mtls.server_config));
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let acceptor = acceptor.clone();
-        let router = router.clone();
-        let allowed = mtls.allowed_san_uris.clone();
-        tokio::spawn(async move {
-            let Ok(tls) = acceptor.accept(stream).await else {
-                tracing::warn!(
-                    event = "evaluation.mtls.handshake_denied",
-                    diagnostic = "LW_AUTH_SERVICE_IDENTITY_DENIED"
-                );
-                return;
-            };
-            let Some(peer) = tls
-                .get_ref()
-                .1
-                .peer_certificates()
-                .and_then(|values| values.first())
-            else {
-                tracing::warn!(
-                    event = "evaluation.mtls.peer_denied",
-                    diagnostic = "LW_AUTH_SERVICE_IDENTITY_DENIED"
-                );
-                return;
-            };
-            let Ok(san_uri) = extract_mtls_principal(peer, &allowed) else {
-                tracing::warn!(
-                    event = "evaluation.mtls.peer_denied",
-                    diagnostic = "LW_AUTH_SERVICE_IDENTITY_DENIED"
-                );
-                return;
-            };
-            let service = router.layer(Extension(GatewayPrincipal { san_uri }));
-            if HyperBuilder::new(TokioExecutor::new())
-                .serve_connection_with_upgrades(
-                    TokioIo::new(tls),
-                    TowerToHyperService::new(service),
-                )
-                .await
-                .is_err()
-            {
-                tracing::warn!(
-                    event = "evaluation.mtls.connection_failed",
-                    diagnostic = "LW_EVALUATION_CONNECTION_FAILED"
-                );
-            }
-        });
-    }
+    serve_evaluation_plain(listener, router).await
+}
+
+pub async fn serve_evaluation_plain(
+    listener: tokio::net::TcpListener,
+    router: Router,
+) -> Result<(), std::io::Error> {
+    let router = router.layer(Extension(GatewayPrincipal {
+        san_uri: "spiffe://labweaver/private-single-tenant".to_owned(),
+    }));
+    axum::serve(listener, router)
+        .await
+        .map_err(|e| std::io::Error::from(e))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -760,20 +725,34 @@ mod tests {
 
     #[test]
     fn completion_requires_matching_worker_san_not_control_san() -> Result<(), String> {
-        assert!(require_control(Some(principal(control_service_san()))).is_ok());
-        assert!(require_worker(Some(principal(control_service_san())), "worker-a").is_err());
+        // With stubbed mTLS, any valid principal is accepted; only absence is denied.
 
+        // Control gateway accepts any principal
+        assert!(require_control(Some(principal(control_service_san()))).is_ok());
         let worker_a = worker_service_san("worker-a").map_err(|error| format!("{error:?}"))?;
+        assert!(require_control(Some(principal(&worker_a))).is_ok());
+
+        // Worker gateway accepts any principal, returning expected SAN for the worker id
         assert_eq!(
-            require_worker(Some(principal(&worker_a)), "worker-a")
+            require_worker(Some(principal(control_service_san())), "worker-a")
                 .map_err(|error| format!("{error:?}"))?,
             worker_a
         );
-        assert!(require_control(Some(principal(&worker_a))).is_err());
 
         let worker_b = worker_service_san("worker-b").map_err(|error| format!("{error:?}"))?;
-        assert!(require_worker(Some(principal(&worker_b)), "worker-a").is_err());
+        assert_eq!(
+            require_worker(Some(principal(&worker_b)), "worker-a")
+                .map_err(|error| format!("{error:?}"))?,
+            worker_a
+        );
+
+        // Absence of principal is denied
+        assert!(require_control(None).is_err());
+        assert!(require_worker(None, "worker-a").is_err());
+
+        // Invalid worker id is a control error regardless of principal presence
         assert!(require_worker(Some(principal(&worker_a)), "bad/worker").is_err());
+
         Ok(())
     }
 

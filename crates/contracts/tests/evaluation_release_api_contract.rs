@@ -9,7 +9,6 @@ fn teacher_release_commands_reject_unknown_fields_and_invalid_identities() {
     let valid = serde_json::json!({
         "candidateId": uuid::Uuid::now_v7(),
         "candidateRevision": 1,
-        "evaluationSpecSha256": "a".repeat(64),
         "approvalId": uuid::Uuid::now_v7(),
     });
     assert!(serde_json::from_value::<CreateEvaluationReleaseRequest>(valid.clone()).is_ok());
@@ -21,10 +20,6 @@ fn teacher_release_commands_reject_unknown_fields_and_invalid_identities() {
     let mut zero_revision = valid.clone();
     zero_revision["candidateRevision"] = serde_json::json!(0);
     assert!(serde_json::from_value::<CreateEvaluationReleaseRequest>(zero_revision).is_err());
-
-    let mut invalid_hash = valid;
-    invalid_hash["evaluationSpecSha256"] = serde_json::json!("not-a-sha256");
-    assert!(serde_json::from_value::<CreateEvaluationReleaseRequest>(invalid_hash).is_err());
 
     assert!(
         serde_json::from_value::<WithdrawEvaluationReleaseRequest>(serde_json::json!({
@@ -106,11 +101,7 @@ fn generated_release_schema_enforces_revision_and_sha256_wire_constraints()
         "../../../schemas/contracts/v1/http/create-evaluation-release-request.schema.json"
     ))?;
     assert_eq!(document["$defs"]["Revision"]["minimum"], 1);
-    assert_eq!(
-        document["$defs"]["Sha256Digest"]["pattern"],
-        "^[0-9a-f]{64}$"
-    );
-    assert_eq!(document["$defs"]["Sha256Digest"]["minLength"], 64);
-    assert_eq!(document["$defs"]["Sha256Digest"]["maxLength"], 64);
+    // Sha256Digest has been removed in ARC-09 mono refactor
+    assert!(document["$defs"].get("Sha256Digest").is_none());
     Ok(())
 }

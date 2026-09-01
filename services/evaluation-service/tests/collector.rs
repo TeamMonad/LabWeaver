@@ -2,11 +2,12 @@
 
 use std::fs;
 
+use contracts::parse_strict_json;
 use contracts::submission::SubmissionManifest;
-use contracts::{Sha256Digest, parse_strict_json};
 #[cfg(unix)]
 use evaluation_service::SnapshotSource;
 use evaluation_service::{CollectError, CollectorLimits, PvcSnapshotSource, SnapshotCollector};
+use persistence_sqlx::Sha256Digest;
 use tempfile::tempdir;
 
 fn manifest(

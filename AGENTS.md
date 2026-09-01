@@ -93,17 +93,17 @@ status:
 
 ## 2. 产品与架构硬约束
 
-- 技术基线为 Rust + Axum、Vue 3、PostgreSQL/SQLx、NATS JetStream、MinIO、Keycloak/OIDC、Kubernetes、KubeVirt、Harbor、Trivy、BuildKit、Ansible、Helm 与 Playwright。Sprint 2 不包含 Headscale/Tailscale、Guacamole、Private Sigstore、Kyverno 或 Packer；不得让这些已删除能力重新进入默认部署或 Release Gate。
-- Sprint 2 的 Claude Code-only Runtime 固定使用受审的 Anthropic 兼容端点，Provider 配置统一使用 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_MODEL` 三个通用字段：前两者与模型名分别来自受审 ConfigMap 文件，令牌仅以 Secret 文件注入。不再读取 `ECNU_API_KEY` 等运营方专属变量名，也不保留兼容别名或 fallback。禁止把令牌写入 Git、YAML、命令参数、日志或报告，也禁止 ambient credential、备用端点和 Provider fallback。
-- Sprint 2 明确允许 Agent Service 任意出站网络访问，并允许 Container 环境通过已审批的 `network.mode=allow_all` 使用任意出站网络与端口；这是课程切片的已接受风险，不得扩展到 KubeVirt VM、BuildKit、Evaluation 或其他平台 workload。身份、Secret、资源上限、入口隔离和教师审批仍必须 fail closed。
-- Sprint 2 采用现有基础设施时只允许盘点、严格校验、创建缺失对象和应用层原地 reconcile；不得删除或重建 namespace、Schema、stream、bucket、Harbor project/image、Keycloak realm/client、PVC、CRD、Webhook、Kyverno 或 Private Sigstore。破坏性 `demo reset` 是本轮明确排除的维护入口。
-- Sprint 2 部署 Evaluation Service，但仅负责 `FrozenSubmission` 的双运行时冻结协调与不可变发布；不得启用 Runner、Checker、Aggregator、Evaluation 执行或评分。Resource Service 保持独立边界且默认不部署。
-- Sprint 2 的 rootless BuildKit 仅允许在 `labweaver-build` 使用 `Unconfined` seccomp/AppArmor、container-scoped SELinux `spc_t` 与 `--oci-worker-no-process-sandbox`；仍禁止 privileged、HostPath、hostNetwork 和 Kubernetes API token。该 SELinux 例外只解决内层 `runc` 的 `devpts` mount 与 snapshot relabel，不得扩展到其他 workload 或改为节点全局策略。Container/KubeVirt executor 当前宽 ClusterRole 是明确的阶段性风险，不得描述为最小权限或生产安全验证通过。
+- 技术基线为 Rust + Axum、Vue 3、PostgreSQL/SQLx、NATS JetStream、MinIO、Keycloak/OIDC、Kubernetes、KubeVirt、Harbor、Trivy、BuildKit、Ansible、Helm 与 Playwright。long-term single-university private deployment 不包含 Headscale/Tailscale、Guacamole、Private Sigstore、Kyverno 或 Packer；不得让这些已删除能力重新进入默认部署或 Release Gate。
+- long-term single-university private deployment 的 Claude Code-only Runtime 固定使用受审的 Anthropic 兼容端点，Provider 配置统一使用 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_MODEL` 三个通用字段：前两者与模型名分别来自受审 ConfigMap 文件，令牌仅以 Secret 文件注入。不再读取 `ECNU_API_KEY` 等运营方专属变量名，也不保留兼容别名或 fallback。禁止把令牌写入 Git、YAML、命令参数、日志或报告，也禁止 ambient credential、备用端点和 Provider fallback。
+- long-term single-university private deployment 明确允许 Agent Service 任意出站网络访问，并允许 Container 环境通过已审批的 `network.mode=allow_all` 使用任意出站网络与端口；这是课程切片的已接受风险，不得扩展到 KubeVirt VM、BuildKit、Evaluation 或其他平台 workload。身份、Secret、资源上限、入口隔离和教师审批仍必须 fail closed。
+- long-term single-university private deployment 采用现有基础设施时只允许盘点、严格校验、创建缺失对象和应用层原地 reconcile；不得删除或重建 namespace、Schema、stream、bucket、Harbor project/image、Keycloak realm/client、PVC、CRD、Webhook、Kyverno 或 Private Sigstore。破坏性 `demo reset` 是本轮明确排除的维护入口。
+- long-term single-university private deployment 部署 Evaluation Service，但仅负责 `FrozenSubmission` 的双运行时冻结协调与不可变发布；不得启用 Runner、Checker、Aggregator、Evaluation 执行或评分。Resource Service 保持独立边界且默认不部署。
+- long-term single-university private deployment 的 rootless BuildKit 仅允许在 `labweaver-build` 使用 `Unconfined` seccomp/AppArmor、container-scoped SELinux `spc_t` 与 `--oci-worker-no-process-sandbox`；仍禁止 privileged、HostPath、hostNetwork 和 Kubernetes API token。该 SELinux 例外只解决内层 `runc` 的 `devpts` mount 与 snapshot relabel，不得扩展到其他 workload 或改为节点全局策略。Container/KubeVirt executor 当前宽 ClusterRole 是明确的阶段性风险，不得描述为最小权限或生产安全验证通过。
 - `labweaver-system` 的 Pod Security `enforce` 固定为 `baseline`，仅用于允许 OpenSSH Gateway 以 root 启动并添加 `CHOWN`、`DAC_OVERRIDE`、`FOWNER`、`SETGID`、`SETUID`、`SYS_CHROOT`；`audit` 与 `warn` 保持 `restricted`。其他 workload 仍必须显式 `runAsNonRoot`、drop all capabilities、只读根文件系统；Gateway 不得使用 privileged、HostPath、hostNetwork 或 Kubernetes API token。
 - Agent 只生成候选方案；确定性工具负责验证；教师负责最终批准。未经批准的 EnvironmentSpec、SubmissionSpec、EvaluationSpec、脚本和镜像不得进入生产执行路径。
 - LLM 输出只能提供 advisory feedback，永远不得写入确定性分数、改变 Gate 结果或绕过审批。服务端必须拒绝包含受保护评分字段的 LLM 输出。
 - 真实 KubeVirt VM 是 P0 硬验收，不得用 Mock、容器或静态报告冒充。GPU 与云扩容在课程切片中使用显式标识的 Mock Capacity Provider。
-- 外部访问默认经过 Headscale/Tailscale；环境端点不得直接暴露公网。网络可达与业务授权分离，AccessGrant 过期或撤销后必须 fail closed。
+- 外部访问在 long-term single-university private deployment 中不依赖 Headscale/Tailscale（已删除，可选桩）；环境端点不得直接暴露公网。网络可达与业务授权分离，AccessGrant 过期或撤销后必须 fail closed。
 - Playwright 黄金路径是浏览器验收与演示重放的单一事实来源；禁止为现场演示维护另一条不可测试的旁路。
 - Ansible 是部署、验证、升级和回滚的统一入口；Helm 与 Kubernetes 模块是其受控执行层。
 - 统一评测必须先完整闭合 OJ 和 Linux 系统实验两类场景，再扩展新的 Runner、Checker 或实验类型。
@@ -141,8 +141,8 @@ status:
 ## 6. 安全与数据边界
 
 - Keycloak/OIDC 负责身份与基础角色；LabWeaver Access Service 负责课程、项目、环境、端点和 Lease 范围授权。两层检查缺一不可。
-- AccessGrant、EndpointGrant 与 Headscale Policy 必须有显式到期、撤销、revision 和审计链；策略编译或应用失败时拒绝新访问。
-- Agent Tool、Ansible Module、Runner 镜像、挂载路径和 Kubernetes 权限必须采用 allowlist 与最小权限。网络访问遵循产品切片的显式策略；Sprint 2 的 Agent Service 与经审批的 `allow_all` Container 是记录在案的例外。
+- AccessGrant、EndpointGrant（Headscale Policy 为可选桩，已在 private deployment 删除）必须有显式到期、撤销、revision 和审计链；策略编译或应用失败时拒绝新访问。
+- Agent Tool、Ansible Module、Runner 镜像、挂载路径和 Kubernetes 权限必须采用 allowlist 与最小权限。网络访问遵循产品切片的显式策略；long-term single-university private deployment 的 Agent Service 与经审批的 `allow_all` Container 是记录在案的例外。
 - Evaluation Job 使用受限 SecurityContext、资源上限、超时、输出上限和网络策略；生成脚本在批准前不得执行。
 - Secret、token、密钥、原始提交、完整材料、日志 payload 和可复原商业内容不得进入 Git、镜像、普通日志或发布报告。
 - 原始或未授权学生内容禁止出站。`SubmissionManifest.llmReadable` 只是候选 allowlist；命中路径仍必须通过敏感信息分类、大小、内容和课程 LLM egress policy 门禁，禁止整包或隐式出站。
@@ -211,7 +211,7 @@ Release Gate 的 connected 操作**不依赖任何账本文件或租约机制**�
 - 本地集成、Fixture、静态检查和单元测试不能冒充集群证据；集群证据也不能回填为普通 Issue 的本地合并门禁。
 
 - 日常状态不再为每项能力维护 E0-E4 标签。状态只写清 `planned`、`implemented`、`verified` 或 `blocked`，并附当前构建身份、实际测试或报告和限制。
-- Sprint 2 发布判断必须在同一 commit、deployment manifest、Migration catalog、镜像 digest 集合和 Run ID 下闭合 Container 与真实 KubeVirt 两条路径。
+- long-term single-university private deployment 发布判断必须在同一 commit、deployment manifest、Migration catalog、镜像 digest 集合和 Run ID 下闭合 Container 与真实 KubeVirt 两条路径。
 - 重要功能必须覆盖正常、空、边界、超大、非法、重复、冲突、越权、版本不兼容、Provider 不可用、IO/网络失败、超时、取消、重试、并发、乱序、恢复和资源清理。
 - 失败路径必须验证无部分提交、无错误评分、无越权访问、无可发布产物和无敏感信息泄露。
 - Playwright 禁止固定 sleep；等待可观察的业务状态或 SSE 事件。失败必须保留 Trace、截图和录像。
@@ -828,7 +828,7 @@ pnpm exec playwright test
 
 ```text
 Sprint 1 结束后：不新增微服务
-Sprint 2 结束后：不新增 Runtime 主类型
+long-term single-university private deployment 结束后：不新增 Runtime 主类型
 Sprint 3 结束后：不新增 Runner 类型和用户功能
 Sprint 4：仅处理缺陷、测试、部署、文档和发布
 ```

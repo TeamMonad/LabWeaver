@@ -8,13 +8,6 @@
       "description": "Strongly typed UUIDv7 identifier for `ImageArtifactId`.",
       "type": "string"
     },
-    "Sha256Digest": {
-      "description": "Canonical lowercase SHA-256 digest.",
-      "maxLength": 64,
-      "minLength": 64,
-      "pattern": "^[0-9a-f]{64}$",
-      "type": "string"
-    },
     "VirtualMachineBaseDisk": {
       "additionalProperties": false,
       "description": "Deployment-owned immutable KubeVirt base-disk identity.\n\nUnlike an object-store `ArtifactRef`, this identifies a CDI source image and its imported\ndisk content. `capacity_bytes` is the reviewed PVC capacity, not a fabricated object length.",
@@ -27,9 +20,6 @@
           "minimum": 0,
           "type": "integer"
         },
-        "diskSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
         "sourceRegistryDigest": {
           "type": "string"
         }
@@ -37,7 +27,6 @@
       "required": [
         "binding",
         "sourceRegistryDigest",
-        "diskSha256",
         "capacityBytes"
       ],
       "type": "object"

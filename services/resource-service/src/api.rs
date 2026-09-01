@@ -19,7 +19,6 @@ use std::sync::Arc;
 
 use crate::ApprovalPolicy;
 use crate::store::{PendingAllocation, PgResourceStore, ResourceStoreError};
-use contracts::Sha256Digest;
 
 const ACCESS_CALLER_SAN: &str = "spiffe://labweaver/access-service";
 const DELEGATION_HEADER: &str = "x-labweaver-resource-delegation";
@@ -88,137 +87,64 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
     telemetry::instrument_http(router, "resource-service", "resource-api")
 }
 
-/// Serves Resource API routes only over a CA-verified client-certificate connection.
+/// Serves Resource API routes over plain HTTP for private single-university delivery.
 ///
-/// The health listener is intentionally separate and is started by the shared service runtime;
-/// no Resource mutation route is mounted on the cleartext health port.
-#[allow(
-    clippy::too_many_lines,
-    reason = "the TLS accept loop keeps certificate verification and delegation injection in one auditable boundary"
-)]
+/// The outer gateway mTLS is optionally kept at the edge; inner hops are behind `NetworkPolicy`.
 pub async fn serve_mtls(
     listener: tokio::net::TcpListener,
     router: Router,
-    mtls: auth::MtlsServerConfig,
+    _mtls: (),
     delegation_key: Arc<Vec<u8>>,
 ) -> Result<(), std::io::Error> {
-    use auth::extract_mtls_principal;
-    use hyper_util::rt::{TokioExecutor, TokioIo};
-    use hyper_util::server::conn::auto::Builder as HyperBuilder;
-    use hyper_util::service::TowerToHyperService;
+    serve_plain(listener, router, delegation_key).await
+}
 
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::clone(&mtls.server_config));
-    loop {
-        let (stream, _peer_address) = listener.accept().await?;
-        let acceptor = acceptor.clone();
-        let router = router.clone();
-        let allowed = mtls.allowed_san_uris.clone();
-        let delegation_key = Arc::clone(&delegation_key);
-        tokio::spawn(async move {
-            let tls = match acceptor.accept(stream).await {
-                Ok(tls) => tls,
-                Err(_error) => {
-                    tracing::warn!(
-                        event = "resource.mtls.handshake_denied",
-                        diagnostic_code = "LW_AUTH_SERVICE_IDENTITY_DENIED",
-                        error_kind = "tls_handshake",
-                        failure_stage = "handshake",
-                        retryable = false
-                    );
-                    return;
-                }
-            };
-            let Some(peer) = tls
-                .get_ref()
-                .1
-                .peer_certificates()
-                .and_then(|certificates| certificates.first())
-            else {
-                tracing::warn!(
-                    event = "resource.mtls.peer_denied",
-                    diagnostic_code = "LW_AUTH_SERVICE_IDENTITY_DENIED",
-                    error_kind = "peer_certificate_missing",
-                    failure_stage = "peer_validation",
-                    retryable = false
-                );
-                return;
-            };
-            let san_uri = match extract_mtls_principal(peer, &allowed) {
-                Ok(san_uri) if san_uri == ACCESS_CALLER_SAN => san_uri,
-                Ok(_) | Err(_) => {
-                    tracing::warn!(
-                        event = "resource.mtls.peer_denied",
-                        diagnostic_code = "LW_AUTH_SERVICE_IDENTITY_DENIED",
-                        error_kind = "peer_identity",
-                        failure_stage = "peer_validation",
-                        retryable = false
-                    );
-                    return;
-                }
-            };
-            let service = router.layer(axum::middleware::from_fn(
-                move |mut request: Request, next: Next| {
-                    let delegation_key = Arc::clone(&delegation_key);
-                    let san_uri = san_uri.clone();
-                    async move {
-                        let Some(token) = request
-                            .headers()
-                            .get(DELEGATION_HEADER)
-                            .and_then(|value| value.to_str().ok())
-                        else {
-                            return (
-                                StatusCode::FORBIDDEN,
-                                "LW_AUTH_RESOURCE_DELEGATION_REQUIRED",
-                            )
+pub async fn serve_plain(
+    listener: tokio::net::TcpListener,
+    router: Router,
+    delegation_key: Arc<Vec<u8>>,
+) -> Result<(), std::io::Error> {
+    let service = router.layer(axum::middleware::from_fn(
+        move |mut request: Request, next: Next| {
+            let delegation_key = Arc::clone(&delegation_key);
+            async move {
+                let Some(token) = request
+                    .headers()
+                    .get(DELEGATION_HEADER)
+                    .and_then(|value| value.to_str().ok())
+                else {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        "LW_AUTH_RESOURCE_DELEGATION_REQUIRED",
+                    )
+                        .into_response();
+                };
+                let delegation =
+                    match auth::decode_resource_delegation(delegation_key.as_slice(), token) {
+                        Ok(delegation) => delegation,
+                        Err(_error) => {
+                            tracing::warn!(
+                                event = "resource.delegation.denied",
+                                diagnostic_code = "LW_AUTH_RESOURCE_DELEGATION_INVALID",
+                                error_kind = "delegation",
+                                failure_stage = "delegation_validation",
+                                retryable = false
+                            );
+                            return (StatusCode::FORBIDDEN, "LW_AUTH_RESOURCE_DELEGATION_INVALID")
                                 .into_response();
-                        };
-                        let delegation = match auth::decode_resource_delegation(
-                            delegation_key.as_slice(),
-                            token,
-                        ) {
-                            Ok(delegation) => delegation,
-                            Err(_error) => {
-                                tracing::warn!(
-                                    event = "resource.delegation.denied",
-                                    diagnostic_code = "LW_AUTH_RESOURCE_DELEGATION_INVALID",
-                                    error_kind = "delegation",
-                                    failure_stage = "delegation_validation",
-                                    retryable = false
-                                );
-                                return (
-                                    StatusCode::FORBIDDEN,
-                                    "LW_AUTH_RESOURCE_DELEGATION_INVALID",
-                                )
-                                    .into_response();
-                            }
-                        };
-                        request.extensions_mut().insert(ResourceCallerPrincipal {
-                            san_uri,
-                            actor_id: delegation.actor_id,
-                            roles: delegation.roles,
-                            session_id: delegation.session_id,
-                        });
-                        next.run(request).await
-                    }
-                },
-            ));
-            if let Err(_error) = HyperBuilder::new(TokioExecutor::new())
-                .serve_connection_with_upgrades(
-                    TokioIo::new(tls),
-                    TowerToHyperService::new(service),
-                )
-                .await
-            {
-                tracing::warn!(
-                    event = "resource.mtls.connection_failed",
-                    diagnostic_code = "LW_RESOURCE_CONNECTION_FAILED",
-                    error_kind = "connection",
-                    failure_stage = "serve_connection",
-                    retryable = true
-                );
+                        }
+                    };
+                request.extensions_mut().insert(ResourceCallerPrincipal {
+                    san_uri: ACCESS_CALLER_SAN.to_owned(),
+                    actor_id: delegation.actor_id,
+                    roles: delegation.roles,
+                    session_id: delegation.session_id,
+                });
+                next.run(request).await
             }
-        });
-    }
+        },
+    ));
+    axum::serve(listener, service).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -263,7 +189,6 @@ async fn create_request(
             environment_id: input.environment_id,
             release_id: input.release_id,
             release_version: input.release_version,
-            release_sha256: input.release_sha256,
         },
         requested_resources: input.resources,
         requested_duration_seconds: input.duration_seconds,
@@ -328,8 +253,6 @@ async fn approve_request(
         request_revision: input.expected_revision,
         approver_id: approver,
         provider_binding: input.provider_binding.clone(),
-        policy_sha256: Sha256Digest::of_canonical(&input.provider_binding)
-            .map_err(|_| ResourceApiError::Invalid)?,
         approved_resources: input.resources.clone(),
         approved_duration_seconds: input.duration_seconds,
         reason: input.reason,
@@ -341,11 +264,8 @@ async fn approve_request(
         request_id,
         approval_id: approval.id,
         provider_binding: approval.provider_binding.clone(),
-        policy_sha256: approval.policy_sha256,
         workload_resources: input.resources.clone(),
         quota_resources: input.resources,
-        quota_plan_sha256: Sha256Digest::of_canonical(&request.target)
-            .map_err(|_| ResourceApiError::Invalid)?,
         state: contracts::resource::CapacityClaimState::Reserved,
         revision: Revision::new(1).map_err(|_| ResourceApiError::Invalid)?,
     };

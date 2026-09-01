@@ -6,7 +6,6 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::str::FromStr as _;
 use std::sync::Arc;
 
@@ -20,9 +19,8 @@ use bollard::grpc::driver::Image as _;
 use bollard::grpc::driver::buildkitd::BuildkitDaemon;
 use bollard::grpc::registry::ImageRegistryOutputBuilder;
 use bytes::Bytes;
+use contracts::BuildRequestId;
 use contracts::events::AgentBuildRequested;
-use contracts::supply_chain::VulnerabilitySummary;
-use contracts::{BuildRequestId, Sha256Digest};
 use flate2::read::GzDecoder;
 use futures::executor::block_on;
 use reqwest::{Certificate, Client, StatusCode, Url};
@@ -30,12 +28,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use tempfile::TempDir;
-use tokio::process::Command;
 use tonic::transport::{Certificate as TlsCertificate, ClientTlsConfig, Endpoint, Identity};
 
 use crate::build_pipeline::{
     BuildIdentity, BuildProviderFailure, BuildProviderFailureCode, BuildProviderRequestContext,
-    BuiltCandidate, PrivateRegistryProject, PublishedImage, ScanEvidence,
+    BuiltCandidate, PrivateRegistryProject, PublishedImage,
 };
 use crate::build_provider::{BuildExecutorBackend, BuildExecutorRequest, BuildExecutorResponse};
 
@@ -52,8 +49,6 @@ pub struct ProductionBuildExecutorConfig {
     pub buildkit_ca_file: PathBuf,
     pub buildkit_client_certificate_file: PathBuf,
     pub buildkit_client_private_key_file: PathBuf,
-    pub trivy_path: PathBuf,
-    pub trivy_cache_directory: PathBuf,
     pub docker_config_directory: PathBuf,
     pub work_directory: PathBuf,
     pub max_unpacked_context_bytes: u64,
@@ -64,20 +59,14 @@ pub struct ProductionBuildExecutorConfig {
     pub harbor_password_file: PathBuf,
     pub project_storage_quota_bytes: u64,
     pub robot_subject: String,
-    pub scanner_name: String,
-    pub scanner_version: String,
-    pub scanner_database_repository: String,
-    pub scanner_database_sha256: Sha256Digest,
 }
 
 impl ProductionBuildExecutorConfig {
     fn validate(&self) -> Result<(), BuildProviderFailure> {
         if !self.buildctl_path.is_absolute()
-            || !self.trivy_path.is_absolute()
             || !self.buildkit_ca_file.is_absolute()
             || !self.buildkit_client_certificate_file.is_absolute()
             || !self.buildkit_client_private_key_file.is_absolute()
-            || !self.trivy_cache_directory.is_absolute()
             || !self.docker_config_directory.is_absolute()
             || !self.work_directory.is_absolute()
             || self.max_unpacked_context_bytes == 0
@@ -93,10 +82,6 @@ impl ProductionBuildExecutorConfig {
             || self.harbor_registry.contains("//")
             || self.project_storage_quota_bytes == 0
             || self.robot_subject.trim().is_empty()
-            || self.scanner_name != "trivy"
-            || self.scanner_version.trim().is_empty()
-            || !valid_database_reference(&self.scanner_database_repository, &self.harbor_registry)
-            || self.scanner_database_sha256 == Sha256Digest::of_bytes(&[])
         {
             return Err(rejected());
         }
@@ -131,7 +116,6 @@ impl ProductionBuildExecutor {
         let harbor_username = read_secret(&config.harbor_username_file)?;
         let harbor_password = read_secret(&config.harbor_password_file)?;
         prepare_private_directory(&config.work_directory)?;
-        prepare_private_directory(&config.trivy_cache_directory)?;
         prepare_docker_config(
             &config.docker_config_directory,
             &config.harbor_registry,
@@ -170,10 +154,6 @@ impl ProductionBuildExecutor {
                 .build(context, command, *identity)
                 .await
                 .map(|candidate| BuildExecutorResponse::Built { candidate }),
-            BuildExecutorRequest::Scan { candidate } => self
-                .scan(candidate)
-                .await
-                .map(|evidence| BuildExecutorResponse::Scanned { evidence }),
             BuildExecutorRequest::Publish { candidate } => self
                 .publish(candidate)
                 .await
@@ -238,7 +218,6 @@ impl ProductionBuildExecutor {
                 &command.request.context_object_key,
                 &command.request.context.object_version,
                 command.request.context.size_bytes,
-                command.request.context.sha256,
                 &command.request.context.media_type,
             )
             .await
@@ -526,58 +505,6 @@ impl ProductionBuildExecutor {
         Endpoint::from_str(&address)
             .and_then(|endpoint| endpoint.tls_config(tls))
             .map_err(|_| rejected())
-    }
-
-    async fn scan(&self, candidate: &BuiltCandidate) -> Result<ScanEvidence, BuildProviderFailure> {
-        let report = tempfile::NamedTempFile::new_in(&self.config.work_directory)
-            .map_err(|_| unavailable())?;
-        let status = Command::new(&self.config.trivy_path)
-            .args([
-                "image",
-                "--format",
-                "json",
-                "--scanners",
-                "vuln,secret",
-                "--severity",
-                "UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL",
-                "--exit-code",
-                "0",
-                "--no-progress",
-                "--cache-dir",
-            ])
-            .arg(&self.config.trivy_cache_directory)
-            .args(["--db-repository", &self.config.scanner_database_repository])
-            .args([
-                "--skip-java-db-update",
-                "--skip-check-update",
-                "--skip-vex-repo-update",
-                "--skip-version-check",
-            ])
-            .arg("--output")
-            .arg(report.path())
-            .arg(format!("{}@{}", candidate.repository, candidate.digest))
-            .env("TRIVY_USERNAME", &self.harbor_username)
-            .env("TRIVY_PASSWORD", &self.harbor_password)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await
-            .map_err(network)?;
-        if !status.success() {
-            return Err(unavailable());
-        }
-        let report = tokio::fs::read(report.path())
-            .await
-            .map_err(|_| output_invalid())?;
-        let vulnerabilities = parse_trivy_report(&report)?;
-        Ok(ScanEvidence {
-            build_identity: candidate.build_identity,
-            digest: candidate.digest.clone(),
-            scanner_name: self.config.scanner_name.clone(),
-            scanner_version: self.config.scanner_version.clone(),
-            scanner_database_sha256: self.config.scanner_database_sha256,
-            vulnerabilities,
-        })
     }
 
     async fn publish(
@@ -980,47 +907,6 @@ fn validate_dockerfile(root: &Path, relative: &str) -> Result<(), BuildProviderF
     Ok(())
 }
 
-fn parse_trivy_report(bytes: &[u8]) -> Result<VulnerabilitySummary, BuildProviderFailure> {
-    let value: Value = serde_json::from_slice(bytes).map_err(|_| output_invalid())?;
-    let mut summary = VulnerabilitySummary {
-        unknown: 0,
-        low: 0,
-        medium: 0,
-        high: 0,
-        critical: 0,
-    };
-    for result in value
-        .get("Results")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        if result
-            .get("Secrets")
-            .and_then(Value::as_array)
-            .is_some_and(|secrets| !secrets.is_empty())
-        {
-            return Err(rejected());
-        }
-        for vulnerability in result
-            .get("Vulnerabilities")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            let counter = match vulnerability.get("Severity").and_then(Value::as_str) {
-                Some("CRITICAL") => &mut summary.critical,
-                Some("HIGH") => &mut summary.high,
-                Some("MEDIUM") => &mut summary.medium,
-                Some("LOW") => &mut summary.low,
-                _ => &mut summary.unknown,
-            };
-            *counter = counter.checked_add(1).ok_or_else(output_invalid)?;
-        }
-    }
-    Ok(summary)
-}
-
 /// Extract the pushed image digest from a `BuildKit` history record. The image
 /// exporter records the digest in `exporter_response`; older or alternative
 /// exporters place it in `result`/`results` descriptors.
@@ -1102,15 +988,6 @@ fn valid_digest(value: &str) -> bool {
         && value[7..]
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-}
-
-fn valid_database_reference(value: &str, registry: &str) -> bool {
-    let Some((repository, digest)) = value.rsplit_once('@') else {
-        return false;
-    };
-    repository.starts_with(&format!("{registry}/"))
-        && !repository.contains("..")
-        && valid_digest(digest)
 }
 
 fn portable_name(value: &str) -> bool {
@@ -1272,22 +1149,6 @@ mod tests {
     }
 
     #[test]
-    fn trivy_database_is_one_digest_bound_internal_repository() {
-        let digest = format!("sha256:{}", "a".repeat(64));
-        assert!(valid_database_reference(
-            &format!("harbor.internal/labweaver-system/trivy-db@{digest}"),
-            "harbor.internal",
-        ));
-        for invalid in [
-            "ghcr.io/aquasecurity/trivy-db:2",
-            "harbor.internal/labweaver-system/trivy-db:2",
-            "harbor.internal/../cache/trivy-db@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        ] {
-            assert!(!valid_database_reference(invalid, "harbor.internal"));
-        }
-    }
-
-    #[test]
     fn docker_config_is_written_for_the_exact_registry() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let target = directory.path().join("docker");
@@ -1401,28 +1262,6 @@ mod tests {
         assert!(
             unpack_context(&link_archive, "application/x-tar", directory.path(), 1024,).is_err()
         );
-    }
-
-    #[test]
-    fn trivy_report_is_bounded_to_counts_and_rejects_secrets() {
-        let report = serde_json::to_vec(&json!({
-            "Results": [{
-                "Vulnerabilities": [
-                    {"Severity": "HIGH"},
-                    {"Severity": "CRITICAL"},
-                    {"Severity": "unexpected"}
-                ]
-            }]
-        }))
-        .expect("serialize report");
-        let summary = parse_trivy_report(&report).expect("valid report");
-        assert_eq!(summary.high, 1);
-        assert_eq!(summary.critical, 1);
-        assert_eq!(summary.unknown, 1);
-
-        let secret = serde_json::to_vec(&json!({"Results": [{"Secrets": [{}]}]}))
-            .expect("serialize secret report");
-        assert!(parse_trivy_report(&secret).is_err());
     }
 
     #[test]

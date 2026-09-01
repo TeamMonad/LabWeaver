@@ -37,13 +37,6 @@
       "minimum": 1,
       "type": "integer"
     },
-    "Sha256Digest": {
-      "description": "Canonical lowercase SHA-256 digest.",
-      "maxLength": 64,
-      "minLength": 64,
-      "pattern": "^[0-9a-f]{64}$",
-      "type": "string"
-    },
     "UtcTimestamp": {
       "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
       "type": "string"
@@ -107,9 +100,6 @@
     "id": {
       "$ref": "#/$defs/ResourceApprovalId"
     },
-    "policySha256": {
-      "$ref": "#/$defs/Sha256Digest"
-    },
     "providerBinding": {
       "type": "string"
     },
@@ -132,7 +122,6 @@
     "requestRevision",
     "approverId",
     "providerBinding",
-    "policySha256",
     "approvedResources",
     "approvedDurationSeconds",
     "reason",

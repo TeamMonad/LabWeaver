@@ -28,13 +28,6 @@
       "minimum": 1,
       "type": "integer"
     },
-    "Sha256Digest": {
-      "description": "Canonical lowercase SHA-256 digest.",
-      "maxLength": 64,
-      "minLength": 64,
-      "pattern": "^[0-9a-f]{64}$",
-      "type": "string"
-    },
     "SshPublicKeyId": {
       "description": "Strongly typed UUIDv7 identifier for `SshPublicKeyId`.",
       "type": "string"
@@ -105,10 +98,6 @@
       "description": "Environment-owned in-cluster SSH Service DNS name. This is returned only\nto the mTLS-authenticated Gateway and never to the browser grant model.",
       "type": "string"
     },
-    "targetSshHostKeyIdentitySha256": {
-      "$ref": "#/$defs/Sha256Digest",
-      "description": "Environment-authoritative digest of the exact OpenSSH host-key\nfingerprint expected from the selected target."
-    },
     "terminateBy": {
       "anyOf": [
         {
@@ -138,7 +127,6 @@
     "sshPublicKeyId",
     "targetAlias",
     "targetHost",
-    "targetSshHostKeyIdentitySha256",
     "gatewayIdentity",
     "connectionId",
     "revision",

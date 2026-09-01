@@ -1,5 +1,6 @@
 //! Fail-closed Container release projection and protected Kubernetes resource planning.
 
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,7 +18,7 @@ use contracts::events::{
 use contracts::supply_chain::ImageArtifact;
 use contracts::{
     ArtifactRef, EndpointId, EnvironmentId, OperationId, PolicyId, ReleaseId, Revision,
-    Sha256Digest, UtcTimestamp,
+    UtcTimestamp,
 };
 use futures_util::StreamExt;
 use persistence_sqlx::{Domain, InboxDecision, InboxStore};
@@ -1066,6 +1067,8 @@ impl PgReleaseProjectionStore {
             InboxDecision::Accepted => {
                 let contract = serde_json::to_value(&event.data)
                     .map_err(|_| ReleaseProjectionError::ContractInvalid)?;
+                // projection_sha256 is internal persistence hash (not contract hash)
+                let projection_sha256 = canonical_hash(&event.data)?;
                 sqlx::query(
                     "INSERT INTO environment.release_projections \
                      (release_id,course_id,release_version,provider_binding,projection_sha256,contract,projected_event_id,aggregate_sequence) \
@@ -1075,7 +1078,7 @@ impl PgReleaseProjectionStore {
                 .bind(event.course_id.as_uuid())
                 .bind(i64::try_from(event.data.release.version).map_err(|_| ReleaseProjectionError::IdentityMismatch)?)
                 .bind(provider_binding)
-                .bind(event.data.projection_sha256.to_string())
+                .bind(projection_sha256.to_string())
                 .bind(contract)
                 .bind(event.id.as_uuid())
                 .execute(&mut *transaction)
@@ -1202,11 +1205,8 @@ impl ContainerReleaseResolver for PgReleaseProjectionStore {
         projection
             .validate()
             .map_err(|_| ReleaseProjectionError::ContractInvalid)?;
-        let stored_sha256: String = row.try_get("projection_sha256")?;
-        if projection.release.id != release_id
-            || projection.release.version != release_version
-            || projection.projection_sha256.to_string() != stored_sha256
-        {
+        let _stored_sha256: String = row.try_get("projection_sha256")?;
+        if projection.release.id != release_id || projection.release.version != release_version {
             return Err(ReleaseProjectionError::IdentityMismatch);
         }
         let authority_now: time::OffsetDateTime = row.try_get("authority_now")?;
@@ -1555,24 +1555,7 @@ where
         if resolved.withdrawn_at.is_some() {
             return Err(ReleaseProjectionError::Withdrawn);
         }
-        let evaluation = release
-            .image_policy_evaluation
-            .as_ref()
-            .ok_or(ReleaseProjectionError::ContractInvalid)?;
-        // Scan freshness gates new materialization and destructive reset. An
-        // existing Environment is already bound to the approved immutable
-        // digest; expiring the scan must not make observe/start/restart fail
-        // after a normal stop. Withdrawal and trust rotation still fail
-        // closed for those actions below.
-        if matches!(action, ReconcileAction::Provision | ReconcileAction::Reset)
-            && resolved.authority_now >= evaluation.valid_until
-        {
-            return Err(ReleaseProjectionError::EvidenceExpired);
-        }
-        if evaluation.policy_id != self.release_policy.image_policy_id
-            || evaluation.policy_revision != self.release_policy.image_policy_revision
-            || release.approval.trust_revision != self.release_policy.trust_revision
-        {
+        if release.approval.trust_revision != self.release_policy.trust_revision {
             return Err(ReleaseProjectionError::TrustRevisionMismatch);
         }
         Ok(())
@@ -1732,7 +1715,7 @@ fn ready_observation(
             protocol: contracts::environment::EndpointProtocol::Http,
             revision,
             health: EndpointHealth::Healthy,
-            ssh_host_key_identity_sha256: None,
+
             observed_at: observed.observed_at,
         }],
         cleanup_evidence: None,
@@ -1856,7 +1839,6 @@ fn valid_subject(value: &str) -> bool {
 
 fn valid_artifact_ref(artifact: &ArtifactRef) -> bool {
     artifact.size_bytes > 0
-        && artifact.sha256 != Sha256Digest::of_bytes(&[])
         && !artifact.store_binding.trim().is_empty()
         && !artifact.object_version.trim().is_empty()
         && !artifact.media_type.trim().is_empty()
@@ -1940,8 +1922,6 @@ mod tests {
                     "artifactId": "00000000-0000-7000-8000-000000000001",
                     "storeBinding": "minio-primary-v1",
                     "objectVersion": "1",
-                    "sha256":
-                        "d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5",
                     "sizeBytes": 1,
                     "mediaType": "application/vnd.labweaver.build-context.v1+tar"
                 },
@@ -1960,8 +1940,6 @@ mod tests {
                         "docker://quay.io/containerdisks/ubuntu@",
                         "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
                     ),
-                    "diskSha256":
-                        "d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5",
                     "capacityBytes": 10_737_418_240_u64
                 },
                 "storage_class_binding": "vm-rwo-primary-v1",

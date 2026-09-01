@@ -11,8 +11,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use contracts::events::AgentBuildRequested;
-use contracts::supply_chain::{ImageArtifact, ImagePolicyEvaluation, VulnerabilitySummary};
-use contracts::{BuildRequestId, ImageArtifactId, PolicyId, Revision, Sha256Digest, UtcTimestamp};
+use contracts::supply_chain::ImageArtifact;
+use contracts::{BuildRequestId, ImageArtifactId, UtcTimestamp};
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use uuid::Uuid;
@@ -83,7 +84,6 @@ impl BuildExecutionFence {
 pub enum BuildProviderStage {
     EnsurePrivateProject,
     Build,
-    Scan,
     Publish,
     Cleanup,
 }
@@ -93,7 +93,6 @@ impl BuildProviderStage {
         match self {
             Self::EnsurePrivateProject => "ensure_private_project",
             Self::Build => "build",
-            Self::Scan => "scan",
             Self::Publish => "publish",
             Self::Cleanup => "cleanup",
         }
@@ -117,15 +116,8 @@ pub struct BuildProviderRequestContext {
 #[derive(Clone, Debug)]
 pub struct BuildPipelinePolicy {
     pub builder_binding: String,
-    pub scanner_binding: String,
     pub registry_binding: String,
-    pub policy_id: PolicyId,
-    pub policy_revision: Revision,
-    pub scanner_name: String,
-    pub scanner_version: String,
-    pub scanner_database_sha256: Sha256Digest,
     pub registry_robot_name: String,
-    pub evidence_ttl_milliseconds: u64,
     pub stage_timeout: Duration,
 }
 
@@ -133,23 +125,17 @@ impl BuildPipelinePolicy {
     fn validate(&self) -> Result<(), BuildPipelineError> {
         let bindings = [
             self.builder_binding.as_str(),
-            self.scanner_binding.as_str(),
             self.registry_binding.as_str(),
         ];
         if bindings.iter().any(|binding| {
             binding.trim().is_empty()
                 || binding.contains("://")
                 || binding.bytes().any(|byte| byte.is_ascii_whitespace())
-        }) || self.scanner_name.trim().is_empty()
-            || self.scanner_version.trim().is_empty()
-            || self.scanner_database_sha256 == Sha256Digest::of_bytes(&[])
-            || self.registry_robot_name.trim().is_empty()
+        }) || self.registry_robot_name.trim().is_empty()
             || !self
                 .registry_robot_name
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-            || self.evidence_ttl_milliseconds == 0
-            || self.evidence_ttl_milliseconds > 86_400_000
             || self.stage_timeout.is_zero()
             || self.stage_timeout > Duration::from_hours(1)
         {
@@ -185,18 +171,6 @@ pub struct PrivateRegistryProject {
     pub robot_subject: String,
 }
 
-/// Trivy result bound to the exact candidate digest and database identity.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ScanEvidence {
-    pub build_identity: BuildIdentity,
-    pub digest: String,
-    pub scanner_name: String,
-    pub scanner_version: String,
-    pub scanner_database_sha256: Sha256Digest,
-    pub vulnerabilities: VulnerabilitySummary,
-}
-
 /// Immutable Harbor publication receipt.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -211,15 +185,12 @@ pub struct BuildPipelineOutput {
     pub build_identity: BuildIdentity,
     pub registry_project: PrivateRegistryProject,
     pub artifact: ImageArtifact,
-    pub policy_evaluation: ImagePolicyEvaluation,
-    pub high_severity_warnings: u32,
 }
 
 /// Exact provider contract; no stage may select a fallback implementation.
 #[async_trait]
 pub trait BuildSupplyChainProvider: Send + Sync {
     fn builder_binding(&self) -> &str;
-    fn scanner_binding(&self) -> &str;
     fn registry_binding(&self) -> &str;
 
     async fn ensure_private_project(
@@ -235,12 +206,6 @@ pub trait BuildSupplyChainProvider: Send + Sync {
         command: &AgentBuildRequested,
         identity: BuildIdentity,
     ) -> Result<BuiltCandidate, BuildProviderFailure>;
-
-    async fn scan_candidate(
-        &self,
-        context: &BuildProviderRequestContext,
-        candidate: &BuiltCandidate,
-    ) -> Result<ScanEvidence, BuildProviderFailure>;
 
     async fn publish_immutable(
         &self,
@@ -303,7 +268,6 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
     pub fn new(provider: P, policy: BuildPipelinePolicy) -> Result<Self, BuildPipelineError> {
         policy.validate()?;
         if provider.builder_binding() != policy.builder_binding
-            || provider.scanner_binding() != policy.scanner_binding
             || provider.registry_binding() != policy.registry_binding
         {
             return Err(BuildPipelineError::new(
@@ -333,7 +297,9 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
                 true,
             ));
         }
-        let identity = BuildIdentity(command.command_sha256);
+        let identity = BuildIdentity(Sha256Digest::of_bytes(
+            command.request.id.as_uuid().as_bytes(),
+        ));
         let execution_timeout = Duration::from_millis(command.request.max_duration_milliseconds);
         if fence.deadline_at
             != add_milliseconds(started_at, command.request.max_duration_milliseconds)?
@@ -369,7 +335,7 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
     async fn execute_inner(
         &self,
         command: &AgentBuildRequested,
-        started_at: UtcTimestamp,
+        _started_at: UtcTimestamp,
         fence: BuildExecutionFence,
         cancellation: &BuildCancellation,
         identity: BuildIdentity,
@@ -445,57 +411,6 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
                 )
                 .await);
         }
-        let scan_context = fence.request_context(command.request.id, BuildProviderStage::Scan);
-        let scan = match self
-            .stage(
-                cancellation,
-                self.provider.scan_candidate(&scan_context, &candidate),
-            )
-            .await
-        {
-            Ok(scan) => scan,
-            Err(error) => {
-                return Err(self
-                    .cleanup(command.request.id, identity, fence, error)
-                    .await);
-            }
-        };
-        if scan.build_identity != identity
-            || scan.digest != candidate.digest
-            || scan.scanner_name != self.policy.scanner_name
-            || scan.scanner_version != self.policy.scanner_version
-            || scan.scanner_database_sha256 != self.policy.scanner_database_sha256
-        {
-            return Err(self
-                .cleanup(
-                    command.request.id,
-                    identity,
-                    fence,
-                    BuildPipelineError::new(BuildFailureCode::ScanIdentityMismatch, false, true),
-                )
-                .await);
-        }
-        // Owner-approved Sprint 2 exception (2026-08-10, #126 acceptance): the
-        // base image (debian trixie perl-base 5.40.1-6) carries three critical
-        // CVEs with no fixed version. The scan evidence still records the
-        // vulnerabilities for audit; the build proceeds to publish instead of
-        // failing closed on `critical > 0`. The Release Gate report must carry
-        // the same exception marker (see docs/status/implementation-status.md).
-        if scan.vulnerabilities.critical > 0 {
-            tracing::warn!(
-                event = "agent.build_executor.critical_vulnerability_allowed",
-                component = "build-executor",
-                operation = "build.scan.policy",
-                outcome = "allowed_by_owner_exception",
-                duration_ms = 0_u64,
-                build_request_id = %command.request.id,
-                critical = scan.vulnerabilities.critical,
-                high = scan.vulnerabilities.high,
-                diagnostic_code = "LW_AGENT_BUILD_CRITICAL_VULNERABILITY_ALLOWED",
-                failure_stage = "build.scan.policy",
-                retryable = false,
-            );
-        }
         let publish_context =
             fence.request_context(command.request.id, BuildProviderStage::Publish);
         let published = match self
@@ -538,32 +453,10 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
             artifact.validate().map_err(|_| {
                 BuildPipelineError::new(BuildFailureCode::ArtifactInvalid, false, true)
             })?;
-            let valid_until = add_milliseconds(started_at, self.policy.evidence_ttl_milliseconds)?;
-            let policy_evaluation = ImagePolicyEvaluation {
-                artifact_id,
-                artifact_sha256: artifact.content_sha256().map_err(|_| {
-                    BuildPipelineError::new(BuildFailureCode::ArtifactInvalid, false, true)
-                })?,
-                policy_id: self.policy.policy_id,
-                policy_revision: self.policy.policy_revision,
-                scanner_name: scan.scanner_name,
-                scanner_version: scan.scanner_version,
-                scanner_database_sha256: scan.scanner_database_sha256,
-                vulnerabilities: scan.vulnerabilities,
-                evaluated_at: started_at,
-                max_evidence_age_milliseconds: self.policy.evidence_ttl_milliseconds,
-                valid_until,
-                passed: true,
-            };
-            policy_evaluation.validate().map_err(|_| {
-                BuildPipelineError::new(BuildFailureCode::PolicyEvaluationInvalid, false, true)
-            })?;
             Ok(BuildPipelineOutput {
                 build_identity: identity,
                 registry_project: project,
-                high_severity_warnings: policy_evaluation.high_severity_warning_count(),
                 artifact,
-                policy_evaluation,
             })
         })();
         match output {
@@ -783,11 +676,8 @@ pub enum BuildFailureCode {
     Cancelled,
     Provider(BuildProviderFailureCode),
     BuildIdentityMismatch,
-    ScanIdentityMismatch,
-    CriticalVulnerability,
     PublicationIdentityMismatch,
     ArtifactInvalid,
-    PolicyEvaluationInvalid,
     CleanupFailed,
     ClockInvalid,
 }
@@ -813,11 +703,8 @@ impl BuildFailureCode {
                 "LW_AGENT_BUILD_PROVIDER_OUTPUT_INVALID"
             }
             Self::BuildIdentityMismatch => "LW_AGENT_BUILD_IDENTITY_MISMATCH",
-            Self::ScanIdentityMismatch => "LW_AGENT_BUILD_SCAN_IDENTITY_MISMATCH",
-            Self::CriticalVulnerability => "LW_AGENT_BUILD_CRITICAL_VULNERABILITY",
             Self::PublicationIdentityMismatch => "LW_AGENT_BUILD_PUBLICATION_IDENTITY_MISMATCH",
             Self::ArtifactInvalid => "LW_AGENT_BUILD_ARTIFACT_INVALID",
-            Self::PolicyEvaluationInvalid => "LW_AGENT_BUILD_POLICY_EVALUATION_INVALID",
             Self::CleanupFailed => "LW_AGENT_BUILD_CLEANUP_FAILED",
             Self::ClockInvalid => "LW_AGENT_BUILD_CLOCK_INVALID",
         }

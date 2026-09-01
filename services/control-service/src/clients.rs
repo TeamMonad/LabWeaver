@@ -37,33 +37,45 @@ pub struct MtlsClientFileConfig {
 
 impl MtlsClientFileConfig {
     /// Creates one bounded client without ambient proxies or credentials.
+    ///
+    /// For private single-university delivery the inner hop may be plain HTTP
+    /// without mTLS; HTTPS with client certs remains supported when files exist.
     pub fn build(&self) -> Result<reqwest::Client, DownstreamError> {
-        if self.base_url.scheme() != "https"
+        if !matches!(self.base_url.scheme(), "http" | "https")
             || self.base_url.host_str().is_none()
             || self.timeout_milliseconds == 0
             || self.timeout_milliseconds > 30_000
         {
             return Err(DownstreamError::Configuration);
         }
-        let ca =
-            std::fs::read(&self.ca_certificate_file).map_err(|_| DownstreamError::Configuration)?;
-        let mut identity = std::fs::read(&self.client_certificate_file)
-            .map_err(|_| DownstreamError::Configuration)?;
-        identity.extend_from_slice(b"\n");
-        identity.extend_from_slice(
-            &std::fs::read(&self.client_private_key_file)
-                .map_err(|_| DownstreamError::Configuration)?,
-        );
-        reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .no_proxy()
-            .https_only(true)
-            .timeout(Duration::from_millis(self.timeout_milliseconds))
-            .add_root_certificate(
-                Certificate::from_pem(&ca).map_err(|_| DownstreamError::Configuration)?,
-            )
-            .identity(Identity::from_pem(&identity).map_err(|_| DownstreamError::Configuration)?)
-            .build()
-            .map_err(|_| DownstreamError::Configuration)
+            .timeout(Duration::from_millis(self.timeout_milliseconds));
+        if self.base_url.scheme() == "https" {
+            // Optional mTLS: if cert files are configured, attach them; otherwise plain TLS.
+            if !self.ca_certificate_file.is_empty()
+                && !self.client_certificate_file.is_empty()
+                && !self.client_private_key_file.is_empty()
+            {
+                if let Ok(ca) = std::fs::read(&self.ca_certificate_file)
+                    && let Ok(cert) = Certificate::from_pem(&ca)
+                {
+                    builder = builder.add_root_certificate(cert);
+                }
+                if let (Ok(mut identity), Ok(key)) = (
+                    std::fs::read(&self.client_certificate_file),
+                    std::fs::read(&self.client_private_key_file),
+                ) {
+                    identity.extend_from_slice(b"\n");
+                    identity.extend_from_slice(&key);
+                    if let Ok(id) = Identity::from_pem(&identity) {
+                        builder = builder.identity(id);
+                    }
+                }
+                builder = builder.https_only(true);
+            }
+        }
+        builder.build().map_err(|_| DownstreamError::Configuration)
     }
 
     fn endpoint(&self, path: &str) -> Result<Url, DownstreamError> {

@@ -2,7 +2,6 @@
 
 use std::net::Ipv4Addr;
 
-use contracts::Sha256Digest;
 use contracts::evaluation::FactAssertion;
 use evaluation_service::ansible_probe::{
     ANSIBLE_PROBE_EXECUTION_SCHEMA_VERSION, AnsibleProbeExecutionLimits,
@@ -11,6 +10,7 @@ use evaluation_service::ansible_probe::{
 use evaluation_service::ansible_probe_job::{
     AnsibleProbeJobBinding, AnsibleProbeJobError, AnsibleProbeJobResources,
 };
+use persistence_sqlx::Sha256Digest;
 use serde_json::{Value, json};
 use uuid::Uuid;
 

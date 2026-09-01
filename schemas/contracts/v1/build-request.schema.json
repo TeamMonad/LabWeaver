@@ -24,10 +24,6 @@
           "description": "Immutable backend object version.",
           "type": "string"
         },
-        "sha256": {
-          "$ref": "#/$defs/Sha256Digest",
-          "description": "Exact content digest."
-        },
         "sizeBytes": {
           "description": "Raw object length.",
           "format": "uint64",
@@ -43,7 +39,6 @@
         "artifactId",
         "storeBinding",
         "objectVersion",
-        "sha256",
         "sizeBytes",
         "mediaType"
       ],
@@ -105,13 +100,6 @@
       "minimum": 1,
       "type": "integer"
     },
-    "Sha256Digest": {
-      "description": "Canonical lowercase SHA-256 digest.",
-      "maxLength": 64,
-      "minLength": 64,
-      "pattern": "^[0-9a-f]{64}$",
-      "type": "string"
-    },
     "UtcTimestamp": {
       "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
       "type": "string"
@@ -135,9 +123,6 @@
     },
     "candidateRevision": {
       "$ref": "#/$defs/Revision"
-    },
-    "candidateSha256": {
-      "$ref": "#/$defs/Sha256Digest"
     },
     "context": {
       "$ref": "#/$defs/ArtifactRef"
@@ -185,7 +170,6 @@
     "courseId",
     "candidateId",
     "candidateRevision",
-    "candidateSha256",
     "approvalId",
     "builderBinding",
     "context",

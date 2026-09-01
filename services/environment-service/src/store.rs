@@ -1,3 +1,4 @@
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -10,9 +11,7 @@ use contracts::events::{
     CloudEvent, EVENT_CONTRACTS, EnvironmentEvent, EventContract, SPEC_VERSION, subjects,
 };
 use contracts::http::{EnvironmentOperationAccepted, IdempotencyKey};
-use contracts::{
-    CourseId, EnvironmentId, EventId, OperationId, Revision, Sequence, Sha256Digest, UtcTimestamp,
-};
+use contracts::{CourseId, EnvironmentId, EventId, OperationId, Revision, Sequence, UtcTimestamp};
 use persistence_sqlx::{
     Domain, IdempotencyDecision, IdempotencyStore, InboxDecision, InboxStore, OutboxStore,
     PersistenceError,

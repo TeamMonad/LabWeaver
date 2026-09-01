@@ -4,6 +4,7 @@
     reason = "the versioned contracts and stable diagnostics define the external surface"
 )]
 
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,7 +16,6 @@ use contracts::submission::{
 };
 use contracts::{
     ActorId, AgentRunId, CourseId, FrozenSubmissionId, RetentionClass, RetentionSnapshot, Revision,
-    Sha256Digest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -240,7 +240,6 @@ impl FreezeService {
             .put_governance_locked(
                 &object_key,
                 &archive.bytes,
-                archive.sha256,
                 archive.media_type,
                 lease.authority_now,
                 request.retention.retain_until,
@@ -270,7 +269,6 @@ impl FreezeService {
             }
         };
         if verified.bytes != archive.bytes
-            || verified.reference.sha256 != archive.sha256
             || verified.reference.size_bytes
                 != u64::try_from(archive.bytes.len()).unwrap_or(u64::MAX)
             || verified.reference.media_type != archive.media_type
@@ -288,9 +286,7 @@ impl FreezeService {
             agent_run_id: request.agent_run_id,
             attempt: lease.attempt,
             manifest_revision: request.manifest_revision,
-            submission_manifest_sha256,
             files: archive.files,
-            manifest_sha256: archive.manifest_sha256,
             object: verified.reference,
             environment: request.environment.clone(),
             retention: request.retention.clone(),

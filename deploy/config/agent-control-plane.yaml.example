@@ -38,18 +38,13 @@ worker_environment_files:
   ANTHROPIC_MODEL: "/etc/labweaver/config/anthropic-model"
 build:
   # Served by the deployment-owned executor binding immutable ArtifactRef inputs
-  # to restricted BuildKit and private Harbor/Trivy.
+  # to restricted BuildKit and private Harbor (Trivy thinned for private deployment).
   provider_subject: "labweaver.provider.container_build.execute.v1"
   builder_binding: "buildkit-primary-v1"
-  scanner_binding: "trivy-primary-v1"
   registry_binding: "harbor-primary-v1"
   policy_id: "00000000-0000-7000-8000-000000000002"
   policy_revision: 1
-  scanner_name: "trivy"
-  scanner_version: "0.72.0"
-  scanner_database_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   registry_robot_name: "runtime-puller"
-  evidence_ttl_milliseconds: 3600000
   stage_timeout_milliseconds: 120000
   worker_lease_seconds: 180
   retry_delay_milliseconds: 2000

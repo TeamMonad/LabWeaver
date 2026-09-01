@@ -11,8 +11,8 @@ use axum::{
 };
 use contracts::{
     AccessGrantId, ActorId, ConsoleSessionId, CourseId, EndpointGrantId, EndpointId, EnvironmentId,
-    EventId, GatewaySessionId, PlatformRole, Revision, Sequence, Sha256Digest, SshPublicKeyId,
-    StreamSequence, UtcTimestamp,
+    EventId, GatewaySessionId, PlatformRole, Revision, Sequence, SshPublicKeyId, StreamSequence,
+    UtcTimestamp,
     access::{
         AccessGrant, AccessGrantSnapshot, AccessGrantState, AuthorizationDecision,
         AuthorizationDecisionSummary, CloseGatewaySessionRequest, CreateGatewaySessionRequest,
@@ -34,6 +34,7 @@ use contracts::{
     },
 };
 use futures_util::StreamExt;
+use persistence_sqlx::Sha256Digest;
 use rand::RngCore;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -931,9 +932,6 @@ pub async fn create_gateway_session(
     {
         return Err(ApiError::forbidden("LW_ACCESS_SSH_DENIED"));
     }
-    let target_ssh_host_key_identity_sha256 = resolved
-        .ssh_host_key_identity_sha256
-        .ok_or_else(|| ApiError::forbidden("LW_ACCESS_SSH_DENIED"))?;
     let expires_at = [
         auth.get::<OffsetDateTime, _>("expires_at"),
         candidate.get::<OffsetDateTime, _>("expires_at"),
@@ -954,11 +952,10 @@ pub async fn create_gateway_session(
       .bind(auth.get::<Uuid,_>("actor_id")).bind(candidate.get::<Uuid,_>("endpoint_id"))
       .bind(candidate.get::<Uuid,_>("endpoint_grant_id")).bind(auth.get::<Uuid,_>("key_id"))
       .bind(now).bind(expires_at).bind(json!({
-          "authorizationId": authorization_id,
-          "alias": request.alias,
-          "targetHost": format!("ssh.lw-env-{}.svc", candidate.get::<Uuid,_>("environment_id")),
-          "sshHostKeyIdentitySha256": target_ssh_host_key_identity_sha256,
-      }))
+           "authorizationId": authorization_id,
+           "alias": request.alias,
+           "targetHost": format!("ssh.lw-env-{}.svc", candidate.get::<Uuid,_>("environment_id")),
+       }))
       .bind(&principal.san_uri).bind(&request.connection_id)
       .execute(&mut *tx).await.map_err(|_| ApiError::conflict("LW_ACCESS_SESSION_CONFLICT"))?;
     sqlx::query("UPDATE access.ssh_authorizations SET consumed_at=$2,session_id=$3 WHERE authorization_id=$1 AND consumed_at IS NULL")
@@ -1911,12 +1908,6 @@ async fn load_session_tx(
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?
         .to_owned();
-    let target_ssh_host_key_identity_sha256 = contract
-        .get("sshHostKeyIdentitySha256")
-        .and_then(Value::as_str)
-        .ok_or_else(|| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?
-        .parse::<Sha256Digest>()
-        .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?;
     let session = GatewaySession {
         id,
         access_grant_id: typed_id(row.get("grant_id"))?,
@@ -1925,7 +1916,6 @@ async fn load_session_tx(
         ssh_public_key_id: typed_id(row.get("key_id"))?,
         target_alias,
         target_host,
-        target_ssh_host_key_identity_sha256,
         gateway_identity: row.get("gateway_identity"),
         connection_id: row.get("connection_id"),
         revision: revision(row.get("revision"))?,

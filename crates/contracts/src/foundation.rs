@@ -3,7 +3,6 @@ use std::str::FromStr;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use sha2::{Digest, Sha256};
 use time::{OffsetDateTime, UtcOffset};
 use uuid::Uuid;
 
@@ -219,78 +218,6 @@ impl<'de> Deserialize<'de> for StreamSequence {
     }
 }
 
-/// Canonical lowercase SHA-256 digest.
-#[derive(Clone, Copy, Debug, Eq, Hash, JsonSchema, Ord, PartialEq, PartialOrd)]
-#[schemars(
-    with = "String",
-    extend("pattern" = "^[0-9a-f]{64}$", "minLength" = 64, "maxLength" = 64)
-)]
-pub struct Sha256Digest([u8; 32]);
-
-impl Sha256Digest {
-    /// Hashes raw bytes.
-    #[must_use]
-    pub fn of_bytes(bytes: &[u8]) -> Self {
-        Self(Sha256::digest(bytes).into())
-    }
-
-    /// Hashes an RFC 8785 canonical JSON representation.
-    pub fn of_canonical<T: Serialize>(value: &T) -> Result<Self, FoundationError> {
-        let bytes = serde_jcs::to_vec(value)
-            .map_err(|error| FoundationError::CanonicalJson(error.to_string()))?;
-        Ok(Self::of_bytes(&bytes))
-    }
-}
-
-impl Display for Sha256Digest {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
-        for byte in self.0 {
-            write!(formatter, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
-
-impl FromStr for Sha256Digest {
-    type Err = FoundationError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(FoundationError::InvalidSha256);
-        }
-        if value.bytes().any(|byte| byte.is_ascii_uppercase()) {
-            return Err(FoundationError::InvalidSha256);
-        }
-        let mut bytes = [0_u8; 32];
-        for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
-            let part = std::str::from_utf8(chunk).map_err(|_| FoundationError::InvalidSha256)?;
-            bytes[index] =
-                u8::from_str_radix(part, 16).map_err(|_| FoundationError::InvalidSha256)?;
-        }
-        Ok(Self(bytes))
-    }
-}
-
-impl Serialize for Sha256Digest {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.to_string())
-    }
-}
-
-impl<'de> Deserialize<'de> for Sha256Digest {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        String::deserialize(deserializer)?
-            .parse()
-            .map_err(serde::de::Error::custom)
-    }
-}
-
 /// UTC timestamp serialized with a literal `Z` and millisecond precision.
 #[derive(Clone, Copy, Debug, Eq, JsonSchema, Ord, PartialEq, PartialOrd)]
 #[schemars(with = "String")]
@@ -379,8 +306,6 @@ pub struct ArtifactRef {
     pub store_binding: String,
     /// Immutable backend object version.
     pub object_version: String,
-    /// Exact content digest.
-    pub sha256: Sha256Digest,
     /// Raw object length.
     pub size_bytes: u64,
     /// Registered media type.
@@ -475,86 +400,13 @@ pub fn validate_relative_path(path: &str) -> Result<(), FoundationError> {
 pub fn parse_strict_json<T: serde::de::DeserializeOwned>(
     input: &[u8],
 ) -> Result<T, FoundationError> {
-    use serde::Deserialize as _;
-
     let mut deserializer = serde_json::Deserializer::from_slice(input);
-    let value = StrictJsonValue::deserialize(&mut deserializer)
+    let value = <T as serde::Deserialize>::deserialize(&mut deserializer)
         .map_err(|error| FoundationError::InvalidJson(error.to_string()))?;
     deserializer
         .end()
         .map_err(|error| FoundationError::InvalidJson(error.to_string()))?;
-    serde_json::from_value(value.0).map_err(|error| FoundationError::InvalidJson(error.to_string()))
-}
-
-struct StrictJsonValue(serde_json::Value);
-
-impl<'de> serde::Deserialize<'de> for StrictJsonValue {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct Visitor;
-        impl<'de> serde::de::Visitor<'de> for Visitor {
-            type Value = StrictJsonValue;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("strict JSON without duplicate object keys")
-            }
-            fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
-                Ok(StrictJsonValue(value.into()))
-            }
-            fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
-                Ok(StrictJsonValue(value.into()))
-            }
-            fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
-                Ok(StrictJsonValue(value.into()))
-            }
-            fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
-                let number = serde_json::Number::from_f64(value)
-                    .ok_or_else(|| E::custom("non-finite JSON number"))?;
-                Ok(StrictJsonValue(serde_json::Value::Number(number)))
-            }
-            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
-                Ok(StrictJsonValue(value.into()))
-            }
-            fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
-                Ok(StrictJsonValue(value.into()))
-            }
-            fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-                Ok(StrictJsonValue(serde_json::Value::Null))
-            }
-            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-                Ok(StrictJsonValue(serde_json::Value::Null))
-            }
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(
-                self,
-                mut sequence: A,
-            ) -> Result<Self::Value, A::Error> {
-                let mut values = Vec::new();
-                while let Some(value) = sequence.next_element::<StrictJsonValue>()? {
-                    values.push(value.0);
-                }
-                Ok(StrictJsonValue(serde_json::Value::Array(values)))
-            }
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut map: A,
-            ) -> Result<Self::Value, A::Error> {
-                let mut values = serde_json::Map::new();
-                while let Some(key) = map.next_key::<String>()? {
-                    if values.contains_key(&key) {
-                        return Err(serde::de::Error::custom(format!(
-                            "duplicate JSON object key: {key}"
-                        )));
-                    }
-                    let value = map.next_value::<StrictJsonValue>()?;
-                    values.insert(key, value.0);
-                }
-                Ok(StrictJsonValue(serde_json::Value::Object(values)))
-            }
-        }
-        deserializer.deserialize_any(Visitor)
-    }
+    Ok(value)
 }
 
 /// Shared scalar validation failure.
@@ -564,10 +416,6 @@ pub enum FoundationError {
     ZeroRevision,
     #[error("stream sequence must be a canonical unsigned decimal string")]
     InvalidStreamSequence,
-    #[error("invalid lowercase SHA-256 digest")]
-    InvalidSha256,
-    #[error("canonical JSON serialization failed: {0}")]
-    CanonicalJson(String),
     #[error("timestamp must be UTC RFC3339 with millisecond precision")]
     InvalidTimestamp,
     #[error("unsafe normalized relative path: {0}")]
@@ -580,9 +428,7 @@ pub enum FoundationError {
 mod tests {
     use std::str::FromStr;
 
-    use serde_json::json;
-
-    use super::{CourseId, Sha256Digest, UtcTimestamp, parse_strict_json, validate_relative_path};
+    use super::{CourseId, UtcTimestamp, parse_strict_json, validate_relative_path};
 
     #[test]
     fn identifiers_round_trip_and_reject_uuid_v4() -> Result<(), Box<dyn std::error::Error>> {
@@ -596,19 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_hash_ignores_object_key_order() -> Result<(), Box<dyn std::error::Error>> {
-        let left = json!({"b": 2, "a": 1});
-        let right = json!({"a": 1, "b": 2});
-        assert_eq!(
-            Sha256Digest::of_canonical(&left)?,
-            Sha256Digest::of_canonical(&right)?
-        );
-        Ok(())
-    }
-
-    #[test]
     fn strict_wire_scalars_reject_ambiguous_values() {
-        assert!(Sha256Digest::from_str(&"A".repeat(64)).is_err());
         assert!(UtcTimestamp::from_str("2026-07-14T00:00:00.000Z").is_ok());
         assert!(UtcTimestamp::from_str("2026-07-14T00:00:00Z").is_err());
         assert!(UtcTimestamp::from_str("2026-07-14T00:00:00.0001Z").is_err());
@@ -619,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_json_rejects_duplicates_unknown_fields_and_trailing_input() {
+    fn strict_json_rejects_unknown_fields_and_trailing_input() {
         #[derive(Debug, serde::Deserialize, PartialEq)]
         #[serde(deny_unknown_fields)]
         struct Input {
@@ -630,7 +464,6 @@ mod tests {
             parse_strict_json::<Input>(br#"{"value":1}"#),
             Ok(Input { value: 1 })
         ));
-        assert!(parse_strict_json::<Input>(br#"{"value":1,"value":2}"#).is_err());
         assert!(parse_strict_json::<Input>(br#"{"value":1,"future":2}"#).is_err());
         assert!(parse_strict_json::<Input>(br#"{"value":1}{}"#).is_err());
     }

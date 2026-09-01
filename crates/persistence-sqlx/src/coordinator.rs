@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use contracts::Sha256Digest;
 use serde::{Deserialize, Serialize};
+
+use crate::Sha256Digest;
 use sha2::{Digest, Sha256};
 use sqlx::{Acquire, PgConnection, PgPool, Row};
 
@@ -440,10 +441,20 @@ impl MigrationCoordinator {
             );
             let migration_id = i64::try_from(migration.id)
                 .map_err(|_| PersistenceError::Catalog("Migration ID exceeds BIGINT".to_owned()))?;
+            let observed_sha256 = migration.sha256.as_ref().map_or_else(
+                || {
+                    let path =
+                        MigrationCatalog::migration_path(root, &migration.file).and_then(|p| {
+                            std::fs::read(p).map_err(|e| PersistenceError::Catalog(e.to_string()))
+                        });
+                    path.map(|bytes| Sha256Digest::of_bytes(&bytes).to_string())
+                },
+                |h| Ok(h.to_string()),
+            )?;
             sqlx::query(&history)
                 .bind(migration_id)
                 .bind(&migration.file)
-                .bind(migration.sha256.to_string())
+                .bind(observed_sha256)
                 .bind(&self.identity.job_id)
                 .bind(&self.identity.release_id)
                 .bind(catalog_hash.to_string())
@@ -502,7 +513,7 @@ fn lock_keys(cluster_uuid: &str, purpose: &str) -> (i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::{MigrationIdentity, MigrationReport, MigrationReportEnvelope};
-    use contracts::{Sha256Digest, foundation::FoundationError};
+    use crate::{Sha256Digest, Sha256Error};
 
     #[test]
     fn report_hash_excludes_the_envelope() -> Result<(), Box<dyn std::error::Error>> {
@@ -524,7 +535,7 @@ mod tests {
         let envelope = MigrationReportEnvelope::new(report)?;
         assert_eq!(
             envelope.report_sha256,
-            Sha256Digest::of_canonical(&envelope.report).map_err(|error: FoundationError| error)?
+            Sha256Digest::of_canonical(&envelope.report).map_err(|error: Sha256Error| error)?
         );
         Ok(())
     }

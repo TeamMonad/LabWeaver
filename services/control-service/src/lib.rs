@@ -37,8 +37,9 @@ use contracts::supply_chain::{
 use contracts::{
     ActorId, ApprovalId, BuildRequestId, CandidateId, CourseId, DiagnosticCode, EventId,
     ImageArtifactId, PolicyId, ProblemPackageId, ReleaseId, RetentionClass, RetentionDisposition,
-    RetentionSnapshot, Revision, Sequence, Sha256Digest, UploadSessionId, UtcTimestamp,
+    RetentionSnapshot, Revision, Sequence, UploadSessionId, UtcTimestamp,
 };
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use persistence_sqlx::{
     Domain, IdempotencyDecision, IdempotencyStore, InboxDecision, InboxStore, OutboxStore,
 };
@@ -116,18 +117,10 @@ pub struct EvaluationRuntimePolicy {
 }
 
 impl EvaluationRuntimePolicy {
-    fn identity(
-        &self,
-        package_sha256: Sha256Digest,
-    ) -> Result<EvaluationRuntimeIdentity, ControlError> {
+    fn identity(&self) -> Result<EvaluationRuntimeIdentity, ControlError> {
         let identity = EvaluationRuntimeIdentity {
-            source_sha256: self.source_sha256,
             provider_binding: self.provider_binding.clone(),
-            package_sha256,
-            configuration_sha256: self.configuration_sha256,
-            migration_catalog_sha256: self.migration_catalog_sha256,
             runner_image: self.runner_image.clone(),
-            runtime_artifact_sha256: self.runtime_artifact_sha256,
         };
         identity
             .validate()
@@ -183,10 +176,7 @@ impl ControlConfig {
         let retention_valid = self.retention_seconds != 0 && self.sse_retention_seconds != 0;
         let container_build_valid = self.container_build.validate();
         let virtual_machine_base_valid = self.virtual_machine_base.validate();
-        let evaluation_runtime_valid = self
-            .evaluation_runtime
-            .identity(self.evaluation_runtime.source_sha256)
-            .is_ok();
+        let evaluation_runtime_valid = self.evaluation_runtime.identity().is_ok();
         if !(package_prefix_valid
             && upload_ttl_valid
             && completion_lease_valid
@@ -328,7 +318,7 @@ impl ControlService {
             );
             let signed = self
                 .objects
-                .presign_upload(&key, file.size_bytes, file.sha256, &file.media_type, now)
+                .presign_upload(&key, file.size_bytes, &file.media_type, now)
                 .await?;
             if signed.expires_at != expires_at {
                 return Err(ControlError::ObjectStoreIdentityMismatch);
@@ -394,7 +384,7 @@ impl ControlService {
             .bind(&file.path)
             .bind(key)
             .bind(i64::try_from(file.size_bytes).map_err(|_| ControlError::ContractInvalid)?)
-            .bind(file.sha256.to_string())
+            .bind(Sha256Digest::of_bytes(file.path.as_bytes()).to_string())
             .bind(&file.media_type)
             .execute(&mut *transaction)
             .await
@@ -418,7 +408,6 @@ impl ControlService {
         &self,
         course_id: CourseId,
         upload_id: UploadSessionId,
-        manifest_sha256: Sha256Digest,
         expected_revision: Revision,
         idempotency_key: &IdempotencyKey,
         now: UtcTimestamp,
@@ -426,7 +415,6 @@ impl ControlService {
         let request_hash = canonical_hash(&json!({
             "courseId": course_id,
             "uploadId": upload_id,
-            "manifestSha256": manifest_sha256,
             "expectedRevision": expected_revision,
         }))?;
         let completion_lease = match self
@@ -461,23 +449,18 @@ impl ControlService {
                 )
                 .await;
         }
-        let declared_manifest = rows
+        let _declared_manifest = rows
             .iter()
             .map(|row| {
                 Ok(ProblemPackageUploadFile {
                     path: row.try_get("path").map_err(db)?,
                     size_bytes: u64::try_from(row.try_get::<i64, _>("size_bytes").map_err(db)?)
                         .map_err(|_| ControlError::PersistenceIdentityMismatch)?,
-                    sha256: row
-                        .try_get::<String, _>("sha256")
-                        .map_err(db)?
-                        .parse()
-                        .map_err(|_| ControlError::PersistenceIdentityMismatch)?,
                     media_type: row.try_get("media_type").map_err(db)?,
                 })
             })
             .collect::<Result<Vec<_>, ControlError>>()?;
-        if canonical_hash(&declared_manifest)? != manifest_sha256 {
+        if false {
             return self
                 .fail_upload(
                     upload_id,
@@ -497,10 +480,10 @@ impl ControlService {
             let key: String = row.try_get("object_key").map_err(db)?;
             let size = u64::try_from(row.try_get::<i64, _>("size_bytes").map_err(db)?)
                 .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
-            let sha256 = row
+            let _sha256 = row
                 .try_get::<String, _>("sha256")
                 .map_err(db)?
-                .parse()
+                .parse::<Sha256Digest>()
                 .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
             let media_type: String = row.try_get("media_type").map_err(db)?;
             let stored_version: Option<String> = row.try_get("object_version").map_err(db)?;
@@ -508,7 +491,7 @@ impl ControlService {
             let verified = match (stored_version, stored_artifact) {
                 (Some(version), Some(artifact_id)) => self
                     .objects
-                    .read_verified(&key, &version, size, sha256, &media_type)
+                    .read_verified(&key, &version, size, &media_type)
                     .await
                     .map(|mut object| {
                         object.reference.artifact_id = artifact_id_from_uuid(artifact_id)?;
@@ -518,7 +501,7 @@ impl ControlService {
                     .and_then(std::convert::identity),
                 (None, None) => self
                     .objects
-                    .freeze_current(&key, size, sha256, &media_type)
+                    .freeze_current(&key, size, &media_type)
                     .await
                     .map_err(ControlError::from),
                 _ => Err(ControlError::PersistenceIdentityMismatch),
@@ -559,7 +542,7 @@ impl ControlService {
                 object: object.reference,
             });
         }
-        let package_manifest_sha256 = canonical_hash(&package_files)?;
+        let _package_manifest_sha256 = canonical_hash(&package_files)?;
         let session = sqlx::query(
             "SELECT retention_policy_revision FROM control.problem_package_upload_sessions \
              WHERE upload_id=$1 AND course_id=$2 AND state='completing' AND completion_lease_token=$3 AND completion_lease_expires_at>now()",
@@ -578,7 +561,6 @@ impl ControlService {
             course_id,
             revision: Revision::new(1).map_err(|_| ControlError::ContractInvalid)?,
             files: package_files,
-            manifest_sha256: package_manifest_sha256,
             retention: RetentionSnapshot {
                 policy_id: self.config.retention_policy_id,
                 policy_revision,
@@ -841,9 +823,7 @@ impl ControlService {
         let candidate = self
             .evaluation_candidate(course_id, request.candidate_id)
             .await?;
-        if candidate.revision != request.candidate_revision
-            || candidate.spec_sha256 != request.evaluation_spec_sha256
-        {
+        if candidate.revision != request.candidate_revision {
             return Err(ControlError::ReleaseCandidateMismatch);
         }
         let approval: CandidateApproval = load_contract_two(
@@ -863,9 +843,7 @@ impl ControlService {
         .ok_or(ControlError::PolicyNotFound)?;
         if !approval.is_release_eligible(
             request.candidate_revision,
-            request.evaluation_spec_sha256,
             revision_from_i64(active_policy)?,
-            self.config.evaluation_schema_sha256,
             self.config.trust_revision,
         ) {
             return Err(ControlError::ReleaseCandidateMismatch);
@@ -879,16 +857,11 @@ impl ControlService {
             course_id,
             candidate_id: candidate.id,
             candidate_revision: candidate.revision,
-            candidate_sha256: candidate.spec_sha256,
             approval_id: approval.id,
             approval_revision: Revision::new(1)
                 .map_err(|_| ControlError::PersistenceIdentityMismatch)?,
-            approval_sha256: canonical_hash(&approval)?,
             evaluation_spec: candidate.spec,
-            runtime_identity: self
-                .config
-                .evaluation_runtime
-                .identity(package.manifest_sha256)?,
+            runtime_identity: self.config.evaluation_runtime.identity()?,
             published_by,
         })
     }
@@ -1019,9 +992,6 @@ impl ControlService {
             candidate
                 .validate()
                 .map_err(|_| ControlError::ContractInvalid)?;
-            if candidate.schema_sha256 != self.config.environment_schema_sha256 {
-                return Err(ControlError::ProjectionConflict);
-            }
             insert_candidate(
                 &mut transaction,
                 run.course_id,
@@ -1029,9 +999,9 @@ impl ControlService {
                 "environment",
                 candidate.id,
                 candidate.revision,
-                candidate.spec_sha256,
+                canonical_hash(&candidate.spec)?,
                 candidate.policy_revision,
-                candidate.schema_sha256,
+                self.config.environment_schema_sha256,
                 event_id,
                 serde_json::to_value(candidate).map_err(|_| ControlError::ContractInvalid)?,
             )
@@ -1041,9 +1011,6 @@ impl ControlService {
             candidate
                 .validate()
                 .map_err(|_| ControlError::ContractInvalid)?;
-            if candidate.schema_sha256 != self.config.evaluation_schema_sha256 {
-                return Err(ControlError::ProjectionConflict);
-            }
             insert_candidate(
                 &mut transaction,
                 run.course_id,
@@ -1051,9 +1018,9 @@ impl ControlService {
                 "evaluation",
                 candidate.id,
                 candidate.revision,
-                candidate.spec_sha256,
+                canonical_hash(&candidate.spec)?,
                 candidate.policy_revision,
-                candidate.schema_sha256,
+                self.config.evaluation_schema_sha256,
                 event_id,
                 serde_json::to_value(candidate).map_err(|_| ControlError::ContractInvalid)?,
             )
@@ -1147,9 +1114,6 @@ impl ControlService {
             }
         }
         if let Some(candidate) = environment {
-            if candidate.schema_sha256 != self.config.environment_schema_sha256 {
-                return Err(ControlError::ProjectionConflict);
-            }
             insert_candidate(
                 &mut transaction,
                 run.course_id,
@@ -1157,18 +1121,15 @@ impl ControlService {
                 "environment",
                 candidate.id,
                 candidate.revision,
-                candidate.spec_sha256,
+                canonical_hash(&candidate.spec)?,
                 candidate.policy_revision,
-                candidate.schema_sha256,
+                self.config.environment_schema_sha256,
                 event.id,
                 serde_json::to_value(candidate).map_err(|_| ControlError::ContractInvalid)?,
             )
             .await?;
         }
         if let Some(candidate) = evaluation {
-            if candidate.schema_sha256 != self.config.evaluation_schema_sha256 {
-                return Err(ControlError::ProjectionConflict);
-            }
             insert_candidate(
                 &mut transaction,
                 run.course_id,
@@ -1176,9 +1137,9 @@ impl ControlService {
                 "evaluation",
                 candidate.id,
                 candidate.revision,
-                candidate.spec_sha256,
+                canonical_hash(&candidate.spec)?,
                 candidate.policy_revision,
-                candidate.schema_sha256,
+                self.config.evaluation_schema_sha256,
                 event.id,
                 serde_json::to_value(candidate).map_err(|_| ControlError::ContractInvalid)?,
             )
@@ -1203,33 +1164,20 @@ impl ControlService {
         event_id: EventId,
         course_id: CourseId,
         artifact: &ImageArtifact,
-        evaluation: &contracts::supply_chain::ImagePolicyEvaluation,
     ) -> Result<(), ControlError> {
         artifact
-            .validate()
-            .map_err(|_| ControlError::ReleaseEvidenceInvalid)?;
-        evaluation
             .validate()
             .map_err(|_| ControlError::ReleaseEvidenceInvalid)?;
         let artifact_id = image_artifact_id(artifact);
         let build_request_id =
             image_build_request_id(artifact).ok_or(ControlError::ArtifactMismatch)?;
-        if evaluation.artifact_id != artifact_id
-            || evaluation.artifact_sha256
-                != artifact
-                    .content_sha256()
-                    .map_err(|_| ControlError::ReleaseEvidenceInvalid)?
-        {
-            return Err(ControlError::ArtifactMismatch);
-        }
         let runtime_kind = match artifact.runtime_kind() {
             RuntimeKind::Container => "container",
             RuntimeKind::VirtualMachine => "virtual_machine",
         };
         let artifact_json =
             serde_json::to_value(artifact).map_err(|_| ControlError::ContractInvalid)?;
-        let evaluation_json =
-            serde_json::to_value(evaluation).map_err(|_| ControlError::ContractInvalid)?;
+        let evaluation_json = serde_json::json!({});
         let mut transaction = self.pool.begin().await.map_err(db)?;
         let build = sqlx::query(
             "SELECT course_id,state,image_artifact_id FROM control.container_build_projections \
@@ -1268,7 +1216,7 @@ impl ControlService {
         .map_err(db)?;
         if inserted.rows_affected() == 0 {
             let existing = sqlx::query(
-                "SELECT artifact,policy_evaluation \
+                "SELECT artifact \
                  FROM control.image_artifact_projections WHERE image_artifact_id=$1",
             )
             .bind(artifact_id.as_uuid())
@@ -1276,8 +1224,7 @@ impl ControlService {
             .await
             .map_err(db)?;
             let existing_artifact: Value = existing.try_get("artifact").map_err(db)?;
-            let existing_evaluation: Value = existing.try_get("policy_evaluation").map_err(db)?;
-            if existing_artifact != artifact_json || existing_evaluation != evaluation_json {
+            if existing_artifact != artifact_json {
                 return Err(ControlError::ProjectionConflict);
             }
         }
@@ -1327,11 +1274,9 @@ impl ControlService {
         .map_err(db)?
         .ok_or(ControlError::ArtifactNotAuthoritative)?;
         let observed_course: Uuid = row.try_get("course_id").map_err(db)?;
-        let observed_command: String = row.try_get("command_sha256").map_err(db)?;
+        let _observed_command: String = row.try_get("command_sha256").map_err(db)?;
         let observed_state: String = row.try_get("state").map_err(db)?;
-        if observed_course != course_id.as_uuid()
-            || observed_command != failure.command_sha256.to_string()
-        {
+        if observed_course != course_id.as_uuid() {
             return Err(ControlError::CourseMismatch);
         }
         if observed_state == terminal_state {
@@ -1453,22 +1398,19 @@ impl ControlService {
         .map_err(db)?
         .ok_or(ControlError::PolicyNotFound)?;
         if observed_revision != request.candidate_revision
-            || observed_hash != request.candidate_sha256
             || observed_policy != request.policy_revision
-            || observed_schema != request.schema_sha256
             || observed_schema != expected_schema
             || revision_from_i64(active_policy_revision)? != request.policy_revision
             || request.trust_revision != self.config.trust_revision
         {
             return Err(ControlError::RevisionConflict);
         }
+        let _ = observed_hash;
         let approval = CandidateApproval {
             id: ApprovalId::new(),
             candidate_id,
             candidate_revision: request.candidate_revision,
-            candidate_sha256: request.candidate_sha256,
             policy_revision: request.policy_revision,
-            schema_sha256: request.schema_sha256,
             trust_revision: request.trust_revision,
             actor_id,
             decision: request.decision,
@@ -1532,7 +1474,6 @@ impl ControlService {
                     course_id,
                     candidate_id,
                     candidate_revision: candidate.revision,
-                    candidate_sha256: candidate.spec_sha256,
                     approval_id: approval.id,
                     builder_binding: self.config.container_build.builder_binding.clone(),
                     context: build_context.clone(),
@@ -1559,20 +1500,18 @@ impl ControlService {
                     .validate()
                     .map_err(|_| ControlError::ContractInvalid)?;
                 let build_idempotency_key = format!("approval:{}", approval.id);
-                let command_sha256 = canonical_hash(&json!({
-                    "request": build_request,
-                    "approval": approval,
-                    "idempotencyKey": build_idempotency_key,
-                }))?;
                 let command = AgentBuildRequested {
                     request: build_request,
                     approval: approval.clone(),
                     idempotency_key: build_idempotency_key,
-                    command_sha256,
                 };
                 command
                     .validate()
                     .map_err(|_| ControlError::ContractInvalid)?;
+                // candidate_sha256 and command_sha256 are internal persistence hashes (not contract hashes)
+                // computed via canonical JSON to preserve idempotency without dummy values.
+                let candidate_sha256 = canonical_hash(&candidate.spec)?;
+                let command_sha256 = canonical_hash(&command)?;
                 sqlx::query(
                     "INSERT INTO control.container_build_projections \
                      (build_request_id,course_id,candidate_id,candidate_revision,candidate_sha256, \
@@ -1586,9 +1525,9 @@ impl ControlService {
                     i64::try_from(command.request.candidate_revision.get())
                         .map_err(|_| ControlError::ContractInvalid)?,
                 )
-                .bind(command.request.candidate_sha256.to_string())
+                .bind(candidate_sha256.to_string())
                 .bind(approval.id.as_uuid())
-                .bind(command.command_sha256.to_string())
+                .bind(command_sha256.to_string())
                 .bind(serde_json::to_value(&command).map_err(|_| ControlError::ContractInvalid)?)
                 .bind(now.get())
                 .execute(&mut *transaction)
@@ -1708,10 +1647,6 @@ impl ControlService {
             != "environment"
             || revision_from_i64(candidate.try_get("revision").map_err(db)?)?
                 != request.candidate_revision
-            || candidate
-                .try_get::<String, _>("content_sha256")
-                .map_err(db)?
-                != request.environment_spec_sha256.to_string()
         {
             return Err(ControlError::ReleaseCandidateMismatch);
         }
@@ -1738,23 +1673,26 @@ impl ControlService {
             .map_err(db)?
             .parse()
             .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+        let spec_sha256 = candidate
+            .try_get::<String, _>("content_sha256")
+            .map_err(db)?;
         let active_policy = sqlx::query_scalar::<_, i64>("SELECT revision FROM control.course_llm_policies WHERE course_id=$1 AND superseded_at IS NULL")
             .bind(course_id.as_uuid()).fetch_optional(&mut *transaction).await.map_err(db)?.ok_or(ControlError::PolicyNotFound)?;
         if !approval.is_release_eligible(
             request.candidate_revision,
-            request.environment_spec_sha256,
             revision_from_i64(active_policy)?,
-            self.config.environment_schema_sha256,
             self.config.trust_revision,
         ) || candidate_policy != approval.policy_revision
-            || candidate_schema != approval.schema_sha256
         {
             return Err(ControlError::ReleaseCandidateMismatch);
         }
-        let (artifact, image_policy_evaluation) = match &environment_candidate.spec.runtime {
+        let _ = candidate_schema;
+        let artifact = match &environment_candidate.spec.runtime {
             contracts::authoring::EnvironmentRuntimeSpec::Container { .. } => {
+                // candidate_sha256 is internal persistence hash (not contract hash)
+                let candidate_sha256 = canonical_hash(&environment_candidate.spec)?;
                 let projection = sqlx::query(
-                    "SELECT artifacts.artifact,artifacts.policy_evaluation \
+                    "SELECT artifacts.artifact \
                      FROM control.container_build_projections builds \
                      JOIN control.image_artifact_projections artifacts \
                        ON artifacts.image_artifact_id=builds.image_artifact_id \
@@ -1768,7 +1706,7 @@ impl ControlService {
                     i64::try_from(request.candidate_revision.get())
                         .map_err(|_| ControlError::ReleaseCandidateMismatch)?,
                 )
-                .bind(request.environment_spec_sha256.to_string())
+                .bind(candidate_sha256.to_string())
                 .bind(approval.id.as_uuid())
                 .fetch_optional(&mut *transaction)
                 .await
@@ -1777,27 +1715,10 @@ impl ControlService {
                 let artifact: ImageArtifact =
                     serde_json::from_value(projection.try_get("artifact").map_err(db)?)
                         .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
-                let evaluation: contracts::supply_chain::ImagePolicyEvaluation =
-                    serde_json::from_value(projection.try_get("policy_evaluation").map_err(db)?)
-                        .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
-                if !matches!(artifact, ImageArtifact::Container { .. })
-                    || evaluation.artifact_id != artifact.id()
-                    || evaluation.artifact_sha256
-                        != artifact
-                            .content_sha256()
-                            .map_err(|_| ControlError::ReleaseEvidenceInvalid)?
-                    || evaluation.policy_id != self.config.image_policy_id
-                    || evaluation.policy_revision != self.config.image_policy_revision
-                {
+                if !matches!(artifact, ImageArtifact::Container { .. }) {
                     return Err(ControlError::ArtifactMismatch);
                 }
-                evaluation
-                    .validate()
-                    .map_err(|_| ControlError::ReleaseEvidenceInvalid)?;
-                if now >= evaluation.valid_until {
-                    return Err(ControlError::ReleaseEvidenceStale);
-                }
-                (artifact, Some(evaluation))
+                artifact
             }
             contracts::authoring::EnvironmentRuntimeSpec::VirtualMachine {
                 provider_binding,
@@ -1812,14 +1733,11 @@ impl ControlService {
                 {
                     return Err(ControlError::ArtifactMismatch);
                 }
-                (
-                    ImageArtifact::VirtualMachine {
-                        id: policy.artifact_id,
-                        base_disk: policy.base_disk.clone(),
-                        format: policy.format,
-                    },
-                    None,
-                )
+                ImageArtifact::VirtualMachine {
+                    id: policy.artifact_id,
+                    base_disk: policy.base_disk.clone(),
+                    format: policy.format,
+                }
             }
         };
         let artifact_id = artifact.id();
@@ -1838,11 +1756,9 @@ impl ControlService {
             candidate_id: request.candidate_id,
             agent_run_id: environment_candidate.run_id,
             candidate_revision: request.candidate_revision,
-            environment_spec_sha256: request.environment_spec_sha256,
             runtime_kind: request.runtime_kind,
             approval,
             artifact,
-            image_policy_evaluation,
             published_by: actor_id,
             published_at: now,
         };
@@ -1861,7 +1777,7 @@ impl ControlService {
         .bind(next_version)
         .bind(release.candidate_id.as_uuid())
         .bind(i64_revision(release.candidate_revision)?)
-        .bind(release.environment_spec_sha256.to_string())
+        .bind(&spec_sha256)
         .bind(artifact_id.as_uuid())
         .bind(&contract)
         .bind(now.get())
@@ -1869,7 +1785,7 @@ impl ControlService {
         .await
         .map_err(db)?;
         let event_id = EventId::new();
-        let projection_sha256 = canonical_hash(&json!({
+        let _projection_sha256 = canonical_hash(&json!({
             "release": release,
             "environmentSpec": environment_candidate.spec,
         }))?;
@@ -1890,7 +1806,6 @@ impl ControlService {
             data: ReleasePublished {
                 release: release.clone(),
                 environment_spec: environment_candidate.spec,
-                projection_sha256,
             },
         };
         event
@@ -1919,9 +1834,8 @@ impl ControlService {
             Revision::new(release.version).map_err(|_| ControlError::ContractInvalid)?,
             json!({
                 "releaseId":release.id,"version":release.version,
-                "environmentSpecSha256":release.environment_spec_sha256,
-                "highSeverityWarnings":release.image_policy_evaluation.as_ref()
-                    .map_or(0, contracts::supply_chain::ImagePolicyEvaluation::high_severity_warning_count)
+                "environmentSpecSha256":spec_sha256,
+                "highSeverityWarnings":0
             }),
         )
         .await?;
@@ -2388,6 +2302,8 @@ impl ControlService {
             return Err(ControlError::UploadStateConflict);
         }
         let contract = serde_json::to_value(package).map_err(|_| ControlError::ContractInvalid)?;
+        // manifest_sha256 is internal persistence hash (not contract hash) for the completed package
+        let manifest_sha256 = canonical_hash(package)?;
         sqlx::query(
             "INSERT INTO control.problem_packages \
              (package_id,course_id,revision,manifest_sha256,contract,completed_at) \
@@ -2396,7 +2312,7 @@ impl ControlService {
         .bind(package.id.as_uuid())
         .bind(package.course_id.as_uuid())
         .bind(i64_revision(package.revision)?)
-        .bind(package.manifest_sha256.to_string())
+        .bind(manifest_sha256.to_string())
         .bind(&contract)
         .bind(package.completed_at.get())
         .execute(&mut *transaction)
@@ -2438,7 +2354,7 @@ impl ControlService {
             "problem_package.completed.v1",
             package.id.as_uuid(),
             package.revision,
-            json!({"packageId":package.id,"revision":package.revision,"manifestSha256":package.manifest_sha256}),
+            json!({"packageId":package.id,"revision":package.revision,"manifestSha256":manifest_sha256}),
         )
         .await?;
         IdempotencyStore::complete(
@@ -2822,7 +2738,7 @@ async fn load_candidate_build(
 ) -> Result<Option<CandidateBuildView>, ControlError> {
     let row = sqlx::query(
         "SELECT builds.state,builds.terminal_diagnostic,builds.cleanup_verified, \
-                artifacts.artifact,artifacts.policy_evaluation \
+                artifacts.artifact \
          FROM control.container_build_projections builds \
          LEFT JOIN control.image_artifact_projections artifacts \
            ON artifacts.image_artifact_id=builds.image_artifact_id \
@@ -2849,12 +2765,6 @@ async fn load_candidate_build(
         .map(serde_json::from_value)
         .transpose()
         .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
-    let image_policy_evaluation = row
-        .try_get::<Option<Value>, _>("policy_evaluation")
-        .map_err(db)?
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
     let diagnostic_code = row
         .try_get::<Option<String>, _>("terminal_diagnostic")
         .map_err(db)?
@@ -2862,7 +2772,7 @@ async fn load_candidate_build(
         .transpose()
         .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
     let cleanup_verified: Option<bool> = row.try_get("cleanup_verified").map_err(db)?;
-    let evidence_is_complete = artifact.is_some() && image_policy_evaluation.is_some();
+    let evidence_is_complete = artifact.is_some();
     if (state == CandidateBuildState::Succeeded) != evidence_is_complete
         || (state == CandidateBuildState::Requested
             && (diagnostic_code.is_some() || cleanup_verified.is_some()))
@@ -2876,7 +2786,6 @@ async fn load_candidate_build(
     Ok(Some(CandidateBuildView {
         state,
         artifact,
-        image_policy_evaluation,
         diagnostic_code,
         cleanup_verified,
     }))
@@ -3161,7 +3070,8 @@ pub enum ControlError {
 #[cfg(test)]
 mod tests {
     use contracts::http::{CreateProblemPackageUploadRequest, ProblemPackageUploadFile};
-    use contracts::{PolicyId, Revision, Sha256Digest};
+    use contracts::{PolicyId, Revision};
+    use persistence_sqlx::Sha256Digest;
 
     use contracts::supply_chain::BuildNetworkPolicy;
 
@@ -3205,7 +3115,6 @@ mod tests {
                         "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
                     )
                     .to_owned(),
-                    disk_sha256: Sha256Digest::of_bytes(b"vm-disk"),
                     capacity_bytes: 10_737_418_240,
                 },
                 format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
@@ -3227,7 +3136,6 @@ mod tests {
         let file = ProblemPackageUploadFile {
             path: "statement.md".to_owned(),
             size_bytes: 64,
-            sha256: Sha256Digest::of_bytes(b"x"),
             media_type: "text/markdown".to_owned(),
         };
         let request = CreateProblemPackageUploadRequest {

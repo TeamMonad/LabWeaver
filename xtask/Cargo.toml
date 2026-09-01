@@ -31,5 +31,9 @@ tempfile.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 ansible = { package = "ansible-rs", version = "1.1.0" }
 
-[lints]
-workspace = true
+[lints.clippy]
+# xtask holds verbose contract/integration verification; allow test-oriented unwraps
+expect_used = "allow"
+unwrap_used = "allow"
+panic = "allow"
+too_many_lines = "allow"

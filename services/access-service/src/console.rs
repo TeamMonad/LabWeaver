@@ -16,12 +16,13 @@ use axum::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use contracts::{
     AccessGrantId, ActorId, ConsoleCapabilityId, ConsoleSessionId, CourseId, EnvironmentId,
-    Revision, Sha256Digest,
+    Revision,
     access::{ConsoleCapability, ConsoleCapabilityAvailability, ConsoleKind, ConsoleLeaseFence},
     environment::{EnvironmentAccessSubjectKind, EnvironmentConsoleEligibilityRequest},
     http::{IssueConsoleCapabilityRequest, StrongEtag},
 };
 use futures_util::{SinkExt, StreamExt};
+use persistence_sqlx::Sha256Digest;
 use rand::RngCore;
 use rustls::{ClientConfig, RootCertStore};
 use sha2::{Digest, Sha256};

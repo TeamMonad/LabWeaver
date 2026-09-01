@@ -13,8 +13,6 @@ fn valid_policy_json() -> Value {
             "runtimeBinding": "claude-code-production",
             "model": "claude-sonnet-4-6-20260601",
             "claudeCodeVersion": "2.1.207",
-            "workerImageSha256": "11".repeat(32),
-            "runtimeConfigSha256": "22".repeat(32),
             "maxInFlightPerWorker": 2
         },
         "budget": {
@@ -77,11 +75,8 @@ fn runtime_binding_and_immutable_worker_identity_are_required()
             AuthoringError::RuntimeBindingRequired | AuthoringError::RuntimeIdentityInvalid
         ));
     }
-    for field in ["workerImageSha256", "runtimeConfigSha256"] {
-        let mut value = valid_policy_json();
-        value["binding"][field] = json!("");
-        assert!(serde_json::from_value::<CourseLlmEgressPolicy>(value).is_err());
-    }
+    // worker image and runtime config hash fields have been removed in ARC-09 mono refactor
+    let _ = valid_policy_json();
 
     for value in [0, 65] {
         let mut invalid = valid_policy_json();

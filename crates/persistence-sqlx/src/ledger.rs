@@ -1,5 +1,6 @@
-use contracts::Sha256Digest;
 use serde_json::Value;
+
+use crate::Sha256Digest;
 use sqlx::{Postgres, Row, Transaction};
 use uuid::Uuid;
 

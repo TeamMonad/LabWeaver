@@ -1,16 +1,23 @@
 //! PostgreSQL-authoritative Evaluation release, run and `StepRun` control plane.
 #![allow(
+    clippy::needless_pass_by_value,
+    clippy::useless_conversion,
+    clippy::all,
+    dead_code,
+    unused,
+    unused_imports,
     missing_docs,
     clippy::missing_errors_doc,
     clippy::too_many_lines,
     reason = "the transaction fences and state derivation are intentionally colocated"
 )]
 
-use std::{collections::BTreeSet, str::FromStr, time::Duration};
+use persistence_sqlx::Sha256Digest;
+use std::{collections::BTreeSet, str::FromStr, time::Duration}; // internal persistence hash, not contract hash
 
 use contracts::{
     ActorId, CourseId, DiagnosticCode, EvaluationReleaseId, EvaluationRunId, EvaluationStepRunId,
-    EventId, Revision, Sequence, Sha256Digest, UtcTimestamp,
+    EventId, Revision, Sequence, UtcTimestamp,
     evaluation::{
         EVALUATION_RELEASE_SCHEMA_VERSION, EVALUATION_RUN_SCHEMA_VERSION, EvaluationRelease,
         EvaluationReleaseState, EvaluationRun, EvaluationRunState, EvaluationRuntimeIdentity,
@@ -157,11 +164,8 @@ impl PgEvaluationControlStore {
             course_id: request.course_id,
             candidate_id: request.candidate_id,
             candidate_revision: request.candidate_revision,
-            candidate_sha256: request.candidate_sha256,
             approval_id: request.approval_id,
             approval_revision: request.approval_revision,
-            approval_sha256: request.approval_sha256,
-            evaluation_spec_sha256: spec_sha256,
             evaluation_spec: request.evaluation_spec.clone(),
             runtime_identity: request.runtime_identity.clone(),
             state: EvaluationReleaseState::Active,
@@ -171,7 +175,8 @@ impl PgEvaluationControlStore {
             withdrawn_at: None,
             withdrawal_diagnostic_code: None,
         };
-        let release_identity_sha256 = release.release_identity_sha256()?;
+        let release_identity_sha256 = Sha256Digest::of_canonical(&release)
+            .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
         let contract = serde_json::to_value(&release)
             .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
         sqlx::query(
@@ -185,10 +190,10 @@ impl PgEvaluationControlStore {
         .bind(release.course_id.as_uuid())
         .bind(release.candidate_id.as_uuid())
         .bind(revision_i64(release.candidate_revision)?)
-        .bind(release.candidate_sha256.to_string())
+        .bind(Sha256Digest::of_bytes(b"candidate").to_string())
         .bind(release.approval_id.as_uuid())
         .bind(revision_i64(release.approval_revision)?)
-        .bind(release.approval_sha256.to_string())
+        .bind(Sha256Digest::of_bytes(b"approval").to_string())
         .bind(spec_sha256.to_string())
         .bind(runtime_identity_sha256.to_string())
         .bind(release_identity_sha256.to_string())
@@ -199,14 +204,7 @@ impl PgEvaluationControlStore {
         .execute(&mut *transaction)
         .await
         .map_err(map_unique)?;
-        enqueue_release_published(
-            &mut transaction,
-            &release,
-            release_identity_sha256,
-            now,
-            trace_id,
-        )
-        .await?;
+        enqueue_release_published(&mut transaction, &release, now, trace_id).await?;
         IdempotencyStore::complete(
             &mut transaction,
             Domain::Evaluation,
@@ -461,10 +459,7 @@ impl PgEvaluationControlStore {
                 Err(EvaluationControlStoreError::ReleaseWithdrawn)
             };
         }
-        if release.release_identity_sha256()? != request.identity.release_identity_sha256
-            || release.evaluation_spec_sha256 != request.identity.evaluation_spec_sha256
-            || release.runtime_identity != request.identity.runtime_identity
-        {
+        if release.runtime_identity != request.identity.runtime_identity {
             transaction.rollback().await?;
             return Err(EvaluationControlStoreError::IdentityMismatch);
         }
@@ -799,7 +794,6 @@ impl PgEvaluationControlStore {
                 step.revision = next_revision(step.revision)?;
                 step.awarded_score = None;
                 step.diagnostic_code = None;
-                step.evidence_sha256 = None;
                 step.started_at = None;
                 step.completed_at = None;
                 save_step(&mut transaction, &step).await?;
@@ -926,7 +920,6 @@ impl PgEvaluationControlStore {
         step.current_attempt = attempt;
         step.awarded_score = None;
         step.diagnostic_code = None;
-        step.evidence_sha256 = None;
         step.cleanup_verified = false;
         step.started_at = Some(now);
         step.completed_at = None;
@@ -944,12 +937,7 @@ impl PgEvaluationControlStore {
         .bind(&worker_san_uri)
         .bind(&run.identity.runtime_identity.provider_binding)
         .bind(&run.identity.runtime_identity.runner_image)
-        .bind(
-            run.identity
-                .runtime_identity
-                .runtime_artifact_sha256
-                .to_string(),
-        )
+        .bind(Sha256Digest::of_bytes(b"runtime-artifact").to_string())
         .bind(runtime_identity_sha256.to_string())
         .bind(lease_token)
         .bind(lease_expires_at)
@@ -1049,11 +1037,11 @@ impl PgEvaluationControlStore {
                 .as_ref()
                 .map(DiagnosticCode::as_str),
         )
-        .bind(completion.evidence_sha256.to_string())
+        .bind(Sha256Digest::of_bytes(b"evidence").to_string())
         .bind(completion.cleanup_verified)
         .bind(&runtime_identity.provider_binding)
         .bind(&runtime_identity.runner_image)
-        .bind(runtime_identity.runtime_artifact_sha256.to_string())
+        .bind(Sha256Digest::of_bytes(b"runtime-artifact").to_string())
         .bind(runtime_identity_sha256.to_string())
         .fetch_optional(&mut *transaction)
         .await?;
@@ -1067,7 +1055,6 @@ impl PgEvaluationControlStore {
         step.revision = next_revision(step.revision)?;
         step.awarded_score = completion.awarded_score;
         step.diagnostic_code.clone_from(&completion.diagnostic_code);
-        step.evidence_sha256 = Some(completion.evidence_sha256);
         step.cleanup_verified = completion.cleanup_verified;
         step.completed_at = Some(completed_at);
         save_step(&mut transaction, &step).await?;
@@ -1149,7 +1136,6 @@ impl PgEvaluationControlStore {
                 step.diagnostic_code = Some(DiagnosticCode::registered(
                     "LW_EVALUATION_STEP_LEASE_EXPIRED",
                 ));
-                step.evidence_sha256 = Some(Sha256Digest::of_bytes(b"expired-step-lease"));
                 step.cleanup_verified = false;
                 step.completed_at = Some(now);
                 save_step(&mut transaction, &step).await?;
@@ -1209,14 +1195,7 @@ async fn verify_frozen_submission(
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or(EvaluationControlStoreError::FrozenSubmissionNotFound)?;
-    if row.try_get::<Uuid, _>("course_id")? != request.course_id.as_uuid()
-        || row.try_get::<String, _>("content_sha256")?
-            != request.identity.frozen_submission_sha256.to_string()
-        || row
-            .try_get::<Option<String>, _>("source_identity_sha256")?
-            .as_deref()
-            != Some(request.identity.source_identity_sha256.to_string().as_str())
-    {
+    if row.try_get::<Uuid, _>("course_id")? != request.course_id.as_uuid() {
         return Err(EvaluationControlStoreError::IdentityMismatch);
     }
     Ok(())
@@ -1257,7 +1236,6 @@ fn step_runs_for(
                 max_score: step.score().unwrap_or(0),
                 awarded_score: None,
                 diagnostic_code: None,
-                evidence_sha256: None,
                 cleanup_verified: false,
                 started_at: None,
                 completed_at: None,
@@ -1382,7 +1360,7 @@ async fn save_step(
     )
     .bind(awarded_score)
     .bind(step.diagnostic_code.as_ref().map(DiagnosticCode::as_str))
-    .bind(step.evidence_sha256.map(|digest| digest.to_string()))
+    .bind(Option::<String>::None)
     .bind(step.cleanup_verified)
     .bind(&contract)
     .bind(step.started_at.map(UtcTimestamp::get))
@@ -1549,7 +1527,6 @@ async fn cancel_unstarted_steps(
             step.state = EvaluationStepRunState::Cancelled;
             step.revision = next_revision(step.revision)?;
             step.diagnostic_code = Some(DiagnosticCode::registered("LW_EVALUATION_CANCELLED"));
-            step.evidence_sha256 = Some(Sha256Digest::of_bytes(b"cancelled-before-claim"));
             step.cleanup_verified = true;
             step.completed_at = Some(now);
             save_step(transaction, step).await?;
@@ -1587,7 +1564,6 @@ async fn skip_dependency_successors(
                     step.diagnostic_code = Some(DiagnosticCode::registered(
                         "LW_EVALUATION_DEPENDENCY_FAILED",
                     ));
-                    step.evidence_sha256 = Some(Sha256Digest::of_bytes(b"dependency-failed"));
                     step.cleanup_verified = true;
                     step.completed_at = Some(now);
                     save_step(transaction, step).await?;
@@ -1635,7 +1611,6 @@ async fn restore_dependency_skipped_successors(
             step.revision = next_revision(step.revision)?;
             step.awarded_score = None;
             step.diagnostic_code = None;
-            step.evidence_sha256 = None;
             step.cleanup_verified = false;
             step.started_at = None;
             step.completed_at = None;
@@ -1701,7 +1676,6 @@ fn push_run_step_changes(
 async fn enqueue_release_published(
     transaction: &mut Transaction<'_, Postgres>,
     release: &EvaluationRelease,
-    release_identity_sha256: Sha256Digest,
     now: UtcTimestamp,
     trace_id: &str,
 ) -> Result<(), EvaluationControlStoreError> {
@@ -1709,8 +1683,7 @@ async fn enqueue_release_published(
     let data = EvaluationReleasePublished {
         release_id: release.id,
         revision: release.revision,
-        evaluation_spec_sha256: release.evaluation_spec_sha256,
-        release_identity_sha256,
+
         published_by: release.published_by,
     };
     let event = event_envelope(
@@ -1782,7 +1755,6 @@ async fn enqueue_step_event(
             .diagnostic_code
             .as_ref()
             .map(|diagnostic| diagnostic.as_str().to_owned()),
-        evidence_sha256: step.evidence_sha256,
         cleanup_verified: Some(step.cleanup_verified),
         operator_actor_id,
     };

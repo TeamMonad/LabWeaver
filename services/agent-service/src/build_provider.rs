@@ -1,4 +1,4 @@
-//! Typed NATS adapter for the deployment-owned BuildKit/Harbor/Trivy executor.
+//! Typed NATS adapter for the deployment-owned BuildKit/Harbor executor.
 #![allow(
     missing_docs,
     reason = "the build pipeline trait and v1 event contracts document the integration semantics"
@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use contracts::BuildRequestId;
 use contracts::events::AgentBuildRequested;
 use futures_util::StreamExt;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{PgPool, Row};
@@ -16,7 +17,7 @@ use std::time::Duration;
 use crate::build_pipeline::{
     BuildIdentity, BuildProviderFailure, BuildProviderFailureCode, BuildProviderRequestContext,
     BuildProviderStage, BuildSupplyChainProvider, BuiltCandidate, PrivateRegistryProject,
-    PublishedImage, ScanEvidence,
+    PublishedImage,
 };
 
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -26,7 +27,6 @@ pub struct NatsBuildSupplyChainProvider {
     client: async_nats::Client,
     subject: String,
     builder_binding: String,
-    scanner_binding: String,
     registry_binding: String,
     request_timeout: Duration,
 }
@@ -36,20 +36,15 @@ impl NatsBuildSupplyChainProvider {
         client: async_nats::Client,
         subject: String,
         builder_binding: String,
-        scanner_binding: String,
         registry_binding: String,
         request_timeout: Duration,
     ) -> Result<Self, BuildProviderFailure> {
         if !valid_subject(&subject)
             || request_timeout.is_zero()
             || request_timeout > Duration::from_hours(1)
-            || [
-                builder_binding.as_str(),
-                scanner_binding.as_str(),
-                registry_binding.as_str(),
-            ]
-            .iter()
-            .any(|binding| !valid_token(binding))
+            || [builder_binding.as_str(), registry_binding.as_str()]
+                .iter()
+                .any(|binding| !valid_token(binding))
         {
             return Err(configuration_failure());
         }
@@ -57,7 +52,6 @@ impl NatsBuildSupplyChainProvider {
             client,
             subject,
             builder_binding,
-            scanner_binding,
             registry_binding,
             request_timeout,
         })
@@ -103,10 +97,6 @@ impl NatsBuildSupplyChainProvider {
 impl BuildSupplyChainProvider for NatsBuildSupplyChainProvider {
     fn builder_binding(&self) -> &str {
         &self.builder_binding
-    }
-
-    fn scanner_binding(&self) -> &str {
-        &self.scanner_binding
     }
 
     fn registry_binding(&self) -> &str {
@@ -161,31 +151,6 @@ impl BuildSupplyChainProvider for NatsBuildSupplyChainProvider {
                     && candidate.build_identity == identity =>
             {
                 Ok(candidate)
-            }
-            BuildExecutorResponse::Failed { failure } => Err(failure),
-            _ => Err(identity_mismatch()),
-        }
-    }
-
-    async fn scan_candidate(
-        &self,
-        context: &BuildProviderRequestContext,
-        candidate: &BuiltCandidate,
-    ) -> Result<ScanEvidence, BuildProviderFailure> {
-        match self
-            .request(
-                context,
-                BuildExecutorRequest::Scan {
-                    candidate: candidate.clone(),
-                },
-            )
-            .await?
-        {
-            BuildExecutorResponse::Scanned { evidence }
-                if evidence.build_identity == candidate.build_identity
-                    && evidence.digest == candidate.digest =>
-            {
-                Ok(evidence)
             }
             BuildExecutorResponse::Failed { failure } => Err(failure),
             _ => Err(identity_mismatch()),
@@ -267,9 +232,6 @@ pub enum BuildExecutorRequest {
         command: AgentBuildRequested,
         identity: BuildIdentity,
     },
-    Scan {
-        candidate: BuiltCandidate,
-    },
     Publish {
         candidate: BuiltCandidate,
     },
@@ -284,7 +246,6 @@ impl BuildExecutorRequest {
         match self {
             Self::EnsurePrivateProject { .. } => BuildProviderStage::EnsurePrivateProject,
             Self::Build { .. } => BuildProviderStage::Build,
-            Self::Scan { .. } => BuildProviderStage::Scan,
             Self::Publish { .. } => BuildProviderStage::Publish,
             Self::Cleanup { .. } => BuildProviderStage::Cleanup,
         }
@@ -298,7 +259,7 @@ pub struct BuildExecutorResponseEnvelope {
     pub build_request_id: BuildRequestId,
     pub fence_generation: u32,
     pub stage: BuildProviderStage,
-    pub stage_request_id: contracts::Sha256Digest,
+    pub stage_request_id: Sha256Digest,
     pub response: BuildExecutorResponse,
 }
 
@@ -315,9 +276,6 @@ pub enum BuildExecutorResponse {
     },
     Built {
         candidate: BuiltCandidate,
-    },
-    Scanned {
-        evidence: ScanEvidence,
     },
     Published {
         image: PublishedImage,
@@ -681,9 +639,13 @@ fn executor_request_identity_valid(request: &BuildExecutorRequest) -> bool {
     match request {
         BuildExecutorRequest::EnsurePrivateProject { command, identity }
         | BuildExecutorRequest::Build { command, identity } => {
-            command.validate().is_ok() && *identity == BuildIdentity(command.command_sha256)
+            command.validate().is_ok()
+                && *identity
+                    == BuildIdentity(Sha256Digest::of_bytes(
+                        command.request.id.as_uuid().as_bytes(),
+                    ))
         }
-        BuildExecutorRequest::Scan { candidate } | BuildExecutorRequest::Publish { candidate } => {
+        BuildExecutorRequest::Publish { candidate } => {
             candidate.digest.starts_with("sha256:")
                 && candidate.digest.len() == 71
                 && candidate
@@ -707,8 +669,8 @@ fn bind_build_executor_request(
 fn build_executor_request_id(
     context: BuildProviderRequestContext,
     request: &BuildExecutorRequest,
-) -> Result<contracts::Sha256Digest, BuildExecutorFenceError> {
-    contracts::Sha256Digest::of_canonical(&serde_json::json!({
+) -> Result<Sha256Digest, BuildExecutorFenceError> {
+    Sha256Digest::of_canonical(&serde_json::json!({
         "protocolVersion": context.protocol_version,
         "buildRequestId": context.build_request_id,
         "fenceGeneration": context.fence_generation,
@@ -724,9 +686,7 @@ const fn executor_request_build_id(request: &BuildExecutorRequest) -> BuildReque
     match request {
         BuildExecutorRequest::EnsurePrivateProject { command, .. }
         | BuildExecutorRequest::Build { command, .. } => command.request.id,
-        BuildExecutorRequest::Scan { candidate } | BuildExecutorRequest::Publish { candidate } => {
-            candidate.build_request_id
-        }
+        BuildExecutorRequest::Publish { candidate } => candidate.build_request_id,
         BuildExecutorRequest::Cleanup {
             build_request_id, ..
         } => *build_request_id,
@@ -737,9 +697,8 @@ const fn build_stage_rank(stage: BuildProviderStage) -> i16 {
     match stage {
         BuildProviderStage::EnsurePrivateProject => 1,
         BuildProviderStage::Build => 2,
-        BuildProviderStage::Scan => 3,
-        BuildProviderStage::Publish => 4,
-        BuildProviderStage::Cleanup => 5,
+        BuildProviderStage::Publish => 3,
+        BuildProviderStage::Cleanup => 4,
     }
 }
 
@@ -747,7 +706,6 @@ const fn build_stage_name(stage: BuildProviderStage) -> &'static str {
     match stage {
         BuildProviderStage::EnsurePrivateProject => "ensure_private_project",
         BuildProviderStage::Build => "build",
-        BuildProviderStage::Scan => "scan",
         BuildProviderStage::Publish => "publish",
         BuildProviderStage::Cleanup => "cleanup",
     }

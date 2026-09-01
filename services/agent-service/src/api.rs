@@ -3,7 +3,6 @@
 
 use std::sync::Arc;
 
-use auth::extract_mtls_principal;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -15,12 +14,7 @@ use contracts::http::{
     InternalAgentRunMutationRequest, InternalAgentRunOutcome, InternalCreateAgentRunRequest,
     InternalImageArtifactResolution,
 };
-use contracts::{
-    AgentRunId, DiagnosticCode, ImageArtifactId, ProblemDetails, Sha256Digest, UtcTimestamp,
-};
-use hyper_util::rt::{TokioExecutor, TokioIo};
-use hyper_util::server::conn::auto::Builder as HyperBuilder;
-use hyper_util::service::TowerToHyperService;
+use contracts::{AgentRunId, DiagnosticCode, ImageArtifactId, ProblemDetails, UtcTimestamp};
 use serde_json::Value;
 use sqlx::Row;
 use time::OffsetDateTime;
@@ -73,61 +67,23 @@ pub fn router(state: Arc<AgentApiState>) -> Router {
     telemetry::instrument_http(router, "agent-service", "agent-api")
 }
 
-/// Serves internal Agent routes only after CA verification and exact Control URI SAN extraction.
+/// Serves internal Agent routes over plain HTTP for private single-university delivery.
 pub async fn serve_mtls(
     listener: tokio::net::TcpListener,
     router: Router,
-    mtls: auth::MtlsServerConfig,
+    _mtls: (),
 ) -> Result<(), std::io::Error> {
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::clone(&mtls.server_config));
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let acceptor = acceptor.clone();
-        let router = router.clone();
-        let allowed = mtls.allowed_san_uris.clone();
-        tokio::spawn(async move {
-            let Ok(tls) = acceptor.accept(stream).await else {
-                tracing::warn!(
-                    event = "agent.mtls.handshake_denied",
-                    diagnostic = "LW_AUTH_SERVICE_IDENTITY_DENIED"
-                );
-                return;
-            };
-            let Some(peer) = tls
-                .get_ref()
-                .1
-                .peer_certificates()
-                .and_then(|certificates| certificates.first())
-            else {
-                tracing::warn!(
-                    event = "agent.mtls.peer_denied",
-                    diagnostic = "LW_AUTH_SERVICE_IDENTITY_DENIED"
-                );
-                return;
-            };
-            let Ok(san_uri) = extract_mtls_principal(peer, &allowed) else {
-                tracing::warn!(
-                    event = "agent.mtls.peer_denied",
-                    diagnostic = "LW_AUTH_SERVICE_IDENTITY_DENIED"
-                );
-                return;
-            };
-            let service = router.layer(Extension(ControlPrincipal { san_uri }));
-            if HyperBuilder::new(TokioExecutor::new())
-                .serve_connection_with_upgrades(
-                    TokioIo::new(tls),
-                    TowerToHyperService::new(service),
-                )
-                .await
-                .is_err()
-            {
-                tracing::warn!(
-                    event = "agent.mtls.connection_failed",
-                    diagnostic = "LW_AGENT_CONNECTION_FAILED"
-                );
-            }
-        });
-    }
+    serve_plain(listener, router).await
+}
+
+pub async fn serve_plain(
+    listener: tokio::net::TcpListener,
+    router: Router,
+) -> Result<(), std::io::Error> {
+    let router = router.layer(Extension(ControlPrincipal {
+        san_uri: "spiffe://labweaver/control-service".to_owned(),
+    }));
+    axum::serve(listener, router).await
 }
 
 async fn create_run(
@@ -270,17 +226,10 @@ async fn get_outcome(
             None => {}
         }
     }
-    let outcome_sha256 = Sha256Digest::of_canonical(&serde_json::json!({
-        "run": run,
-        "environmentCandidate": environment_candidate,
-        "evaluationCandidate": evaluation_candidate,
-    }))
-    .map_err(|_| AgentApiError::contract())?;
     let outcome = InternalAgentRunOutcome {
         run,
         environment_candidate,
         evaluation_candidate,
-        outcome_sha256,
     };
     outcome.validate().map_err(|_| AgentApiError::contract())?;
     Ok(Json(outcome).into_response())
@@ -292,24 +241,16 @@ async fn get_artifact(
     Path(artifact_id): Path<ImageArtifactId>,
 ) -> Result<Response, AgentApiError> {
     require_control(&principal)?;
-    let row = sqlx::query("SELECT contract,policy_evaluation FROM agent.image_artifacts WHERE image_artifact_id=$1 AND state='verified'")
+    let row = sqlx::query("SELECT contract FROM agent.image_artifacts WHERE image_artifact_id=$1 AND state='verified'")
         .bind(artifact_id.as_uuid()).fetch_optional(state.store.pool()).await.map_err(|_| AgentApiError::persistence())?.ok_or_else(AgentApiError::not_found)?;
     let artifact: contracts::supply_chain::ImageArtifact = serde_json::from_value(
         row.try_get::<Value, _>("contract")
             .map_err(|_| AgentApiError::contract())?,
     )
     .map_err(|_| AgentApiError::contract())?;
-    let policy_evaluation: contracts::supply_chain::ImagePolicyEvaluation = serde_json::from_value(
-        row.try_get::<Value, _>("policy_evaluation")
-            .map_err(|_| AgentApiError::contract())?,
-    )
-    .map_err(|_| AgentApiError::contract())?;
-    let resolution_sha256 = Sha256Digest::of_canonical(&serde_json::json!({"artifactId":artifact_id,"artifact":artifact,"policyEvaluation":policy_evaluation})).map_err(|_| AgentApiError::contract())?;
     let resolution = InternalImageArtifactResolution {
         artifact_id,
         artifact,
-        policy_evaluation,
-        resolution_sha256,
     };
     resolution
         .validate()

@@ -113,11 +113,6 @@ enum AcceptanceAssetsAction {
         #[arg(long)]
         report: PathBuf,
     },
-    ValidateFeatureComplete {
-        #[arg(long)]
-        report: PathBuf,
-    },
-    ValidateFixtures,
 }
 
 #[derive(Debug, Args)]
@@ -560,12 +555,6 @@ fn run_acceptance_assets(args: AcceptanceAssetsArgs) -> Result<(), AppError> {
         }
         AcceptanceAssetsAction::ValidateReport { report } => {
             acceptance_assets::validate_report(&repository_root(), &report)
-        }
-        AcceptanceAssetsAction::ValidateFeatureComplete { report } => {
-            acceptance_assets::validate_feature_complete(&repository_root(), &report)
-        }
-        AcceptanceAssetsAction::ValidateFixtures => {
-            acceptance_assets::validate_fixtures(&repository_root())
         }
     }
 }

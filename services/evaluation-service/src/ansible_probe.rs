@@ -11,8 +11,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
 
-use contracts::Sha256Digest;
 use contracts::evaluation::FactAssertion;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;

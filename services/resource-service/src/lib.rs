@@ -17,7 +17,6 @@ use contracts::resource::{
     ResourceRequestState,
 };
 use contracts::{Revision, UtcTimestamp};
-
 pub mod api;
 pub mod capacity;
 pub mod messaging;
@@ -381,7 +380,7 @@ mod tests {
     };
     use contracts::{
         ActorId, CapacityClaimId, CourseId, EnvironmentId, LeaseId, ReleaseId, ResourceApprovalId,
-        ResourceRequestId, Revision, Sha256Digest, UtcTimestamp,
+        ResourceRequestId, Revision, UtcTimestamp,
     };
 
     use super::{ApprovalPolicy, LifecycleError, ResourceLifecycle};
@@ -527,7 +526,6 @@ mod tests {
                 environment_id: EnvironmentId::new(),
                 release_id: ReleaseId::new(),
                 release_version: 1,
-                release_sha256: digest(),
             },
             requested_resources: WorkloadResources {
                 cpu_millicores: 500,
@@ -551,7 +549,6 @@ mod tests {
             request_revision: Revision::new(1).unwrap_or_else(|_| unreachable!()),
             approver_id: ActorId::new(),
             provider_binding: "kubernetes-standard".into(),
-            policy_sha256: digest(),
             approved_resources: resources,
             approved_duration_seconds: 600,
             reason: "course capacity approved".into(),
@@ -560,9 +557,6 @@ mod tests {
         }
     }
 
-    fn digest() -> Sha256Digest {
-        Sha256Digest::from_str(&"a".repeat(64)).unwrap_or_else(|_| unreachable!())
-    }
     fn timestamp(value: &str) -> UtcTimestamp {
         UtcTimestamp::from_str(value).unwrap_or_else(|_| unreachable!())
     }

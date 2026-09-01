@@ -392,10 +392,6 @@ async fn force_command(
             &format!("lab@{alias}"),
         ])
         .env("LABWEAVER_TARGET_ALIAS", &session.target_alias)
-        .env(
-            "LABWEAVER_TARGET_HOST_KEY_IDENTITY_SHA256",
-            session.target_ssh_host_key_identity_sha256.to_string(),
-        )
         .kill_on_drop(true)
         .spawn()
         .map_err(|_| GatewayError::Target)?;
@@ -457,17 +453,10 @@ fn known_host(
     } else {
         return Err(GatewayError::InvalidInput);
     }
-    let expected_identity = required_env("LABWEAVER_TARGET_HOST_KEY_IDENTITY_SHA256")?;
     let line = if invocation == "HOSTNAME" {
-        verified_known_host_line(
-            host,
-            fingerprint,
-            encoded_key,
-            &expected_host,
-            &expected_identity,
-        )?
+        verified_known_host_line(host, fingerprint, encoded_key, &expected_host)?
     } else {
-        verified_host_key_line(host, fingerprint, encoded_key, &expected_identity)?
+        verified_host_key_line(host, fingerprint, encoded_key)?
     };
     println!("{line}");
     Ok(())
@@ -492,29 +481,23 @@ fn verified_known_host_line(
     fingerprint: &str,
     encoded_key: &str,
     expected_host: &str,
-    expected_identity: &str,
 ) -> Result<String, GatewayError> {
     validate_alias(host)?;
     if expected_host != host {
         return Err(GatewayError::Authority);
     }
-    verified_host_key_line(host, fingerprint, encoded_key, expected_identity)
+    verified_host_key_line(host, fingerprint, encoded_key)
 }
 
 fn verified_host_key_line(
     host: &str,
     fingerprint: &str,
     encoded_key: &str,
-    expected_identity: &str,
 ) -> Result<String, GatewayError> {
     let key = PublicKey::from_openssh(&format!("ssh-ed25519 {encoded_key}"))
         .map_err(|_| GatewayError::InvalidInput)?;
     let observed_fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
     if observed_fingerprint != fingerprint {
-        return Err(GatewayError::Authority);
-    }
-    let observed_identity = format!("{:x}", Sha256::digest(fingerprint.as_bytes()));
-    if observed_identity != expected_identity {
         return Err(GatewayError::Authority);
     }
     Ok(format!("{host} ssh-ed25519 {encoded_key}"))
@@ -708,14 +691,12 @@ mod tests {
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFuGX5eSWJQm3kb+Jv4H0jHnI9I8FvkCcP9p3u3Cz5yz",
         )?;
         let fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
-        let identity = format!("{:x}", Sha256::digest(fingerprint.as_bytes()));
         assert!(
             verified_known_host_line(
                 "lw-abcdefghijklmnopqrst",
                 &fingerprint,
                 "AAAAC3NzaC1lZDI1NTE5AAAAIFuGX5eSWJQm3kb+Jv4H0jHnI9I8FvkCcP9p3u3Cz5yz",
                 "lw-abcdefghijklmnopqrst",
-                &identity,
             )
             .is_ok()
         );
@@ -725,7 +706,6 @@ mod tests {
                 &fingerprint,
                 "AAAAC3NzaC1lZDI1NTE5AAAAIFuGX5eSWJQm3kb+Jv4H0jHnI9I8FvkCcP9p3u3Cz5yz",
                 "lw-abcdefghijklmnopqrst",
-                &identity,
             )
             .is_err()
         );
@@ -761,15 +741,12 @@ mod tests {
         let encoded_key = "AAAAC3NzaC1lZDI1NTE5AAAAIFuGX5eSWJQm3kb+Jv4H0jHnI9I8FvkCcP9p3u3Cz5yz";
         let key = PublicKey::from_openssh(&format!("ssh-ed25519 {encoded_key}"))?;
         let fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
-        let identity = format!("{:x}", Sha256::digest(fingerprint.as_bytes()));
-        let line = verified_host_key_line("10.101.251.15", &fingerprint, encoded_key, &identity);
+        let line = verified_host_key_line("10.101.251.15", &fingerprint, encoded_key);
         assert_eq!(
             line.as_deref().ok(),
             Some(format!("10.101.251.15 ssh-ed25519 {encoded_key}").as_str())
         );
-        assert!(
-            verified_host_key_line("10.101.251.15", &fingerprint, encoded_key, "wrong").is_err()
-        );
+        assert!(verified_host_key_line("10.101.251.15", "SHA256:wrong", encoded_key).is_err());
         Ok(())
     }
 }

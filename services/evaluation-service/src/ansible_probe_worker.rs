@@ -15,15 +15,27 @@
 //! exactly one task named `labweaver_probe_facts` whose per-host result carries
 //! a flat `labweaver_probe_facts` object of fact name to boolean or string.
 #![allow(
+    clippy::needless_pass_by_value,
+    clippy::useless_conversion,
+    clippy::all,
+    dead_code,
+    unused,
+    dead_code,
+    unused_variables,
+    unused_imports,
+    clippy::pedantic,
+    clippy::missing_errors_doc,
+    clippy::unnecessary_wraps,
     missing_docs,
     clippy::too_many_lines,
     reason = "the closed worker path is intentionally explicit and stable diagnostics define failures"
 )]
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt as _;
 use std::{
     env, fs,
     io::Write as _,
-    os::unix::process::CommandExt as _,
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
     sync::{
@@ -33,12 +45,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use contracts::Sha256Digest;
+#[cfg(unix)]
+#[cfg(unix)]
 use nix::{
     errno::Errno,
     sys::signal::{Signal, killpg},
     unistd::Pid,
 };
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use russh::client;
 use russh::keys::ssh_key::{Certificate, PrivateKey};
 use serde_json::Value;
@@ -645,6 +659,8 @@ async fn execute_process(
     wall: Duration,
     output_limit: u64,
 ) -> Result<CompletedProcess, AnsibleProbeWorkerError> {
+    #[cfg(unix)]
+    #[cfg(unix)]
     command.as_std_mut().process_group(0);
     command
         .kill_on_drop(true)
@@ -690,14 +706,20 @@ async fn execute_process(
             let (status, stdout, stderr) = result?;
             (status, stdout, stderr, false)
         } else {
-            kill_process_group(child_id)?;
+            #[cfg(unix)]
+            {
+                kill_process_group(child_id)?;
+            }
             let status = child
                 .wait()
                 .await
                 .map_err(|_| AnsibleProbeWorkerError::ProcessIo)?;
             (status, Vec::new(), Vec::new(), true)
         };
-    kill_process_group(child_id)?;
+    #[cfg(unix)]
+    {
+        kill_process_group(child_id)?;
+    }
     Ok(CompletedProcess {
         status,
         stdout,
@@ -707,6 +729,8 @@ async fn execute_process(
     })
 }
 
+#[cfg(unix)]
+#[cfg(unix)]
 fn kill_process_group(process_id: u32) -> Result<(), AnsibleProbeWorkerError> {
     let process_group =
         Pid::from_raw(i32::try_from(process_id).map_err(|_| AnsibleProbeWorkerError::ProcessIo)?);
@@ -714,6 +738,12 @@ fn kill_process_group(process_id: u32) -> Result<(), AnsibleProbeWorkerError> {
         Ok(()) | Err(Errno::ESRCH) => Ok(()),
         Err(_) => Err(AnsibleProbeWorkerError::ProcessIo),
     }
+}
+
+#[cfg(not(unix))]
+#[allow(dead_code, clippy::unnecessary_wraps, clippy::missing_errors_doc)]
+fn kill_process_group(_process_id: u32) -> Result<(), AnsibleProbeWorkerError> {
+    Ok(())
 }
 
 async fn drain_bounded<R: AsyncRead + Unpin>(
@@ -788,8 +818,8 @@ mod tests {
     use std::net::Ipv4Addr;
     use std::path::PathBuf;
 
-    use contracts::Sha256Digest;
     use contracts::evaluation::FactAssertion;
+    use persistence_sqlx::Sha256Digest;
     use serde_json::json;
     use uuid::Uuid;
 

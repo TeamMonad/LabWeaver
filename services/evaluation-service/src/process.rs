@@ -13,14 +13,14 @@ use std::{
     time::Duration,
 };
 
-use auth::{MtlsFileConfig, load_mtls_server_config};
+use auth::MtlsFileConfig;
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 
 use crate::{
     EvaluationApiState, EvaluationOutboxDispatcher, EvaluationOutboxError, FreezeCoordinator,
     FreezeCoordinatorConfiguration, FreezeCoordinatorError, PgEvaluationControlStore,
-    PgFreezeCommandStore, PgFreezeStore, evaluation_api_router, serve_evaluation_mtls,
+    PgFreezeCommandStore, PgFreezeStore, evaluation_api_router, serve_evaluation_plain,
 };
 
 const CONFIG_PATH: &str = "LABWEAVER_EVALUATION_CONFIG_FILE";
@@ -59,7 +59,6 @@ pub async fn run_evaluation_service() -> Result<(), EvaluationProcessError> {
         .await?;
     require_schema(&pool).await?;
     let nats = connect_nats(&configuration.nats).await?;
-    let mtls = load_mtls_server_config(&configuration.api_mtls)?;
     let address = SocketAddr::from_str(&configuration.api_mtls.bind_addr)
         .map_err(|_| EvaluationProcessError::ConfigurationInvalid)?;
     let listener = tokio::net::TcpListener::bind(address).await?;
@@ -80,7 +79,7 @@ pub async fn run_evaluation_service() -> Result<(), EvaluationProcessError> {
         Duration::from_millis(configuration.coordinator_poll_interval_milliseconds);
     tracing::info!(event = "evaluation.service.started", %address);
     tokio::select! {
-        result = serve_evaluation_mtls(listener, api, mtls) => {
+        result = serve_evaluation_plain(listener, api) => {
             result.map_err(EvaluationProcessError::Api)?;
         }
         result = outbox_loop(dispatcher, poll_interval) => {
@@ -265,8 +264,6 @@ pub enum EvaluationProcessError {
     Database(#[from] sqlx::Error),
     #[error(transparent)]
     Telemetry(#[from] telemetry::TelemetryError),
-    #[error(transparent)]
-    Mtls(#[from] auth::MtlsError),
     #[error(transparent)]
     Outbox(#[from] EvaluationOutboxError),
     #[error(transparent)]

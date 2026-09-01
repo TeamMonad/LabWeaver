@@ -1,3 +1,4 @@
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -14,9 +15,7 @@ use contracts::environment::{
     EndpointHealth, EnvironmentEndpoint, EnvironmentInstance, ObservedEnvironmentState,
 };
 use contracts::supply_chain::{ImageArtifact, VirtualMachineBaseDisk, VirtualMachineDiskFormat};
-use contracts::{
-    ArtifactRef, EndpointId, EnvironmentId, OperationId, Revision, Sha256Digest, UtcTimestamp,
-};
+use contracts::{ArtifactRef, EndpointId, EnvironmentId, OperationId, Revision, UtcTimestamp};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1548,7 +1547,7 @@ where
             "labweaver.io/release-version": projection.release.version.to_string(),
             "labweaver.io/base-disk-binding": base_disk.binding,
             "labweaver.io/base-disk-source-registry": base_disk.source_registry_digest,
-            "labweaver.io/base-disk-sha256": base_disk.disk_sha256.to_string(),
+            "labweaver.io/base-disk-sha256": base_disk.capacity_bytes.to_string(),
             "labweaver.io/environment-generation": instance.generation.to_string(),
         });
         let resources = &projection.environment_spec.resources;
@@ -1982,7 +1981,7 @@ fn ready_observation(
             protocol: contracts::environment::EndpointProtocol::Ssh,
             revision,
             health: EndpointHealth::Healthy,
-            ssh_host_key_identity_sha256: Some(observed.ssh_host_key_sha256),
+
             observed_at: observed.observed_at,
         }],
         cleanup_evidence: None,
@@ -2127,7 +2126,6 @@ fn valid_guest_user(value: &str) -> bool {
 
 fn valid_artifact_ref(artifact: &ArtifactRef) -> bool {
     artifact.size_bytes > 0
-        && artifact.sha256 != Sha256Digest::of_bytes(&[])
         && !artifact.store_binding.trim().is_empty()
         && !artifact.object_version.trim().is_empty()
         && !artifact.media_type.trim().is_empty()

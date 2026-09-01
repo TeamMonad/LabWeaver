@@ -17,8 +17,6 @@ metrics.workspace = true
 openidconnect.workspace = true
 rand.workspace = true
 reqwest.workspace = true
-rustls.workspace = true
-rustls-pemfile.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -31,7 +29,6 @@ time.workspace = true
 tokio.workspace = true
 url.workspace = true
 uuid.workspace = true
-x509-parser.workspace = true
 
 [dev-dependencies]
 axum.workspace = true

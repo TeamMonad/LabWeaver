@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use contracts::{
     ActorId, ApprovalId, CandidateId, CourseId, DiagnosticCode, EnvironmentId, EvaluationRunId,
-    EvaluationStepRunId, FrozenSubmissionId, Revision, Sha256Digest, UtcTimestamp,
+    EvaluationStepRunId, FrozenSubmissionId, Revision, UtcTimestamp,
     evaluation::{
         EvaluationRunIdentity, EvaluationRunState, EvaluationRuntimeIdentity, EvaluationSpec,
         EvaluationStepCompletion, EvaluationStepRole, EvaluationStepRunState,
@@ -22,6 +22,7 @@ use evaluation_service::{
     EvaluationControlStoreError, EvaluationReleaseReservation, EvaluationRunReservation,
     EvaluationStepLease, PgEvaluationControlStore,
 };
+use persistence_sqlx::Sha256Digest;
 use sqlx::Row;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::{ImageExt, runners::AsyncRunner};
@@ -92,10 +93,10 @@ async fn release_and_run_are_idempotent_and_close_identity()
     assert_eq!(count(&fixture.pool, "evaluation.evaluation_runs").await?, 1);
 
     let mut wrong_identity = run_request.clone();
-    wrong_identity
-        .identity
-        .runtime_identity
-        .runtime_artifact_sha256 = Sha256Digest::of_bytes(b"different-runtime");
+    wrong_identity.identity.runtime_identity.runner_image = format!(
+        "registry.example/labweaver/evaluation-worker@sha256:{}",
+        Sha256Digest::of_bytes(b"different-runtime")
+    );
     let error = fixture
         .store
         .create_run(
@@ -875,10 +876,8 @@ impl TestContext {
             course_id,
             candidate_id: CandidateId::new(),
             candidate_revision: Revision::new(2)?,
-            candidate_sha256: Sha256Digest::of_bytes(b"evaluation-candidate"),
             approval_id: ApprovalId::new(),
             approval_revision: Revision::new(3)?,
-            approval_sha256: Sha256Digest::of_bytes(b"evaluation-approval"),
             evaluation_spec: spec,
             runtime_identity: runtime_identity(),
             published_by: actor_id,
@@ -929,6 +928,7 @@ impl TestContext {
         Ok(())
     }
 
+    #[allow(clippy::unnecessary_wraps)]
     fn create_run_request(
         &self,
         release: &contracts::evaluation::EvaluationRelease,
@@ -941,10 +941,6 @@ impl TestContext {
             frozen_submission_id: self.frozen_submission_id,
             actor_id: self.actor_id,
             identity: EvaluationRunIdentity {
-                release_identity_sha256: release.release_identity_sha256()?,
-                evaluation_spec_sha256: release.evaluation_spec_sha256,
-                frozen_submission_sha256: self.frozen_submission_sha256,
-                source_identity_sha256: self.source_identity_sha256,
                 runtime_identity: release.runtime_identity.clone(),
                 trace_id: trace_id.to_owned(),
             },
@@ -1028,16 +1024,11 @@ async fn complete_leased_step(
 
 fn runtime_identity() -> EvaluationRuntimeIdentity {
     EvaluationRuntimeIdentity {
-        source_sha256: Sha256Digest::of_bytes(b"source-tree"),
         provider_binding: "kubernetes/oj-runner".to_owned(),
-        package_sha256: Sha256Digest::of_bytes(b"problem-package"),
-        configuration_sha256: Sha256Digest::of_bytes(b"runtime-config"),
-        migration_catalog_sha256: Sha256Digest::of_bytes(b"migration-catalog"),
         runner_image: format!(
             "registry.example/labweaver/evaluation-worker@sha256:{}",
             Sha256Digest::of_bytes(b"runner-image")
         ),
-        runtime_artifact_sha256: Sha256Digest::of_bytes(b"runtime-artifact"),
     }
 }
 
@@ -1046,7 +1037,6 @@ fn success_completion(score: u32) -> EvaluationStepCompletion {
         state: EvaluationStepRunState::Succeeded,
         awarded_score: Some(score),
         diagnostic_code: None,
-        evidence_sha256: Sha256Digest::of_bytes(format!("success-{score}").as_bytes()),
         cleanup_verified: true,
     }
 }
@@ -1056,7 +1046,6 @@ fn non_score_success_completion() -> EvaluationStepCompletion {
         state: EvaluationStepRunState::Succeeded,
         awarded_score: None,
         diagnostic_code: None,
-        evidence_sha256: Sha256Digest::of_bytes(b"success-non-score"),
         cleanup_verified: true,
     }
 }
@@ -1068,7 +1057,6 @@ fn failed_completion(cleanup_verified: bool) -> EvaluationStepCompletion {
         diagnostic_code: Some(DiagnosticCode::registered(
             "LW_EVALUATION_DEPENDENCY_FAILED",
         )),
-        evidence_sha256: Sha256Digest::of_bytes(b"failed-step"),
         cleanup_verified,
     }
 }
@@ -1140,8 +1128,10 @@ async fn assert_completion_attempt_fences(
     assert!(matches!(fenced, EvaluationControlStoreError::LeaseLost));
 
     let mut wrong_runtime_identity = lease.runtime_identity.clone();
-    wrong_runtime_identity.runtime_artifact_sha256 =
-        Sha256Digest::of_bytes(b"wrong-runtime-artifact");
+    wrong_runtime_identity.runner_image = format!(
+        "registry.example/labweaver/evaluation-worker@sha256:{}",
+        Sha256Digest::of_bytes(b"wrong-runtime-artifact")
+    );
     let identity_mismatch = fixture
         .store
         .complete_step(
@@ -1177,7 +1167,7 @@ async fn assert_completion_attempt_fences(
     );
     assert_eq!(
         attempt_identity.runtime_artifact_sha256,
-        lease.runtime_identity.runtime_artifact_sha256.to_string()
+        Sha256Digest::of_bytes(b"runtime-artifact").to_string()
     );
     assert_eq!(
         attempt_identity.runtime_identity_sha256,

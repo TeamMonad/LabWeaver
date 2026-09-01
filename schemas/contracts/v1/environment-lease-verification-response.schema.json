@@ -14,7 +14,7 @@
     },
     "EnvironmentLeaseAuthorization": {
       "additionalProperties": false,
-      "description": "Resource-authoritative Active Lease snapshot retained with the accepted operation.",
+      "description": "Resource-authoritative Active Lease snapshot retained with the accepted operation.\nPrivate single-university deployment simplifies this to a TTL/PVC binding:\n`capacity_binding` maps directly to the Work PVC name and `expires_at` is\nthe authoritative TTL; no separate capacity-shell hash is required.",
       "properties": {
         "activeFrom": {
           "$ref": "#/$defs/UtcTimestamp"

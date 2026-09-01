@@ -2,8 +2,9 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use contracts::Sha256Digest;
 use serde::{Deserialize, Serialize};
+
+use crate::Sha256Digest;
 
 use crate::{Domain, PersistenceError};
 
@@ -15,8 +16,9 @@ pub struct CatalogMigration {
     pub id: u64,
     /// Catalog-relative, normalized SQL filename.
     pub file: String,
-    /// Exact file content identity.
-    pub sha256: Sha256Digest,
+    /// Optional file content identity; when None only existence is verified (thinned catalog).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<Sha256Digest>,
 }
 
 /// Ordered Migration list for one authoritative domain.
@@ -78,12 +80,14 @@ impl MigrationCatalog {
         let bytes = fs::read(&path).map_err(|error| {
             PersistenceError::Catalog(format!("cannot read {}: {error}", path.display()))
         })?;
-        let observed = Sha256Digest::of_bytes(&bytes);
-        if observed != migration.sha256 {
-            return Err(PersistenceError::IdentityMismatch(format!(
-                "{} expected {} but observed {}",
-                migration.file, migration.sha256, observed
-            )));
+        if let Some(expected) = &migration.sha256 {
+            let observed = Sha256Digest::of_bytes(&bytes);
+            if &observed != expected {
+                return Err(PersistenceError::IdentityMismatch(format!(
+                    "{} expected {} but observed {}",
+                    migration.file, expected, observed
+                )));
+            }
         }
         let sql = String::from_utf8(bytes).map_err(|error| {
             PersistenceError::Catalog(format!("{} is not UTF-8: {error}", migration.file))
@@ -178,7 +182,7 @@ fn reject_non_transactional_sql(file: &str, sql: &str) -> Result<(), Persistence
 #[cfg(test)]
 mod tests {
     use super::{CatalogMigration, MigrationCatalog};
-    use contracts::Sha256Digest;
+    use crate::Sha256Digest;
 
     #[test]
     fn repository_catalog_is_valid_and_deterministic() -> Result<(), Box<dyn std::error::Error>> {
@@ -197,13 +201,32 @@ mod tests {
         let migration = CatalogMigration {
             id: 1,
             file: "control/0001.sql".to_owned(),
-            sha256: Sha256Digest::of_bytes(b"CREATE TABLE expected_identity (id integer);"),
+            sha256: Some(Sha256Digest::of_bytes(
+                b"CREATE TABLE expected_identity (id integer);",
+            )),
         };
         std::fs::write(&file, "CREATE TABLE substituted_identity (id integer);")?;
         let Err(error) = MigrationCatalog::read_verified_sql(&root, &migration) else {
             return Err("tampered migration was accepted".into());
         };
         assert_eq!(error.diagnostic_code(), "DB_MIGRATION_IDENTITY_MISMATCH");
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn thinned_catalog_without_sha256_passes_existence_check()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!("labweaver-catalog-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(root.join("control"))?;
+        let file = root.join("control/0001.sql");
+        std::fs::write(&file, "CREATE TABLE t (id integer);")?;
+        let migration = CatalogMigration {
+            id: 1,
+            file: "control/0001.sql".to_owned(),
+            sha256: None,
+        };
+        assert!(MigrationCatalog::read_verified_sql(&root, &migration).is_ok());
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

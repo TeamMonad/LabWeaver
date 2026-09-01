@@ -5,11 +5,12 @@
     reason = "the internal dispatcher exposes only stable diagnostics"
 )]
 
-use std::{str::FromStr, time::Duration};
+use persistence_sqlx::Sha256Digest;
+use std::{str::FromStr, time::Duration}; // internal persistence hash, not contract hash
 
 use async_nats::jetstream::message::PublishMessage;
 use contracts::{
-    EventId, Sha256Digest,
+    EventId,
     events::{CloudEvent, EVENT_CONTRACTS},
 };
 use serde_json::Value;

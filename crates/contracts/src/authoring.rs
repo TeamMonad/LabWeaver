@@ -10,7 +10,7 @@ use crate::evaluation::EvaluationSpec;
 use crate::supply_chain::VirtualMachineBaseDisk;
 use crate::{
     ActorId, AgentRunId, ApprovalId, ArtifactRef, CandidateId, CourseId, PolicyId,
-    ProblemPackageId, RetentionSnapshot, Revision, Sha256Digest, UtcTimestamp,
+    ProblemPackageId, RetentionSnapshot, Revision, UtcTimestamp,
 };
 
 /// One immutable file in a teacher ProblemPackage.
@@ -31,13 +31,12 @@ pub struct ProblemPackage {
     pub course_id: CourseId,
     pub revision: Revision,
     pub files: Vec<PackageFile>,
-    pub manifest_sha256: Sha256Digest,
     pub retention: RetentionSnapshot,
     pub completed_at: UtcTimestamp,
 }
 
 impl ProblemPackage {
-    /// Validates atomic package identity and recomputes the canonical manifest hash.
+    /// Validates atomic package identity.
     pub fn validate(&self) -> Result<(), AuthoringError> {
         if self.files.is_empty() {
             return Err(AuthoringError::InvalidPackage(
@@ -63,11 +62,6 @@ impl ProblemPackage {
             previous = Some(&file.path);
             validate_artifact_ref(&file.object)?;
         }
-        let computed = Sha256Digest::of_canonical(&self.files)
-            .map_err(|error| AuthoringError::InvalidPackage(error.to_string()))?;
-        if computed != self.manifest_sha256 {
-            return Err(AuthoringError::PackageHashMismatch);
-        }
         Ok(())
     }
 }
@@ -86,10 +80,6 @@ pub struct ClaudeCodeBindingV1 {
     pub model: String,
     /// Exact Claude Code CLI version baked into the worker image.
     pub claude_code_version: String,
-    /// Immutable SHA-256 identity of the worker container image.
-    pub worker_image_sha256: Sha256Digest,
-    /// Hash of the effective sanitized Claude Code runtime configuration.
-    pub runtime_config_sha256: Sha256Digest,
     /// Maximum concurrent Claude Code child processes admitted by one worker instance.
     pub max_in_flight_per_worker: u16,
 }
@@ -584,8 +574,6 @@ pub struct LlmUsage {
 pub struct AgentAttempt {
     pub number: u32,
     pub state: AgentAttemptState,
-    pub input_sha256: Sha256Digest,
-    pub output_sha256: Option<Sha256Digest>,
     pub checkpoint: Option<ArtifactRef>,
     pub usage: LlmUsage,
     /// Whether a terminal provider envelope made this usage observable.
@@ -659,11 +647,6 @@ impl AgentRun {
                     ));
                 }
                 match attempt.state {
-                    AgentAttemptState::Succeeded if attempt.output_sha256.is_none() => {
-                        return Err(AuthoringError::InvalidAgentRun(
-                            "successful attempt requires immutable output hash".to_owned(),
-                        ));
-                    }
                     AgentAttemptState::Succeeded if !attempt.usage_observed => {
                         return Err(AuthoringError::InvalidAgentRun(
                             "successful attempt requires observed usage".to_owned(),
@@ -763,9 +746,7 @@ pub struct EnvironmentCandidate {
     pub run_id: AgentRunId,
     pub revision: Revision,
     pub spec: EnvironmentSpec,
-    pub spec_sha256: Sha256Digest,
     pub policy_revision: Revision,
-    pub schema_sha256: Sha256Digest,
     pub model: String,
     pub created_at: UtcTimestamp,
 }
@@ -773,13 +754,9 @@ pub struct EnvironmentCandidate {
 impl EnvironmentCandidate {
     pub fn validate(&self) -> Result<(), AuthoringError> {
         self.spec.validate()?;
-        if self.model.trim().is_empty()
-            || Sha256Digest::of_canonical(&self.spec).map_err(|_| {
-                AuthoringError::InvalidEnvironmentSpec("canonical hash failed".to_owned())
-            })? != self.spec_sha256
-        {
+        if self.model.trim().is_empty() {
             return Err(AuthoringError::InvalidEnvironmentSpec(
-                "candidate model or spec hash is invalid".to_owned(),
+                "candidate model is invalid".to_owned(),
             ));
         }
         Ok(())
@@ -794,22 +771,16 @@ pub struct EvaluationCandidate {
     pub run_id: AgentRunId,
     pub revision: Revision,
     pub spec: EvaluationSpec,
-    pub spec_sha256: Sha256Digest,
     pub policy_revision: Revision,
-    pub schema_sha256: Sha256Digest,
     pub model: String,
     pub created_at: UtcTimestamp,
 }
 
 impl EvaluationCandidate {
     pub fn validate(&self) -> Result<(), AuthoringError> {
-        if self.model.trim().is_empty()
-            || Sha256Digest::of_canonical(&self.spec).map_err(|_| {
-                AuthoringError::InvalidAgentRun("canonical EvaluationSpec hash failed".to_owned())
-            })? != self.spec_sha256
-        {
+        if self.model.trim().is_empty() {
             return Err(AuthoringError::InvalidAgentRun(
-                "candidate model or spec hash is invalid".to_owned(),
+                "candidate model is invalid".to_owned(),
             ));
         }
         Ok(())
@@ -832,9 +803,7 @@ pub struct CandidateApproval {
     pub id: ApprovalId,
     pub candidate_id: CandidateId,
     pub candidate_revision: Revision,
-    pub candidate_sha256: Sha256Digest,
     pub policy_revision: Revision,
-    pub schema_sha256: Sha256Digest,
     pub trust_revision: Revision,
     pub actor_id: ActorId,
     pub decision: CandidateDecision,
@@ -848,16 +817,12 @@ impl CandidateApproval {
     pub fn is_release_eligible(
         &self,
         candidate_revision: Revision,
-        candidate_sha256: Sha256Digest,
         active_policy_revision: Revision,
-        active_schema_sha256: Sha256Digest,
         active_trust_revision: Revision,
     ) -> bool {
         self.decision == CandidateDecision::Approved
             && self.candidate_revision == candidate_revision
-            && self.candidate_sha256 == candidate_sha256
             && self.policy_revision == active_policy_revision
-            && self.schema_sha256 == active_schema_sha256
             && self.trust_revision == active_trust_revision
     }
 }
@@ -899,16 +864,16 @@ pub enum AuthoringError {
 }
 
 impl AuthoringError {
-    /// Returns the stable blocking diagnostic.
+    /// Returns the stable blocking diagnostic (coarse-grained with detail in `detail`).
     #[must_use]
     pub const fn diagnostic_code(&self) -> &'static str {
         match self {
-            Self::RuntimeBindingRequired => diagnostic::AGENT_RUNTIME_BINDING_REQUIRED,
-            Self::ModelRequired => diagnostic::LLM_MODEL_REQUIRED,
-            Self::RuntimeIdentityInvalid => diagnostic::AGENT_RUNTIME_IDENTITY_INVALID,
-            Self::InvalidBudget | Self::HardDenyClassesModified => diagnostic::LLM_EGRESS_DENIED,
-            Self::PackageHashMismatch => diagnostic::SUBMISSION_HASH_MISMATCH,
-            Self::InvalidEnvironmentSpec(_) => diagnostic::ENV_PROVIDER_BINDING_REQUIRED,
+            Self::RuntimeBindingRequired
+            | Self::ModelRequired
+            | Self::RuntimeIdentityInvalid
+            | Self::InvalidEnvironmentSpec(_) => diagnostic::INVALID_REQUEST,
+            Self::InvalidBudget | Self::HardDenyClassesModified => diagnostic::ACCESS_DENIED,
+            Self::PackageHashMismatch => diagnostic::HASH_MISMATCH,
             Self::InvalidPackage(_) | Self::InvalidArtifactReference | Self::InvalidAgentRun(_) => {
                 diagnostic::CONTRACT_DOCUMENT_INVALID
             }

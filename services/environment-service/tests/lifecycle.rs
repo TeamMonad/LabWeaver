@@ -8,7 +8,7 @@ use contracts::environment::{
     DesiredEnvironmentState, EndpointHealth, EnvironmentLeaseAuthorization,
     EnvironmentOperationKind, EnvironmentResetTarget, ObservedEnvironmentState, OperationState,
 };
-use contracts::{ActorId, ArtifactId, ArtifactRef, LeaseId, OperationId, Sha256Digest};
+use contracts::{ActorId, ArtifactId, ArtifactRef, LeaseId, OperationId};
 use environment_service::{
     LifecycleCommand, LifecycleError, ProviderObservation, apply_provider_failure,
     apply_provider_observation, apply_retry, begin_timeout_cleanup, plan_command,
@@ -667,7 +667,6 @@ fn cleanup_evidence() -> ArtifactRef {
         artifact_id: ArtifactId::new(),
         store_binding: "environment-cleanup-evidence-v1".to_owned(),
         object_version: "version-0001".to_owned(),
-        sha256: Sha256Digest::of_bytes(b"cleanup evidence"),
         size_bytes: 16,
         media_type: "application/json".to_owned(),
     }

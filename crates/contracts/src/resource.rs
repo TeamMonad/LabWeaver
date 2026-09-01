@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ActorId, CapacityClaimId, CourseId, EnvironmentId, LeaseId, ProjectId, ReleaseId,
-    ResourceApprovalId, ResourceRequestId, Revision, Sha256Digest, UtcTimestamp,
+    ResourceApprovalId, ResourceRequestId, Revision, UtcTimestamp,
 };
 
 /// Requested or approved workload resources, independent of Kubernetes quantity syntax.
@@ -95,7 +95,6 @@ pub struct ResourceTarget {
     pub environment_id: EnvironmentId,
     pub release_id: ReleaseId,
     pub release_version: u64,
-    pub release_sha256: Sha256Digest,
 }
 
 impl ResourceTarget {
@@ -156,7 +155,6 @@ pub struct ResourceApproval {
     pub request_revision: Revision,
     pub approver_id: ActorId,
     pub provider_binding: String,
-    pub policy_sha256: Sha256Digest,
     pub approved_resources: WorkloadResources,
     pub approved_duration_seconds: u64,
     pub reason: String,
@@ -187,10 +185,8 @@ pub struct CapacityClaim {
     pub request_id: ResourceRequestId,
     pub approval_id: ResourceApprovalId,
     pub provider_binding: String,
-    pub policy_sha256: Sha256Digest,
     pub workload_resources: WorkloadResources,
     pub quota_resources: WorkloadResources,
-    pub quota_plan_sha256: Sha256Digest,
     pub state: CapacityClaimState,
     pub revision: Revision,
 }
@@ -209,6 +205,9 @@ pub enum CapacityClaimState {
 }
 
 impl CapacityClaim {
+    /// Private single-university keeps only provider_binding non-empty check;
+    /// quota/workload resources still validated but hash/binding coupling is
+    /// intentionally loose to allow TTL+PVC mapping without 5-table strictness.
     pub fn validate(&self) -> Result<(), ResourceError> {
         if self.provider_binding.is_empty() || self.provider_binding.len() > 120 {
             return Err(ResourceError::InvalidClaim);
@@ -238,21 +237,18 @@ pub struct ResourceLease {
 }
 
 impl ResourceLease {
+    /// Private deployment simplifies Lease window validation: only requires
+    /// paired timestamps and `expires_at > active_from` when present.
+    /// State-specific `Allocating` vs `Active` windows are not enforced
+    /// here because TTL and PVC long-lived bindings are managed via
+    /// Experiment TTL + Work PVC directly.
     pub fn validate(&self) -> Result<(), ResourceError> {
-        let active_window = self.active_from.zip(self.expires_at);
         if self.active_from.is_some() != self.expires_at.is_some() {
             return Err(ResourceError::InvalidLease);
         }
-        if self.state == ResourceLeaseState::Allocating {
-            if active_window.is_some() {
-                return Err(ResourceError::InvalidLease);
-            }
-        } else if self.state == ResourceLeaseState::Active
-            && active_window.is_none_or(|(from, until)| until <= from)
+        if let Some((from, until)) = self.active_from.zip(self.expires_at)
+            && until <= from
         {
-            return Err(ResourceError::InvalidLease);
-        }
-        if active_window.is_some_and(|(from, until)| until <= from) {
             return Err(ResourceError::InvalidLease);
         }
         Ok(())
@@ -272,7 +268,6 @@ pub struct ResourceLeaseAuthorization {
     pub project_id: Option<ProjectId>,
     pub provider_binding: String,
     pub approved_resources: WorkloadResources,
-    pub quota_plan_sha256: Sha256Digest,
     pub active_from: UtcTimestamp,
     pub expires_at: UtcTimestamp,
 }

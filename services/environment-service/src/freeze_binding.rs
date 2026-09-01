@@ -1,9 +1,10 @@
 //! Environment-authoritative immutable submission source resolution.
 
-use std::{path::PathBuf, sync::Arc};
+use persistence_sqlx::Sha256Digest;
+use std::{path::PathBuf, sync::Arc}; // internal persistence hash, not contract hash
 
 use contracts::{
-    EnvironmentId, Sha256Digest, UtcTimestamp,
+    EnvironmentId, UtcTimestamp,
     authoring::RuntimeKind,
     environment::{DesiredEnvironmentState, EndpointHealth, ObservedEnvironmentState},
     submission::{
@@ -120,9 +121,6 @@ impl FreezeBindingService {
             release_id: instance.release_id,
             release_version: instance.release_version,
             runtime_kind: instance.runtime_kind,
-            runtime_artifact_sha256: artifact
-                .content_sha256()
-                .map_err(|_| FreezeBindingError::ReleaseIdentityMismatch)?,
             build_request_id: match artifact {
                 ImageArtifact::Container {
                     build_request_id, ..
@@ -174,14 +172,8 @@ impl FreezeBindingService {
         let vm_uid: uuid::Uuid = row.try_get("vm_uid")?;
         let root_disk_uid: uuid::Uuid = row.try_get("root_disk_uid")?;
         let host: String = row.try_get("service_cluster_ip")?;
-        let expected_host_key_sha256 = row
-            .try_get::<String, _>("ssh_host_key_sha256")?
-            .parse()
-            .map_err(|_| FreezeBindingError::ObservationInvalid)?;
-        let observation_sha256 = row
-            .try_get::<String, _>("observation_sha256")?
-            .parse::<Sha256Digest>()
-            .map_err(|_| FreezeBindingError::ObservationInvalid)?;
+        let expected_host_key_sha256 = row.try_get::<String, _>("ssh_host_key_sha256")?;
+        let observation_sha256 = row.try_get::<String, _>("observation_sha256")?;
         let source_identity = Sha256Digest::of_canonical(&serde_json::json!({
             "environmentId": environment_id,
             "generation": generation,
@@ -192,7 +184,8 @@ impl FreezeBindingService {
             "sshHostKeySha256": expected_host_key_sha256,
             "observationSha256": observation_sha256,
         }))
-        .map_err(|_| FreezeBindingError::ObservationInvalid)?;
+        .map_err(|_| FreezeBindingError::ObservationInvalid)?
+        .to_string();
         let expires_at =
             UtcTimestamp::from_utc(now.get() + time::Duration::seconds(CERTIFICATE_TTL_SECONDS))
                 .map_err(|_| FreezeBindingError::CertificateFailed)?;

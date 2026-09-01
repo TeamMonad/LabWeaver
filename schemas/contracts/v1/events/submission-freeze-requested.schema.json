@@ -32,13 +32,6 @@
       "minimum": 0,
       "type": "integer"
     },
-    "Sha256Digest": {
-      "description": "Canonical lowercase SHA-256 digest.",
-      "maxLength": 64,
-      "minLength": 64,
-      "pattern": "^[0-9a-f]{64}$",
-      "type": "string"
-    },
     "SubmissionFreezeRequested": {
       "additionalProperties": false,
       "properties": {
@@ -50,15 +43,11 @@
         },
         "frozenSubmissionId": {
           "$ref": "#/$defs/FrozenSubmissionId"
-        },
-        "manifestSha256": {
-          "$ref": "#/$defs/Sha256Digest"
         }
       },
       "required": [
         "frozenSubmissionId",
         "environmentId",
-        "manifestSha256",
         "frozenBy"
       ],
       "type": "object"

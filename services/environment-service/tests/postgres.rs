@@ -23,7 +23,7 @@ use contracts::events::{CloudEvent, EVENT_CONTRACTS, ReleaseWithdrawn, SPEC_VERS
 use contracts::supply_chain::{VirtualMachineBaseDisk, VirtualMachineDiskFormat};
 use contracts::{
     ActorId, ArtifactId, ArtifactRef, CourseId, EndpointId, EnvironmentId, EventId, OperationId,
-    ReleaseId, Revision, Sequence, Sha256Digest, UtcTimestamp,
+    ReleaseId, Revision, Sequence, UtcTimestamp,
 };
 use environment_service::{
     CONTAINER_BACKEND_PROTOCOL_VERSION, ContainerApplyObservation, ContainerBackendFence,
@@ -42,6 +42,7 @@ use environment_service::{
     ReconcileAction, ReconcileWorker, ReconcileWorkerOutcome, Reconciler,
     ReleaseProjectionDecision, apply_provider_observation,
 };
+use persistence_sqlx::Sha256Digest;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
@@ -853,7 +854,6 @@ impl ContainerExecutorBackend for CountingContainerExecutor {
                         artifact_id: ArtifactId::new(),
                         store_binding: "environment-cleanup-evidence-v1".to_owned(),
                         object_version: plan.plan_sha256.to_string(),
-                        sha256: Sha256Digest::of_bytes(plan.namespace.as_bytes()),
                         size_bytes: 1,
                         media_type: "application/json".to_owned(),
                     },
@@ -1117,7 +1117,6 @@ impl KubeVirtExecutorBackend for CountingKubeVirtExecutor {
                         artifact_id: ArtifactId::new(),
                         store_binding: "environment-cleanup-evidence-v1".to_owned(),
                         object_version: plan.plan_sha256.to_string(),
-                        sha256: Sha256Digest::of_bytes(plan.namespace.as_bytes()),
                         size_bytes: 1,
                         media_type: "application/json".to_owned(),
                     },
@@ -1239,7 +1238,6 @@ fn kubevirt_executor_plan(environment_id: EnvironmentId) -> KubeVirtResourcePlan
                 "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
             )
             .to_owned(),
-            disk_sha256: Sha256Digest::of_bytes(b"vm-base-disk"),
             capacity_bytes: 10_737_418_240,
         },
         base_disk_format: VirtualMachineDiskFormat::Qcow2,
@@ -1339,7 +1337,6 @@ async fn kubevirt_observation_identity_is_durable_fenced_and_tombstoned()
                 "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
             )
             .to_owned(),
-            disk_sha256: Sha256Digest::of_bytes(b"vm-base-disk"),
             capacity_bytes: 10_737_418_240,
         },
         base_disk_format: VirtualMachineDiskFormat::Qcow2,
@@ -1421,7 +1418,6 @@ async fn kubevirt_observation_identity_is_durable_fenced_and_tombstoned()
         artifact_id: ArtifactId::new(),
         store_binding: "environment-cleanup-evidence-v1".to_owned(),
         object_version: "cleanup-1".to_owned(),
-        sha256: Sha256Digest::of_bytes(b"cleanup-evidence"),
         size_bytes: 1,
         media_type: "application/json".to_owned(),
     };
@@ -1627,7 +1623,6 @@ impl EnvironmentProvider for LifecycleSuccessProvider {
                         protocol: EndpointProtocol::Https,
                         revision: next_revision,
                         health: EndpointHealth::Healthy,
-                        ssh_host_key_identity_sha256: None,
                         observed_at: timestamp("2026-07-14T00:01:00.000Z"),
                     }],
                     cleanup_evidence: None,
@@ -1641,7 +1636,6 @@ impl EnvironmentProvider for LifecycleSuccessProvider {
                     artifact_id: ArtifactId::new(),
                     store_binding: "environment-cleanup-evidence-v1".to_owned(),
                     object_version: instance.operation.id.to_string(),
-                    sha256: Sha256Digest::of_bytes(instance.operation.id.to_string().as_bytes()),
                     size_bytes: 1,
                     media_type: "application/json".to_owned(),
                 }),

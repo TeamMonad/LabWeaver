@@ -37,7 +37,7 @@ pub use auth::{
 };
 pub use diagnostic::{DiagnosticCode, ProblemDetails, Violation};
 pub use foundation::*;
-pub use http::{OperationScopeKind, operation_authorization};
+pub use http::{OperationScopeKind, operation_contract};
 
 /// Stable public REST major version.
 pub const API_VERSION: &str = "v1";

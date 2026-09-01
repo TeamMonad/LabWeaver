@@ -76,13 +76,15 @@ impl EnvironmentOwnerResolverClient {
             .map_err(|_| OwnerResolverClientError::CertificateMaterial)?;
 
         let mut builder = Client::builder()
-            .https_only(true)
             .tls_built_in_root_certs(false)
             .redirect(reqwest::redirect::Policy::none())
             .identity(identity)
             .timeout(Duration::from_millis(config.timeout_milliseconds));
+        // Private single-university: allow plain HTTP when transport is InsecureTestOnly.
         if transport_security == TransportSecurityMode::InsecureTestOnly {
             builder = builder.danger_accept_invalid_certs(true);
+        } else {
+            builder = builder.https_only(true);
         }
         for root in roots {
             builder = builder.add_root_certificate(root);

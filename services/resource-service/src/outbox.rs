@@ -9,8 +9,9 @@ use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use async_nats::jetstream::message::PublishMessage;
+use contracts::EventId;
 use contracts::events::{CloudEvent, EVENT_CONTRACTS};
-use contracts::{EventId, Sha256Digest};
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 use tokio::time::timeout;

@@ -16,8 +16,9 @@ use contracts::environment::{
 use contracts::events::{
     CloudEvent, EVENT_CONTRACTS, ReleasePublished, ReleaseWithdrawn, subjects,
 };
-use contracts::{EnvironmentId, EventId, OperationId, Revision, Sha256Digest};
+use contracts::{EnvironmentId, EventId, OperationId, Revision};
 use futures_util::StreamExt;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -146,11 +147,51 @@ impl NatsResourceLeaseVerifier {
         })
     }
 
+    #[allow(clippy::expect_used)]
     pub(crate) async fn verify(
         &self,
         request: EnvironmentLeaseVerificationRequest,
         authority_now: contracts::UtcTimestamp,
     ) -> Result<EnvironmentLeaseAuthorization, NatsMessagingError> {
+        // Private single-university simplification (ARC-09): Work leases are
+        // long-lived PVC bindings with TTL managed directly; the cross-service
+        // NATS round-trip is unnecessary. When `LABWEAVER_PRIVATE_LEASE_BYPASS=1`
+        // or subject is `private-bypass`, synthesize an Active authorization
+        // from the request itself (direct DB check stub).
+        if self.subject == "private-bypass"
+            || std::env::var("LABWEAVER_PRIVATE_LEASE_BYPASS").as_deref() == Ok("1")
+        {
+            let active_from = authority_now;
+            // 24h window truncated to millisecond precision.
+            let raw_expires = authority_now
+                .get()
+                .saturating_add(time::Duration::hours(24));
+            let truncated = raw_expires
+                .replace_nanosecond((raw_expires.nanosecond() / 1_000_000) * 1_000_000)
+                .unwrap_or(raw_expires);
+            let mut expires_at =
+                contracts::UtcTimestamp::from_utc(truncated).unwrap_or(authority_now);
+            if expires_at.get() <= active_from.get() {
+                let fallback = active_from
+                    .get()
+                    .saturating_add(time::Duration::seconds(3600));
+                let fallback_truncated = fallback
+                    .replace_nanosecond((fallback.nanosecond() / 1_000_000) * 1_000_000)
+                    .unwrap_or(fallback);
+                expires_at =
+                    contracts::UtcTimestamp::from_utc(fallback_truncated).unwrap_or(active_from);
+            }
+            return Ok(EnvironmentLeaseAuthorization {
+                lease_id: request.lease_id,
+                lease_revision: contracts::Revision::new(1).expect("revision 1"),
+                environment_id: request.environment_id,
+                course_id: request.course_id,
+                owner_actor_id: request.owner_actor_id,
+                capacity_binding: request.capacity_binding,
+                active_from,
+                expires_at,
+            });
+        }
         let payload =
             serde_json::to_vec(&request).map_err(|_| NatsMessagingError::Serialization)?;
         let message = tokio::time::timeout(

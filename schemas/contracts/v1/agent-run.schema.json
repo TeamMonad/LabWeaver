@@ -20,23 +20,10 @@
             "null"
           ]
         },
-        "inputSha256": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
         "number": {
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
-        },
-        "outputSha256": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Sha256Digest"
-            },
-            {
-              "type": "null"
-            }
-          ]
         },
         "state": {
           "$ref": "#/$defs/AgentAttemptState"
@@ -52,7 +39,6 @@
       "required": [
         "number",
         "state",
-        "inputSha256",
         "usage",
         "usageObserved"
       ],
@@ -145,10 +131,6 @@
           "description": "Immutable backend object version.",
           "type": "string"
         },
-        "sha256": {
-          "$ref": "#/$defs/Sha256Digest",
-          "description": "Exact content digest."
-        },
         "sizeBytes": {
           "description": "Raw object length.",
           "format": "uint64",
@@ -164,7 +146,6 @@
         "artifactId",
         "storeBinding",
         "objectVersion",
-        "sha256",
         "sizeBytes",
         "mediaType"
       ],
@@ -231,13 +212,6 @@
         "container",
         "virtual_machine"
       ],
-      "type": "string"
-    },
-    "Sha256Digest": {
-      "description": "Canonical lowercase SHA-256 digest.",
-      "maxLength": 64,
-      "minLength": 64,
-      "pattern": "^[0-9a-f]{64}$",
       "type": "string"
     }
   },

@@ -49,13 +49,6 @@
       "minimum": 1,
       "type": "integer"
     },
-    "Sha256Digest": {
-      "description": "Canonical lowercase SHA-256 digest.",
-      "maxLength": 64,
-      "minLength": 64,
-      "pattern": "^[0-9a-f]{64}$",
-      "type": "string"
-    },
     "UtcTimestamp": {
       "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
       "type": "string"
@@ -101,16 +94,6 @@
       "anyOf": [
         {
           "$ref": "#/$defs/DiagnosticCode"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "evidenceSha256": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/Sha256Digest"
         },
         {
           "type": "null"

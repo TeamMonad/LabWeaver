@@ -22,22 +22,12 @@
         "runtimeBinding": {
           "description": "Deployment-owned opaque runtime profile; never a credential or endpoint URL.",
           "type": "string"
-        },
-        "runtimeConfigSha256": {
-          "$ref": "#/$defs/Sha256Digest",
-          "description": "Hash of the effective sanitized Claude Code runtime configuration."
-        },
-        "workerImageSha256": {
-          "$ref": "#/$defs/Sha256Digest",
-          "description": "Immutable SHA-256 identity of the worker container image."
         }
       },
       "required": [
         "runtimeBinding",
         "model",
         "claudeCodeVersion",
-        "workerImageSha256",
-        "runtimeConfigSha256",
         "maxInFlightPerWorker"
       ],
       "type": "object"
@@ -119,13 +109,6 @@
       "format": "uint64",
       "minimum": 1,
       "type": "integer"
-    },
-    "Sha256Digest": {
-      "description": "Canonical lowercase SHA-256 digest.",
-      "maxLength": 64,
-      "minLength": 64,
-      "pattern": "^[0-9a-f]{64}$",
-      "type": "string"
     },
     "StudentContentMode": {
       "description": "Only explicit SubmissionManifest paths may disclose student content.",

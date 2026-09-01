@@ -16,8 +16,9 @@ use async_trait::async_trait;
 use contracts::events::{
     AgentBuildCompleted, AgentBuildFailed, AgentRunEvent, CloudEvent, EVENT_CONTRACTS, subjects,
 };
-use contracts::{EventId, ImageArtifactId, Sha256Digest};
+use contracts::{EventId, ImageArtifactId};
 use futures_util::StreamExt;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::{PgPool, Row};
@@ -556,9 +557,6 @@ impl AgentBuildConsumer {
                 };
                 if resolution.validate().is_err()
                     || resolution.artifact_id != data.artifact_id
-                    || resolution.artifact.content_sha256().ok() != Some(data.artifact_sha256)
-                    || canonical_hash(&resolution.policy_evaluation)?
-                        != data.policy_evaluation_sha256
                     || container_build_request_id(&resolution.artifact)
                         != Some(data.build_request_id)
                 {
@@ -575,12 +573,7 @@ impl AgentBuildConsumer {
                     return Ok(());
                 }
                 match control
-                    .project_artifact(
-                        event.id,
-                        event.course_id,
-                        &resolution.artifact,
-                        &resolution.policy_evaluation,
-                    )
+                    .project_artifact(event.id, event.course_id, &resolution.artifact)
                     .await
                 {
                     Ok(()) => message
@@ -712,6 +705,7 @@ impl AgentBuildConsumer {
     }
 }
 
+#[allow(dead_code)]
 fn canonical_hash<T: Serialize>(value: &T) -> Result<Sha256Digest, MessagingError> {
     Sha256Digest::of_canonical(value).map_err(|_| MessagingError::Contract)
 }

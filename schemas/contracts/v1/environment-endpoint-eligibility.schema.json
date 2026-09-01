@@ -49,17 +49,6 @@
         },
         "revision": {
           "$ref": "#/$defs/Revision"
-        },
-        "sshHostKeyIdentitySha256": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Sha256Digest"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "SHA-256 of the OpenSSH host-key fingerprint string observed by the\nruntime executor. Required for SSH and absent for non-SSH endpoints."
         }
       },
       "required": [
@@ -80,13 +69,6 @@
       "format": "uint64",
       "minimum": 1,
       "type": "integer"
-    },
-    "Sha256Digest": {
-      "description": "Canonical lowercase SHA-256 digest.",
-      "maxLength": 64,
-      "minLength": 64,
-      "pattern": "^[0-9a-f]{64}$",
-      "type": "string"
     },
     "UtcTimestamp": {
       "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",

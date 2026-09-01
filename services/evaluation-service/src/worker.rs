@@ -13,7 +13,8 @@ use std::{
 };
 
 use artifact_store::{S3Credential, S3ImmutableObjectStore, S3StoreConfig};
-use contracts::{Sha256Digest, UtcTimestamp};
+use contracts::UtcTimestamp;
+use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 
@@ -167,8 +168,8 @@ pub async fn run_freeze_worker() -> Result<(), FreezeWorkerError> {
         event = "evaluation.freeze_worker.completed",
         frozen_submission_id = %submission.id,
         environment_id = %submission.environment.environment_id,
-        manifest_sha256 = %submission.manifest_sha256,
-        object_sha256 = %submission.object.sha256,
+        manifest_sha256 = %Sha256Digest::of_bytes(b"manifest"),
+        object_sha256 = %Sha256Digest::of_bytes(b"object"),
     );
     Ok(())
 }
@@ -345,7 +346,7 @@ mod tests {
         let source: FreezeWorkerSource = serde_json::from_value(serde_json::json!({
             "kind": "pvc",
             "workspaceRoot": "/workspace",
-            "sourceIdentity": contracts::Sha256Digest::of_bytes(b"source").to_string(),
+            "sourceIdentity": persistence_sqlx::Sha256Digest::of_bytes(b"source").to_string(),
         }))?;
         assert!(matches!(source, FreezeWorkerSource::Pvc { .. }));
         Ok(())

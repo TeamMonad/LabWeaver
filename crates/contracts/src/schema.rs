@@ -6,9 +6,7 @@ use schemars::{Schema, schema_for};
 use serde_json::{Value, json};
 
 use crate::events::{self, CloudEvent};
-use crate::http::{
-    ApiSurface, Method, MutationContract, OPERATIONS, OperationScopeKind, operation_authorization,
-};
+use crate::http::{ApiSurface, Method, MutationContract, OPERATIONS, OperationScopeKind};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GeneratedArtifact {
@@ -112,10 +110,6 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/image-artifact.schema.json",
         crate::supply_chain::ImageArtifact
-    );
-    document!(
-        "schemas/contracts/v1/image-policy-evaluation.schema.json",
-        crate::supply_chain::ImagePolicyEvaluation
     );
     document!(
         "schemas/contracts/v1/environment-template-release.schema.json",
@@ -793,11 +787,8 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 "oneTime": true
             });
         }
-        let authorization = operation_authorization(operation.operation_id).ok_or_else(|| {
-            GenerationError::Contract("operation authorization metadata is missing".to_owned())
-        })?;
-        operation_json["x-labweaver-allowed-roles"] = json!(authorization.allowed_roles);
-        operation_json["x-labweaver-scope"] = json!(match authorization.scope {
+        operation_json["x-labweaver-allowed-roles"] = json!(operation.allowed_roles);
+        operation_json["x-labweaver-scope"] = json!(match operation.scope {
             OperationScopeKind::Global => "global",
             OperationScopeKind::Course => "course",
             OperationScopeKind::Project => "project",
@@ -916,11 +907,11 @@ fn add_auth_paths(surface: ApiSurface, paths: &mut BTreeMap<String, Value>) {
             );
             paths.insert(
                 "/internal/v1/build-requests/{buildRequestId}/cancel".to_owned(),
-                json!({"post":{"operationId":"cancelInternalAgentBuild","summary":"Request one actor-attributed build cancellation at an exact course, command hash, state and revision","security":[{"serviceMtls":[]}],"parameters":[{"name":"buildRequestId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentBuildCancellationRequest"}}}},"responses":{"202":{"description":"Durable cancellation requested","content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentBuildCancellationResult"}}}},"403":{"$ref":"#/components/responses/Problem"},"409":{"$ref":"#/components/responses/Problem"},"422":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"post":{"operationId":"cancelInternalAgentBuild","summary":"Request one actor-attributed build cancellation at an exact course, state and revision","security":[{"serviceMtls":[]}],"parameters":[{"name":"buildRequestId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentBuildCancellationRequest"}}}},"responses":{"202":{"description":"Durable cancellation requested","content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentBuildCancellationResult"}}}},"403":{"$ref":"#/components/responses/Problem"},"409":{"$ref":"#/components/responses/Problem"},"422":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/internal/v1/build-requests/{buildRequestId}".to_owned(),
-                json!({"get":{"operationId":"getInternalAgentBuild","summary":"Read the Agent-owned build state and revision for an exact course and command hash","security":[{"serviceMtls":[]}],"parameters":[{"name":"buildRequestId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"courseId","in":"query","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"commandSha256","in":"query","required":true,"schema":{"type":"string","pattern":"^[0-9a-f]{64}$"}}],"responses":{"200":{"description":"Authoritative build status","content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentBuildCancellationResult"}}}},"403":{"$ref":"#/components/responses/Problem"},"404":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"get":{"operationId":"getInternalAgentBuild","summary":"Read the Agent-owned build state and revision for an exact course","security":[{"serviceMtls":[]}],"parameters":[{"name":"buildRequestId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"courseId","in":"query","required":true,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Authoritative build status","content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentBuildCancellationResult"}}}},"403":{"$ref":"#/components/responses/Problem"},"404":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/internal/v1/agent-runs/{runId}/tracks/{track}/retry".to_owned(),
