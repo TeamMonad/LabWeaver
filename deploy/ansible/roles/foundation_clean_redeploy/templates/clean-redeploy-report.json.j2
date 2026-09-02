@@ -1,0 +1,30 @@
+{
+  "schema_version": "labweaver.foundation-clean-redeploy-report.v1",
+  "run_id": {{ foundation_clean_redeploy_run_id | to_json }},
+  "source_commit": {{ foundation_clean_redeploy_source_commit | to_json }},
+  "cluster_uid": {{ foundation_clean_redeploy_cluster_uid.stdout | trim | to_json }},
+  "issue": "#152",
+  "release_eligible": false,
+  "closes_issues": [],
+  "note": "clean-rebuild-non-release: this cluster is a non-release clean rebuild environment; it cannot close #142 or #148 and its results are not a Release Gate.",
+  "removed": {
+    "namespaces": {{ foundation_clean_redeploy_namespaces | sort | to_json }},
+    "application_release": {{ foundation_clean_redeploy_application_release | to_json }},
+    "application_namespace": {{ foundation_clean_redeploy_application_namespace | to_json }}
+  },
+  "protected_shared_namespaces": {{ foundation_clean_redeploy_protected_namespaces | sort | to_json }},
+  "evidence": {
+    "ownership_inventory_sha256": {{ ('sha256:' + foundation_clean_redeploy_ownership_hash.stat.checksum) | to_json }},
+    "pre_destruction_inventory_sha256": {{ ('sha256:' + foundation_clean_redeploy_pre_destruction_hash.stat.checksum) | to_json }}
+  },
+  "readback": {
+    "dedicated_namespaces_remaining": {{ foundation_clean_redeploy_remaining_namespaces | to_json }},
+    "residual_persistent_volume_claims": {{ foundation_clean_redeploy_residual_pvcs | to_json }},
+    "residual_persistent_volume_claim_namespaces": {{ foundation_clean_redeploy_residual_pv_claims | to_json }},
+    "protected_namespaces_intact": true
+  },
+  "credential_rotation": {
+    "old_credentials_status": "revoked-by-destruction",
+    "registry": "pending foundation reinstall and 96-foundation-rotation-verify.yml"
+  }
+}

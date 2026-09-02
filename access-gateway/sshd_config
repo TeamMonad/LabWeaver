@@ -1,0 +1,26 @@
+Port 2222
+Protocol 2
+HostKey /etc/labweaver/secrets/ssh_host_ed25519_key
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+PubkeyAuthentication yes
+AuthorizedKeysFile none
+AuthorizedKeysCommand /usr/local/bin/labweaver-gateway-command authorized-keys %u "%t %k" "%C"
+AuthorizedKeysCommandUser gateway-auth
+AllowTcpForwarding no
+PermitOpen none
+PermitListen none
+GatewayPorts no
+PermitTunnel no
+X11Forwarding no
+AllowAgentForwarding no
+PermitUserEnvironment no
+PermitUserRC no
+AllowUsers gateway
+Subsystem sftp /bin/false
+MaxAuthTries 2
+LoginGraceTime 30
+ClientAliveInterval 15
+ClientAliveCountMax 4
+LogLevel VERBOSE

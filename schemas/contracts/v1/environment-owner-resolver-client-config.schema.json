@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Deployment-supplied client settings for the controlled mTLS owner-resolver call.",
+  "properties": {
+    "allowedServerSans": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "caCertificateLocator": {
+      "type": "string"
+    },
+    "clientCertificateLocator": {
+      "type": "string"
+    },
+    "clientPrivateKeyLocator": {
+      "type": "string"
+    },
+    "maxRetries": {
+      "format": "uint8",
+      "maximum": 255,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "resolverUri": {
+      "type": "string"
+    },
+    "timeoutMilliseconds": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "resolverUri",
+    "caCertificateLocator",
+    "clientCertificateLocator",
+    "clientPrivateKeyLocator",
+    "allowedServerSans",
+    "timeoutMilliseconds",
+    "maxRetries"
+  ],
+  "title": "EnvironmentOwnerResolverClientConfig",
+  "type": "object"
+}

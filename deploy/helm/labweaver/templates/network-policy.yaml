@@ -1,0 +1,247 @@
+{{- if .Values.network.defaultDenyEnabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+{{- end }}
+{{- $root := . -}}
+{{- range $name, $configuration := .Values.workloads }}
+{{- if $configuration.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  namespace: {{ $root.Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: {{ $name }}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    {{- if eq $name "resource-service" }}
+    # Resource accepts the signed Access delegation only over its mTLS API port;
+    # the health port remains exposed for the platform probe path.
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: access-service}
+      ports:
+        - {protocol: TCP, port: 8087}
+        - {protocol: TCP, port: 9448}
+    {{- else if eq $name "environment-service" }}
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: [access-service, evaluation-service, resource-service]
+      ports: [{protocol: TCP, port: 9446}]
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/part-of: labweaver}
+      ports: [{protocol: TCP, port: 8083}]
+    {{- else if eq $name "container-executor" }}
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: environment-service}
+      ports: [{protocol: TCP, port: 9450}]
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/part-of: labweaver}
+      ports: [{protocol: TCP, port: 8085}]
+    {{- else if eq $name "kubevirt-console-executor" }}
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: environment-service}
+      ports: [{protocol: TCP, port: 9451}]
+    {{- else }}
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/part-of: labweaver}
+      {{- with $configuration.ports }}
+      ports:
+        {{- range . }}
+        - {protocol: TCP, port: {{ .containerPort }}}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+    {{- if or (eq $name "web") (eq $name "access-service") (eq $name "openssh-gateway") }}
+    - from:
+        - namespaceSelector:
+            {{- toYaml $root.Values.network.edgeNamespaceSelector | nindent 12 }}
+        - namespaceSelector:
+            {{- toYaml $root.Values.network.gatewayNamespaceSelector | nindent 12 }}
+      {{- with $configuration.ports }}
+      ports:
+        {{- range . }}
+        - {protocol: TCP, port: {{ .containerPort }}}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+    {{- if eq $name "openssh-gateway" }}
+    {{- range $cidr := $root.Values.network.gatewayIngressCidrs }}
+    - from:
+        - ipBlock: {cidr: {{ $cidr | quote }}}
+      ports: [{protocol: TCP, port: 2222}]
+    {{- end }}
+    {{- end }}
+  egress:
+    {{- if eq $name "kubevirt-console-executor" }}
+    # Console frames leave only through the Kubernetes VNC subresource. DNS is
+    # limited to cluster DNS so the explicitly configured API endpoint resolves.
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+          podSelector:
+            matchLabels: {k8s-app: kube-dns}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    {{- if empty $root.Values.network.kubernetesApiCidrs }}
+    {{- fail "network.kubernetesApiCidrs must identify the adopted API endpoint when runtime executors are enabled" }}
+    {{- end }}
+    {{- if empty $root.Values.network.kubernetesApiPorts }}
+    {{- fail "network.kubernetesApiPorts must identify the adopted API endpoint ports when runtime executors are enabled" }}
+    {{- end }}
+    {{- range $cidr := $root.Values.network.kubernetesApiCidrs }}
+    - to:
+        - ipBlock: {cidr: {{ $cidr | quote }}}
+      ports:
+        {{- range $port := $root.Values.network.kubernetesApiPorts }}
+        - {protocol: TCP, port: {{ $port }}}
+        {{- end }}
+    {{- end }}
+    # The console adapter reads the authoritative Environment state before
+    # opening the KubeVirt VNC stream. Keep that database path explicit; the
+    # default-deny policy must not turn a database timeout into a misleading
+    # console runtime failure.
+    - to:
+        - namespaceSelector:
+            {{- toYaml $root.Values.network.infrastructureNamespaceSelector | nindent 12 }}
+      ports: [{protocol: TCP, port: 5432}]
+    {{- else }}
+    {{- if eq $name "agent-service" }}
+    # Agent candidate generation may reach arbitrary external tools and package
+    # authorities. Identity, secrets, budgets and approval remain service-owned.
+    - {}
+    {{- end }}
+    - to:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/part-of: labweaver}
+    - to:
+        - namespaceSelector:
+            {{- toYaml $root.Values.network.infrastructureNamespaceSelector | nindent 12 }}
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+          podSelector:
+            matchLabels: {k8s-app: kube-dns}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    {{- range $endpoint := $root.Values.network.externalServiceEndpoints }}
+    - to:
+        - ipBlock: {cidr: {{ required "network.externalServiceEndpoints[].cidr is required" $endpoint.cidr | quote }}}
+      ports:
+        {{- range $port := required "network.externalServiceEndpoints[].ports is required" $endpoint.ports }}
+        - {protocol: TCP, port: {{ $port }}}
+        {{- end }}
+    {{- end }}
+    {{- range $endpoint := $configuration.externalEgress }}
+    - to:
+        - ipBlock: {cidr: {{ required "workloads[].externalEgress[].cidr is required" $endpoint.cidr | quote }}}
+      ports:
+        {{- range $port := required "workloads[].externalEgress[].ports is required" $endpoint.ports }}
+        - {protocol: TCP, port: {{ $port }}}
+        {{- end }}
+    {{- end }}
+    {{- if $configuration.kubernetesApi }}
+    {{- if empty $root.Values.network.kubernetesApiCidrs }}
+    {{- fail "network.kubernetesApiCidrs must identify the adopted API endpoint when runtime executors are enabled" }}
+    {{- end }}
+    {{- if empty $root.Values.network.kubernetesApiPorts }}
+    {{- fail "network.kubernetesApiPorts must identify the adopted API endpoint ports when runtime executors are enabled" }}
+    {{- end }}
+    {{- range $cidr := $root.Values.network.kubernetesApiCidrs }}
+    - to:
+        - ipBlock: {cidr: {{ $cidr | quote }}}
+      ports:
+        {{- range $port := $root.Values.network.kubernetesApiPorts }}
+        - {protocol: TCP, port: {{ $port }}}
+        {{- end }}
+    {{- end }}
+    {{- end }}
+    {{- if eq $name "openssh-gateway" }}
+    - to:
+        - namespaceSelector:
+            {{- toYaml $root.Values.network.environmentNamespaceSelector | nindent 12 }}
+      ports: [{protocol: TCP, port: 22}]
+    {{- end }}
+    {{- if eq $name "kubevirt-executor" }}
+    # The executor verifies the guest SSH host key before publishing a VM as
+    # ready. Environment ingress remains restricted to this exact workload.
+    - to:
+        - namespaceSelector:
+            {{- toYaml $root.Values.network.environmentNamespaceSelector | nindent 12 }}
+      ports: [{protocol: TCP, port: 22}]
+    {{- end }}
+    {{- if eq $name "access-service" }}
+    - to:
+        - namespaceSelector:
+            {{- toYaml $root.Values.network.identityNamespaceSelector | nindent 12 }}
+      ports:
+        - {protocol: TCP, port: 443}
+        - {protocol: TCP, port: 8080}
+    - to:
+        - namespaceSelector:
+            {{- toYaml $root.Values.network.environmentNamespaceSelector | nindent 12 }}
+      ports:
+        - {protocol: TCP, port: 8080}
+        - {protocol: TCP, port: 9446}
+    {{- end }}
+    {{- if eq $name "environment-service" }}
+    - to:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: container-executor}
+      ports: [{protocol: TCP, port: 9450}]
+    - to:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: kubevirt-console-executor}
+      ports: [{protocol: TCP, port: 9451}]
+    {{- end }}
+    {{- end }}
+{{- end }}
+{{- end }}
+{{- if $root.Values.network.cdiCloneSourcePolicyEnabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cdi-clone-source
+  namespace: {{ $root.Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      cdi.kubevirt.io: cdi-clone-source
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+          podSelector:
+            matchLabels: {k8s-app: kube-dns}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    - to:
+        - namespaceSelector:
+            {{- toYaml $root.Values.network.environmentNamespaceSelector | nindent 12 }}
+          podSelector:
+            matchLabels:
+              cdi.kubevirt.io: cdi-upload-server
+      ports:
+        - {protocol: TCP, port: 8443}
+{{- end }}

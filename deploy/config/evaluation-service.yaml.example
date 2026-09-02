@@ -1,0 +1,54 @@
+# Freeze-only Evaluation owner process. Secret values are mounted files; this
+# document contains no credentials and is parsed with deny_unknown_fields.
+databaseUrlFile: /etc/labweaver/secrets/database-url
+databaseMaxConnections: 10
+apiMtls:
+  bind_addr: 0.0.0.0:9447
+  server_certificate_file: /etc/labweaver/secrets/tls.crt
+  server_key_file: /etc/labweaver/secrets/tls.key
+  client_ca_file: /etc/labweaver/secrets/mtls-ca.pem
+  allowed_san_uris:
+    - spiffe://labweaver/access-service
+    - spiffe://labweaver/control-service
+  required_eku: clientAuth
+nats:
+  server: tls://nats.labweaver-data.svc:4222
+  caFile: /etc/labweaver/secrets/nats-ca.pem
+  clientCertificateFile: /etc/labweaver/secrets/nats-client.crt
+  clientPrivateKeyFile: /etc/labweaver/secrets/nats-client.key
+  credentialsFile: /etc/labweaver/secrets/nats.creds
+outboxPublishTimeoutMilliseconds: 5000
+outboxPollIntervalMilliseconds: 100
+coordinatorPollIntervalMilliseconds: 500
+coordinator:
+  kubernetesApiServer: https://kubernetes.default.svc
+  kubernetesBearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+  kubernetesCaFile: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+  environmentServiceBaseUri: https://environment-service:9446/
+  environmentCaFile: /etc/labweaver/secrets/mtls-ca.pem
+  environmentClientCertificateFile: /etc/labweaver/secrets/tls.crt
+  environmentClientPrivateKeyFile: /etc/labweaver/secrets/tls.key
+  allowedEnvironmentServerSans: [environment-service]
+  workerImage: harbor.example.invalid/labweaver/evaluation-service@sha256:0000000000000000000000000000000000000000000000000000000000000000
+  workerServiceAccountName: evaluation-freeze-worker
+  vmJobNamespace: labweaver-evaluation
+  workerConfigurationFile: /etc/labweaver/config/worker.yaml
+  workerSecretFiles:
+    database-url: /etc/labweaver/secrets/database-url
+    postgres-ca.pem: /etc/labweaver/secrets/postgres-ca.pem
+    minio-access-key: /etc/labweaver/secrets/minio-access-key
+    minio-ca.pem: /etc/labweaver/secrets/minio-ca.pem
+    minio-secret-key: /etc/labweaver/secrets/minio-secret-key
+  workerRegistryPullConfigFile: /etc/labweaver/secrets/registry-pull-config.json
+  workerTlsCaFile: /etc/labweaver/secrets/minio-ca.pem
+  infrastructureNamespaceLabels:
+    labweaver.io/infrastructure: "true"
+  dnsNamespaceLabels:
+    kubernetes.io/metadata.name: kube-system
+  dnsPodLabels:
+    k8s-app: kube-dns
+  retentionPolicyId: 01900000-0000-7000-8000-000000000001
+  retentionPolicyRevision: 1
+  retentionDays: 90
+  jobActiveDeadlineSeconds: 900
+  requestTimeoutMilliseconds: 5000

@@ -1,0 +1,9 @@
+---
+- import_playbook: 00-preflight.yml
+  vars:
+    labweaver_preflight_scope: identity-foundation
+
+- name: Reconcile the private identity foundation
+  hosts: control_plane
+  gather_facts: false
+  roles: [identity_foundation]

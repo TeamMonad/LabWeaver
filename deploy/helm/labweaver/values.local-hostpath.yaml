@@ -1,0 +1,21 @@
+# Docker Desktop-only validation overlay. This is not a production profile and
+# must never be consumed by the formal connected Release Gate.
+localValidation:
+  mode: local-hostpath
+  releaseEligible: false
+  singleNode: true
+  storageClassName: hostpath
+  accessMode: ReadWriteOnce
+
+images:
+  # This is a render-only immutable locator. A connected package manifest must
+  # replace it before any approved deployment; this overlay never publishes it.
+  resource_service: harbor.internal.example/labweaver-system/resource-service@sha256:9999999999999999999999999999999999999999999999999999999999999999
+
+workloads:
+  kubevirt-executor:
+    enabled: false
+  kubevirt-console-executor:
+    enabled: false
+  resource-service:
+    enabled: true

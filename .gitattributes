@@ -1,0 +1,9 @@
+# This file and all generated contract artifacts must stay LF on every
+# platform so that deterministic drift checks compare byte-identical output.
+.gitattributes text eol=lf
+
+web/src/generated/contracts/** text eol=lf
+schemas/** text eol=lf
+
+# Default: let Git handle line endings for other text files.
+* text=auto

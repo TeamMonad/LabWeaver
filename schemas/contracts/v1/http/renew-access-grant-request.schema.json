@@ -1,0 +1,28 @@
+{
+  "$defs": {
+    "AccessGrantId": {
+      "description": "Strongly typed UUIDv7 identifier for `AccessGrantId`.",
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "expiresAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "grantId": {
+      "$ref": "#/$defs/AccessGrantId"
+    }
+  },
+  "required": [
+    "grantId",
+    "expiresAt"
+  ],
+  "title": "RenewAccessGrantRequest",
+  "type": "object"
+}

@@ -1,0 +1,40 @@
+---
+identity_foundation_enabled: false
+identity_foundation_verify_only: false
+identity_namespace: keycloak-system # noqa: var-naming[no-role-prefix]
+identity_name: labweaver-keycloak # noqa: var-naming[no-role-prefix]
+identity_hostname: keycloak.labweaver.internal # noqa: var-naming[no-role-prefix]
+identity_gateway_vip: 10.20.0.222 # noqa: var-naming[no-role-prefix]
+identity_gateway_class: cilium # noqa: var-naming[no-role-prefix]
+# Management subnet allowed to reach Keycloak directly and through the identity
+# NetworkPolicy (identity-allow ingress). This covers the edge-router LAN for
+# RHEL controllers and the v1 campus subnet for the Ubuntu cluster.
+identity_admin_allowed_cidr: 10.20.0.0/16 # noqa: var-naming[no-role-prefix]
+# Platform namespaces allowed to reach Keycloak from inside the cluster
+# (identity-allow ingress + identity-gateway-ingress CNP). Leave empty for a
+# demo/minimal deployment; production stacks must include labweaver-system.
+identity_allow_platform_namespaces: [] # noqa: var-naming[no-role-prefix]
+identity_realm: workloads # noqa: var-naming[no-role-prefix]
+identity_workload_client_id: labweaver-buildkit # noqa: var-naming[no-role-prefix]
+identity_workload_audience: labweaver-buildkit # noqa: var-naming[no-role-prefix]
+identity_secret_locator_sha256: sha256:REPLACE_IDENTITY_SECRET_LOCATOR_SHA256 # noqa: var-naming[no-role-prefix]
+identity_storage_class: local-path # noqa: var-naming[no-role-prefix]
+identity_postgres_storage: 20Gi # noqa: var-naming[no-role-prefix]
+identity_keycloak_replicas: 2 # noqa: var-naming[no-role-prefix]
+identity_manifest_directory: /var/lib/labweaver/identity/manifests # noqa: var-naming[no-role-prefix]
+identity_kubeconfig_path: /etc/kubernetes/admin.conf # noqa: var-naming[no-role-prefix]
+identity_kubectl_path: /usr/bin/kubectl # noqa: var-naming[no-role-prefix]
+identity_dns_fragment_path: /etc/dnsmasq.d/30-keycloak.conf # noqa: var-naming[no-role-prefix]
+identity_ca_secret_name: labweaver-identity-root-ca # noqa: var-naming[no-role-prefix]
+identity_ca_bundle_configmap_name: labweaver-identity-ca-bundle # noqa: var-naming[no-role-prefix]
+identity_tls_secret_name: labweaver-keycloak-tls # noqa: var-naming[no-role-prefix]
+identity_database_secret_name: labweaver-keycloak-database # noqa: var-naming[no-role-prefix]
+identity_bootstrap_secret_name: labweaver-keycloak-bootstrap # noqa: var-naming[no-role-prefix]
+identity_workload_secret_name: labweaver-buildkit-client # noqa: var-naming[no-role-prefix]
+# v1-style controllers have no dnsmasq; the Keycloak endpoint is resolved by
+# Gateway VIP + curl --resolve during verification. RHEL routers keep the
+# fragment-based DNS path enabled.
+identity_dnsmasq_enabled: true # noqa: var-naming[no-role-prefix]
+# RHEL controllers install the locked python3-kubernetes RPM; Debian-family
+# controllers already run the pinned client from the ansible venv.
+identity_controller_manage_python_kubernetes: true # noqa: var-naming[no-role-prefix]

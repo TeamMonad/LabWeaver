@@ -1,0 +1,106 @@
+---
+# Docker Desktop is intentionally read-only in this playbook.  It is a local
+# capability probe, not an application deployment or a substitute for the
+# connected Resource/KubeVirt verification.
+- name: Probe Docker Desktop local-hostpath capabilities
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    local_expected_docker_context: desktop-linux
+    local_expected_kubernetes_context: docker-desktop
+    local_ecnu_env_file: "{{ lookup('env', 'LABWEAVER_LOCAL_ECNU_ENV_FILE') | default('.env', true) }}"
+  tasks:
+    - name: Read Docker context
+      ansible.builtin.command: docker context show
+      register: local_docker_context
+      changed_when: false
+
+    - name: Read Kubernetes context
+      ansible.builtin.command: kubectl config current-context
+      register: local_kubernetes_context
+      changed_when: false
+
+    - name: Read Kubernetes nodes
+      ansible.builtin.command: kubectl get nodes --output json
+      register: local_nodes
+      changed_when: false
+
+    - name: Read storage classes
+      ansible.builtin.command: kubectl get storageclass --output json
+      register: local_storage_classes
+      changed_when: false
+
+    - name: Read installed CRDs
+      ansible.builtin.command: kubectl get crd --output json
+      register: local_crds
+      changed_when: false
+
+    - name: Check the explicit private ECNU locator
+      ansible.builtin.stat:
+        path: "{{ local_ecnu_env_file }}"
+      register: local_ecnu_file
+      changed_when: false
+
+    - name: Require the private ECNU locator
+      ansible.builtin.assert:
+        that:
+          - local_ecnu_file.stat.exists
+          - local_ecnu_file.stat.isreg
+        fail_msg: LW_LOCAL_PREFLIGHT_ECNU_KEY_MISSING
+
+    - name: Read the private ECNU locator without logging its contents
+      ansible.builtin.slurp:
+        src: "{{ local_ecnu_env_file }}"
+      register: local_ecnu_contents
+      no_log: true
+
+    - name: Require a non-empty ECNU_API_KEY entry
+      ansible.builtin.assert:
+        that:
+          - (local_ecnu_contents.content | b64decode) is search('(?m)^ECNU_API_KEY=[^#\\r\\n ]+')
+        fail_msg: LW_LOCAL_PREFLIGHT_ECNU_KEY_MISSING
+      no_log: true
+
+    - name: Require the Docker Desktop contexts
+      ansible.builtin.assert:
+        that:
+          - local_docker_context.stdout | trim == local_expected_docker_context
+          - local_kubernetes_context.stdout | trim == local_expected_kubernetes_context
+        fail_msg: LW_LOCAL_PREFLIGHT_CONTEXT_INVALID
+
+    - name: Require a single Ready node
+      ansible.builtin.assert:
+        that:
+          - (local_nodes.stdout | from_json).items | length == 1
+          - >-
+            ((local_nodes.stdout | from_json).items
+            | map(attribute='status.conditions') | flatten
+            | selectattr('type', 'equalto', 'Ready')
+            | selectattr('status', 'equalto', 'True') | list | length) == 1
+        fail_msg: LW_LOCAL_PREFLIGHT_SINGLE_READY_NODE_REQUIRED
+
+    - name: Require hostpath and explicitly report missing RWX capability
+      ansible.builtin.assert:
+        that:
+          - "'hostpath' in (local_storage_classes.stdout | from_json).items | map(attribute='metadata.name') | list"
+        fail_msg: LW_LOCAL_PREFLIGHT_HOSTPATH_UNAVAILABLE
+
+    - name: Stop before any apply when formal RWX is unavailable
+      ansible.builtin.assert:
+        that:
+          - "'nfs-rwx' in (local_storage_classes.stdout | from_json).items | map(attribute='metadata.name') | list"
+        fail_msg: LW_LOCAL_PREFLIGHT_NFS_RWX_UNAVAILABLE
+
+    - name: Stop before any apply when KubeVirt/CDI are unavailable
+      ansible.builtin.assert:
+        that:
+          - >-
+            ((local_crds.stdout | from_json).items
+            | map(attribute='metadata.name') | list
+            | select('in', ['virtualmachines.kubevirt.io', 'kubevirts.kubevirt.io']) | list | length) > 0
+          - >-
+            ((local_crds.stdout | from_json).items
+            | map(attribute='metadata.name') | list
+            | select('in', ['datavolumes.cdi.kubevirt.io', 'cdis.cdi.kubevirt.io']) | list | length) > 0
+        fail_msg: LW_LOCAL_PREFLIGHT_KUBEVIRT_CDI_UNAVAILABLE

@@ -1,0 +1,53 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: identity-default-deny, namespace: {{ identity_namespace }}}
+spec: {podSelector: {}, policyTypes: [Ingress, Egress]}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: identity-allow, namespace: {{ identity_namespace }}}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/part-of: labweaver-identity}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: "{{ identity_namespace }}"
+        - ipBlock: {cidr: "{{ identity_admin_allowed_cidr }}"}
+{% if identity_allow_platform_namespaces | length > 0 %}
+{% for ns in identity_allow_platform_namespaces %}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: "{{ ns }}"
+{% endfor %}
+{% endif %}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: "{{ identity_namespace }}"
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: identity-gateway-ingress, namespace: {{ identity_namespace }}}
+spec:
+  endpointSelector: {matchLabels: {app.kubernetes.io/name: {{ identity_name }}}}
+  ingress:
+    - fromEntities: [ingress]
+      toPorts:
+        - ports: [{port: "8080", protocol: TCP}]
+{% if identity_allow_platform_namespaces | length > 0 %}
+{% for ns in identity_allow_platform_namespaces %}
+    - fromEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: "{{ ns }}"
+      toPorts:
+        - ports: [{port: "8080", protocol: TCP}]
+{% endfor %}
+{% endif %}

@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://labweaver.dev/schemas/results/sprint3-acceptance-evidence.v1.schema.json",
+  "title": "Sprint 3 acceptance evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "scenarioId", "gateId", "evidenceLevel", "executionMode", "providerMode", "result", "isFixture", "isMock", "connected", "liveRuntime", "productionIdentity", "diagnosticCode", "safeSummary", "requiredStepsSkipped", "unresolvedBlockers", "knownLimitations", "cleanup", "rollback", "redaction"],
+  "properties": {
+    "schemaVersion": {"const": "sprint3-acceptance-evidence.v1"},
+    "scenarioId": {"type": "string", "pattern": "^[a-z0-9-]+$"},
+    "gateId": {"type": "string", "pattern": "^[a-z0-9-]+$"},
+    "evidenceLevel": {"enum": ["E1", "E2", "E3", "E4"]},
+    "executionMode": {"enum": ["planned", "fixture", "local", "ci", "connected", "live-runtime"]},
+    "providerMode": {"enum": ["none", "fixture", "mock", "real"]},
+    "result": {"enum": ["planned", "passed", "failed", "blocked"]},
+    "isFixture": {"type": "boolean"}, "isMock": {"type": "boolean"}, "connected": {"type": "boolean"},
+    "liveRuntime": {"type": "boolean"}, "productionIdentity": {"type": "boolean"},
+    "diagnosticCode": {"type": "string", "pattern": "^LW_[A-Z0-9_]+$"},
+    "safeSummary": {"type": "string", "minLength": 1, "maxLength": 500},
+    "startedAt": {"type": "string", "format": "date-time"}, "completedAt": {"type": "string", "format": "date-time"},
+    "expiresAt": {"type": "string", "format": "date-time"}, "durationMs": {"type": "integer", "minimum": 0},
+    "productEntrypoint": {"type": "string", "minLength": 1}, "actor": {"type": "string", "minLength": 1},
+    "verifier": {"type": "string", "minLength": 1}, "tenantId": {"type": "string", "minLength": 1},
+    "courseId": {"type": "string", "minLength": 1}, "authenticationIdentity": {"type": "string", "minLength": 1},
+    "authorizationIdentity": {"type": "string", "minLength": 1}, "submissionIdentity": {"type": "string", "minLength": 1},
+    "labRelease": {"type": "string", "minLength": 1}, "evaluationRelease": {"type": "string", "minLength": 1},
+    "environmentTemplateRelease": {"type": "string", "minLength": 1}, "providerIdentity": {"type": "string", "minLength": 1},
+    "resourceIdentity": {"type": "string", "minLength": 1}, "accessIdentity": {"type": "string", "minLength": 1},
+    "runId": {"type": "string", "minLength": 1}, "stepRunId": {"type": "string", "minLength": 1},
+    "attemptId": {"type": "string", "minLength": 1}, "readbackRunId": {"type": "string", "minLength": 1},
+    "traceId": {"type": "string", "minLength": 1}, "buildIdentity": {"type": "string", "minLength": 1},
+    "sourceCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "buildSourceCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "deploymentSourceCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "baseCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "dirty": {"type": "boolean"}, "imageDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "artifactHash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "specHash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "policyRevision": {"type": "string", "minLength": 1}, "trustRevision": {"type": "string", "minLength": 1},
+    "environmentIdentity": {"type": "string", "minLength": 1}, "deploymentIdentity": {"type": "string", "minLength": 1},
+    "toolVersions": {"type": "object", "additionalProperties": {"type": "string", "minLength": 1}},
+    "expectedOutcome": {"type": "string", "minLength": 1}, "actualOutcome": {"type": "string", "minLength": 1},
+    "exitCode": {"type": "integer"}, "timedOut": {"type": "boolean"},
+    "resourceLimits": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+    "evidenceReferences": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "logHash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "retainedArtifacts": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "requiredStepsSkipped": {"type": "boolean"},
+    "unresolvedBlockers": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "knownLimitations": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "blockerOwner": {"type": "string", "minLength": 1}, "unblockCondition": {"type": "string", "minLength": 1},
+    "cleanup": {
+      "type": "object", "additionalProperties": false, "required": ["required", "completed", "readbackCompleted"],
+      "properties": {"required": {"type": "boolean"}, "completed": {"type": "boolean"}, "readbackCompleted": {"type": "boolean"}, "runId": {"type": "string", "minLength": 1}, "diagnosticCode": {"type": "string", "pattern": "^LW_[A-Z0-9_]+$"}}
+    },
+    "rollback": {
+      "type": "object", "additionalProperties": false, "required": ["required", "verified"],
+      "properties": {"required": {"type": "boolean"}, "verified": {"type": "boolean"}, "diagnosticCode": {"type": "string", "pattern": "^LW_[A-Z0-9_]+$"}}
+    },
+    "redaction": {
+      "type": "object", "additionalProperties": false, "required": ["verified", "containsSecrets", "containsRawUserContent"],
+      "properties": {"verified": {"type": "boolean"}, "containsSecrets": {"const": false}, "containsRawUserContent": {"const": false}}
+    }
+  }
+}

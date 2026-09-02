@@ -1,0 +1,40 @@
+ARG RUST_BUILDER="docker.io/library/rust:1.85.1-bookworm@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4"
+ARG CPP17_RUNTIME="cgr.dev/chainguard/gcc-glibc@sha256:8c43994421c12e300ea5d227c774822e5d7aa45feaeb8e5721f4b5023d7ebfc5"
+
+FROM ${RUST_BUILDER} AS builder
+ARG RUST_TOOLCHAIN=1.97.1
+ARG SOURCE_DATE_EPOCH
+ARG SOURCE_COMMIT
+ENV CARGO_INCREMENTAL=0 \
+    CARGO_NET_GIT_FETCH_WITH_CLI=false \
+    RUSTUP_TOOLCHAIN=${RUST_TOOLCHAIN} \
+    SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY rust-toolchain.toml rustfmt.toml ./
+COPY .cargo .cargo
+COPY crates crates
+COPY services services
+COPY access-gateway access-gateway
+COPY xtask xtask
+COPY migrations migrations
+COPY vendor vendor
+RUN --mount=type=cache,id=labweaver-oj-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=labweaver-oj-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    cargo fetch --locked
+RUN --network=none \
+    --mount=type=cache,id=labweaver-oj-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=labweaver-oj-cargo-target,target=/src/target,sharing=locked \
+    test -n "${SOURCE_DATE_EPOCH}" && test -n "${SOURCE_COMMIT}" && \
+    cargo build --release --locked --package evaluation-service && \
+    install -D -m 0555 target/release/evaluation-service /out/labweaver-service
+
+FROM ${CPP17_RUNTIME} AS runtime
+ARG SOURCE_COMMIT
+LABEL org.opencontainers.image.source="https://github.com/TeamMonad/LabWeaver" \
+      org.opencontainers.image.revision="${SOURCE_COMMIT}" \
+      org.opencontainers.image.title="LabWeaver approved C++17 OJ runner" \
+      io.labweaver.toolchain-profile="cpp17-approved-v1"
+COPY --from=builder --chown=65532:65532 /out/labweaver-service /usr/local/bin/labweaver-service
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/labweaver-service"]

@@ -1,0 +1,327 @@
+---
+- name: Validate Resource deployment inputs
+  ansible.builtin.assert:
+    that:
+      - resource_application_run_id is match('^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
+      - resource_application_source_commit is match('^[0-9a-f]{40,64}$')
+      - resource_application_package_manifest | length > 0
+      - resource_application_configuration_bundle | length > 0
+      - resource_application_acceptance_profile_file | length > 0
+      - resource_application_access_seed_file | length > 0
+      - resource_application_postgres_service | length > 0
+      - resource_application_postgres_service_file | length > 0
+      - resource_application_values_file | length > 0
+    fail_msg: RESOURCE_APPLICATION_INPUT_INVALID
+
+- name: Verify controller-owned Resource deployment inputs
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    checksum_algorithm: sha256
+  loop:
+    - "{{ resource_application_package_manifest }}"
+    - "{{ resource_application_configuration_bundle }}"
+    - "{{ resource_application_access_seed_file }}"
+    - "{{ resource_application_configuration_manifest }}"
+    - "{{ resource_application_values_file }}"
+    - "{{ resource_application_chart_source }}"
+    - "{{ resource_application_postgres_service_file }}"
+  register: resource_application_inputs
+
+- name: Reject missing Resource deployment inputs
+  ansible.builtin.assert:
+    that: resource_application_inputs.results | map(attribute='stat.exists') | min
+    fail_msg: RESOURCE_APPLICATION_REQUIRED_PATH_MISSING
+
+- name: Create root-owned Resource acceptance profile directory
+  ansible.builtin.file:
+    path: "{{ resource_application_profile_root }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  become: true
+
+- name: Read the deployed Agent runtime configuration without logging it
+  ansible.builtin.command:
+    argv:
+      - "{{ resource_application_kubectl }}"
+      - --kubeconfig
+      - "{{ resource_application_kubeconfig }}"
+      - --namespace
+      - "{{ resource_application_namespace }}"
+      - get
+      - configmap/agent-service-config
+      - --output
+      - 'jsonpath={.data.config\.yaml}'
+  register: resource_application_agent_runtime_configuration
+  changed_when: false
+  no_log: true
+
+- name: Persist the sanitized Agent runtime configuration for profile identity
+  ansible.builtin.copy:
+    dest: "{{ resource_application_profile_runtime_configuration_file }}"
+    content: "{{ resource_application_agent_runtime_configuration.stdout }}"
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
+
+- name: Read the deployed immutable Agent image identity
+  ansible.builtin.command:
+    argv:
+      - "{{ resource_application_kubectl }}"
+      - --kubeconfig
+      - "{{ resource_application_kubeconfig }}"
+      - --namespace
+      - "{{ resource_application_namespace }}"
+      - get
+      - deployment/agent-service
+      - --output
+      - 'jsonpath={.spec.template.spec.containers[0].image}'
+  register: resource_application_agent_image
+  changed_when: false
+  no_log: true
+
+- name: Read the deployed Claude Code version
+  ansible.builtin.command:
+    argv:
+      - "{{ resource_application_kubectl }}"
+      - --kubeconfig
+      - "{{ resource_application_kubeconfig }}"
+      - --namespace
+      - "{{ resource_application_namespace }}"
+      - exec
+      - deployment/agent-service
+      - --
+      - claude
+      - --version
+  register: resource_application_claude_version
+  changed_when: false
+  no_log: true
+
+- name: Derive exact Resource acceptance runtime identity
+  ansible.builtin.set_fact:
+    resource_application_agent_image_sha256: >-
+      {{ resource_application_agent_image.stdout
+         | regex_search('@sha256:[0-9a-f]{64}')
+         | regex_replace('^@sha256:', '') }}
+    resource_application_claude_code_version: "{{ resource_application_claude_version.stdout | regex_search('^[0-9]+\\.[0-9]+\\.[0-9]+') }}"
+  no_log: true
+
+- name: Reject incomplete deployed Resource acceptance runtime identity
+  ansible.builtin.assert:
+    that:
+      - resource_application_agent_image_sha256 is match('^[0-9a-f]{64}$')
+      - resource_application_claude_code_version is match('^[0-9]+\\.[0-9]+\\.[0-9]+$')
+    fail_msg: RESOURCE_APPLICATION_PROFILE_RUNTIME_IDENTITY_INVALID
+  no_log: true
+
+- name: Prepare stable root-owned Resource acceptance source inputs
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ resource_application_profile_preparer }}"
+      - --access-seed
+      - "{{ resource_application_access_seed_file }}"
+      - --runtime-configuration
+      - "{{ resource_application_profile_runtime_configuration_file }}"
+      - --agent-image-sha256
+      - "{{ resource_application_agent_image_sha256 }}"
+      - --claude-code-version
+      - "{{ resource_application_claude_code_version }}"
+      - --model
+      - "{{ resource_application_profile_model }}"
+      - --runtime-binding
+      - "{{ resource_application_profile_runtime_binding }}"
+      - --provider-binding
+      - "{{ resource_application_profile_provider_binding }}"
+      - --configuration-output
+      - "{{ resource_application_profile_configuration_file }}"
+      - --material-output
+      - "{{ resource_application_profile_material_file }}"
+  changed_when: true
+  register: resource_application_profile_prepare
+  failed_when: false
+  no_log: true
+
+- name: Surface a stable Resource acceptance source preparation diagnostic
+  ansible.builtin.assert:
+    that: resource_application_profile_prepare.rc == 0
+    fail_msg: >-
+      {{ resource_application_profile_prepare.stderr
+         | regex_search('LW_[A-Z0-9_]+')
+         | default('RESOURCE_APPLICATION_PROFILE_PREPARE_FAILED', true) }}
+
+- name: Render root-owned Resource acceptance profile from private source inputs
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ resource_application_profile_renderer }}"
+      - --access-seed
+      - "{{ resource_application_access_seed_file }}"
+      - --configuration
+      - "{{ resource_application_profile_configuration_file }}"
+      - --material
+      - "{{ resource_application_profile_material_file }}"
+      - --output
+      - "{{ resource_application_acceptance_profile_file }}"
+  changed_when: true
+  no_log: true
+
+- name: Verify rendered or pre-existing private Resource acceptance profile
+  ansible.builtin.stat:
+    path: "{{ resource_application_acceptance_profile_file }}"
+    checksum_algorithm: sha256
+  register: resource_application_acceptance_profile_input
+
+- name: Reject missing private Resource acceptance profile
+  ansible.builtin.assert:
+    that: resource_application_acceptance_profile_input.stat.exists
+    fail_msg: RESOURCE_APPLICATION_REQUIRED_PATH_MISSING
+
+- name: Parse immutable Resource package and private configuration
+  ansible.builtin.set_fact:
+    resource_application_package: "{{ lookup('ansible.builtin.file', resource_application_package_manifest) | from_json }}"
+    resource_application_bundle_manifest: "{{ lookup('ansible.builtin.file', resource_application_configuration_manifest) | from_json }}"
+    resource_application_bundle_objects: "{{ lookup('ansible.builtin.file', resource_application_configuration_bundle) | from_yaml_all | list }}"
+    resource_application_bundle_sha256: "sha256:{{ resource_application_inputs.results[1].stat.checksum }}"
+  no_log: true
+
+- name: Validate private Resource acceptance profile against Access bootstrap
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ resource_application_profile_validator }}"
+      - --profile
+      - "{{ resource_application_acceptance_profile_file }}"
+      - --access-seed
+      - "{{ resource_application_access_seed_file }}"
+  register: resource_application_acceptance_profile
+  changed_when: false
+  no_log: true
+
+- name: Load validated private Access bootstrap
+  ansible.builtin.set_fact:
+    resource_application_access_seed: >-
+      {{ lookup('ansible.builtin.file', resource_application_access_seed_file) | from_json }}
+  no_log: true
+
+- name: Create bounded Resource bootstrap workspace
+  ansible.builtin.file:
+    path: "{{ resource_application_report_root }}/{{ resource_application_run_id }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  become: true
+
+- name: Render conflict-detecting Access bootstrap
+  ansible.builtin.template:
+    src: access-seed-adopt.sql.j2
+    dest: "{{ resource_application_report_root }}/{{ resource_application_run_id }}/access-seed-adopt.sql"
+    owner: root
+    group: root
+    mode: '0600'
+  become: true
+  no_log: true
+
+- name: Apply or verify Resource Access bootstrap
+  labweaver_postgres_apply:
+    kubeconfig: "{{ resource_application_kubeconfig }}"
+    psql: "{{ resource_application_psql }}"
+    service_file: "{{ resource_application_postgres_service_file }}"
+    service: "{{ resource_application_postgres_service }}"
+    sql_file: "{{ resource_application_report_root }}/{{ resource_application_run_id }}/access-seed-adopt.sql"
+
+- name: Enforce exact Resource package and configuration boundaries
+  ansible.builtin.assert:
+    that:
+      - resource_application_package.schema_version == 'platform-image-package-manifest.v1'
+      - resource_application_package.profile | default('platform') == 'resource'
+      - resource_application_package.source_commit == resource_application_expected_source_commit
+      - resource_application_package.overall == 'passed'
+      - resource_application_package.images | length == 1
+      - resource_application_package.images[0].component == 'resource-service'
+      - resource_application_package.images[0].reference is match('^[^@]+@sha256:[0-9a-f]{64}$')
+      - resource_application_bundle_manifest.apiVersion == 'deploy.labweaver.io/resource-bundle-manifest/v1'
+      - resource_application_bundle_manifest.namespace == resource_application_namespace
+      - resource_application_bundle_objects | length == 2
+      - resource_application_bundle_objects | map(attribute='metadata.name') | sort == ['resource-service-config', 'resource-service-secrets']
+      - resource_application_bundle_objects | map(attribute='metadata.namespace') | unique | list == [resource_application_namespace]
+    fail_msg: RESOURCE_APPLICATION_IDENTITY_INVALID
+  no_log: true
+
+- name: Apply only the independently reviewed Resource configuration
+  labweaver_resource_bundle_apply:
+    kubeconfig: "{{ resource_application_kubeconfig }}"
+    bundle: "{{ resource_application_configuration_bundle }}"
+
+- name: Build isolated Resource Helm arguments
+  ansible.builtin.set_fact:
+    resource_application_helm_args:
+      - "--values={{ resource_application_values_file }}"
+      - "--set-string"
+      - "imagePullSecrets[0].name={{ resource_application_image_pull_secret_name }}"
+      - "--set-string"
+      - "deploymentIdentity.configurationBundleSha256={{ resource_application_bundle_sha256 }}"
+      - "--set-string"
+      - "images.resource_service={{ resource_application_package.images[0].reference }}"
+      - "--set"
+      - "workloads.resource-service.enabled=true"
+      - "--set"
+      - "network.defaultDenyEnabled=false"
+      - "--set"
+      - "network.cdiCloneSourcePolicyEnabled=false"
+      - "--set"
+      - "network.ciliumIngressPolicyEnabled=false"
+      - "--set"
+      - "network.resourceKubernetesApiCiliumPolicyEnabled=true"
+
+- name: Disable every non-Resource workload explicitly
+  ansible.builtin.set_fact:
+    resource_application_helm_args: "{{ resource_application_helm_args + ['--set', 'workloads.' + item + '.enabled=false'] }}"
+  loop: "{{ resource_application_workloads }}"
+
+- name: Atomically deploy the Resource authority without taking ownership of the Sprint 2 release
+  ansible.builtin.command:
+    argv: >-
+      {{ [resource_application_helm, '--kubeconfig', resource_application_kubeconfig,
+          'upgrade', '--install', resource_application_release_name, resource_application_chart_source,
+          '--namespace', resource_application_namespace, '--atomic', '--wait',
+          '--timeout', resource_application_rollout_timeout] + resource_application_helm_args }}
+  changed_when: true
+
+- name: Verify Resource authority rollout and digest readback
+  ansible.builtin.command:
+    argv:
+      - "{{ resource_application_kubectl }}"
+      - --kubeconfig
+      - "{{ resource_application_kubeconfig }}"
+      - --namespace
+      - "{{ resource_application_namespace }}"
+      - rollout
+      - status
+      - deployment/resource-service
+      - "--timeout={{ resource_application_rollout_timeout }}"
+  changed_when: false
+
+- name: Publish identity-bound Resource deployment manifest
+  ansible.builtin.copy:
+    dest: "{{ resource_application_report_root }}/{{ resource_application_run_id }}/resource-deployment-manifest.json"
+    owner: root
+    group: root
+    mode: '0600'
+    content: >-
+      {{ {
+        'schemaVersion': 'resource-deployment-manifest.v1',
+        'sourceCommit': resource_application_package.source_commit,
+        'runId': resource_application_run_id,
+        'packageManifestSha256': 'sha256:' ~ resource_application_inputs.results[0].stat.checksum,
+        'configurationBundleSha256': resource_application_bundle_sha256,
+        'image': {
+          'component': resource_application_package.images[0].component,
+          'reference': resource_application_package.images[0].reference
+        }
+      } | to_nice_json }}
+  become: true
+  no_log: true

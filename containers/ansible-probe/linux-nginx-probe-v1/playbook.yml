@@ -1,0 +1,36 @@
+---
+# LabWeaver approved read-only Ansible probe profile: linux-nginx-probe-v1
+#
+# Boundary contract:
+# - Only the frozen v1 allowlisted modules run against the target VM:
+#   ansible.builtin.package_facts, ansible.builtin.service_facts,
+#   ansible.builtin.stat. No shell, no command, no writes, no handlers.
+# - The playbook never mutates the target; it emits observation facts only.
+# - Fact mapping into the bounded typed evidence model happens in the
+#   labweaver-service ansible-probe worker (Rust), not in Ansible.
+# - Paths below are the approved observation surface for the Linux Nginx
+#   teaching lab (docs/labs/linux-nginx-material-contract.md). Assertions
+#   referencing anything outside this surface fail closed as unknown facts.
+- name: LabWeaver read-only Linux Nginx probe (linux-nginx-probe-v1)
+  hosts: probe_target
+  gather_facts: false
+  tasks:
+    - name: Collect installed package facts
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: Collect systemd service facts
+      ansible.builtin.service_facts:
+
+    - name: Stat approved Nginx material paths
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        get_checksum: true
+        checksum_algorithm: sha256
+        follow: true
+      loop:
+        - /etc/nginx/nginx.conf
+        - /etc/nginx/sites-available/default
+        - /srv/labweaver-nginx-lab
+        - /srv/labweaver-nginx-lab/index.html
+      register: labweaver_probe_stat

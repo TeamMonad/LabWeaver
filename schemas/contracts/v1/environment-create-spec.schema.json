@@ -1,0 +1,103 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "EnvironmentClass": {
+      "description": "Environment business class retained from the v2.1 architecture.",
+      "enum": [
+        "experiment",
+        "work"
+      ],
+      "type": "string"
+    },
+    "LeaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
+      "type": "string"
+    },
+    "ReleaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `ReleaseId`.",
+      "type": "string"
+    },
+    "RuntimeKind": {
+      "description": "Runtime kind shared by candidates, releases, and instances.",
+      "enum": [
+        "container",
+        "virtual_machine"
+      ],
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Authoritative fields required to create the first Environment aggregate.",
+  "properties": {
+    "capacityBinding": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "class": {
+      "$ref": "#/$defs/EnvironmentClass"
+    },
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    },
+    "displayLabel": {
+      "type": "string"
+    },
+    "eligibilityExpiresAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "leaseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LeaseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "ownerActorId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "providerBinding": {
+      "type": "string"
+    },
+    "releaseId": {
+      "$ref": "#/$defs/ReleaseId"
+    },
+    "releaseVersion": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "runtimeKind": {
+      "$ref": "#/$defs/RuntimeKind"
+    }
+  },
+  "required": [
+    "courseId",
+    "ownerActorId",
+    "displayLabel",
+    "class",
+    "runtimeKind",
+    "releaseId",
+    "releaseVersion",
+    "providerBinding",
+    "eligibilityExpiresAt"
+  ],
+  "title": "EnvironmentCreateSpec",
+  "type": "object"
+}

@@ -1,0 +1,152 @@
+{
+  "$defs": {
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "PathRule": {
+      "description": "Strict safe path selector shared by packages, collectors, and LLM allowlists.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "exactFile",
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "directoryTree",
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SubmissionApiVersion": {
+      "enum": [
+        "evaluation.labweaver.io/v1"
+      ],
+      "type": "string"
+    },
+    "SubmissionDocumentKind": {
+      "enum": [
+        "SubmissionManifest"
+      ],
+      "type": "string"
+    },
+    "SubmissionManifest": {
+      "additionalProperties": false,
+      "description": "Stable SubmissionManifest v1.",
+      "properties": {
+        "apiVersion": {
+          "$ref": "#/$defs/SubmissionApiVersion"
+        },
+        "exclude": {
+          "items": {
+            "$ref": "#/$defs/PathRule"
+          },
+          "type": "array"
+        },
+        "followSymlinks": {
+          "type": "boolean"
+        },
+        "include": {
+          "items": {
+            "$ref": "#/$defs/PathRule"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "$ref": "#/$defs/SubmissionDocumentKind"
+        },
+        "llmReadable": {
+          "items": {
+            "$ref": "#/$defs/PathRule"
+          },
+          "type": "array"
+        },
+        "maxFiles": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxTotalBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "required": {
+          "items": {
+            "$ref": "#/$defs/PathRule"
+          },
+          "type": "array"
+        },
+        "source": {
+          "$ref": "#/$defs/SubmissionSource"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "name",
+        "source",
+        "include",
+        "exclude",
+        "required",
+        "llmReadable",
+        "maxTotalBytes",
+        "maxFiles",
+        "followSymlinks"
+      ],
+      "type": "object"
+    },
+    "SubmissionSource": {
+      "description": "Source available to a bounded Collector.",
+      "enum": [
+        "workspace",
+        "system_facts"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    },
+    "manifest": {
+      "$ref": "#/$defs/SubmissionManifest"
+    }
+  },
+  "required": [
+    "courseId",
+    "manifest"
+  ],
+  "title": "FreezeSubmissionRequest",
+  "type": "object"
+}

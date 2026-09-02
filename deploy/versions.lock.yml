@@ -1,0 +1,138 @@
+schema_version: 1
+platform_images:
+  platform: linux/amd64
+  rust_toolchain: 1.97.1
+  buildkit: v0.31.1
+  buildkit_image: docker.io/moby/buildkit@sha256:6b59b7df63a8cb9902736f9ddf7fcff8261613d3e7449b8ea8b7537fc399c03a
+  buildx: v0.35.0
+  buildx_windows_amd64_sha256: 8076395009787cd1d30c94edeb5d7ac3945273374fc162c00e9810c3e9325ebe
+  dockerfile_frontend: docker.io/docker/dockerfile:1.25.0@sha256:0adf442eae370b6087e08edc7c50b552d80ddf261576f4ebd6421006b2461f12
+  trivy: 0.72.0
+  helm: v3.21.3
+  ci_images:
+    trivy: docker.io/aquasec/trivy:0.72.0@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f
+    helm: docker.io/alpine/helm:3.21.3@sha256:35da09ba0716fc7c3cd63b6b31ee380a9c7662e95f29ab0e4ae962420afd315b
+  pnpm: 9.15.4
+  claude_code: 2.1.215
+  claude_code_linux_x64_sha512: cf00de4e2b500f7bf4fc6c57de19753d3639e23ee2177fe103d40614cf79ca29ddf61064bcbcafe9a53d59d1fbd3cf6cdc02027c8ea167be00157b41469e9bcd
+  bases:
+    rust_builder: docker.io/library/rust:1.97.1-bookworm@sha256:14bc9c5966e7b3a385794b3d5389a8765668342025fbcc7b2e3d2866ac4bd8c3
+    rust_runtime: gcr.io/distroless/cc-debian12:nonroot@sha256:66aa873a4a14fb164aa01296058efd8253744606d72715e45acface073359faa
+    node_builder: docker.io/library/node:22.18.0-bookworm-slim@sha256:752ea8a2f758c34002a0461bd9f1cee4f9a3c36d48494586f60ffce1fc708e0e
+    web_runtime: docker.io/nginxinc/nginx-unprivileged:1.29.5-alpine@sha256:42a7d7f2ee23e9f5a1dcdf3647ba5c585bbd18f79e79cd817e70e8cd61c55779
+    gateway_builder: docker.io/library/rust:1.97.1-alpine3.21@sha256:7bae7c67364dad5ebbd4060923b34d734fbed66d7c1cf3af72aa2f062af93eb6
+    gateway_runtime: docker.io/library/alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
+controller:
+  image: containers/Containerfile.controller
+  rust_toolchain: 1.97.1
+  ansible_core: 2.18.6
+  ansible_lint: 25.6.1
+  python_kubernetes: 34.1.0
+  python_jsonschema: 4.24.0
+  helm: v3.21.3
+  kubectl: v1.34.1
+oj_cpp17:
+  toolchain_profile: cpp17-approved-v1
+  base_runtime: cgr.dev/chainguard/gcc-glibc@sha256:8c43994421c12e300ea5d227c774822e5d7aa45feaeb8e5721f4b5023d7ebfc5
+ansible_probe:
+  playbook_profile: linux-nginx-probe-v1
+  ansible_core: 2.20.5
+  openssh_client: 10.5p1
+  openssh_client_tarball_sha256: d44d28a839ea9daf969cc69150fde59910b2b39361dad81a3bd6cbd19218db11
+  toolchain: cgr.dev/chainguard/python@sha256:7b79c054afd14f566d1d52ea1d4d037267ec8570efedbc6ead779d89ba943abe
+  base_runtime: cgr.dev/chainguard/python@sha256:cc8d5c94686633e8affbaf52ac4e6c739544fb8a7f69c1e7091adf1a312f30b8
+postgresql:
+  image: docker.io/library/postgres:17.6-alpine@sha256:747d5ed1fdeeb124b880fbe3d7c6557d2c4064ae41d6b6297d417882effce4be
+platform_foundation:
+  nats: docker.io/library/nats:2.14.1-scratch@sha256:4223c8fa116891628611e154fb66570cad599d8f8b3b131b82caf10f378e9dcf
+  nats_box: docker.io/natsio/nats-box:0.18.0@sha256:abdc9f9f0120bb8adfbf674eb037d1551db55356eb198b7bd4ffed377f6950a6
+  minio: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+  buildkit_rootless: docker.io/moby/buildkit:v0.31.1-rootless@sha256:946cf909534b789c9b84af75e6d4f8cb23c3b9cb387daec5ba0f4878a3e4647c
+  admin_tools:
+    nats_cli:
+      version: v0.4.0
+      linux_amd64_url: https://github.com/nats-io/natscli/releases/download/v0.4.0/nats-0.4.0-linux-amd64.zip
+      linux_amd64_sha256: 8dbd437c826b953dbd7432cf890ef22ba3c33dccc3dce5e71b3e8d055427849c
+    nsc:
+      version: v2.15.0
+      linux_amd64_url: https://github.com/nats-io/nsc/releases/download/v2.15.0/nsc-linux-amd64.zip
+      linux_amd64_sha256: 7d55eda757dc9f233675a3038fcf8779bcda99753b1603f7009fc8537e126b7e
+    minio_client:
+      version: RELEASE.2025-08-13T08-35-41Z
+      linux_amd64_url: https://github.com/minio/mc/releases/download/RELEASE.2025-08-13T08-35-41Z/mc.linux-amd64.RELEASE.2025-08-13T08-35-41Z
+      linux_amd64_sha256: 01f866e9c5f9b87c2b09116fa5d7c06695b106242d829a8bb32990c00312e891
+    buildctl:
+      version: v0.31.1
+      linux_amd64_url: https://github.com/moby/buildkit/releases/download/v0.31.1/buildkit-v0.31.1.linux-amd64.tar.gz
+      linux_amd64_sha256: 1fc78750d0c96bdc18799a3c0b551d6807bd4939e8cd79e357823e467451e16e
+    keycloak_admin:
+      version: 26.7.0
+      linux_amd64_url: https://github.com/keycloak/keycloak/releases/download/26.7.0/keycloak-26.7.0.tar.gz
+      linux_amd64_sha256: f771df0aa1e4820f57d56f7d6d015beb6415487b43f8de7e5a6d48f8a7fe118a
+    system_packages:
+      postgresql: postgresql-0:16.14-1.el10_2.x86_64
+      java: java-21-openjdk-headless-1:21.0.11.0.10-2.el10_1.x86_64
+kubernetes:
+  minor: v1.35
+  patch: v1.35.6
+crio: 1.35.5
+cilium:
+  chart: 1.19.5
+  image: quay.io/cilium/cilium:v1.19.5@sha256:20fbbc14ac20b55a292c0dcda5571bf31cde30a7dbc68c29db3e709390ab0732
+gateway_api:
+  standard_channel: v1.6.0
+metallb:
+  chart: 0.16.1
+local_path_provisioner: v0.0.36
+nfs_csi:
+  chart: 4.13.4
+cert_manager: v1.21.0
+kubevirt: v1.8.4
+cdi: v1.65.0
+etcd: 3.6.6
+harbor:
+  chart: 1.19.1
+  app: 2.15.1
+  chart_archive_sha256: sha256:593f47e1ff6cdb58bd571708535ccef436f44ccf842c5f7925cd7b03e827edc1
+  images:
+    nginx: sha256:1f9d06d040f2478f6cf7f6da0091877bf987a641810f4bfaadb2a87d73dbf4fb
+    portal: sha256:ac55161c57a8351807adf8f8def264bdd52667c371d0436beefebdac4341c9e2
+    core: sha256:887a85b8ea98b76bfc9f715f1a0785bb99f9a1034241513902dd6e95be922a83
+    jobservice: sha256:0de4fd2ce3a02d3e6591b439e4674ea085885ddf43652b44004cc67eb19dba12
+    registry: sha256:ebf0325c2661729dbb317cbf839608eb8b15cfa158911a94976f2c21563c466e
+    registryctl: sha256:554147a956989175f63f8d41573d716c6ddf6052acd1749c88c0f99ce6ee2bff
+    trivy: sha256:f0c52bed36c083ec4fded26cefab01e4cd58c9354c261cb3156c69f57bb50131
+    database: sha256:7944d8594a48a8d014e1fa440bc788348f2a779fa2c612ed6b79390cd767e6db
+    redis: sha256:5669d4828805d9ed0bbfc18c101c6ec82d26a13cb9242b48f6348a3e3b2e4cca
+    exporter: sha256:372275b6b6abeb571fa7bd5de458e3d75f1a1636503b3c0abe02938f2b285d75
+  oidc: disabled
+  topology: single-instance
+  persistence:
+    database: local-path
+    redis: local-path
+    registry: nfs-rwx
+    trivy: nfs-rwx
+identity_foundation:
+  keycloak: 26.7.0
+  postgres: 17.6-alpine
+  python_kubernetes_rpm: python3-kubernetes-34.1.0-2.el10_2
+  images:
+    keycloak: docker.io/keycloak/keycloak:26.7.0@sha256:1362a9d9f13ab325231ea133610cc905e12805804abc7acbef552dd613720aa6
+    postgres: docker.io/library/postgres:17.6-alpine@sha256:747d5ed1fdeeb124b880fbe3d7c6557d2c4064ae41d6b6297d417882effce4be
+test_images:
+  busybox: docker.io/library/busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+  cirros: quay.io/kubevirt/cirros-container-disk-demo@sha256:e2a45211b1f4a73e40b5356e503786c6dc7b5fb003b5d1d4ffa0a450a3dfdefe
+  kind_node: kindest/node:v1.35.0@sha256:452d707d4862f52530247495d180205e029056831160e22870e37e3f6c1ac31f
+  registry: docker.io/library/registry:3.0.0@sha256:6c5666b861f3505b116bb9aa9b25175e71210414bd010d92035ff64018f9457e
+platform_vm_base:
+  binding: ubuntu-24.04-v1
+  release: ubuntu-24.04
+  registry_url: docker://quay.io/containerdisks/ubuntu@sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5
+  disk_sha256: ffe6203da54deeb6db5d2a98a83f9ec8e55f149d3f7ba622e1abe5fa966ee3d6
+  artifact_id: 00000000-0000-7000-8000-000000000003
+  format: qcow2
+  capacity_bytes: 10737418240
+  data_source_name: ubuntu-lab-base-v1
+  seed_data_volume_name: ubuntu-lab-base-v1-seed
+  storage_class_name: local-path
+  storage_request: 10Gi

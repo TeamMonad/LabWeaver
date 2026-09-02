@@ -1,0 +1,17 @@
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: harbor-single-instance
+  namespace: {{ harbor_namespace }}
+  labels:
+    app.kubernetes.io/part-of: labweaver-infrastructure
+spec:
+  hard:
+    pods: "20"
+    requests.cpu: "6"
+    requests.memory: 12Gi
+    limits.cpu: "8"
+    limits.memory: 16Gi
+    persistentvolumeclaims: "10"
+    requests.storage: 200Gi

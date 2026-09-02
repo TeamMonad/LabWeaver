@@ -1,0 +1,158 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "EvaluationRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `EvaluationRunId`.",
+      "type": "string"
+    },
+    "EvaluationStepRunEvent": {
+      "additionalProperties": false,
+      "description": "Payload-safe step state event. Evidence must be read from the authority.",
+      "properties": {
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cleanupVerified": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "diagnosticCode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operatorActorId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActorId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "runId": {
+          "$ref": "#/$defs/EvaluationRunId"
+        },
+        "state": {
+          "type": "string"
+        },
+        "stepId": {
+          "type": "string"
+        },
+        "stepRunId": {
+          "$ref": "#/$defs/EvaluationStepRunId"
+        }
+      },
+      "required": [
+        "runId",
+        "stepRunId",
+        "stepId",
+        "revision",
+        "state",
+        "attempt"
+      ],
+      "type": "object"
+    },
+    "EvaluationStepRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `EvaluationStepRunId`.",
+      "type": "string"
+    },
+    "EventId": {
+      "description": "Strongly typed UUIDv7 identifier for `EventId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "Sequence": {
+      "description": "Aggregate-local ordering sequence. This value is not an SSE resume cursor.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Strict CloudEvents 1.0 envelope carried as structured JSON.",
+  "properties": {
+    "aggregateRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "aggregateSequence": {
+      "$ref": "#/$defs/Sequence"
+    },
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    },
+    "data": {
+      "$ref": "#/$defs/EvaluationStepRunEvent"
+    },
+    "datacontenttype": {
+      "type": "string"
+    },
+    "dataschema": {
+      "type": "string"
+    },
+    "id": {
+      "$ref": "#/$defs/EventId"
+    },
+    "source": {
+      "type": "string"
+    },
+    "specversion": {
+      "type": "string"
+    },
+    "subject": {
+      "type": "string"
+    },
+    "time": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "traceId": {
+      "type": "string"
+    },
+    "type": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "specversion",
+    "id",
+    "source",
+    "type",
+    "subject",
+    "time",
+    "datacontenttype",
+    "dataschema",
+    "courseId",
+    "aggregateRevision",
+    "aggregateSequence",
+    "traceId",
+    "data"
+  ],
+  "title": "CloudEvent",
+  "type": "object"
+}

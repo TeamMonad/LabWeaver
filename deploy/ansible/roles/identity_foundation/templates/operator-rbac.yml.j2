@@ -1,0 +1,98 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: labweaver-operations
+  labels: {pod-security.kubernetes.io/enforce: restricted}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: architect-deployer, namespace: labweaver-operations}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: devops-verifier, namespace: labweaver-operations}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: labweaver-architect-deployer}
+subjects:
+  - {kind: ServiceAccount, name: architect-deployer, namespace: labweaver-operations}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: cluster-admin}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: labweaver-cluster-observer}
+rules:
+  - apiGroups: [""]
+    resources: [namespaces, nodes, persistentvolumes, events]
+    verbs: [get, list, watch]
+  - apiGroups: [storage.k8s.io]
+    resources: [storageclasses, csidrivers, csinodes]
+    verbs: [get, list, watch]
+  - apiGroups: [gateway.networking.k8s.io]
+    resources: [gatewayclasses]
+    verbs: [get, list, watch]
+  - apiGroups: [apiextensions.k8s.io]
+    resources: [customresourcedefinitions]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: labweaver-devops-cluster-view}
+subjects:
+  - {kind: ServiceAccount, name: devops-verifier, namespace: labweaver-operations}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: labweaver-cluster-observer}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: labweaver-testflight-operator}
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/log, services, endpoints, configmaps, persistentvolumeclaims, events]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets, replicasets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [batch]
+    resources: [jobs, cronjobs]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [policy]
+    resources: [poddisruptionbudgets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [gateway.networking.k8s.io]
+    resources: [gateways, httproutes]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [kubevirt.io]
+    resources: [virtualmachines, virtualmachineinstances]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [subresources.kubevirt.io]
+    resources: [virtualmachines/start, virtualmachines/stop, virtualmachines/restart]
+    verbs: [update]
+  - apiGroups: [cdi.kubevirt.io]
+    resources: [datavolumes]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [cert-manager.io, cilium.io]
+    resources: ['*']
+    verbs: [get, list, watch]
+{#
+  The identity foundation must be bootstrappable after a clean validation reset.
+  labweaver-demo is an application-era namespace and is intentionally absent
+  until the application adoption role creates its owned namespace. Binding a
+  RoleBinding to it here makes the foundation depend on deleted state and
+  fails before Keycloak can be reconciled. Application-scoped permissions are
+  applied by the owning application role after its namespace exists.
+#}
+{% for namespace in [identity_namespace, 'harbor'] %}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: labweaver-devops-admin, namespace: {{ namespace }}}
+subjects:
+  - {kind: ServiceAccount, name: devops-verifier, namespace: labweaver-operations}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: labweaver-testflight-operator}
+{% endfor %}

@@ -1,0 +1,53 @@
+---
+platform_foundation_enabled: false
+platform_foundation_kubeconfig: /etc/kubernetes/admin.conf
+platform_foundation_namespace: labweaver-data
+platform_foundation_bundle: ""
+platform_foundation_manifest: "{{ playbook_dir }}/../../config/platform-foundation-bundle-manifest.json"
+platform_foundation_storage_class: local-path
+platform_foundation_minio_storage_class: nfs-rwx
+platform_foundation_postgres_storage: 20Gi
+platform_foundation_postgres_database: labweaver
+platform_foundation_postgres_admin_role: postgres-admin
+platform_foundation_postgres_admin_memberships:
+  - lw_release_coordinator
+  - lw_audit_projection
+  - lw_control_owner
+  - lw_access_owner
+  - lw_environment_owner
+  - lw_agent_owner
+  - lw_evaluation_owner
+  - lw_resource_owner
+  - lw_control_migration
+  - lw_access_migration
+  - lw_environment_migration
+  - lw_agent_migration
+  - lw_evaluation_migration
+  - lw_resource_migration
+platform_foundation_postgres_admin_owner_memberships:
+  - lw_release_coordinator
+  - lw_audit_projection
+  - lw_control_owner
+  - lw_access_owner
+  - lw_environment_owner
+  - lw_agent_owner
+  - lw_evaluation_owner
+  - lw_resource_owner
+platform_foundation_postgres_admin_migration_memberships:
+  - lw_control_migration
+  - lw_access_migration
+  - lw_environment_migration
+  - lw_agent_migration
+  - lw_evaluation_migration
+  - lw_resource_migration
+platform_foundation_postgres_admin_runtime_memberships:
+  - lw_control_runtime
+  - lw_access_runtime
+  - lw_environment_runtime
+  - lw_agent_runtime
+  - lw_evaluation_runtime
+  - lw_resource_runtime
+platform_foundation_nats_storage: 10Gi
+platform_foundation_minio_storage: 100Gi
+platform_foundation_rollout_retries: 60
+platform_foundation_rollout_delay: 5

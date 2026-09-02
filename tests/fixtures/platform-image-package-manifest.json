@@ -1,0 +1,59 @@
+{
+  "schema_version": "platform-image-package-manifest.v1",
+  "run_id": "pkg-fixture-0001",
+  "release_id": "platform-fixture",
+  "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "source_date_epoch": 1784304000,
+  "component_lock_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "platform": "linux/amd64",
+  "registry": "harbor.internal.example",
+  "builder": {
+    "buildkit": "v0.31.1",
+    "buildx": "v0.35.0"
+  },
+  "images": [
+    {
+      "component": "access-service",
+      "reference": "harbor.internal.example/labweaver-system/access-service@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "scan": { "scanner": "trivy:0.72.0", "database_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "critical": 0, "high": 0, "report": "artifact://package/access-service/trivy.json", "report_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" }
+    },
+    {
+      "component": "agent-service",
+      "reference": "harbor.internal.example/labweaver-system/agent-service@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "scan": { "scanner": "trivy:0.72.0", "database_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "critical": 0, "high": 1, "report": "artifact://package/agent-service/trivy.json", "report_sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" }
+    },
+    {
+      "component": "control-service",
+      "reference": "harbor.internal.example/labweaver-system/control-service@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "scan": { "scanner": "trivy:0.72.0", "database_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "critical": 0, "high": 0, "report": "artifact://package/control-service/trivy.json", "report_sha256": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
+    },
+    {
+      "component": "environment-service",
+      "reference": "harbor.internal.example/labweaver-system/environment-service@sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "scan": { "scanner": "trivy:0.72.0", "database_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "critical": 0, "high": 0, "report": "artifact://package/environment-service/trivy.json", "report_sha256": "sha256:1212121212121212121212121212121212121212121212121212121212121212" }
+    },
+    {
+      "component": "evaluation-service",
+      "reference": "harbor.internal.example/labweaver-system/evaluation-service@sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "scan": { "scanner": "trivy:0.72.0", "database_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "critical": 0, "high": 0, "report": "artifact://package/evaluation-service/trivy.json", "report_sha256": "sha256:1515151515151515151515151515151515151515151515151515151515151515" }
+    },
+    {
+      "component": "openssh-gateway",
+      "reference": "harbor.internal.example/labweaver-system/openssh-gateway@sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "scan": { "scanner": "trivy:0.72.0", "database_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "critical": 0, "high": 0, "report": "artifact://package/openssh-gateway/trivy.json", "report_sha256": "sha256:1313131313131313131313131313131313131313131313131313131313131313" }
+    },
+    {
+      "component": "web",
+      "reference": "harbor.internal.example/labweaver-system/web@sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "scan": { "scanner": "trivy:0.72.0", "database_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "critical": 0, "high": 0, "report": "artifact://package/web/trivy.json", "report_sha256": "sha256:1414141414141414141414141414141414141414141414141414141414141414" }
+    }
+  ],
+  "overall": "passed"
+}

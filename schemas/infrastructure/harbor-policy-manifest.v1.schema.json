@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://labweaver.invalid/schemas/harbor-policy-manifest.v1.schema.json",
+  "title": "HarborPolicyManifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "project", "oidc", "policy_revision", "credential_locator"],
+  "properties": {
+    "schema_version": { "const": "harbor-policy-manifest.v1" },
+    "run_id": { "type": "string", "pattern": "^infra-[a-z0-9-]+$" },
+    "project": { "type": "object", "required": ["name", "private", "auto_scan"], "properties": { "name": { "const": "labweaver-system" }, "private": { "const": true }, "auto_scan": { "const": true } } },
+    "oidc": { "const": { "status": "not_configured", "reason": "issue-23-non-goal" } },
+    "policy_revision": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "credential_locator": { "type": "object", "required": ["kind", "revision"], "properties": { "kind": { "const": "root-only-router-locator" }, "revision": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" } } }
+  }
+}

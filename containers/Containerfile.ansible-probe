@@ -1,0 +1,83 @@
+ARG RUST_BUILDER="docker.io/library/rust:1.97.1-bookworm@sha256:14bc9c5966e7b3a385794b3d5389a8765668342025fbcc7b2e3d2866ac4bd8c3"
+ARG ANSIBLE_PROBE_TOOLCHAIN="cgr.dev/chainguard/python@sha256:7b79c054afd14f566d1d52ea1d4d037267ec8570efedbc6ead779d89ba943abe"
+ARG ANSIBLE_PROBE_RUNTIME="cgr.dev/chainguard/python@sha256:cc8d5c94686633e8affbaf52ac4e6c739544fb8a7f69c1e7091adf1a312f30b8"
+
+FROM ${RUST_BUILDER} AS builder
+ARG RUST_TOOLCHAIN=1.97.1
+ARG SOURCE_DATE_EPOCH
+ARG SOURCE_COMMIT
+ENV CARGO_INCREMENTAL=0 \
+    CARGO_NET_GIT_FETCH_WITH_CLI=false \
+    RUSTUP_TOOLCHAIN=${RUST_TOOLCHAIN} \
+    SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY rust-toolchain.toml rustfmt.toml ./
+COPY .cargo .cargo
+COPY crates crates
+COPY services services
+COPY access-gateway access-gateway
+COPY xtask xtask
+COPY migrations migrations
+COPY vendor vendor
+RUN --mount=type=cache,id=labweaver-probe-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=labweaver-probe-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    cargo fetch --locked
+RUN --network=none \
+    --mount=type=cache,id=labweaver-probe-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=labweaver-probe-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=labweaver-probe-cargo-target,target=/src/target,sharing=locked \
+    test -n "${SOURCE_DATE_EPOCH}" && test -n "${SOURCE_COMMIT}" && \
+    cargo build --release --locked --package evaluation-service && \
+    install -D -m 0555 target/release/evaluation-service /out/labweaver-service
+
+# OpenSSH client built from the upstream source release against the same Wolfi
+# toolchain that ships in the runtime, so the linked OpenSSL matches exactly.
+# The tarball identity is locked in deploy/versions.lock.yml.
+FROM ${ANSIBLE_PROBE_TOOLCHAIN} AS openssh-builder
+ARG OPENSSH_VERSION=10.5p1
+ARG OPENSSH_SHA256=d44d28a839ea9daf969cc69150fde59910b2b39361dad81a3bd6cbd19218db11
+USER root
+RUN apk add --no-cache build-base ca-certificates curl linux-headers openssl-dev zlib-dev \
+    && curl -fsSL --retry 6 --retry-delay 3 --retry-all-errors -C - \
+       -o /tmp/openssh.tar.gz "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-${OPENSSH_VERSION}.tar.gz" \
+    && echo "${OPENSSH_SHA256}  /tmp/openssh.tar.gz" | sha256sum -c \
+    && tar -xzf /tmp/openssh.tar.gz -C /tmp \
+    && cd "/tmp/openssh-${OPENSSH_VERSION}" \
+    && ./configure --prefix=/opt/openssh --without-openssl-header-check \
+    && make -j"$(nproc)" ssh \
+    && install -D -m 0755 ssh /opt/openssh/bin/ssh
+
+FROM ${ANSIBLE_PROBE_TOOLCHAIN} AS pip-builder
+USER root
+RUN install -d -m 0755 /opt/labweaver/probe/bin \
+    && python3 -m pip install --no-cache-dir --target=/opt/labweaver/probe/pylib \
+       ansible-core==2.20.5 \
+    && ln -s /opt/labweaver/probe/pylib/bin/ansible-playbook \
+       /opt/labweaver/probe/bin/ansible-playbook
+
+FROM ${ANSIBLE_PROBE_RUNTIME} AS runtime
+ARG SOURCE_COMMIT
+LABEL org.opencontainers.image.source="https://github.com/TeamMonad/LabWeaver" \
+      org.opencontainers.image.revision="${SOURCE_COMMIT}" \
+      org.opencontainers.image.title="LabWeaver approved read-only Ansible probe runner" \
+      io.labweaver.playbook-profile="linux-nginx-probe-v1"
+COPY --from=pip-builder /opt/labweaver /opt/labweaver
+COPY --from=pip-builder /usr/lib/locale/C.utf8 /usr/lib/locale/C.utf8
+COPY --from=openssh-builder /opt/openssh/bin/ssh /usr/local/bin/ssh
+COPY --from=builder --chown=65532:65532 /out/labweaver-service /usr/local/bin/labweaver-service
+COPY containers/ansible-probe/linux-nginx-probe-v1/playbook.yml \
+     /opt/labweaver/probe/linux-nginx-probe-v1/playbook.yml
+ENV ANSIBLE_NOCOWS=1 \
+    ANSIBLE_LOCALHOST_WARNING=false \
+    ANSIBLE_HOME=/work/ansible \
+    ANSIBLE_LOCAL_TEMP=/work/ansible/tmp \
+    ANSIBLE_REMOTE_TEMP=/work/ansible-remote/tmp \
+    HOME=/work \
+    LC_ALL=C.UTF-8 \
+    LANG=C.UTF-8 \
+    PYTHONUTF8=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/opt/labweaver/probe/pylib
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/labweaver-service"]

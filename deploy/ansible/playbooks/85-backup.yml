@@ -1,0 +1,5 @@
+---
+- name: Create and validate an etcd snapshot
+  hosts: control_plane
+  gather_facts: true
+  roles: [backup]

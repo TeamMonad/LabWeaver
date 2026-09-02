@@ -1,0 +1,67 @@
+---
+# Issue the Resource NATS user from a reviewed, private NSC store.
+# This playbook never accepts a service .creds file as a signing source.
+- name: Issue Resource NATS identity
+  hosts: resource_identity_controller
+  gather_facts: false
+  become: false
+  vars:
+    resource_identity_python: "{{ lookup('ansible.builtin.env', 'LABWEAVER_PYTHON') | default('python3', true) }}"
+    resource_identity_script: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_IDENTITY_SCRIPT') }}"
+    resource_identity_nsc: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_NSC') }}"
+    resource_identity_store: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_NSC_STORE') }}"
+    resource_identity_output: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_IDENTITY_OUTPUT') }}"
+  tasks:
+    - name: Require explicit private issuance inputs
+      ansible.builtin.assert:
+        that:
+          - resource_identity_script | length > 0
+          - resource_identity_nsc | length > 0
+          - resource_identity_store | length > 0
+          - resource_identity_output | length > 0
+          - "'.private' in resource_identity_store or '/private/' in resource_identity_store"
+          - "'.private' in resource_identity_output or '/private/' in resource_identity_output"
+        fail_msg: RESOURCE_NATS_ISSUANCE_INPUT_INVALID
+
+    - name: Inspect signing inputs without reading secret contents
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ resource_identity_script }}"
+        - "{{ resource_identity_nsc }}"
+        - "{{ resource_identity_store }}"
+      register: resource_identity_inputs
+      no_log: true
+
+    - name: Reject missing signing inputs
+      ansible.builtin.assert:
+        that:
+          - resource_identity_inputs.results | map(attribute='stat.exists') | min
+          - resource_identity_inputs.results[0].stat.mode | default('') in ['0700', '0750', '0755']
+          - resource_identity_inputs.results[1].stat.mode | default('') in ['0700', '0750', '0755']
+        fail_msg: RESOURCE_NATS_SIGNING_SOURCE_UNAVAILABLE
+      no_log: true
+
+    - name: Issue Resource identity with bounded permissions
+      ansible.builtin.command:
+        argv:
+          - "{{ resource_identity_python }}"
+          - "{{ resource_identity_script }}"
+          - --store
+          - "{{ resource_identity_store }}"
+          - --nsc
+          - "{{ resource_identity_nsc }}"
+          - --output
+          - "{{ resource_identity_output }}"
+      register: resource_identity_issuance
+      changed_when: true
+      no_log: true
+
+    - name: Require machine-readable issuance success
+      ansible.builtin.assert:
+        that:
+          - resource_identity_issuance.rc == 0
+          - "'resource-service' in resource_identity_issuance.stdout"
+          - "'issued' in resource_identity_issuance.stdout"
+        fail_msg: RESOURCE_NATS_ISSUANCE_FAILED
+      no_log: true

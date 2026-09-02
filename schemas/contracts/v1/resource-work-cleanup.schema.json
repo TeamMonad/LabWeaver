@@ -1,0 +1,74 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "LeaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Resource-authoritative request to revoke access and delete one Work\nenvironment before releasing its exact capacity claim.",
+  "properties": {
+    "capacityBinding": {
+      "type": "string"
+    },
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    },
+    "environmentId": {
+      "$ref": "#/$defs/EnvironmentId"
+    },
+    "leaseId": {
+      "$ref": "#/$defs/LeaseId"
+    },
+    "leaseRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "ownerActorId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "reasonCode": {
+      "type": "string"
+    },
+    "traceId": {
+      "type": "string"
+    },
+    "version": {
+      "format": "uint8",
+      "maximum": 255,
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "leaseId",
+    "leaseRevision",
+    "environmentId",
+    "courseId",
+    "ownerActorId",
+    "capacityBinding",
+    "reasonCode",
+    "traceId"
+  ],
+  "title": "ResourceWorkCleanup",
+  "type": "object"
+}

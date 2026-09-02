@@ -1,0 +1,33 @@
+---
+# Issue #152 destructive clean redeploy of LabWeaver-dedicated foundation.
+# This role only runs after the read-only ownership preflight has proven every
+# candidate namespace, and it never touches the protected shared namespaces.
+foundation_clean_redeploy_confirmation: "{{ lookup('ansible.builtin.env', 'LABWEAVER_FOUNDATION_CLEAN_CONFIRMATION') }}"
+foundation_clean_redeploy_run_id: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RUN_ID') }}"
+foundation_clean_redeploy_source_commit: "{{ lookup('ansible.builtin.env', 'LABWEAVER_COMMIT_SHA') }}"
+foundation_clean_redeploy_kubeconfig: /etc/kubernetes/admin.conf
+foundation_clean_redeploy_kubectl: /usr/bin/kubectl
+foundation_clean_redeploy_helm: /usr/local/bin/helm
+foundation_clean_redeploy_report_root: /var/lib/labweaver/foundation-clean-redeploy
+foundation_clean_redeploy_delete_timeout: 20m
+# Must match the ownership preflight candidate list exactly; the role refuses
+# to run when the two drift apart.
+foundation_clean_redeploy_namespaces:
+  - labweaver-data
+  - labweaver-build
+  - labweaver-demo
+  - labweaver-evaluation
+  - labweaver-operations
+  - labweaver-system
+  - harbor
+  - keycloak-system
+foundation_clean_redeploy_protected_namespaces:
+  - kube-system
+  - kube-public
+  - kube-node-lease
+  - kubevirt
+  - cdi
+# The Sprint 2 application release lives inside labweaver-system and must be
+# uninstalled before its namespace is destroyed.
+foundation_clean_redeploy_application_release: labweaver
+foundation_clean_redeploy_application_namespace: labweaver-system

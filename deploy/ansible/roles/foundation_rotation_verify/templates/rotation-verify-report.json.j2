@@ -1,0 +1,26 @@
+{
+  "schema_version": "labweaver.foundation-rotation-verify-report.v1",
+  "run_id": {{ foundation_rotation_verify_run_id | to_json }},
+  "source_commit": {{ foundation_rotation_verify_source_commit | to_json }},
+  "cluster_uid": {{ foundation_rotation_verify_cluster_uid.stdout | trim | to_json }},
+  "issue": "#152",
+  "release_eligible": false,
+  "note": "clean-rebuild-non-release: rotation evidence for the dedicated foundation rebuild; it cannot close #142 or #148 and is not a Release Gate.",
+  "old_credentials": {
+    "postgres_rejected": {{ (foundation_rotation_verify_old_postgres.rc != 0) | to_json }},
+    "nats_rejected": {{ (foundation_rotation_verify_old_nats.rc != 0) | to_json }},
+    "minio_rejected": {{ (foundation_rotation_verify_old_minio.rc != 0) | to_json }},
+    "harbor_probe_executed": {{ (foundation_rotation_verify_old_harbor_username | length > 0) | to_json }}
+  },
+  "reinstalled_foundation": {
+    "namespace": {{ foundation_rotation_verify_foundation_namespace | to_json }},
+    "workloads": {{ foundation_rotation_verify_statefulsets.resources | map(attribute='metadata.name') | list | sort | to_json }},
+    "ready_replicas": [{% for set in foundation_rotation_verify_statefulsets.resources %}{{ set.status.readyReplicas | default(0, true) | int }}{% if not loop.last %}, {% endif %}{% endfor %}]
+  },
+  "credential_registry": {
+    "locator": {{ (foundation_rotation_verify_registry_root + '/' + foundation_rotation_verify_run_id + '/credential-registry.json') | to_json }},
+    "sha256": {{ ('sha256:' + foundation_rotation_verify_registry_hash.stat.checksum) | to_json }},
+    "entry_count": {{ foundation_rotation_verify_registry.entry_count | to_json }},
+    "total_bytes": {{ foundation_rotation_verify_registry.total_bytes | to_json }}
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "labweaver://schemas/results/migration-report.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["report", "reportSha256"],
+  "properties": {
+    "reportSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "catalogSha256", "identity", "outcome", "domains", "diagnostic"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "catalogSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "outcome": { "enum": ["succeeded", "failed"] },
+        "diagnostic": { "type": ["string", "null"] },
+        "identity": { "type": "object" },
+        "domains": { "type": "array" }
+      }
+    }
+  }
+}

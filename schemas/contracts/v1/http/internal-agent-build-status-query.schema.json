@@ -1,0 +1,21 @@
+{
+  "$defs": {
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Scope and immutable identity required to read one Agent-owned build status.",
+  "properties": {
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    }
+  },
+  "required": [
+    "courseId"
+  ],
+  "title": "InternalAgentBuildStatusQuery",
+  "type": "object"
+}

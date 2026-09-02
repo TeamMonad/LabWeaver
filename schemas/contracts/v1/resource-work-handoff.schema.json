@@ -1,0 +1,130 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "CapacityClaimId": {
+      "description": "Strongly typed UUIDv7 identifier for `CapacityClaimId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "LeaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "ReleaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `ReleaseId`.",
+      "type": "string"
+    },
+    "ResourceRequestId": {
+      "description": "Strongly typed UUIDv7 identifier for `ResourceRequestId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Resource-to-Environment command to create one Work aggregate from an already-approved\nLease and capacity shell. Environment resolves the release projection locally.",
+  "properties": {
+    "capacityBinding": {
+      "type": "string"
+    },
+    "claimId": {
+      "$ref": "#/$defs/CapacityClaimId"
+    },
+    "claimRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    },
+    "displayLabel": {
+      "type": "string"
+    },
+    "environmentId": {
+      "$ref": "#/$defs/EnvironmentId"
+    },
+    "leaseId": {
+      "$ref": "#/$defs/LeaseId"
+    },
+    "leaseRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "ownerActorId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "projectId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ProjectId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "providerBinding": {
+      "type": "string"
+    },
+    "releaseId": {
+      "$ref": "#/$defs/ReleaseId"
+    },
+    "releaseVersion": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "requestId": {
+      "$ref": "#/$defs/ResourceRequestId"
+    },
+    "requestRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "traceId": {
+      "type": "string"
+    },
+    "version": {
+      "format": "uint8",
+      "maximum": 255,
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "requestId",
+    "requestRevision",
+    "leaseId",
+    "leaseRevision",
+    "claimId",
+    "claimRevision",
+    "environmentId",
+    "courseId",
+    "ownerActorId",
+    "displayLabel",
+    "releaseId",
+    "releaseVersion",
+    "providerBinding",
+    "capacityBinding",
+    "traceId"
+  ],
+  "title": "ResourceWorkHandoff",
+  "type": "object"
+}

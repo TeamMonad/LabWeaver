@@ -1,0 +1,19 @@
+{
+  "apiVersion": "deploy.labweaver.io/platform-bundle-manifest/v1",
+  "namespace": "labweaver-build",
+  "configMaps": {
+    "buildkit-config": [
+      "buildkitd.toml"
+    ]
+  },
+  "secrets": {
+    "buildkit-server-secrets": [
+      "ca.crt",
+      "health.crt",
+      "health.key",
+      "registry-ca.crt",
+      "tls.crt",
+      "tls.key"
+    ]
+  }
+}

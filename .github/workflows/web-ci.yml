@@ -1,0 +1,93 @@
+name: web-ci
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+jobs:
+  web-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect Web changes
+        id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            comparison_base="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+            changed_files="$(git diff --name-only "$comparison_base" "$HEAD_SHA")"
+          elif [[ "$BEFORE_SHA" =~ ^0+$ ]]; then
+            comparison_base="$(git rev-parse "$AFTER_SHA^" 2>/dev/null || true)"
+            if [[ -n "$comparison_base" ]]; then
+              changed_files="$(git diff --name-only "$comparison_base" "$AFTER_SHA")"
+            else
+              changed_files="$(git diff-tree --no-commit-id --name-only -r "$AFTER_SHA")"
+            fi
+          else
+            changed_files="$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA")"
+          fi
+
+          if printf '%s\n' "$changed_files" | grep -Eq '^(web/|\.github/workflows/web-ci\.yml$)'; then
+            echo "web_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "web_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Web gate not applicable
+        if: steps.changes.outputs.web_changed != 'true'
+        shell: bash
+        run: |
+          echo "web-gate: not applicable; no Web or Web workflow files changed."
+
+      - name: Setup Node.js
+        if: steps.changes.outputs.web_changed == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.18.0'
+
+      - name: Setup pnpm
+        if: steps.changes.outputs.web_changed == 'true'
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - name: Install dependencies
+        if: steps.changes.outputs.web_changed == 'true'
+        working-directory: ./web
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        if: steps.changes.outputs.web_changed == 'true'
+        working-directory: ./web
+        run: pnpm lint
+
+      - name: Type check
+        if: steps.changes.outputs.web_changed == 'true'
+        working-directory: ./web
+        run: pnpm typecheck
+
+      - name: Unit tests
+        if: steps.changes.outputs.web_changed == 'true'
+        working-directory: ./web
+        run: pnpm test
+
+      - name: Build
+        if: steps.changes.outputs.web_changed == 'true'
+        working-directory: ./web
+        run: pnpm build

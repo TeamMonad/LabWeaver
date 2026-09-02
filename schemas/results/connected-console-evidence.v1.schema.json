@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://labweaver.invalid/schemas/results/connected-console-evidence.v1.schema.json",
+  "title": "ConnectedConsoleEvidenceV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "status", "mode", "providerMode", "sourceCommit", "runId",
+    "packageIdentity", "deploymentIdentity", "migrationCatalogSha256", "runtimeKind",
+    "consoleKind", "images", "lifecycleCases",
+    "browserEvidence", "cleanup", "redaction"
+  ],
+  "properties": {
+    "schemaVersion": {"const": "connected-console-evidence.v1"},
+    "status": {"const": "passed"},
+    "mode": {"const": "connected"},
+    "providerMode": {"const": "real"},
+    "sourceCommit": {"$ref": "#/$defs/commit"},
+    "runId": {"$ref": "#/$defs/uuid"},
+    "packageIdentity": {"$ref": "#/$defs/digest"},
+    "deploymentIdentity": {"$ref": "#/$defs/digest"},
+    "migrationCatalogSha256": {"$ref": "#/$defs/digest"},
+    "runtimeKind": {"enum": ["container", "kubevirt"]},
+    "consoleKind": {"enum": ["xterm", "novnc"]},
+    "images": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["accessService", "environmentService", "runtimeArtifact"],
+      "properties": {
+        "accessService": {"$ref": "#/$defs/digest"},
+        "environmentService": {"$ref": "#/$defs/digest"},
+        "runtimeArtifact": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "lifecycleCases": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "items": {"$ref": "#/$defs/lifecycleCase"}
+    },
+    "browserEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["browser", "browserVersion", "viewport", "traceSha256", "screenshotSha256", "videoSha256"],
+      "properties": {
+        "browser": {"type": "string", "minLength": 1, "maxLength": 50},
+        "browserVersion": {"type": "string", "minLength": 1, "maxLength": 50},
+        "viewport": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["width", "height"],
+          "properties": {
+            "width": {"type": "integer", "minimum": 320, "maximum": 4096},
+            "height": {"type": "integer", "minimum": 320, "maximum": 4096}
+          }
+        },
+        "traceSha256": {"$ref": "#/$defs/digest"},
+        "screenshotSha256": {"$ref": "#/$defs/digest"},
+        "videoSha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["completed", "readbackCompleted", "temporaryFaultPolicyRemoved", "preCounts", "postCounts", "readbackSha256"],
+      "properties": {
+        "completed": {"const": true},
+        "readbackCompleted": {"const": true},
+        "temporaryFaultPolicyRemoved": {"const": true},
+        "preCounts": {"$ref": "#/$defs/resourceCounts"},
+        "postCounts": {"$ref": "#/$defs/resourceCounts"},
+        "readbackSha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "redaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verified", "containsSecrets", "containsRawUserContent", "containsTerminalTranscript", "containsVncFrames", "containsAbsolutePaths"],
+      "properties": {
+        "verified": {"const": true},
+        "containsSecrets": {"const": false},
+        "containsRawUserContent": {"const": false},
+        "containsTerminalTranscript": {"const": false},
+        "containsVncFrames": {"const": false},
+        "containsAbsolutePaths": {"const": false}
+      }
+    }
+  },
+  "$defs": {
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "uuid": {"type": "string", "format": "uuid"},
+    "name": {"type": "string", "pattern": "^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$"},
+    "environment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "revision", "namespace", "targetName", "targetUid", "runtimeIdentity"],
+      "properties": {
+        "id": {"$ref": "#/$defs/uuid"}, "revision": {"type": "integer", "minimum": 1},
+        "namespace": {"$ref": "#/$defs/name"}, "targetName": {"$ref": "#/$defs/name"},
+        "targetUid": {"$ref": "#/$defs/uuid"},
+        "runtimeIdentity": {"type": "string", "minLength": 1, "maxLength": 200}
+      }
+    },
+    "access": {
+      "type": "object", "additionalProperties": false,
+      "required": ["grantId", "grantRevision", "leaseId", "leaseRevision"],
+      "properties": {
+        "grantId": {"$ref": "#/$defs/uuid"}, "grantRevision": {"type": "integer", "minimum": 1},
+        "leaseId": {"$ref": "#/$defs/uuid"}, "leaseRevision": {"type": "integer", "minimum": 1}
+      }
+    },
+    "resourceCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capabilities", "sessions", "pods", "vmis", "pvcs", "faultPolicies"],
+      "properties": {
+        "capabilities": {"type": "integer", "minimum": 0},
+        "sessions": {"type": "integer", "minimum": 0},
+        "pods": {"type": "integer", "minimum": 0},
+        "vmis": {"type": "integer", "minimum": 0},
+        "pvcs": {"type": "integer", "minimum": 0},
+        "faultPolicies": {"type": "integer", "minimum": 0}
+      }
+    },
+    "lifecycleCase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["case", "status", "environment", "access", "capabilityId", "sessionId", "durationMs", "observedDiagnostic", "staleReconnectDenied", "auditSha256"],
+      "properties": {
+        "case": {"enum": ["positive", "revoke", "expiry", "stop", "delete", "control-channel-loss"]},
+        "status": {"const": "passed"},
+        "environment": {"$ref": "#/$defs/environment"},
+        "access": {"$ref": "#/$defs/access"},
+        "capabilityId": {"$ref": "#/$defs/uuid"},
+        "sessionId": {"$ref": "#/$defs/uuid"},
+        "durationMs": {"type": "integer", "minimum": 0, "maximum": 60000},
+        "observedDiagnostic": {"type": "string", "pattern": "^LW_[A-Z0-9_]+$"},
+        "staleReconnectDenied": {"const": true},
+        "auditSha256": {"$ref": "#/$defs/digest"}
+      }
+    }
+  }
+}

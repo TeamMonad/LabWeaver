@@ -1,0 +1,49 @@
+[package]
+name = "evaluation-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+artifact-store = { path = "../../crates/artifact-store" }
+async-nats = { version = "=0.45.0", default-features = false, features = ["ring", "server_2_10", "server_2_11"] }
+auth = { path = "../../crates/auth" }
+async-trait.workspace = true
+axum.workspace = true
+base64.workspace = true
+cap-std.workspace = true
+cap-fs-ext.workspace = true
+contracts = { path = "../../crates/contracts" }
+hyper-util = { version = "0.1.20", features = ["server", "service", "tokio"] }
+nix.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+persistence-sqlx = { path = "../../crates/persistence-sqlx" }
+russh.workspace = true
+russh-sftp.workspace = true
+serde.workspace = true
+serde_jcs.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+sqlx.workspace = true
+telemetry = { path = "../../crates/telemetry" }
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock.workspace = true
+seccompiler.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+testcontainers = "=0.25.0"
+testcontainers-modules = { version = "0.13.0", features = ["postgres"] }
+
+[lints]
+workspace = true

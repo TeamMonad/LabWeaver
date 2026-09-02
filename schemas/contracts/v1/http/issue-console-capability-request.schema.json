@@ -1,0 +1,78 @@
+{
+  "$defs": {
+    "ConsoleKind": {
+      "description": "Browser interaction transport selected by an approved environment release.",
+      "enum": [
+        "xterm",
+        "novnc"
+      ],
+      "type": "string"
+    },
+    "ConsoleLeaseFence": {
+      "additionalProperties": false,
+      "description": "Resource-owned Lease identity that fences a Work console capability.",
+      "properties": {
+        "expiresAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "leaseId": {
+          "$ref": "#/$defs/LeaseId"
+        },
+        "leaseRevision": {
+          "$ref": "#/$defs/Revision"
+        }
+      },
+      "required": [
+        "leaseId",
+        "leaseRevision",
+        "expiresAt"
+      ],
+      "type": "object"
+    },
+    "LeaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Revision-fenced request to issue a single browser console capability.",
+  "properties": {
+    "expectedAccessGrantRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "expectedEnvironmentRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "expectedLeaseFence": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ConsoleLeaseFence"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "kind": {
+      "$ref": "#/$defs/ConsoleKind"
+    }
+  },
+  "required": [
+    "kind",
+    "expectedAccessGrantRevision",
+    "expectedEnvironmentRevision"
+  ],
+  "title": "IssueConsoleCapabilityRequest",
+  "type": "object"
+}

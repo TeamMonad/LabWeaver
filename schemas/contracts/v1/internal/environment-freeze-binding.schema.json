@@ -1,0 +1,182 @@
+{
+  "$defs": {
+    "AgentRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `AgentRunId`.",
+      "type": "string"
+    },
+    "BuildRequestId": {
+      "description": "Strongly typed UUIDv7 identifier for `BuildRequestId`.",
+      "type": "string"
+    },
+    "EnvironmentFreezeSourceBinding": {
+      "description": "Environment-owned source locator safe for one bounded freeze Job.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "container",
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "persistentVolumeClaim": {
+              "type": "string"
+            },
+            "storageClassName": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "namespace",
+            "persistentVolumeClaim",
+            "storageClassName"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "collectorCertificateOpenssh": {
+              "type": "string"
+            },
+            "expectedHostKeySha256": {
+              "type": "string"
+            },
+            "expiresAt": {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            "host": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "virtual_machine",
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "port": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sourceIdentity": {
+              "type": "string"
+            },
+            "username": {
+              "type": "string"
+            },
+            "workspaceRoot": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "namespace",
+            "host",
+            "port",
+            "username",
+            "workspaceRoot",
+            "expectedHostKeySha256",
+            "sourceIdentity",
+            "collectorCertificateOpenssh",
+            "expiresAt"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "FrozenEnvironmentIdentity": {
+      "additionalProperties": false,
+      "description": "Frozen build and runtime identity used to reproduce collection.",
+      "properties": {
+        "buildRequestId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BuildRequestId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "environmentId": {
+          "$ref": "#/$defs/EnvironmentId"
+        },
+        "environmentRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "releaseId": {
+          "$ref": "#/$defs/ReleaseId"
+        },
+        "releaseVersion": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runtimeKind": {
+          "$ref": "#/$defs/RuntimeKind"
+        }
+      },
+      "required": [
+        "environmentId",
+        "environmentRevision",
+        "releaseId",
+        "releaseVersion",
+        "runtimeKind"
+      ],
+      "type": "object"
+    },
+    "ReleaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `ReleaseId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "RuntimeKind": {
+      "description": "Runtime kind shared by candidates, releases, and instances.",
+      "enum": [
+        "container",
+        "virtual_machine"
+      ],
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Exact immutable and runtime source identity returned only to Evaluation over mTLS.",
+  "properties": {
+    "agentRunId": {
+      "$ref": "#/$defs/AgentRunId"
+    },
+    "environment": {
+      "$ref": "#/$defs/FrozenEnvironmentIdentity"
+    },
+    "source": {
+      "$ref": "#/$defs/EnvironmentFreezeSourceBinding"
+    }
+  },
+  "required": [
+    "environment",
+    "agentRunId",
+    "source"
+  ],
+  "title": "EnvironmentFreezeBinding",
+  "type": "object"
+}

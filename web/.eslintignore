@@ -1,0 +1,8 @@
+node_modules
+dist
+dist-ssr
+.auth
+test-results
+playwright-report*
+playwright-report-live
+playwright-report-fixture

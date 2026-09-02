@@ -1,0 +1,37 @@
+{
+  "$defs": {
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Request from `AuthorizedKeysCommand` over mTLS. Target selection happens only after\npublic-key authentication, through the fixed command grammar.",
+  "properties": {
+    "connectionId": {
+      "type": "string"
+    },
+    "gatewayIdentity": {
+      "type": "string"
+    },
+    "presentedKeyFingerprintSha256": {
+      "type": "string"
+    },
+    "requestedAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "sourceAddressHash": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "presentedKeyFingerprintSha256",
+    "gatewayIdentity",
+    "connectionId",
+    "sourceAddressHash",
+    "requestedAt"
+  ],
+  "title": "SshAuthorizationRequest",
+  "type": "object"
+}

@@ -1,0 +1,94 @@
+apiVersion: evaluation.labweaver.io/v1
+kind: EvaluationSpec
+metadata:
+  name: shortest-path-v1
+  version: "1.0.0"
+spec:
+  submission:
+    collector:
+      kind: workspace_snapshot
+      include:
+        - src/main.cpp
+        - report.md
+      exclude:
+        - build
+      maxBytes: 20971520
+    llmReadable:
+      - src/main.cpp
+      - report.md
+  steps:
+    - role: gate
+      id: preflight
+      runner:
+        kind: file_assertion
+        requiredFiles:
+          - src/main.cpp
+      checker:
+        kind: exit_code
+        expected: 0
+      failurePolicy: stop
+    - role: gate
+      id: compile
+      dependsOn: [preflight]
+      runner:
+        kind: program
+        toolchainProfile: cpp17-approved-v1
+        phase: compile
+        input: src/main.cpp
+        limits:
+          wallTimeSeconds: 30
+          memoryBytes: 1073741824
+          outputBytes: 4194304
+      checker:
+        kind: exit_code
+        expected: 0
+      failurePolicy: stop
+    - role: score
+      id: correctness
+      dependsOn: [compile]
+      runner:
+        kind: program
+        toolchainProfile: cpp17-approved-v1
+        phase: test
+        input: src/main.cpp
+        testGroups:
+          - name: basic
+            source: evaluator://tests/basic
+            maxPoints: 20
+          - name: random
+            source: evaluator://tests/random
+            maxPoints: 50
+          - name: boundary
+            source: evaluator://tests/boundary
+            maxPoints: 30
+        limits:
+          wallTimeSeconds: 2
+          memoryBytes: 268435456
+          outputBytes: 4194304
+      checker:
+        kind: token
+      score:
+        max: 80
+      failurePolicy: continue
+    - role: advisory
+      id: report-review
+      dependsOn: [preflight]
+      runner:
+        kind: llm_review
+        include:
+          - report.md
+          - src/main.cpp
+        rubric: evaluator://rubrics/code-review-v1.yaml
+        outputMode: goal_assessment
+      failurePolicy: continue_advisory
+  aggregation:
+    kind: deterministic_sum
+    maxScore: 80
+    gates:
+      - step: compile
+        requiredStatus: passed
+  review:
+    teacherApprovalRequiredForRelease: true
+    forceManualWhen:
+      - infrastructureError
+      - invalidEvidence

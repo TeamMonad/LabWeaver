@@ -1,0 +1,41 @@
+{
+  "$defs": {
+    "SshPublicKeyId": {
+      "description": "Strongly typed UUIDv7 identifier for `SshPublicKeyId`.",
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Fail-closed SSH authorization result.",
+  "properties": {
+    "authorizationId": {
+      "type": "string"
+    },
+    "forceCommandToken": {
+      "type": "string"
+    },
+    "normalizedAuthorizedKey": {
+      "type": "string"
+    },
+    "sshPublicKeyId": {
+      "$ref": "#/$defs/SshPublicKeyId"
+    },
+    "validUntil": {
+      "$ref": "#/$defs/UtcTimestamp"
+    }
+  },
+  "required": [
+    "authorizationId",
+    "sshPublicKeyId",
+    "normalizedAuthorizedKey",
+    "forceCommandToken",
+    "validUntil"
+  ],
+  "title": "SshAuthorization",
+  "type": "object"
+}

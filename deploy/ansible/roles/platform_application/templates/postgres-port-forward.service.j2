@@ -1,0 +1,22 @@
+[Unit]
+Description=LabWeaver application PostgreSQL controller port-forward
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={{ platform_application_kubectl }} --kubeconfig {{ platform_application_kubeconfig }} --namespace {{ platform_application_postgres_forward_namespace }} port-forward --address 127.0.0.1 service/{{ platform_application_postgres_forward_kubernetes_service }} {{ platform_application_postgres_forward_port }}:5432
+Restart=on-failure
+RestartSec=2s
+User=root
+Group=root
+RuntimeDirectory=labweaver-postgres-forward
+RuntimeDirectoryMode=0700
+Environment=HOME=/run/labweaver-postgres-forward
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target

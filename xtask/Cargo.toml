@@ -1,0 +1,39 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-nats.workspace = true
+bollard.workspace = true
+futures-util.workspace = true
+clap = { version = "4.5.40", features = ["derive"] }
+sha2 = "0.10"
+contracts = { path = "../crates/contracts" }
+persistence-sqlx = { path = "../crates/persistence-sqlx" }
+serde.workspace = true
+serde_jcs.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+jsonschema.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ansible = { package = "ansible-rs", version = "1.1.0" }
+
+[lints.clippy]
+# xtask holds verbose contract/integration verification; allow test-oriented unwraps
+expect_used = "allow"
+unwrap_used = "allow"
+panic = "allow"
+too_many_lines = "allow"

@@ -1,0 +1,95 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "EvaluationReleaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `EvaluationReleaseId`.",
+      "type": "string"
+    },
+    "EvaluationRunIdentity": {
+      "additionalProperties": false,
+      "description": "Immutable run identity joining release, frozen submission and trace evidence.",
+      "properties": {
+        "runtimeIdentity": {
+          "$ref": "#/$defs/EvaluationRuntimeIdentity"
+        },
+        "traceId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "runtimeIdentity",
+        "traceId"
+      ],
+      "type": "object"
+    },
+    "EvaluationRuntimeIdentity": {
+      "additionalProperties": false,
+      "description": "Immutable build and deployment identity that must match every run using the release.",
+      "properties": {
+        "providerBinding": {
+          "description": "Explicit runtime provider binding chosen by Control and enforced by Evaluation.",
+          "type": "string"
+        },
+        "runnerImage": {
+          "description": "Digest-pinned runner image reference.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "providerBinding",
+        "runnerImage"
+      ],
+      "type": "object"
+    },
+    "FrozenSubmissionId": {
+      "description": "Strongly typed UUIDv7 identifier for `FrozenSubmissionId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Control-to-Evaluation command that starts one run from a release and frozen submission.",
+  "properties": {
+    "actorId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    },
+    "frozenSubmissionId": {
+      "$ref": "#/$defs/FrozenSubmissionId"
+    },
+    "identity": {
+      "$ref": "#/$defs/EvaluationRunIdentity"
+    },
+    "releaseId": {
+      "$ref": "#/$defs/EvaluationReleaseId"
+    },
+    "releaseRevision": {
+      "$ref": "#/$defs/Revision"
+    }
+  },
+  "required": [
+    "courseId",
+    "releaseId",
+    "releaseRevision",
+    "frozenSubmissionId",
+    "actorId",
+    "identity"
+  ],
+  "title": "InternalCreateEvaluationRunRequest",
+  "type": "object"
+}

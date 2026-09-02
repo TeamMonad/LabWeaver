@@ -1,0 +1,199 @@
+{{- $root := . -}}
+{{- range $name, $configuration := .Values.workloads }}
+{{- if $configuration.enabled }}
+{{- $imageKey := required (printf "workloads.%s.imageKey is required" $name) $configuration.imageKey }}
+{{- $image := index $root.Values.images $imageKey }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ $name }}
+    {{- include "labweaver.labels" $root | nindent 4 }}
+spec:
+  replicas: {{ default 1 $configuration.replicas }}
+  revisionHistoryLimit: 3
+  {{- with $configuration.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    matchLabels: {app.kubernetes.io/name: {{ $name }}}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ $name }}
+        {{- include "labweaver.labels" $root | nindent 8 }}
+      annotations:
+        labweaver.io/configuration-bundle-sha256: {{ include "labweaver.configurationBundleSha256" $root | quote }}
+      {{- if and (eq $name "web") $root.Values.objectStoreRoute.enabled }}
+        checksum/object-store-proxy: {{ printf "%s\n%s\n%s\n%s" $root.Values.objectStoreRoute.caCertificate $root.Values.objectStoreRoute.backendHostname $root.Values.objectStoreRoute.pathPrefix $root.Values.objectStoreRoute.serviceName | sha256sum | quote }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ $name }}
+      automountServiceAccountToken: {{ default false $configuration.kubernetesApi }}
+      {{- with $root.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with (default $root.Values.hostAliases $configuration.hostAliases) }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: {{ not (default false $configuration.gateway) }}
+        runAsUser: {{ ternary 0 (default 65532 $configuration.runAsUser) (default false $configuration.gateway) }}
+        runAsGroup: {{ ternary 0 (default 65532 $configuration.runAsUser) (default false $configuration.gateway) }}
+        fsGroup: {{ ternary 0 (default 65532 $configuration.runAsUser) (default false $configuration.gateway) }}
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: {{ $name }}
+          image: {{ include "labweaver.image" (dict "key" $imageKey "value" $image) | quote }}
+          imagePullPolicy: IfNotPresent
+          {{- with $configuration.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if or $configuration.env $configuration.secretEnv }}
+          env:
+            {{- range $key, $value := $configuration.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- range $key, $reference := $configuration.secretEnv }}
+            - name: {{ $key }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default $configuration.secret $reference.secret }}
+                  key: {{ required (printf "workloads.%s.secretEnv.%s.key is required" $name $key) $reference.key }}
+            {{- end }}
+          {{- end }}
+          {{- with $configuration.ports }}
+          ports:
+            {{- range . }}
+            - name: {{ .name }}
+              containerPort: {{ .containerPort }}
+              protocol: TCP
+            {{- end }}
+          {{- end }}
+          {{- with $configuration.readiness }}
+          readinessProbe:
+            {{- if eq .type "http" }}
+            httpGet: {path: {{ default "/health/ready" .path }}, port: {{ .port }}}
+            {{- else if eq .type "tcp" }}
+            tcpSocket: {port: {{ .port }}}
+            {{- else }}
+            {{- fail (printf "workloads.%s.readiness.type must be http or tcp" $name) }}
+            {{- end }}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            {{- if eq .type "http" }}
+            httpGet: {path: {{ default "/health/live" .livenessPath }}, port: {{ .port }}}
+            {{- else }}
+            tcpSocket: {port: {{ .port }}}
+            {{- end }}
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            {{- if $configuration.gateway }}
+            runAsUser: 0
+            runAsGroup: 0
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID", "SYS_CHROOT"]
+            {{- else }}
+            runAsNonRoot: true
+            capabilities: {drop: ["ALL"]}
+            {{- end }}
+          resources:
+            {{- toYaml (default $root.Values.resources $configuration.resources) | nindent 12 }}
+          volumeMounts:
+            {{- if $configuration.configMap }}
+            - {name: config, mountPath: /etc/labweaver/config, readOnly: true}
+            {{- end }}
+            {{- if and $configuration.secret (not $configuration.gateway) }}
+            - {name: secrets, mountPath: /etc/labweaver/secrets, readOnly: true}
+            {{- end }}
+            - {name: tmp, mountPath: /tmp}
+            {{- if $configuration.gateway }}
+            - {name: sshd-run, mountPath: /run/sshd}
+            - {name: secret-source, mountPath: /var/run/labweaver-secrets-src, readOnly: true}
+            - {name: gateway-secrets, mountPath: /etc/labweaver/secrets}
+            {{- end }}
+            {{- if and (eq $name "web") $root.Values.objectStoreRoute.enabled }}
+            - {name: object-store, mountPath: /etc/labweaver/object-store, readOnly: true}
+            - {name: object-store-nginx, mountPath: /etc/nginx/labweaver-conf.d, readOnly: true}
+            {{- end }}
+      volumes:
+        {{- if $configuration.configMap }}
+        - name: config
+          configMap: {name: {{ $configuration.configMap }}}
+        {{- end }}
+        {{- if and $configuration.secret (not $configuration.gateway) }}
+        - name: secrets
+          secret:
+            secretName: {{ $configuration.secret }}
+            defaultMode: 0440
+        {{- end }}
+        - name: tmp
+          emptyDir: {sizeLimit: {{ default "64Mi" $configuration.tmpSizeLimit }}}
+        {{- if $configuration.gateway }}
+        - name: sshd-run
+          emptyDir: {sizeLimit: 8Mi}
+        - name: secret-source
+          secret:
+            secretName: {{ required (printf "workloads.%s.secret is required" $name) $configuration.secret }}
+            defaultMode: 0400
+        - name: gateway-secrets
+          emptyDir: {sizeLimit: 8Mi}
+        {{- end }}
+        {{- if and (eq $name "web") $root.Values.objectStoreRoute.enabled }}
+        - name: object-store
+          configMap:
+            name: {{ $root.Release.Name }}-object-store-ca
+            items: [{key: ca.crt, path: ca.crt}]
+        - name: object-store-nginx
+          configMap:
+            name: {{ $root.Release.Name }}-object-store-ca
+            items: [{key: object-store.conf, path: object-store.conf}]
+        {{- end }}
+{{- with $configuration.ports }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ $root.Release.Namespace }}
+  {{- if and (eq $name "openssh-gateway") $root.Values.sshGatewayService.enabled }}
+  annotations:
+    metallb.io/allow-shared-ip: {{ required "sshGatewayService.sharedIPKey is required" $root.Values.sshGatewayService.sharedIPKey | quote }}
+  {{- end }}
+  labels:
+    app.kubernetes.io/name: {{ $name }}
+    {{- include "labweaver.labels" $root | nindent 4 }}
+spec:
+  {{- if and (eq $name "openssh-gateway") $root.Values.sshGatewayService.enabled }}
+  type: LoadBalancer
+  loadBalancerIP: {{ required "sshGatewayService.loadBalancerIP is required" $root.Values.sshGatewayService.loadBalancerIP | quote }}
+  externalTrafficPolicy: Cluster
+  {{- end }}
+  selector: {app.kubernetes.io/name: {{ $name }}}
+  ports:
+    {{- range . }}
+    - name: {{ .name }}
+      port: {{ .servicePort }}
+      targetPort: {{ .name }}
+      protocol: TCP
+    {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

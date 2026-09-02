@@ -1,0 +1,5 @@
+---
+- name: Install cert-manager and internal Gateway assets
+  hosts: control_plane
+  gather_facts: false
+  roles: [cluster_addons]

@@ -1,0 +1,132 @@
+{
+  "$defs": {
+    "CapacityClaimId": {
+      "description": "Strongly typed UUIDv7 identifier for `CapacityClaimId`.",
+      "type": "string"
+    },
+    "CapacityClaimState": {
+      "description": "Provider-owned capacity-shell lifecycle. Resource remains the authority for every transition.",
+      "enum": [
+        "reserved",
+        "provisioning",
+        "ready",
+        "handed_off",
+        "releasing",
+        "released",
+        "blocked"
+      ],
+      "type": "string"
+    },
+    "GpuRequest": {
+      "additionalProperties": false,
+      "description": "A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.",
+      "properties": {
+        "class": {
+          "type": "string"
+        },
+        "count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "class",
+        "count"
+      ],
+      "type": "object"
+    },
+    "ResourceApprovalId": {
+      "description": "Strongly typed UUIDv7 identifier for `ResourceApprovalId`.",
+      "type": "string"
+    },
+    "ResourceRequestId": {
+      "description": "Strongly typed UUIDv7 identifier for `ResourceRequestId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "WorkloadResources": {
+      "additionalProperties": false,
+      "description": "Requested or approved workload resources, independent of Kubernetes quantity syntax.",
+      "properties": {
+        "cpuMillicores": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "gpu": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpuRequest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memoryBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "storageBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cpuMillicores",
+        "memoryBytes",
+        "storageBytes"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Exact capacity allocation identity. Handles remain private to the provider implementation.",
+  "properties": {
+    "approvalId": {
+      "$ref": "#/$defs/ResourceApprovalId"
+    },
+    "id": {
+      "$ref": "#/$defs/CapacityClaimId"
+    },
+    "providerBinding": {
+      "type": "string"
+    },
+    "quotaResources": {
+      "$ref": "#/$defs/WorkloadResources"
+    },
+    "requestId": {
+      "$ref": "#/$defs/ResourceRequestId"
+    },
+    "revision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "state": {
+      "$ref": "#/$defs/CapacityClaimState"
+    },
+    "workloadResources": {
+      "$ref": "#/$defs/WorkloadResources"
+    }
+  },
+  "required": [
+    "id",
+    "requestId",
+    "approvalId",
+    "providerBinding",
+    "workloadResources",
+    "quotaResources",
+    "state",
+    "revision"
+  ],
+  "title": "CapacityClaim",
+  "type": "object"
+}

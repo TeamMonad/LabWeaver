@@ -1,0 +1,95 @@
+---
+platform_reset_confirmation: "{{ lookup('ansible.builtin.env', 'LABWEAVER_PLATFORM_RESET_CONFIRMATION') }}"
+platform_reset_run_id: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RUN_ID') }}"
+platform_reset_source_commit: "{{ lookup('ansible.builtin.env', 'LABWEAVER_COMMIT_SHA') }}"
+platform_reset_migration_catalog: "{{ playbook_dir }}/../../../migrations/catalog.yaml"
+platform_reset_kubeconfig: /etc/kubernetes/admin.conf
+platform_reset_kubectl: /usr/bin/kubectl
+platform_reset_helm: /usr/local/bin/helm
+platform_reset_psql: /usr/bin/psql
+platform_reset_nats: /usr/local/bin/nats
+platform_reset_mc: /usr/local/bin/mc
+platform_reset_kcadm: /usr/local/bin/kcadm.sh
+platform_reset_buildctl: /usr/local/bin/buildctl
+platform_reset_report_root: /var/lib/labweaver/platform-reset
+platform_reset_namespaces:
+  - access-system
+  - environment-system
+  - labweaver-demo
+  - labweaver-evaluation
+  - labweaver-system
+platform_reset_domains: [control, access, environment, agent, evaluation, resource]
+platform_reset_postgres_service_file: ""
+platform_reset_postgres_service: platform-admin
+platform_reset_nats_server: ""
+platform_reset_nats_credentials_file: ""
+platform_reset_nats_streams:
+  - name: LABWEAVER_AGENT_EVENTS
+    subjects: labweaver.agent.>
+    max_age: 24h
+  - name: LABWEAVER_CONTROL_COMMANDS
+    subjects: labweaver.control.agent_build.requested.v1
+    max_age: 24h
+  - name: LABWEAVER_ENVIRONMENT_COMMANDS
+    subjects: labweaver.environment.instance.lifecycle_requested.v1
+    max_age: 24h
+  - name: LABWEAVER_RELEASES
+    subjects: labweaver.control.environment_template_release.>
+    max_age: 168h
+  - {name: LABWEAVER_ACCESS, subjects: "labweaver.access.>", max_age: 24h}
+  - {name: LABWEAVER_SUBMISSION, subjects: "labweaver.evaluation.submission.>", max_age: 168h}
+platform_reset_minio_alias: ""
+platform_reset_minio_bucket: labweaver-artifacts
+platform_reset_buildkit_address: ""
+platform_reset_harbor_api: ""
+platform_reset_harbor_username: ""
+platform_reset_harbor_password: ""
+platform_reset_harbor_project: labweaver-system
+platform_reset_keycloak_realm: workloads
+platform_reset_keycloak_config: ""
+platform_reset_keycloak_server: ""
+platform_reset_keycloak_admin_realm: master
+platform_reset_keycloak_username: ""
+platform_reset_keycloak_password: ""
+platform_reset_keycloak_realm_file: ""
+platform_reset_access_seed_file: ""
+platform_reset_chart_source: "{{ playbook_dir }}/../../helm/labweaver"
+platform_reset_values_files: []
+platform_reset_rollback_probe_values_file: ""
+platform_reset_configuration_bundle: ""
+platform_reset_configuration_manifest: "{{ playbook_dir }}/../../config/platform-bundle-manifest.json"
+platform_reset_required_configmaps:
+  - control-service-config
+  - access-service-config
+  - agent-service-config
+  - build-executor-config
+  - environment-service-config
+  - evaluation-service-config
+  - container-executor-config
+  - kubevirt-executor-config
+  - web-config
+platform_reset_required_secrets:
+  - control-service-secrets
+  - access-service-secrets
+  - agent-service-secrets
+  - build-executor-secrets
+  - environment-service-secrets
+  - evaluation-service-secrets
+  - container-executor-secrets
+  - kubevirt-executor-secrets
+  - openssh-gateway-secrets
+platform_reset_release_name: labweaver
+platform_reset_namespace: labweaver-system
+platform_reset_rollout_timeout: 10m
+platform_reset_workloads:
+  - control-service
+  - access-service
+  - agent-service
+  - build-executor
+  - environment-service
+  - evaluation-service
+  - container-executor
+  - kubevirt-executor
+  - openssh-gateway
+  - web
+platform_reset_runtime_probe_namespace: labweaver-demo

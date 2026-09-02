@@ -1,0 +1,169 @@
+{
+  "$defs": {
+    "ClaudeCodeBindingV1": {
+      "additionalProperties": false,
+      "description": "Immutable Claude Code worker binding.\n\nProvider-specific transport and authentication remain deployment-owned Claude Code\nconfiguration. The contract binds only a sanitized profile identity, exact model, CLI version,\nworker image, effective non-secret runtime configuration hash, and per-worker admission limit.",
+      "properties": {
+        "claudeCodeVersion": {
+          "description": "Exact Claude Code CLI version baked into the worker image.",
+          "type": "string"
+        },
+        "maxInFlightPerWorker": {
+          "description": "Maximum concurrent Claude Code child processes admitted by one worker instance.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "model": {
+          "description": "Exact model identifier passed to Claude Code; moving aliases are rejected.",
+          "type": "string"
+        },
+        "runtimeBinding": {
+          "description": "Deployment-owned opaque runtime profile; never a credential or endpoint URL.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "runtimeBinding",
+        "model",
+        "claudeCodeVersion",
+        "maxInFlightPerWorker"
+      ],
+      "type": "object"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "DeniedDataClass": {
+      "description": "Non-overridable content classifications at the LLM boundary.",
+      "enum": [
+        "secret",
+        "token",
+        "private_key",
+        "personally_identifiable_information",
+        "unallowlisted_student_submission"
+      ],
+      "type": "string"
+    },
+    "LlmBudget": {
+      "additionalProperties": false,
+      "description": "Per-attempt bounded LLM budget.",
+      "properties": {
+        "maxCostMicrousd": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxInputTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxOutputTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxRequests": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxSchemaRepairs": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxTransientRetries": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "timeoutMilliseconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "maxInputTokens",
+        "maxOutputTokens",
+        "maxRequests",
+        "maxCostMicrousd",
+        "timeoutMilliseconds",
+        "maxTransientRetries",
+        "maxSchemaRepairs"
+      ],
+      "type": "object"
+    },
+    "PolicyId": {
+      "description": "Strongly typed UUIDv7 identifier for `PolicyId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "StudentContentMode": {
+      "description": "Only explicit SubmissionManifest paths may disclose student content.",
+      "enum": [
+        "manifest_allowlist_only"
+      ],
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Versioned course policy governing all LLM egress.",
+  "properties": {
+    "activatedAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "binding": {
+      "$ref": "#/$defs/ClaudeCodeBindingV1"
+    },
+    "budget": {
+      "$ref": "#/$defs/LlmBudget"
+    },
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    },
+    "deniedDataClasses": {
+      "items": {
+        "$ref": "#/$defs/DeniedDataClass"
+      },
+      "type": "array"
+    },
+    "id": {
+      "$ref": "#/$defs/PolicyId"
+    },
+    "revision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "studentContentMode": {
+      "$ref": "#/$defs/StudentContentMode"
+    }
+  },
+  "required": [
+    "id",
+    "courseId",
+    "revision",
+    "binding",
+    "budget",
+    "deniedDataClasses",
+    "studentContentMode",
+    "activatedAt"
+  ],
+  "title": "CourseLlmEgressPolicy",
+  "type": "object"
+}

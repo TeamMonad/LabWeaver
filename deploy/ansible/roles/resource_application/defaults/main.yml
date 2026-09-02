@@ -1,0 +1,51 @@
+---
+resource_application_run_id: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RUN_ID') }}"
+resource_application_source_commit: "{{ lookup('ansible.builtin.env', 'LABWEAVER_COMMIT_SHA') }}"
+resource_application_expected_source_commit: >-
+  {{ lookup('ansible.builtin.env', 'LABWEAVER_PACKAGE_SOURCE_COMMIT')
+     | default(resource_application_source_commit, true) }}
+resource_application_package_manifest: "{{ lookup('ansible.builtin.env', 'LABWEAVER_PACKAGE_MANIFEST') }}"
+resource_application_configuration_bundle: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_CONFIGURATION_BUNDLE') }}"
+resource_application_profile_root: /var/lib/labweaver/.private/resource-acceptance
+resource_application_acceptance_profile_file: >-
+  {{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_ACCEPTANCE_PROFILE')
+     | default(resource_application_profile_root ~ '/profile.json', true) }}
+resource_application_access_seed_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_ACCESS_SEED_FILE') }}"
+resource_application_profile_validator: "{{ playbook_dir }}/../../../tools/validate_resource_acceptance_profile.py"
+resource_application_profile_renderer: "{{ playbook_dir }}/../../../tools/render_resource_acceptance_profile.py"
+resource_application_profile_preparer: "{{ playbook_dir }}/../../../tools/prepare_resource_acceptance_profile.py"
+resource_application_profile_configuration_file: >-
+  {{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_PROFILE_CONFIGURATION')
+     | default(resource_application_profile_root ~ '/configuration.json', true) }}
+resource_application_profile_material_file: >-
+  {{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_PROFILE_MATERIAL')
+     | default(resource_application_profile_root ~ '/material.md', true) }}
+resource_application_profile_runtime_configuration_file: "{{ resource_application_profile_root }}/agent-runtime-config.yaml"
+resource_application_profile_model: ecnu-plus
+resource_application_profile_runtime_binding: claude-code-production
+resource_application_profile_provider_binding: kubernetes-standard
+resource_application_psql: /usr/bin/psql
+resource_application_postgres_service: "{{ lookup('ansible.builtin.env', 'LABWEAVER_POSTGRES_SERVICE') }}"
+resource_application_postgres_service_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_POSTGRES_SERVICE_FILE') }}"
+resource_application_configuration_manifest: "{{ playbook_dir }}/../../config/resource-bundle-manifest.json"
+resource_application_values_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_VALUES_FILE') }}"
+resource_application_chart_source: "{{ playbook_dir }}/../../helm/labweaver"
+resource_application_kubeconfig: /etc/kubernetes/admin.conf
+resource_application_kubectl: /usr/bin/kubectl
+resource_application_helm: /usr/local/bin/helm
+resource_application_namespace: labweaver-system
+resource_application_release_name: labweaver-resource
+resource_application_image_pull_secret_name: harbor-labweaver-system-pull
+resource_application_rollout_timeout: 10m
+resource_application_report_root: /var/lib/labweaver/resource-application
+resource_application_workloads:
+  - control-service
+  - access-service
+  - agent-service
+  - build-executor
+  - environment-service
+  - evaluation-service
+  - container-executor
+  - kubevirt-executor
+  - openssh-gateway
+  - web

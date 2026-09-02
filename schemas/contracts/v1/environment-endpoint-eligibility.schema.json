@@ -1,0 +1,114 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "EndpointHealth": {
+      "description": "Endpoint health gates new AccessGrants.",
+      "enum": [
+        "pending",
+        "healthy",
+        "unhealthy",
+        "removed"
+      ],
+      "type": "string"
+    },
+    "EndpointId": {
+      "description": "Strongly typed UUIDv7 identifier for `EndpointId`.",
+      "type": "string"
+    },
+    "EndpointProtocol": {
+      "description": "Supported controlled protocols.",
+      "enum": [
+        "http",
+        "https",
+        "ssh"
+      ],
+      "type": "string"
+    },
+    "EnvironmentEndpoint": {
+      "additionalProperties": false,
+      "description": "Sanitized Environment-owned endpoint metadata.",
+      "properties": {
+        "health": {
+          "$ref": "#/$defs/EndpointHealth"
+        },
+        "id": {
+          "$ref": "#/$defs/EndpointId"
+        },
+        "observedAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "protocol": {
+          "$ref": "#/$defs/EndpointProtocol"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        }
+      },
+      "required": [
+        "id",
+        "protocol",
+        "revision",
+        "health",
+        "observedAt"
+      ],
+      "type": "object"
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Environment-authoritative endpoint facts safe for Access Service.\n\nHost, port, credential, provider and network-policy data are deliberately absent.",
+  "properties": {
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    },
+    "eligibilityExpiresAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "endpoints": {
+      "items": {
+        "$ref": "#/$defs/EnvironmentEndpoint"
+      },
+      "type": "array"
+    },
+    "environmentId": {
+      "$ref": "#/$defs/EnvironmentId"
+    },
+    "environmentRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "ownerActorId": {
+      "$ref": "#/$defs/ActorId"
+    }
+  },
+  "required": [
+    "environmentId",
+    "courseId",
+    "ownerActorId",
+    "environmentRevision",
+    "eligibilityExpiresAt",
+    "endpoints"
+  ],
+  "title": "EnvironmentEndpointEligibility",
+  "type": "object"
+}

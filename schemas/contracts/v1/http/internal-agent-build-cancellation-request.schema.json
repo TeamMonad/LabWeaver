@@ -1,0 +1,75 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "BuildRequestId": {
+      "description": "Strongly typed UUIDv7 identifier for `BuildRequestId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "InternalAgentBuildState": {
+      "description": "Agent-owned durable state used as an optimistic precondition for build cancellation.",
+      "enum": [
+        "requested",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Control-to-Agent build cancellation command carried only over allowlisted mTLS.",
+  "properties": {
+    "actorId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "authoritySanUri": {
+      "description": "Exact verified Control URI SAN; the Agent compares it with the mTLS peer principal.",
+      "type": "string"
+    },
+    "buildRequestId": {
+      "$ref": "#/$defs/BuildRequestId"
+    },
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    },
+    "expectedRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "expectedState": {
+      "$ref": "#/$defs/InternalAgentBuildState"
+    },
+    "requestedAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    }
+  },
+  "required": [
+    "courseId",
+    "buildRequestId",
+    "expectedState",
+    "expectedRevision",
+    "actorId",
+    "authoritySanUri",
+    "requestedAt"
+  ],
+  "title": "InternalAgentBuildCancellationRequest",
+  "type": "object"
+}

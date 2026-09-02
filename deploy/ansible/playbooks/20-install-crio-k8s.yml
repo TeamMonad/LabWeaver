@@ -1,0 +1,5 @@
+---
+- name: Install pinned CRI-O and Kubernetes packages
+  hosts: k8s_cluster
+  gather_facts: true
+  roles: [kubernetes_packages]

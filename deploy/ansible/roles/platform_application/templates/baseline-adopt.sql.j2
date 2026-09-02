@@ -1,0 +1,102 @@
+\set ON_ERROR_STOP on
+BEGIN;
+{% set catalog = lookup('ansible.builtin.file', playbook_dir + '/../../../migrations/catalog.yaml') | from_yaml %}
+{% set catalog_sha256 = lookup('ansible.builtin.file', playbook_dir + '/../../../migrations/catalog.yaml') | hash('sha256') %}
+{{ lookup('ansible.builtin.file', playbook_dir + '/../../../migrations/bootstrap/0001_roles_and_schemas.sql') }}
+{% for domain in platform_application_domains %}
+ALTER ROLE lw_{{ domain }}_runtime PASSWORD :'lw_{{ domain }}_password';
+{% endfor %}
+{% for domain in platform_application_domains %}
+{% set domain_catalog = (catalog.domains | selectattr('name', 'equalto', domain) | list | first) %}
+SET ROLE lw_{{ domain }}_migration;
+DO $verify_{{ domain }}$
+DECLARE
+    history_count bigint;
+    maximum_migration_id bigint;
+BEGIN
+    SELECT count(*), COALESCE(max(migration_id), 0)
+      INTO history_count, maximum_migration_id
+      FROM {{ domain }}.schema_migrations;
+
+    IF history_count = 0 AND EXISTS (
+        SELECT 1 FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = '{{ domain }}'
+          AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+          AND c.relname <> 'schema_migrations'
+    ) THEN
+        RAISE EXCEPTION 'PLATFORM_{{ domain | upper }}_UNTRACKED_SCHEMA';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM {{ domain }}.schema_migrations
+        WHERE NOT (
+{% for migration in domain_catalog.migrations %}
+            (migration_id = {{ migration.id }}
+             AND filename = '{{ migration.file | basename }}'
+             AND sha256 IN ('{{ migration.sha256 }}'{% if migration.id == 1 and domain in platform_application_retained_baseline_sha256 %}, '{{ platform_application_retained_baseline_sha256[domain] }}'{% endif %})
+             AND outcome = 'applied'){% if not loop.last %} OR{% endif %}
+{% endfor %}
+        )
+    ) THEN
+        RAISE EXCEPTION 'PLATFORM_{{ domain | upper }}_MIGRATION_IDENTITY_MISMATCH';
+    END IF;
+{% for migration in domain_catalog.migrations %}
+    IF {{ migration.id }} <= maximum_migration_id AND NOT EXISTS (
+        SELECT 1 FROM {{ domain }}.schema_migrations
+        WHERE migration_id = {{ migration.id }}
+          AND filename = '{{ migration.file | basename }}'
+          AND sha256 IN ('{{ migration.sha256 }}'{% if migration.id == 1 and domain in platform_application_retained_baseline_sha256 %}, '{{ platform_application_retained_baseline_sha256[domain] }}'{% endif %})
+          AND outcome = 'applied'
+    ) THEN
+        RAISE EXCEPTION 'PLATFORM_{{ domain | upper }}_MIGRATION_PREFIX_INVALID';
+    END IF;
+{% endfor %}
+END
+$verify_{{ domain }}$;
+RESET ROLE;
+
+{% for migration in domain_catalog.migrations %}
+SET ROLE lw_{{ domain }}_migration;
+SELECT NOT EXISTS (
+    SELECT 1 FROM {{ domain }}.schema_migrations
+    WHERE migration_id = {{ migration.id }}
+) AS apply_{{ domain }}_{{ migration.id }} \gset
+RESET ROLE;
+\if :apply_{{ domain }}_{{ migration.id }}
+SET ROLE lw_{{ domain }}_owner;
+SET search_path TO {{ domain }}, pg_catalog;
+{{ lookup('ansible.builtin.file', playbook_dir + '/../../../migrations/' + migration.file) }}
+RESET ROLE;
+SET ROLE lw_{{ domain }}_migration;
+INSERT INTO {{ domain }}.schema_migrations (
+    migration_id, filename, sha256, outcome, executor_identity, release_id, catalog_sha256
+) VALUES (
+    {{ migration.id }}, '{{ migration.file | basename }}', '{{ migration.sha256 }}',
+    'applied', 'ansible-platform-application', '{{ platform_application_run_id }}',
+    '{{ catalog_sha256 }}'
+);
+RESET ROLE;
+\endif
+{% endfor %}
+
+RESET ROLE;
+SET ROLE lw_{{ domain }}_migration;
+DO $complete_{{ domain }}$
+BEGIN
+    IF (SELECT count(*) FROM {{ domain }}.schema_migrations) <> {{ domain_catalog.migrations | length }}{% for migration in domain_catalog.migrations %}
+       OR NOT EXISTS (
+           SELECT 1 FROM {{ domain }}.schema_migrations
+           WHERE migration_id = {{ migration.id }}
+             AND filename = '{{ migration.file | basename }}'
+             AND sha256 IN ('{{ migration.sha256 }}'{% if migration.id == 1 and domain in platform_application_retained_baseline_sha256 %}, '{{ platform_application_retained_baseline_sha256[domain] }}'{% endif %})
+             AND outcome = 'applied'
+       ){% endfor %}
+    THEN
+        RAISE EXCEPTION 'PLATFORM_{{ domain | upper }}_MIGRATION_SET_INCOMPLETE';
+    END IF;
+END
+$complete_{{ domain }}$;
+RESET ROLE;
+{% endfor %}
+COMMIT;

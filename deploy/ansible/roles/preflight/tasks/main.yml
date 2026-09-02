@@ -1,0 +1,216 @@
+---
+- name: Require an approved preflight scope
+  ansible.builtin.assert:
+    that: >-
+      (labweaver_preflight_scope | default('cluster')) in
+      ['cluster', 'identity-foundation', 'platform-foundation',
+       'platform-buildkit', 'platform-harbor-route', 'platform-application', 'platform-reset',
+       'resource-application', 'resource-replay', 'resource-replay-auth',
+       'foundation-clean-redeploy', 'foundation-rotation-verify']
+    fail_msg: PREFLIGHT_SCOPE_INVALID
+  run_once: true
+  delegate_to: localhost
+
+- name: Assert required full-cluster inventory groups
+  ansible.builtin.assert:
+    that:
+      - groups['routers'] | length == 1
+      - groups['control_plane'] | length == 1
+      - groups['workers'] | length >= 2
+      - groups['nfs_servers'] | length == 1
+    fail_msg: "inventory must declare exactly one router/control plane/NFS server and at least two workers"
+  run_once: true
+  delegate_to: localhost
+  when: >-
+    (labweaver_preflight_scope | default('cluster')) in
+    ['cluster', 'platform-foundation', 'platform-buildkit',
+     'platform-harbor-route', 'platform-application', 'platform-reset',
+     'resource-application', 'resource-replay', 'resource-replay-auth',
+     'foundation-clean-redeploy', 'foundation-rotation-verify']
+
+- name: Assert the minimal identity-foundation inventory boundary
+  ansible.builtin.assert:
+    that:
+      - (groups.get('routers', []) | sort) == ['edge-router']
+      - (groups.get('control_plane', []) | sort) == ['k8s-cp1']
+      - (groups.get('k8s_cluster', []) | sort) == ['k8s-cp1']
+      - groups.get('workers', []) | length == 0
+      - groups.get('nfs_servers', []) | length == 0
+    fail_msg: IDENTITY_INVENTORY_SCOPE_INVALID
+  run_once: true
+  delegate_to: localhost
+  when:
+    - (labweaver_preflight_scope | default('cluster')) == 'identity-foundation'
+    - not (labweaver_preflight_identity_adopted | default(false) | bool)
+
+- name: Assert the adopted-cluster identity-foundation inventory boundary
+  ansible.builtin.assert:
+    that:
+      - (groups.get('routers', []) | sort) == [preflight_identity_router]
+      - (groups.get('control_plane', []) | sort) == [preflight_identity_control_plane]
+      - "'{{ preflight_identity_control_plane }}' in groups.get('k8s_cluster', [])"
+    fail_msg: IDENTITY_INVENTORY_SCOPE_INVALID
+  run_once: true
+  delegate_to: localhost
+  when:
+    - (labweaver_preflight_scope | default('cluster')) == 'identity-foundation'
+    - labweaver_preflight_identity_adopted | default(false) | bool
+
+- name: Reject unresolved configuration placeholders
+  ansible.builtin.assert:
+    that:
+      - preflight_required_inputs | select('match', '^REPLACE_') | list | length == 0
+      - preflight_required_inputs | select('equalto', '') | list | length == 0
+    fail_msg: "private inventory/group variables contain an unresolved placeholder"
+  vars:
+    preflight_required_inputs:
+      - "{{ kubernetes_api_endpoint | string }}"
+      - "{{ kubernetes_api_advertise_address | string }}"
+      - "{{ router_wan_interface | string }}"
+      - "{{ router_lan_interface | string }}"
+      - "{{ router_lan_address | string }}"
+      - "{{ router_lan_cidr | string }}"
+      - "{{ metallb_pool | string }}"
+      - "{{ gateway_vip | string }}"
+      - "{{ nfs_server | string }}"
+      - "{{ local_path_device | string }}"
+      - "{{ storage_device_wwn | string }}"
+      - "{{ storage_device_size_bytes | string }}"
+      - "{{ verify_rwo_node | string }}"
+      - "{{ verify_nfs_writer_node | string }}"
+      - "{{ verify_nfs_reader_node | string }}"
+      - "{{ verify_gateway_hostname | string }}"
+  run_once: true
+  delegate_to: localhost
+  when: (labweaver_preflight_scope | default('cluster')) == 'cluster'
+
+- name: Reject unresolved identity-foundation controller placeholders
+  ansible.builtin.assert:
+    that:
+      - identity_controller_inputs | select('match', '^REPLACE_') | list | length == 0
+      - identity_controller_inputs | select('equalto', '') | list | length == 0
+    fail_msg: "private inventory/controller variables contain an unresolved placeholder"
+  vars:
+    identity_controller_inputs:
+      - "{{ kubernetes_api_endpoint | string }}"
+      - "{{ kubernetes_api_advertise_address | string }}"
+      - "{{ router_wan_interface | string }}"
+      - "{{ router_lan_interface | string }}"
+      - "{{ router_lan_address | string }}"
+      - "{{ router_lan_cidr | string }}"
+      - "{{ nfs_server | string }}"
+  run_once: true
+  delegate_to: localhost
+  when: (labweaver_preflight_scope | default('cluster')) == 'identity-foundation'
+
+- name: Assert supported OS family target
+  ansible.builtin.assert:
+    that:
+      - >-
+        (ansible_facts.os_family == 'RedHat'
+         and (ansible_facts.distribution_major_version | int) >= 10)
+        or
+        (ansible_facts.os_family == 'Debian'
+         and ansible_facts.distribution == 'Ubuntu'
+         and (ansible_facts.distribution_major_version | int) >= 22)
+    fail_msg: >-
+      supported node families are Rocky/RHEL 10+ (RedHat) and Ubuntu 22.04+
+      (Debian); this host is {{ ansible_facts.os_family }}
+      {{ ansible_facts.distribution | default('') }}
+      {{ ansible_facts.distribution_version | default('') }}
+  when:
+    - inventory_hostname != 'localhost'
+    - not (labweaver_direct_kubernetes_controller | default(false) | bool)
+
+- name: Require local-only hosts for direct Kubernetes controller mode
+  ansible.builtin.assert:
+    that:
+      - (labweaver_preflight_scope | default('cluster')) == 'identity-foundation'
+      - ansible_connection == 'local'
+    fail_msg: DIRECT_KUBERNETES_CONTROLLER_SCOPE_INVALID
+  when:
+    - labweaver_direct_kubernetes_controller | default(false) | bool
+    - inventory_hostname != 'localhost'
+
+- name: Verify the adopted cluster API from the direct controller
+  ansible.builtin.command:
+    argv:
+      - "{{ identity_kubectl_path | default('/usr/bin/kubectl') }}"
+      - --kubeconfig
+      - "{{ identity_kubeconfig_path | default('/etc/kubernetes/admin.conf') }}"
+      - get
+      - namespace
+      - kube-system
+      - --output
+      - name
+  changed_when: false
+  run_once: true
+  delegate_to: localhost
+  when: labweaver_direct_kubernetes_controller | default(false) | bool
+
+- name: Assert required interfaces are already present
+  ansible.builtin.command: "/usr/sbin/ip link show {{ item }}"
+  check_mode: false
+  changed_when: false
+  loop:
+    - "{{ router_wan_interface }}"
+    - "{{ router_lan_interface }}"
+  when:
+    - inventory_hostname in groups['routers']
+    - not (labweaver_direct_kubernetes_controller | default(false) | bool)
+    - not (labweaver_skip_router_services | default(false) | bool)
+
+- name: Assert Kubernetes node SELinux is enforcing
+  ansible.builtin.command: /usr/sbin/getenforce
+  check_mode: false
+  changed_when: false
+  register: preflight_selinux_mode
+  failed_when: preflight_selinux_mode.stdout != 'Enforcing'
+  when:
+    - inventory_hostname in groups['k8s_cluster']
+    - ansible_facts.os_family == 'RedHat'
+    - not (labweaver_direct_kubernetes_controller | default(false) | bool)
+
+- name: Assert workers expose the KVM device
+  ansible.builtin.stat:
+    path: /dev/kvm
+  register: preflight_kvm_device
+  when: inventory_hostname in groups.get('workers', [])
+
+- name: Reject workers without KVM
+  ansible.builtin.assert:
+    that: preflight_kvm_device.stat.exists and preflight_kvm_device.stat.ischr
+    fail_msg: "worker lacks /dev/kvm; hardware KVM verification cannot run"
+  when: inventory_hostname in groups.get('workers', [])
+
+- name: Assert workers expose nested virtualization CPU flags
+  ansible.builtin.command: /usr/bin/grep -E 'vmx|svm' /proc/cpuinfo
+  check_mode: false
+  changed_when: false
+  when: inventory_hostname in groups.get('workers', [])
+
+- name: Assert NFS server is running # noqa: command-instead-of-module
+  ansible.builtin.command: >-
+    systemctl is-active --quiet
+    {{ 'nfs-server.service' if ansible_facts.os_family == 'RedHat'
+       else 'nfs-kernel-server.service' }}
+  check_mode: false
+  changed_when: false
+  when: inventory_hostname in groups.get('nfs_servers', [])
+
+- name: Assert the required NFS export is present
+  ansible.builtin.command: /usr/sbin/exportfs -v
+  check_mode: false
+  changed_when: false
+  register: preflight_nfs_exports
+  failed_when: nfs_share not in preflight_nfs_exports.stdout
+  when: inventory_hostname in groups.get('nfs_servers', [])
+
+- name: Assert NFSv4 is reachable from every Kubernetes node
+  ansible.builtin.wait_for:
+    host: "{{ nfs_server }}"
+    port: 2049
+    timeout: 5
+  when:
+    - (labweaver_preflight_scope | default('cluster')) == 'cluster'
+    - inventory_hostname in groups['k8s_cluster']

@@ -1,0 +1,27 @@
+---
+# Issue #152 clean redeploy finalization. Closes the same run after the
+# destructive cycle: reclaims residual PersistentVolumes whose claims lived in
+# the destroyed LabWeaver namespaces, re-runs the destruction readback with
+# final semantics, and persists the tombstone. Requires the same-run clean
+# report, the same cluster UID binding, and a distinct confirmation string.
+foundation_clean_redeploy_finalize_confirmation: "{{ lookup('ansible.builtin.env', 'LABWEAVER_FOUNDATION_FINALIZE_CONFIRMATION') }}"
+foundation_clean_redeploy_finalize_run_id: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RUN_ID') }}"
+foundation_clean_redeploy_finalize_source_commit: "{{ lookup('ansible.builtin.env', 'LABWEAVER_COMMIT_SHA') }}"
+foundation_clean_redeploy_finalize_kubeconfig: /etc/kubernetes/admin.conf
+foundation_clean_redeploy_finalize_kubectl: /usr/bin/kubectl
+foundation_clean_redeploy_finalize_report_root: /var/lib/labweaver/foundation-clean-redeploy
+foundation_clean_redeploy_finalize_namespaces:
+  - labweaver-data
+  - labweaver-build
+  - labweaver-demo
+  - labweaver-evaluation
+  - labweaver-operations
+  - labweaver-system
+  - harbor
+  - keycloak-system
+foundation_clean_redeploy_finalize_protected_namespaces:
+  - kube-system
+  - kube-public
+  - kube-node-lease
+  - kubevirt
+  - cdi

@@ -1,0 +1,15 @@
+---
+# Issue #152 credential rotation verification (budget step 5: one verification
+# replay). Runs after the clean redeploy, the foundation/harbor/identity/buildkit
+# install cycle and both idempotent reconciles. It proves the old dedicated
+# credentials are rejected, freezes the sanitized new-credential registry and
+# emits the clean-rebuild-non-release rotation report.
+- import_playbook: 00-preflight.yml
+  vars:
+    labweaver_preflight_scope: foundation-rotation-verify
+
+- name: Verify credential rotation and freeze the sanitized registry
+  hosts: control_plane
+  gather_facts: false
+  become: true
+  roles: [foundation_rotation_verify]

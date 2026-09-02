@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.labweaver.io/results/platform-image-package-manifest.v1.schema.json",
+  "title": "PlatformImagePackageManifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "release_id",
+    "source_commit",
+    "source_date_epoch",
+    "component_lock_hash",
+    "platform",
+    "registry",
+    "builder",
+    "images",
+    "overall"
+  ],
+  "properties": {
+    "schema_version": { "const": "platform-image-package-manifest.v1" },
+    "profile": { "enum": ["platform", "resource"], "default": "platform" },
+    "run_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "release_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "source_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "source_date_epoch": { "type": "integer", "minimum": 1 },
+    "component_lock_hash": { "$ref": "#/$defs/sha256" },
+    "platform": { "const": "linux/amd64" },
+    "registry": { "type": "string", "minLength": 1, "maxLength": 253 },
+    "builder": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["buildkit", "buildx"],
+      "properties": {
+        "buildkit": { "type": "string", "minLength": 1 },
+        "buildx": { "type": "string", "minLength": 1 }
+      }
+    },
+    "images": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 7,
+      "items": { "$ref": "#/$defs/image" }
+    },
+    "overall": { "const": "passed" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "profile": { "const": "resource" } }, "required": ["profile"] },
+      "then": {
+        "properties": {
+          "images": {
+            "minItems": 1,
+            "maxItems": 1,
+            "items": { "$ref": "#/$defs/resourceImage" }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "images": {
+            "minItems": 7,
+            "maxItems": 7,
+            "contains": { "properties": { "component": { "const": "access-service" } } },
+            "allOf": [
+              { "contains": { "properties": { "component": { "const": "agent-service" } } } },
+              { "contains": { "properties": { "component": { "const": "control-service" } } } },
+              { "contains": { "properties": { "component": { "const": "environment-service" } } } },
+              { "contains": { "properties": { "component": { "const": "evaluation-service" } } } },
+              { "contains": { "properties": { "component": { "const": "openssh-gateway" } } } },
+              { "contains": { "properties": { "component": { "const": "web" } } } }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "resourceImage": {
+      "allOf": [
+        { "$ref": "#/$defs/image" },
+        { "properties": { "component": { "const": "resource-service" } } }
+      ]
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["component", "reference", "digest", "scan"],
+      "properties": {
+        "component": {
+          "enum": [
+            "access-service",
+            "agent-service",
+            "control-service",
+            "environment-service",
+            "evaluation-service",
+            "openssh-gateway",
+            "resource-service",
+            "web"
+          ]
+        },
+        "reference": { "type": "string", "minLength": 1 },
+        "digest": { "$ref": "#/$defs/sha256" },
+        "scan": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "scanner",
+            "database_digest",
+            "critical",
+            "high",
+            "report",
+            "report_sha256"
+          ],
+          "properties": {
+            "scanner": { "type": "string", "pattern": "^trivy:.+$" },
+            "database_digest": { "$ref": "#/$defs/sha256" },
+            "critical": { "const": 0 },
+            "high": { "type": "integer", "minimum": 0 },
+            "report": { "type": "string", "pattern": "^artifact://" },
+            "report_sha256": { "$ref": "#/$defs/sha256" }
+          }
+        }
+      }
+    }
+  }
+}

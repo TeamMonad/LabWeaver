@@ -1,0 +1,45 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Evaluation-authenticated request for one current Environment freeze binding.",
+  "properties": {
+    "actorId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "collectorPublicKeyOpenssh": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    },
+    "expectedRevision": {
+      "$ref": "#/$defs/Revision"
+    }
+  },
+  "required": [
+    "courseId",
+    "actorId",
+    "expectedRevision"
+  ],
+  "title": "EnvironmentFreezeBindingRequest",
+  "type": "object"
+}

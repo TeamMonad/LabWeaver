@@ -1,0 +1,42 @@
+{
+  "$defs": {
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Redeems exactly one SSH authorization into a tracked Gateway session.",
+  "properties": {
+    "alias": {
+      "description": "Exact server-generated SSH endpoint alias parsed from `connect <alias>`.",
+      "type": "string"
+    },
+    "authorizationId": {
+      "type": "string"
+    },
+    "connectionId": {
+      "type": "string"
+    },
+    "forceCommandToken": {
+      "type": "string"
+    },
+    "gatewayIdentity": {
+      "type": "string"
+    },
+    "openedAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    }
+  },
+  "required": [
+    "authorizationId",
+    "forceCommandToken",
+    "alias",
+    "gatewayIdentity",
+    "connectionId",
+    "openedAt"
+  ],
+  "title": "CreateGatewaySessionRequest",
+  "type": "object"
+}

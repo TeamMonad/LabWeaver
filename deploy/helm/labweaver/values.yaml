@@ -1,0 +1,294 @@
+images:
+  access_service: ""
+  agent_service: ""
+  control_service: ""
+  environment_service: ""
+  evaluation_service: ""
+  web: ""
+  openssh_gateway: ""
+  resource_service: ""
+
+imagePullSecrets: []
+
+# The private configuration bundle is applied by Ansible before Helm. Binding
+# its immutable digest to every Pod template ensures services that read their
+# configuration only during startup are rolled whenever that bundle changes.
+deploymentIdentity:
+  configurationBundleSha256: ""
+
+# Static aliases are only for adopted, stable infrastructure VIPs whose names
+# are already part of the reviewed Sprint 2 configuration. They do not replace
+# service discovery for LabWeaver workloads.
+hostAliases: []
+
+portalRoute:
+  enabled: false
+  namespace: ""
+  name: labweaver-platform
+  hostname: ""
+  gatewayName: ""
+  gatewaySectionName: http
+
+objectStoreRoute:
+  enabled: false
+  namespace: ""
+  serviceName: minio
+  serviceNamespace: labweaver-data
+  servicePort: 9000
+  pathPrefix: ""
+  backendHostname: ""
+  caCertificate: ""
+
+sshGatewayService:
+  enabled: false
+  loadBalancerIP: ""
+  sharedIPKey: ""
+
+workloads:
+  control-service:
+    enabled: true
+    imageKey: control_service
+    args: []
+    configMap: control-service-config
+    secret: control-service-secrets
+    env:
+      LABWEAVER_CONTROL_CONFIG_FILE: /etc/labweaver/config/config.yaml
+      SSL_CERT_FILE: /etc/labweaver/secrets/minio-ca.pem
+    ports:
+      - {name: mtls, containerPort: 9444, servicePort: 9444}
+    readiness: {type: tcp, port: mtls}
+    externalEgress: []
+  access-service:
+    enabled: true
+    imageKey: access_service
+    args: []
+    configMap: access-service-config
+    secret: access-service-secrets
+    env:
+      LABWEAVER_ACCESS_AUTH_CONFIG_FILE: /etc/labweaver/config/config.yaml
+    ports:
+      - {name: browser, containerPort: 8080, servicePort: 8080}
+      - {name: mtls, containerPort: 9443, servicePort: 9443}
+    readiness: {type: tcp, port: browser}
+  agent-service:
+    enabled: true
+    imageKey: agent_service
+    args: ["--mode", "agent-service"]
+    configMap: agent-service-config
+    secret: agent-service-secrets
+    env:
+      LABWEAVER_AGENT_CONFIG_FILE: /etc/labweaver/config/config.yaml
+      # Acceptance-only VM candidate diagnostics. The directory is backed by
+      # the existing pod-scoped /tmp volume and is removed with the pod.
+      LABWEAVER_LLM_OUTPUT_DIR: /tmp
+      SSL_CERT_FILE: /etc/labweaver/secrets/minio-ca.pem
+    ports:
+      - {name: mtls, containerPort: 9445, servicePort: 9445}
+    readiness: {type: tcp, port: mtls}
+  build-executor:
+    enabled: true
+    imageKey: agent_service
+    args: ["--mode", "build-executor"]
+    configMap: build-executor-config
+    secret: build-executor-secrets
+    env:
+      LABWEAVER_BUILD_EXECUTOR_CONFIG_FILE: /etc/labweaver/config/config.yaml
+      LABWEAVER_BIND_ADDR: 0.0.0.0:8084
+      SSL_CERT_FILE: /etc/labweaver/secrets/outbound-ca.pem
+      AWS_CA_BUNDLE: /etc/labweaver/secrets/outbound-ca.pem
+    ports:
+      - {name: health, containerPort: 8084, servicePort: 8084}
+    readiness: {type: http, port: health, path: /health/ready}
+    # Trivy expands its vulnerability database and scan workspace under /tmp.
+    # Keep this workload-scoped: the executor still has no hostPath or host
+    # namespace access, while a 512 MiB EmptyDir is smaller than a real DB.
+    tmpSizeLimit: 2Gi
+    resources:
+      requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 512Mi}
+      limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 3Gi}
+  environment-service:
+    enabled: true
+    imageKey: environment_service
+    # The retained Sprint 2 cluster cannot reserve a second environment owner
+    # while a one-replica rollout is in progress. Keep this workload-specific:
+    # the API becomes briefly unavailable, while unrelated services retain the
+    # default surge strategy.
+    strategy:
+      type: RollingUpdate
+      rollingUpdate: {maxSurge: 0, maxUnavailable: 1}
+    args: ["--mode", "environment-service"]
+    configMap: environment-service-config
+    secret: environment-service-secrets
+    env:
+      LABWEAVER_BIND_ADDR: 0.0.0.0:8083
+      LABWEAVER_OWNER_RESOLVER_BIND_ADDR: 0.0.0.0:9446
+      LABWEAVER_OWNER_RESOLVER_CLIENT_CA_PATH: /etc/labweaver/secrets/mtls-ca.pem
+      LABWEAVER_OWNER_RESOLVER_SERVER_CERT_PATH: /etc/labweaver/secrets/tls.crt
+      LABWEAVER_OWNER_RESOLVER_SERVER_KEY_PATH: /etc/labweaver/secrets/tls.key
+      LABWEAVER_OWNER_RESOLVER_ALLOWED_CALLER_SANS: spiffe://labweaver/access-service,spiffe://labweaver/evaluation-service,spiffe://labweaver/resource-service
+      LABWEAVER_NATS_CA_PATH: /etc/labweaver/secrets/nats-ca.pem
+      LABWEAVER_NATS_CLIENT_CERT_PATH: /etc/labweaver/secrets/nats-client.crt
+      LABWEAVER_NATS_CLIENT_KEY_PATH: /etc/labweaver/secrets/nats-client.key
+      LABWEAVER_NATS_CREDENTIALS_PATH: /etc/labweaver/secrets/nats.creds
+      LABWEAVER_ENVIRONMENT_COMMAND_STREAM: LABWEAVER_ENVIRONMENT_COMMANDS
+      LABWEAVER_ENVIRONMENT_COMMAND_CONSUMER: environment-service-v1
+      LABWEAVER_ENVIRONMENT_COMMAND_QUARANTINE_SUBJECT: labweaver.environment.command.quarantine.v1
+      LABWEAVER_ENVIRONMENT_RELEASE_STREAM: LABWEAVER_RELEASES
+      LABWEAVER_ENVIRONMENT_RELEASE_CONSUMER: environment-release-v1
+      LABWEAVER_ENVIRONMENT_RELEASE_QUARANTINE_SUBJECT: labweaver.environment.release.quarantine.v1
+      LABWEAVER_ENVIRONMENT_PROVIDER_BINDINGS_PATH: /etc/labweaver/config/providers.json
+      LABWEAVER_ACCESS_REVOCATION_SUBJECT: labweaver.service.access.revoke.v1
+      LABWEAVER_RESOURCE_LEASE_VERIFICATION_SUBJECT: labweaver.resource.lease.verify.v1
+      LABWEAVER_ENVIRONMENT_WORKER_ID: environment-service-platform
+      LABWEAVER_CONTAINER_TERMINAL_EXECUTOR_URI: wss://container-executor:9450/internal/v1/container-terminal
+      LABWEAVER_CONTAINER_TERMINAL_EXECUTOR_CA_PATH: /etc/labweaver/secrets/mtls-ca.pem
+      LABWEAVER_CONTAINER_TERMINAL_EXECUTOR_CERT_PATH: /etc/labweaver/secrets/tls.crt
+      LABWEAVER_CONTAINER_TERMINAL_EXECUTOR_KEY_PATH: /etc/labweaver/secrets/tls.key
+      LABWEAVER_KUBEVIRT_CONSOLE_EXECUTOR_URI: wss://kubevirt-console-executor:9451/internal/v1/kubevirt-vnc
+    secretEnv:
+      LABWEAVER_DATABASE_URL: {key: database-url}
+      LABWEAVER_NATS_SERVER: {key: nats-server}
+      LABWEAVER_ENVIRONMENT_SYSTEM_ACTOR_ID: {key: system-actor-id}
+    ports:
+      - {name: health, containerPort: 8083, servicePort: 8083}
+      - {name: resolver, containerPort: 9446, servicePort: 9446}
+    readiness: {type: http, port: health, path: /health/ready}
+  container-executor:
+    enabled: true
+    imageKey: environment_service
+    args: ["--mode", "container-executor"]
+    configMap: container-executor-config
+    secret: container-executor-secrets
+    rbacProfile: container
+    kubernetesApi: true
+    env:
+      LABWEAVER_RUNTIME_EXECUTOR_CONFIG_FILE: /etc/labweaver/config/config.yaml
+      LABWEAVER_BIND_ADDR: 0.0.0.0:8085
+      SSL_CERT_FILE: /etc/labweaver/secrets/minio-ca.pem
+    ports:
+      - {name: health, containerPort: 8085, servicePort: 8085}
+      - {name: console-mtls, containerPort: 9450, servicePort: 9450}
+    readiness: {type: http, port: health, path: /health/ready}
+  kubevirt-executor:
+    enabled: true
+    imageKey: environment_service
+    args: ["--mode", "kubevirt-executor"]
+    configMap: kubevirt-executor-config
+    secret: kubevirt-executor-secrets
+    rbacProfile: kubevirt
+    kubernetesApi: true
+    env:
+      LABWEAVER_RUNTIME_EXECUTOR_CONFIG_FILE: /etc/labweaver/config/config.yaml
+      LABWEAVER_BIND_ADDR: 0.0.0.0:8086
+      SSL_CERT_FILE: /etc/labweaver/secrets/minio-ca.pem
+    ports:
+      - {name: health, containerPort: 8086, servicePort: 8086}
+    readiness: {type: http, port: health, path: /health/ready}
+  kubevirt-console-executor:
+    enabled: true
+    imageKey: environment_service
+    args: ["--mode", "kubevirt-console-executor"]
+    configMap: kubevirt-console-executor-config
+    secret: kubevirt-console-executor-secrets
+    rbacProfile: kubevirt-console
+    kubernetesApi: true
+    env:
+      LABWEAVER_KUBEVIRT_CONSOLE_CONFIG_FILE: /etc/labweaver/config/config.yaml
+      LABWEAVER_BIND_ADDR: 0.0.0.0:8089
+    ports:
+      - {name: health, containerPort: 8089, servicePort: 8089}
+      - {name: console-mtls, containerPort: 9451, servicePort: 9451}
+    readiness: {type: http, port: health, path: /health/ready}
+  openssh-gateway:
+    enabled: true
+    imageKey: openssh_gateway
+    args: []
+    secret: openssh-gateway-secrets
+    gateway: true
+    env:
+      LABWEAVER_ACCESS_URL: https://access-service:9443
+      LABWEAVER_GATEWAY_IDENTITY: spiffe://labweaver/openssh-gateway
+      LABWEAVER_MTLS_CERT: /etc/labweaver/secrets/mtls.crt
+      LABWEAVER_MTLS_KEY: /etc/labweaver/secrets/mtls.key
+      LABWEAVER_MTLS_CA: /etc/labweaver/secrets/mtls-ca.pem
+    ports:
+      - {name: ssh, containerPort: 2222, servicePort: 2222}
+    readiness: {type: tcp, port: ssh}
+  web:
+    enabled: true
+    imageKey: web
+    args: []
+    configMap: web-config
+    runAsUser: 101
+    ports:
+      - {name: http, containerPort: 8080, servicePort: 8080}
+    readiness: {type: http, port: http, path: /, livenessPath: /}
+  evaluation-service:
+    enabled: true
+    imageKey: evaluation_service
+    # Evaluation owns the freeze coordinator and must also roll without a
+    # second replica on the retained resource-constrained demo cluster.
+    strategy:
+      type: RollingUpdate
+      rollingUpdate: {maxSurge: 0, maxUnavailable: 1}
+    args: ["--mode", "evaluation-service"]
+    configMap: evaluation-service-config
+    secret: evaluation-service-secrets
+    rbacProfile: evaluation
+    kubernetesApi: true
+    env:
+      LABWEAVER_EVALUATION_CONFIG_FILE: /etc/labweaver/config/config.yaml
+      SSL_CERT_FILE: /etc/labweaver/secrets/minio-ca.pem
+    ports:
+      - {name: mtls, containerPort: 9447, servicePort: 9447}
+    readiness: {type: tcp, port: mtls}
+  resource-service:
+    enabled: false
+    imageKey: resource_service
+    args: []
+    configMap: resource-service-config
+    secret: resource-service-secrets
+    rbacProfile: resource
+    kubernetesApi: true
+    env:
+      LABWEAVER_BIND_ADDR: 0.0.0.0:8087
+      LABWEAVER_RESOURCE_MTLS_CONFIG_FILE: /etc/labweaver/config/mtls.yaml
+      LABWEAVER_RESOURCE_CAPACITY_CONFIG_FILE: /etc/labweaver/config/capacity.json
+      LABWEAVER_NATS_CA_PATH: /etc/labweaver/secrets/nats-ca.pem
+      LABWEAVER_NATS_CLIENT_CERT_PATH: /etc/labweaver/secrets/nats-client.crt
+      LABWEAVER_NATS_CLIENT_KEY_PATH: /etc/labweaver/secrets/nats-client.key
+      LABWEAVER_NATS_CREDENTIALS_PATH: /etc/labweaver/secrets/nats.creds
+      LABWEAVER_RESOURCE_LEASE_VERIFICATION_SUBJECT: labweaver.resource.lease.verify.v1
+    secretEnv:
+      LABWEAVER_DATABASE_URL: {key: database-url}
+      LABWEAVER_NATS_SERVER: {key: nats-server}
+    ports:
+      - {name: health, containerPort: 8087, servicePort: 8087}
+      - {name: mtls, containerPort: 9448, servicePort: 9448}
+    readiness: {type: http, port: health, path: /health/ready}
+
+resources:
+  requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 64Mi}
+  limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 256Mi}
+
+network:
+  defaultDenyEnabled: true
+  cdiCloneSourcePolicyEnabled: true
+  ciliumIngressPolicyEnabled: true
+  resourceKubernetesApiCiliumPolicyEnabled: false
+  infrastructureNamespaceSelector:
+    matchLabels: {labweaver.io/infrastructure: "true"}
+  edgeNamespaceSelector:
+    matchLabels: {labweaver.io/edge: "true"}
+  gatewayNamespaceSelector:
+    matchLabels: {kubernetes.io/metadata.name: labweaver-demo}
+  environmentNamespaceSelector:
+    matchLabels: {labweaver.io/environment: "true"}
+  identityNamespaceSelector:
+    matchLabels: {kubernetes.io/metadata.name: keycloak-system}
+  kubernetesApiCidrs: []
+  # The in-cluster Service is addressed on 443, while CNI enforcement can
+  # observe the adopted control-plane endpoint after DNAT on 6443.
+  kubernetesApiPorts: [443, 6443]
+  gatewayIngressCidrs: []
+  externalServiceEndpoints: []

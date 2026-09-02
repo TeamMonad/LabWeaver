@@ -1,0 +1,185 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "AuthorizationScope": {
+      "description": "Resource scope evaluated by the authorization boundary.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Platform-wide endpoint with no course resource.",
+          "properties": {
+            "kind": {
+              "const": "global",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Course-scoped endpoint.",
+          "properties": {
+            "course_id": {
+              "$ref": "#/$defs/CourseId"
+            },
+            "kind": {
+              "const": "course",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "course_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Project-scoped endpoint.",
+          "properties": {
+            "course_id": {
+              "$ref": "#/$defs/CourseId"
+            },
+            "kind": {
+              "const": "project",
+              "type": "string"
+            },
+            "project_id": {
+              "$ref": "#/$defs/ProjectId"
+            }
+          },
+          "required": [
+            "kind",
+            "course_id",
+            "project_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Environment owner resolution is supplied by the owning service.",
+          "properties": {
+            "course_id": {
+              "$ref": "#/$defs/CourseId"
+            },
+            "environment_id": {
+              "$ref": "#/$defs/EnvironmentId"
+            },
+            "environment_revision": {
+              "$ref": "#/$defs/Revision",
+              "description": "Exact Environment-authoritative revision resolved for this request."
+            },
+            "kind": {
+              "const": "environment",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "course_id",
+            "environment_id",
+            "environment_revision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Internal service endpoint authenticated by mTLS.",
+          "properties": {
+            "kind": {
+              "const": "service",
+              "type": "string"
+            },
+            "service_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "service_id"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "BffSessionId": {
+      "description": "Strongly typed UUIDv7 identifier for `BffSessionId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Trusted-Gateway authorization request. The caller identity is taken from\nmTLS and is never accepted from a browser-controlled header.",
+  "properties": {
+    "actorId": {
+      "$ref": "#/$defs/ActorId",
+      "description": "Actor whose session or bearer token was already authenticated."
+    },
+    "authorizationRevision": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Revision"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Revision observed by the caller, if it holds a prior decision."
+    },
+    "operationId": {
+      "description": "Stable operation catalog identifier.",
+      "type": "string"
+    },
+    "scope": {
+      "$ref": "#/$defs/AuthorizationScope",
+      "description": "Scope requiring evaluation."
+    },
+    "scopeRevision": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Revision"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Scope revision observed by the caller, if it holds a prior decision."
+    },
+    "sessionId": {
+      "$ref": "#/$defs/BffSessionId",
+      "description": "Opaque BFF session identifier presented only by the trusted Gateway.\nAccess verifies that the live session belongs to `actor_id`; it is never\naccepted from a browser header."
+    }
+  },
+  "required": [
+    "operationId",
+    "actorId",
+    "sessionId",
+    "scope"
+  ],
+  "title": "AuthorizationDecisionRequest",
+  "type": "object"
+}

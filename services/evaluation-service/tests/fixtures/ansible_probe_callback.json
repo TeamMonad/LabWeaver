@@ -1,0 +1,75 @@
+{
+  "custom_stats": {},
+  "global_custom_stats": {},
+  "plays": [
+    {
+      "play": {
+        "duration": { "end": "2026-08-06T14:30:01.000000Z", "start": "2026-08-06T14:29:58.000000Z" },
+        "id": "0a1b2c3d-0000-4000-8000-000000000001",
+        "name": "linux nginx read-only probe"
+      },
+      "tasks": [
+        {
+          "hosts": {
+            "192.168.56.10": {
+              "action": "ansible.builtin.package_facts",
+              "ansible_facts": { "packages": { "nginx": [{ "name": "nginx", "version": "1.24.0-2ubuntu7" }] } },
+              "changed": false
+            }
+          },
+          "task": { "duration": { "end": "2026-08-06T14:29:59.000000Z", "start": "2026-08-06T14:29:58.000000Z" }, "id": "0a1b2c3d-0000-4000-8000-000000000002", "name": "collect package facts" }
+        },
+        {
+          "hosts": {
+            "192.168.56.10": {
+              "action": "ansible.builtin.service_facts",
+              "ansible_facts": { "services": { "nginx.service": { "name": "nginx.service", "state": "running", "status": "enabled" } } },
+              "changed": false
+            }
+          },
+          "task": { "duration": { "end": "2026-08-06T14:30:00.000000Z", "start": "2026-08-06T14:29:59.000000Z" }, "id": "0a1b2c3d-0000-4000-8000-000000000003", "name": "collect service facts" }
+        },
+        {
+          "hosts": {
+            "192.168.56.10": {
+              "action": "ansible.builtin.stat",
+              "changed": false,
+              "stat": { "exists": true, "mode": "0644", "checksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+            }
+          },
+          "task": { "duration": { "end": "2026-08-06T14:30:00.500000Z", "start": "2026-08-06T14:30:00.000000Z" }, "id": "0a1b2c3d-0000-4000-8000-000000000004", "name": "stat nginx site config" }
+        },
+        {
+          "hosts": {
+            "192.168.56.10": {
+              "action": "ansible.builtin.debug",
+              "changed": false,
+              "labweaver_probe_facts": {
+                "host.reachable": true,
+                "service.nginx.active": true,
+                "service.nginx.state": "running",
+                "package.nginx.installed": true,
+                "package.nginx.version": "1.24.0-2ubuntu7",
+                "file./etc/nginx/sites-available/default.exists": true,
+                "file./etc/nginx/sites-available/default.sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "file./etc/nginx/sites-available/default.mode": "0644"
+              }
+            }
+          },
+          "task": { "duration": { "end": "2026-08-06T14:30:01.000000Z", "start": "2026-08-06T14:30:00.500000Z" }, "id": "0a1b2c3d-0000-4000-8000-000000000005", "name": "labweaver_probe_facts" }
+        }
+      ]
+    }
+  ],
+  "stats": {
+    "192.168.56.10": {
+      "changed": 0,
+      "failures": 0,
+      "ignored": 0,
+      "ok": 4,
+      "rescued": 0,
+      "skipped": 0,
+      "unreachable": 0
+    }
+  }
+}

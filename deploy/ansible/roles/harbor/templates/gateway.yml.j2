@@ -1,0 +1,89 @@
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: harbor-internal-ca
+  namespace: {{ harbor_namespace }}
+  labels:
+    app.kubernetes.io/part-of: labweaver-infrastructure
+spec:
+  isCA: true
+  commonName: labweaver-harbor-internal-ca
+  secretName: {{ harbor_ca_secret_name }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: dev-selfsigned
+    kind: ClusterIssuer
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: harbor-internal-ca
+  namespace: {{ harbor_namespace }}
+spec:
+  ca:
+    secretName: {{ harbor_ca_secret_name }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: harbor-gateway-tls
+  namespace: {{ harbor_namespace }}
+spec:
+  secretName: {{ harbor_gateway_tls_secret_name }}
+  dnsNames:
+    - {{ harbor_hostname }}
+  issuerRef:
+    name: harbor-internal-ca
+    kind: Issuer
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ harbor_gateway_name }}
+  namespace: {{ harbor_namespace }}
+  labels:
+    app.kubernetes.io/part-of: labweaver-infrastructure
+spec:
+  gatewayClassName: cilium
+  infrastructure:
+    annotations:
+      metallb.io/loadBalancerIPs: {{ harbor_gateway_vip }}
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: {{ harbor_hostname }}
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: {{ harbor_gateway_tls_secret_name }}
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: harbor
+  namespace: {{ harbor_namespace }}
+  labels:
+    app.kubernetes.io/part-of: labweaver-infrastructure
+spec:
+  parentRefs:
+    - name: {{ harbor_gateway_name }}
+      sectionName: https
+  hostnames:
+    - {{ harbor_hostname }}
+  rules:
+    - backendRefs:
+        # Transitional bootstrap form: the Gateway terminates client TLS and
+        # reaches nginx's plaintext listener until the Sprint 2 Harbor route
+        # adoption converts this Gateway to TLS passthrough and routes to the
+        # HTTPS listener. The adoption leaves this HTTPRoute in place but
+        # detached from the TLS-only listener.
+        - name: {{ harbor_release_name }}
+          port: 80

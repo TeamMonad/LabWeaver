@@ -1,0 +1,15 @@
+# Dependencies
+node_modules
+
+# Build outputs
+dist
+dist-ssr
+*.local
+
+# Auth / test artifacts
+.auth
+test-results
+playwright-report*
+
+# Logs
+*.log

@@ -1,0 +1,53 @@
+ARG RUST_BUILDER="docker.io/library/rust:1.97.1-alpine3.21@sha256:7bae7c67364dad5ebbd4060923b34d734fbed66d7c1cf3af72aa2f062af93eb6"
+ARG GATEWAY_RUNTIME="docker.io/library/alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d"
+
+FROM ${RUST_BUILDER} AS builder
+ARG RUST_TOOLCHAIN=1.97.1
+ARG SOURCE_COMMIT
+ARG SOURCE_DATE_EPOCH
+ENV CARGO_INCREMENTAL=0 \
+    RUSTUP_TOOLCHAIN=${RUST_TOOLCHAIN} \
+    SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+RUN apk add --no-cache musl-dev=1.2.5-r11
+WORKDIR /src
+COPY Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml ./
+COPY .cargo .cargo
+COPY crates crates
+COPY services services
+COPY access-gateway access-gateway
+COPY xtask xtask
+COPY migrations migrations
+COPY vendor vendor
+RUN --mount=type=cache,id=labweaver-gateway-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=labweaver-gateway-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    cargo fetch --locked
+RUN --network=none \
+    --mount=type=cache,id=labweaver-gateway-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=labweaver-gateway-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    test -n "${SOURCE_COMMIT}" && test -n "${SOURCE_DATE_EPOCH}" && \
+    CARGO_TARGET_DIR=/tmp/labweaver-gateway-target \
+      cargo build --release --locked --offline --package access-gateway && \
+    install -D -m 0555 \
+      /tmp/labweaver-gateway-target/release/access-gateway \
+      /out/labweaver-gateway
+
+FROM ${GATEWAY_RUNTIME} AS runtime
+ARG SOURCE_COMMIT
+RUN apk add --no-cache \
+      openssh-client-default=9.9_p2-r0 \
+      openssh-server=9.9_p2-r0 \
+    && adduser -D -H -s /sbin/nologin gateway-auth \
+    && adduser -D -H -s /bin/sh gateway \
+    && passwd -d gateway \
+    && addgroup gateway gateway-auth \
+    && mkdir -p /run/sshd /etc/labweaver
+COPY --from=builder /out/labweaver-gateway /usr/local/bin/labweaver-gateway
+COPY access-gateway/sshd_config /etc/ssh/sshd_config
+COPY access-gateway/target-ssh.conf /etc/labweaver/target-ssh.conf
+COPY --chmod=0555 access-gateway/entrypoint.sh /usr/local/bin/labweaver-gateway-entrypoint
+COPY --chmod=0555 access-gateway/command-wrapper.sh /usr/local/bin/labweaver-gateway-command
+LABEL org.opencontainers.image.source="https://github.com/TeamMonad/LabWeaver" \
+      org.opencontainers.image.revision="${SOURCE_COMMIT}" \
+      org.opencontainers.image.title="openssh-gateway"
+EXPOSE 2222
+ENTRYPOINT ["/usr/local/bin/labweaver-gateway-entrypoint"]

@@ -1,0 +1,182 @@
+name: Platform Images
+
+on:
+  pull_request:
+    branches: [develop]
+    paths:
+      - access-gateway/**
+      - containers/**
+      - crates/**
+      - services/**
+      - Cargo.toml
+      - Cargo.lock
+      - deploy/helm/**
+      - deploy/versions.lock.yml
+      - schemas/results/platform-image-*.json
+      - tests/fixtures/platform-image-*
+      - xtask/**
+      - .github/workflows/platform-images.yml
+  push:
+    branches: [develop]
+    paths:
+      - access-gateway/**
+      - containers/**
+      - crates/**
+      - services/**
+      - Cargo.toml
+      - Cargo.lock
+      - deploy/helm/**
+      - deploy/versions.lock.yml
+      - schemas/results/platform-image-*.json
+      - tests/fixtures/platform-image-*
+      - xtask/**
+      - .github/workflows/platform-images.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: platform-images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract-and-render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - run: cargo xtask package-validate --manifest tests/fixtures/platform-image-package-manifest.json --mode static
+      - run: cargo test -p xtask --locked platform_images
+      - name: Render Sprint 2 chart
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD:/workspace" -w /workspace \
+            docker.io/alpine/helm:3.21.3@sha256:35da09ba0716fc7c3cd63b6b31ee380a9c7662e95f29ab0e4ae962420afd315b \
+            template labweaver deploy/helm/labweaver --namespace labweaver-system \
+            --set-string deploymentIdentity.configurationBundleSha256=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+            --values tests/fixtures/platform-images-values.yaml >"$RUNNER_TEMP/platform-images.yaml"
+          if grep -E 'image: .*:(latest|main|develop)([[:space:]]|$)' "$RUNNER_TEMP/platform-images.yaml"; then
+            echo LW_PACKAGE_HELM_MUTABLE_IMAGE_FORBIDDEN >&2
+            exit 1
+          fi
+          count="$(grep -Ec 'image: "?harbor\.internal\.example/labweaver-system/[a-z0-9-]+@sha256:[0-9a-f]{64}"?' "$RUNNER_TEMP/platform-images.yaml")"
+          test "$count" -eq 11 || {
+            echo "LW_PACKAGE_HELM_IMAGE_COUNT_INVALID:expected=11 actual=$count" >&2
+            exit 1
+          }
+          configuration_count="$(grep -Ec 'labweaver.io/configuration-bundle-sha256: "?sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"?' "$RUNNER_TEMP/platform-images.yaml")"
+          test "$configuration_count" -eq 11 || {
+            echo "LW_PACKAGE_HELM_CONFIGURATION_IDENTITY_COUNT_INVALID:expected=11 actual=$configuration_count" >&2
+            exit 1
+          }
+          if docker run --rm -v "$PWD:/workspace" -w /workspace \
+            docker.io/alpine/helm:3.21.3@sha256:35da09ba0716fc7c3cd63b6b31ee380a9c7662e95f29ab0e4ae962420afd315b \
+            template labweaver deploy/helm/labweaver --namespace labweaver-system \
+            --values tests/fixtures/platform-images-values.yaml \
+            --set-string deploymentIdentity.configurationBundleSha256=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+            --set-json 'network.kubernetesApiCidrs=[]' >/dev/null 2>&1; then
+            echo LW_PACKAGE_HELM_API_CIDR_FAIL_CLOSED_MISSING >&2
+            exit 1
+          fi
+
+  build-and-scan:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component:
+          - access-service
+          - agent-service
+          - ansible-probe-runner
+          - control-service
+          - environment-service
+          - evaluation-service
+          - oj-cpp17-runner
+          - openssh-gateway
+          - resource-service
+          - web
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+        with:
+          version: v0.35.0
+          driver-opts: image=moby/buildkit@sha256:6b59b7df63a8cb9902736f9ddf7fcff8261613d3e7449b8ea8b7537fc399c03a
+      - name: Build reproducible runtime image
+        env:
+          COMPONENT: ${{ matrix.component }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_commit="$(git rev-parse HEAD)"
+          source_date_epoch="$(git show -s --format=%ct HEAD)"
+          file=containers/Containerfile.rust
+          service_args=(--build-arg "SERVICE=$COMPONENT" --target runtime)
+          if [[ "$COMPONENT" == web ]]; then
+            file=containers/Containerfile.web
+            service_args=()
+          elif [[ "$COMPONENT" == ansible-probe-runner ]]; then
+            file=containers/Containerfile.ansible-probe
+            service_args=()
+          elif [[ "$COMPONENT" == oj-cpp17-runner ]]; then
+            file=containers/Containerfile.oj-cpp17
+            service_args=()
+          elif [[ "$COMPONENT" == openssh-gateway ]]; then
+            file=access-gateway/Dockerfile
+            service_args=()
+          elif [[ "$COMPONENT" == agent-service ]]; then
+            claude_code_version="$(awk '$1 == "claude_code:" { print $2 }' deploy/versions.lock.yml)"
+            claude_code_sha512="$(awk '$1 == "claude_code_linux_x64_sha512:" { print $2 }' deploy/versions.lock.yml)"
+            test -n "$claude_code_version" && test -n "$claude_code_sha512"
+            service_args=(
+              --build-arg "SERVICE=$COMPONENT"
+              --build-arg "CLAUDE_CODE_VERSION=$claude_code_version"
+              --build-arg "CLAUDE_CODE_LINUX_X64_SHA512=$claude_code_sha512"
+              --target agent-runtime
+            )
+          fi
+          for pass in first second; do
+            docker buildx build --file "$file" --platform linux/amd64 \
+              --build-arg "SOURCE_COMMIT=$source_commit" \
+              --build-arg "SOURCE_DATE_EPOCH=$source_date_epoch" \
+              "${service_args[@]}" --provenance=false \
+              --output "type=oci,dest=$RUNNER_TEMP/$COMPONENT-$pass.tar,rewrite-timestamp=true,oci-mediatypes=true" .
+          done
+          first="$(sha256sum "$RUNNER_TEMP/$COMPONENT-first.tar" | cut -d' ' -f1)"
+          second="$(sha256sum "$RUNNER_TEMP/$COMPONENT-second.tar" | cut -d' ' -f1)"
+          test "$first" = "$second" || {
+            echo "LW_PACKAGE_BUILD_NOT_REPRODUCIBLE:$COMPONENT" >&2
+            exit 1
+          }
+      - name: Scan runtime image archive
+        env:
+          COMPONENT: ${{ matrix.component }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/$COMPONENT-oci"
+          tar -xf "$RUNNER_TEMP/$COMPONENT-first.tar" -C "$RUNNER_TEMP/$COMPONENT-oci"
+          test -f "$RUNNER_TEMP/$COMPONENT-oci/index.json" || {
+            echo "LW_PACKAGE_OCI_LAYOUT_INVALID:$COMPONENT" >&2
+            exit 1
+          }
+          docker run --rm -v "$RUNNER_TEMP:/evidence" \
+            docker.io/aquasec/trivy:0.72.0@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f \
+            image --input "/evidence/$COMPONENT-oci" --scanners vuln,secret \
+            --severity HIGH,CRITICAL --exit-code 0 --format json \
+            --output "/evidence/$COMPONENT-trivy.json"
+          high="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' "$RUNNER_TEMP/$COMPONENT-trivy.json")"
+          critical="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' "$RUNNER_TEMP/$COMPONENT-trivy.json")"
+          secrets="$(jq '[.Results[]?.Secrets[]?] | length' "$RUNNER_TEMP/$COMPONENT-trivy.json")"
+          if [[ "$COMPONENT" == oj-cpp17-runner && "$high" -ne 0 ]] \
+            || [[ "$critical" -ne 0 ]] || [[ "$secrets" -ne 0 ]]; then
+            echo "LW_PACKAGE_SCAN_BLOCKED:$COMPONENT high=$high critical=$critical secrets=$secrets" >&2
+            exit 1
+          fi
+      - name: Upload OJ runner vulnerability evidence
+        if: ${{ always() && matrix.component == 'oj-cpp17-runner' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: oj-cpp17-runner-trivy
+          path: ${{ runner.temp }}/oj-cpp17-runner-trivy.json
+          if-no-files-found: error
+          retention-days: 14

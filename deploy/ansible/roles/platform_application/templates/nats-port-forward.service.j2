@@ -1,0 +1,22 @@
+[Unit]
+Description=LabWeaver application NATS controller port-forward
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={{ platform_application_kubectl }} --kubeconfig {{ platform_application_kubeconfig }} --namespace {{ platform_application_nats_forward_namespace }} port-forward --address {{ platform_application_nats_forward_address }} service/{{ platform_application_nats_forward_kubernetes_service }} {{ platform_application_nats_forward_port }}:4222
+Restart=on-failure
+RestartSec=2s
+User=root
+Group=root
+RuntimeDirectory=labweaver-nats-forward
+RuntimeDirectoryMode=0700
+Environment=HOME=/run/labweaver-nats-forward
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target

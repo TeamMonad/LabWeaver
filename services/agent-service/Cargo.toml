@@ -1,0 +1,47 @@
+[package]
+name = "agent-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+artifact-store = { path = "../../crates/artifact-store" }
+async-nats = { version = "=0.45.0", default-features = false, features = ["ring", "server_2_10", "server_2_11"] }
+bollard = { workspace = true, features = ["buildkit"] }
+bollard-buildkit-proto = "0.6.1"
+bytes = "1.12.1"
+auth = { path = "../../crates/auth" }
+axum.workspace = true
+base64.workspace = true
+contracts = { path = "../../crates/contracts" }
+futures-util = "0.3.31"
+flate2 = "=1.1.9"
+futures = "0.3.31"
+persistence-sqlx = { path = "../../crates/persistence-sqlx" }
+hyper-util.workspace = true
+regex = "1.12.2"
+reqwest.workspace = true
+serde_yaml.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+telemetry = { path = "../../crates/telemetry" }
+thiserror.workspace = true
+tempfile.workspace = true
+tar = "=0.4.46"
+time.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tonic = { version = "=0.13.1", default-features = false, features = ["transport", "channel", "tls-ring"] }
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+testcontainers = { version = "=0.25.0", features = ["blocking"] }
+testcontainers-modules = { version = "0.13.0", features = ["postgres"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,66 @@
+{
+  "$defs": {
+    "EndpointHealth": {
+      "description": "Endpoint health gates new AccessGrants.",
+      "enum": [
+        "pending",
+        "healthy",
+        "unhealthy",
+        "removed"
+      ],
+      "type": "string"
+    },
+    "EndpointId": {
+      "description": "Strongly typed UUIDv7 identifier for `EndpointId`.",
+      "type": "string"
+    },
+    "EndpointProtocol": {
+      "description": "Supported controlled protocols.",
+      "enum": [
+        "http",
+        "https",
+        "ssh"
+      ],
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Sanitized Environment-owned endpoint metadata.",
+  "properties": {
+    "health": {
+      "$ref": "#/$defs/EndpointHealth"
+    },
+    "id": {
+      "$ref": "#/$defs/EndpointId"
+    },
+    "observedAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "protocol": {
+      "$ref": "#/$defs/EndpointProtocol"
+    },
+    "revision": {
+      "$ref": "#/$defs/Revision"
+    }
+  },
+  "required": [
+    "id",
+    "protocol",
+    "revision",
+    "health",
+    "observedAt"
+  ],
+  "title": "EnvironmentEndpoint",
+  "type": "object"
+}

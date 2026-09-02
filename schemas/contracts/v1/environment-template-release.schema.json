@@ -1,0 +1,253 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "AgentRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `AgentRunId`.",
+      "type": "string"
+    },
+    "ApprovalId": {
+      "description": "Strongly typed UUIDv7 identifier for `ApprovalId`.",
+      "type": "string"
+    },
+    "BuildRequestId": {
+      "description": "Strongly typed UUIDv7 identifier for `BuildRequestId`.",
+      "type": "string"
+    },
+    "CandidateApproval": {
+      "additionalProperties": false,
+      "description": "Human decision bound to an exact candidate and dependency identity.",
+      "properties": {
+        "actorId": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
+        },
+        "candidateRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "decidedAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "decision": {
+          "$ref": "#/$defs/CandidateDecision"
+        },
+        "id": {
+          "$ref": "#/$defs/ApprovalId"
+        },
+        "policyRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "trustRevision": {
+          "$ref": "#/$defs/Revision"
+        }
+      },
+      "required": [
+        "id",
+        "candidateId",
+        "candidateRevision",
+        "policyRevision",
+        "trustRevision",
+        "actorId",
+        "decision",
+        "reason",
+        "decidedAt"
+      ],
+      "type": "object"
+    },
+    "CandidateDecision": {
+      "description": "Append-only candidate decision.",
+      "enum": [
+        "approved",
+        "rejected",
+        "withdrawn"
+      ],
+      "type": "string"
+    },
+    "CandidateId": {
+      "description": "Strongly typed UUIDv7 identifier for `CandidateId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "ImageArtifact": {
+      "description": "Complete immutable runtime artifact identity.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "build_request_id": {
+              "$ref": "#/$defs/BuildRequestId"
+            },
+            "digest": {
+              "type": "string"
+            },
+            "id": {
+              "$ref": "#/$defs/ImageArtifactId"
+            },
+            "kind": {
+              "const": "container",
+              "type": "string"
+            },
+            "repository": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "build_request_id",
+            "repository",
+            "digest"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "base_disk": {
+              "$ref": "#/$defs/VirtualMachineBaseDisk"
+            },
+            "format": {
+              "$ref": "#/$defs/VirtualMachineDiskFormat"
+            },
+            "id": {
+              "$ref": "#/$defs/ImageArtifactId"
+            },
+            "kind": {
+              "const": "virtual_machine",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "base_disk",
+            "format"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ImageArtifactId": {
+      "description": "Strongly typed UUIDv7 identifier for `ImageArtifactId`.",
+      "type": "string"
+    },
+    "ReleaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `ReleaseId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "RuntimeKind": {
+      "description": "Runtime kind shared by candidates, releases, and instances.",
+      "enum": [
+        "container",
+        "virtual_machine"
+      ],
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    },
+    "VirtualMachineBaseDisk": {
+      "additionalProperties": false,
+      "description": "Deployment-owned immutable KubeVirt base-disk identity.\n\nUnlike an object-store `ArtifactRef`, this identifies a CDI source image and its imported\ndisk content. `capacity_bytes` is the reviewed PVC capacity, not a fabricated object length.",
+      "properties": {
+        "binding": {
+          "type": "string"
+        },
+        "capacityBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sourceRegistryDigest": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "binding",
+        "sourceRegistryDigest",
+        "capacityBytes"
+      ],
+      "type": "object"
+    },
+    "VirtualMachineDiskFormat": {
+      "description": "Supported VM base-disk encodings.",
+      "enum": [
+        "qcow2",
+        "raw"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Immutable environment-first release.",
+  "properties": {
+    "agentRunId": {
+      "$ref": "#/$defs/AgentRunId"
+    },
+    "approval": {
+      "$ref": "#/$defs/CandidateApproval"
+    },
+    "artifact": {
+      "$ref": "#/$defs/ImageArtifact"
+    },
+    "candidateId": {
+      "$ref": "#/$defs/CandidateId"
+    },
+    "candidateRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    },
+    "id": {
+      "$ref": "#/$defs/ReleaseId"
+    },
+    "publishedAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "publishedBy": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "runtimeKind": {
+      "$ref": "#/$defs/RuntimeKind"
+    },
+    "version": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "id",
+    "courseId",
+    "version",
+    "candidateId",
+    "agentRunId",
+    "candidateRevision",
+    "runtimeKind",
+    "approval",
+    "artifact",
+    "publishedBy",
+    "publishedAt"
+  ],
+  "title": "EnvironmentTemplateRelease",
+  "type": "object"
+}

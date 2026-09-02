@@ -1,0 +1,63 @@
+# Non-secret Agent authority and durable worker configuration for Issue #48.
+database_url_file: "/etc/labweaver/secrets/database-url"
+database_max_connections: 20
+control_mtls:
+  bind_addr: "0.0.0.0:9445"
+  server_certificate_file: "/etc/labweaver/secrets/tls.crt"
+  server_key_file: "/etc/labweaver/secrets/tls.key"
+  client_ca_file: "/etc/labweaver/secrets/mtls-ca.pem"
+  allowed_san_uris: ["spiffe://labweaver/control-service"]
+  required_eku: "clientAuth"
+object_store:
+  binding: "problem-package-minio-v1"
+  endpoint: "https://minio.labweaver-data.svc:9000/"
+  bucket: "labweaver-artifacts"
+  region: "labweaver-internal-1"
+  objectPrefix: "problem-packages"
+  uploadTtlSeconds: 900
+  maxObjectBytes: 67108864
+  forcePathStyle: true
+object_store_access_key_file: "/etc/labweaver/secrets/minio-access-key"
+object_store_secret_key_file: "/etc/labweaver/secrets/minio-secret-key"
+object_store_session_token_file: null
+classifier_binding: "labweaver-dlp-v1"
+classifier_revision: 1
+worker_id: "agent-worker-01"
+dispatch_lease_seconds: 120
+track_lease_seconds: 120
+poll_interval_milliseconds: 500
+# The Anthropic-compatible endpoint binding uses only the three generic provider fields:
+# ANTHROPIC_BASE_URL and ANTHROPIC_MODEL are reviewed ConfigMap values, and
+# ANTHROPIC_AUTH_TOKEN is a Secret value. All three are read from mounted files and passed
+# into an env-cleared Claude Code process; none is inherited from the service environment.
+# Operator-specific variable names are not read, and there is no alias, ambient credential,
+# or alternate provider route.
+worker_environment_files:
+  ANTHROPIC_BASE_URL: "/etc/labweaver/config/anthropic-base-url"
+  ANTHROPIC_AUTH_TOKEN: "/etc/labweaver/secrets/anthropic-auth-token"
+  ANTHROPIC_MODEL: "/etc/labweaver/config/anthropic-model"
+build:
+  # Served by the deployment-owned executor binding immutable ArtifactRef inputs
+  # to restricted BuildKit and private Harbor (Trivy thinned for private deployment).
+  provider_subject: "labweaver.provider.container_build.execute.v1"
+  builder_binding: "buildkit-primary-v1"
+  registry_binding: "harbor-primary-v1"
+  policy_id: "00000000-0000-7000-8000-000000000002"
+  policy_revision: 1
+  registry_robot_name: "runtime-puller"
+  stage_timeout_milliseconds: 120000
+  worker_lease_seconds: 180
+  retry_delay_milliseconds: 2000
+  max_attempts: 3
+nats:
+  server: "tls://nats.labweaver-data.svc:4222"
+  ca_file: "/etc/labweaver/secrets/nats-ca.pem"
+  client_certificate_file: "/etc/labweaver/secrets/nats-client.crt"
+  client_private_key_file: "/etc/labweaver/secrets/nats-client.key"
+  credentials_file: "/etc/labweaver/secrets/nats.creds"
+  # Deployment-owned durable consumer filter: labweaver.control.agent_build.requested.v1
+  build_command_stream_name: "LABWEAVER_CONTROL_COMMANDS"
+  build_command_consumer_name: "agent-build-command-v1"
+  build_command_quarantine_subject: "labweaver.agent.quarantine.build_command.v1"
+  publish_timeout_milliseconds: 5000
+  outbox_poll_milliseconds: 250

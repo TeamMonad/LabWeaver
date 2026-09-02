@@ -1,0 +1,40 @@
+{
+  "$defs": {
+    "EvaluationRuntimeIdentity": {
+      "additionalProperties": false,
+      "description": "Immutable build and deployment identity that must match every run using the release.",
+      "properties": {
+        "providerBinding": {
+          "description": "Explicit runtime provider binding chosen by Control and enforced by Evaluation.",
+          "type": "string"
+        },
+        "runnerImage": {
+          "description": "Digest-pinned runner image reference.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "providerBinding",
+        "runnerImage"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Immutable run identity joining release, frozen submission and trace evidence.",
+  "properties": {
+    "runtimeIdentity": {
+      "$ref": "#/$defs/EvaluationRuntimeIdentity"
+    },
+    "traceId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "runtimeIdentity",
+    "traceId"
+  ],
+  "title": "EvaluationRunIdentity",
+  "type": "object"
+}

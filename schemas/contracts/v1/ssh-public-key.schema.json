@@ -1,0 +1,72 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "SshKeyAlgorithm": {
+      "description": "Public-key algorithm frozen by the v1 Access contract.",
+      "enum": [
+        "ed25519",
+        "security_key_ed25519",
+        "rsa_sha2"
+      ],
+      "type": "string"
+    },
+    "SshPublicKeyId": {
+      "description": "Strongly typed UUIDv7 identifier for `SshPublicKeyId`.",
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Sanitized key metadata returned by public APIs.",
+  "properties": {
+    "actorId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "algorithm": {
+      "$ref": "#/$defs/SshKeyAlgorithm"
+    },
+    "createdAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "fingerprintSha256": {
+      "type": "string"
+    },
+    "id": {
+      "$ref": "#/$defs/SshPublicKeyId"
+    },
+    "revision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "rsaBits": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "id",
+    "actorId",
+    "fingerprintSha256",
+    "algorithm",
+    "revision",
+    "createdAt"
+  ],
+  "title": "SshPublicKey",
+  "type": "object"
+}

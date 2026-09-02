@@ -1,0 +1,26 @@
+{
+  "apiVersion": "deploy.labweaver.io/platform-access-seed/v1",
+  "courseMemberships": [
+    {
+      "actorId": "00000000-0000-7000-8000-000000000201",
+      "issuer": "https://keycloak.example.invalid/realms/workloads",
+      "subjectSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "courseId": "019fbc00-0000-7000-8000-000000000301",
+      "role": "teacher"
+    },
+    {
+      "actorId": "00000000-0000-7000-8000-000000000202",
+      "issuer": "https://keycloak.example.invalid/realms/workloads",
+      "subjectSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "courseId": "019fbc00-0000-7000-8000-000000000301",
+      "role": "student"
+    },
+    {
+      "actorId": "00000000-0000-7000-8000-000000000203",
+      "issuer": "https://keycloak.example.invalid/realms/workloads",
+      "subjectSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "courseId": "019fbc00-0000-7000-8000-000000000301",
+      "role": "platform_admin"
+    }
+  ]
+}

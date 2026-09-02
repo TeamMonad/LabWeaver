@@ -1,0 +1,373 @@
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use thiserror::Error;
+
+use super::spec::{AggregationKind, EvaluationSpec, SubmissionSpec};
+
+/// Stable fail-fast diagnostics for `EvaluationSpec` documents.
+#[derive(Debug, Error, PartialEq)]
+pub enum EvaluationSpecError {
+    /// YAML syntax, type, enum, or unknown-field validation failed.
+    #[error("EvaluationSpec document is invalid: {0}")]
+    InvalidDocument(String),
+    /// Required metadata was empty.
+    #[error("EvaluationSpec metadata name and version are required")]
+    InvalidMetadata,
+    /// No evaluation steps were declared.
+    #[error("EvaluationSpec must contain at least one step")]
+    EmptySteps,
+    /// A step identifier occurred more than once.
+    #[error("duplicate EvaluationSpec step id: {step_id}")]
+    DuplicateStepId {
+        /// Duplicated identifier.
+        step_id: String,
+    },
+    /// A dependency did not name an existing step.
+    #[error("step {step_id} depends on missing step {dependency}")]
+    MissingDependency {
+        /// Dependent step.
+        step_id: String,
+        /// Missing dependency.
+        dependency: String,
+    },
+    /// The step dependency graph contained a cycle.
+    #[error("EvaluationSpec step graph contains a dependency cycle")]
+    DependencyCycle,
+    /// A path escaped the immutable submission root.
+    #[error("unsafe relative path in {location}: {path}")]
+    UnsafePath {
+        /// Field or step containing the path.
+        location: String,
+        /// Rejected path.
+        path: String,
+    },
+    /// Collector limits or inputs were empty.
+    #[error("invalid collector configuration: {0}")]
+    InvalidCollector(String),
+    /// An LLM-readable path was not frozen by the configured Collector.
+    #[error("LLM-readable path is not part of the frozen submission: {path}")]
+    LlmReadableNotCollected {
+        /// Path that was not frozen.
+        path: String,
+    },
+    /// An advisory step requested a path outside the submission LLM allowlist.
+    #[error("step {step_id} requested a path outside submission.llmReadable: {path}")]
+    LlmIncludeNotAllowed {
+        /// Advisory step containing the request.
+        step_id: String,
+        /// Path that was not allowlisted.
+        path: String,
+    },
+    /// Runner configuration was inconsistent with its declared kind or phase.
+    #[error("invalid configuration for step {step_id}: {detail}")]
+    InvalidStepConfiguration {
+        /// Step containing the error.
+        step_id: String,
+        /// Safe diagnostic detail.
+        detail: String,
+    },
+    /// Deterministic score totals did not match the aggregator declaration.
+    #[error(
+        "deterministic score total {step_total} does not match aggregation max {aggregate_max}"
+    )]
+    AggregationScoreMismatch {
+        /// Sum of deterministic score steps.
+        step_total: u32,
+        /// Declared aggregation maximum.
+        aggregate_max: u32,
+    },
+    /// Summing deterministic score maxima exceeded the contract's integer range.
+    #[error("deterministic score total overflows u32 at step {step_id}")]
+    AggregationScoreOverflow {
+        /// Step whose score caused the overflow.
+        step_id: String,
+    },
+    /// An aggregation gate did not reference a Gate step.
+    #[error("aggregation gate references non-gate or missing step: {step_id}")]
+    InvalidAggregationGate {
+        /// Invalid gate reference.
+        step_id: String,
+    },
+    /// The release policy attempted to bypass mandatory teacher approval.
+    #[error("teacher approval is required before releasing an EvaluationSpec")]
+    TeacherApprovalRequired,
+}
+
+impl EvaluationSpecError {
+    /// Returns the stable diagnostic code for this failure.
+    #[must_use]
+    pub const fn diagnostic_code(&self) -> &'static str {
+        match self {
+            Self::InvalidDocument(_) => "LW_EVAL_SPEC_DOCUMENT_INVALID",
+            Self::InvalidMetadata => "LW_EVAL_METADATA_INVALID",
+            Self::EmptySteps => "LW_EVAL_STEPS_EMPTY",
+            Self::DuplicateStepId { .. } => "LW_EVAL_STEP_DUPLICATE",
+            Self::MissingDependency { .. } => "LW_EVAL_DEPENDENCY_MISSING",
+            Self::DependencyCycle => "LW_EVAL_DAG_CYCLE",
+            Self::UnsafePath { .. } => "LW_EVAL_SUBMISSION_PATH_UNSAFE",
+            Self::InvalidCollector(_) => "LW_EVAL_COLLECTOR_INVALID",
+            Self::LlmReadableNotCollected { .. } => "LW_EVAL_LLM_READABLE_NOT_COLLECTED",
+            Self::LlmIncludeNotAllowed { .. } => "LW_EVAL_LLM_INCLUDE_NOT_ALLOWED",
+            Self::InvalidStepConfiguration { .. } => "LW_EVAL_STEP_CONFIG_INVALID",
+            Self::AggregationScoreMismatch { .. } => "LW_EVAL_AGGREGATION_SCORE_MISMATCH",
+            Self::AggregationScoreOverflow { .. } => "LW_EVAL_AGGREGATION_SCORE_OVERFLOW",
+            Self::InvalidAggregationGate { .. } => "LW_EVAL_AGGREGATION_GATE_INVALID",
+            Self::TeacherApprovalRequired => "LW_EVAL_TEACHER_APPROVAL_REQUIRED",
+        }
+    }
+}
+
+pub(crate) fn validate_spec(spec: &EvaluationSpec) -> Result<(), EvaluationSpecError> {
+    let metadata = spec.metadata();
+    if metadata.name.trim().is_empty() || metadata.version.trim().is_empty() {
+        return Err(EvaluationSpecError::InvalidMetadata);
+    }
+
+    let body = spec.body();
+    if body.steps.is_empty() {
+        return Err(EvaluationSpecError::EmptySteps);
+    }
+    if !body.review.teacher_approval_required_for_release() {
+        return Err(EvaluationSpecError::TeacherApprovalRequired);
+    }
+    let llm_readable = validate_submission(&body.submission)?;
+
+    let mut steps = BTreeMap::new();
+    for step in &body.steps {
+        if step.id().trim().is_empty() {
+            return Err(EvaluationSpecError::InvalidStepConfiguration {
+                step_id: step.id().to_owned(),
+                detail: "step id must not be empty".to_owned(),
+            });
+        }
+        if steps.insert(step.id(), step).is_some() {
+            return Err(EvaluationSpecError::DuplicateStepId {
+                step_id: step.id().to_owned(),
+            });
+        }
+        if let Some(runner) = step.deterministic_runner() {
+            runner.validate(step.id())?;
+            validate_paths(step.id(), &runner.submission_paths())?;
+            let Some(checker) = step.deterministic_checker() else {
+                return Err(EvaluationSpecError::InvalidStepConfiguration {
+                    step_id: step.id().to_owned(),
+                    detail: "deterministic step requires a checker".to_owned(),
+                });
+            };
+            checker.validate_for(runner, step.id())?;
+        }
+        if step.score() == Some(0) {
+            return Err(EvaluationSpecError::InvalidStepConfiguration {
+                step_id: step.id().to_owned(),
+                detail: "score step max must be non-zero".to_owned(),
+            });
+        }
+        if let Some(runner) = step.advisory_runner() {
+            let paths = runner.included_paths();
+            if paths.is_empty() {
+                return Err(EvaluationSpecError::InvalidStepConfiguration {
+                    step_id: step.id().to_owned(),
+                    detail: "llm_review include must not be empty".to_owned(),
+                });
+            }
+            validate_paths(step.id(), paths)?;
+            if let Some(path) = paths
+                .iter()
+                .find(|path| !llm_readable.contains(path.as_str()))
+            {
+                return Err(EvaluationSpecError::LlmIncludeNotAllowed {
+                    step_id: step.id().to_owned(),
+                    path: path.clone(),
+                });
+            }
+        }
+    }
+
+    validate_dependencies(&body.steps, &steps)?;
+    validate_aggregation(spec, &steps)
+}
+
+fn validate_submission(submission: &SubmissionSpec) -> Result<BTreeSet<&str>, EvaluationSpecError> {
+    if submission.collector.max_bytes() == 0 {
+        return Err(EvaluationSpecError::InvalidCollector(
+            "maxBytes must be non-zero".to_owned(),
+        ));
+    }
+    if !submission.collector.has_inputs() {
+        return Err(EvaluationSpecError::InvalidCollector(
+            "collector input list must not be empty".to_owned(),
+        ));
+    }
+    if let Some(paths) = submission.collector.included_paths() {
+        validate_paths("submission.collector.include", paths)?;
+    }
+    if let Some(paths) = submission.collector.excluded_paths() {
+        validate_paths("submission.collector.exclude", paths)?;
+    }
+    validate_paths("submission.llmReadable", &submission.llm_readable)?;
+    let llm_readable = submission
+        .llm_readable
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if llm_readable.len() != submission.llm_readable.len() {
+        return Err(EvaluationSpecError::InvalidCollector(
+            "submission.llmReadable must not contain duplicate paths".to_owned(),
+        ));
+    }
+    match submission.collector.included_paths() {
+        Some(collected) => {
+            let collected = collected
+                .iter()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
+            let excluded = submission
+                .collector
+                .excluded_paths()
+                .unwrap_or_default()
+                .iter()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
+            if let Some(path) = llm_readable.iter().find(|path| {
+                !collected.contains(**path)
+                    || excluded
+                        .iter()
+                        .any(|excluded| path_is_excluded(path, excluded))
+            }) {
+                return Err(EvaluationSpecError::LlmReadableNotCollected {
+                    path: (*path).to_owned(),
+                });
+            }
+        }
+        None => {
+            if let Some(path) = llm_readable.first() {
+                return Err(EvaluationSpecError::LlmReadableNotCollected {
+                    path: (*path).to_owned(),
+                });
+            }
+        }
+    }
+    Ok(llm_readable)
+}
+
+fn path_is_excluded(path: &str, excluded: &str) -> bool {
+    path == excluded
+        || path
+            .strip_prefix(excluded)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn validate_paths<T: AsRef<str>>(location: &str, paths: &[T]) -> Result<(), EvaluationSpecError> {
+    for value in paths {
+        let value = value.as_ref();
+        if !is_normalized_safe_relative_path(value) {
+            return Err(EvaluationSpecError::UnsafePath {
+                location: location.to_owned(),
+                path: value.to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn is_normalized_safe_relative_path(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value == value.trim()
+        && !value.starts_with('/')
+        && !value.contains('\\')
+        && !value
+            .chars()
+            .any(|character| matches!(character, '*' | '?' | '[' | ']' | '{' | '}'))
+        && value
+            .split('/')
+            .all(|component| !component.is_empty() && component != "." && component != "..")
+}
+
+fn validate_dependencies<'a>(
+    ordered_steps: &'a [super::spec::EvaluationStep],
+    steps: &BTreeMap<&'a str, &'a super::spec::EvaluationStep>,
+) -> Result<(), EvaluationSpecError> {
+    let mut incoming = BTreeMap::new();
+    let mut outgoing: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for step in ordered_steps {
+        incoming.insert(step.id(), step.dependencies().len());
+        let mut unique = BTreeSet::new();
+        for dependency in step.dependencies() {
+            if !steps.contains_key(dependency.as_str()) {
+                return Err(EvaluationSpecError::MissingDependency {
+                    step_id: step.id().to_owned(),
+                    dependency: dependency.clone(),
+                });
+            }
+            if !unique.insert(dependency.as_str()) {
+                return Err(EvaluationSpecError::InvalidStepConfiguration {
+                    step_id: step.id().to_owned(),
+                    detail: format!("duplicate dependency: {dependency}"),
+                });
+            }
+            outgoing
+                .entry(dependency.as_str())
+                .or_default()
+                .push(step.id());
+        }
+    }
+
+    let mut ready = incoming
+        .iter()
+        .filter_map(|(id, count)| (*count == 0).then_some(*id))
+        .collect::<VecDeque<_>>();
+    let mut visited = 0;
+    while let Some(id) = ready.pop_front() {
+        visited += 1;
+        if let Some(dependents) = outgoing.get(id) {
+            for dependent in dependents {
+                if let Some(count) = incoming.get_mut(dependent) {
+                    *count -= 1;
+                    if *count == 0 {
+                        ready.push_back(dependent);
+                    }
+                }
+            }
+        }
+    }
+    if visited != ordered_steps.len() {
+        return Err(EvaluationSpecError::DependencyCycle);
+    }
+    Ok(())
+}
+
+fn validate_aggregation(
+    spec: &EvaluationSpec,
+    steps: &BTreeMap<&str, &super::spec::EvaluationStep>,
+) -> Result<(), EvaluationSpecError> {
+    let aggregation = &spec.body().aggregation;
+    match aggregation.kind {
+        AggregationKind::DeterministicSum => {}
+    }
+    let score_total = spec.body().steps.iter().try_fold(0_u32, |total, step| {
+        let Some(score) = step.score() else {
+            return Ok(total);
+        };
+        total
+            .checked_add(score)
+            .ok_or_else(|| EvaluationSpecError::AggregationScoreOverflow {
+                step_id: step.id().to_owned(),
+            })
+    })?;
+    if score_total != aggregation.max_score {
+        return Err(EvaluationSpecError::AggregationScoreMismatch {
+            step_total: score_total,
+            aggregate_max: aggregation.max_score,
+        });
+    }
+    for gate in &aggregation.gates {
+        if !steps
+            .get(gate.step.as_str())
+            .is_some_and(|step| step.is_gate())
+        {
+            return Err(EvaluationSpecError::InvalidAggregationGate {
+                step_id: gate.step.clone(),
+            });
+        }
+    }
+    Ok(())
+}

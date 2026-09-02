@@ -1,0 +1,50 @@
+catalogVersion: 1
+toolVersion: 0.1.0
+bootstrap:
+  id: 1
+  file: bootstrap/0001_roles_and_schemas.sql
+domains:
+  - name: control
+    migrations:
+      - id: 1
+        file: control/0001_platform_baseline.sql
+  - name: access
+    migrations:
+      - id: 1
+        file: access/0001_platform_baseline.sql
+      - id: 2
+        file: access/0002_console_capabilities_and_sessions.sql
+  - name: environment
+    migrations:
+      - id: 1
+        file: environment/0001_platform_baseline.sql
+  - name: agent
+    migrations:
+      - id: 1
+        file: agent/0001_platform_baseline.sql
+      - id: 2
+        file: agent/0002_allow_content_addressed_image_reuse.sql
+      - id: 3
+        file: agent/0003_work_agent_run_class.sql
+  - name: evaluation
+    migrations:
+      - id: 1
+        file: evaluation/0001_platform_baseline.sql
+      - id: 2
+        file: evaluation/0002_evaluation_control_plane.sql
+      - id: 3
+        file: evaluation/0003_release_withdrawal_and_student_results.sql
+  - name: resource
+    migrations:
+      - id: 1
+        file: resource/0001_platform_baseline.sql
+      - id: 2
+        file: resource/0002_resource_request_capacity_lease.sql
+      - id: 3
+        file: resource/0003_resource_contract_snapshots.sql
+      - id: 4
+        file: resource/0004_resource_claim_quota_resources.sql
+      - id: 5
+        file: resource/0005_resource_lease_pending_terminal_states.sql
+      - id: 6
+        file: resource/0006_resource_lease_reconciliation.sql

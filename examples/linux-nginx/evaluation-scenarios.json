@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "linux-nginx-material-scenarios/v1alpha1",
+  "status": "candidate",
+  "normal": {
+    "requiredFacts": [
+      "host.reachable=true",
+      "package.nginx.installed=true",
+      "service.nginx.active=true",
+      "network.tcp.80.listening=true",
+      "http.root.status=200",
+      "html.title=Nginx Lab",
+      "html.h1=Nginx Lab",
+      "html.data-lab-id=linux-nginx-v1"
+    ]
+  },
+  "negative": [
+    {
+      "id": "nginx-not-listening",
+      "condition": "nginx service stopped or TCP port 80 absent",
+      "diagnostic": "LW_LINUX_LAB_NGINX_NOT_LISTENING"
+    },
+    {
+      "id": "site-mismatch",
+      "condition": "default-site root or required HTML marker differs",
+      "diagnostic": "LW_LINUX_LAB_SITE_MISMATCH"
+    }
+  ]
+}

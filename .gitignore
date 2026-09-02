@@ -1,0 +1,66 @@
+# Rust
+/target/
+
+# Local private directories
+.tmp/
+.private/
+artifacts/
+.kimi/
+
+# Environment files
+.env
+.auth/
+.env.*
+.env.local
+.env.*.local
+!.env.example
+
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+*.tsbuildinfo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Role memo (local private, not committed)
+ROLE.md
+
+# Generated screenshots (keep script, ignore outputs)
+web/screenshots/*.png
+
+# Playwright authentication state and generated E1/E2E evidence
+web/.auth/
+web/test-results/
+web/playwright-report/
+web/artifacts/playwright/
+
+# Local reference files (not part of project source)
+老师给的作业要求.pptx
+LabWeaver_生产级技术实现方案_v2.1(1).md
+LabWeaver_项目计划与课程落地方案_v2.1(1).md
+LabWeaver_GitHub驱动Scrum与Codex四人每日工作计划(1).md
+
+# Private Ansible deployment inputs and generated controller state
+deploy/ansible/collections/
+deploy/ansible/inventories/*/hosts.yml
+deploy/ansible/inventories/*/group_vars/all/*
+deploy/ansible/inventories/*/.vault-password
+*.retry
+__pycache__/
+.cache/

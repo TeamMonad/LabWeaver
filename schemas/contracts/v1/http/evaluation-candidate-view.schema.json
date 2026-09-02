@@ -1,0 +1,930 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "AdvisoryFailurePolicy": {
+      "description": "Failure behavior for an Advisory step.",
+      "oneOf": [
+        {
+          "const": "continue_advisory",
+          "description": "Preserve the advisory failure without changing deterministic results.",
+          "type": "string"
+        }
+      ]
+    },
+    "AdvisoryOutputMode": {
+      "description": "Supported non-scoring advisory output mode.",
+      "oneOf": [
+        {
+          "const": "goal_assessment",
+          "description": "Emit a `goal-review/v1` assessment.",
+          "type": "string"
+        }
+      ]
+    },
+    "AdvisoryRunnerSpec": {
+      "description": "Advisory Runner configurations, structurally separated from scoring.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Reviews allowlisted submission paths without producing a score.",
+          "properties": {
+            "include": {
+              "description": "Submission-relative paths visible to the LLM.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "const": "llm_review",
+              "type": "string"
+            },
+            "outputMode": {
+              "$ref": "#/$defs/AdvisoryOutputMode",
+              "description": "Versioned advisory output shape."
+            },
+            "rubric": {
+              "description": "Immutable advisory rubric locator.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "include",
+            "rubric",
+            "outputMode"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "AgentRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `AgentRunId`.",
+      "type": "string"
+    },
+    "AggregationGate": {
+      "additionalProperties": false,
+      "description": "Required Gate status used by deterministic aggregation.",
+      "properties": {
+        "requiredStatus": {
+          "$ref": "#/$defs/RequiredStatus"
+        },
+        "step": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "step",
+        "requiredStatus"
+      ],
+      "type": "object"
+    },
+    "AggregationKind": {
+      "description": "Supported deterministic aggregation algorithm.",
+      "oneOf": [
+        {
+          "const": "deterministic_sum",
+          "description": "Checked sum of deterministic Score steps.",
+          "type": "string"
+        }
+      ]
+    },
+    "AggregationSpec": {
+      "additionalProperties": false,
+      "description": "Pure deterministic score aggregation contract.",
+      "properties": {
+        "gates": {
+          "items": {
+            "$ref": "#/$defs/AggregationGate"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "$ref": "#/$defs/AggregationKind"
+        },
+        "maxScore": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "maxScore",
+        "gates"
+      ],
+      "type": "object"
+    },
+    "ApprovalId": {
+      "description": "Strongly typed UUIDv7 identifier for `ApprovalId`.",
+      "type": "string"
+    },
+    "CandidateApproval": {
+      "additionalProperties": false,
+      "description": "Human decision bound to an exact candidate and dependency identity.",
+      "properties": {
+        "actorId": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
+        },
+        "candidateRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "decidedAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "decision": {
+          "$ref": "#/$defs/CandidateDecision"
+        },
+        "id": {
+          "$ref": "#/$defs/ApprovalId"
+        },
+        "policyRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "trustRevision": {
+          "$ref": "#/$defs/Revision"
+        }
+      },
+      "required": [
+        "id",
+        "candidateId",
+        "candidateRevision",
+        "policyRevision",
+        "trustRevision",
+        "actorId",
+        "decision",
+        "reason",
+        "decidedAt"
+      ],
+      "type": "object"
+    },
+    "CandidateDecision": {
+      "description": "Append-only candidate decision.",
+      "enum": [
+        "approved",
+        "rejected",
+        "withdrawn"
+      ],
+      "type": "string"
+    },
+    "CandidateId": {
+      "description": "Strongly typed UUIDv7 identifier for `CandidateId`.",
+      "type": "string"
+    },
+    "CheckerSpec": {
+      "description": "Deterministic Checker configurations frozen for v1.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Exact byte-oriented comparison.",
+          "properties": {
+            "kind": {
+              "const": "exact",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Whitespace-insensitive token comparison.",
+          "properties": {
+            "kind": {
+              "const": "token",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Process exit-code comparison.",
+          "properties": {
+            "expected": {
+              "description": "Required exit code.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "kind": {
+              "const": "exit_code",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "expected"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "JSON Schema document validation.",
+          "properties": {
+            "kind": {
+              "const": "json_schema",
+              "type": "string"
+            },
+            "schemaRef": {
+              "description": "Immutable schema locator.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "schemaRef"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "System service state comparison.",
+          "properties": {
+            "expected": {
+              "$ref": "#/$defs/ExpectedServiceState",
+              "description": "Required service state."
+            },
+            "kind": {
+              "const": "service_state",
+              "type": "string"
+            },
+            "service": {
+              "description": "Stable service name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "service",
+            "expected"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "CollectorSpec": {
+      "description": "Supported P0 submission collectors.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Collects an allowlisted workspace snapshot.",
+          "properties": {
+            "exclude": {
+              "default": [],
+              "description": "Excluded submission-relative paths.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "include": {
+              "description": "Included submission-relative paths.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "const": "workspace_snapshot",
+              "type": "string"
+            },
+            "maxBytes": {
+              "description": "Maximum collected bytes.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "include",
+            "maxBytes"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Collects bounded system facts for a Linux experiment.",
+          "properties": {
+            "facts": {
+              "description": "Named facts to collect.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "const": "system_facts",
+              "type": "string"
+            },
+            "maxBytes": {
+              "description": "Maximum collected bytes.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "facts",
+            "maxBytes"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DeterministicRunnerSpec": {
+      "description": "Deterministic Runner configurations frozen for P0 OJ and Linux evaluation.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Verifies that allowlisted submission files exist.",
+          "properties": {
+            "kind": {
+              "const": "file_assertion",
+              "type": "string"
+            },
+            "requiredFiles": {
+              "description": "Required submission-relative files.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "requiredFiles"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Compiles or tests a program through an approved toolchain profile.",
+          "properties": {
+            "input": {
+              "description": "Submission-relative program input.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "program",
+              "type": "string"
+            },
+            "limits": {
+              "$ref": "#/$defs/ExecutionLimits",
+              "description": "Mandatory execution limits."
+            },
+            "phase": {
+              "$ref": "#/$defs/ProgramPhase",
+              "description": "Compile or test phase."
+            },
+            "testGroups": {
+              "default": [],
+              "description": "Deterministic test groups used by the test phase.",
+              "items": {
+                "$ref": "#/$defs/TestGroup"
+              },
+              "type": "array"
+            },
+            "toolchainProfile": {
+              "description": "Explicit approved toolchain binding.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "toolchainProfile",
+            "phase",
+            "input",
+            "limits"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Executes a read-only approved Ansible probe profile.",
+          "properties": {
+            "assertions": {
+              "description": "Facts expected from the probe.",
+              "items": {
+                "$ref": "#/$defs/FactAssertion"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "const": "ansible_probe",
+              "type": "string"
+            },
+            "moduleAllowlist": {
+              "description": "Modules requested from the frozen P0 allowlist.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "playbookProfile": {
+              "description": "Explicit approved playbook binding.",
+              "type": "string"
+            },
+            "readOnly": {
+              "description": "Must remain true in v1.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "playbookProfile",
+            "moduleAllowlist",
+            "readOnly",
+            "assertions"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "EvaluationApiVersion": {
+      "enum": [
+        "evaluation.labweaver.io/v1"
+      ],
+      "type": "string"
+    },
+    "EvaluationBody": {
+      "additionalProperties": false,
+      "description": "Submission, step, aggregation, and review decomposition of an evaluation.",
+      "properties": {
+        "aggregation": {
+          "$ref": "#/$defs/AggregationSpec"
+        },
+        "review": {
+          "$ref": "#/$defs/ReviewPolicy"
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/EvaluationStep"
+          },
+          "type": "array"
+        },
+        "submission": {
+          "$ref": "#/$defs/SubmissionSpec"
+        }
+      },
+      "required": [
+        "submission",
+        "steps",
+        "aggregation",
+        "review"
+      ],
+      "type": "object"
+    },
+    "EvaluationCandidate": {
+      "additionalProperties": false,
+      "description": "Immutable validated Evaluation candidate.",
+      "properties": {
+        "createdAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "id": {
+          "$ref": "#/$defs/CandidateId"
+        },
+        "model": {
+          "type": "string"
+        },
+        "policyRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "runId": {
+          "$ref": "#/$defs/AgentRunId"
+        },
+        "spec": {
+          "$ref": "#/$defs/EvaluationSpec"
+        }
+      },
+      "required": [
+        "id",
+        "runId",
+        "revision",
+        "spec",
+        "policyRevision",
+        "model",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "EvaluationKind": {
+      "enum": [
+        "EvaluationSpec"
+      ],
+      "type": "string"
+    },
+    "EvaluationMetadata": {
+      "additionalProperties": false,
+      "description": "Stable name and version of an evaluation definition.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "type": "object"
+    },
+    "EvaluationSpec": {
+      "additionalProperties": false,
+      "description": "Versioned evaluation definition shared by OJ and Linux system experiments.",
+      "properties": {
+        "apiVersion": {
+          "$ref": "#/$defs/EvaluationApiVersion"
+        },
+        "kind": {
+          "$ref": "#/$defs/EvaluationKind"
+        },
+        "metadata": {
+          "$ref": "#/$defs/EvaluationMetadata"
+        },
+        "spec": {
+          "$ref": "#/$defs/EvaluationBody"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "metadata",
+        "spec"
+      ],
+      "type": "object"
+    },
+    "EvaluationStep": {
+      "description": "A role-specific evaluation step.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A deterministic prerequisite that can stop downstream execution.",
+          "properties": {
+            "checker": {
+              "$ref": "#/$defs/CheckerSpec"
+            },
+            "dependsOn": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "failurePolicy": {
+              "$ref": "#/$defs/GateFailurePolicy"
+            },
+            "id": {
+              "type": "string"
+            },
+            "role": {
+              "const": "gate",
+              "type": "string"
+            },
+            "runner": {
+              "$ref": "#/$defs/DeterministicRunnerSpec"
+            }
+          },
+          "required": [
+            "role",
+            "id",
+            "runner",
+            "checker",
+            "failurePolicy"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A deterministic step that contributes to aggregation.",
+          "properties": {
+            "checker": {
+              "$ref": "#/$defs/CheckerSpec"
+            },
+            "dependsOn": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "failurePolicy": {
+              "$ref": "#/$defs/ScoreFailurePolicy"
+            },
+            "id": {
+              "type": "string"
+            },
+            "role": {
+              "const": "score",
+              "type": "string"
+            },
+            "runner": {
+              "$ref": "#/$defs/DeterministicRunnerSpec"
+            },
+            "score": {
+              "$ref": "#/$defs/ScoreSpec"
+            }
+          },
+          "required": [
+            "role",
+            "id",
+            "runner",
+            "checker",
+            "score",
+            "failurePolicy"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A non-scoring advisory review step.",
+          "properties": {
+            "dependsOn": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "failurePolicy": {
+              "$ref": "#/$defs/AdvisoryFailurePolicy"
+            },
+            "id": {
+              "type": "string"
+            },
+            "role": {
+              "const": "advisory",
+              "type": "string"
+            },
+            "runner": {
+              "$ref": "#/$defs/AdvisoryRunnerSpec"
+            }
+          },
+          "required": [
+            "role",
+            "id",
+            "runner",
+            "failurePolicy"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ExecutionLimits": {
+      "additionalProperties": false,
+      "description": "Resource and output limits for a program Runner.",
+      "properties": {
+        "memoryBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "outputBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "wallTimeSeconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "wallTimeSeconds",
+        "memoryBytes",
+        "outputBytes"
+      ],
+      "type": "object"
+    },
+    "ExpectedServiceState": {
+      "description": "Expected state of a system service.",
+      "oneOf": [
+        {
+          "const": "active",
+          "description": "Service is active.",
+          "type": "string"
+        },
+        {
+          "const": "inactive",
+          "description": "Service is inactive.",
+          "type": "string"
+        }
+      ]
+    },
+    "FactAssertion": {
+      "additionalProperties": false,
+      "description": "Expected fact emitted by a Linux probe.",
+      "properties": {
+        "expected": true,
+        "fact": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "fact",
+        "expected"
+      ],
+      "type": "object"
+    },
+    "GateFailurePolicy": {
+      "description": "Failure behavior for a Gate step.",
+      "oneOf": [
+        {
+          "const": "stop",
+          "description": "Stop downstream deterministic execution.",
+          "type": "string"
+        }
+      ]
+    },
+    "ManualReviewReason": {
+      "description": "Conditions that force manual teacher review.",
+      "oneOf": [
+        {
+          "const": "infrastructureError",
+          "description": "Runner or infrastructure execution failed independently of student work.",
+          "type": "string"
+        },
+        {
+          "const": "invalidEvidence",
+          "description": "Evidence is missing, malformed, or fails identity validation.",
+          "type": "string"
+        }
+      ]
+    },
+    "ProgramPhase": {
+      "description": "Approved program Runner phase.",
+      "oneOf": [
+        {
+          "const": "compile",
+          "description": "Compile the submitted program.",
+          "type": "string"
+        },
+        {
+          "const": "test",
+          "description": "Execute deterministic test groups.",
+          "type": "string"
+        }
+      ]
+    },
+    "RequiredStatus": {
+      "description": "Required deterministic Gate terminal status.",
+      "oneOf": [
+        {
+          "const": "passed",
+          "description": "The Gate must pass.",
+          "type": "string"
+        }
+      ]
+    },
+    "ReviewPolicy": {
+      "additionalProperties": false,
+      "description": "Mandatory approval and manual-review policy.",
+      "properties": {
+        "forceManualWhen": {
+          "items": {
+            "$ref": "#/$defs/ManualReviewReason"
+          },
+          "type": "array"
+        },
+        "teacherApprovalRequiredForRelease": {
+          "const": true,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "teacherApprovalRequiredForRelease",
+        "forceManualWhen"
+      ],
+      "type": "object"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "ScoreFailurePolicy": {
+      "description": "Failure behavior for a Score step.",
+      "oneOf": [
+        {
+          "const": "stop",
+          "description": "Stop downstream deterministic execution.",
+          "type": "string"
+        },
+        {
+          "const": "continue",
+          "description": "Continue with independent steps while preserving the failure.",
+          "type": "string"
+        }
+      ]
+    },
+    "ScoreSpec": {
+      "additionalProperties": false,
+      "description": "Maximum contribution of a deterministic Score step.",
+      "properties": {
+        "max": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max"
+      ],
+      "type": "object"
+    },
+    "SubmissionSpec": {
+      "additionalProperties": false,
+      "description": "Submission collection boundary used before evaluation starts.",
+      "properties": {
+        "collector": {
+          "$ref": "#/$defs/CollectorSpec"
+        },
+        "llmReadable": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "collector",
+        "llmReadable"
+      ],
+      "type": "object"
+    },
+    "TestGroup": {
+      "additionalProperties": false,
+      "description": "One deterministic program test group.",
+      "properties": {
+        "maxPoints": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "source",
+        "maxPoints"
+      ],
+      "type": "object"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Control-owned teacher read model for one immutable Evaluation candidate.",
+  "properties": {
+    "approvals": {
+      "items": {
+        "$ref": "#/$defs/CandidateApproval"
+      },
+      "type": "array"
+    },
+    "candidate": {
+      "$ref": "#/$defs/EvaluationCandidate"
+    },
+    "trustRevision": {
+      "$ref": "#/$defs/Revision"
+    }
+  },
+  "required": [
+    "candidate",
+    "approvals",
+    "trustRevision"
+  ],
+  "title": "EvaluationCandidateView",
+  "type": "object"
+}

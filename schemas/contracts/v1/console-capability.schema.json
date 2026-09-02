@@ -1,0 +1,130 @@
+{
+  "$defs": {
+    "AccessGrantId": {
+      "description": "Strongly typed UUIDv7 identifier for `AccessGrantId`.",
+      "type": "string"
+    },
+    "ConsoleCapabilityId": {
+      "description": "Strongly typed UUIDv7 identifier for `ConsoleCapabilityId`.",
+      "type": "string"
+    },
+    "ConsoleKind": {
+      "description": "Browser interaction transport selected by an approved environment release.",
+      "enum": [
+        "xterm",
+        "novnc"
+      ],
+      "type": "string"
+    },
+    "ConsoleLeaseFence": {
+      "additionalProperties": false,
+      "description": "Resource-owned Lease identity that fences a Work console capability.",
+      "properties": {
+        "expiresAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "leaseId": {
+          "$ref": "#/$defs/LeaseId"
+        },
+        "leaseRevision": {
+          "$ref": "#/$defs/Revision"
+        }
+      },
+      "required": [
+        "leaseId",
+        "leaseRevision",
+        "expiresAt"
+      ],
+      "type": "object"
+    },
+    "EnvironmentClass": {
+      "description": "Environment business class retained from the v2.1 architecture.",
+      "enum": [
+        "experiment",
+        "work"
+      ],
+      "type": "string"
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "LeaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One-time browser console handoff. The secret is an HttpOnly cookie, never a field here.",
+  "properties": {
+    "accessGrantId": {
+      "$ref": "#/$defs/AccessGrantId"
+    },
+    "accessGrantRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "connectionLocator": {
+      "type": "string"
+    },
+    "environmentClass": {
+      "$ref": "#/$defs/EnvironmentClass"
+    },
+    "environmentId": {
+      "$ref": "#/$defs/EnvironmentId"
+    },
+    "environmentRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "expiresAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "id": {
+      "$ref": "#/$defs/ConsoleCapabilityId"
+    },
+    "issuedAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "kind": {
+      "$ref": "#/$defs/ConsoleKind"
+    },
+    "leaseFence": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ConsoleLeaseFence"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "websocketSubprotocol": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "kind",
+    "accessGrantId",
+    "accessGrantRevision",
+    "environmentId",
+    "environmentClass",
+    "environmentRevision",
+    "issuedAt",
+    "expiresAt",
+    "connectionLocator",
+    "websocketSubprotocol"
+  ],
+  "title": "ConsoleCapability",
+  "type": "object"
+}

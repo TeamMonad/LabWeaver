@@ -1,0 +1,30 @@
+---
+# Issue #152 one-shot clean foundation entry point (clean-rebuild-non-release).
+#
+# Execution budget for the whole clean redeploy, enforced by the run ledger:
+#   1. one read-only preflight        -> this playbook, plays 1-2
+#   2. one cleanup cycle              -> this playbook, play 3
+#   3. one infrastructure install     -> 92-platform-foundation.yml, 95-harbor.yml,
+#                                        91-identity-foundation.yml, 92-platform-buildkit.yml
+#   4. two idempotent reconciles      -> run 92-platform-foundation.yml twice
+#   5. one verification replay        -> 96-foundation-rotation-verify.yml
+# A second occurrence of the same stable diagnostic stops the run as Blocked;
+# there is no fourth connected deployment cycle.
+#
+# This environment is releaseEligible=false. It never closes #142/#148 and its
+# results are not a Release Gate.
+- import_playbook: 00-preflight.yml
+  vars:
+    labweaver_preflight_scope: foundation-clean-redeploy
+
+- name: Verify LabWeaver infrastructure ownership (read-only)
+  hosts: control_plane
+  gather_facts: false
+  become: true
+  roles: [foundation_ownership_preflight]
+
+- name: Destroy and tombstone the LabWeaver-dedicated foundation
+  hosts: control_plane
+  gather_facts: false
+  become: true
+  roles: [foundation_clean_redeploy]

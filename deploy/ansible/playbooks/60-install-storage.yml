@@ -1,0 +1,10 @@
+---
+- name: Configure local storage and NFS CSI
+  hosts: k8s_cluster
+  gather_facts: true
+  roles: [storage_nodes]
+
+- name: Install storage controllers
+  hosts: control_plane
+  gather_facts: false
+  roles: [storage_controllers]

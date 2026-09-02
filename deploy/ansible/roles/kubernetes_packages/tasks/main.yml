@@ -1,0 +1,171 @@
+---
+# Install pinned CRI-O and Kubernetes packages from pkgs.k8s.io.
+# RedHat family uses the RPM channel, Debian/Ubuntu family the deb channel;
+# both pin the same versions from deploy/versions.lock.yml.
+- name: Configure Kubernetes RPM repository (RedHat)
+  ansible.builtin.yum_repository:
+    name: kubernetes
+    description: Kubernetes {{ kubernetes_minor }}
+    baseurl: "https://pkgs.k8s.io/core:/stable:/{{ kubernetes_minor }}/rpm/"
+    enabled: true
+    gpgcheck: true
+    gpgkey: "https://pkgs.k8s.io/core:/stable:/{{ kubernetes_minor }}/rpm/repodata/repomd.xml.key"
+  when: ansible_facts.os_family == 'RedHat'
+
+- name: Configure CRI-O RPM repository (RedHat)
+  ansible.builtin.yum_repository:
+    name: crio
+    description: CRI-O {{ kubernetes_minor }}
+    baseurl: "https://pkgs.k8s.io/addons:/cri-o:/stable:/{{ kubernetes_minor }}/rpm/"
+    enabled: true
+    gpgcheck: true
+    gpgkey: "https://pkgs.k8s.io/addons:/cri-o:/stable:/{{ kubernetes_minor }}/rpm/repodata/repomd.xml.key"
+  when: ansible_facts.os_family == 'RedHat'
+
+- name: Install pinned Kubernetes and CRI-O packages (RedHat)
+  ansible.builtin.dnf:
+    name:
+      - "cri-o-{{ crio_version }}*"
+      - "kubelet-{{ kubernetes_patch | regex_replace('^v', '') }}*"
+      - "kubeadm-{{ kubernetes_patch | regex_replace('^v', '') }}*"
+      - "kubectl-{{ kubernetes_patch | regex_replace('^v', '') }}*"
+    state: present
+    disable_excludes: kubernetes
+  when: ansible_facts.os_family == 'RedHat'
+
+- name: Ensure the APT keyrings directory exists (Ubuntu)
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+  when: ansible_facts.os_family == 'Debian'
+
+- name: Remove stale Kubernetes/CRI-O apt sources and keyrings (old cluster,
+    previous pkgs.k8s.io addons channel) before configuring fresh ones
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/apt/sources.list.d/kubernetes.list
+    - /etc/apt/sources.list.d/cri-o.list
+    - /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    - /etc/apt/keyrings/kubernetes-apt-keyring.asc
+    - /etc/apt/keyrings/cri-o-apt-keyring.gpg
+    - /etc/apt/keyrings/cri-o-apt-keyring.asc
+  when: ansible_facts.os_family == 'Debian'
+
+- name: Configure Kubernetes APT keyring (Ubuntu)
+  ansible.builtin.get_url:
+    url: "https://pkgs.k8s.io/core:/stable:/{{ kubernetes_minor }}/deb/Release.key"
+    dest: /etc/apt/keyrings/kubernetes-apt-keyring.asc
+    mode: '0644'
+  when: ansible_facts.os_family == 'Debian'
+
+- name: Configure Kubernetes APT repository (Ubuntu)
+  ansible.builtin.apt_repository:
+    repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.asc] https://pkgs.k8s.io/core:/stable:/{{ kubernetes_minor }}/deb/ /"
+    filename: kubernetes
+    state: present
+  when: ansible_facts.os_family == 'Debian'
+
+- name: Configure CRI-O APT keyring (Ubuntu)
+  ansible.builtin.get_url:
+    url: "https://download.opensuse.org/repositories/isv:/cri-o:/stable:/{{ kubernetes_minor }}/deb/Release.key"
+    dest: /etc/apt/keyrings/cri-o-apt-keyring.asc
+    mode: '0644'
+  when: ansible_facts.os_family == 'Debian'
+
+- name: Configure CRI-O APT repository (Ubuntu)
+  ansible.builtin.apt_repository:
+    repo: "deb [signed-by=/etc/apt/keyrings/cri-o-apt-keyring.asc] https://download.opensuse.org/repositories/isv:/cri-o:/stable:/{{ kubernetes_minor }}/deb/ /"
+    filename: cri-o
+    state: present
+  when: ansible_facts.os_family == 'Debian'
+
+- name: Refresh APT after repository change (Ubuntu)
+  ansible.builtin.apt:
+    update_cache: true
+  when: ansible_facts.os_family == 'Debian'
+
+- name: Assert the exact pinned versions are available in the configured sources (Ubuntu)
+  ansible.builtin.shell: >-
+    set -o pipefail &&
+    apt-cache madison {{ item.pkg | quote }} |
+    awk '{print $3}' |
+    grep -Fx {{ (item.version ~ '-1.1') | quote }}
+  args:
+    executable: /bin/bash
+  changed_when: false
+  register: v1_pinned
+  loop:
+    - { pkg: kubeadm, version: "{{ kubernetes_patch | regex_replace('^v', '') }}" }
+    - { pkg: kubelet, version: "{{ kubernetes_patch | regex_replace('^v', '') }}" }
+    - { pkg: kubectl, version: "{{ kubernetes_patch | regex_replace('^v', '') }}" }
+    - { pkg: cri-o, version: "{{ crio_version }}" }
+  when: ansible_facts.os_family == 'Debian'
+
+- name: Reject pinned versions missing from the configured sources (Ubuntu)
+  ansible.builtin.assert:
+    that: item.stdout | trim == item.item.version ~ '-1.1'
+    fail_msg: >-
+      KUBERNETES_PACKAGE_VERSION_UNAVAILABLE: {{ item.item.pkg }} pinned
+      {{ item.item.version }}-1.1 is not available in the configured sources
+      (source channel may have moved on; update versions.lock.yml deliberately)
+  loop: "{{ v1_pinned.results }}"
+  when: ansible_facts.os_family == 'Debian'
+
+- name: Install pinned Kubernetes and CRI-O packages (Ubuntu)
+  ansible.builtin.apt:
+    name:
+      - "kubeadm={{ kubernetes_patch | regex_replace('^v', '') }}-1.1"
+      - "kubelet={{ kubernetes_patch | regex_replace('^v', '') }}-1.1"
+      - "kubectl={{ kubernetes_patch | regex_replace('^v', '') }}-1.1"
+      - "cri-o={{ crio_version }}-1.1"
+    state: present
+  when: ansible_facts.os_family == 'Debian'
+
+- name: Enable CRI-O and kubelet
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop: [crio, kubelet]
+
+- name: Remove stale CRI-O proxy drop-ins from previous manual setups (they
+    lexically override 99-proxy.conf and point at dead local proxies)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/systemd/system/crio.service.d/http-proxy.conf
+    - /etc/systemd/system/crio.service.d/proxy.conf
+    - /etc/systemd/system/crio.service.d/10-proxy.conf
+    - /etc/systemd/system/crio.service.d/50-proxy.conf
+  when: crio_http_proxy | default('') != '' or crio_https_proxy | default('') != ''
+
+- name: Ensure the CRI-O systemd drop-in directory exists (proxy config)
+  ansible.builtin.file:
+    path: /etc/systemd/system/crio.service.d
+    state: directory
+    mode: '0755'
+  when: crio_http_proxy | default('') != '' or crio_https_proxy | default('') != ''
+
+- name: Configure CRI-O proxy environment (optional, when the node cannot reach
+    public image registries directly; e.g. campus-network egress restrictions)
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/crio.service.d/99-proxy.conf
+    mode: '0644'
+    content: |
+      [Service]
+      Environment=HTTP_PROXY={{ crio_http_proxy }}
+      Environment=HTTPS_PROXY={{ crio_https_proxy }}
+      Environment=NO_PROXY={{ crio_no_proxy }}
+  when: crio_http_proxy | default('') != '' or crio_https_proxy | default('') != ''
+  register: crio_proxy_conf
+
+- name: Reload CRI-O when proxy configuration changed
+  ansible.builtin.systemd_service:
+    name: crio
+    daemon_reload: true
+    state: restarted
+  when: crio_proxy_conf is defined and crio_proxy_conf.changed
