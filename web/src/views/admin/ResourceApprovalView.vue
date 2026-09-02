@@ -84,7 +84,9 @@
           </div>
           <div class="meta-row">
             <span class="meta-label">状态</span>
-            <span class="meta-value">{{ approval.selectedRequest.state }}</span>
+            <span class="meta-value" :title="approval.selectedRequest.state">
+              {{ resourceRequestStateLabel(approval.selectedRequest.state) }}
+            </span>
           </div>
           <div class="meta-row">
             <span class="meta-label">当前 Revision</span>
@@ -118,8 +120,16 @@
                 v-model="providerBinding"
                 class="text-input"
                 type="text"
+                list="provider-binding-options"
                 aria-label="Provider Binding"
+                aria-describedby="provider-binding-hint"
               />
+              <datalist id="provider-binding-options">
+                <option value="mock-capacity-primary">mock-capacity-primary（Mock 容量）</option>
+              </datalist>
+              <p v-if="isMockProviderBinding" id="provider-binding-hint" class="mock-binding-warning" role="note">
+                Mock 容量提供方：仅用于容量模拟与演示，不提供真实算力。
+              </p>
               <label class="input-label" for="approve-duration">批准时长（秒）</label>
               <input
                 id="approve-duration"
@@ -185,7 +195,9 @@
             >
               重试分配
             </button>
-            <p v-else class="state-note">当前状态 {{ approval.selectedRequest.state }} 为只读，无可用管理操作。</p>
+            <p v-else class="state-note">
+              当前状态 {{ resourceRequestStateLabel(approval.selectedRequest.state) }} 为只读，无可用管理操作。
+            </p>
           </div>
         </div>
       </div>
@@ -235,7 +247,9 @@
           </div>
           <div class="meta-row">
             <span class="meta-label">状态</span>
-            <span class="meta-value">{{ approval.selectedLease.state }}</span>
+            <span class="meta-value" :title="approval.selectedLease.state">
+              {{ resourceLeaseStateLabel(approval.selectedLease.state) }}
+            </span>
           </div>
           <div class="meta-row">
             <span class="meta-label">当前 Revision</span>
@@ -295,7 +309,7 @@
               撤销 Lease
             </button>
             <p v-if="approval.selectedLease.state === 'expired' || approval.selectedLease.state === 'revoked'" class="state-note">
-              当前状态 {{ approval.selectedLease.state }} 为终态，无可用管理操作。
+              当前状态 {{ resourceLeaseStateLabel(approval.selectedLease.state) }} 为终态，无可用管理操作。
             </p>
           </div>
         </div>
@@ -334,6 +348,7 @@ import SvgIcon from '@/components/common/SvgIcon.vue'
 import { useResourceApproval, type LeaseActionKind, type RequestActionKind } from '@/composables/useResourceApproval'
 import type { WorkloadResources } from '@/generated/contracts'
 import { formatBytes, formatTimestamp, truncateSha256 } from '@/utils/format'
+import { resourceRequestStateLabel, resourceLeaseStateLabel } from '@/utils/stateLabels'
 
 const GIB = 1024 ** 3
 const DEFAULT_PROVIDER_BINDING = 'mock-capacity-primary'
@@ -403,7 +418,7 @@ const requestRows = computed<RequestRow[]>(() => {
       releaseVersion: `v${request.target.releaseVersion}`,
       resources: formatResources(request.requestedResources),
       duration: formatDuration(request.requestedDurationSeconds),
-      state: request.state,
+      state: resourceRequestStateLabel(request.state),
       revision: `rev-${request.revision}`,
       updatedAt: formatTimestamp(request.updatedAt),
     }))
@@ -428,7 +443,7 @@ const leaseRows = computed<LeaseRow[]>(() => {
       requestId: lease.requestId,
       claimId: lease.claimId,
       resources: resources ? formatResources(resources) : '—',
-      state: lease.state,
+      state: resourceLeaseStateLabel(lease.state),
       revision: `rev-${lease.revision}`,
       activeFrom: lease.activeFrom ? formatTimestamp(lease.activeFrom) : '—',
       expiresAt: lease.expiresAt ? formatTimestamp(lease.expiresAt) : '—',
@@ -438,6 +453,7 @@ const leaseRows = computed<LeaseRow[]>(() => {
 
 const requestReason = ref('')
 const providerBinding = ref(DEFAULT_PROVIDER_BINDING)
+const isMockProviderBinding = computed(() => /mock/i.test(providerBinding.value.trim()))
 const approveDuration = ref(7200)
 const resizeMode = ref(false)
 const resizeCpuMillicores = ref(2000)
@@ -694,6 +710,16 @@ async function onLeaseConfirmed() {
 .input-label {
   font: var(--md-sys-body-medium);
   color: var(--md-sys-color-on-surface-variant);
+}
+
+.mock-binding-warning {
+  grid-column: 2;
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: var(--md-sys-shape-small);
+  background: var(--md-sys-color-tertiary-container);
+  color: var(--md-sys-color-on-tertiary-container);
+  font: var(--md-sys-body-small);
 }
 
 .text-input {

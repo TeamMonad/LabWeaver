@@ -8,8 +8,13 @@ export function formatBytes(bytes: number): string {
 }
 
 export function truncateSha256(sha256: string, head = 8, tail = 8): string {
-  if (sha256.length <= head + tail + 3) return sha256
+  if (sha256.length <= head + tail + 1) return sha256
   return `${sha256.slice(0, head)}…${sha256.slice(-tail)}`
+}
+
+/** Renders a stable short form of a long identifier for dense UI surfaces. */
+export function shortId(id: string, head = 12): string {
+  return id.length <= head ? id : `${id.slice(0, head)}…`
 }
 
 export function idempotencyKey(): string {

@@ -105,6 +105,15 @@
                 <div v-if="approval.latestEnvironmentApproval" class="approval-status" :class="`approval-status--${approval.latestEnvironmentApproval.decision}`">
                   最新审批：{{ approval.latestEnvironmentApproval.decision }} — {{ approval.latestEnvironmentApproval.reason }}
                 </div>
+
+                <div v-if="approval.decisionDiagnostic?.kind === 'environment'" class="approval-decision-error">
+                  <DiagnosticBanner
+                    :code="approval.decisionDiagnostic.diagnostic.code"
+                    :message="approval.decisionDiagnostic.diagnostic.message"
+                    :retryable="approval.decisionDiagnostic.diagnostic.retryable"
+                    severity="warning"
+                  />
+                </div>
               </div>
 
               <section class="release-section" aria-labelledby="release-heading">
@@ -252,6 +261,15 @@
                 <div v-if="approval.latestEvaluationApproval" class="approval-status" :class="`approval-status--${approval.latestEvaluationApproval.decision}`">
                   最新审批：{{ approval.latestEvaluationApproval.decision }} — {{ approval.latestEvaluationApproval.reason }}
                 </div>
+
+                <div v-if="approval.decisionDiagnostic?.kind === 'evaluation'" class="approval-decision-error">
+                  <DiagnosticBanner
+                    :code="approval.decisionDiagnostic.diagnostic.code"
+                    :message="approval.decisionDiagnostic.diagnostic.message"
+                    :retryable="approval.decisionDiagnostic.diagnostic.retryable"
+                    severity="warning"
+                  />
+                </div>
               </div>
 
               <section class="release-section" aria-labelledby="evaluation-release-heading">
@@ -348,7 +366,7 @@
     <ConfirmDialog
       :open="evaluationPublishConfirmOpen"
       title="确认发布 EvaluationRelease"
-      description="`将发布当前已批准的 Evaluation 候选 rev-${evaluationCandidateView?.candidate.revision ?? '?'}。Runtime 身份由 Control 固定构造，是否继续？`"
+      :description="`将发布当前已批准的 Evaluation 候选 rev-${evaluationCandidateView?.candidate.revision ?? '?'}。Runtime 身份由 Control 固定构造，是否继续？`"
       confirm-text="发布"
       severity="warning"
       @confirm="onEvaluationPublishConfirmed"

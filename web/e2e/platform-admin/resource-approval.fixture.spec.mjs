@@ -35,14 +35,14 @@ test('admin approves a reviewing request and a lease appears', async ({ page }) 
   await confirmDialog(page)
 
   await expect(page.locator('.diagnostic-banner--info')).toContainText('RESOURCE_REQUEST_APPROVED')
-  await expect(page.locator('.request-detail')).toContainText('allocating')
+  await expect(page.locator('.request-detail')).toContainText('分配中')
   await expect(page.locator('.lease-table .data-table__row')).toHaveCount(3)
 })
 
 test('admin renews and revokes an active lease', async ({ page }) => {
   await openApprovalPage(page)
 
-  await page.locator('.lease-table .data-table__row', { hasText: 'active' }).first().click()
+  await page.locator('.lease-table .data-table__row', { hasText: '使用中' }).first().click()
   await expect(page.locator('.lease-detail')).toBeVisible()
 
   await page.fill('input[aria-label="续期时长（秒）"]', '3600')
@@ -56,7 +56,7 @@ test('admin renews and revokes an active lease', async ({ page }) => {
   await page.getByRole('button', { name: '撤销 Lease', exact: true }).click()
   await confirmDialog(page)
   await expect(page.locator('.diagnostic-banner--info')).toContainText('RESOURCE_LEASE_REVOKED')
-  await expect(page.locator('.lease-detail')).toContainText('revoked')
+  await expect(page.locator('.lease-detail')).toContainText('已撤销')
 })
 
 test('revision conflict surfaces a stable diagnostic', async ({ page }) => {
@@ -86,7 +86,7 @@ test('reject requires a reason and rejects a reviewing request', async ({ page }
   await confirmDialog(page)
 
   await expect(page.locator('.diagnostic-banner--info')).toContainText('RESOURCE_REQUEST_REJECTED')
-  await expect(page.locator('.request-detail')).toContainText('rejected')
+  await expect(page.locator('.request-detail')).toContainText('已拒绝')
 })
 
 test('course filter narrows the request list', async ({ page }) => {

@@ -8,11 +8,15 @@
     />
     <dialog
       v-if="open"
+      ref="dialogRef"
       class="confirm-dialog"
       role="alertdialog"
+      aria-modal="true"
       :aria-labelledby="titleId"
       :aria-describedby="descId"
       open
+      @keydown.esc.prevent="dismissible && $emit('cancel')"
+      @keydown.tab="trapFocus"
     >
       <div class="confirm-dialog__icon" aria-hidden="true">
         <SvgIcon :name="icon" size="xl" />
@@ -24,6 +28,7 @@
       <div class="confirm-dialog__actions">
         <button
           v-if="dismissible"
+          ref="cancelButtonRef"
           type="button"
           class="text-button"
           @click="$emit('cancel')"
@@ -34,7 +39,6 @@
           type="button"
           class="filled-button"
           :class="`filled-button--${confirmSeverity}`"
-          autofocus
           @click="$emit('confirm')"
         >
           {{ confirmText }}
@@ -45,7 +49,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import SvgIcon from './SvgIcon.vue'
 
 interface Props {
@@ -70,8 +74,44 @@ defineEmits<{
   cancel: []
 }>()
 
-const titleId = computed(() => `confirm-title-${Math.random().toString(36).slice(2, 8)}`)
-const descId = computed(() => `confirm-desc-${Math.random().toString(36).slice(2, 8)}`)
+const instanceId = `lw-confirm-${Math.random().toString(36).slice(2, 10)}`
+const titleId = computed(() => `confirm-title-${instanceId}`)
+const descId = computed(() => `confirm-desc-${instanceId}`)
+
+const dialogRef = ref<HTMLDialogElement | null>(null)
+const cancelButtonRef = ref<HTMLButtonElement | null>(null)
+
+// Focus lands on the cancel action so an accidental Enter can never trigger an
+// irreversible confirm (GCP-style destructive-action protection).
+watch(
+  () => props.open,
+  async (open) => {
+    if (!open) return
+    await nextTick()
+    if (props.dismissible) cancelButtonRef.value?.focus()
+    else dialogRef.value?.querySelector<HTMLButtonElement>('.filled-button')?.focus()
+  },
+  { immediate: true },
+)
+
+function trapFocus(event: KeyboardEvent) {
+  const dialog = dialogRef.value
+  if (!dialog) return
+  const focusable = Array.from(
+    dialog.querySelectorAll<HTMLElement>('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'),
+  )
+  if (focusable.length === 0) return
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  const active = document.activeElement
+  if (event.shiftKey && (active === first || !dialog.contains(active))) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && active === last) {
+    event.preventDefault()
+    first.focus()
+  }
+}
 
 const icon = computed(() => {
   switch (props.severity) {

@@ -23,16 +23,20 @@
 
     <nav class="drawer-nav" aria-label="角色入口">
       <RouterLink
-        v-for="item in roleItems"
+        v-for="item in visibleRoleItems"
         :key="item.name"
         :to="item.path"
         class="drawer-item"
         :class="{ 'drawer-item--active': isActive(item.path) }"
+        :aria-current="isActive(item.path) ? 'page' : undefined"
         @click="isModal && $emit('close')"
       >
         <SvgIcon :name="item.icon" size="md" :aria-label="item.label" />
         <span class="drawer-item__label">{{ item.label }}</span>
       </RouterLink>
+      <p v-if="isAuthenticated && visibleRoleItems.length === 0" class="drawer-empty" role="note">
+        当前账号未被授予任何工作台角色。
+      </p>
     </nav>
 
     <div class="drawer-footer">
@@ -61,6 +65,7 @@
 import { computed, ref, watch, nextTick } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import SvgIcon from '@/components/common/SvgIcon.vue'
+import { useAuth } from '@/composables/useAuth'
 
 const props = defineProps<{
   open: boolean
@@ -92,6 +97,16 @@ const roleItems = [
   { name: 'researcher', role: 'researcher', path: '/researcher', label: '科研工作台', icon: 'science' as const },
   { name: 'admin', role: 'admin', path: '/admin', label: '管理工作台', icon: 'admin_panel_settings' as const },
 ]
+
+const { user, isAuthenticated } = useAuth()
+// Anonymous visitors keep all entries (they lead to the sign-in flow); a
+// signed-in user only sees workbenches their OIDC roles authorize, so no
+// dead links to a role_denied error page.
+const visibleRoleItems = computed(() => {
+  if (!isAuthenticated.value) return roleItems
+  const roles = new Set((user.value?.profile?.roles as string[] | undefined) ?? [])
+  return roleItems.filter((item) => roles.has(item.role))
+})
 
 const isActive = computed(() => (path: string) => route.path.startsWith(path))
 </script>
@@ -190,6 +205,15 @@ const isActive = computed(() => (path: string) => route.path.startsWith(path))
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.drawer-empty {
+  margin: 8px;
+  padding: 12px;
+  border-radius: var(--md-sys-shape-medium);
+  background: var(--md-sys-color-surface-container);
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-small);
 }
 
 .navigation-drawer--rail .drawer-item {

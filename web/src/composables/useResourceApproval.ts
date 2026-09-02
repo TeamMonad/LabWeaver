@@ -1,4 +1,4 @@
-import { computed, reactive, ref, onMounted } from 'vue'
+import { computed, reactive, ref, onMounted, onScopeDispose } from 'vue'
 import {
   approveResourceRequest,
   getResourceLease,
@@ -161,6 +161,7 @@ export function useResourceApproval() {
         diagnostic: makeDiagnostic(successCode, `操作已接受，当前 revision rev-${result.data.revision}。`, false),
       }
       await load()
+      schedulePoll()
       return true
     } finally {
       acting.value = null
@@ -191,6 +192,7 @@ export function useResourceApproval() {
         diagnostic: makeDiagnostic('RESOURCE_LEASE_RENEWED', `Lease 已续期，当前 revision rev-${result.data.revision}。`, false),
       }
       await load()
+      schedulePoll()
       return true
     } finally {
       acting.value = null
@@ -221,6 +223,7 @@ export function useResourceApproval() {
         diagnostic: makeDiagnostic('RESOURCE_LEASE_REVOKED', `Lease 已撤销，当前 revision rev-${result.data.revision}。`, false),
       }
       await load()
+      schedulePoll()
       return true
     } finally {
       acting.value = null
@@ -228,6 +231,68 @@ export function useResourceApproval() {
   }
 
   onMounted(load)
+
+  /**
+   * Approval outcomes progress asynchronously (Approved → Allocating → Active,
+   * leases → Expiring → Expired). Poll quietly while any row is transitional
+   * so admins see state advance without manual reloads. Pauses when the page
+   * is hidden and stops on scope disposal.
+   */
+  const REQUEST_TRANSITIONAL_STATES = new Set(['submitted', 'policy_checked', 'reviewing', 'allocating'])
+  const LEASE_TRANSITIONAL_STATES = new Set(['active', 'expiring'])
+  const POLL_INTERVAL_MS = 5000
+  let pollTimer: ReturnType<typeof setTimeout> | null = null
+
+  function stopPolling() {
+    if (pollTimer) {
+      clearTimeout(pollTimer)
+      pollTimer = null
+    }
+  }
+
+  async function refreshSilently() {
+    const [requestResult, leaseResult] = await Promise.all([
+      listResourceRequests({}),
+      listResourceLeases({}),
+    ])
+    if (!requestResult.error) requests.value = { kind: 'success', data: requestResult.data }
+    if (!leaseResult.error) leases.value = { kind: 'success', data: leaseResult.data }
+    schedulePoll()
+  }
+
+  function schedulePoll() {
+    stopPolling()
+    if (requests.value.kind !== 'success' && leases.value.kind !== 'success') return
+    const requestPending =
+      requests.value.kind === 'success' &&
+      requests.value.data.some((request) => REQUEST_TRANSITIONAL_STATES.has(request.state))
+    const leasePending =
+      leases.value.kind === 'success' &&
+      leases.value.data.some((lease) => LEASE_TRANSITIONAL_STATES.has(lease.state))
+    if (!requestPending && !leasePending) return
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+    pollTimer = setTimeout(() => void refreshSilently(), POLL_INTERVAL_MS)
+  }
+
+  function onVisibilityChange() {
+    if (document.visibilityState === 'visible') schedulePoll()
+    else stopPolling()
+  }
+
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    onScopeDispose(() => {
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+      stopPolling()
+    })
+  }
+
+  // schedulePoll is driven from refreshSilently/load completions.
+  const baseLoad = load
+  async function loadWithPolling() {
+    await baseLoad()
+    schedulePoll()
+  }
 
   return reactive({
     requests,
@@ -239,7 +304,7 @@ export function useResourceApproval() {
     requestResources,
     acting,
     outcome,
-    load,
+    load: loadWithPolling,
     selectRequest,
     selectLease,
     runRequestAction,

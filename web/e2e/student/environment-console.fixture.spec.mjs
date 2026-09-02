@@ -17,7 +17,9 @@ async function expectNoA11yViolations(page, message) {
   expect(axeResult.violations, message).toEqual([])
 }
 
-const expectedDrawerLabels = ['教师工作台', '学生工作台', '科研工作台', '管理工作台']
+// The drawer filters role entries by the signed-in user's OIDC roles (a
+// student sees only their own workbench), so the expected set is role-scoped.
+const expectedDrawerLabels = ['学生工作台']
 
 // Desktop layouts pin the navigation drawer into the app-shell grid. Assert the
 // role entries actually render so a stale golden baseline can never mask a
@@ -105,7 +107,7 @@ test('environment console direct entry loads endpoints', async ({ page }) => {
 
   // The env card should load from the direct URL.
   await waitForEnvironmentCard(page)
-  await expect(page.locator('.env-state')).toHaveText('failed')
+  await expect(page.locator('.env-state')).toHaveText('失败')
 
   // Endpoints must load automatically so the grant button is enabled.
   await expect(page.locator('.access-section .data-table__row')).toHaveCount(1)
@@ -137,22 +139,22 @@ test('environment console create, lifecycle, grant and revoke', async ({ page })
   await page.locator('.data-table__row').first().locator('button:has-text("创建环境")').click()
   await page.waitForURL(/\/student\/environments\?environmentId=/)
   await waitForEnvironmentCard(page)
-  await expect(page.locator('.env-state')).toHaveText('ready')
+  await expect(page.locator('.env-state')).toHaveText('运行中')
 
   // Lifecycle: stop -> start -> restart.
   await page.locator('button:has-text("停止")').click()
-  await expect(page.locator('.env-state')).toHaveText('stopped')
+  await expect(page.locator('.env-state')).toHaveText('已停止')
 
   await page.locator('button:has-text("启动")').click()
-  await expect(page.locator('.env-state')).toHaveText('ready')
+  await expect(page.locator('.env-state')).toHaveText('运行中')
 
   await page.locator('button:has-text("重启")').click()
-  await expect(page.locator('.env-state')).toHaveText('ready')
+  await expect(page.locator('.env-state')).toHaveText('运行中')
 
   // Issue an access grant.
   await page.locator('button:has-text("签发访问授权")').click()
   await expect(page.locator('.grant-card')).toBeVisible()
-  await expect(page.locator('text=active')).toBeVisible()
+  await expect(page.locator('text=生效中')).toBeVisible()
 
   // Revoke the grant and observe the revoked diagnostic.
   await page.locator('button:has-text("撤销授权")').click()
@@ -170,7 +172,7 @@ for (const theme of themes) {
       await page.locator('.data-table__row').first().locator('button:has-text("创建环境")').click()
       await page.waitForURL(/\/student\/environments\?environmentId=/)
       await waitForEnvironmentCard(page)
-      await expect(page.locator('.env-state')).toHaveText('ready')
+      await expect(page.locator('.env-state')).toHaveText('运行中')
 
       await expectNoA11yViolations(page, 'success console should have no a11y violations')
       await expectDesktopDrawerNav(page, viewport.name)
@@ -194,7 +196,7 @@ for (const theme of themes) {
       await page.locator('.data-table__row').first().locator('button:has-text("创建环境")').click()
       await page.waitForURL(/\/student\/environments\?environmentId=/)
       await waitForEnvironmentCard(page)
-      await expect(page.locator('.env-state')).toHaveText('ready')
+      await expect(page.locator('.env-state')).toHaveText('运行中')
 
       await page.locator('button:has-text("签发访问授权")').click()
       await expect(page.locator('.grant-card')).toBeVisible()
@@ -221,7 +223,7 @@ for (const theme of themes) {
       await page.locator('.data-table__row').first().locator('button:has-text("创建环境")').click()
       await page.waitForURL(/\/student\/environments\?environmentId=/)
       await waitForEnvironmentCard(page)
-      await expect(page.locator('.env-state')).toHaveText('ready')
+      await expect(page.locator('.env-state')).toHaveText('运行中')
 
       await page.locator('button:has-text("签发访问授权")').click()
       await expect(page.locator('.grant-card')).toBeVisible()

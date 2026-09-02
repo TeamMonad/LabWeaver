@@ -40,6 +40,15 @@ async function fixtureFetch(input: RequestInfo | URL, init?: RequestInit): Promi
   const request = input instanceof Request && init === undefined ? input : new Request(input, init)
   const url = new URL(request.url)
 
+  // Liveness probe served locally so the fixture demo reflects a reachable
+  // platform instead of a misleading "unreachable" status.
+  if (url.pathname === '/health/live' && (request.method === 'GET' || request.method === 'HEAD')) {
+    return new Response(JSON.stringify({ status: 'ok', mode: 'fixture' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
   if (!url.pathname.startsWith('/api/v1/')) {
     return (originalFetch ?? globalThis.fetch)(input, init)
   }

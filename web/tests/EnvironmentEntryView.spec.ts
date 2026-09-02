@@ -127,7 +127,7 @@ describe('EnvironmentEntryView', () => {
     })
     const { wrapper } = await mountAt({ environmentId: 'env-1' })
     await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
-    expect(wrapper.text()).toContain('ready')
+    expect(wrapper.text()).toContain('运行中')
     expect(wrapper.text()).toContain('启动')
     await vi.waitFor(() => expect(vi.mocked(listEnvironmentEndpoints)).toHaveBeenCalledWith({ path: { environmentId: 'env-1' } }))
     expect(wrapper.text()).toContain('ssh')

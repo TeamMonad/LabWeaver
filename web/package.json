@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev:fixture": "cross-env VITE_DATA_MODE=fixture vite",
+    "dev:fixture": "cross-env VITE_DATA_MODE=fixture VITE_API_AUTH_MODE=bearer vite",
     "build": "vue-tsc --noEmit && vite build && pnpm verify:production-bundle",
     "build:fixture": "cross-env VITE_DATA_MODE=fixture VITE_API_AUTH_MODE=bearer VITE_OIDC_AUTHORITY=http://localhost:4173/oidc VITE_OIDC_CLIENT_ID=labweaver-fixture VITE_OIDC_REDIRECT_URI=http://localhost:4173/auth/callback VITE_OIDC_POST_LOGOUT_REDIRECT_URI=http://localhost:4173/ vite build --mode e2e-fixture",
     "preview:fixture": "cross-env VITE_DATA_MODE=fixture vite preview --port 4173",
@@ -14,7 +14,7 @@
     "preview": "vite preview",
     "lint": "eslint . --max-warnings=0",
     "test": "vitest run",
-    "test:fixture": "cross-env VITE_DATA_MODE=fixture vitest run",
+    "test:fixture": "cross-env VITE_DATA_MODE=fixture VITE_API_AUTH_MODE=bearer vitest run",
     "test:live": "cross-env VITE_DATA_MODE=live vitest run",
     "test:watch": "vitest",
     "typecheck": "vue-tsc --noEmit",

@@ -21,7 +21,12 @@ export function useEnvironmentLifecycle(courseId: Ref<string | undefined>) {
     else operating.value.delete(id)
   }
 
-  async function create(request: CreateEnvironmentRequestSchema) {
+  /**
+   * `intentKey` lets the caller pin one Idempotency-Key to one logical create
+   * intent so that retrying after a network timeout replays the same create
+   * instead of minting a second environment. Omit it only for first attempts.
+   */
+  async function create(request: CreateEnvironmentRequestSchema, intentKey?: string) {
     const id = courseId.value
     if (!id) {
       return {
@@ -30,7 +35,7 @@ export function useEnvironmentLifecycle(courseId: Ref<string | undefined>) {
       }
     }
     const result = await createEnvironment({
-      headers: { 'Idempotency-Key': idempotencyKey() },
+      headers: { 'Idempotency-Key': intentKey ?? idempotencyKey() },
       body: request,
     })
     if (result.error) {

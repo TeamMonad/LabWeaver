@@ -19,7 +19,9 @@ vi.mock('@/config', () => ({
     response_type: 'code',
     scope: 'openid profile email',
   },
-  API_BASE_URL: '/api/v1',
+  // Public API base URL must be an origin (never /api/v1) — see client.ts.
+  API_BASE_URL: '/',
+  API_AUTH_MODE: 'bff',
   APP_TITLE: 'LabWeaver',
 }))
 
