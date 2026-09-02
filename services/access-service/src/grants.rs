@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, path::PathBuf, sync::Arc, time::Duration};
 
 use async_nats::jetstream::consumer::PullConsumer;
 use async_nats::jetstream::message::PublishMessage;
@@ -17,7 +17,7 @@ use contracts::{
         AccessGrant, AccessGrantSnapshot, AccessGrantState, AuthorizationDecision,
         AuthorizationDecisionSummary, CloseGatewaySessionRequest, CreateGatewaySessionRequest,
         EndpointAction, EndpointGrant, EndpointGrantSnapshot, EndpointGrantSnapshotState,
-        GatewaySession, GatewaySessionState, HeartbeatGatewaySessionRequest, SshAuthorization,
+        GatewaySession, HeartbeatGatewaySessionRequest, SshAuthorization,
         SshAuthorizationRequest, SshKeyAlgorithm, SshPublicKey, validate_ssh_public_key,
     },
     environment::{
@@ -25,8 +25,7 @@ use contracts::{
         EnvironmentEndpointEligibilityRequest,
     },
     events::{
-        AccessGrantChanged, CloudEvent, EventContract, GatewaySessionChanged, SshPublicKeyRevoked,
-        subjects,
+        AccessGrantChanged, CloudEvent, GatewaySessionChanged, SshPublicKeyRevoked, subjects,
     },
     http::{
         CreateAccessGrantRequest, CreateSshPublicKeyRequest, EnvironmentAccessGrantListQuery,
@@ -35,11 +34,9 @@ use contracts::{
 };
 use futures_util::StreamExt;
 use persistence_sqlx::Sha256Digest;
-use rand::RngCore;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -48,6 +45,8 @@ use super::{
     ApiError, AppState, MtlsPrincipal, authenticated_identity, authenticated_session, console,
     cookie_session_id, require_browser_origin, utc_timestamp,
 };
+
+use super::grant_helpers::{ validate_alias, valid_fingerprint, valid_sha256_hex, random_token, sha256_hex, ssh_alias, protocol_str, parse_protocol, parse_health, optional_contract_string, optional_contract_u16, grant_state_str, parse_grant_state, session_state_str, parse_session_state, typed_id};
 
 const TERMINATION_SECONDS: i64 = 60;
 // This request/reply subject deliberately sits outside the persisted
@@ -891,7 +890,9 @@ pub async fn create_gateway_session(
     .ok_or_else(|| ApiError::forbidden("LW_ACCESS_SSH_DENIED"))?;
     let actor_id = typed_id::<ActorId>(candidate.get("actor_id"))?;
     let endpoint_id = typed_id::<EndpointId>(candidate.get("endpoint_id"))?;
-    let endpoint_revision = revision(candidate.get("endpoint_revision"))?;
+    let endpoint_revision: i64 = candidate.get("endpoint_revision");
+    let endpoint_revision = Revision::try_from(endpoint_revision)
+        .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?;
     let subject_kind: EnvironmentAccessSubjectKind = serde_json::from_value(
         candidate
             .get::<Value, _>("contract")
@@ -908,7 +909,12 @@ pub async fn create_gateway_session(
                 course_id: typed_id(candidate.get("course_id"))?,
                 actor_id,
                 subject_kind,
-                expected_revision: revision(candidate.get("environment_revision"))?,
+                expected_revision: Revision::try_from(
+                    candidate
+                        .try_get::<i64, _>("environment_revision")
+                        .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?,
+                )
+                .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?,
                 endpoint_ids: vec![endpoint_id],
             },
             utc_timestamp(now)?,
@@ -1424,11 +1430,9 @@ pub async fn environment_state_loop(state: Arc<AppState>) -> Result<(), GrantRun
                 &message.payload,
             )
             .map_err(|_| GrantRuntimeError::Contract)?;
-        let contract = contracts::events::EVENT_CONTRACTS
-            .iter()
-            .copied()
-            .find(|item| item.subject == subjects::ENVIRONMENT_STATE_CHANGED)
-            .ok_or(GrantRuntimeError::Contract)?;
+        let contract =
+            contracts::events::EventContract::by_subject(subjects::ENVIRONMENT_STATE_CHANGED)
+                .ok_or(GrantRuntimeError::Contract)?;
         event
             .validate(contract)
             .map_err(|_| GrantRuntimeError::Contract)?;
@@ -1582,7 +1586,9 @@ async fn revoke_environment_grants(
     .fetch_one(&mut *transaction)
     .await?;
     transaction.commit().await?;
-    revision(maximum_revision).map_err(|error| log_revocation_mutation_error(&error))
+    Revision::try_from(maximum_revision)
+        .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))
+        .map_err(|error| log_revocation_mutation_error(&error))
 }
 
 fn log_revocation_mutation_error(error: &ApiError) -> GrantRuntimeError {
@@ -1791,9 +1797,17 @@ async fn load_grant_tx(
         actor_id,
         course_id: typed_id(row.get("course_id"))?,
         environment_id: typed_id(row.get("environment_id"))?,
-        environment_revision: revision(row.get("environment_revision"))?,
+        environment_revision: Revision::try_from(
+            row.try_get::<i64, _>("environment_revision")
+                .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?,
+        )
+        .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?,
         state: parse_grant_state(&row.get::<String, _>("state"))?,
-        revision: revision(row.get("revision"))?,
+        revision: Revision::try_from(
+            row.try_get::<i64, _>("revision")
+                .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?,
+        )
+        .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?,
         endpoint_grants: endpoints,
         issued_at: utc_timestamp(row.get("not_before"))?,
         expires_at: utc_timestamp(row.get("expires_at"))?,
@@ -1837,7 +1851,11 @@ async fn endpoint_grants(
                 id,
                 access_grant_id: grant_id,
                 endpoint_id: typed_id(row.get("endpoint_id"))?,
-                endpoint_revision: revision(row.get("endpoint_revision"))?,
+                endpoint_revision: Revision::try_from(
+                    row.try_get::<i64, _>("endpoint_revision")
+                        .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?,
+                )
+                .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?,
                 protocol,
                 action: EndpointAction::Connect,
                 health: parse_health(&row.get::<String, _>("health"))?,
@@ -1873,7 +1891,11 @@ fn ssh_key_from_row(
                 u32::try_from(value).map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))
             })
             .transpose()?,
-        revision: revision(row.get("revision"))?,
+        revision: Revision::try_from(
+            row.try_get::<i64, _>("revision")
+                .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?,
+        )
+        .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?,
         created_at: utc_timestamp(row.get("created_at"))?,
     })
 }
@@ -1911,14 +1933,22 @@ async fn load_session_tx(
     let session = GatewaySession {
         id,
         access_grant_id: typed_id(row.get("grant_id"))?,
-        access_grant_revision: revision(row.get("grant_revision"))?,
+        access_grant_revision: Revision::try_from(
+            row.try_get::<i64, _>("grant_revision")
+                .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?,
+        )
+        .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?,
         endpoint_grant_id: typed_id(row.get("endpoint_grant_id"))?,
         ssh_public_key_id: typed_id(row.get("key_id"))?,
         target_alias,
         target_host,
         gateway_identity: row.get("gateway_identity"),
         connection_id: row.get("connection_id"),
-        revision: revision(row.get("revision"))?,
+        revision: Revision::try_from(
+            row.try_get::<i64, _>("revision")
+                .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?,
+        )
+        .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?,
         state: parse_session_state(&row.get::<String, _>("state"))?,
         opened_at: utc_timestamp(row.get("started_at"))?,
         last_heartbeat_at: utc_timestamp(row.get("last_heartbeat_at"))?,
@@ -2213,7 +2243,8 @@ pub(super) async fn enqueue_event_value(
     revision: Revision,
     data: Value,
 ) -> Result<(), ApiError> {
-    let contract = event_contract(subject)?;
+    let contract = contracts::events::EventContract::by_subject(subject)
+        .ok_or_else(|| ApiError::internal("LW_ACCESS_EVENT_INVALID"))?;
     let event_id = EventId::new();
     let now = utc_timestamp(OffsetDateTime::now_utc())?;
     let event = CloudEvent {
@@ -2244,13 +2275,6 @@ pub(super) async fn enqueue_event_value(
     Ok(())
 }
 
-fn event_contract(subject: &str) -> Result<EventContract, ApiError> {
-    contracts::events::EVENT_CONTRACTS
-        .iter()
-        .copied()
-        .find(|c| c.subject == subject)
-        .ok_or_else(|| ApiError::internal("LW_ACCESS_EVENT_INVALID"))
-}
 fn ensure_gateway_request(
     state: &AppState,
     principal: &MtlsPrincipal,
@@ -2267,156 +2291,6 @@ fn ensure_gateway_request(
     } else {
         Err(ApiError::forbidden("LW_ACCESS_GATEWAY_IDENTITY_DENIED"))
     }
-}
-fn validate_alias(alias: &str) -> Result<(), ApiError> {
-    if alias.len() == 23
-        && alias.starts_with("lw-")
-        && alias[3..]
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b))
-    {
-        Ok(())
-    } else {
-        Err(ApiError::forbidden("LW_ACCESS_ALIAS_INVALID"))
-    }
-}
-fn valid_fingerprint(value: &str) -> bool {
-    value.starts_with("SHA256:")
-        && value.len() <= 96
-        && value[7..]
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
-}
-fn valid_sha256_hex(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-}
-fn random_token() -> String {
-    let mut bytes = [0_u8; 32];
-    rand::rng().fill_bytes(&mut bytes);
-    hex(&bytes)
-}
-fn sha256_hex(value: &[u8]) -> String {
-    hex(&Sha256::digest(value))
-}
-fn hex(value: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(value.len() * 2);
-    for byte in value {
-        output.push(char::from(DIGITS[usize::from(byte >> 4)]));
-        output.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
-    }
-    output
-}
-fn ssh_alias(id: EndpointGrantId) -> String {
-    let alphabet = b"abcdefghijklmnopqrstuvwxyz234567";
-    let uuid = id.as_uuid();
-    let bytes = uuid.as_bytes();
-    let mut out = String::from("lw-");
-    let mut acc = 0_u32;
-    let mut bits = 0_u8;
-    for byte in bytes {
-        acc = (acc << 8) | u32::from(*byte);
-        bits += 8;
-        while bits >= 5 && out.len() < 23 {
-            bits -= 5;
-            out.push(alphabet[((acc >> bits) & 31) as usize] as char);
-        }
-    }
-    while out.len() < 23 {
-        out.push('a');
-    }
-    out
-}
-fn protocol_str(p: EndpointProtocol) -> &'static str {
-    match p {
-        EndpointProtocol::Http => "http",
-        EndpointProtocol::Https => "https",
-        EndpointProtocol::Ssh => "ssh",
-    }
-}
-fn parse_protocol(v: &str) -> Result<EndpointProtocol, ApiError> {
-    match v {
-        "http" => Ok(EndpointProtocol::Http),
-        "https" => Ok(EndpointProtocol::Https),
-        "ssh" => Ok(EndpointProtocol::Ssh),
-        _ => Err(ApiError::internal("LW_ACCESS_STORE_CORRUPT")),
-    }
-}
-fn parse_health(v: &str) -> Result<EndpointHealth, ApiError> {
-    match v {
-        "healthy" => Ok(EndpointHealth::Healthy),
-        "unhealthy" => Ok(EndpointHealth::Unhealthy),
-        "removed" => Ok(EndpointHealth::Removed),
-        _ => Err(ApiError::internal("LW_ACCESS_STORE_CORRUPT")),
-    }
-}
-
-fn optional_contract_string(contract: &Value, field: &str) -> Result<Option<String>, ApiError> {
-    match contract.get(field) {
-        Some(Value::String(value)) if !value.is_empty() => Ok(Some(value.clone())),
-        Some(Value::Null) | None => Ok(None),
-        _ => Err(ApiError::internal("LW_ACCESS_STORE_CORRUPT")),
-    }
-}
-
-fn optional_contract_u16(contract: &Value, field: &str) -> Result<Option<u16>, ApiError> {
-    match contract.get(field) {
-        Some(Value::Number(value)) => value
-            .as_u64()
-            .and_then(|value| u16::try_from(value).ok())
-            .map(Some)
-            .ok_or_else(|| ApiError::internal("LW_ACCESS_STORE_CORRUPT")),
-        Some(Value::Null) | None => Ok(None),
-        _ => Err(ApiError::internal("LW_ACCESS_STORE_CORRUPT")),
-    }
-}
-fn grant_state_str(s: AccessGrantState) -> &'static str {
-    match s {
-        AccessGrantState::Requested => "requested",
-        AccessGrantState::Active => "active",
-        AccessGrantState::Denied => "denied",
-        AccessGrantState::Expired => "expired",
-        AccessGrantState::Revoked => "revoked",
-    }
-}
-fn parse_grant_state(v: &str) -> Result<AccessGrantState, ApiError> {
-    match v {
-        "requested" => Ok(AccessGrantState::Requested),
-        "active" => Ok(AccessGrantState::Active),
-        "denied" => Ok(AccessGrantState::Denied),
-        "expired" => Ok(AccessGrantState::Expired),
-        "revoked" => Ok(AccessGrantState::Revoked),
-        _ => Err(ApiError::internal("LW_ACCESS_STORE_CORRUPT")),
-    }
-}
-fn session_state_str(s: GatewaySessionState) -> &'static str {
-    match s {
-        GatewaySessionState::Active => "active",
-        GatewaySessionState::Terminating => "terminating",
-        GatewaySessionState::TerminationOverdue => "termination_overdue",
-        GatewaySessionState::Closed => "closed",
-    }
-}
-fn parse_session_state(v: &str) -> Result<GatewaySessionState, ApiError> {
-    match v {
-        "active" => Ok(GatewaySessionState::Active),
-        "terminating" => Ok(GatewaySessionState::Terminating),
-        "termination_overdue" => Ok(GatewaySessionState::TerminationOverdue),
-        "closed" => Ok(GatewaySessionState::Closed),
-        _ => Err(ApiError::internal("LW_ACCESS_STORE_CORRUPT")),
-    }
-}
-fn revision(v: i64) -> Result<Revision, ApiError> {
-    Revision::new(u64::try_from(v).map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?)
-        .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))
-}
-fn typed_id<T: FromStr>(v: Uuid) -> Result<T, ApiError> {
-    v.to_string()
-        .parse()
-        .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))
 }
 
 #[cfg(test)]

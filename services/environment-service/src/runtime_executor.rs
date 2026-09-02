@@ -1378,9 +1378,10 @@ mod namespace_identity_tests {
     }
 }
 
-fn read_secret(path: &PathBuf) -> Result<String, ProviderFailure> {
-    let value = std::fs::read_to_string(path).map_err(|_| rejected())?;
-    let value = value.trim();
+fn read_secret(path: &std::path::Path) -> Result<String, ProviderFailure> {
+    let raw = auth::crypto::read_secret(path).map_err(|_| rejected())?;
+    let value_str = String::from_utf8(raw).map_err(|_| rejected())?;
+    let value = value_str.trim();
     if value.is_empty() || value.bytes().any(|byte| byte.is_ascii_control()) {
         return Err(rejected());
     }

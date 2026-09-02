@@ -8,6 +8,12 @@ use chacha20poly1305::{
     aead::{Aead, OsRng, rand_core::RngCore},
 };
 
+/// Reads the contents of a secret file from disk as raw bytes.
+/// This is the shared helper used by services to load TLS/SSH private keys.
+pub fn read_secret(path: &std::path::Path) -> Result<Vec<u8>, std::io::Error> {
+    std::fs::read(path)
+}
+
 /// Versioned authenticated-encryption key material.
 #[derive(Clone)]
 pub struct KeyRing {

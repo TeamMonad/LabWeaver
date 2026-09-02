@@ -11,10 +11,7 @@ use std::str::FromStr; // internal persistence hash, not contract hash
 use contracts::{
     ActorId, CourseId, DiagnosticCode, EnvironmentId, EventId, FrozenSubmissionId, OperationId,
     Revision, Sequence, UtcTimestamp,
-    events::{
-        CloudEvent, EVENT_CONTRACTS, EventContract, SPEC_VERSION, SubmissionFreezeRequested,
-        subjects,
-    },
+    events::{CloudEvent, EventContract, SPEC_VERSION, SubmissionFreezeRequested, subjects},
     http::OperationAccepted,
     submission::SubmissionManifest,
 };
@@ -361,7 +358,8 @@ async fn enqueue_requested(
     command: &SubmissionFreezeCommand,
     __manifest_sha256: Sha256Digest,
 ) -> Result<(), FreezeCommandStoreError> {
-    let contract = event_contract(subjects::SUBMISSION_FREEZE_REQUESTED)?;
+    let contract = EventContract::by_subject(subjects::SUBMISSION_FREEZE_REQUESTED)
+        .ok_or(FreezeCommandStoreError::ContractInvalid)?;
     let event_id = EventId::new();
     let envelope = CloudEvent {
         specversion: SPEC_VERSION.to_owned(),
@@ -435,14 +433,6 @@ fn accepted(
         revision: Revision::new(1).map_err(|_| FreezeCommandStoreError::ContractInvalid)?,
         status_url: format!("/api/v1/frozen-submissions/{submission_id}"),
     })
-}
-
-fn event_contract(subject: &str) -> Result<EventContract, FreezeCommandStoreError> {
-    EVENT_CONTRACTS
-        .iter()
-        .copied()
-        .find(|contract| contract.subject == subject)
-        .ok_or(FreezeCommandStoreError::ContractInvalid)
 }
 
 fn parse_id<T: FromStr<Err = uuid::Error>>(

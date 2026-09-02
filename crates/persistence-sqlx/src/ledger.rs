@@ -270,3 +270,75 @@ fn validate_token(label: &str, value: &str) -> Result<(), PersistenceError> {
     }
     Ok(())
 }
+
+/// Returns `true` if the error is a `PostgreSQL` unique-constraint violation (code 23505).
+#[must_use]
+pub fn is_unique_violation(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(sqlx::error::DatabaseError::code)
+        .is_some_and(|code| code == "23505")
+}
+
+/// A pending outbox row fetched for dispatch.
+#[derive(Debug)]
+pub struct OutboxRow {
+    /// The outbox event identifier.
+    pub event_id: Uuid,
+    /// NATS subject for delivery.
+    pub subject: String,
+    /// `CloudEvent` type string.
+    pub event_type: String,
+    /// Serialized `CloudEvent` payload.
+    pub payload: Value,
+    /// SHA-256 hash of the canonical payload.
+    pub stored_hash: String,
+}
+
+impl OutboxStore {
+    /// Fetches the next unpublished outbox row using `FOR UPDATE SKIP LOCKED`.
+    ///
+    /// Pass the fully qualified table path (e.g. `"control.outbox_events"`).
+    pub async fn fetch_next_pending(
+        transaction: &mut Transaction<'_, Postgres>,
+        table_path: &str,
+    ) -> Result<Option<OutboxRow>, PersistenceError> {
+        let query = format!(
+            "SELECT event_id, subject, event_type, payload, payload_sha256 \
+             FROM {table_path} WHERE published_at IS NULL \
+             ORDER BY created_at, event_id FOR UPDATE SKIP LOCKED LIMIT 1"
+        );
+        let row = sqlx::query(&query)
+            .fetch_optional(&mut **transaction)
+            .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        Ok(Some(OutboxRow {
+            event_id: row.try_get("event_id")?,
+            subject: row.try_get("subject")?,
+            event_type: row.try_get("event_type")?,
+            payload: row.try_get("payload")?,
+            stored_hash: row.try_get("payload_sha256")?,
+        }))
+    }
+
+    /// Marks an outbox row as published.
+    ///
+    /// Returns `true` if exactly one row was updated (i.e. no fence).
+    pub async fn mark_published(
+        transaction: &mut Transaction<'_, Postgres>,
+        table_path: &str,
+        event_id: Uuid,
+    ) -> Result<bool, PersistenceError> {
+        let query = format!(
+            "UPDATE {table_path} SET published_at=date_trunc('milliseconds', clock_timestamp()) \
+             WHERE event_id=$1 AND published_at IS NULL"
+        );
+        let updated = sqlx::query(&query)
+            .bind(event_id)
+            .execute(&mut **transaction)
+            .await?;
+        Ok(updated.rows_affected() == 1)
+    }
+}

@@ -9,8 +9,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use contracts::events::{
-    AgentBuildCompleted, AgentBuildFailed, AgentBuildRequested, CloudEvent, EVENT_CONTRACTS,
-    SPEC_VERSION, subjects,
+    AgentBuildCompleted, AgentBuildFailed, AgentBuildRequested, CloudEvent, SPEC_VERSION, subjects,
 };
 use contracts::http::{
     IdempotencyKey, InternalAgentBuildCancellationRequest, InternalAgentBuildCancellationResult,
@@ -71,7 +70,9 @@ impl PgBuildStore {
         consumer: &str,
         event: &CloudEvent<AgentBuildRequested>,
     ) -> Result<BuildCommandDecision, BuildStoreError> {
-        let contract = event_contract(subjects::AGENT_BUILD_REQUESTED)?;
+        let contract =
+            contracts::events::EventContract::by_subject(subjects::AGENT_BUILD_REQUESTED)
+                .ok_or(BuildStoreError::ContractInvalid)?;
         event
             .validate(contract)
             .map_err(|_| BuildStoreError::ContractInvalid)?;
@@ -118,7 +119,10 @@ impl PgBuildStore {
                 .execute(&mut *transaction)
                 .await
                 .map_err(|error| {
-                    if is_unique_violation(&error) {
+                    if error
+                        .as_database_error()
+                        .is_some_and(sqlx::error::DatabaseError::is_unique_violation)
+                    {
                         BuildStoreError::IdentityMismatch
                     } else {
                         BuildStoreError::Database(error)
@@ -432,7 +436,12 @@ impl PgBuildStore {
             .parse::<Sha256Digest>()
             .map_err(|_| BuildStoreError::ContractInvalid)?;
         let state = parse_build_state(&row.try_get::<String, _>("state")?)?;
-        let revision = revision_from_i64(row.try_get("revision")?)?;
+        let revision = {
+            let val: i64 = row
+                .try_get::<i64, _>("revision")
+                .map_err(|_| BuildStoreError::ContractInvalid)?;
+            Revision::try_from(val).map_err(|_| BuildStoreError::ContractInvalid)?
+        };
         if course_id != request.course_id {
             return Err(BuildStoreError::CourseMismatch);
         }
@@ -445,13 +454,7 @@ impl PgBuildStore {
         ) {
             return Err(BuildStoreError::StateConflict);
         }
-        let next_revision = Revision::new(
-            revision
-                .get()
-                .checked_add(1)
-                .ok_or(BuildStoreError::ContractInvalid)?,
-        )
-        .map_err(|_| BuildStoreError::ContractInvalid)?;
+        let next_revision = revision.next().ok_or(BuildStoreError::ContractInvalid)?;
         let updated = sqlx::query(
             "UPDATE agent.build_commands SET cancellation_requested=true,cancellation_audit_version=1,revision=$2, \
                  cancellation_actor_id=$3,cancellation_authority_san_uri=$4, \
@@ -459,11 +462,11 @@ impl PgBuildStore {
              WHERE build_request_id=$1 AND revision=$6 AND state=$7",
         )
         .bind(request.build_request_id.as_uuid())
-        .bind(i64::try_from(next_revision.get()).map_err(|_| BuildStoreError::ContractInvalid)?)
+        .bind(next_revision.to_i64().ok_or(BuildStoreError::ContractInvalid)?)
         .bind(request.actor_id.as_uuid())
         .bind(&request.authority_san_uri)
         .bind(request.requested_at.get())
-        .bind(i64::try_from(revision.get()).map_err(|_| BuildStoreError::ContractInvalid)?)
+        .bind(revision.to_i64().ok_or(BuildStoreError::ContractInvalid)?)
         .bind(build_state_name(state))
         .execute(&mut *transaction)
         .await?;
@@ -513,11 +516,15 @@ impl PgBuildStore {
         if course_id != query.course_id {
             return Err(BuildStoreError::CourseMismatch);
         }
+        let rev_val: i64 = row
+            .try_get::<i64, _>("revision")
+            .map_err(|_| BuildStoreError::ContractInvalid)?;
+        let revision = Revision::try_from(rev_val).map_err(|_| BuildStoreError::ContractInvalid)?;
         Ok(InternalAgentBuildCancellationResult {
             course_id,
             build_request_id,
             state: parse_build_state(&row.try_get::<String, _>("state")?)?,
-            revision: revision_from_i64(row.try_get("revision")?)?,
+            revision,
             cancellation_requested: row.try_get("cancellation_requested")?,
         })
     }
@@ -740,7 +747,8 @@ async fn enqueue_terminal_event<T: serde::Serialize>(
     if trace_id.trim().is_empty() {
         return Err(BuildStoreError::ContractInvalid);
     }
-    let contract = event_contract(subject)?;
+    let contract = contracts::events::EventContract::by_subject(subject)
+        .ok_or(BuildStoreError::ContractInvalid)?;
     let event_id = EventId::new();
     let event = CloudEvent {
         specversion: SPEC_VERSION.to_owned(),
@@ -790,14 +798,6 @@ fn container_identity(
     }
 }
 
-fn event_contract(subject: &str) -> Result<contracts::events::EventContract, BuildStoreError> {
-    EVENT_CONTRACTS
-        .iter()
-        .copied()
-        .find(|contract| contract.subject == subject)
-        .ok_or(BuildStoreError::ContractInvalid)
-}
-
 fn canonical_hash<T: serde::Serialize>(value: &T) -> Result<Sha256Digest, BuildStoreError> {
     Sha256Digest::of_canonical(value).map_err(|_| BuildStoreError::ContractInvalid)
 }
@@ -823,11 +823,6 @@ const fn build_state_name(state: InternalAgentBuildState) -> &'static str {
     }
 }
 
-fn revision_from_i64(value: i64) -> Result<Revision, BuildStoreError> {
-    Revision::new(u64::try_from(value).map_err(|_| BuildStoreError::ContractInvalid)?)
-        .map_err(|_| BuildStoreError::ContractInvalid)
-}
-
 fn valid_worker_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -846,13 +841,6 @@ fn add_duration(
         .checked_add(duration)
         .ok_or(BuildStoreError::ClockInvalid)?;
     UtcTimestamp::from_utc(value).map_err(|_| BuildStoreError::ClockInvalid)
-}
-
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    error
-        .as_database_error()
-        .and_then(sqlx::error::DatabaseError::code)
-        .is_some_and(|code| code == "23505")
 }
 
 #[derive(Debug, thiserror::Error)]

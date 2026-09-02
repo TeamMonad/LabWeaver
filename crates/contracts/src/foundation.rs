@@ -124,6 +124,43 @@ impl Revision {
     pub const fn get(self) -> u64 {
         self.0
     }
+
+    /// Increments the revision by one, returning `None` on overflow.
+    #[must_use]
+    #[inline]
+    pub fn next(self) -> Option<Self> {
+        self.0.checked_add(1).map(Self)
+    }
+
+    /// Converts the revision to an i64 (safe: u64 fits in i64 only when <= i64::MAX).
+    #[must_use]
+    #[inline]
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "we guard against overflow before casting"
+    )]
+    pub fn to_i64(self) -> Option<i64> {
+        if self.0 > i64::MAX as u64 {
+            None
+        } else {
+            Some(self.0 as i64)
+        }
+    }
+}
+
+#[allow(
+    clippy::cast_sign_loss,
+    reason = "positive i64 is checked before conversion"
+)]
+impl TryFrom<i64> for Revision {
+    type Error = FoundationError;
+
+    fn try_from(value: i64) -> Result<Self, Self::Error> {
+        if value <= 0 {
+            return Err(FoundationError::ZeroRevision);
+        }
+        Ok(Self(value as u64))
+    }
 }
 
 impl<'de> Deserialize<'de> for Revision {

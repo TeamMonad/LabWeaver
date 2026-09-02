@@ -9,9 +9,7 @@ use contracts::environment::{
     EnvironmentLeaseAuthorization, EnvironmentLeaseState, EnvironmentLeaseVerificationRequest,
     EnvironmentLeaseVerificationResponse,
 };
-use contracts::events::{
-    CloudEvent, EVENT_CONTRACTS, ResourceLeaseChanged, ResourceRequestChanged, subjects,
-};
+use contracts::events::{CloudEvent, ResourceLeaseChanged, ResourceRequestChanged, subjects};
 use contracts::http::IdempotencyKey;
 use contracts::resource::{
     CapacityClaim, CapacityClaimState, ResourceApproval, ResourceLease, ResourceLeaseState,
@@ -1545,7 +1543,8 @@ async fn enqueue_request_event(
     subject: &str,
     trace_id: &str,
 ) -> Result<(), ResourceStoreError> {
-    let contract = event_contract(subject)?;
+    let contract = contracts::events::EventContract::by_subject(subject)
+        .ok_or(ResourceStoreError::EventContractInvalid)?;
     let event_id = EventId::new();
     let payload = serde_json::to_value(CloudEvent {
         specversion: contracts::events::SPEC_VERSION.into(),
@@ -1587,7 +1586,8 @@ async fn enqueue_lease_event(
     subject: &str,
     trace_id: &str,
 ) -> Result<(), ResourceStoreError> {
-    let contract = event_contract(subject)?;
+    let contract = contracts::events::EventContract::by_subject(subject)
+        .ok_or(ResourceStoreError::EventContractInvalid)?;
     let event_id = EventId::new();
     let payload = serde_json::to_value(CloudEvent {
         specversion: contracts::events::SPEC_VERSION.into(),
@@ -1621,14 +1621,6 @@ async fn enqueue_lease_event(
     )
     .await?;
     Ok(())
-}
-
-fn event_contract(subject: &str) -> Result<contracts::events::EventContract, ResourceStoreError> {
-    EVENT_CONTRACTS
-        .iter()
-        .copied()
-        .find(|contract| contract.subject == subject)
-        .ok_or(ResourceStoreError::EventContractInvalid)
 }
 
 async fn database_now(

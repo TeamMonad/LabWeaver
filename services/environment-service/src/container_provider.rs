@@ -1084,7 +1084,7 @@ impl PgReleaseProjectionStore {
                 .execute(&mut *transaction)
                 .await
                 .map_err(|error| {
-                    if is_unique_violation(&error) {
+                    if error.as_database_error().is_some_and(sqlx::error::DatabaseError::is_unique_violation) {
                         ReleaseProjectionError::IdentityMismatch
                     } else {
                         ReleaseProjectionError::Database(error)
@@ -1856,13 +1856,6 @@ fn valid_dns_label(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-}
-
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    error
-        .as_database_error()
-        .and_then(sqlx::error::DatabaseError::code)
-        .is_some_and(|code| code == "23505")
 }
 
 const fn unavailable() -> ProviderFailure {

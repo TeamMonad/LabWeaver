@@ -30,6 +30,9 @@ tokio.workspace = true
 url.workspace = true
 uuid.workspace = true
 
+[dependencies.async-nats]
+workspace = true
+
 [dev-dependencies]
 axum.workspace = true
 environment-service = { path = "../../services/environment-service" }

@@ -132,7 +132,7 @@ fn required_path(name: &'static str) -> Result<PathBuf, OwnerResolverRuntimeErro
 }
 
 fn read_secret(path: &Path) -> Result<Vec<u8>, OwnerResolverRuntimeError> {
-    std::fs::read(path).map_err(|_| OwnerResolverRuntimeError::SecretRead)
+    auth::crypto::read_secret(path).map_err(|_| OwnerResolverRuntimeError::SecretRead)
 }
 
 /// Stable startup failures which never expose database URLs, paths, or certificate contents.

@@ -68,14 +68,6 @@ pub fn router(state: Arc<AgentApiState>) -> Router {
 }
 
 /// Serves internal Agent routes over plain HTTP for private single-university delivery.
-pub async fn serve_mtls(
-    listener: tokio::net::TcpListener,
-    router: Router,
-    _mtls: (),
-) -> Result<(), std::io::Error> {
-    serve_plain(listener, router).await
-}
-
 pub async fn serve_plain(
     listener: tokio::net::TcpListener,
     router: Router,

@@ -1,6 +1,7 @@
 //! Access Service browser BFF entry points.
 
 mod console;
+mod grant_helpers;
 mod grants;
 mod proxy;
 

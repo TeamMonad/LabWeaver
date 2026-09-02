@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 async-trait.workspace = true
 artifact-store = { path = "../../crates/artifact-store" }
+auth = { path = "../../crates/auth" }
 async-nats = { version = "=0.45.0", default-features = false, features = ["ring", "server_2_10", "server_2_11"] }
 axum = { workspace = true, features = ["ws"] }
 base64.workspace = true

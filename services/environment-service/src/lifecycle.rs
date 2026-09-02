@@ -3,7 +3,7 @@ use contracts::environment::{
     EnvironmentInstance, EnvironmentLeaseAuthorization, EnvironmentLifecycleCommand,
     EnvironmentOperation, EnvironmentOperationKind, ObservedEnvironmentState, OperationState,
 };
-use contracts::{ArtifactRef, OperationId, Revision, UtcTimestamp};
+use contracts::{ArtifactRef, OperationId, UtcTimestamp};
 use serde::{Deserialize, Serialize};
 
 /// Repository-facing alias for the contracts-owned lifecycle command.
@@ -158,7 +158,10 @@ pub fn plan_command_authorized(
     }
 
     let mut planned = current.clone();
-    planned.revision = next_revision(current.revision)?;
+    planned.revision = current
+        .revision
+        .next()
+        .ok_or(LifecycleError::RevisionOverflow)?;
     planned.desired_state = desired_state(current, command.kind);
     planned.observed_state = accepted_observed_state(current, command.kind)?;
     if increments_generation(command.kind) {
@@ -220,7 +223,10 @@ pub fn apply_provider_observation(
         EnvironmentInstance::ensure_transition(current.observed_state, observation.next_state)?;
     }
     let mut updated = current.clone();
-    updated.revision = next_revision(current.revision)?;
+    updated.revision = current
+        .revision
+        .next()
+        .ok_or(LifecycleError::RevisionOverflow)?;
     updated.observed_state = observation.next_state;
     updated.endpoints = observation.endpoints;
     updated.cleanup_evidence = observation.cleanup_evidence;
@@ -282,7 +288,10 @@ pub fn begin_timeout_cleanup(
         )?;
     }
     let mut updated = current.clone();
-    updated.revision = next_revision(current.revision)?;
+    updated.revision = current
+        .revision
+        .next()
+        .ok_or(LifecycleError::RevisionOverflow)?;
     if updated.desired_state != DesiredEnvironmentState::Deleted {
         updated.generation = current
             .generation
@@ -328,7 +337,10 @@ pub fn apply_retry(
         return Err(LifecycleError::RetryTimeInvalid);
     }
     let mut updated = current.clone();
-    updated.revision = next_revision(current.revision)?;
+    updated.revision = current
+        .revision
+        .next()
+        .ok_or(LifecycleError::RevisionOverflow)?;
     updated.operation.attempt += 1;
     updated.operation.next_attempt_at = next_attempt_at;
     updated.operation.state = OperationState::Accepted;
@@ -353,7 +365,10 @@ pub fn apply_provider_failure(
         )?;
     }
     let mut updated = current.clone();
-    updated.revision = next_revision(current.revision)?;
+    updated.revision = current
+        .revision
+        .next()
+        .ok_or(LifecycleError::RevisionOverflow)?;
     updated.observed_state = ObservedEnvironmentState::Failed;
     updated.failed_phase = Some(current.observed_state);
     updated.operation.state = OperationState::Failed;
@@ -467,14 +482,6 @@ fn validate_provider_observation(
         return Err(LifecycleError::ProviderObservationInvalid);
     }
     Ok(())
-}
-
-fn next_revision(current: Revision) -> Result<Revision, LifecycleError> {
-    let value = current
-        .get()
-        .checked_add(1)
-        .ok_or(LifecycleError::RevisionOverflow)?;
-    Revision::new(value).map_err(|_| LifecycleError::RevisionOverflow)
 }
 
 const fn increments_generation(kind: EnvironmentOperationKind) -> bool {

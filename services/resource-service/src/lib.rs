@@ -90,7 +90,10 @@ impl ResourceLifecycle {
         }
         let mut next = request.clone();
         next.state = ResourceRequestState::Allocating;
-        next.revision = increment(request.revision)?;
+        next.revision = request
+            .revision
+            .next()
+            .ok_or(LifecycleError::RevisionOverflow)?;
         next.updated_at = now;
         next.diagnostic_code = None;
         Ok(next)
@@ -198,7 +201,10 @@ impl ResourceLifecycle {
         }
         let mut next = lease.clone();
         next.state = ResourceLeaseState::Active;
-        next.revision = increment(lease.revision)?;
+        next.revision = lease
+            .revision
+            .next()
+            .ok_or(LifecycleError::RevisionOverflow)?;
         next.active_from = Some(active_from);
         next.expires_at = Some(expires_at);
         next.updated_at = active_from;
@@ -317,20 +323,13 @@ fn transition(
     }
     let mut next = request.clone();
     next.state = to;
-    next.revision = increment(request.revision)?;
+    next.revision = request
+        .revision
+        .next()
+        .ok_or(LifecycleError::RevisionOverflow)?;
     next.updated_at = now;
     next.diagnostic_code = None;
     Ok(next)
-}
-
-fn increment(revision: Revision) -> Result<Revision, LifecycleError> {
-    Revision::new(
-        revision
-            .get()
-            .checked_add(1)
-            .ok_or(LifecycleError::RevisionOverflow)?,
-    )
-    .map_err(|_| LifecycleError::RevisionOverflow)
 }
 
 fn transition_lease(
@@ -345,7 +344,10 @@ fn transition_lease(
     }
     let mut next = lease.clone();
     next.state = state;
-    next.revision = increment(lease.revision)?;
+    next.revision = lease
+        .revision
+        .next()
+        .ok_or(LifecycleError::RevisionOverflow)?;
     next.active_from = lease.active_from;
     next.expires_at = expires_at;
     next.revoke_reason_code = reason;

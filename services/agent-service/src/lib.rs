@@ -13,4 +13,5 @@ pub mod build_store;
 pub mod classifier;
 pub mod claude_code;
 pub mod messaging;
+pub mod run_helpers;
 pub mod run_store;

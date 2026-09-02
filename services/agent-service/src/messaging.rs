@@ -34,23 +34,13 @@ pub async fn connect_nats_mtls(
     key: PathBuf,
     credentials: PathBuf,
 ) -> Result<async_nats::Client, AgentMessagingError> {
-    if server.trim().is_empty()
-        || [&ca, &certificate, &key, &credentials]
-            .iter()
-            .any(|path| path.as_os_str().is_empty())
-    {
-        return Err(AgentMessagingError::Configuration);
-    }
-    async_nats::ConnectOptions::new()
-        .require_tls(true)
-        .add_root_certificates(ca)
-        .add_client_certificate(certificate, key)
-        .credentials_file(credentials)
+    auth::nats::connect_mtls(server, ca, certificate, key, credentials)
         .await
-        .map_err(|_| AgentMessagingError::Credentials)?
-        .connect(server)
-        .await
-        .map_err(|_| AgentMessagingError::Connect)
+        .map_err(|e| match e {
+            auth::NatsMtlsError::Configuration => AgentMessagingError::Configuration,
+            auth::NatsMtlsError::Credentials(_) => AgentMessagingError::Credentials,
+            auth::NatsMtlsError::Connect(_) => AgentMessagingError::Connect,
+        })
 }
 
 /// Bounded `PostgreSQL` Outbox dispatcher.

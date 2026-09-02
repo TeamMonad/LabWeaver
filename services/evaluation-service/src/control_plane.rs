@@ -25,8 +25,8 @@ use contracts::{
         EvaluationStepRun, EvaluationStepRunState, StudentEvaluationResult,
     },
     events::{
-        CloudEvent, EVENT_CONTRACTS, EvaluationReleasePublished, EvaluationRunEvent,
-        EvaluationStepRunEvent, EventContract, SPEC_VERSION, subjects,
+        CloudEvent, EvaluationReleasePublished, EvaluationRunEvent, EvaluationStepRunEvent,
+        EventContract, SPEC_VERSION, subjects,
     },
     http::{
         CursorPage, IdempotencyKey, InternalCreateEvaluationRunRequest,
@@ -38,6 +38,8 @@ use persistence_sqlx::{Domain, IdempotencyDecision, IdempotencyStore, OutboxStor
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
+
+use super::control_helpers::{run_state_name, step_failure_policy_name, step_role_name, step_state_name};
 
 const PUBLISH_RELEASE_OPERATION: &str = "publish_evaluation_release_v1";
 const WITHDRAW_RELEASE_OPERATION: &str = "withdraw_evaluation_release_v1";
@@ -189,15 +191,15 @@ impl PgEvaluationControlStore {
         .bind(release.id.as_uuid())
         .bind(release.course_id.as_uuid())
         .bind(release.candidate_id.as_uuid())
-        .bind(revision_i64(release.candidate_revision)?)
+        .bind(release.candidate_revision.to_i64().ok_or(EvaluationControlStoreError::ContractInvalid)?)
         .bind(Sha256Digest::of_bytes(b"candidate").to_string())
         .bind(release.approval_id.as_uuid())
-        .bind(revision_i64(release.approval_revision)?)
+        .bind(release.approval_revision.to_i64().ok_or(EvaluationControlStoreError::ContractInvalid)?)
         .bind(Sha256Digest::of_bytes(b"approval").to_string())
         .bind(spec_sha256.to_string())
         .bind(runtime_identity_sha256.to_string())
         .bind(release_identity_sha256.to_string())
-        .bind(revision_i64(release.revision)?)
+        .bind(release.revision.to_i64().ok_or(EvaluationControlStoreError::ContractInvalid)?)
         .bind(&contract)
         .bind(release.published_by.as_uuid())
         .bind(now.get())
@@ -348,7 +350,10 @@ impl PgEvaluationControlStore {
             return Err(EvaluationControlStoreError::StateConflict);
         }
         release.state = EvaluationReleaseState::Withdrawn;
-        release.revision = next_revision(release.revision)?;
+        release.revision = release
+            .revision
+            .next()
+            .ok_or(EvaluationControlStoreError::ContractInvalid)?;
         release.withdrawn_at = Some(now);
         release.withdrawal_diagnostic_code = Some(request.reason_code.clone());
         release.validate()?;
@@ -359,7 +364,12 @@ impl PgEvaluationControlStore {
              withdrawn_at=$4,withdrawal_diagnostic_code=$5,updated_at=$4 WHERE release_id=$1",
         )
         .bind(release.id.as_uuid())
-        .bind(revision_i64(release.revision)?)
+        .bind(
+            release
+                .revision
+                .to_i64()
+                .ok_or(EvaluationControlStoreError::ContractInvalid)?,
+        )
         .bind(&contract)
         .bind(now.get())
         .bind(request.reason_code.as_str())
@@ -373,7 +383,12 @@ impl PgEvaluationControlStore {
         )
         .bind(release.id.as_uuid())
         .bind(release.course_id.as_uuid())
-        .bind(revision_i64(release.revision)?)
+        .bind(
+            release
+                .revision
+                .to_i64()
+                .ok_or(EvaluationControlStoreError::ContractInvalid)?,
+        )
         .bind(request.withdrawn_by.as_uuid())
         .bind(request.reason_code.as_str())
         .bind(idempotency_key.as_str())
@@ -501,13 +516,21 @@ impl PgEvaluationControlStore {
         .bind(run.id.as_uuid())
         .bind(run.course_id.as_uuid())
         .bind(run.release_id.as_uuid())
-        .bind(revision_i64(run.release_revision)?)
+        .bind(
+            run.release_revision
+                .to_i64()
+                .ok_or(EvaluationControlStoreError::ContractInvalid)?,
+        )
         .bind(run.frozen_submission_id.as_uuid())
         .bind(run.actor_id.as_uuid())
         .bind(idempotency_key.as_str())
         .bind(request_sha256.to_string())
         .bind(run_identity_sha256.to_string())
-        .bind(revision_i64(run.revision)?)
+        .bind(
+            run.revision
+                .to_i64()
+                .ok_or(EvaluationControlStoreError::ContractInvalid)?,
+        )
         .bind(i32::try_from(run.max_score).map_err(|_| EvaluationControlStoreError::ScoreInvalid)?)
         .bind(&contract)
         .bind(now.get())
@@ -764,7 +787,10 @@ impl PgEvaluationControlStore {
                 } else {
                     EvaluationRunState::Cancelled
                 };
-                run.revision = next_revision(run.revision)?;
+                run.revision = run
+                    .revision
+                    .next()
+                    .ok_or(EvaluationControlStoreError::ContractInvalid)?;
                 run.updated_at = now;
                 changed_step_ids = cancel_unstarted_steps(&mut transaction, &mut run, now).await?;
                 if run.state == EvaluationRunState::Cancelled {
@@ -791,7 +817,10 @@ impl PgEvaluationControlStore {
                     return Err(EvaluationControlStoreError::StateConflict);
                 }
                 step.state = EvaluationStepRunState::Retryable;
-                step.revision = next_revision(step.revision)?;
+                step.revision = step
+                    .revision
+                    .next()
+                    .ok_or(EvaluationControlStoreError::ContractInvalid)?;
                 step.awarded_score = None;
                 step.diagnostic_code = None;
                 step.started_at = None;
@@ -811,7 +840,10 @@ impl PgEvaluationControlStore {
                 run.diagnostic_code = None;
                 run.completed_at = None;
                 run.cleanup_verified = false;
-                run.revision = next_revision(run.revision)?;
+                run.revision = run
+                    .revision
+                    .next()
+                    .ok_or(EvaluationControlStoreError::ContractInvalid)?;
                 run.updated_at = now;
             }
             MutationKind::VerifyStepCleanup => {
@@ -832,11 +864,17 @@ impl PgEvaluationControlStore {
                     return Err(EvaluationControlStoreError::StateConflict);
                 }
                 step.cleanup_verified = true;
-                step.revision = next_revision(step.revision)?;
+                step.revision = step
+                    .revision
+                    .next()
+                    .ok_or(EvaluationControlStoreError::ContractInvalid)?;
                 mark_attempt_cleanup_verified(&mut transaction, &step, now).await?;
                 save_step(&mut transaction, &step).await?;
                 push_step_change(&mut changed_step_ids, step.id);
-                run.revision = next_revision(run.revision)?;
+                run.revision = run
+                    .revision
+                    .next()
+                    .ok_or(EvaluationControlStoreError::ContractInvalid)?;
                 run.updated_at = now;
             }
         }
@@ -916,7 +954,10 @@ impl PgEvaluationControlStore {
         let lease_expires_at = now.get() + time::Duration::milliseconds(lease_milliseconds);
         let runtime_identity_sha256 = runtime_identity_sha256(&run.identity.runtime_identity)?;
         step.state = EvaluationStepRunState::Running;
-        step.revision = next_revision(step.revision)?;
+        step.revision = step
+            .revision
+            .next()
+            .ok_or(EvaluationControlStoreError::ContractInvalid)?;
         step.current_attempt = attempt;
         step.awarded_score = None;
         step.diagnostic_code = None;
@@ -947,7 +988,10 @@ impl PgEvaluationControlStore {
         if run.state == EvaluationRunState::Queued {
             run.state = EvaluationRunState::Running;
         }
-        run.revision = next_revision(run.revision)?;
+        run.revision = run
+            .revision
+            .next()
+            .ok_or(EvaluationControlStoreError::ContractInvalid)?;
         run.updated_at = now;
         let trace_id = run.identity.trace_id.clone();
         refresh_and_save_run(&mut transaction, &mut run, now, &[step.id], &trace_id, None).await?;
@@ -1052,7 +1096,10 @@ impl PgEvaluationControlStore {
         let completed_at = UtcTimestamp::from_utc(completed_at)
             .map_err(|_| EvaluationControlStoreError::ClockInvalid)?;
         step.state = completion.state;
-        step.revision = next_revision(step.revision)?;
+        step.revision = step
+            .revision
+            .next()
+            .ok_or(EvaluationControlStoreError::ContractInvalid)?;
         step.awarded_score = completion.awarded_score;
         step.diagnostic_code.clone_from(&completion.diagnostic_code);
         step.cleanup_verified = completion.cleanup_verified;
@@ -1074,7 +1121,10 @@ impl PgEvaluationControlStore {
                 .await?,
             );
         }
-        run.revision = next_revision(run.revision)?;
+        run.revision = run
+            .revision
+            .next()
+            .ok_or(EvaluationControlStoreError::ContractInvalid)?;
         run.updated_at = completed_at;
         refresh_and_save_run(
             &mut transaction,
@@ -1132,7 +1182,10 @@ impl PgEvaluationControlStore {
                 let mut step = load_step_for_update(&mut transaction, step_run_id).await?;
                 let run_id = step.run_id;
                 step.state = EvaluationStepRunState::Failed;
-                step.revision = next_revision(step.revision)?;
+                step.revision = step
+                    .revision
+                    .next()
+                    .ok_or(EvaluationControlStoreError::ContractInvalid)?;
                 step.diagnostic_code = Some(DiagnosticCode::registered(
                     "LW_EVALUATION_STEP_LEASE_EXPIRED",
                 ));
@@ -1159,7 +1212,10 @@ impl PgEvaluationControlStore {
         }
         for (run_id, changed_step_ids) in affected_runs {
             let mut run = load_run_for_update(&mut transaction, run_id).await?;
-            run.revision = next_revision(run.revision)?;
+            run.revision = run
+                .revision
+                .next()
+                .ok_or(EvaluationControlStoreError::ContractInvalid)?;
             let trace_id = run.identity.trace_id.clone();
             refresh_and_save_run(
                 &mut transaction,
@@ -1266,7 +1322,7 @@ async fn save_new_step(
     .bind(step_role_name(step.role))
     .bind(step_failure_policy_name(step.failure_policy))
     .bind(&step.depends_on)
-    .bind(revision_i64(step.revision)?)
+    .bind(step.revision.to_i64().ok_or(EvaluationControlStoreError::ContractInvalid)?)
     .bind(i32::try_from(step.max_score).map_err(|_| EvaluationControlStoreError::ScoreInvalid)?)
     .bind(&contract)
     .bind(now.get())
@@ -1353,7 +1409,11 @@ async fn save_step(
     )
     .bind(step.id.as_uuid())
     .bind(step_state_name(step.state))
-    .bind(revision_i64(step.revision)?)
+    .bind(
+        step.revision
+            .to_i64()
+            .ok_or(EvaluationControlStoreError::ContractInvalid)?,
+    )
     .bind(
         i32::try_from(step.current_attempt)
             .map_err(|_| EvaluationControlStoreError::AttemptOverflow)?,
@@ -1480,7 +1540,11 @@ async fn refresh_and_save_run(
     )
     .bind(run.id.as_uuid())
     .bind(run_state_name(run.state))
-    .bind(revision_i64(run.revision)?)
+    .bind(
+        run.revision
+            .to_i64()
+            .ok_or(EvaluationControlStoreError::ContractInvalid)?,
+    )
     .bind(i32::try_from(run.awarded_score).map_err(|_| EvaluationControlStoreError::ScoreInvalid)?)
     .bind(run.diagnostic_code.as_ref().map(DiagnosticCode::as_str))
     .bind(run.cancellation_requested)
@@ -1525,7 +1589,10 @@ async fn cancel_unstarted_steps(
             EvaluationStepRunState::Pending | EvaluationStepRunState::Retryable
         ) {
             step.state = EvaluationStepRunState::Cancelled;
-            step.revision = next_revision(step.revision)?;
+            step.revision = step
+                .revision
+                .next()
+                .ok_or(EvaluationControlStoreError::ContractInvalid)?;
             step.diagnostic_code = Some(DiagnosticCode::registered("LW_EVALUATION_CANCELLED"));
             step.cleanup_verified = true;
             step.completed_at = Some(now);
@@ -1559,7 +1626,10 @@ async fn skip_dependency_successors(
             match step.state {
                 EvaluationStepRunState::Pending | EvaluationStepRunState::Retryable => {
                     step.state = EvaluationStepRunState::Skipped;
-                    step.revision = next_revision(step.revision)?;
+                    step.revision = step
+                        .revision
+                        .next()
+                        .ok_or(EvaluationControlStoreError::ContractInvalid)?;
                     step.awarded_score = None;
                     step.diagnostic_code = Some(DiagnosticCode::registered(
                         "LW_EVALUATION_DEPENDENCY_FAILED",
@@ -1608,7 +1678,10 @@ async fn restore_dependency_skipped_successors(
                 continue;
             }
             step.state = EvaluationStepRunState::Pending;
-            step.revision = next_revision(step.revision)?;
+            step.revision = step
+                .revision
+                .next()
+                .ok_or(EvaluationControlStoreError::ContractInvalid)?;
             step.awarded_score = None;
             step.diagnostic_code = None;
             step.cleanup_verified = false;
@@ -1679,7 +1752,8 @@ async fn enqueue_release_published(
     now: UtcTimestamp,
     trace_id: &str,
 ) -> Result<(), EvaluationControlStoreError> {
-    let contract = event_contract(subjects::EVALUATION_RELEASE_PUBLISHED)?;
+    let contract = EventContract::by_subject(subjects::EVALUATION_RELEASE_PUBLISHED)
+        .ok_or(EvaluationControlStoreError::ContractInvalid)?;
     let data = EvaluationReleasePublished {
         release_id: release.id,
         revision: release.revision,
@@ -1707,7 +1781,8 @@ async fn enqueue_run_event(
     trace_id: &str,
     operator_actor_id: Option<ActorId>,
 ) -> Result<(), EvaluationControlStoreError> {
-    let contract = event_contract(subject)?;
+    let contract =
+        EventContract::by_subject(subject).ok_or(EvaluationControlStoreError::ContractInvalid)?;
     let sequence = next_outbox_sequence(transaction, run.id.as_uuid()).await?;
     let data = EvaluationRunEvent {
         run_id: run.id,
@@ -1742,7 +1817,8 @@ async fn enqueue_step_event(
     trace_id: &str,
     operator_actor_id: Option<ActorId>,
 ) -> Result<(), EvaluationControlStoreError> {
-    let contract = event_contract(subjects::EVALUATION_STEP_RUN_STATE_CHANGED)?;
+    let contract = EventContract::by_subject(subjects::EVALUATION_STEP_RUN_STATE_CHANGED)
+        .ok_or(EvaluationControlStoreError::ContractInvalid)?;
     let sequence = next_outbox_sequence(transaction, step.id.as_uuid()).await?;
     let data = EvaluationStepRunEvent {
         run_id: run.id,
@@ -1874,33 +1950,11 @@ fn decode_step(value: Value) -> Result<EvaluationStepRun, EvaluationControlStore
     Ok(step)
 }
 
-fn event_contract(subject: &str) -> Result<EventContract, EvaluationControlStoreError> {
-    EVENT_CONTRACTS
-        .iter()
-        .copied()
-        .find(|contract| contract.subject == subject)
-        .ok_or(EvaluationControlStoreError::ContractInvalid)
-}
-
 fn parse_id<T: FromStr<Err = uuid::Error>>(value: Uuid) -> Result<T, EvaluationControlStoreError> {
     value
         .to_string()
         .parse()
         .map_err(|_| EvaluationControlStoreError::IdentityMismatch)
-}
-
-fn next_revision(revision: Revision) -> Result<Revision, EvaluationControlStoreError> {
-    Revision::new(
-        revision
-            .get()
-            .checked_add(1)
-            .ok_or(EvaluationControlStoreError::ContractInvalid)?,
-    )
-    .map_err(|_| EvaluationControlStoreError::ContractInvalid)
-}
-
-fn revision_i64(revision: Revision) -> Result<i64, EvaluationControlStoreError> {
-    i64::try_from(revision.get()).map_err(|_| EvaluationControlStoreError::ContractInvalid)
 }
 
 const fn is_terminal_run(state: EvaluationRunState) -> bool {
@@ -1932,44 +1986,6 @@ fn runtime_identity_sha256(
         .map_err(|_| EvaluationControlStoreError::IdentityMismatch)
 }
 
-const fn run_state_name(state: EvaluationRunState) -> &'static str {
-    match state {
-        EvaluationRunState::Queued => "queued",
-        EvaluationRunState::Running => "running",
-        EvaluationRunState::Cancelling => "cancelling",
-        EvaluationRunState::Succeeded => "succeeded",
-        EvaluationRunState::Failed => "failed",
-        EvaluationRunState::Cancelled => "cancelled",
-    }
-}
-
-const fn step_state_name(state: EvaluationStepRunState) -> &'static str {
-    match state {
-        EvaluationStepRunState::Pending => "pending",
-        EvaluationStepRunState::Running => "running",
-        EvaluationStepRunState::Retryable => "retryable",
-        EvaluationStepRunState::Succeeded => "succeeded",
-        EvaluationStepRunState::Failed => "failed",
-        EvaluationStepRunState::Cancelled => "cancelled",
-        EvaluationStepRunState::Skipped => "skipped",
-    }
-}
-
-const fn step_role_name(role: EvaluationStepRole) -> &'static str {
-    match role {
-        EvaluationStepRole::Gate => "gate",
-        EvaluationStepRole::Score => "score",
-        EvaluationStepRole::Advisory => "advisory",
-    }
-}
-
-const fn step_failure_policy_name(policy: EvaluationStepFailurePolicy) -> &'static str {
-    match policy {
-        EvaluationStepFailurePolicy::Stop => "stop",
-        EvaluationStepFailurePolicy::Continue => "continue",
-        EvaluationStepFailurePolicy::ContinueAdvisory => "continue_advisory",
-    }
-}
 
 fn validate_trace(trace_id: &str) -> Result<(), EvaluationControlStoreError> {
     if trace_id.trim().is_empty() || trace_id.len() > 128 || trace_id.chars().any(char::is_control)

@@ -66,8 +66,6 @@ enum Command {
     Demo(DemoCommand),
     #[command(subcommand)]
     Playwright(PlaywrightCommand),
-    #[command(subcommand)]
-    Docs(DocsCommand),
     Tools(ConfirmArgs),
     DevDeps(ConfirmArgs),
     Migrate(ConfirmArgs),
@@ -250,7 +248,6 @@ struct RestoreArgs {
 
 #[derive(Debug, Subcommand)]
 enum DemoCommand {
-    Seed(EnvironmentArgs),
     Replay,
     Reset(EnvironmentArgs),
 }
@@ -302,11 +299,6 @@ struct ResourceReplayArgs {
 #[derive(Debug, Subcommand)]
 enum PlaywrightCommand {
     Install,
-}
-
-#[derive(Debug, Subcommand)]
-enum DocsCommand {
-    Serve,
 }
 
 #[derive(Debug, Subcommand)]
@@ -518,12 +510,10 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::Restore(args) => destructive_not_implemented("restore", args.yes),
         Command::Destroy(args) => destructive_not_implemented("destroy", args.yes),
         Command::Demo(command) => match command {
-            DemoCommand::Seed(args) => not_implemented(format!("demo seed --env {}", args.env)),
             DemoCommand::Replay => demo_replay(),
             DemoCommand::Reset(args) => platform_reset(&args),
         },
         Command::Playwright(PlaywrightCommand::Install) => not_implemented("playwright install"),
-        Command::Docs(DocsCommand::Serve) => not_implemented("docs serve"),
         Command::Tools(args) => destructive_not_implemented("tools", args.yes),
         Command::DevDeps(args) => destructive_not_implemented("dev-deps", args.yes),
         Command::Migrate(args) => destructive_not_implemented("migrate", args.yes),

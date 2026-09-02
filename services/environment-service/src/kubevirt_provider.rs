@@ -1973,7 +1973,7 @@ fn ready_observation(
             operation_complete: false,
         });
     }
-    let revision = next_revision(instance.revision)?;
+    let revision = instance.revision.next().ok_or_else(invalid_observation)?;
     Ok(ProviderObservation {
         next_state: ObservedEnvironmentState::Ready,
         endpoints: vec![EnvironmentEndpoint {
@@ -2040,14 +2040,6 @@ fn valid_stopped_observation(
         && !observed.vm_uid.is_nil()
         && !observed.root_disk_uid.is_nil()
         && observed.vmi_absent
-}
-
-fn next_revision(revision: Revision) -> Result<Revision, ProviderFailure> {
-    revision
-        .get()
-        .checked_add(1)
-        .and_then(|value| Revision::new(value).ok())
-        .ok_or_else(invalid_observation)
 }
 
 fn deterministic_endpoint_id(environment_id: EnvironmentId) -> Result<EndpointId, ProviderFailure> {

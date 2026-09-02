@@ -17,6 +17,8 @@ pub mod crypto;
 pub mod csrf;
 /// Bearer JWT verifier with JWKS rotation.
 pub mod jwt;
+/// NATS mTLS connection helper shared across services.
+pub mod nats;
 /// One-time OIDC Authorization Code + PKCE transaction values.
 pub mod oidc;
 /// Environment-authoritative owner resolver mTLS client.
@@ -38,6 +40,7 @@ pub use jwt::{
     BackchannelLogoutClaims, BearerClaims, JwtVerifierError, build_backchannel_logout_authorizer,
     build_bearer_authorizer,
 };
+pub use nats::NatsMtlsError;
 pub use oidc::{OidcTransaction, OidcTransactionError};
 pub use owner_resolver::{EnvironmentOwnerResolverClient, OwnerResolverClientError};
 pub use provider::{

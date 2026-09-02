@@ -360,8 +360,10 @@ async fn resolve_availability(
         .map_err(|_| ApiError::internal("LW_ACCESS_ID_INVALID"))?;
     let environment_id = EnvironmentId::from_str(&row.get::<Uuid, _>("environment_id").to_string())
         .map_err(|_| ApiError::internal("LW_ACCESS_ID_INVALID"))?;
-    let environment_revision = revision(row.get("environment_revision"))?;
-    let access_grant_revision = revision(row.get("revision"))?;
+    let environment_revision = Revision::try_from(row.get::<i64, _>("environment_revision"))
+        .map_err(|_| ApiError::internal("LW_ACCESS_CONSOLE_RECORD_INVALID"))?;
+    let access_grant_revision = Revision::try_from(row.get::<i64, _>("revision"))
+        .map_err(|_| ApiError::internal("LW_ACCESS_CONSOLE_RECORD_INVALID"))?;
     let membership =
         grants::active_membership(&state.pool, course_id, actor_id, &session.roles).await?;
     let actor = ActorId::from_str(&actor_id.to_string())
@@ -444,10 +446,10 @@ async fn insert_capability(
            AND (cm.expires_at IS NULL OR cm.expires_at>clock_timestamp())",
     )
     .bind(capability.id.as_uuid()).bind(console_kind_db(capability.kind)).bind(capability.access_grant_id.as_uuid())
-    .bind(i64_revision(capability.access_grant_revision)?).bind(session.session_id).bind(session.actor_id)
+    .bind(capability.access_grant_revision.to_i64().ok_or(ApiError::internal("LW_ACCESS_CONSOLE_RECORD_INVALID"))?).bind(session.session_id).bind(session.actor_id)
     .bind(capability.environment_id.as_uuid()).bind(match capability.environment_class { contracts::authoring::EnvironmentClass::Experiment => "experiment", contracts::authoring::EnvironmentClass::Work => "work" })
-    .bind(i64_revision(capability.environment_revision)?).bind(lease.map(|f| f.lease_id.as_uuid()))
-    .bind(lease.map(|f| i64_revision(f.lease_revision)).transpose()?).bind(lease.map(|f| f.expires_at.get()))
+    .bind(capability.environment_revision.to_i64().ok_or(ApiError::internal("LW_ACCESS_CONSOLE_RECORD_INVALID"))?).bind(lease.map(|f| f.lease_id.as_uuid()))
+    .bind(lease.and_then(|f| f.lease_revision.to_i64()).ok_or(ApiError::internal("LW_ACCESS_CONSOLE_RECORD_INVALID"))?).bind(lease.map(|f| f.expires_at.get()))
     .bind(capability.issued_at.get()).bind(capability.expires_at.get()).bind(availability.expires_at.get())
     .bind(Sha256Digest::of_bytes(capability.connection_locator.as_bytes()).to_string())
     .bind(hex_sha(secret)).bind(&encrypted.payload).bind(&encrypted.key_id)
@@ -615,7 +617,8 @@ async fn consume_capability(
         (Some(id), Some(rev), Some(expires)) => Some(ConsoleLeaseFence {
             lease_id: FromStr::from_str(&id.to_string())
                 .map_err(|_| ApiError::internal("LW_ACCESS_ID_INVALID"))?,
-            lease_revision: revision(rev)?,
+            lease_revision: Revision::try_from(rev)
+                .map_err(|_| ApiError::internal("LW_ACCESS_CONSOLE_RECORD_INVALID"))?,
             expires_at: utc_timestamp(expires)?,
         }),
         (None, None, None) => None,
@@ -629,8 +632,10 @@ async fn consume_capability(
         .map_err(|_| ApiError::internal("LW_ACCESS_ID_INVALID"))?;
     let environment_id = EnvironmentId::from_str(&row.get::<Uuid, _>("environment_id").to_string())
         .map_err(|_| ApiError::internal("LW_ACCESS_ID_INVALID"))?;
-    let grant_revision = revision(row.get("access_grant_revision"))?;
-    let environment_revision = revision(row.get("environment_revision"))?;
+    let grant_revision = Revision::try_from(row.get::<i64, _>("access_grant_revision"))
+        .map_err(|_| ApiError::internal("LW_ACCESS_CONSOLE_RECORD_INVALID"))?;
+    let environment_revision = Revision::try_from(row.get::<i64, _>("environment_revision"))
+        .map_err(|_| ApiError::internal("LW_ACCESS_CONSOLE_RECORD_INVALID"))?;
     grants::enqueue_event_value(
         &mut tx,
         contracts::events::subjects::ACCESS_CONSOLE_SESSION_STATE_CHANGED,
@@ -792,7 +797,8 @@ pub(super) async fn enqueue_console_event(
         .bind(session_id.as_uuid()).fetch_one(&mut **tx).await.map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
     let course_id = CourseId::from_str(&row.get::<Uuid, _>("course_id").to_string())
         .map_err(|_| ApiError::internal("LW_ACCESS_ID_INVALID"))?;
-    let revision = revision(row.get("revision"))?;
+    let revision = Revision::try_from(row.get::<i64, _>("revision"))
+        .map_err(|_| ApiError::internal("LW_ACCESS_CONSOLE_RECORD_INVALID"))?;
     grants::enqueue_event_value(
         tx,
         contracts::events::subjects::ACCESS_CONSOLE_SESSION_STATE_CHANGED,
@@ -913,19 +919,10 @@ fn random_token() -> String {
 fn hex_sha(value: &[u8]) -> String {
     format!("{:x}", Sha256::digest(value))
 }
-fn revision(value: i64) -> Result<Revision, ApiError> {
-    Revision::new(
-        u64::try_from(value).map_err(|_| ApiError::internal("LW_ACCESS_CONSOLE_RECORD_INVALID"))?,
-    )
-    .map_err(|_| ApiError::internal("LW_ACCESS_CONSOLE_RECORD_INVALID"))
-}
 fn revision_from_row(row: &sqlx::postgres::PgRow, name: &str) -> Result<Revision, ApiError> {
-    revision(row.get(name))
+    Revision::try_from(row.get::<i64, _>(name))
+        .map_err(|_| ApiError::internal("LW_ACCESS_CONSOLE_RECORD_INVALID"))
 }
-fn i64_revision(value: Revision) -> Result<i64, ApiError> {
-    i64::try_from(value.get()).map_err(|_| ApiError::internal("LW_ACCESS_CONSOLE_RECORD_INVALID"))
-}
-
 const fn console_kind_db(kind: ConsoleKind) -> &'static str {
     match kind {
         ConsoleKind::Xterm => "xterm",

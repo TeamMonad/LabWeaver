@@ -576,14 +576,6 @@ fn if_match(headers: &HeaderMap) -> Result<Revision, EvaluationApiError> {
         })
 }
 
-pub async fn serve_evaluation_mtls(
-    listener: tokio::net::TcpListener,
-    router: Router,
-    _mtls: (),
-) -> Result<(), std::io::Error> {
-    serve_evaluation_plain(listener, router).await
-}
-
 pub async fn serve_evaluation_plain(
     listener: tokio::net::TcpListener,
     router: Router,

@@ -158,6 +158,15 @@ impl EventContract {
             "urn:labweaver:control-service"
         }
     }
+
+    /// Finds the registered contract whose subject matches `subject`.
+    #[must_use]
+    pub fn by_subject(subject: &str) -> Option<Self> {
+        EVENT_CONTRACTS
+            .iter()
+            .copied()
+            .find(|c| c.subject == subject)
+    }
 }
 
 pub const EVENT_CONTRACTS: &[EventContract] = &[

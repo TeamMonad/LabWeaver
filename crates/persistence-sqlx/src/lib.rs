@@ -14,7 +14,10 @@ pub use coordinator::{
     DomainMigrationReport, MigrationCoordinator, MigrationIdentity, MigrationReport,
     MigrationReportEnvelope,
 };
-pub use ledger::{IdempotencyDecision, IdempotencyStore, InboxDecision, InboxStore, OutboxStore};
+pub use ledger::{
+    IdempotencyDecision, IdempotencyStore, InboxDecision, InboxStore, OutboxRow, OutboxStore,
+    is_unique_violation,
+};
 pub use schema::{Domain, SchemaStatus, SchemaVerifier};
 
 /// Stable persistence and Migration diagnostics.

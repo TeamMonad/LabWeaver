@@ -126,20 +126,19 @@ async fn outbox_loop(
 async fn connect_nats(
     configuration: &NatsConfiguration,
 ) -> Result<async_nats::Client, EvaluationProcessError> {
-    let options = async_nats::ConnectOptions::new()
-        .require_tls(true)
-        .add_root_certificates(configuration.ca_file.clone())
-        .add_client_certificate(
-            configuration.client_certificate_file.clone(),
-            configuration.client_private_key_file.clone(),
-        )
-        .credentials_file(configuration.credentials_file.clone())
-        .await
-        .map_err(|_| EvaluationProcessError::NatsCredentials)?;
-    options
-        .connect(&configuration.server)
-        .await
-        .map_err(|_| EvaluationProcessError::NatsConnect)
+    auth::nats::connect_mtls(
+        &configuration.server,
+        configuration.ca_file.clone(),
+        configuration.client_certificate_file.clone(),
+        configuration.client_private_key_file.clone(),
+        configuration.credentials_file.clone(),
+    )
+    .await
+    .map_err(|e| match e {
+        auth::NatsMtlsError::Configuration => EvaluationProcessError::ConfigurationInvalid,
+        auth::NatsMtlsError::Credentials(_) => EvaluationProcessError::NatsCredentials,
+        auth::NatsMtlsError::Connect(_) => EvaluationProcessError::NatsConnect,
+    })
 }
 
 fn read_configuration() -> Result<EvaluationConfiguration, EvaluationProcessError> {

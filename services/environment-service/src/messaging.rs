@@ -43,29 +43,31 @@ pub async fn connect_nats_mtls(
     client_private_key_path: PathBuf,
     credentials_path: PathBuf,
 ) -> Result<async_nats::Client, NatsMessagingError> {
-    if server.trim().is_empty()
-        || [
-            &ca_path,
-            &client_certificate_path,
-            &client_private_key_path,
-            &credentials_path,
-        ]
-        .iter()
-        .any(|path| !path.is_absolute())
+    // Preserve environment-service's absolute-path validation
+    if [
+        &ca_path,
+        &client_certificate_path,
+        &client_private_key_path,
+        &credentials_path,
+    ]
+    .iter()
+    .any(|path| !path.is_absolute())
     {
         return Err(NatsMessagingError::Configuration);
     }
-    let options = async_nats::ConnectOptions::new()
-        .require_tls(true)
-        .add_root_certificates(ca_path)
-        .add_client_certificate(client_certificate_path, client_private_key_path)
-        .credentials_file(credentials_path)
-        .await
-        .map_err(|_| NatsMessagingError::Credentials)?;
-    options
-        .connect(server)
-        .await
-        .map_err(|_| NatsMessagingError::Connect)
+    auth::nats::connect_mtls(
+        server,
+        ca_path,
+        client_certificate_path,
+        client_private_key_path,
+        credentials_path,
+    )
+    .await
+    .map_err(|e| match e {
+        auth::NatsMtlsError::Configuration => NatsMessagingError::Configuration,
+        auth::NatsMtlsError::Credentials(_) => NatsMessagingError::Credentials,
+        auth::NatsMtlsError::Connect(_) => NatsMessagingError::Connect,
+    })
 }
 
 /// JetStream-backed publisher that waits for the server persistence acknowledgement.

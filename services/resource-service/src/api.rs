@@ -90,15 +90,6 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
 /// Serves Resource API routes over plain HTTP for private single-university delivery.
 ///
 /// The outer gateway mTLS is optionally kept at the edge; inner hops are behind `NetworkPolicy`.
-pub async fn serve_mtls(
-    listener: tokio::net::TcpListener,
-    router: Router,
-    _mtls: (),
-    delegation_key: Arc<Vec<u8>>,
-) -> Result<(), std::io::Error> {
-    serve_plain(listener, router, delegation_key).await
-}
-
 pub async fn serve_plain(
     listener: tokio::net::TcpListener,
     router: Router,

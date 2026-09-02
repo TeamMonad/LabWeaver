@@ -7,9 +7,7 @@ use contracts::environment::{
     EnvironmentLeaseAuthorization, EnvironmentOperation, EnvironmentOperationKind,
     ObservedEnvironmentState, OperationState,
 };
-use contracts::events::{
-    CloudEvent, EVENT_CONTRACTS, EnvironmentEvent, EventContract, SPEC_VERSION, subjects,
-};
+use contracts::events::{CloudEvent, EnvironmentEvent, EventContract, SPEC_VERSION, subjects};
 use contracts::http::{EnvironmentOperationAccepted, IdempotencyKey};
 use contracts::{CourseId, EnvironmentId, EventId, OperationId, Revision, Sequence, UtcTimestamp};
 use persistence_sqlx::{
@@ -583,7 +581,10 @@ async fn create_in_transaction(
     .execute(&mut **transaction)
     .await;
     if let Err(error) = result {
-        if is_unique_violation(&error) {
+        if error
+            .as_database_error()
+            .is_some_and(sqlx::error::DatabaseError::is_unique_violation)
+        {
             return Err(EnvironmentStoreError::EnvironmentAlreadyExists);
         }
         return Err(error.into());
@@ -950,7 +951,8 @@ async fn enqueue_environment_event_at(
         operation_id: Some(instance.operation.id),
         diagnostic_code: instance.last_diagnostic_code.clone(),
     };
-    let contract = event_contract(subject)?;
+    let contract =
+        EventContract::by_subject(subject).ok_or(EnvironmentStoreError::EventContractMissing)?;
     let event_id = EventId::new();
     let envelope = CloudEvent {
         specversion: SPEC_VERSION.to_owned(),
@@ -984,14 +986,6 @@ async fn enqueue_environment_event_at(
     )
     .await?;
     Ok(())
-}
-
-fn event_contract(subject: &str) -> Result<EventContract, EnvironmentStoreError> {
-    EVENT_CONTRACTS
-        .iter()
-        .copied()
-        .find(|contract| contract.subject == subject)
-        .ok_or(EnvironmentStoreError::EventContractMissing)
 }
 
 async fn database_now(
@@ -1110,13 +1104,6 @@ fn lease_milliseconds(duration: Duration) -> Result<i64, EnvironmentStoreError> 
         return Err(EnvironmentStoreError::InvalidLease);
     }
     i64::try_from(duration.as_millis()).map_err(|_| EnvironmentStoreError::InvalidLease)
-}
-
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    error
-        .as_database_error()
-        .and_then(sqlx::error::DatabaseError::code)
-        .is_some_and(|code| code == "23505")
 }
 
 #[derive(Debug, thiserror::Error)]
