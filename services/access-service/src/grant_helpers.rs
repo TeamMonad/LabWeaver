@@ -201,7 +201,7 @@ pub(crate) fn parse_session_state(v: &str) -> Result<GatewaySessionState, ApiErr
     }
 }
 
-/// Convert a UUID to any type that implements FromStr, with store-corrupt error.
+/// Convert a UUID to any type that implements `FromStr`, with store-corrupt error.
 pub(crate) fn typed_id<T: FromStr>(v: uuid::Uuid) -> Result<T, ApiError> {
     v.to_string()
         .parse()

@@ -1,4 +1,4 @@
-//! Pure AgentRun orchestration helpers extracted from run_store.rs.
+//! Pure [`AgentRun`] orchestration helpers extracted from [`run_store`](crate::run_store).
 //!
 //! Validation, checkpoint construction, and attempt tracking helpers that have no SQL dependency.
 
@@ -24,7 +24,7 @@ use super::run_store::{
     TrackClaim, zero_usage,
 };
 
-/// Append a newly claimed attempt to the AgentRun record.
+/// Append a newly claimed attempt to the `AgentRun` record.
 pub(crate) fn append_claimed_attempt(
     run: &mut AgentRun,
     track_kind: AgentTrackKind,
@@ -75,7 +75,7 @@ pub(crate) fn append_claimed_attempt(
     Ok(attempt)
 }
 
-/// Validate a reservation input before creating an idempotent AgentRun.
+/// Validate a reservation input before creating an idempotent `AgentRun`.
 pub(crate) fn validate_reservation(
     command: &ReserveAgentRun<'_>,
 ) -> Result<(), AgentRunStoreError> {
@@ -120,7 +120,7 @@ pub(crate) fn validate_reserved_run(
     Ok(())
 }
 
-/// Construct the initial AgentRun from a create request.
+/// Construct the initial `AgentRun` from a create request.
 pub(crate) fn requested_run(
     request: &CreateAgentRunRequest,
     course_id: CourseId,
@@ -253,7 +253,7 @@ pub(crate) fn evaluation_checkpoint(
     }
 }
 
-/// Apply a committed checkpoint to the in-memory AgentRun record.
+/// Apply a committed checkpoint to the in-memory `AgentRun` record.
 pub(crate) fn apply_checkpoint(
     run: &mut AgentRun,
     checkpoint: &AgentTrackCheckpoint,

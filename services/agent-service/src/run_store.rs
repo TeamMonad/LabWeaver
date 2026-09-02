@@ -565,6 +565,10 @@ impl PostgresAgentRunStore {
     /// # Errors
     ///
     /// Returns a stable identity, idempotency, contract or persistence failure.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "multi-step database transaction with many ordered operations"
+    )]
     pub async fn reserve(
         &self,
         command: ReserveAgentRun<'_>,

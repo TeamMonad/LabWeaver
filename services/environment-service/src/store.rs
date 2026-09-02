@@ -502,6 +502,10 @@ impl PgEnvironmentStore {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "multi-step database transaction with many ordered operations"
+)]
 async fn create_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     idempotency_key: &str,
