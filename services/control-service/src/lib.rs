@@ -20,8 +20,8 @@ use contracts::authoring::{
 };
 use contracts::evaluation::EvaluationRuntimeIdentity;
 use contracts::events::{
-    AgentBuildFailed, AgentBuildRequested, AgentRunEvent, CloudEvent,
-    ReleasePublished, ReleaseWithdrawn, SPEC_VERSION, subjects,
+    AgentBuildFailed, AgentBuildRequested, AgentRunEvent, CloudEvent, ReleasePublished,
+    ReleaseWithdrawn, SPEC_VERSION, subjects,
 };
 use contracts::http::{
     CandidateBuildState, CandidateBuildView, CandidateDecisionRequest,
@@ -1531,7 +1531,8 @@ impl ControlService {
                 .await
                 .map_err(db)?;
                 let event_id = EventId::new();
-                let contract = contracts::events::EventContract::by_subject(BUILD_REQUEST_SUBJECT).ok_or(ControlError::ContractInvalid)?;
+                let contract = contracts::events::EventContract::by_subject(BUILD_REQUEST_SUBJECT)
+                    .ok_or(ControlError::ContractInvalid)?;
                 let event = CloudEvent {
                     specversion: SPEC_VERSION.to_owned(),
                     id: event_id,
@@ -1794,7 +1795,9 @@ impl ControlService {
             subject: RELEASE_SUBJECT.to_owned(),
             time: now,
             datacontenttype: "application/json".to_owned(),
-            dataschema: contracts::events::EventContract::by_subject(RELEASE_SUBJECT).ok_or(ControlError::ContractInvalid)?.data_schema(),
+            dataschema: contracts::events::EventContract::by_subject(RELEASE_SUBJECT)
+                .ok_or(ControlError::ContractInvalid)?
+                .data_schema(),
             course_id,
             aggregate_revision: Revision::new(release.version)
                 .map_err(|_| ControlError::ContractInvalid)?,
@@ -1806,7 +1809,10 @@ impl ControlService {
             },
         };
         event
-            .validate(contracts::events::EventContract::by_subject(RELEASE_SUBJECT).ok_or(ControlError::ContractInvalid)?)
+            .validate(
+                contracts::events::EventContract::by_subject(RELEASE_SUBJECT)
+                    .ok_or(ControlError::ContractInvalid)?,
+            )
             .map_err(|_| ControlError::ContractInvalid)?;
         let event_payload =
             serde_json::to_value(&event).map_err(|_| ControlError::ContractInvalid)?;
@@ -1941,7 +1947,9 @@ impl ControlService {
             subject: WITHDRAWAL_SUBJECT.to_owned(),
             time: now,
             datacontenttype: "application/json".to_owned(),
-            dataschema: contracts::events::EventContract::by_subject(WITHDRAWAL_SUBJECT).ok_or(ControlError::ContractInvalid)?.data_schema(),
+            dataschema: contracts::events::EventContract::by_subject(WITHDRAWAL_SUBJECT)
+                .ok_or(ControlError::ContractInvalid)?
+                .data_schema(),
             course_id,
             aggregate_revision: Revision::new(expected_version)
                 .map_err(|_| ControlError::ContractInvalid)?,
@@ -1956,7 +1964,10 @@ impl ControlService {
             },
         };
         event
-            .validate(contracts::events::EventContract::by_subject(WITHDRAWAL_SUBJECT).ok_or(ControlError::ContractInvalid)?)
+            .validate(
+                contracts::events::EventContract::by_subject(WITHDRAWAL_SUBJECT)
+                    .ok_or(ControlError::ContractInvalid)?,
+            )
             .map_err(|_| ControlError::ContractInvalid)?;
         let event_payload =
             serde_json::to_value(&event).map_err(|_| ControlError::ContractInvalid)?;

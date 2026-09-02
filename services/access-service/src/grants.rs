@@ -17,8 +17,8 @@ use contracts::{
         AccessGrant, AccessGrantSnapshot, AccessGrantState, AuthorizationDecision,
         AuthorizationDecisionSummary, CloseGatewaySessionRequest, CreateGatewaySessionRequest,
         EndpointAction, EndpointGrant, EndpointGrantSnapshot, EndpointGrantSnapshotState,
-        GatewaySession, HeartbeatGatewaySessionRequest, SshAuthorization,
-        SshAuthorizationRequest, SshKeyAlgorithm, SshPublicKey, validate_ssh_public_key,
+        GatewaySession, HeartbeatGatewaySessionRequest, SshAuthorization, SshAuthorizationRequest,
+        SshKeyAlgorithm, SshPublicKey, validate_ssh_public_key,
     },
     environment::{
         EndpointHealth, EndpointProtocol, EnvironmentAccessSubjectKind,
@@ -46,7 +46,12 @@ use super::{
     cookie_session_id, require_browser_origin, utc_timestamp,
 };
 
-use super::grant_helpers::{ validate_alias, valid_fingerprint, valid_sha256_hex, random_token, sha256_hex, ssh_alias, protocol_str, parse_protocol, parse_health, optional_contract_string, optional_contract_u16, grant_state_str, parse_grant_state, session_state_str, parse_session_state, typed_id};
+use super::grant_helpers::{
+    grant_state_str, optional_contract_string, optional_contract_u16, parse_grant_state,
+    parse_health, parse_protocol, parse_session_state, protocol_str, random_token,
+    session_state_str, sha256_hex, ssh_alias, typed_id, valid_fingerprint, valid_sha256_hex,
+    validate_alias,
+};
 
 const TERMINATION_SECONDS: i64 = 60;
 // This request/reply subject deliberately sits outside the persisted

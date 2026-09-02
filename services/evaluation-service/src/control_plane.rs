@@ -39,7 +39,9 @@ use serde_json::Value;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
-use super::control_helpers::{run_state_name, step_failure_policy_name, step_role_name, step_state_name};
+use super::control_helpers::{
+    run_state_name, step_failure_policy_name, step_role_name, step_state_name,
+};
 
 const PUBLISH_RELEASE_OPERATION: &str = "publish_evaluation_release_v1";
 const WITHDRAW_RELEASE_OPERATION: &str = "withdraw_evaluation_release_v1";
@@ -1985,7 +1987,6 @@ fn runtime_identity_sha256(
     Sha256Digest::of_canonical(runtime_identity)
         .map_err(|_| EvaluationControlStoreError::IdentityMismatch)
 }
-
 
 fn validate_trace(trace_id: &str) -> Result<(), EvaluationControlStoreError> {
     if trace_id.trim().is_empty() || trace_id.len() > 128 || trace_id.chars().any(char::is_control)

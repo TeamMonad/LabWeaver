@@ -9,9 +9,9 @@ use contracts::{
     access::{AccessGrantState, GatewaySessionState},
     environment::{EndpointHealth, EndpointProtocol},
 };
+use rand::RngCore;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use rand::RngCore;
 
 use super::ApiError;
 
@@ -140,7 +140,10 @@ pub(crate) fn optional_contract_string(
 }
 
 /// Extract an optional u16 field from a JSON contract object.
-pub(crate) fn optional_contract_u16(contract: &Value, field: &str) -> Result<Option<u16>, ApiError> {
+pub(crate) fn optional_contract_u16(
+    contract: &Value,
+    field: &str,
+) -> Result<Option<u16>, ApiError> {
     match contract.get(field) {
         Some(Value::Number(value)) => value
             .as_u64()

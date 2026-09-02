@@ -20,7 +20,8 @@ use crate::claude_code::{
 };
 
 use super::run_store::{
-    AgentRunStoreError, ExecuteAgentRun, ReserveAgentRun, AgentTrackCheckpoint, StoredCandidate, TrackClaim, zero_usage,
+    AgentRunStoreError, AgentTrackCheckpoint, ExecuteAgentRun, ReserveAgentRun, StoredCandidate,
+    TrackClaim, zero_usage,
 };
 
 /// Append a newly claimed attempt to the AgentRun record.
@@ -75,7 +76,9 @@ pub(crate) fn append_claimed_attempt(
 }
 
 /// Validate a reservation input before creating an idempotent AgentRun.
-pub(crate) fn validate_reservation(command: &ReserveAgentRun<'_>) -> Result<(), AgentRunStoreError> {
+pub(crate) fn validate_reservation(
+    command: &ReserveAgentRun<'_>,
+) -> Result<(), AgentRunStoreError> {
     if command.trace_id.trim().is_empty()
         || command.course_id != command.input.course_id()
         || command.request.package_id != command.input.package_id()

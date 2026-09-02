@@ -3,7 +3,9 @@
 //! These functions convert evaluation domain types to their stable string
 //! representations used in SQL, logs, and event payloads.
 
-use contracts::evaluation::{EvaluationRunState, EvaluationStepFailurePolicy, EvaluationStepRole, EvaluationStepRunState};
+use contracts::evaluation::{
+    EvaluationRunState, EvaluationStepFailurePolicy, EvaluationStepRole, EvaluationStepRunState,
+};
 
 /// Returns the canonical name for an evaluation run state.
 #[must_use]

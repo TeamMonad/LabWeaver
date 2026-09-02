@@ -13,9 +13,7 @@ use contracts::authoring::{
 use contracts::diagnostic;
 use contracts::events::{AgentRunEvent, CloudEvent, SPEC_VERSION, subjects};
 use contracts::http::{CreateAgentRunRequest, IdempotencyKey};
-use contracts::{
-    AgentRunId, ArtifactId, CourseId, EventId, Revision, Sequence, UtcTimestamp,
-};
+use contracts::{AgentRunId, ArtifactId, CourseId, EventId, Revision, Sequence, UtcTimestamp};
 use persistence_sqlx::{Domain, IdempotencyDecision, IdempotencyStore, OutboxStore};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -29,9 +27,9 @@ use crate::claude_code::{
 };
 
 use crate::run_helpers::{
-    append_claimed_attempt, apply_checkpoint, checkpoint_state,
-    environment_checkpoint, evaluation_checkpoint, requested_run, terminal_event,
-    validate_reserved_run, validate_reservation, validate_worker, lease_milliseconds,
+    append_claimed_attempt, apply_checkpoint, checkpoint_state, environment_checkpoint,
+    evaluation_checkpoint, lease_milliseconds, requested_run, terminal_event, validate_reservation,
+    validate_reserved_run, validate_worker,
 };
 
 const CREATE_OPERATION: &str = "create_agent_run_v1";
