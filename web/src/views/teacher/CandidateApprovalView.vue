@@ -22,7 +22,7 @@
           </div>
           <div class="summary-row">
             <span class="summary-label">状态</span>
-            <span class="summary-value">{{ runData.state }}</span>
+            <GcpStatusPill :state="runData.state" domain="agent" />
           </div>
           <div class="summary-row">
             <span class="summary-label">请求 Runtime</span>
@@ -392,6 +392,7 @@ import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import StructuredDiff from '@/components/common/StructuredDiff.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
+import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
 import { useCourseContext } from '@/composables/useCourseContext'
 import { useCandidateApproval } from '@/composables/useCandidateApproval'
 import { useEvaluationReleases } from '@/composables/useEvaluationReleases'

@@ -192,7 +192,7 @@
             <div class="run-header">
               <span class="run-id">{{ data.id }}</span>
               <span v-if="agent.elapsedSeconds !== null" class="run-elapsed">已耗时 {{ agent.elapsedSeconds }} 秒</span>
-              <span class="run-state" :class="`run-state--${data.state}`">{{ agentRunStateLabel(data.state) }}</span>
+              <GcpStatusPill :state="data.state" domain="agent" />
             </div>
             <div v-if="data.tracks.length > 0" class="run-tracks">
               <div v-for="track in data.tracks" :key="track.kind" class="run-track">
@@ -205,9 +205,7 @@
                 <ul class="run-attempts">
                   <li v-for="attempt in track.attempts" :key="attempt.number" class="run-attempt">
                     <span class="run-attempt__number">第 {{ attempt.number }} 次尝试</span>
-                    <span class="run-attempt__state" :class="`run-attempt__state--${attempt.state}`">
-                      {{ agentAttemptStateLabel(attempt.state) }}
-                    </span>
+                    <GcpStatusPill :state="attempt.state" domain="agent" size="sm" />
                     <span v-if="attempt.diagnosticCode" class="run-attempt__diagnostic">
                       {{ attempt.diagnosticCode }}
                     </span>
@@ -298,6 +296,7 @@ import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import DataTable from '@/components/common/DataTable.vue'
 import EventTimeline from '@/components/common/EventTimeline.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
+import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
 import { truncateSha256, shortId } from '@/utils/format'
 import { agentRunStateLabel, agentAttemptStateLabel, agentTrackKindLabel } from '@/utils/stateLabels'
 import type { DataTableColumn } from '@/components/common/DataTable.vue'

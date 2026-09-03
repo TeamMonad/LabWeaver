@@ -21,19 +21,45 @@
       </button>
     </div>
 
-    <nav class="drawer-nav" aria-label="角色入口">
+    <nav class="drawer-nav" aria-label="角色与产品导航">
+      <div class="nav-section-title" v-if="!isRail">工作台角色</div>
       <RouterLink
         v-for="item in visibleRoleItems"
         :key="item.name"
         :to="item.path"
         class="drawer-item"
-        :class="{ 'drawer-item--active': isActive(item.path) }"
-        :aria-current="isActive(item.path) ? 'page' : undefined"
+        :class="{ 'drawer-item--active': isActiveRole(item.path) }"
+        :aria-current="isActiveRole(item.path) ? 'page' : undefined"
         @click="isModal && $emit('close')"
       >
         <SvgIcon :name="item.icon" size="md" :aria-label="item.label" />
         <span class="drawer-item__label">{{ item.label }}</span>
       </RouterLink>
+
+      <!-- GCP-style Product / Resource Tree for Active Workbench -->
+      <template v-if="currentRoleSubNav.length > 0">
+        <div class="nav-divider" />
+        <div
+          v-for="group in currentRoleSubNav"
+          :key="group.category"
+          class="sub-nav-group"
+        >
+          <div v-if="!isRail" class="nav-section-title">{{ group.category }}</div>
+          <RouterLink
+            v-for="sub in group.items"
+            :key="sub.path"
+            :to="sub.path"
+            class="sub-nav-item"
+            :class="{ 'sub-nav-item--active': isSubActive(sub.path) }"
+            :title="isRail ? sub.label : undefined"
+            @click="isModal && $emit('close')"
+          >
+            <SvgIcon :name="sub.icon" size="sm" class="sub-nav-icon" aria-hidden="true" />
+            <span class="sub-nav-item__label">{{ sub.label }}</span>
+          </RouterLink>
+        </div>
+      </template>
+
       <p v-if="isAuthenticated && visibleRoleItems.length === 0" class="drawer-empty" role="note">
         当前账号未被授予任何工作台角色。
       </p>
@@ -109,9 +135,146 @@ const visibleRoleItems = computed(() => {
 })
 
 const isActive = computed(() => (path: string) => route.path.startsWith(path))
+const isActiveRole = computed(() => (path: string) => route.path.startsWith(path))
+const isSubActive = computed(() => (path: string) => route.path === path || route.path.startsWith(path + '/'))
+
+interface SubNavGroup {
+  category: string
+  items: Array<{
+    name: string
+    path: string
+    label: string
+    icon: string
+  }>
+}
+
+const currentRoleSubNav = computed<SubNavGroup[]>(() => {
+  const p = route.path
+  if (p.startsWith('/student')) {
+    return [
+      {
+        category: '计算与环境 (Compute)',
+        items: [
+          { name: 'labs', path: '/student/labs', label: '我的实验', icon: 'science' },
+          { name: 'environments', path: '/student/environments', label: '环境控制台', icon: 'desktop_windows' },
+          { name: 'ssh-keys', path: '/student/ssh-keys', label: 'SSH 公钥', icon: 'key' },
+        ],
+      },
+      {
+        category: '评测与成果 (Evaluation)',
+        items: [
+          { name: 'results', path: '/student/results', label: '评测结果', icon: 'fact_check' },
+        ],
+      },
+    ]
+  }
+  if (p.startsWith('/teacher')) {
+    return [
+      {
+        category: '实验与编排 (Labs & Build)',
+        items: [
+          { name: 'overview', path: '/teacher/overview', label: '实验总览', icon: 'dashboard' },
+          { name: 'labs', path: '/teacher/labs', label: '实验列表', icon: 'menu_book' },
+          { name: 'materials', path: '/teacher/materials', label: '材料与 AgentRun', icon: 'smart_toy' },
+          { name: 'approvals', path: '/teacher/approvals', label: '候选审批与发布', icon: 'rule' },
+        ],
+      },
+    ]
+  }
+  if (p.startsWith('/admin')) {
+    return [
+      {
+        category: '治理与配额 (Governance)',
+        items: [
+          { name: 'approvals', path: '/admin/approvals', label: '资源审批与 Lease', icon: 'admin_panel_settings' },
+          { name: 'policies', path: '/admin/policies', label: '安全策略', icon: 'policy' },
+          { name: 'audit', path: '/admin/audit', label: '审计日志', icon: 'history' },
+        ],
+      },
+    ]
+  }
+  if (p.startsWith('/researcher')) {
+    return [
+      {
+        category: '工作空间与计算 (Workspaces)',
+        items: [
+          { name: 'workspaces', path: '/researcher/workspaces', label: '工作空间', icon: 'workspaces' },
+          { name: 'resources', path: '/researcher/resources', label: '资源申请', icon: 'memory' },
+        ],
+      },
+    ]
+  }
+  return []
+})
 </script>
 
 <style scoped>
+.nav-section-title {
+  padding: 8px 16px 4px;
+  font: var(--md-sys-label-small);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--md-sys-color-on-surface-variant);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.nav-divider {
+  height: 1px;
+  background: var(--md-sys-color-outline-variant);
+  margin: 8px 12px;
+}
+
+.sub-nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sub-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 38px;
+  padding: 0 16px 0 20px;
+  border-radius: var(--md-sys-shape-full);
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-label-medium);
+  text-decoration: none;
+  overflow: hidden;
+  transition: background-color 0.15s;
+}
+
+.sub-nav-item:hover {
+  background: var(--md-sys-color-surface-container-highest);
+  color: var(--md-sys-color-on-surface);
+}
+
+.sub-nav-item--active {
+  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+  font-weight: 600;
+}
+
+.sub-nav-icon {
+  flex-shrink: 0;
+}
+
+.sub-nav-item__label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.navigation-drawer--rail .sub-nav-item {
+  justify-content: center;
+  padding: 0;
+}
+
+.navigation-drawer--rail .sub-nav-item__label,
+.navigation-drawer--rail .nav-section-title {
+  display: none;
+}
 .navigation-drawer {
   position: fixed;
   top: 0;

@@ -46,7 +46,11 @@
         interactive
         aria-label="资源申请列表"
         @row-click="(row) => approval.selectRequest((row as unknown as RequestRow).id)"
-      />
+      >
+        <template #state="{ row }">
+          <GcpStatusPill :state="row.state" domain="resource" />
+        </template>
+      </DataTable>
 
       <div v-if="approval.selectedRequest" class="request-detail md-card">
         <div class="detail-meta">
@@ -84,9 +88,7 @@
           </div>
           <div class="meta-row">
             <span class="meta-label">状态</span>
-            <span class="meta-value" :title="approval.selectedRequest.state">
-              {{ resourceRequestStateLabel(approval.selectedRequest.state) }}
-            </span>
+            <GcpStatusPill :state="approval.selectedRequest.state" domain="resource" />
           </div>
           <div class="meta-row">
             <span class="meta-label">当前 Revision</span>
@@ -229,7 +231,11 @@
         interactive
         aria-label="资源 Lease 列表"
         @row-click="(row) => approval.selectLease((row as unknown as LeaseRow).id)"
-      />
+      >
+        <template #state="{ row }">
+          <GcpStatusPill :state="row.state" domain="resource" />
+        </template>
+      </DataTable>
 
       <div v-if="approval.selectedLease" class="lease-detail md-card">
         <div class="detail-meta">
@@ -247,9 +253,7 @@
           </div>
           <div class="meta-row">
             <span class="meta-label">状态</span>
-            <span class="meta-value" :title="approval.selectedLease.state">
-              {{ resourceLeaseStateLabel(approval.selectedLease.state) }}
-            </span>
+            <GcpStatusPill :state="approval.selectedLease.state" domain="resource" />
           </div>
           <div class="meta-row">
             <span class="meta-label">当前 Revision</span>
@@ -345,6 +349,7 @@ import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import DataTable, { type DataTableColumn } from '@/components/common/DataTable.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
+import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
 import { useResourceApproval, type LeaseActionKind, type RequestActionKind } from '@/composables/useResourceApproval'
 import type { WorkloadResources } from '@/generated/contracts'
 import { formatBytes, formatTimestamp, truncateSha256 } from '@/utils/format'
