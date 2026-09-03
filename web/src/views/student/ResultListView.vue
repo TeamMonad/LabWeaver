@@ -37,6 +37,15 @@
         >
           {{ evaluation.loadingMore ? '加载中…' : '加载更多' }}
         </button>
+        <div v-if="evaluation.loadMoreError" class="load-more-error">
+          <DiagnosticBanner
+            :code="evaluation.loadMoreError.code"
+            :message="evaluation.loadMoreError.message"
+            :retryable="evaluation.loadMoreError.retryable"
+            severity="warning"
+            @retry="evaluation.loadMore()"
+          />
+        </div>
       </template>
     </AsyncStateView>
   </section>

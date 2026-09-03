@@ -26,7 +26,7 @@ async function uploadAndStartRun(page) {
   await page.locator('button:has-text("上传材料包")').click()
   await expect(page.locator('.package-summary')).toContainText('材料包已归档')
   await page.locator('button:has-text("启动 AgentRun")').click()
-  await expect(page.locator('.run-state')).toHaveText('succeeded', { timeout: 15000 })
+  await expect(page.locator('.run-state')).toHaveText('已成功', { timeout: 15000 })
 }
 
 async function openApprovalPage(page) {

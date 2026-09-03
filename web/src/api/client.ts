@@ -1,4 +1,4 @@
-import axios, { AxiosError, type AxiosInstance, type AxiosRequestConfig } from 'axios'
+import axios, { AxiosError, type AxiosInstance } from 'axios'
 import { API_AUTH_MODE, API_BASE_URL } from '@/config'
 import { getOidcAccessToken } from '@/composables/useAuth'
 import { IS_FIXTURE } from '@/config/dataMode'
@@ -237,18 +237,31 @@ export async function initializeSdkClient(): Promise<void> {
   defaultSdkClient.setConfig({
     axios: sdkTransport,
     baseURL: '',
-    auth: IS_FIXTURE
-      ? async () => {
-          // Fixture mode does not use OIDC; fall back to the local test token
-          // so that SDK SSE requests carry the Bearer header intercepted by the
-          // fixture fetch wrapper.
-          return localStorage.getItem('access_token') ?? undefined
-        }
-      : undefined,
+    auth:
+      IS_FIXTURE || API_AUTH_MODE === 'bearer'
+        ? async () => {
+            // Fixture mode does not use OIDC; fall back to the local test token.
+            // Live bearer mode resolves the OIDC session token so fetch-based
+            // SDK transports (SSE) authenticate exactly like axios transports.
+            if (IS_FIXTURE) return localStorage.getItem('access_token') ?? undefined
+            return getOidcAccessToken()
+          }
+        : // BFF mode relies on the session cookie; same-origin fetch sends it.
+          undefined,
   })
 }
 
 /** Health checks are intentionally outside the authenticated Public API contract. */
-export async function healthCheck(config?: AxiosRequestConfig) {
-  return apiClient.instance.get('/health/live', config)
+export async function healthCheck(options?: { timeout?: number }): Promise<{ ok: boolean; status: number }> {
+  // fetch (not axios/XHR) so the fixture fetch interceptor can serve liveness
+  // locally and the probe behaves identically in fixture and live modes.
+  const controller = new AbortController()
+  const timeout = options?.timeout ?? 5000
+  const timer = setTimeout(() => controller.abort(), timeout)
+  try {
+    const response = await fetch('/health/live', { signal: controller.signal, cache: 'no-store' })
+    return { ok: response.ok, status: response.status }
+  } finally {
+    clearTimeout(timer)
+  }
 }

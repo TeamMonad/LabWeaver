@@ -21,7 +21,7 @@ async function createEnvironmentFromRelease(page, runtimeLabel) {
   // it exercises the current approved artifact instead of an expired row.
   await page.locator(`tr:has-text("${runtimeLabel}") button:has-text("创建环境")`).last().click()
   await expect(page).toHaveURL(/environmentId=/)
-  await expect(page.locator('.env-state')).toHaveText('ready', { timeout: 15000 })
+  await expect(page.locator('.env-state')).toHaveText('运行中', { timeout: 15000 })
 }
 
 async function issueGrant(page) {
@@ -41,11 +41,17 @@ test('student VM single-line SSH command, freeze evidence, and operations timeli
 
   await expectNoA11yViolations(page, 'ssh access card should have no a11y violations')
 
-  // Freeze submission and inspect evidence identity.
+  // Freeze submission and inspect evidence identity. The freeze button first
+  // reveals the SubmissionManifest confirmation so the student can verify the
+  // required files before creating the immutable submission.
   await page.locator('button:has-text("冻结提交")').click()
+  await expect(page.locator('.freeze-confirm')).toBeVisible()
+  await expect(page.locator('.freeze-confirm')).toContainText('README.md')
+  await page.locator('button:has-text("确认冻结")').click()
   await expect(page.getByText('Object Version', { exact: true })).toBeVisible({ timeout: 15000 })
   await expect(page.getByText('SHA-256', { exact: true })).toBeVisible()
   await expect(page.locator('.evidence-card')).toContainText('f'.repeat(64))
+  await expect(page.locator('.evidence-card')).toContainText('提交 ID')
 
   // Operations timeline shows create + freeze with revisions.
   await expect(page.locator('.timeline-section')).toBeVisible()

@@ -18,6 +18,7 @@ export function useEvaluationResults(courseId: Ref<string | undefined>) {
   const results = ref<AsyncState<StudentEvaluationResultSchema[]>>({ kind: 'idle' })
   const nextCursor = ref<string | null>(null)
   const loadingMore = ref(false)
+  const loadMoreError = ref<DiagnosticViewModel | null>(null)
 
   async function load(cursor?: string) {
     const course = courseId.value
@@ -36,9 +37,22 @@ export function useEvaluationResults(courseId: Ref<string | undefined>) {
         query: { cursor, limit: 50 },
       })
       if (response.error) {
-        results.value = resultError(response.error, 'EVALUATION_RESULTS_LOAD_FAILED', '加载评测结果失败')
+        const problem = extractProblemDetails(response.error)
+        const diagnostic = makeDiagnostic(
+          problem?.diagnosticCode ?? 'EVALUATION_RESULTS_LOAD_FAILED',
+          problem?.detail ?? '加载评测结果失败',
+          problem?.retryable ?? true,
+        )
+        if (cursor && results.value.kind === 'success') {
+          // Keep already-loaded rows visible; surface the failure as a
+          // recoverable gap so the student can retry just this page.
+          loadMoreError.value = diagnostic
+        } else {
+          results.value = { kind: 'error', diagnostic }
+        }
         return
       }
+      loadMoreError.value = null
       const previous = cursor && results.value.kind === 'success' ? results.value.data : []
       const items = [...previous, ...response.data.items]
       nextCursor.value = response.data.nextCursor ?? null
@@ -49,7 +63,14 @@ export function useEvaluationResults(courseId: Ref<string | undefined>) {
   }
 
   watch(courseId, () => load(), { immediate: true })
-  return reactive({ results, nextCursor, loadingMore, load, loadMore: () => nextCursor.value ? load(nextCursor.value) : Promise.resolve() })
+  return reactive({
+    results,
+    nextCursor,
+    loadingMore,
+    loadMoreError,
+    load,
+    loadMore: () => (nextCursor.value ? load(nextCursor.value) : Promise.resolve()),
+  })
 }
 
 export function useEvaluationResult(

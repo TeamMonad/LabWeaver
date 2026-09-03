@@ -92,249 +92,438 @@
       </div>
 
       <template v-else>
-        <AsyncStateView :state="env.instance" @retry="env.load">
-          <template #success="{ data }">
-            <div class="env-card md-card">
-              <div class="env-header">
-                <div>
-                  <span class="env-id">{{ data.id }}</span>
-                  <span class="env-runtime">{{ data.runtimeKind === 'container' ? '容器' : '虚拟机' }}</span>
-                </div>
-                <span class="env-state" :class="`env-state--${data.observedState}`">{{ data.observedState }}</span>
-              </div>
-
-              <div class="env-meta">
-                <span>期望状态：{{ data.desiredState }}</span>
-                <span>版本：rev-{{ data.revision }}</span>
-                <span>过期时间：{{ formatTimestamp(data.eligibilityExpiresAt) }}</span>
-              </div>
-
-              <div class="env-actions">
-                <button
-                  type="button"
-                  class="filled-button"
-                  :disabled="!canStart(data)"
-                  @click="runLifecycle(data, 'start')"
-                >
-                  启动
-                </button>
-                <button
-                  type="button"
-                  class="outlined-button"
-                  :disabled="!canStop(data)"
-                  @click="runLifecycle(data, 'stop')"
-                >
-                  停止
-                </button>
-                <button
-                  type="button"
-                  class="outlined-button"
-                  :disabled="!canRestart(data)"
-                  @click="runLifecycle(data, 'restart')"
-                >
-                  重启
-                </button>
-                <button
-                  type="button"
-                  class="text-button error"
-                  :disabled="!canDelete(data)"
-                  @click="openDelete(data)"
-                >
-                  删除
-                </button>
-              </div>
-
-              <div v-if="lifecycleDiagnostic" class="lifecycle-result">
-                <DiagnosticBanner
-                  :code="lifecycleDiagnostic.code"
-                  :message="lifecycleDiagnostic.message"
-                  :retryable="lifecycleDiagnostic.retryable"
-                  severity="error"
-                  @retry="retryLifecycle"
+        <div class="gcp-resource-view">
+          <div class="gcp-resource-header">
+            <div class="gcp-breadcrumbs">
+              <RouterLink to="/student/labs" class="breadcrumb-link">我的实验</RouterLink>
+              <span class="breadcrumb-sep">/</span>
+              <span class="breadcrumb-current">{{ selectedEnvironmentId }}</span>
+            </div>
+            <div class="resource-title-row">
+              <div class="title-with-pill">
+                <h2>{{ selectedEnvironmentId }}</h2>
+                <GcpStatusPill
+                  v-if="env.instance.kind === 'success'"
+                  :state="env.instance.data.observedState"
+                  domain="environment"
                 />
               </div>
+              <button
+                type="button"
+                class="text-button small"
+                @click="clearSelectedEnvironment"
+              >
+                <SvgIcon name="swap_horiz" size="sm" aria-hidden="true" />
+                <span>切换其他环境</span>
+              </button>
             </div>
+          </div>
 
-            <div class="access-section">
-              <h4 class="section-subtitle">访问授权</h4>
-              <AsyncStateView :state="access.endpoints" @retry="access.loadEndpoints">
-                <template #success="{ data: eps }">
-                  <DataTable :columns="endpointColumns" :rows="eps" aria-label="环境入口">
-                    <template #protocol="{ row }">
-                      <span class="tag">{{ row.protocol }}</span>
-                    </template>
-                    <template #health="{ row }">
-                      <span class="health-dot" :class="`health-dot--${row.health}`" />
-                      {{ row.health }}
-                    </template>
-                    <template #observedAt="{ row }">
-                      {{ formatTimestamp(row.observedAt) }}
-                    </template>
-                  </DataTable>
-
-                  <div class="grant-actions">
-                    <button
-                      v-if="access.grant.kind !== 'success'"
-                      type="button"
-                      class="filled-button"
-                      :disabled="access.creating || eps.length === 0"
-                      @click="issueAccessGrant"
-                    >
-                      签发访问授权
-                    </button>
-                    <button
-                      v-if="access.grant.kind === 'success'"
-                      type="button"
-                      class="text-button error"
-                      @click="revokeAccessGrant"
-                    >
-                      撤销授权
-                    </button>
-                  </div>
-
-                  <div v-if="createGrantDiagnostic" class="grant-result">
-                    <DiagnosticBanner
-                      :code="createGrantDiagnostic.code"
-                      :message="createGrantDiagnostic.message"
-                      :retryable="createGrantDiagnostic.retryable"
-                      severity="error"
-                      @retry="issueAccessGrant"
-                    />
-                  </div>
-
-                  <AsyncStateView :state="access.grant" @retry="issueAccessGrant">
-                    <template #success="{ data: g }">
-                      <div class="grant-card">
-                        <div class="grant-row">
-                          <span>授权 ID</span>
-                          <code>{{ g.id }}</code>
-                        </div>
-                        <div class="grant-row">
-                          <span>状态</span>
-                          <span class="env-state" :class="`env-state--${g.state}`">{{ g.state }}</span>
-                        </div>
-                        <div class="grant-row">
-                          <span>有效期</span>
-                          <span>{{ formatTimestamp(g.issuedAt) }} → {{ formatTimestamp(g.expiresAt) }}</span>
-                        </div>
-                        <div class="grant-row">
-                          <span>过期</span>
-                          <span>{{ formatExpiry(g.expiresAt) }}</span>
-                        </div>
-                        <div class="grant-row">
-                          <span>入口授权</span>
-                          <div class="endpoint-grants">
-                            <span v-for="eg in g.endpointGrants" :key="eg.id" class="tag">
-                              {{ eg.protocol }} {{ eg.alias ?? eg.endpointId }}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div v-if="g.state === 'active'" class="runtime-access">
-                        <div v-if="httpsGrant(g)" class="access-card">
-                          <h5 class="access-card__title">
-                            <SvgIcon name="code" size="sm" aria-hidden="true" />
-                            容器实验入口
-                          </h5>
-                          <p class="access-card__desc">通过当前登录会话与 AccessGrant 打开受保护的容器实验页面。</p>
-                          <button
-                            type="button"
-                            class="filled-button"
-                            :disabled="!connectUrl(g)"
-                            @click="openContainerRuntime(g)"
-                          >
-                            打开容器实验
-                          </button>
-                          <p v-if="!connectUrl(g)" class="access-card__hint">连接地址缺失，无法打开。</p>
-                        </div>
-
-                        <div v-if="sshGrant(g)" class="access-card">
-                          <h5 class="access-card__title">
-                            <SvgIcon name="terminal" size="sm" aria-hidden="true" />
-                            SSH
-                          </h5>
-                          <p class="access-card__desc">单行命令到唯一 VM；无需下载配置。</p>
-                          <div v-if="sshCommand(g)" class="ssh-command">
-                            <code class="ssh-command__text">{{ sshCommand(g) }}</code>
-                            <CopyButton :text="sshCommand(g) ?? ''" aria-label="复制 SSH 命令" />
-                          </div>
-                          <div v-if="sshCommand(g)" class="ssh-meta">
-                            <span>Gateway fingerprint：<code>{{ sshFingerprint(g) ?? 'unavailable' }}</code></span>
-                            <span>Grant：{{ formatExpiry(g.expiresAt) }}</span>
-                          </div>
-                          <p v-else class="access-card__hint">SSH 别名或 Gateway 缺失，无法生成命令。</p>
-                        </div>
-                      </div>
-
-                      <div v-if="g.state === 'active' && data.observedState === 'ready'" class="console-section">
-                        <ConsolePanel
-                          v-if="data.runtimeKind === 'container'"
-                          kind="xterm"
-                          :grant="g"
-                          :environment="data"
-                        />
-                        <ConsolePanel
-                          v-else-if="data.runtimeKind === 'virtual_machine'"
-                          kind="novnc"
-                          :grant="g"
-                          :environment="data"
-                        />
-                      </div>
-                    </template>
-                  </AsyncStateView>
-                </template>
-              </AsyncStateView>
-            </div>
-
-            <div class="freeze-section">
-              <h4 class="section-subtitle">冻结提交与证据</h4>
-              <p class="freeze-desc">将当前工作区冻结为不可变提交，保留 Collector object version 与 SHA-256。</p>
+          <!-- GCP Action Bar -->
+          <GcpActionBar
+            :refreshing="env.instance.kind === 'loading'"
+            @refresh="refreshAll"
+          >
+            <template v-if="env.instance.kind === 'success'">
               <button
                 type="button"
                 class="filled-button"
-                :disabled="!canFreeze(data) || freezeState.kind === 'loading'"
-                @click="freeze(data)"
+                :disabled="!canStart(env.instance.data)"
+                @click="runLifecycle(env.instance.data, 'start')"
               >
-                {{ freezeState.kind === 'loading' ? '冻结中…' : '冻结提交' }}
+                启动
               </button>
+              <button
+                type="button"
+                class="outlined-button"
+                :disabled="!canStop(env.instance.data)"
+                @click="runLifecycle(env.instance.data, 'stop')"
+              >
+                停止
+              </button>
+              <button
+                type="button"
+                class="outlined-button"
+                :disabled="!canRestart(env.instance.data)"
+                @click="runLifecycle(env.instance.data, 'restart')"
+              >
+                重启
+              </button>
+              <button
+                v-if="env.instance.data.observedState === 'failed'"
+                type="button"
+                class="outlined-button"
+                :disabled="retryingEnvironment"
+                @click="retryFailedOperation(env.instance.data)"
+              >
+                重试失败的操作
+              </button>
+              <button
+                type="button"
+                class="text-button error"
+                :disabled="!canDelete(env.instance.data)"
+                @click="openDelete(env.instance.data)"
+              >
+                删除
+              </button>
+            </template>
+          </GcpActionBar>
 
-              <div v-if="freezeDiagnostic" class="freeze-result">
-                <DiagnosticBanner
-                  :code="freezeDiagnostic.code"
-                  :message="freezeDiagnostic.message"
-                  :retryable="freezeDiagnostic.retryable"
-                  severity="error"
-                  @retry="retryFreeze"
-                />
+          <div v-if="lifecycleDiagnostic" class="lifecycle-result">
+            <DiagnosticBanner
+              :code="lifecycleDiagnostic.code"
+              :message="lifecycleDiagnostic.message"
+              :retryable="lifecycleDiagnostic.retryable"
+              severity="error"
+              @retry="retryLifecycle"
+            />
+          </div>
+
+          <!-- GCP Detail Tabs -->
+          <nav class="gcp-detail-tabs" aria-label="环境资源详情导航">
+            <button
+              type="button"
+              class="detail-tab"
+              :class="{ 'detail-tab--active': activeTab === 'overview' }"
+              @click="activeTab = 'overview'"
+            >
+              <SvgIcon name="info" size="sm" aria-hidden="true" />
+              <span>概览与访问</span>
+            </button>
+            <button
+              type="button"
+              class="detail-tab"
+              :class="{ 'detail-tab--active': activeTab === 'terminal' }"
+              @click="activeTab = 'terminal'"
+            >
+              <SvgIcon name="terminal" size="sm" aria-hidden="true" />
+              <span>Web 控制台</span>
+            </button>
+            <button
+              type="button"
+              class="detail-tab"
+              :class="{ 'detail-tab--active': activeTab === 'operations' }"
+              @click="activeTab = 'operations'"
+            >
+              <SvgIcon name="history" size="sm" aria-hidden="true" />
+              <span>异步操作与诊断</span>
+            </button>
+            <button
+              type="button"
+              class="detail-tab"
+              :class="{ 'detail-tab--active': activeTab === 'freeze' }"
+              @click="activeTab = 'freeze'"
+            >
+              <SvgIcon name="lock" size="sm" aria-hidden="true" />
+              <span>实验提交与凭据</span>
+            </button>
+          </nav>
+
+          <AsyncStateView :state="env.instance" @retry="env.load">
+            <template #success="{ data }">
+              <!-- TAB 1: Overview & Endpoints -->
+              <div v-show="activeTab === 'overview'" class="tab-pane">
+                <div class="env-card md-card">
+                  <div class="env-meta-grid">
+                    <div class="meta-item">
+                      <span class="meta-item__label">Runtime</span>
+                      <span class="meta-item__value">{{ data.runtimeKind === 'container' ? '容器' : '虚拟机' }}</span>
+                    </div>
+                    <div class="meta-item">
+                      <span class="meta-item__label">期望状态</span>
+                      <span class="meta-item__value">{{ environmentStateLabel(data.desiredState) }}</span>
+                    </div>
+                    <div class="meta-item">
+                      <span class="meta-item__label">修订版本</span>
+                      <span class="meta-item__value">rev-{{ data.revision }}</span>
+                    </div>
+                    <div class="meta-item">
+                      <span class="meta-item__label">过期时间</span>
+                      <span class="meta-item__value">{{ formatTimestamp(data.eligibilityExpiresAt) }}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="access-section">
+                  <h4 class="section-subtitle">访问端点与授权 (Access & Endpoints)</h4>
+                  <AsyncStateView :state="access.endpoints" @retry="access.loadEndpoints">
+                    <template #success="{ data: eps }">
+                      <DataTable :columns="endpointColumns" :rows="eps" aria-label="环境入口">
+                        <template #protocol="{ row }">
+                          <span class="tag">{{ row.protocol }}</span>
+                        </template>
+                        <template #health="{ row }">
+                          <span class="health-dot" :class="`health-dot--${row.health}`" />
+                          {{ endpointHealthLabel(row.health) }}
+                        </template>
+                        <template #observedAt="{ row }">
+                          {{ formatTimestamp(row.observedAt) }}
+                        </template>
+                      </DataTable>
+
+                      <div class="grant-actions">
+                        <button
+                          v-if="access.grant.kind !== 'success'"
+                          type="button"
+                          class="filled-button"
+                          :disabled="access.creating || eps.length === 0"
+                          @click="issueAccessGrant"
+                        >
+                          签发访问授权
+                        </button>
+                        <button
+                          v-if="access.grant.kind === 'success'"
+                          type="button"
+                          class="text-button error"
+                          @click="revokeAccessGrant"
+                        >
+                          撤销授权
+                        </button>
+                      </div>
+
+                      <div v-if="createGrantDiagnostic" class="grant-result">
+                        <DiagnosticBanner
+                          :code="createGrantDiagnostic.code"
+                          :message="createGrantDiagnostic.message"
+                          :retryable="createGrantDiagnostic.retryable"
+                          severity="error"
+                          @retry="issueAccessGrant"
+                        />
+                      </div>
+
+                      <AsyncStateView :state="access.grant" @retry="issueAccessGrant">
+                        <template #success="{ data: g }">
+                          <div class="grant-card">
+                            <div class="grant-row">
+                              <span>授权 ID</span>
+                              <code>{{ g.id }}</code>
+                            </div>
+                            <div class="grant-row">
+                              <span>状态</span>
+                              <span class="env-state" :class="`env-state--${g.state}`">{{ accessGrantStateLabel(g.state) }}</span>
+                            </div>
+                            <div class="grant-row">
+                              <span>有效期</span>
+                              <span>{{ formatTimestamp(g.issuedAt) }} → {{ formatTimestamp(g.expiresAt) }}</span>
+                            </div>
+                            <div class="grant-row">
+                              <span>过期</span>
+                              <span>{{ formatExpiry(g.expiresAt) }}</span>
+                            </div>
+                            <div class="grant-row">
+                              <span>入口授权</span>
+                              <div class="endpoint-grants">
+                                <span v-for="eg in g.endpointGrants" :key="eg.id" class="tag">
+                                  {{ eg.protocol }} {{ eg.alias ?? eg.endpointId }}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div v-if="g.state === 'active'" class="runtime-access">
+                            <div v-if="httpsGrant(g)" class="access-card">
+                              <h5 class="access-card__title">
+                                <SvgIcon name="code" size="sm" aria-hidden="true" />
+                                容器实验入口
+                              </h5>
+                              <p class="access-card__desc">通过当前登录会话与 AccessGrant 打开受保护的容器实验页面。</p>
+                              <button
+                                type="button"
+                                class="filled-button"
+                                :disabled="!connectUrl(g)"
+                                @click="openContainerRuntime(g)"
+                              >
+                                打开容器实验
+                              </button>
+                              <p v-if="!connectUrl(g)" class="access-card__hint">连接地址缺失，无法打开。</p>
+                            </div>
+
+                            <div v-if="sshGrant(g)" class="access-card">
+                              <h5 class="access-card__title">
+                                <SvgIcon name="terminal" size="sm" aria-hidden="true" />
+                                SSH
+                              </h5>
+                              <p class="access-card__desc">单行命令到唯一 VM；无需下载配置。</p>
+                              <div v-if="sshCommand(g)" class="ssh-command">
+                                <code class="ssh-command__text">{{ sshCommand(g) }}</code>
+                                <CopyButton :text="sshCommand(g) ?? ''" aria-label="复制 SSH 命令" />
+                              </div>
+                              <div v-if="sshCommand(g)" class="ssh-meta">
+                                <span>Gateway fingerprint：<code>{{ sshFingerprint(g) ?? 'unavailable' }}</code></span>
+                                <span>Grant：{{ formatExpiry(g.expiresAt) }}</span>
+                              </div>
+                              <p v-else class="access-card__hint">SSH 别名或 Gateway 缺失，无法生成命令。</p>
+                            </div>
+                          </div>
+                        </template>
+                      </AsyncStateView>
+                    </template>
+                  </AsyncStateView>
+                </div>
               </div>
 
-              <div v-if="freezeEvidence(data)" class="evidence-card">
-                <div class="grant-row">
-                  <span>Object Version</span>
-                  <code>{{ freezeEvidence(data)?.objectVersion }}</code>
+              <!-- TAB 2: Web Terminal -->
+              <div v-show="activeTab === 'terminal'" class="tab-pane">
+                <div v-if="access.grant.kind === 'success' && access.grant.data.state === 'active'" class="console-wrapper">
+                  <ConsolePanel
+                    v-if="data.runtimeKind === 'container'"
+                    kind="xterm"
+                    :grant="access.grant.data"
+                    :environment="data"
+                  />
+                  <ConsolePanel
+                    v-else-if="data.runtimeKind === 'virtual_machine'"
+                    kind="novnc"
+                    :grant="access.grant.data"
+                    :environment="data"
+                  />
                 </div>
-                <div class="grant-row">
-                  <span>SHA-256</span>
-                  <code>{{ freezeEvidence(data)?.sha256 }}</code>
-                </div>
-                <div class="grant-row">
-                  <span>Media Type</span>
-                  <code>{{ freezeEvidence(data)?.mediaType }}</code>
-                </div>
-                <div class="grant-row">
-                  <span>大小</span>
-                  <code>{{ freezeEvidence(data)?.sizeBytes }} B</code>
+                <div v-else class="console-unauthorized-pane md-card">
+                  <SvgIcon name="terminal" size="lg" aria-hidden="true" />
+                  <h4>终端未连接</h4>
+                  <p>连接云终端需要有效的 AccessGrant 访问授权。请点击下方按钮一键签发：</p>
+                  <button
+                    type="button"
+                    class="filled-button"
+                    :disabled="access.creating"
+                    @click="issueAccessGrant"
+                  >
+                    立即签发授权并连接终端
+                  </button>
                 </div>
               </div>
-            </div>
 
-            <div v-if="operations.operations.kind === 'success' && operations.operations.data.length > 0" class="timeline-section">
-              <h4 class="section-subtitle">操作与诊断时间线</h4>
-              <EventTimeline :events="operationTimeline" aria-label="环境操作与诊断时间线" />
-            </div>
-          </template>
-        </AsyncStateView>
+              <!-- TAB 3: Operations & Timeline -->
+              <div v-show="activeTab === 'operations'" class="tab-pane">
+                <div v-if="showProgression" class="env-progression" role="status">
+                  <ol class="progression-steps">
+                    <li
+                      v-for="(step, index) in PROGRESSION_STEPS"
+                      :key="step"
+                      class="progression-step"
+                      :class="{
+                        'progression-step--done': progressionStepIndex !== null && index < progressionStepIndex,
+                        'progression-step--active': index === progressionStepIndex,
+                      }"
+                    >
+                      {{ step }}
+                    </li>
+                  </ol>
+                  <p v-if="activeOperation" class="progression-meta">
+                    尝试 {{ activeOperation.attempt }}/{{ activeOperation.maxAttempts }}
+                    <template v-if="activeOperation.providerPhase"> · 阶段：{{ activeOperation.providerPhase }}</template>
+                    · 截止 {{ formatTimestamp(activeOperation.deadlineAt) }}
+                  </p>
+                </div>
+
+                <div v-if="data.observedState === 'failed'" class="env-failed-panel">
+                  <DiagnosticBanner
+                    code="ENVIRONMENT_FAILED"
+                    :message="`环境进入失败状态${data.failedPhase ? `（阶段：${environmentStateLabel(data.failedPhase)}）` : ''}${data.lastDiagnosticCode ? `，诊断码：${data.lastDiagnosticCode}` : ''}。可尝试重试失败的操作；重试为幂等操作，不会重复创建资源。`"
+                    :retryable="true"
+                    severity="error"
+                  />
+                  <div class="env-failed-actions">
+                    <button
+                      type="button"
+                      class="outlined-button"
+                      :disabled="retryingEnvironment"
+                      @click="retryFailedOperation(data)"
+                    >
+                      {{ retryingEnvironment ? '重试中…' : '重试失败的操作' }}
+                    </button>
+                  </div>
+                </div>
+
+                <div v-if="retryDiagnostic" class="lifecycle-result">
+                  <DiagnosticBanner
+                    :code="retryDiagnostic.code"
+                    :message="retryDiagnostic.message"
+                    :retryable="retryDiagnostic.retryable"
+                    severity="error"
+                    @retry="retryFailedOperation(data)"
+                  />
+                </div>
+
+                <div v-if="operations.operations.kind === 'success' && operations.operations.data.length > 0" class="timeline-section">
+                  <h4 class="section-subtitle">操作与诊断时间线</h4>
+                  <EventTimeline :events="operationTimeline" aria-label="环境操作与诊断时间线" />
+                </div>
+              </div>
+
+              <!-- TAB 4: Freeze & Submission -->
+              <div v-show="activeTab === 'freeze'" class="tab-pane">
+                <div class="freeze-section md-card">
+                  <h4 class="section-subtitle">冻结不可变提交</h4>
+                  <p class="freeze-desc">将当前工作区冻结为不可变提交，保留 Collector object version 与 SHA-256。</p>
+                  <div class="freeze-action-row">
+                    <button
+                      type="button"
+                      class="filled-button"
+                      :disabled="!canFreeze(data) || freezeState.kind === 'loading'"
+                      @click="freezeConfirmVisible = true"
+                    >
+                      {{ freezeState.kind === 'loading' ? '冻结中…' : '发起冻结提交' }}
+                    </button>
+                  </div>
+
+                  <div v-if="freezeConfirmVisible" class="freeze-confirm" role="dialog" aria-label="确认冻结清单">
+                    <h5 class="section-subtitle">确认冻结清单（SubmissionManifest）</h5>
+                    <pre class="freeze-manifest">{{ freezeManifestText }}</pre>
+                    <p class="freeze-confirm-hint">
+                      提交前请确认清单覆盖全部必交文件；当前清单为课程默认工作区冻结规则，按提交规范定制清单的能力依赖服务端清单投影。
+                    </p>
+                    <div class="env-failed-actions">
+                      <button
+                        type="button"
+                        class="filled-button"
+                        :disabled="!canFreeze(data) || freezeState.kind === 'loading'"
+                        @click="confirmFreeze(data)"
+                      >
+                        确认冻结
+                      </button>
+                      <button type="button" class="text-button" @click="freezeConfirmVisible = false">取消</button>
+                    </div>
+                  </div>
+
+                  <div v-if="freezeDiagnostic" class="freeze-result">
+                    <DiagnosticBanner
+                      :code="freezeDiagnostic.code"
+                      :message="freezeDiagnostic.message"
+                      :retryable="freezeDiagnostic.retryable"
+                      severity="error"
+                      @retry="retryFreeze"
+                    />
+                  </div>
+
+                  <div v-if="freezeEvidenceFor(data)" class="evidence-card">
+                    <div class="grant-row">
+                      <span>提交 ID</span>
+                      <code>{{ freezeEvidenceFor(data)?.submissionId }}</code>
+                    </div>
+                    <div class="grant-row">
+                      <span>Object Version</span>
+                      <code>{{ freezeEvidenceFor(data)?.object.objectVersion }}</code>
+                    </div>
+                    <div class="grant-row">
+                      <span>SHA-256</span>
+                      <code>{{ freezeEvidenceFor(data)?.object.sha256 }}</code>
+                    </div>
+                    <div class="grant-row">
+                      <span>Media Type</span>
+                      <code>{{ freezeEvidenceFor(data)?.object.mediaType }}</code>
+                    </div>
+                    <div class="grant-row">
+                      <span>大小</span>
+                      <code>{{ freezeEvidenceFor(data)?.object.sizeBytes }} B</code>
+                    </div>
+                    <p class="evidence-hint">提交凭据将保留显示，可与「评测结果」页对账。</p>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </AsyncStateView>
+        </div>
       </template>
     </section>
 
@@ -359,7 +548,7 @@ import { useEnvironmentInstance } from '@/composables/useEnvironmentInstance'
 import { useEnvironmentLifecycle } from '@/composables/useEnvironmentLifecycle'
 import { useEnvironmentAccess } from '@/composables/useEnvironmentAccess'
 import { useEnvironmentOperations } from '@/composables/useEnvironmentOperations'
-import { freezeSubmission, getFrozenSubmission } from '@/generated/contracts'
+import { freezeSubmission, getFrozenSubmission, retryEnvironment } from '@/generated/contracts'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import ConsolePanel from '@/components/console/ConsolePanel.vue'
 import CopyButton from '@/components/common/CopyButton.vue'
@@ -368,7 +557,10 @@ import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import EventTimeline from '@/components/common/EventTimeline.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
+import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
+import GcpActionBar from '@/components/common/GcpActionBar.vue'
 import { formatTimestamp, idempotencyKey, ifMatch } from '@/utils/format'
+import { environmentStateLabel, endpointHealthLabel, accessGrantStateLabel } from '@/utils/stateLabels'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import type { DataTableColumn } from '@/components/common/DataTable.vue'
 import type {
@@ -394,6 +586,18 @@ const isContextFromEnv = computed(() => course.context.value?.source === 'env')
 
 const route = useRoute()
 const router = useRouter()
+
+const activeTab = ref<'overview' | 'terminal' | 'operations' | 'freeze'>('overview')
+
+function clearSelectedEnvironment() {
+  selectedEnvironmentId.value = undefined
+  environmentIdInput.value = ''
+  void router.replace({ query: { ...route.query, environmentId: undefined } })
+}
+
+async function refreshAll() {
+  await Promise.all([env.load(), access.loadEndpoints(), operations.load()])
+}
 
 const releases = useEnvironmentTemplateReleases(courseId)
 const lifecycle = useEnvironmentLifecycle(courseId)
@@ -426,6 +630,42 @@ const operations = useEnvironmentOperations(selectedEnvironmentId)
 const freezeState = ref<AsyncState<OperationAccepted>>({ kind: 'idle' })
 const freezeDiagnostic = ref<DiagnosticViewModel | null>(null)
 const lastFreezeEnvironmentId = ref<string | null>(null)
+// Freeze evidence is deliberately component-local: the environment instance is
+// replaced wholesale by polling, and the public contract does not embed freeze
+// evidence on the instance, so injecting it there would silently disappear.
+const frozenSubmission = ref<{
+  environmentId: string
+  submissionId: string
+  object: EnvironmentInstanceSchema['cleanupEvidence']
+  manifestSha256: string
+  frozenAt: string
+} | null>(null)
+const retryDiagnostic = ref<DiagnosticViewModel | null>(null)
+const retryingEnvironment = ref(false)
+const freezeConfirmVisible = ref(false)
+// Until the public contract exposes a server-owned SubmissionSpec projection
+// for the selected release, the freeze manifest is the platform default
+// workspace rule. It is rendered for student confirmation before freezing and
+// is the exact object sent to the freeze endpoint (needs-contract: #178).
+const FREEZE_MANIFEST = {
+  apiVersion: 'evaluation.labweaver.io/v1',
+  kind: 'SubmissionManifest',
+  name: 'workspace-freeze',
+  include: [{ kind: 'exactFile', path: 'README.md' }],
+  exclude: [],
+  required: [{ kind: 'exactFile', path: 'README.md' }],
+  llmReadable: [],
+  followSymlinks: false,
+  maxFiles: 1000,
+  maxTotalBytes: 10485760,
+  source: 'workspace',
+} as const
+// One Idempotency-Key per logical intent, kept across retries until the intent
+// reaches a terminal outcome, so a network timeout + retry cannot mint a
+// duplicate frozen submission or a duplicate environment.
+const freezeIntentKey = ref<string | null>(null)
+const createIntentKey = ref<string | null>(null)
+const createIntentReleaseId = ref<string | null>(null)
 
 watch(
   () => route.query.environmentId,
@@ -484,6 +724,44 @@ const operationTimeline = computed<TimelineEvent[]>(() => {
   }))
 })
 
+const PROGRESSION_STEPS = ['已受理', '校验中', '构建中', '置备中', '运行中'] as const
+
+const activeOperation = computed<EnvironmentOperationSnapshotSchema | null>(() => {
+  if (operations.operations.kind !== 'success') return null
+  const items = operations.operations.data
+  const active = items.filter((op) => op.state === 'accepted' || op.state === 'running')
+  const pool = active.length > 0 ? active : items
+  return [...pool].sort((left, right) => right.acceptedAt.localeCompare(left.acceptedAt))[0] ?? null
+})
+
+const progressionStepIndex = computed(() => {
+  const instance = env.instance.kind === 'success' ? env.instance.data : undefined
+  if (!instance) return null
+  const phase = activeOperation.value?.providerPhase ?? null
+  if (phase === 'validating' || phase === 'building' || phase === 'provisioning') {
+    return { validating: 1, building: 2, provisioning: 3 }[phase]
+  }
+  switch (instance.observedState) {
+    case 'requested':
+      return 0
+    case 'validating':
+      return 1
+    case 'building':
+      return 2
+    case 'provisioning':
+      return 3
+    case 'ready':
+      return 4
+    default:
+      return null
+  }
+})
+
+const showProgression = computed(() => {
+  const index = progressionStepIndex.value
+  return index !== null && index < PROGRESSION_STEPS.length - 1
+})
+
 function endpointGrantOf(g: AccessGrantWithGateway, protocol: 'https' | 'ssh') {
   return g.endpointGrants.find((eg) => eg.protocol === protocol && eg.health === 'healthy') ?? null
 }
@@ -519,32 +797,29 @@ function canFreeze(data: EnvironmentInstanceSchema): boolean {
   return data.observedState === 'ready' && freezeState.value.kind !== 'loading'
 }
 
-function freezeEvidence(data: EnvironmentInstanceSchema) {
-  return (data as EnvironmentInstanceWithFreeze).freezeEvidence ?? null
+const freezeManifestText = JSON.stringify(FREEZE_MANIFEST, null, 2)
+
+async function confirmFreeze(data: EnvironmentInstanceSchema) {
+  freezeConfirmVisible.value = false
+  await freeze(data)
 }
 
 async function freeze(data: EnvironmentInstanceSchema) {
   freezeDiagnostic.value = null
   lastFreezeEnvironmentId.value = data.id
+  // Reuse the same idempotency key across retries of this freeze intent; it is
+  // cleared once the freeze reaches a terminal outcome.
+  if (!freezeIntentKey.value || lastFreezeEnvironmentId.value !== data.id) {
+    freezeIntentKey.value = idempotencyKey()
+  }
+  const intentKey = freezeIntentKey.value
   freezeState.value = { kind: 'loading', message: '冻结提交中…' }
   const result = await freezeSubmission({
     path: { environmentId: data.id },
-    headers: { 'Idempotency-Key': idempotencyKey(), 'If-Match': ifMatch(data.revision) },
+    headers: { 'Idempotency-Key': intentKey, 'If-Match': ifMatch(data.revision) },
     body: {
       courseId: data.courseId,
-      manifest: {
-        apiVersion: 'evaluation.labweaver.io/v1',
-        kind: 'SubmissionManifest',
-        name: 'workspace-freeze',
-        include: [{ kind: 'exactFile', path: 'README.md' }],
-        exclude: [],
-        required: [{ kind: 'exactFile', path: 'README.md' }],
-        llmReadable: [],
-        followSymlinks: false,
-        maxFiles: 1000,
-        maxTotalBytes: 10485760,
-        source: 'workspace',
-      },
+      manifest: FREEZE_MANIFEST,
     },
   })
   if (result.error) {
@@ -558,8 +833,10 @@ async function freeze(data: EnvironmentInstanceSchema) {
       ),
     }
     freezeDiagnostic.value = freezeState.value.kind === 'error' ? freezeState.value.diagnostic : null
+    freezeIntentKey.value = null
     return
   }
+  freezeIntentKey.value = null
   freezeState.value = { kind: 'success', data: result.data }
   const submissionId = result.data.statusUrl.match(
     /^\/api\/v1\/frozen-submissions\/([0-9a-f-]{36})$/,
@@ -574,13 +851,18 @@ async function freeze(data: EnvironmentInstanceSchema) {
       ),
     }
     freezeDiagnostic.value = freezeState.value.diagnostic
+    freezeIntentKey.value = null
     return
   }
   let frozenObject: EnvironmentInstanceWithFreeze['freezeEvidence']
+  let frozenManifestSha256: string | null = null
+  let frozenAt: string | null = null
   for (let attempt = 0; attempt < 30; attempt += 1) {
     const frozen = await getFrozenSubmission({ path: { submissionId } })
     if (frozen.data) {
       frozenObject = frozen.data.object
+      frozenManifestSha256 = frozen.data.manifestSha256
+      frozenAt = frozen.data.frozenAt
       break
     }
     const problem = extractProblemDetails(frozen.error)
@@ -598,6 +880,7 @@ async function freeze(data: EnvironmentInstanceSchema) {
         ),
       }
       freezeDiagnostic.value = freezeState.value.diagnostic
+      freezeIntentKey.value = null
       return
     }
     await new Promise<void>((resolve) => window.setTimeout(resolve, 1000))
@@ -610,11 +893,21 @@ async function freeze(data: EnvironmentInstanceSchema) {
     freezeDiagnostic.value = freezeState.value.diagnostic
     return
   }
-  await env.load()
-  if (env.instance.kind === 'success' && env.instance.data.id === data.id) {
-    ;(env.instance.data as EnvironmentInstanceWithFreeze).freezeEvidence = frozenObject
+  frozenSubmission.value = {
+    environmentId: data.id,
+    submissionId,
+    object: frozenObject,
+    manifestSha256: frozenManifestSha256 ?? '',
+    frozenAt: frozenAt ?? '',
   }
+  await env.load()
   await operations.load()
+}
+
+function freezeEvidenceFor(data: EnvironmentInstanceSchema) {
+  return frozenSubmission.value && frozenSubmission.value.environmentId === data.id
+    ? frozenSubmission.value
+    : null
 }
 
 async function retryFreeze() {
@@ -648,17 +941,31 @@ function applyEnvironmentId() {
 async function createFromRelease(release: EnvironmentTemplateReleaseViewSchema) {
   createDiagnostic.value = null
   pendingRelease.value = release
+  // Keep one idempotency key per create intent (release + user) so a retry
+  // after a timeout replays the same create instead of minting a duplicate.
+  if (createIntentReleaseId.value !== release.id || !createIntentKey.value) {
+    createIntentKey.value = idempotencyKey()
+    createIntentReleaseId.value = release.id
+  }
+  const intentKey = createIntentKey.value
   lifecycle.operating.add(`create:${release.id}`)
   try {
-    const result = await lifecycle.create({
-      courseId: courseId.value ?? '',
-      releaseId: release.id,
-      releaseVersion: release.version,
-    })
+    const result = await lifecycle.create(
+      {
+        courseId: courseId.value ?? '',
+        releaseId: release.id,
+        releaseVersion: release.version,
+      },
+      intentKey,
+    )
     if (!result.ok) {
       createDiagnostic.value = result.diagnostic
-    } else if (result.accepted?.environmentId) {
-      router.replace({ query: { ...route.query, environmentId: result.accepted.environmentId } })
+    } else {
+      createIntentKey.value = null
+      createIntentReleaseId.value = null
+      if (result.accepted?.environmentId) {
+        router.replace({ query: { ...route.query, environmentId: result.accepted.environmentId } })
+      }
     }
   } finally {
     lifecycle.operating.delete(`create:${release.id}`)
@@ -675,6 +982,33 @@ async function runLifecycle(data: EnvironmentInstanceSchema, action: LifecycleTa
   const result = await lifecycle.act(data.id, data.revision, action)
   if (!result.ok) {
     lifecycleDiagnostic.value = result.diagnostic ?? null
+    return
+  }
+  // Refresh the operations timeline immediately so the new command shows up
+  // instead of waiting for the next full page load.
+  await operations.load()
+}
+
+async function retryFailedOperation(data: EnvironmentInstanceSchema) {
+  retryDiagnostic.value = null
+  retryingEnvironment.value = true
+  try {
+    const result = await retryEnvironment({
+      path: { environmentId: data.id },
+      headers: { 'Idempotency-Key': idempotencyKey(), 'If-Match': ifMatch(data.revision) },
+    })
+    if (result.error) {
+      const problem = extractProblemDetails(result.error)
+      retryDiagnostic.value = makeDiagnostic(
+        problem?.diagnosticCode ?? 'ENVIRONMENT_RETRY_FAILED',
+        problem?.detail ?? '重试失败的操作未成功',
+        problem?.retryable ?? true,
+      )
+      return
+    }
+    await Promise.all([env.load(), operations.load()])
+  } finally {
+    retryingEnvironment.value = false
   }
 }
 
@@ -727,7 +1061,160 @@ async function revokeAccessGrant() {
 .environment-entry {
   display: flex;
   flex-direction: column;
-  gap: 28px;
+  gap: 24px;
+}
+
+/* GCP Resource Header & Breadcrumbs */
+.gcp-resource-view {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.gcp-breadcrumbs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font: var(--md-sys-body-small);
+  color: var(--md-sys-color-on-surface-variant);
+  margin-bottom: 6px;
+}
+
+.breadcrumb-link {
+  color: var(--md-sys-color-primary);
+  text-decoration: none;
+}
+
+.breadcrumb-link:hover {
+  text-decoration: underline;
+}
+
+.breadcrumb-sep {
+  opacity: 0.5;
+}
+
+.breadcrumb-current {
+  font-family: monospace;
+  font-weight: 500;
+  color: var(--md-sys-color-on-surface);
+}
+
+.resource-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.title-with-pill {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.title-with-pill h2 {
+  font: var(--md-sys-headline-small);
+  color: var(--md-sys-color-on-surface);
+  margin: 0;
+  font-family: monospace;
+}
+
+/* GCP Detail Tabs */
+.gcp-detail-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.gcp-detail-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.detail-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 42px;
+  padding: 0 16px;
+  border: none;
+  background: transparent;
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-label-large);
+  cursor: pointer;
+  white-space: nowrap;
+  position: relative;
+  transition: color 0.15s;
+}
+
+.detail-tab:hover {
+  color: var(--md-sys-color-on-surface);
+}
+
+.detail-tab--active {
+  color: var(--md-sys-color-primary);
+  font-weight: 600;
+}
+
+.detail-tab--active::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: var(--md-sys-color-primary);
+  border-radius: 3px 3px 0 0;
+}
+
+.tab-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 8px 0;
+}
+
+.env-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px;
+  padding: 16px;
+}
+
+.meta-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.meta-item__label {
+  font: var(--md-sys-label-small);
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.meta-item__value {
+  font: var(--md-sys-body-medium);
+  font-weight: 500;
+  color: var(--md-sys-color-on-surface);
+}
+
+.console-unauthorized-pane {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 48px 24px;
+  text-align: center;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.console-unauthorized-pane h4 {
+  font: var(--md-sys-title-medium);
+  color: var(--md-sys-color-on-surface);
 }
 
 .page-header h2 {
@@ -887,6 +1374,85 @@ async function revokeAccessGrant() {
   flex-wrap: wrap;
   gap: 16px;
   margin-bottom: 16px;
+  font: var(--md-sys-body-small);
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.env-progression {
+  margin-bottom: 16px;
+}
+
+.progression-steps {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0 0 6px;
+  padding: 0;
+}
+
+.progression-step {
+  position: relative;
+  padding: 4px 12px;
+  border-radius: var(--md-sys-shape-small);
+  font: var(--md-sys-label-medium);
+  color: var(--md-sys-color-on-surface-variant);
+  background: var(--md-sys-color-surface-container-high);
+}
+
+.progression-step--done {
+  background: var(--md-sys-color-tertiary-container);
+  color: var(--md-sys-color-on-tertiary-container);
+}
+
+.progression-step--active {
+  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+}
+
+.progression-meta {
+  margin: 0;
+  font: var(--md-sys-body-small);
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.env-failed-panel {
+  margin-bottom: 16px;
+}
+
+.env-failed-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.evidence-hint {
+  margin: 8px 0 0;
+  font: var(--md-sys-body-small);
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.freeze-confirm {
+  margin-top: 12px;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-medium);
+  padding: 12px 16px;
+}
+
+.freeze-manifest {
+  margin: 8px 0;
+  padding: 12px;
+  border-radius: var(--md-sys-shape-small);
+  background: var(--md-sys-color-surface-container);
+  color: var(--md-sys-color-on-surface);
+  font-family: monospace;
+  font-size: 12px;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.freeze-confirm-hint {
+  margin: 0 0 8px;
   font: var(--md-sys-body-small);
   color: var(--md-sys-color-on-surface-variant);
 }

@@ -70,20 +70,19 @@
 
     <section class="status-bar md-card">
       <div class="status-item">
-        <span class="status-dot" :style="{ background: 'var(--md-sys-color-success)' }" />
+        <span
+          class="status-dot"
+          :style="{ background: platformHealthDotColor }"
+          role="img"
+          :aria-label="platformHealthLabel"
+        />
         <span class="status-label">平台服务</span>
-        <span class="status-value">运行中</span>
-      </div>
-      <div class="status-divider" />
-      <div class="status-item">
-        <span class="status-dot" :style="{ background: 'var(--md-sys-color-warning)' }" />
-        <span class="status-label">项目阶段</span>
-        <span class="status-value">Sprint 2 Environment</span>
+        <span class="status-value">{{ platformHealthLabel }}</span>
       </div>
       <div class="status-divider" />
       <div class="status-item">
         <span class="status-label">版本</span>
-        <span class="status-value">v0.2.0-dev</span>
+        <span class="status-value">{{ APP_TITLE }}</span>
       </div>
     </section>
   </div>
@@ -95,13 +94,39 @@ import { RouterLink, useRoute } from 'vue-router'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import { useAuth } from '@/composables/useAuth'
-import { OIDC_ENABLED } from '@/config'
+import { OIDC_ENABLED, APP_TITLE } from '@/config'
+import { healthCheck } from '@/api/client'
 import type { AppRole } from '@/router'
 import type { FixtureDemoRole } from '@/fixture/devAuth'
 
 const auth = useAuth()
 const route = useRoute()
 const oidcEnabled = OIDC_ENABLED
+
+// Real liveness probe: the status bar must reflect the actual backend state
+// instead of a hardcoded "running" claim.
+const platformHealth = ref<'checking' | 'up' | 'down'>('checking')
+
+const platformHealthLabel = computed(() => {
+  if (platformHealth.value === 'up') return '运行中'
+  if (platformHealth.value === 'down') return '不可达'
+  return '检测中…'
+})
+
+const platformHealthDotColor = computed(() => {
+  if (platformHealth.value === 'up') return 'var(--md-sys-color-success)'
+  if (platformHealth.value === 'down') return 'var(--md-sys-color-error)'
+  return 'var(--md-sys-color-on-surface-variant)'
+})
+
+onMounted(async () => {
+  try {
+    const result = await healthCheck({ timeout: 5000 })
+    platformHealth.value = result.ok ? 'up' : 'down'
+  } catch {
+    platformHealth.value = 'down'
+  }
+})
 
 // Fixture builds replace the OIDC login with deterministic demo identities so
 // protected pages stay reachable for manual browser acceptance. The fixture

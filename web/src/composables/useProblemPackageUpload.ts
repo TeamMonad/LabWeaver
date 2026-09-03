@@ -68,12 +68,21 @@ export function useProblemPackageUpload(courseId: Ref<string | undefined>, polic
     }
   }
 
+  function packagePathOf(file: File): string {
+    return (file as File & { webkitRelativePath?: string }).webkitRelativePath ?? file.name
+  }
+
   async function addFiles(selected: File[]) {
+    // Directory traversal pushes files in async completion order, so the same
+    // folder can produce a different list (and therefore a different
+    // manifestSha256) on every run. Sort by package path before hashing so the
+    // file table, the manifest hash and visual baselines are deterministic.
+    const ordered = [...selected].sort((left, right) => packagePathOf(left).localeCompare(packagePathOf(right)))
     state.value = { kind: 'hashing' }
     try {
       const hashed = await Promise.all(
-        selected.map(async (file) => {
-          const path = (file as File & { webkitRelativePath?: string }).webkitRelativePath ?? file.name
+        ordered.map(async (file) => {
+          const path = packagePathOf(file)
           const sha256 = await sha256File(file)
           return {
             file,

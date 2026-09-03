@@ -76,6 +76,9 @@ export function useCandidateApproval(courseId: Ref<string | undefined>, runId: R
   const previousEnvironmentSpec = ref<AsyncState<unknown>>({ kind: 'idle' })
   const publish = ref<AsyncState<OperationAccepted>>({ kind: 'idle' })
   const deciding = ref<CandidateKind | null>(null)
+  // Decision failures (e.g. a 409 from a duplicate decision) are surfaced next
+  // to the action while the candidate card keeps its diff and approval context.
+  const decisionDiagnostic = ref<{ kind: CandidateKind; diagnostic: DiagnosticViewModel } | null>(null)
 
   async function loadRun() {
     const id = courseId.value
@@ -191,6 +194,7 @@ export function useCandidateApproval(courseId: Ref<string | undefined>, runId: R
     const id = courseId.value
     if (!id) return
     deciding.value = kind
+    decisionDiagnostic.value = null
     try {
       if (kind === 'environment') {
         if (environmentCandidate.value.kind !== 'success') return
@@ -210,7 +214,13 @@ export function useCandidateApproval(courseId: Ref<string | undefined>, runId: R
           },
         })
         if (result.error) {
-          environmentCandidate.value = { kind: 'error', diagnostic: errorDiagnostic(result.error, 'DECISION_FAILED', '提交审批失败') }
+          // A 409 (double click, or another teacher decided first) must keep
+          // the candidate card reviewable: write the failure into a separate
+          // decision diagnostic instead of replacing the whole view.
+          decisionDiagnostic.value = {
+            kind,
+            diagnostic: errorDiagnostic(result.error, 'DECISION_FAILED', '提交审批失败'),
+          }
           return
         }
         const approvals = [...view.approvals, result.data]
@@ -233,7 +243,10 @@ export function useCandidateApproval(courseId: Ref<string | undefined>, runId: R
           },
         })
         if (result.error) {
-          evaluationCandidate.value = { kind: 'error', diagnostic: errorDiagnostic(result.error, 'DECISION_FAILED', '提交审批失败') }
+          decisionDiagnostic.value = {
+            kind,
+            diagnostic: errorDiagnostic(result.error, 'DECISION_FAILED', '提交审批失败'),
+          }
           return
         }
         const approvals = [...view.approvals, result.data]
@@ -291,6 +304,7 @@ export function useCandidateApproval(courseId: Ref<string | undefined>, runId: R
     canPublish,
     publish,
     deciding,
+    decisionDiagnostic,
     load: loadRun,
     decide,
     publishRelease,

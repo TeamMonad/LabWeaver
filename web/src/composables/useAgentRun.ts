@@ -1,4 +1,4 @@
-import { reactive, ref, type Ref } from 'vue'
+import { reactive, ref, computed, type Ref } from 'vue'
 import { createAgentRun, getAgentRun, cancelAgentRun, retryAgentRunTrack } from '@/generated/contracts'
 import type { AgentRunSchema, CreateAgentRunRequestSchema } from '@/generated/contracts'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
@@ -10,7 +10,18 @@ export function useAgentRun(courseId: Ref<string | undefined>) {
   const run = ref<AsyncState<AgentRunSchema>>({ kind: 'idle' })
   const polling = ref(false)
   const pollError = ref<DiagnosticViewModel | null>(null)
+  // Local-only start timestamp: the contract does not expose run creation time,
+  // so elapsed time is measured from the moment this browser session started
+  // the run and is not meaningful after a page reload.
+  const startedAtMs = ref<number | null>(null)
   let pollTimer: ReturnType<typeof setTimeout> | null = null
+
+  const elapsedSeconds = computed(() => {
+    if (startedAtMs.value === null) return null
+    const current = run.value.kind === 'success' ? run.value.data : undefined
+    if (current && TERMINAL_STATES.has(current.state)) return null
+    return Math.max(0, Math.floor((Date.now() - startedAtMs.value) / 1000))
+  })
 
   async function start(request: CreateAgentRunRequestSchema) {
     const id = courseId.value
@@ -23,6 +34,7 @@ export function useAgentRun(courseId: Ref<string | undefined>) {
     }
 
     run.value = { kind: 'loading', message: '创建 AgentRun…' }
+    startedAtMs.value = Date.now()
     const result = await createAgentRun({
       path: { courseId: id },
       headers: { 'Idempotency-Key': idempotencyKey() },
@@ -148,5 +160,5 @@ export function useAgentRun(courseId: Ref<string | undefined>) {
     beginPolling(current.id)
   }
 
-  return reactive({ run, polling, pollError, start, cancel, retryTrack, stopPolling, beginPolling, resumePolling })
+  return reactive({ run, polling, pollError, elapsedSeconds, start, cancel, retryTrack, stopPolling, beginPolling, resumePolling })
 }

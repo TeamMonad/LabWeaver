@@ -111,10 +111,10 @@ test('material upload package, agent run succeeds', async ({ page }) => {
   // Start an agent run against the archived package.
   await page.locator('button:has-text("启动 AgentRun")').click()
   await expect(page.locator('.run-card')).toBeVisible()
-  await expect(page.locator('.run-state')).toHaveText('running')
+  await expect(page.locator('.run-state')).toHaveText('运行中')
 
   // The fixture run succeeds after a bounded number of polls.
-  await expect(page.locator('.run-state')).toHaveText('succeeded', { timeout: 15000 })
+  await expect(page.locator('.run-state')).toHaveText('已成功', { timeout: 15000 })
 })
 
 test('material upload agent run cancel', async ({ page }) => {
@@ -125,10 +125,10 @@ test('material upload agent run cancel', async ({ page }) => {
   await uploadMaterialPackage(page)
 
   await page.locator('button:has-text("启动 AgentRun")').click()
-  await expect(page.locator('.run-state')).toHaveText('running')
+  await expect(page.locator('.run-state')).toHaveText('运行中')
 
   await page.locator('button:has-text("取消")').click()
-  await expect(page.locator('.run-state')).toHaveText('cancelled', { timeout: 15000 })
+  await expect(page.locator('.run-state')).toHaveText('已取消', { timeout: 15000 })
 })
 
 for (const theme of themes) {
@@ -142,7 +142,7 @@ for (const theme of themes) {
 
       await uploadMaterialPackage(page)
       await page.locator('button:has-text("启动 AgentRun")').click()
-      await expect(page.locator('.run-state')).toHaveText('succeeded', { timeout: 15000 })
+      await expect(page.locator('.run-state')).toHaveText('已成功', { timeout: 15000 })
 
       await expectNoA11yViolations(page, 'run success view should have no a11y violations')
 
@@ -266,7 +266,7 @@ for (const theme of themes) {
 
       await uploadMaterialPackage(page, { suffix: '-run-fail', runFail: true })
       await page.locator('button:has-text("启动 AgentRun")').click()
-      await expect(page.locator('.run-state')).toHaveText('failed', { timeout: 15000 })
+      await expect(page.locator('.run-state')).toHaveText('失败', { timeout: 15000 })
 
       await expect(page).toHaveScreenshot(`material-upload-run-failed-${theme}-${viewport.name}.png`, {
         fullPage: true,
@@ -274,7 +274,7 @@ for (const theme of themes) {
       })
 
       await page.locator('button:has-text("重试环境轨道")').click()
-      await expect(page.locator('.run-state')).toHaveText('succeeded', { timeout: 15000 })
+      await expect(page.locator('.run-state')).toHaveText('已成功', { timeout: 15000 })
     })
   }
 }
@@ -293,7 +293,7 @@ for (const theme of themes) {
       await uploadMaterialPackage(page, { suffix: '-poll-gap' })
       await setFixtureFlag(page, 'agentRunPollFailures', '1')
       await page.locator('button:has-text("启动 AgentRun")').click()
-      await expect(page.locator('.run-state')).toHaveText('running')
+      await expect(page.locator('.run-state')).toHaveText('运行中')
 
       await expect(page.locator('text=AGENT_RUN_POLL_TRANSIENT')).toBeVisible()
 
@@ -303,7 +303,7 @@ for (const theme of themes) {
       })
 
       await page.locator('.poll-error button:has-text("重试")').click()
-      await expect(page.locator('.run-state')).toHaveText('succeeded', { timeout: 15000 })
+      await expect(page.locator('.run-state')).toHaveText('已成功', { timeout: 15000 })
     })
   }
 }

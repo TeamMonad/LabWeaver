@@ -7,7 +7,7 @@
     <FixtureBanner v-if="showFixtureBanner" class="fixture-banner" />
     <TopAppBar
       :drawer-open="drawerOpen"
-      @toggle-drawer="drawerOpen = !drawerOpen"
+      @toggle-drawer="handleToggleDrawer"
     />
 
     <NavigationDrawer
@@ -43,6 +43,14 @@ const route = useRoute()
 const appMain = ref<HTMLElement | null>(null)
 const drawerOpen = ref(false)
 const drawerRail = ref(false)
+
+function handleToggleDrawer() {
+  if (typeof window !== 'undefined' && window.innerWidth >= 840) {
+    drawerRail.value = !drawerRail.value
+  } else {
+    drawerOpen.value = !drawerOpen.value
+  }
+}
 
 watch(
   () => route.fullPath,

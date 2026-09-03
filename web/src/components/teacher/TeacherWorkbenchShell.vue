@@ -52,55 +52,59 @@ const showCreateNotice = ref(false)
 
 <style scoped>
 .teacher-shell {
-  display: grid;
-  grid-template-columns: 248px minmax(0, 1fr);
-  min-height: calc(100vh - var(--app-top-bar-height));
-  margin: -24px -32px -48px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
 }
 
 .sidebar {
-  background: var(--md-sys-color-surface);
-  border-right: 1px solid var(--md-sys-color-outline-variant);
-  padding: 24px 14px;
+  background: var(--md-sys-color-surface-container-low);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-medium);
+  padding: 16px 20px;
 }
 
 .sidebar-heading {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 0 10px 20px;
-  font: var(--md-sys-title-medium);
-  color: var(--md-sys-color-on-surface);
+  display: none;
 }
 
 .module-nav {
-  display: grid;
-  gap: 4px;
-  padding-bottom: 20px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  padding-bottom: 8px;
+  overflow-x: auto;
 }
 
 .module-nav a {
-  padding: 10px 12px;
-  border-radius: var(--md-sys-shape-medium);
+  padding: 8px 16px;
+  border-radius: var(--md-sys-shape-full);
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-label-large);
   text-decoration: none;
+  white-space: nowrap;
+  transition: all 0.15s ease;
 }
 
-.module-nav a:hover,
+.module-nav a:hover {
+  background: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface);
+}
+
 .module-active {
-  background: var(--md-sys-color-primary-container);
-  color: var(--md-sys-color-on-primary-container);
+  background: var(--md-sys-color-primary-container) !important;
+  color: var(--md-sys-color-on-primary-container) !important;
+  font-weight: 600;
 }
 
 .resource-tree {
-  padding: 20px 10px;
+  padding: 12px 16px;
 }
 
 .resource-tree h2 {
   font: var(--md-sys-label-large);
-  margin-bottom: 12px;
+  margin-bottom: 8px;
   color: var(--md-sys-color-on-surface);
 }
 
@@ -108,10 +112,11 @@ const showCreateNotice = ref(false)
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-body-small);
   line-height: 1.5;
+  margin: 0;
 }
 
 .workspace {
-  padding: 28px 32px 48px;
+  padding: 0;
   min-width: 0;
 }
 

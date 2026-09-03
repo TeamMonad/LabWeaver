@@ -24,13 +24,13 @@ async function load(page, environmentId, runtimeLabel) {
   await page.getByRole('button', { name: '加载', exact: true }).click()
   await expect(page.locator('.env-id')).toHaveText(environmentId)
   await expect(page.locator('.env-runtime')).toHaveText(runtimeLabel)
-  await expect(page.locator('.env-state')).toHaveText('ready')
+  await expect(page.locator('.env-state')).toHaveText('运行中')
 }
 
 async function ensureGrant(page) {
   const button = page.getByRole('button', { name: '签发访问授权', exact: true })
   if (await button.isVisible()) await button.click()
-  await expect(page.locator('.grant-card').getByText('active', { exact: true })).toBeVisible()
+  await expect(page.locator('.grant-card').getByText('生效中', { exact: true })).toBeVisible()
 }
 
 async function openConsole(page, kind) {
@@ -132,7 +132,7 @@ function consoleMatrix({ runtime, label, kind, input }) {
           await expect(page.getByText(/CONSOLE_|会话已断开|连接失败/)).toBeVisible({ timeout: 60_000 })
         } else if (lifecycle === 'stop') {
           await page.getByRole('button', { name: '停止', exact: true }).click()
-          await expect(page.locator('.env-state')).not.toHaveText('ready', { timeout: 60_000 })
+          await expect(page.locator('.env-state')).not.toHaveText('运行中', { timeout: 60_000 })
         } else if (lifecycle === 'delete') {
           await page.getByRole('button', { name: '删除', exact: true }).click()
           await page.getByRole('alertdialog').getByRole('button', { name: '删除', exact: true }).click()

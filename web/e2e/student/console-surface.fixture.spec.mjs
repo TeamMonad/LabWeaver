@@ -17,7 +17,7 @@ async function createEnvAndGrant(page, runtimeLabel) {
   await page.goto('/student/environments')
   await page.waitForSelector('.environment-entry')
   await page.locator(`tr:has-text("${runtimeLabel}") button:has-text("创建环境")`).first().click()
-  await expect(page.locator('.env-state')).toHaveText('ready', { timeout: 15000 })
+  await expect(page.locator('.env-state')).toHaveText('运行中', { timeout: 15000 })
   await page.locator('button:has-text("签发访问授权")').click()
   await expect(page.locator('.grant-card')).toBeVisible()
 }

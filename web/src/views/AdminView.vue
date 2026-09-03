@@ -13,7 +13,7 @@
 import RoleLayout from '@/components/layout/RoleLayout.vue'
 
 const tabs = [
-  { path: '/admin', label: '策略' },
+  { path: '/admin/policies', label: '策略' },
   { path: '/admin/resource-approval', label: '资源审批' },
   { path: '/admin/audit', label: '审计' },
 ]

@@ -49,17 +49,65 @@ export const useCourseStore = defineStore('course', () => {
     }
   }
 
+  const availableCourses = ref<CourseContext[]>([
+    {
+      courseId: 'course-cs101',
+      courseName: '操作系统核心实验 (CS101)',
+      role: 'student',
+    },
+    {
+      courseId: 'course-ai201',
+      courseName: '自主智能体与大模型工程 (AI201)',
+      role: 'student',
+    },
+    {
+      courseId: 'course-sys301',
+      courseName: '云原生系统架构与容器实训 (SYS301)',
+      role: 'teacher',
+    },
+  ])
+
+  function setContext(context: CourseContext | string | null, role: CourseContext['role'] = 'student'): void {
+    if (typeof context === 'string') {
+      const found = availableCourses.value.find((c) => c.courseId === context)
+      currentContext.value = found ?? {
+        courseId: context,
+        courseName: context,
+        role,
+      }
+    } else {
+      currentContext.value = context
+    }
+    error.value = null
+    if (currentContext.value && typeof localStorage !== 'undefined') {
+      try {
+        localStorage.setItem('labweaver_course_context', JSON.stringify(currentContext.value))
+      } catch {
+        // ignore quota errors in private browsing
+      }
+    }
+  }
+
   function clearContext(): void {
     currentContext.value = null
     error.value = null
     isLoading.value = false
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.removeItem('labweaver_course_context')
+      } catch {
+        // ignore
+      }
+    }
   }
 
   return {
     currentContext,
+    availableCourses,
     isLoading,
     error,
     isBound,
+    setContext,
     loadContext,
     clearContext,
   }

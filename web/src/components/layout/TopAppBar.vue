@@ -13,23 +13,23 @@
         <span class="brand-name">LabWeaver</span>
         <span class="brand-subtitle">智织实验云</span>
       </RouterLink>
+      <GcpProjectSelector class="top-project-selector" />
     </div>
 
-    <div class="top-app-bar__context">
-      <span class="context-label" aria-label="当前课程上下文">课程 / 项目</span>
-      <button
-        type="button"
-        class="context-button"
-        aria-label="选择课程或项目上下文（待 #47 接入）"
-        disabled
-      >
-        <SvgIcon name="folder_open" size="sm" aria-hidden="true" />
-        <span class="context-button__text">选择上下文</span>
-        <SvgIcon name="expand_more" size="sm" aria-hidden="true" />
-      </button>
+    <div class="top-app-bar__center">
+      <GcpSearchBar />
     </div>
 
     <div class="top-app-bar__trailing">
+      <RouterLink
+        to="/student/environments"
+        class="icon-button shell-button"
+        title="打开云终端控制台 (Cloud Shell)"
+        aria-label="打开云终端控制台"
+      >
+        <SvgIcon name="terminal" size="md" aria-hidden="true" />
+      </RouterLink>
+
       <button
         type="button"
         class="icon-button"
@@ -69,6 +69,8 @@
 import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
 import SvgIcon from '@/components/common/SvgIcon.vue'
+import GcpProjectSelector from '@/components/layout/GcpProjectSelector.vue'
+import GcpSearchBar from '@/components/layout/GcpSearchBar.vue'
 import { useAuth } from '@/composables/useAuth'
 import { useThemeStore } from '@/stores/theme'
 import { OIDC_ENABLED } from '@/config'
@@ -136,16 +138,29 @@ function cycleTheme() {
 .top-app-bar__trailing {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   flex-shrink: 0;
 }
 
-.top-app-bar__context {
-  display: none;
-  align-items: center;
+.top-app-bar__leading {
   gap: 12px;
+}
+
+.top-project-selector {
+  margin-left: 8px;
+}
+
+.top-app-bar__center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   flex: 1;
+  max-width: 540px;
   min-width: 0;
+}
+
+.shell-button {
+  text-decoration: none;
 }
 
 .context-label {

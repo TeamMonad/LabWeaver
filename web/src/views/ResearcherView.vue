@@ -13,6 +13,6 @@
 import RoleLayout from '@/components/layout/RoleLayout.vue'
 
 const tabs = [
-  { path: '/researcher', label: '工作环境' },
+  { path: '/researcher/workspaces', label: '工作环境' },
 ]
 </script>

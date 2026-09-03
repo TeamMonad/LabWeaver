@@ -266,7 +266,7 @@ describe('useCandidateApproval', () => {
     expect(approval.canPublish).toBe(false)
   })
 
-  it('surfaces decision conflict as error diagnostic', async () => {
+  it('surfaces decision conflict without discarding the candidate view', async () => {
     const courseId = ref('course-1')
     const runId = ref('run-1')
     const approval = useCandidateApproval(courseId, runId)
@@ -286,9 +286,11 @@ describe('useCandidateApproval', () => {
     })
 
     await approval.decide('environment', 'approved', 'ok')
-    expect(approval.environmentCandidate.kind).toBe('error')
-    if (approval.environmentCandidate.kind === 'error') {
-      expect(approval.environmentCandidate.diagnostic.code).toBe('REVISION_CONFLICT')
-    }
+    // The candidate card (diff, approvals, evidence) must stay reviewable after
+    // a conflict (duplicate click or another teacher decided first).
+    expect(approval.environmentCandidate.kind).toBe('success')
+    expect(approval.decisionDiagnostic?.kind).toBe('environment')
+    expect(approval.decisionDiagnostic?.diagnostic.code).toBe('REVISION_CONFLICT')
+    expect(approval.decisionDiagnostic?.diagnostic.retryable).toBe(false)
   })
 })

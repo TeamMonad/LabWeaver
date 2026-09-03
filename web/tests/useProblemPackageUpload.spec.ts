@@ -84,6 +84,27 @@ describe('useProblemPackageUpload', () => {
     )
   })
 
+  it('sorts files by package path regardless of arrival order so manifest hashing stays deterministic', async () => {
+    const courseId = ref('course-1')
+    const policyRevision = ref(1)
+    const upload = useProblemPackageUpload(courseId, policyRevision)
+
+    const zed = makeFile('zeta.txt', 'z')
+    Object.defineProperty(zed, 'webkitRelativePath', { value: 'materials/zeta.txt' })
+    const alpha = makeFile('alpha.txt', 'a')
+    Object.defineProperty(alpha, 'webkitRelativePath', { value: 'materials/alpha/alpha.txt' })
+    const mid = makeFile('mid.txt', 'm')
+    Object.defineProperty(mid, 'webkitRelativePath', { value: 'materials/mid.txt' })
+
+    await upload.addFiles([zed, alpha, mid])
+
+    expect(upload.files.map((f) => f.path)).toEqual([
+      'materials/alpha/alpha.txt',
+      'materials/mid.txt',
+      'materials/zeta.txt',
+    ])
+  })
+
   it('marks object upload failure without throwing unhandled rejection', async () => {
     const courseId = ref('course-1')
     const policyRevision = ref(1)
