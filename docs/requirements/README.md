@@ -1,31 +1,18 @@
-# Requirements Baseline
+# 产品需求
 
-This directory is the formal, testable requirements baseline for LabWeaver. It
-converts the v2.1 design baseline into reviewable requirements; it is not
-runtime evidence and does not change service ownership, public contracts, or
-release policy.
+LabWeaver 面向教师、学生、科研用户和管理员，提供 Agent 原生的教学与科研工作环境。当前产品选择见 ADR 0015，实际实现结果见 Issue #180 的 PR。
 
-## Reading order
+| 用户 | 主流程 |
+| --- | --- |
+| 教师 | 上传材料、描述目标、生成并验证配置和镜像、预览、一次批准完整实验包、查看结果 |
+| 学生 | 打开实验、启动或继续、终端/桌面/SSH 工作、提交、查看确定性评测与反馈 |
+| 科研用户 | 选择项目、模板或软件需求、资源和时长、查看估价、申请 Work、连接配置、续期和回收 |
+| 管理员 | 配置资源池/GPU/费率、审批、查看用量费用、调整预算和处理故障 |
 
-1. [Impact map](impact-map.md) identifies affected roles, outcomes,
-   dependencies, and risks.
-2. [User journeys](user-journeys.md) turns role flows into observable stages
-   and failure signals.
-3. [User stories](user-stories.md) records US-01 through US-10 using 3C.
-4. [Acceptance criteria](acceptance-criteria.md) assigns stable requirement
-   IDs, expected evidence, and current verification state.
+普通用户无需理解 Provider、NATS、Kubernetes 对象和内部 revision。高级配置使用真实表单与服务端校验；YAML 可作高级入口，不是唯一入口或第二配置真源。
 
-## Evidence rule
+实验扩展主要增加模板、脚本或镜像包与行为测试。xv6、受控安全实验和 CTF 用于检验通用性，不增加专用业务服务或 RuntimeKind。
 
-The `Current evidence` column in the acceptance matrix is a fact about the
-current repository state. `planned`, `blocked`, E0 documentation, and E1
-contract tests are not evidence that a production path is complete. The
-implementation status, test plan, and coverage matrix remain the authorities
-for current capability state and required next proof.
+GPU 包括独占、容器时间片和 VM vGPU。规格展示共享方式与限制，费用展示显式单位和费率，未知状态不能伪装为零。计费先核算与提醒，不接支付或默认中断科研任务。
 
-## Scope and priorities
-
-All ten stories are retained. P0 items are current release commitments; P1
-items are explicitly out of the current release gate; P2 is reserved for the
-production-evolution items in the v2.1 scope baseline. A story may have P0
-and P1 acceptance criteria when its core flow is P0 but an enhancement is not.
+六个业务服务和 A/B/C/D 职责保留。Slurm、MIG、通用多环境 DAG、支付网关和完整 CTF 竞赛运营不在当前范围。测试关注可完成的用户旅程和失败行为，不以重复需求/状态/覆盖矩阵维护进度。

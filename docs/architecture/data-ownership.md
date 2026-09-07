@@ -1,52 +1,20 @@
-# Data Ownership
+# 数据所有权
 
-The domain model uses one PostgreSQL cluster with independent schemas and
-least-privilege logins. `platform_meta` is deployment metadata, not a business
-domain; no runtime service login can access it. The production rules are defined by
-[ADR 0002](../adr/0002-postgresql-schema-and-migration-policy.md); no schema,
-role or Migration has been implemented by this documentation work.
+PostgreSQL 是业务事实源。六个服务共享数据库实例并各自拥有领域 Schema；NATS 负责可靠投递，不是业务状态源。
 
-| PostgreSQL schema | Business owner | Initial planned entities | Write boundary |
-| --- | --- | --- | --- |
-| `platform_meta` | deployment release coordinator | release ledger, lock-attempt and report identities | short-lived provisioner and restricted release-coordinator only; no runtime service access |
-| `control` | Control Service | courses, projects, lab_packages, template_versions, publication_approvals | Control runtime and Migration identities only |
-| `access` | Access Service | devices, access_grants, endpoint_grants, policy_revisions, preauth_issuances | Access runtime and Migration identities only |
-| `environment` | Environment Service | environment_instances, endpoints, configuration_requests, configuration_runs | Environment runtime and Migration identities only |
-| `agent` | Agent Service | agent_runs, checkpoints, tool_calls, generated_artifacts | Agent runtime and Migration identities only |
-| `evaluation` | Evaluation Service | evaluation_specs, runs, step_runs, fragments, review_reports | Evaluation runtime and Migration identities only |
-| `resource` | Resource Service | resource_requests, approvals, leases, capacity_claims | Resource runtime and Migration identities only |
-| `shared_audit` | Control Service audit projection | sanitized audit_log, projection progress | restricted Control projection identity only; no business writes |
+| Schema | 权威数据 |
+| --- | --- |
+| control | Project、课程、材料、模板和发布批准 |
+| access | 成员范围、访问授权、会话与撤销 |
+| environment | 实例、操作、端点与配置运行 |
+| agent | 候选、任务和构建记录 |
+| evaluation | 提交、评测执行、结果和反馈 |
+| resource | 目录、申请、审批、分配、租约、费率、用量与费用 |
 
-Each business domain owns a local Outbox and commits its business write,
-idempotency record and Outbox row in one transaction. `shared_audit` is not a
-shared Outbox and not a cross-domain business-write exception. Control Service
-temporarily owns the append-only audit projection; it consumes versioned events
-and may not write another domain's business schema.
+Project 为 Work 和资源费用的必选归属，Course 只表达教学关联。课程退出或关闭不能级联删除独立科研环境。
 
-Cross-domain records use stable identifiers and immutable version/hash
-references. Cross-schema foreign keys, cascades, triggers and functions are
-prohibited. Consumers must reject or idempotently handle duplicate, stale,
-unsupported and replayed events. Runtime roles cannot run DDL or write another
-domain schema; all schema evolution is the separately controlled Migration Job.
-The short-lived provisioner owns initial schema creation, `PUBLIC` revocation
-and owner-specific default privileges. Each domain Migration login owns its
-Migration history, while runtime has only its own schema DML plus read-only
-history validation access. Connection pools cannot share identities or widen
-their fixed `search_path`.
-| PostgreSQL schema | Owner | Initial planned entities |
-| --- | --- | --- |
-| `control` | Control Service | courses, projects, lab_packages, template_versions, publication_approvals |
-| `access` | Access Service | devices, access_grants, endpoint_grants, policy_revisions, preauth_issuances |
-| `environment` | Environment Service | environment_instances (desired/observed state and revision), environment_operations, endpoints, configuration_requests, configuration_runs, cleanup_evidence |
-| `agent` | Agent Service | agent_runs, checkpoints, tool_calls, generated_artifacts |
-| `evaluation` | Evaluation Service | evaluation_specs, runs, step_runs, fragments, review_reports |
-| `resource` | Resource Service | resource_requests, approvals, leases, capacity_claims |
-| `shared_audit` | Append-only audit boundary | audit_log, outbox_events, event_projection |
+领域写入、防重与 Outbox 使用同一事务。跨领域原子性仅在明确业务不变量需要时，由唯一协调入口调用各 Owner 的数据访问实现并使用同一个 PostgreSQL 事务；只授予该入口必需权限。不得复制其他领域 SQL 或使用共享超级账号，不持锁等待模型、Kubernetes、构建或人工审批。
 
-All writes use a transaction plus Outbox or an equivalent atomic boundary. Consumers must reject or idempotently handle duplicates, stale events, unsupported versions and replay. No schema or Migration is implemented by ARC-01a; the table records the frozen ownership decision only.
+外部副作用通过持久任务、Outbox、幂等与代次条件更新完成。停止请求不等于设备释放；未知计量不等于零费用。费用条目及调整属于业务数据，不能作为开发报告清理。
 
-For the proposed environment lifecycle, `environment_instances` references a
-Resource-owned Lease and Access-owned grants but never owns or writes them. A
-future deleted instance remains an Environment-owned audit tombstone with
-sanitized cleanup evidence; it is not a cross-service cache or a recoverable
-replacement for Resource or Access history.
+空数据库通过显式迁移初始化。服务启动仅校验配置和所需结构，不隐式重建旧 Schema。本次无外部消费者允许全仓接口硬切，但不形成永久数据删除政策；远端数据切换不属于本轮实施。

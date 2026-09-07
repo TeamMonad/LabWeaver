@@ -1,71 +1,17 @@
-# Sprint 2 Database Baseline
+# 数据库迁移
 
-## Current contract
+六个服务使用同一 PostgreSQL 数据库中的领域 Schema。迁移源码在 migrations；运行时不自行执行 DDL、修复未知 Schema 或删除旧数据。
 
-Sprint 2 adopts the retained infrastructure without destructive reset. The six service/data ownership
-boundaries remain fixed, but each domain now has exactly one current migration:
+v3 面向空数据库验证当前初始化路径，同时更新所有仓库调用者，不保留旧接口兼容层。对既有部署的数据清理和离线切换须作为明确维护动作执行，不属于本轮本地代码任务。
 
-```text
-migrations/<domain>/0001_platform_baseline.sql
-```
+## 一致性与权限
 
-The domains are `control`, `access`, `environment`, `agent`, `evaluation`, and
-`resource`. Evaluation and Resource retain schema ownership even though their
-services are disabled in the Sprint 2 deployment profile. There is no supported
-compatibility, backfill, or down-migration path for an older populated
-pre-release schema. Such a schema is an explicit blocker requiring a separately
-reviewed forward migration; it is never dropped implicitly.
+领域业务、防重和 Outbox 在同一事务提交。跨 Schema 操作只有存在具体原子不变量时才使用指定协调入口及受限权限；不由任意服务复制别的领域 SQL，不使用共享超级账号。
 
-`migrations/catalog.yaml` is the checked-in source of migration identity. Its
-domain order, filename and SHA-256 values are deterministic. After an approved
-baseline change, update the catalog hashes and verify them with:
+服务配置只包含凭据文件引用，不能将数据库密码写入命令行、仓库或日志。迁移错误、未知结构或部分初始化须明确报错；服务启动不能把失败转换成成功就绪。
 
-```sh
-cargo test -p xtask migration_catalog
-```
+## 本地检查与恢复
 
-Changing a baseline requires the same A+B review as any Migration change.
-Editing an already applied baseline is a blocking identity mismatch.
+对一次性本地 PostgreSQL 执行迁移、关键约束、事务失败与并发行为测试。共享数据库变更需要检查所有受影响服务。
 
-## Ownership and execution
-
-Bootstrap creates the six schemas and their existing owner/runtime role
-boundaries. A service may read and write only its own domain. Cross-domain
-foreign keys, triggers, direct writes and shared business tables remain
-forbidden.
-
-The Sprint 2 adoption path creates a domain schema and applies its baseline only
-when both the schema and its migration ledger are absent. It accepts an existing
-domain only when the recorded filename and SHA-256 exactly match the checked-in
-catalog:
-
-```sh
-cargo xtask deploy --env <environment> --package-manifest <verified-manifest> --yes
-```
-
-The playbook requires a root-controlled `PGSERVICEFILE`; database URLs and
-passwords are not command-line arguments or report fields. It binds the run
-identity to the exact cluster UID and migration catalog. It never drops or
-recreates a schema. A partial schema, unknown table, missing role, failed
-statement, unavailable database, or catalog mismatch stops the run before
-product deployment and no passing deployment report is written.
-
-## Runtime and Release Gate
-
-Services never apply or repair migrations at startup. Readiness fails when the
-expected schema or migration identity is absent or mismatched. The Sprint 2
-deployment manifest and Release Gate both bind the SHA-256 of
-`migrations/catalog.yaml`; reports from another catalog, commit or Run ID are
-invalid.
-
-The first additive Access forward migration is
-`access/0002_console_capabilities_and_sessions.sql`. It creates only
-metadata/authority tables, binds capability redemption to one session, keeps
-the 30-second invariant in SQL, and never stores console payloads. Forward
-recovery disables issuance, terminates live proxy sessions, repairs the cause,
-and reapplies the unchanged catalog identity; startup never repairs or drops a
-partially applied migration. An applied hash mismatch remains a blocker.
-
-Future post-v1 data evolution must introduce a new ADR and forward migrations.
-It must not restore the deleted pre-release v1/v2 compatibility machinery or
-reinterpret first-install baseline evidence as production upgrade evidence.
+若初始化失败，检查实际事务终态并修复原因；仅可重建明确属于本地测试的空数据库。对已有业务数据不自动 drop，不以修改已应用记录隐藏结构差异。代码回退和数据库恢复是不同操作，PR 应分别说明其影响。

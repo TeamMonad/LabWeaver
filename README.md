@@ -1,33 +1,29 @@
 # LabWeaver
 
-LabWeaver 是面向教学实验和科研工作的 Agent 驱动云原生实验平台。
+LabWeaver 是 Agent 原生的教学与科研工作环境平台。六个独立服务共同提供实验创作、容器和虚拟机、科研 Work、访问、统一评测以及资源与费用管理。
 
-当前仓库处于 Sprint 1 Foundation 初始化阶段。设计基线位于 `docs/draft/`；实际完成度仅以 `docs/status/implementation-status.md`、当前提交和可复现测试证据为准。
+v3 重构由 [Issue #180](https://github.com/TeamMonad/LabWeaver/issues/180) 跟踪。目标能力不等于已经通过实机验证；实际变更、测试和未验证范围以关联 PR 为准。
 
-## 开发入口
+## 开发
+
+使用仓库固定的 Rust 工具链与前端 package scripts。优先运行受影响范围：
 
 ```sh
-cargo xtask check
+cargo check -p control-service --locked
+cargo test -p contracts --locked
+pnpm --dir web typecheck
+pnpm --dir web test
 ```
 
-服务启动前必须显式设置 `LABWEAVER_BIND_ADDR`。缺失或非法配置会阻断启动，不会自动回退到隐式地址。
+启动真实业务服务需要显式配置数据库、OIDC、消息与对象存储；模型和集群执行可以在外部边界替换。缺少配置必须明确失败，不启动模拟业务产品。
 
-## 文档入口
+## 文档
 
-- `docs/requirements/README.md`：可测试需求基线、用户旅程、3C 用户故事和验收项；
-- `docs/architecture/c4.md`：系统上下文与容器边界；
-- `docs/architecture/service-boundaries.md`：服务职责和依赖规则；
-- `docs/architecture/data-ownership.md`：权威数据所有权；
-- `docs/adr/0002-postgresql-schema-and-migration-policy.md`：PostgreSQL 所有权与迁移策略；
-- `docs/development/database-migrations.md`：数据库迁移正式契约；
-- `docs/contracts/contracts-v1.md`：公共类型、REST/SSE、Gateway、生成物和兼容策略；
-- `docs/contracts/environment-lifecycle-v1.md`：Experiment / Work 环境生命周期 v1 契约；
-- `docs/adr/0004-environment-lifecycle-domain.md`：环境生命周期跨域决策；
-- `docs/adr/0005-contracts-ssot-environment-first-release.md`：Contracts SSOT 与 Environment-first Release；
-- `docs/adr/0006-trusted-runtime-artifact-supply-chain.md`：可信 Runtime Artifact 供应链；
-- `docs/adr/0003-nats-subject-and-delivery-contract.md`：NATS Subject 与投递语义；
-- `docs/contracts/nats-event-contract-v1.md`：NATS v1 事件目录；
-- `docs/status/implementation-status.md`：实现状态事实源；
-- `docs/testing/test-plan.md`：测试和证据计划；
-- `docs/process/scrum.md`：GitHub Scrum 操作约束；
-- `docs/deployment/ansible.md`：Kubernetes 基础设施的私有配置、预检、部署、验证和备份流程。
+- [开发约定](AGENTS.md)
+- [服务边界](docs/architecture/service-boundaries.md)
+- [数据所有权](docs/architecture/data-ownership.md)
+- [访问边界](docs/architecture/access-trust-boundary.md)
+- [v3 架构决定](docs/adr/0015-v3-project-work-resource-platform.md)
+- [开发与测试](docs/development/README.md)
+
+应用部署与基础组件安装分开。真实 KubeVirt、GPU 和共享集群验证需要对应环境；普通本地测试不能替代实机验证。不得将凭据或用户提交内容放入仓库。
