@@ -8,6 +8,8 @@ Keycloak 验证用户和服务身份；Access 验证项目、课程、环境、�
 
 内部服务使用独立 Keycloak 服务账户通过 client credentials 获取短期访问令牌。接收方验证签名、issuer、audience、有效期和调用者权限；不得相信客户端自行填入的 actor、role 或 principal。已有 BFF 会话与受限代理用户上下文仍需 Access 查询当前成员和资源授权。
 
+每个接收服务使用自己的 audience，调用方按目标获取并缓存令牌；Keycloak 的 audience mapper、角色与 scope 必须显式配置，不能通过让所有服务接受同一个 audience 来省略配置。Access 转发 Resource 用户请求时同时携带服务令牌和短期签名用户委托，两者缺一不可。Environment 与 Evaluation 的用量写入分别限定到各自拥有的环境或任务，具备一般服务身份不代表可以代写另一领域的用量。
+
 令牌获取与内部 HTTP 使用服务端 TLS；凭据来自 Secret 文件，不写入 URL、命令参数或日志。不保留固定 SPIFFE principal、假 mTLS 参数或关闭验证的生产 fallback。保留 NATS 与 SSH 各自实际需要的认证和加密。
 
 ## 浏览器与 SSH
