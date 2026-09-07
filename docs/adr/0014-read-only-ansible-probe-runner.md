@@ -74,10 +74,10 @@ mounting, runs as UID/GID 65532 with a read-only root filesystem,
 key and user certificate read-only from their Secrets, and mounts writable
 `/work` and `/evidence` emptyDir volumes with explicit size limits.
 
-The worker runs only the pinned profile playbook at
-`/opt/labweaver/probe/linux-nginx-probe-v1/playbook.yml`; any other profile
-name fails closed. The playbook runs only the three allowlisted modules
-against the VM and stats only the approved material paths
+The worker resolves the approved package-relative `playbook_profile` below
+`/input/evaluator`; an absolute path, traversal, or missing package file fails
+closed. The original nginx example uses three allowlisted modules
+against the VM and stats its approved material paths
 (`/etc/nginx/nginx.conf`, `/etc/nginx/sites-available/default`,
 `/srv/labweaver-nginx-lab` and its `index.html`). No user-controlled value is
 ever concatenated into a command line. The worker invokes `ansible-playbook`
