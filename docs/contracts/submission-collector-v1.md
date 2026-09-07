@@ -108,9 +108,10 @@ Lock. Upload uses one attempt-specific key, exact SHA-256 checksum,
 `If-None-Match: *`, Governance mode and the frozen `retainUntil`. Success
 requires an exact non-null version and verified HEAD plus byte read-back.
 
-`evaluation.submission_freeze_requests` owns one stable ID per course and
-idempotency key. `submission_freeze_attempts` retains every fenced attempt and
-failure diagnostic. A completed attempt, authoritative `frozen_submissions`
+`evaluation.submission_freeze_requests` owns one stable ID per project and
+idempotency key. Course is optional teaching context and does not change that
+identity. `submission_freeze_attempts` retains every fenced attempt and failure
+diagnostic. A completed attempt, authoritative `frozen_submissions`
 row and v2 Outbox event are committed in one transaction. Exact replay returns
 the stored contract; a different request under the same key conflicts.
 

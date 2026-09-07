@@ -14,4 +14,12 @@ v3 面向空数据库验证当前初始化路径，同时更新所有仓库调�
 
 对一次性本地 PostgreSQL 执行迁移、关键约束、事务失败与并发行为测试。共享数据库变更需要检查所有受影响服务。
 
+以下测试通过 Testcontainers 启动一次性 PostgreSQL，检查完整迁移和领域访问边界，需要本机 Docker 可用：
+
+```sh
+cargo test -p persistence-sqlx --test postgres_integration bootstrap_migrate_and_enforce_domain_boundaries --locked
+```
+
+Project 是幂等与归属的基本范围。可选 Course 不得作为普通唯一索引中唯一防重的组成条件，否则无课程记录可能绕过 PostgreSQL 的唯一约束。一次执行尝试的 TaskRunId 必须持久化且唯一，恢复时复用该身份；不得在读取时生成替代 ID。
+
 若初始化失败，检查实际事务终态并修复原因；仅可重建明确属于本地测试的空数据库。对已有业务数据不自动 drop，不以修改已应用记录隐藏结构差异。代码回退和数据库恢复是不同操作，PR 应分别说明其影响。

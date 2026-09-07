@@ -14,6 +14,10 @@ Control 的发布入口一次批准完整实验包，绑定环境模板、执行
 
 Evaluation 保留现有任务状态与 Reconciler。冻结文件输入绑定不可变提交；实时 Probe 绑定目标环境、实例与观察时间，目标变化后不得将旧结果写到新实例。程序执行与 Probe 可共享真实重复的受限进程、Job 观察、取消与清理代码，输入和结果语义仍分别表达。
 
+程序步骤的 `toolchainProfile` 是批准包内 JSON 文件的相对路径，使用 `evaluation.labweaver.io/program-profile/v1` 格式，包含可选的 `compileArgv` 和必需的 `runArgv`。编译步骤必须提供编译命令；解释执行可明确省略。参数逐项传入进程，仅替换 `{source}`、`{binary}`、`{submission_dir}`、`{evaluator_dir}` 四个路径标记。Probe 的 `playbookProfile` 同样指向批准包内的实际 playbook，不能通过课程名称选择写死的实现。
+
+Evaluation 发布记录保存完整包及其工件 locator，执行前校验不可变工件的 hash 与大小。冻结归档和包内文件分别物化到任务临时卷，执行容器只读挂载输入。带访问权限的下载地址只进入受控 Secret；不得以预置 PVC、ConfigMap 中的用户文件或后来编辑的包补齐发布内容。
+
 Worker 返回有界的结构化检查结果；确定性评分由已批准规则计算。启动失败、镜像不可用、协议损坏、读取失败和未知执行状态是基础设施错误，不转换为学生错误或通过。LLM 反馈与确定性结果分开存储，不接受它提供的分数或 Gate 决定。
 
 一次性任务使用 Resource 的 TaskRunId 租约。Evaluation 将项目、任务、租约与执行代次绑定到持久运行记录，再确认执行意图并启动 Job。取消、恢复和结果写入使用同一代次条件，旧 Worker 不能覆盖新尝试。实际执行对象清理完成后才确认释放；HTTP 接收请求、发出删除或 Worker 失联都不表示资源已经释放。
