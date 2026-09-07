@@ -1,76 +1,23 @@
-# Contracts v1
+# 公共契约
 
-## Authority and evidence
+crates/contracts 是领域类型、校验、HTTP/SSE、NATS 和 Schema 的语义来源。OpenAPI、JSON Schema 和 Web SDK 从同一来源生成，不手工维护平行类型。文件名和现有 API 版本不代表承诺保留旧消费者；v3 按已批准范围同步更新仓库内调用方。
 
-`crates/contracts` is the semantic single source of truth for public types, validation, lifecycle rules, REST/SSE, Gateway Internal API and NATS payloads. Generated JSON Schema, OpenAPI and the Public Axios SDK are projections and must be byte-identical to regeneration. This delivery is E1 only: it proves contract behavior, not Handler, PostgreSQL, Outbox, Provider, Gateway, Kubernetes or browser runtime availability.
+## 归属与权限
 
-## Stable wire rules
+Project 是 Work、资源申请和费用的必选归属，Course 为可选教学关联。教学课程自身的接口仍保留课程语义。Project 授权只依赖相应项目成员关系；Environment 授权使用所属 Project、可选 Course、实例和运行代次。
 
-- Public identifiers are non-interchangeable UUIDv7 newtypes; persisted revisions are non-zero `u64`, and event/SSE sequence values are monotonic `u64`.
-- Time is RFC 3339 UTC with literal `Z` and millisecond precision. Expiry, timeout and retry budgets are explicit.
-- SHA-256 is lowercase 64-character hex. Structured documents hash RFC 8785 canonical JSON; files and binary artifacts hash raw bytes.
-- Request documents and events reject unknown fields, duplicate keys, missing/empty/oversized values, non-finite numbers and unsupported versions. Responses may gain optional fields in v1.
-- Every JSON ingress must decode through `contracts::parse_strict_json`; this rejects duplicate keys and trailing documents before typed decoding instead of losing conflicts in a default map.
-- Errors use RFC 9457 `application/problem+json` with `diagnosticCode`, request/trace identity, retryability and bounded violations. Unknown `LW_*` diagnostics are blocking.
+内部身份来自验证过的服务 JWT，不来自 actor、role 或 principal 请求头。受限服务代表用户调用时，Access 仍检查真实会话、成员及资源范围。
 
-## Domain invariants
+## 生命周期和结果
 
-Problem packages complete atomically only after path, size, per-file hash and manifest hash validation. Course LLM policy permits only an explicit Claude Code worker binding with an opaque runtime profile, exact model, CLI version, worker image hash, runtime-configuration hash, bounded per-worker in-flight limit, revision and budgets; it has no SDK, provider or model fallback. Provider transport and authentication remain deployment-owned Claude Code configuration and are not public contract fields. Secret, token, private key, PII and student content outside `llmReadable` are denied, while allowlisted paths still pass classification, content and size policy.
+环境、评测和 Agent 任务保留各自权威状态。长任务返回可查询操作及真实阶段，取消和终态由实际 Owner 推进。刷新、重试、重复事件和进程重启通过幂等与代次条件更新处理。
 
-Agent runs contain independent Environment and Evaluation tracks. Each due track has one PostgreSQL-authoritative worker lease; heartbeat extends that exact token, expiry permits a monotonic retry, durable cancellation is observed by the lease owner, and terminal completion immediately retains the track checkpoint before aggregate derivation. The preparation dispatcher is not claimable while every remaining track has a live lease; only a requested track or an expired running lease permits recovery, preventing a live long-running Claude invocation from being replay-polled as new preparation work. Claude Code input can be constructed only by the service-owned ProblemPackage gate after package/object size and SHA-256 verification, course-policy matching and revision-bound hard-deny classification. A track accepts output only after CLI-version verification, result-envelope validation, immutable budget enforcement, protected-field rejection, exact generated Schema, semantic validation and canonical output hashing all succeed. Retry creates a monotonic attempt under the same run and preserves prior checkpoint, usage, cost and diagnostics. Candidate decisions are append-only and bind exact candidate/dependency revisions and hashes; stale policy, schema or trust revisions require revalidation and approval.
+资源目标区分长期环境和一次性任务；目标身份由实际 Owner 绑定项目后申请资源，不凭空创建长期 Work。GPU class 由资源目录解析成独占、时间片或 vGPU，不能由调用者篡改成另一种模式。
 
-EnvironmentSpec separates business class from a closed Container/VM union. Container network mode is explicit: `allow_all` permits unrestricted egress while retaining ingress isolation, and `deny_all` or `restricted` preserve egress isolation; VM specs reject `allow_all`. EvaluationSpec and GoalReview use v1; deterministic points are integers and LLM output has no scoring or release authority. SubmissionManifest supports only `exactFile` and `directoryTree`, rejects path escape, symlink, duplicate and overlap, and produces an immutable FrozenSubmission identity.
+费用包含显式单位、费率版本、计量区间与调整原因。未知计量或缺少费率不能输出已结算的零费用。冻结文件与实时 Probe 分开表示，基础设施错误不当作学生失败，LLM 不改变确定性成绩。
 
-Build, artifact, scan and release semantics follow ADR 0006. Environment state exposes desired/observed state, generation and operation identity. Restart preserves mutable disk through stop/start; reset revokes Grants before restoring the published baseline. Access uses accepted Ed25519, FIDO2 Ed25519 or RSA >=3072 keys, exact OpenSSH SHA-256 fingerprint matching, server aliases, healthy one-to-one `EndpointGrant`s and a 60-second session termination bound after revoke, expiry or key deletion. HTTP(S) endpoint grants carry only the server-derived same-origin `/connect/{endpointGrantId}/` URL; direct runtime routes are forbidden. SSH endpoint grants carry the deployment-reviewed public Gateway DNS name, fixed port `2222` and OpenSSH `SHA256:` host-key fingerprint; none of these fields identifies or overrides the private runtime target. `AccessGrant` follows `requested -> active|denied|revoked` and `active -> expired|revoked`; renew uses `Idempotency-Key` plus strong `If-Match`, extends time only and creates a new revision.
+## 格式与错误
 
-## HTTP, SSE and Gateway
+标识使用现有领域 UUID 类型，revision 和业务序列继续使用既有约束。输入拒绝冲突、未知字段、路径越界和非法数值。错误使用可读 Problem Details 与稳定 diagnostic，保留足够上下文但不记录 Secret 或用户正文。
 
-Public REST is under `/api/v1`; Internal Gateway routes are under `/internal/v1` and require deployment-controlled service identity with mTLS. Every mutation requires `Idempotency-Key`; request-hash mismatch returns `LW_IDEMPOTENCY_CONFLICT`. Existing-resource mutations also require strong `If-Match`; missing/stale values return 412 `LW_REVISION_CONFLICT`. Long-running Environment work returns 202 with both Environment and operation identity. Course-scoped inventory, operation history and actor-scoped AccessGrant discovery use opaque cursors, bounded limits and snapshot stream positions; malformed cursors return 400 and expired cursors return 410. Aggregate-local `Sequence` and public `StreamSequence` are distinct wire types. `StreamSequence` is a canonical unsigned decimal string across REST snapshots, event envelopes, SSE `id`, `Last-Event-ID`, and `after`, preserving the full `u64` range without JavaScript number coercion.
-
-SSE uses `GET /api/v1/events?courseId=...`. `Last-Event-ID` and `after` are equivalent and conflicting values are rejected. Expired cursors return 410 `LW_SSE_CURSOR_EXPIRED`; gaps return `LW_SSE_CURSOR_GAP` and require REST snapshot recovery. Events contain only sanitized identity, revision/hash and diagnostic fields.
-
-OpenSSH authenticates only the fixed local account `gateway`. `AuthorizedKeysCommand` accepts the presented key and Gateway identity but deliberately has no target field because OpenSSH resolves the local account before running the helper. The client selects one server-generated alias only through the exact forced-command grammar `connect lw-<id>`. Access Service revalidates that alias, key, actor, grant, membership and Environment endpoint before consuming the one-time token. Neither phase accepts a target host/port, generic shell, forwarding, SCP or SFTP semantics.
-
-The redeemed `GatewaySession` carries the server-generated alias and the
-Environment-authoritative SHA-256 identity of the observed OpenSSH host-key
-fingerprint. The Gateway supplies a per-connection `KnownHostsCommand`: it
-recomputes the fingerprint from the key offered during the handshake, hashes
-that exact fingerprint string, and emits a host-key line only when both the
-alias and identity match the session. A static `known_hosts` file, trust-on-first-use,
-and `StrictHostKeyChecking=no` are not valid deployment fallbacks.
-The Gateway target identity is an Ed25519 private key paired with an OpenSSH
-user certificate issued by the deployment-owned SSH user CA for the exact
-`labweaver-gateway` principal. Shipping a bare key while guests use
-`TrustedUserCAKeys` is an invalid configuration and must fail at container
-startup.
-
-The Gateway creates, heartbeats and closes sessions through dedicated request types. A one-time opaque token is bound to Gateway identity, connection, key, grant revision and endpoint; only its SHA-256 digest is stored and consumption is atomic. A session records the key and grant revision. Revocation creates an explicit `terminating` deadline, and a missing close receipt becomes `terminationOverdue` rather than a successful close.
-
-Environment exposes a read-only mTLS endpoint-eligibility decision bound to environment/course/subject/revision, eligibility/Lease expiry and the exact requested endpoint protocol, health and revision. The response never contains host, port, credentials or Provider internals, and Access never reads the Environment schema directly.
-
-Container browser terminals use the additive AccessGrant-scoped
-`ConsoleCapability` contract. Discovery returns the Environment-authoritative
-revision, class and exact Resource-verified Work Lease fence. Issuance requires
-BFF session, strict Origin, CSRF, `Idempotency-Key`, strong `If-Match` and exact
-body fences. The 30-second locator is redeemed once with a path-scoped HttpOnly
-cookie. Terminal input and output are binary WebSocket frames; bounded resize
-is the only browser JSON text control. Environment resolves the immutable
-`TerminalSpec` and runtime Pod itself and never accepts a browser/Access
-supplied command, Pod address or Kubernetes credential.
-
-The internal Environment eligibility response is a tagged
-`EnvironmentConsoleBinding`. A Container instance returns `xterm` with its
-validated `TerminalSpec`; a KubeVirt instance returns `novnc` without a VMI
-namespace, UID, endpoint or credential. Runtime/binding mismatches are rejected,
-and Access issues and consumes only the returned kind. A subprotocol mismatch
-is checked before the one-time handoff is consumed.
-
-## Generation and compatibility
-
-```sh
-cargo xtask contracts generate
-cargo xtask contracts check
-cargo xtask test --suite contract
-```
-
-Generated outputs are `schemas/contracts/v1/`, two files in `schemas/openapi/`, and `web/src/generated/contracts/`. Only Public OpenAPI feeds the Web SDK. v1 breaking changes require parallel v2 publication; existing subjects and fields cannot be reinterpreted.
+内容摘要和镜像 digest 用于真实输入与产物完整性；运行时不要求开发证明包或固定镜像数量。生成与校验命令以当前 xtask 和 Web scripts 为准，修改公共契约必须重新生成并检查所有消费者。
