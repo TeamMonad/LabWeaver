@@ -22,6 +22,7 @@ pnpm --dir web test
 - [开发约定](AGENTS.md)
 - [服务边界](docs/architecture/service-boundaries.md)
 - [数据所有权](docs/architecture/data-ownership.md)
+- [资源占用与费用](docs/architecture/resource-accounting.md)
 - [访问边界](docs/architecture/access-trust-boundary.md)
 - [v3 架构决定](docs/adr/0015-v3-project-work-resource-platform.md)
 - [开发与测试](docs/development/README.md)
