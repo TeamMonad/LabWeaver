@@ -1,20 +1,25 @@
 # Submission Collector v1
 
-Status: implemented locally for Issue #54 and PR #121; A+B security review, D
-Verify and connected dual-runtime evidence remain required.
+This document describes the collector contract. Current implementation and test
+status are maintained in the related pull request.
 
 ## Accepted input and identity
 
 The internal freeze command must come from an authenticated, approved
 `SubmissionManifest` projection and carries:
 
-- course, actor, Agent run and non-zero manifest revision;
+- required project, optional course, actor, Agent run and non-zero manifest revision;
 - canonical `submissionManifestSha256`;
 - exact Environment ID/revision, release ID/version, runtime kind, runtime
   artifact SHA-256 and optional Container build request;
 - StudentSubmission retention policy identity/revision/deadline;
 - one idempotency key and trace ID;
 - one Environment-owned source identity.
+
+The project is the authorization and idempotency scope even when no course is
+associated. A nullable course must not weaken the database uniqueness constraint.
+Distinct freeze requests may legitimately produce identical content hashes;
+content identity does not replace request identity.
 
 The current collector accepts `source: workspace`. It does not execute an
 `EvaluationSpec`, Runner or Checker and cannot produce a score. Container
