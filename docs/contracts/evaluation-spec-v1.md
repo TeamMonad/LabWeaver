@@ -70,7 +70,7 @@ image and runtime artifact identities. A run additionally binds the release
 identity, immutable FrozenSubmission content hash, source identity and trace ID.
 
 Evaluation Service owns the PostgreSQL-authoritative lifecycle. The internal
-mTLS API accepts release publication, run creation, readback, cancellation,
+service-account JWT API over TLS accepts release publication, run creation, readback, cancellation,
 StepRun retry, cleanup verification and worker completion. Worker completion is
 fenced by `(stepRunId, attempt, workerId, leaseToken)` and accepts only hash-only
 evidence. Failed or cancelled StepRuns may remain pending cleanup; the aggregate

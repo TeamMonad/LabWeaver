@@ -56,11 +56,11 @@ timeout have distinct stable diagnostics.
 The VM image accepts the collector principal through the reviewed public user
 CA. The short-lived certificate issuer and ephemeral Secret cleanup are
 deployment dependencies, not static repository credentials. Their absence
-blocks VM E3.
+blocks VM collection.
 
-Environment Service now owns the internal mTLS binding endpoint. It accepts
-only the exact Evaluation Service URI identity, requires the current owner,
-course and Environment revision, and rejects anything except a running,
+Environment Service owns the internal binding endpoint protected by a
+service-account JWT over TLS. It requires an authorized Evaluation caller,
+the current owner, project, optional course and Environment revision, and rejects anything except a running,
 current-generation, eligible Environment with a healthy endpoint. VM bindings
 are derived from the persisted running KubeVirt observation and receive a
 299-second certificate with principal `labweaver-collector` and critical
@@ -68,7 +68,7 @@ are derived from the persisted running KubeVirt observation and receive a
 public CA embedded in the reviewed VM provider configuration.
 
 Evaluation Service owns the browser-facing freeze command after Access BFF
-authentication and course authorization. The coordinator atomically changes a
+authentication and project authorization. The coordinator atomically changes a
 queued command to `running`, uses only fixed Kubernetes API operations, and
 creates a digest-pinned same-image Job. Container Jobs run in the Environment
 namespace with the exact PVC mounted read-only; VM Jobs run in the dedicated

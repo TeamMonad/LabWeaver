@@ -1,7 +1,7 @@
 # Container Supply Chain and Runtime v1
 
-Status: implemented locally; connected BuildKit, Harbor, Trivy and Kubernetes
-verification is pending.
+This document describes the supply-chain contract. Issue #180 tracks current
+implementation and local validation; remote execution is outside this change.
 
 ## Scope and ownership
 
@@ -23,7 +23,7 @@ container-executor:
   server-side apply
   -> observe
   -> scale, restart or delete
-  -> cleanup readback and immutable evidence
+  -> cleanup readback
 ```
 
 Neither executor accepts a shell command, `kubectl` text, mutable image tag or
@@ -34,13 +34,13 @@ Provider selected by registration order.
 | Subject | Producer to consumer | Durable behavior |
 | --- | --- | --- |
 | `labweaver.control.agent_build.requested.v1` | Control to Agent | Agent records the exact command hash and Inbox identity before ACK |
-| `labweaver.agent.build.completed.v1` | Agent to Control | Control resolves the authoritative digest-bound artifact over mTLS |
+| `labweaver.agent.build.completed.v1` | Agent to Control | Control resolves the authoritative digest-bound artifact using a service-account JWT over TLS |
 | `labweaver.agent.build.failed.v1` | Agent to Control | Stable terminal diagnostic, retryability and cleanup status |
 | `labweaver.control.environment_template_release.published.v1` | Control to Environment | Immutable release and approved EnvironmentSpec projection |
 | `labweaver.control.environment_template_release.withdrawn.v1` | Control to Environment | Ordered append-only withdrawal |
 
-There is no v2 compatibility layer. The destructive Sprint 2 reset removes old
-development data and installs one current baseline per domain.
+Repository consumers move together to the current contract. Empty databases
+use the migration baseline; service startup never resets existing data.
 
 ## Artifact and publication gate
 
@@ -58,8 +58,6 @@ executor generation, missing approval or a failed cleanup block publication.
 Control resolves the exact successful build projection and policy evaluation;
 the public publication request contains only candidate, approval and runtime
 identity and cannot supply its own artifact or scanner evidence.
-Sprint 2 does not generate or validate Sigstore, Fulcio, Rekor, CT, TUF, SBOM,
-provenance, attestation or Kyverno evidence.
 
 ## Fencing, replay and failure behavior
 
@@ -70,11 +68,9 @@ reuse, stale generations and operations after cleanup are rejected. A timeout,
 cancel or failed stage enters bounded cleanup and cannot produce a publishable
 artifact or Ready environment.
 
-## Required evidence
+## Validation
 
-Local tests prove contract validation, deterministic plans, fixed tool
-invocation, replay and tombstone behavior. Sprint 2 verification additionally
-requires one source identity to close BuildKit/Harbor/Trivy, private digest
-pull, Container lifecycle, authorization negatives, submission freeze, cleanup
-readback and the machine-readable Release Gate. Static or Fixture results do
-not satisfy that connected gate.
+Local tests cover contract validation, deterministic plans, fixed tool
+invocation, replay and tombstone behavior. Real BuildKit, registry, scanner and
+Kubernetes behavior requires separate execution against those dependencies.
+Report the commands actually run and remaining limits in the PR.

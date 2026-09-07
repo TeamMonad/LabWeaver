@@ -18,3 +18,5 @@ Resource 持久化分配决定和租约；Environment 唯一管理环境 Namespa
 同步查询和即时授权直接调用所属服务。长任务使用所属领域的持久状态、Outbox、幂等与条件更新。复用现有操作 DTO、SSE 和页面组件，不增加 Operation Service 或通用 Saga。
 
 内部 HTTP 通过 Keycloak 服务身份和 TLS，用户范围授权由 Access 独立判断。NATS、SSH、OIDC 和工件完整性按各自实际用途保留，不因删除开发证明机制而取消。
+
+实验包批准与任务执行见[批准的实验包与执行](approved-execution.md)，GPU 分配和费用规则见[资源与计费](resource-accounting.md)。
