@@ -24,15 +24,15 @@ class LocalHostpathContractTests(unittest.TestCase):
                 encoding="utf-8"
             )
         )
-        self.assertEqual(schema["properties"]["releaseEligible"]["const"], False)
+        self.assertNotIn("releaseEligible", schema["properties"])
+        self.assertNotIn("identity", schema["properties"])
         self.assertNotIn("token", json.dumps(schema).lower())
         self.assertNotIn("password", json.dumps(schema).lower())
 
-    def test_sample_report_validates_and_cannot_be_promoted(self) -> None:
+    def test_sample_report_validates(self) -> None:
         sample = {
             "schemaVersion": "local-connected-non-release.v1",
             "mode": "local-hostpath",
-            "releaseEligible": False,
             "sourceCommit": "a" * 40,
             "runId": "019fd0f9-a1ac-73d0-99bd-42cbc82c66e9",
             "dockerContext": "desktop-linux",
@@ -50,11 +50,6 @@ class LocalHostpathContractTests(unittest.TestCase):
             },
             "capabilityGaps": ["LW_LOCAL_PREFLIGHT_NFS_RWX_UNAVAILABLE"],
             "blockers": ["LW_LOCAL_PREFLIGHT_NFS_RWX_UNAVAILABLE"],
-            "identity": {
-                "kind": "local-preflight",
-                "sourceCommit": "a" * 40,
-                "runId": "019fd0f9-a1ac-73d0-99bd-42cbc82c66e9",
-            },
         }
         with self.subTest("valid report"):
             import tempfile
@@ -63,61 +58,6 @@ class LocalHostpathContractTests(unittest.TestCase):
                 path = Path(directory) / "report.json"
                 path.write_text(json.dumps(sample), encoding="utf-8")
                 VALIDATOR.validate(path)
-        with self.subTest("promotion rejected"):
-            sample["releaseEligible"] = True
-            with tempfile.TemporaryDirectory() as directory:
-                path = Path(directory) / "report.json"
-                path.write_text(json.dumps(sample), encoding="utf-8")
-                with self.assertRaisesRegex(ValueError, "SCHEMA_INVALID"):
-                    VALIDATOR.validate(path)
-
-    def test_resource_replay_identity_is_sanitized_and_required(self) -> None:
-        schema = json.loads(
-            (ROOT / "schemas/results/local-connected-non-release.v1.schema.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        from jsonschema import Draft202012Validator
-
-        validator = Draft202012Validator(schema)
-        identity = {
-            "kind": "resource-replay-plan",
-            "sourceCommit": "a" * 40,
-            "runId": "019fd0f9-a1ac-73d0-99bd-42cbc82c66e9",
-            "profile": {"path": ".private/resource/profile.json", "sha256": "sha256:" + "a" * 64},
-            "authentication": {"path": ".private/resource/auth.json", "sha256": "sha256:" + "b" * 64},
-            "deploymentManifest": {"path": "artifacts/resource/deployment.json", "sha256": "sha256:" + "c" * 64},
-            "packageManifest": {"path": "artifacts/resource/package.json", "sha256": "sha256:" + "d" * 64},
-            "resourceImage": "harbor.example/labweaver/resource-service@sha256:" + "e" * 64,
-            "configurationBundleSha256": "sha256:" + "f" * 64,
-        }
-        report = {
-            "schemaVersion": "local-connected-non-release.v1",
-            "mode": "local-hostpath",
-            "releaseEligible": False,
-            "sourceCommit": "a" * 40,
-            "runId": "019fd0f9-a1ac-73d0-99bd-42cbc82c66e9",
-            "dockerContext": "desktop-linux",
-            "kubernetesContext": "docker-desktop",
-            "nodeCount": 1,
-            "readyNodeCount": 1,
-            "storageClasses": ["hostpath"],
-            "capabilities": {
-                "singleReadyNode": True,
-                "hostpath": True,
-                "nfsRwx": False,
-                "kubevirt": False,
-                "cdi": False,
-                "ecnuApiKey": False,
-            },
-            "capabilityGaps": ["LW_LOCAL_PREFLIGHT_NFS_RWX_UNAVAILABLE"],
-            "blockers": ["LW_LOCAL_PREFLIGHT_NFS_RWX_UNAVAILABLE"],
-            "identity": identity,
-        }
-        validator.validate(report)
-        identity["profile"]["path"] = "C:/private/profile.json"
-        with self.assertRaises(Exception):
-            validator.validate(report)
 
     def test_local_provider_overlay_disables_kubevirt_and_uses_hostpath(self) -> None:
         profile = json.loads(

@@ -5,7 +5,6 @@ use std::path::Path;
 use std::process::Command;
 
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::AppError;
@@ -14,22 +13,14 @@ const PROFILE: &str = "local-hostpath";
 const REPORT_SCHEMA: &str = "local-connected-non-release.v1";
 
 pub(crate) fn run(root: &Path, profile: &str) -> Result<(), AppError> {
-    run_with_identity(root, profile, None)
+    run_probe(root, profile)
 }
 
-/// Run the read-only local probe and attach a sanitized replay identity when
-/// the caller has already validated a Resource replay input set. The identity
-/// is deliberately JSON-shaped so this module cannot accidentally gain access
-/// to credentials or private payloads.
 #[allow(
     clippy::too_many_lines,
-    reason = "the local preflight boundary assembles one complete sanitized report"
+    reason = "the local preflight boundary assembles one complete capability report"
 )]
-pub(crate) fn run_with_identity(
-    root: &Path,
-    profile: &str,
-    replay_identity: Option<Value>,
-) -> Result<(), AppError> {
+fn run_probe(root: &Path, profile: &str) -> Result<(), AppError> {
     if profile != PROFILE {
         return Err(AppError::InvalidArgument {
             role: "local preflight profile",
@@ -37,18 +28,7 @@ pub(crate) fn run_with_identity(
     }
 
     let source_commit = git_commit(root)?;
-    let run_id = replay_identity
-        .as_ref()
-        .and_then(|value| value.get("runId"))
-        .and_then(Value::as_str)
-        .map(|value| {
-            Uuid::parse_str(value).map_err(|error| AppError::ReleaseGate {
-                code: "LW_LOCAL_REPLAY_IDENTITY_INVALID",
-                detail: format!("local replay runId is invalid: {error}"),
-            })
-        })
-        .transpose()?
-        .unwrap_or_else(Uuid::now_v7);
+    let run_id = Uuid::now_v7();
     let mut blockers = Vec::new();
     let (docker_context, kubernetes_context) = probe_contexts(&mut blockers);
     let cluster = probe_cluster(&mut blockers);
@@ -83,29 +63,9 @@ pub(crate) fn run_with_identity(
         })
         .cloned()
         .collect::<Vec<_>>();
-    let identity = replay_identity
-        .map(|mut value| {
-            let object = value.as_object_mut().ok_or(AppError::ReleaseGate {
-                code: "LW_LOCAL_REPLAY_IDENTITY_INVALID",
-                detail: "local replay identity must be a JSON object".to_owned(),
-            })?;
-            object.insert("sourceCommit".to_owned(), json!(source_commit));
-            object.insert("runId".to_owned(), json!(run_id));
-            Ok::<Value, AppError>(value)
-        })
-        .transpose()?
-        .unwrap_or_else(|| {
-            json!({
-                "kind": "local-preflight",
-                "sourceCommit": source_commit,
-                "runId": run_id,
-            })
-        });
-
     let report = json!({
         "schemaVersion": REPORT_SCHEMA,
         "mode": PROFILE,
-        "releaseEligible": false,
         "sourceCommit": source_commit,
         "runId": run_id,
         "dockerContext": docker_context,
@@ -123,14 +83,13 @@ pub(crate) fn run_with_identity(
         },
         "capabilityGaps": capability_gaps,
         "blockers": blockers,
-        "identity": identity,
     });
     let report_bytes = serde_json::to_vec_pretty(&report).map_err(|error| AppError::Io {
         role: "serialize local preflight report",
         detail: error.to_string(),
     })?;
     let report_path = root
-        .join("artifacts/local-replay")
+        .join("artifacts/local-preflight")
         .join(format!("local-connected-non-release-{run_id}.json"));
     let Some(report_parent) = report_path.parent() else {
         return Err(AppError::Io {
@@ -159,62 +118,6 @@ pub(crate) fn run_with_identity(
             ),
         })
     }
-}
-
-pub(crate) fn file_identity(root: &Path, path: &Path) -> Result<Value, AppError> {
-    let canonical_root = root.canonicalize().map_err(|error| AppError::Io {
-        role: "resolve local replay repository root",
-        detail: error.to_string(),
-    })?;
-    let canonical = path.canonicalize().map_err(|error| AppError::Io {
-        role: "resolve local replay identity locator",
-        detail: error.to_string(),
-    })?;
-    let relative = canonical
-        .strip_prefix(&canonical_root)
-        .map_err(|_| AppError::ReleaseGate {
-            code: "LW_LOCAL_REPLAY_IDENTITY_LOCATOR_OUTSIDE_REPOSITORY",
-            detail: "local replay identity locators must be relative to the repository".to_owned(),
-        })?;
-    if relative.components().any(|component| {
-        matches!(
-            component,
-            std::path::Component::ParentDir | std::path::Component::RootDir
-        )
-    }) {
-        return Err(AppError::ReleaseGate {
-            code: "LW_LOCAL_REPLAY_IDENTITY_LOCATOR_INVALID",
-            detail: "local replay identity locator must not escape the repository".to_owned(),
-        });
-    }
-    let bytes = fs::read(&canonical).map_err(|error| AppError::Io {
-        role: "hash local replay identity locator",
-        detail: error.to_string(),
-    })?;
-    Ok(json!({
-        "path": relative.to_string_lossy().replace('\\', "/"),
-        "sha256": format!("sha256:{:x}", Sha256::digest(bytes)),
-    }))
-}
-
-pub(crate) fn resource_image_reference(package_manifest: &Path) -> Result<String, AppError> {
-    let bytes = fs::read(package_manifest).map_err(|error| AppError::Io {
-        role: "read local Resource package manifest",
-        detail: error.to_string(),
-    })?;
-    let manifest: Value =
-        serde_json::from_slice(&bytes).map_err(|error| AppError::ReleaseGate {
-            code: "LW_LOCAL_REPLAY_PACKAGE_MANIFEST_INVALID",
-            detail: error.to_string(),
-        })?;
-    manifest
-        .pointer("/images/0/reference")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or(AppError::ReleaseGate {
-            code: "LW_LOCAL_REPLAY_PACKAGE_MANIFEST_INVALID",
-            detail: "Resource package manifest has no immutable image reference".to_owned(),
-        })
 }
 
 #[derive(Debug, Default)]
@@ -401,7 +304,7 @@ fn git_commit(root: &Path) -> Result<String, AppError> {
     }
     let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if value.len() != 40 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(AppError::ReleaseGate {
+        return Err(AppError::Integration {
             code: "LW_LOCAL_PREFLIGHT_SOURCE_IDENTITY_INVALID",
             detail: "Git HEAD is not a full hexadecimal commit".to_owned(),
         });
@@ -418,11 +321,8 @@ fn relative_path(root: &Path, path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{file_identity, item_count, names, ready_node_count};
+    use super::{item_count, names, ready_node_count};
     use serde_json::json;
-    use std::fs;
-    use tempfile::tempdir;
-
     #[test]
     fn capability_probe_counts_only_ready_nodes() {
         let value = json!({
@@ -434,28 +334,5 @@ mod tests {
         assert_eq!(item_count(&value), Some(2));
         assert_eq!(ready_node_count(&value), Some(1));
         assert_eq!(names(&value), vec!["docker-desktop", "not-ready"]);
-    }
-
-    #[test]
-    fn file_identity_accepts_a_noncanonical_repository_root() -> Result<(), String> {
-        let temporary = tempdir().map_err(|error| error.to_string())?;
-        let repository = temporary.path().join("repo");
-        fs::create_dir(&repository).map_err(|error| error.to_string())?;
-        let locator = repository.join(".private").join("locator.json");
-        let parent = locator
-            .parent()
-            .ok_or_else(|| "locator parent is missing".to_owned())?;
-        fs::create_dir(parent).map_err(|error| error.to_string())?;
-        fs::write(&locator, b"synthetic locator").map_err(|error| error.to_string())?;
-        let aliased_root = temporary.path().join("repo").join("..").join("repo");
-        let identity =
-            file_identity(&aliased_root, &locator).map_err(|error| format!("{error:?}"))?;
-        assert_eq!(identity["path"], ".private/locator.json");
-        assert!(
-            identity["sha256"]
-                .as_str()
-                .is_some_and(|value| value.starts_with("sha256:"))
-        );
-        Ok(())
     }
 }

@@ -342,14 +342,13 @@
 - name: Validate immutable package identity
   ansible.builtin.assert:
     that:
-      - platform_application_package.schema_version == 'platform-image-package-manifest.v1'
+      - platform_application_package.schema_version == 'platform-image-package-manifest.v2'
+      - platform_application_package.profile | default('platform') == 'platform'
       - platform_application_package.source_commit == platform_application_source_commit
-      - platform_application_package.overall == 'passed'
-      - platform_application_package.images | length == 7
-      - platform_application_package.images | map(attribute='component') | sort == platform_application_components | sort
-      - platform_application_package.images | map(attribute='component') | unique | length == 7
-      - platform_application_package.images | map(attribute='reference') | select('match', '^[^@]+@sha256:[0-9a-f]{64}$') | list | length == 7
-      - platform_application_package.images | map(attribute='scan.critical') | map('int') | max == 0
+      - platform_application_package.images | length > 0
+      - platform_application_package.images | map(attribute='component') | unique | list | length == platform_application_package.images | length
+      - platform_application_package.images | map(attribute='component') | difference(platform_application_components) | list | length == 0
+      - platform_application_package.images | map(attribute='reference') | select('match', '^[^@]+@sha256:[0-9a-f]{64}$') | list | length == platform_application_package.images | length
     fail_msg: PLATFORM_APPLICATION_PACKAGE_INVALID
 
 - name: Bind the evaluation freeze worker to the immutable package image

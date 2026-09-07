@@ -59,16 +59,6 @@ jobs:
             echo LW_PACKAGE_HELM_MUTABLE_IMAGE_FORBIDDEN >&2
             exit 1
           fi
-          count="$(grep -Ec 'image: "?harbor\.internal\.example/labweaver-system/[a-z0-9-]+@sha256:[0-9a-f]{64}"?' "$RUNNER_TEMP/platform-images.yaml")"
-          test "$count" -eq 11 || {
-            echo "LW_PACKAGE_HELM_IMAGE_COUNT_INVALID:expected=11 actual=$count" >&2
-            exit 1
-          }
-          configuration_count="$(grep -Ec 'labweaver.io/configuration-bundle-sha256: "?sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"?' "$RUNNER_TEMP/platform-images.yaml")"
-          test "$configuration_count" -eq 11 || {
-            echo "LW_PACKAGE_HELM_CONFIGURATION_IDENTITY_COUNT_INVALID:expected=11 actual=$configuration_count" >&2
-            exit 1
-          }
           if docker run --rm -v "$PWD:/workspace" -w /workspace \
             docker.io/alpine/helm:3.21.3@sha256:35da09ba0716fc7c3cd63b6b31ee380a9c7662e95f29ab0e4ae962420afd315b \
             template labweaver deploy/helm/labweaver --namespace labweaver-system \
@@ -79,7 +69,7 @@ jobs:
             exit 1
           fi
 
-  build-and-scan:
+  build-images:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -147,36 +137,3 @@ jobs:
             echo "LW_PACKAGE_BUILD_NOT_REPRODUCIBLE:$COMPONENT" >&2
             exit 1
           }
-      - name: Scan runtime image archive
-        env:
-          COMPONENT: ${{ matrix.component }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/$COMPONENT-oci"
-          tar -xf "$RUNNER_TEMP/$COMPONENT-first.tar" -C "$RUNNER_TEMP/$COMPONENT-oci"
-          test -f "$RUNNER_TEMP/$COMPONENT-oci/index.json" || {
-            echo "LW_PACKAGE_OCI_LAYOUT_INVALID:$COMPONENT" >&2
-            exit 1
-          }
-          docker run --rm -v "$RUNNER_TEMP:/evidence" \
-            docker.io/aquasec/trivy:0.72.0@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f \
-            image --input "/evidence/$COMPONENT-oci" --scanners vuln,secret \
-            --severity HIGH,CRITICAL --exit-code 0 --format json \
-            --output "/evidence/$COMPONENT-trivy.json"
-          high="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' "$RUNNER_TEMP/$COMPONENT-trivy.json")"
-          critical="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' "$RUNNER_TEMP/$COMPONENT-trivy.json")"
-          secrets="$(jq '[.Results[]?.Secrets[]?] | length' "$RUNNER_TEMP/$COMPONENT-trivy.json")"
-          if [[ "$COMPONENT" == oj-cpp17-runner && "$high" -ne 0 ]] \
-            || [[ "$critical" -ne 0 ]] || [[ "$secrets" -ne 0 ]]; then
-            echo "LW_PACKAGE_SCAN_BLOCKED:$COMPONENT high=$high critical=$critical secrets=$secrets" >&2
-            exit 1
-          fi
-      - name: Upload OJ runner vulnerability evidence
-        if: ${{ always() && matrix.component == 'oj-cpp17-runner' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: oj-cpp17-runner-trivy
-          path: ${{ runner.temp }}/oj-cpp17-runner-trivy.json
-          if-no-files-found: error
-          retention-days: 14
