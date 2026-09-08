@@ -1,7 +1,6 @@
 # ADR 0010: Immutable PVC and Certificate-bound SSH Collector
 
-Status: proposed and implemented locally for Issue #54; requires A+B contract
-and security review plus D same-build Verify before acceptance.
+Status: historical. Frozen-input semantics remain relevant; internal HTTP authentication now follows [ADR 0015](0015-v3-project-work-resource-platform.md), and execution credentials follow [the approved execution contract](../architecture/approved-execution.md).
 
 ## Context
 

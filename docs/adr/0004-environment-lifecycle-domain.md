@@ -1,6 +1,6 @@
 # ADR 0004: Environment Lifecycle Domain
 
-Status: proposed; requires human contract and security review.
+Status: historical. Lifecycle rules remain relevant; internal service identity and current ownership follow [ADR 0015](0015-v3-project-work-resource-platform.md).
 
 ## Context
 

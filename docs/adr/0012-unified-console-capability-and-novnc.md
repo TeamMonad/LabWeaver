@@ -1,6 +1,6 @@
 # ADR 0012: Unified Console Capability and noVNC Boundary
 
-Status: Accepted; Container xterm and KubeVirt noVNC implemented locally, connected verification pending
+Status: historical. Console capability semantics remain relevant; internal bridge authentication now uses the service JWT and server TLS boundary in [ADR 0015](0015-v3-project-work-resource-platform.md).
 
 Date: 2026-07-29
 
