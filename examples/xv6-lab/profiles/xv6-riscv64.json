@@ -1,0 +1,24 @@
+{
+  "schemaVersion": "evaluation.labweaver.io/program-profile/v1",
+  "compileArgv": [
+    "/usr/bin/sh",
+    "{evaluator_dir}/scripts/build-xv6.sh",
+    "{source}",
+    "{binary}",
+    "{submission_dir}",
+    "{evaluator_dir}"
+  ],
+  "runArgv": [
+    "/usr/bin/sh",
+    "{evaluator_dir}/scripts/run-xv6.sh",
+    "{binary}",
+    "{submission_dir}",
+    "{evaluator_dir}"
+  ],
+  "supportFiles": [
+    "scripts/build-xv6.sh",
+    "scripts/run-xv6.sh",
+    "scripts/run-xv6.py",
+    "xv6/xv6-source.tar.gz"
+  ]
+}

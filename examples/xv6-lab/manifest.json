@@ -1,0 +1,520 @@
+{
+  "apiVersion": "labweaver.io/problem-package/v1",
+  "kind": "ProblemPackage",
+  "metadata": {
+    "name": "xv6-riscv-user-lab",
+    "version": "1.0.0"
+  },
+  "spec": {
+    "runtime": {
+      "kind": "container",
+      "providerBinding": "kubernetes-work-local-hostpath",
+      "runnerImage": "registry.example.invalid/labweaver/evaluation-runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "security": {
+      "runAsNonRoot": true,
+      "readOnlyRootFilesystem": true,
+      "allowPrivilegeEscalation": false,
+      "networkPolicyBinding": "xv6-lab-deny-egress-v1"
+    },
+    "files": [
+      {
+        "path": "Dockerfile",
+        "role": "public",
+        "sha256": "3cecf0ba2d84a5ebbd3fd382cf0ad3468a044169d37c8799af5d777680afbfe9"
+      },
+      {
+        "path": "README.md",
+        "role": "public",
+        "sha256": "72cc002cc27b5d4dc42695480d54d81f27636f972379a4a3fa7884062d76d2bb"
+      },
+      {
+        "path": "environment.yaml",
+        "role": "public",
+        "sha256": "77666e7af818c5fb19d83b2b033580dd896378a0ab91edd51d8c57cbf15376d5"
+      },
+      {
+        "path": "evaluation.yaml",
+        "role": "public",
+        "sha256": "2139edb51fd25d850994a65e2a6937bf923fd1af7b9d57d10a5c349513c5fb2f"
+      },
+      {
+        "path": "profiles/xv6-riscv64.json",
+        "role": "public",
+        "sha256": "0a9611b8fe27e9f9678d3162fcdc40df9ec3d9b0804332b17a29059b1f47afaf"
+      },
+      {
+        "path": "scripts/build-xv6.sh",
+        "role": "public",
+        "sha256": "24589dcbca82bdf19c3b3982bd18393d95155be8e7448cbc0319f01cc1e27bb9"
+      },
+      {
+        "path": "scripts/local-test.sh",
+        "role": "public",
+        "sha256": "2abc7ffdce0a68cf859801826c83fbf83c698a6970610446d25b50cf3cdc44b7"
+      },
+      {
+        "path": "scripts/run-xv6.py",
+        "role": "public",
+        "sha256": "5be81a75187e9ac2cd922eef08375632cc043570aaabc644f604d8df8d614236"
+      },
+      {
+        "path": "scripts/run-xv6.sh",
+        "role": "public",
+        "sha256": "b53f91a186a4ac22ab9f80132e357a7e93c19840e9314ed563db61424c78bfd6"
+      },
+      {
+        "path": "student/student.c",
+        "role": "public",
+        "sha256": "7076f50f2befd74dd4d81f992d6a7818c73c8414e5bef3b12696ee41a2ee9ada"
+      },
+      {
+        "path": "tests/xv6-riscv64/filesystem.in",
+        "role": "public",
+        "sha256": "f02aec217cc43a4f231dd40369de26f863314c95e48f31b7a1868a948bfc3f9e"
+      },
+      {
+        "path": "tests/xv6-riscv64/filesystem.out",
+        "role": "public",
+        "sha256": "eec63cdd47b5cbbca46068b91e472d505fc0e28fbd6caa315bb6ca00df639bef"
+      },
+      {
+        "path": "tests/xv6-riscv64/smoke.in",
+        "role": "public",
+        "sha256": "8827bc20c501a8b240a93ddd7d227b55c46cf3e225a7a0bf3d5f2c8567630df3"
+      },
+      {
+        "path": "tests/xv6-riscv64/smoke.out",
+        "role": "public",
+        "sha256": "2eddc1428d96c2632aa818020bfaf3ae1bd70f1b0664b491a8f47cfb49e6f8fc"
+      },
+      {
+        "path": "xv6/.clang-format",
+        "role": "public",
+        "sha256": "473394ee6f212436d88b3747c2d2835a8adc427520c7c598198fc86b59ca672c"
+      },
+      {
+        "path": "xv6/.dir-locals.el",
+        "role": "public",
+        "sha256": "f003e2e21b904bb06f9540e8ae4245ea170e4b031aea8db891b257ab3c46fd0b"
+      },
+      {
+        "path": "xv6/.editorconfig",
+        "role": "public",
+        "sha256": "149245fa90a4f6d46eb1bb15ff96b397949c9d09d0dfa83e8284da67f30af2f0"
+      },
+      {
+        "path": "xv6/.gdbinit.tmpl-riscv",
+        "role": "public",
+        "sha256": "dd007a5de2a4375dfff173cae7f3049a00d3a6cd562ae99e4ffa689210e0160f"
+      },
+      {
+        "path": "xv6/.gitignore",
+        "role": "public",
+        "sha256": "0795d94363fbbc0a86a9347618027e44ba1140415c6c802793c80f55b1402278"
+      },
+      {
+        "path": "xv6/LICENSE",
+        "role": "public",
+        "sha256": "677302f30c9882c1f81b9be8ceda6efd4edff5576b9e02963b6114cf70c3162c"
+      },
+      {
+        "path": "xv6/Makefile",
+        "role": "public",
+        "sha256": "fcf73ed2990775c0c6950a2862bbc129c2a4ade0da395fabb17900f4d5adaae6"
+      },
+      {
+        "path": "xv6/README",
+        "role": "public",
+        "sha256": "62e7b5718d95ed57222e818e0a4a44cb827b822c89d6da0d682f541222e7b0a1"
+      },
+      {
+        "path": "xv6/kernel/bio.c",
+        "role": "public",
+        "sha256": "5a0dcfd6266635ba55eaa32611d9e274e3f752402ec0964661bef7a954bd8108"
+      },
+      {
+        "path": "xv6/kernel/buf.h",
+        "role": "public",
+        "sha256": "00b344a48220ddeaff96b60730ace733c811ea9b33ee1ead76790716c3847614"
+      },
+      {
+        "path": "xv6/kernel/console.c",
+        "role": "public",
+        "sha256": "d3088059d9591e367b7b15706590e472fe38cc505b22d7d8cf03b8da5de5d699"
+      },
+      {
+        "path": "xv6/kernel/defs.h",
+        "role": "public",
+        "sha256": "cdfe9d6e9c253c6795728958221b68d9ff3ea264f008513a3aaba1e29b30f536"
+      },
+      {
+        "path": "xv6/kernel/elf.h",
+        "role": "public",
+        "sha256": "f51c9ad3bed12d4047e5b6aa62086685ad1fa8c1ac0709076f6390eda6306ac5"
+      },
+      {
+        "path": "xv6/kernel/entry.S",
+        "role": "public",
+        "sha256": "bc064b802759060414c3ce9ae94cd8b609d6a7adf42e8bf857899de81da10b2f"
+      },
+      {
+        "path": "xv6/kernel/exec.c",
+        "role": "public",
+        "sha256": "b93ef7e97e7c701474ae5d9d7a5f0399e7fcf430c47c9bca15d49f4102ebaad2"
+      },
+      {
+        "path": "xv6/kernel/fcntl.h",
+        "role": "public",
+        "sha256": "c8c2a7fa8a9c432be55dcd4bd6db9429c88c3a95cec6f79a576968b36048e166"
+      },
+      {
+        "path": "xv6/kernel/file.c",
+        "role": "public",
+        "sha256": "b31fe01b67f97c8e00c36150cf16ec0ea7d27d2f324b6066d0f62eeddff4a4ac"
+      },
+      {
+        "path": "xv6/kernel/file.h",
+        "role": "public",
+        "sha256": "8b1d433b0deca07fab07bb9eb4e750d0b7c869b33f3b448447dbfca5f2814826"
+      },
+      {
+        "path": "xv6/kernel/fs.c",
+        "role": "public",
+        "sha256": "eb2cab16ab4eac8059e022e5c009c14d12fc35b720dd63e147270a1dbc50eed6"
+      },
+      {
+        "path": "xv6/kernel/fs.h",
+        "role": "public",
+        "sha256": "08118f92377d555b5352579518c26ad5093188c6f88257be70d1f122691545a3"
+      },
+      {
+        "path": "xv6/kernel/kalloc.c",
+        "role": "public",
+        "sha256": "090ff45843dadbc4e674f96967a478cea37714a62fe6b723b8ac9c34fdb15983"
+      },
+      {
+        "path": "xv6/kernel/kernel.ld",
+        "role": "public",
+        "sha256": "5bfb4cc2da14087b472181653b7e0de6639c34222d78f2c1f1f84aa68c7304a8"
+      },
+      {
+        "path": "xv6/kernel/kernelvec.S",
+        "role": "public",
+        "sha256": "a88f4ea371d9416e9a371ee15a74d5f24b7b2712ac1a1d92ef42015eb2224d3f"
+      },
+      {
+        "path": "xv6/kernel/log.c",
+        "role": "public",
+        "sha256": "62c1a96498b2e345f24ddf13bc81b7bdee89f845d6d8d553f07dbb43ff498f71"
+      },
+      {
+        "path": "xv6/kernel/main.c",
+        "role": "public",
+        "sha256": "56af5e10f12ea1f0f82c4e3ec1216e450c113ce1dab5f3888977b6e7fa4e163d"
+      },
+      {
+        "path": "xv6/kernel/memlayout.h",
+        "role": "public",
+        "sha256": "6d7a9c4f352f0649ce8367f629e718a0fec9703be7baf996576929ac142dc26a"
+      },
+      {
+        "path": "xv6/kernel/param.h",
+        "role": "public",
+        "sha256": "2e231d4c792da80c39668de92d56c28e9d24fd1bdc190435f7ce4025d24bbb59"
+      },
+      {
+        "path": "xv6/kernel/pipe.c",
+        "role": "public",
+        "sha256": "c38b2e8b0530d1382d9dc3a957954ab3cf6ae3bb8fd232362d0f908da96ec5bb"
+      },
+      {
+        "path": "xv6/kernel/plic.c",
+        "role": "public",
+        "sha256": "125fc60925cae8cfff87450c88faa30634e4406f1e5a16234ff49ffba5dca7ab"
+      },
+      {
+        "path": "xv6/kernel/printk.c",
+        "role": "public",
+        "sha256": "a4e6d431a3f56250b4962025290e662ddd211db56567cbba95957df0c4e3b2e3"
+      },
+      {
+        "path": "xv6/kernel/proc.c",
+        "role": "public",
+        "sha256": "9c9a8109fc68ab385a9dddd6a7c23a64023481479c6a2831882f5668d010cb13"
+      },
+      {
+        "path": "xv6/kernel/proc.h",
+        "role": "public",
+        "sha256": "117f9994f13255bc1422857ff8bcef858ade187881f3f1391d295df237692004"
+      },
+      {
+        "path": "xv6/kernel/riscv.h",
+        "role": "public",
+        "sha256": "f1fefb95e1f2f10979fb4e79eec44b67975f7c37dcc7754f28d26228c81d9067"
+      },
+      {
+        "path": "xv6/kernel/sleeplock.c",
+        "role": "public",
+        "sha256": "0ddda91203e2ee48285182e165879f25eaf56dc1ba34118e0d7066a34ff455bd"
+      },
+      {
+        "path": "xv6/kernel/sleeplock.h",
+        "role": "public",
+        "sha256": "70e71f5e3ac908740add92f74058f2264cb86f800b9d1ab4099ff37ce457e9e3"
+      },
+      {
+        "path": "xv6/kernel/spinlock.c",
+        "role": "public",
+        "sha256": "9f7911af4c249f5b9af5ea28c7b97b675a3e5daf3285cd84458b66e12f1c4851"
+      },
+      {
+        "path": "xv6/kernel/spinlock.h",
+        "role": "public",
+        "sha256": "82e59d9f745045042c74892b7e055bc5339f8ae438362e4b6f0ff962eae6ee36"
+      },
+      {
+        "path": "xv6/kernel/start.c",
+        "role": "public",
+        "sha256": "86529a328bcbb240772ef486152d4cf0f541baae06e4969f24824da575a34d87"
+      },
+      {
+        "path": "xv6/kernel/stat.h",
+        "role": "public",
+        "sha256": "653da9a25a16140de6733b0fa87d2988d0dee962fe75ab5f17fcb50d19e3f8be"
+      },
+      {
+        "path": "xv6/kernel/string.c",
+        "role": "public",
+        "sha256": "67a31dd59ee8326c5cd0bd6866209682de1ff6f1bcd6c4dc08641a6e2827f192"
+      },
+      {
+        "path": "xv6/kernel/swtch.S",
+        "role": "public",
+        "sha256": "baff65e42b8f80e3b2ec5e1f67e2033b0b9bd7b35564db998573f576bc816088"
+      },
+      {
+        "path": "xv6/kernel/syscall.c",
+        "role": "public",
+        "sha256": "5b8a911360bec429ff6990d8814eba53e5add3465e6bc343b92f43983774a788"
+      },
+      {
+        "path": "xv6/kernel/syscall.h",
+        "role": "public",
+        "sha256": "cd8b85b251ca89434ce0ce31d86d98521b8ecb3e2b224d95c74db6ee9948525f"
+      },
+      {
+        "path": "xv6/kernel/sysfile.c",
+        "role": "public",
+        "sha256": "5e18c50913ebc5c007b06bec86511d93b46d0361fac75291c8456867a7fd0b29"
+      },
+      {
+        "path": "xv6/kernel/sysproc.c",
+        "role": "public",
+        "sha256": "55c1161e4fe5ba7d0094881f0b610b072d0e0e9233f01520226260a79f3ecb98"
+      },
+      {
+        "path": "xv6/kernel/trampoline.S",
+        "role": "public",
+        "sha256": "92c055df5557217dc6008714c01dc801836a86538a1ab67b617b66bcd873053f"
+      },
+      {
+        "path": "xv6/kernel/trap.c",
+        "role": "public",
+        "sha256": "6b7d192e64c49ce729dd3b597d8ba65e452e4c37d15942bab65660a032b3de60"
+      },
+      {
+        "path": "xv6/kernel/types.h",
+        "role": "public",
+        "sha256": "2b243b4826114e7b4dfcdb80dd3ce26d50e9f6c3b2acc776d2887ffc1cf19785"
+      },
+      {
+        "path": "xv6/kernel/uart.c",
+        "role": "public",
+        "sha256": "6c284f94eb8fcca9c723015f366a849a441f462b99d16e3cca5880439df6a493"
+      },
+      {
+        "path": "xv6/kernel/virtio.h",
+        "role": "public",
+        "sha256": "beb83bae22279e8f0358232139e5e368302e59625b72309ed9a32d7bdcb1f0d8"
+      },
+      {
+        "path": "xv6/kernel/virtio_disk.c",
+        "role": "public",
+        "sha256": "ea2074da81f9f1f7ef808aac832982f4ccfc6b3bad8d1df7a8c037737ed17186"
+      },
+      {
+        "path": "xv6/kernel/vm.c",
+        "role": "public",
+        "sha256": "7e85b5001ab9282eefd11f13cd10f9d09287f1feaa603be7fd984de75e0e0de6"
+      },
+      {
+        "path": "xv6/kernel/vm.h",
+        "role": "public",
+        "sha256": "ebd5dfc1a2d28cb16a15dea12ac9467bded6ca4bf652f44b580e4c5bef3fb1a3"
+      },
+      {
+        "path": "xv6/mkfs/mkfs.c",
+        "role": "public",
+        "sha256": "7bb235c8f644713a07cbd4a22b56ff5752c6b376615367342e4435a8b4547eb0"
+      },
+      {
+        "path": "xv6/test-xv6.py",
+        "role": "public",
+        "sha256": "374c4b171d0ad99267174e48d0a1944a022fd32ee9655c4ec5f8c6b0a7be28d3"
+      },
+      {
+        "path": "xv6/user/cat.c",
+        "role": "public",
+        "sha256": "44b0acf6d999a9addc466faa090c8349962a7a51528c8af2e7afae4bf2437df0"
+      },
+      {
+        "path": "xv6/user/dorphan.c",
+        "role": "public",
+        "sha256": "22b733e653f7e845770266f4c79f0c4be3803aa760b8bbc1d34b841f19288ce5"
+      },
+      {
+        "path": "xv6/user/echo.c",
+        "role": "public",
+        "sha256": "b51803acf48c2c3e87bebf637c941c4a63d21313f0c6d103cd76753eb72b2145"
+      },
+      {
+        "path": "xv6/user/forktest.c",
+        "role": "public",
+        "sha256": "2db82f25cd4f248c31744a88b5cd8d332128c7c0e689d6899077dff1f2c08b35"
+      },
+      {
+        "path": "xv6/user/forphan.c",
+        "role": "public",
+        "sha256": "500755a5f770f8f7385b867119b43fd6f468fb8130a40050258d0b24f08c7eed"
+      },
+      {
+        "path": "xv6/user/grep.c",
+        "role": "public",
+        "sha256": "691a256810d8cd1ac7033750fae8369aac58a9412461c2c03e19ebcb54f5e787"
+      },
+      {
+        "path": "xv6/user/grind.c",
+        "role": "public",
+        "sha256": "a40116e15183bf2738980800289db9b93a509d62403e256613212b8126558355"
+      },
+      {
+        "path": "xv6/user/init.c",
+        "role": "public",
+        "sha256": "39f1a20c9d369b9f782eeb5c01ef5fa7747b850adeec0a7a1a6549052d4a0018"
+      },
+      {
+        "path": "xv6/user/kill.c",
+        "role": "public",
+        "sha256": "bed1eb7a8446eb3295f47d07e1c5bf7eeee0473de8ca9a213fe6eb73bf7d3c49"
+      },
+      {
+        "path": "xv6/user/ln.c",
+        "role": "public",
+        "sha256": "5d797233c2ae45ce210f2d5e7954084fe84c882b7645fba52bb55c6428d768cc"
+      },
+      {
+        "path": "xv6/user/logstress.c",
+        "role": "public",
+        "sha256": "86adae4bd36a98232d96b3febf7050b1b60153bf377e1a4e4428fe793fc24a21"
+      },
+      {
+        "path": "xv6/user/ls.c",
+        "role": "public",
+        "sha256": "fde93accc14669a7e69ffbd1ed695608fd7d9b307e1e4662734cc8246454e5d6"
+      },
+      {
+        "path": "xv6/user/mkdir.c",
+        "role": "public",
+        "sha256": "86c0730a6ae8088a9fa19b0efebf8c59eea9cff20da5a2d4bb3d89f3c1c8c836"
+      },
+      {
+        "path": "xv6/user/printf.c",
+        "role": "public",
+        "sha256": "8c98780668f6418103de788fa8f2c2d16ed419de95a4484e20fe9531194ccbca"
+      },
+      {
+        "path": "xv6/user/rm.c",
+        "role": "public",
+        "sha256": "fa81e84bc38dffa25cf4387dcf52781b41822fd65077ab6eb3296fefb14fe551"
+      },
+      {
+        "path": "xv6/user/sh.c",
+        "role": "public",
+        "sha256": "9f0ea2e437df99f3eecc0adfbf0dd0854f9cb80a8e7a0f636fa73da5b01fc5e3"
+      },
+      {
+        "path": "xv6/user/stressfs.c",
+        "role": "public",
+        "sha256": "7a88dd1e545ac0207b013430d095e2c45aa692275590d0d997631fa0605f27a1"
+      },
+      {
+        "path": "xv6/user/sync.c",
+        "role": "public",
+        "sha256": "a3c4a87c18c1da9262524de13c4a7011d0a9d9c456c01098a4c204d4ff3d9734"
+      },
+      {
+        "path": "xv6/user/ulib.c",
+        "role": "public",
+        "sha256": "0bb30cebbd735f730e335e807742e0d20ddf5779d534714f558a606aac2d7a4b"
+      },
+      {
+        "path": "xv6/user/umalloc.c",
+        "role": "public",
+        "sha256": "510c0c97dc26156ef758aac9823d2c66f3bfa59b8389d4164c22f16ff968b4c5"
+      },
+      {
+        "path": "xv6/user/user.h",
+        "role": "public",
+        "sha256": "7bdb892e879d1ef3affc682e3ae9a6c13e965c87b35fb838a413cfa3a48f25d4"
+      },
+      {
+        "path": "xv6/user/user.ld",
+        "role": "public",
+        "sha256": "33cf919389b25afe2f6ce8d74eebe5687c42037f9be3453f09ba5f6da158c488"
+      },
+      {
+        "path": "xv6/user/usertests.c",
+        "role": "public",
+        "sha256": "afd549c0b9be8764445d503e489d0e86573ec2233f9b564c479aa7adac199792"
+      },
+      {
+        "path": "xv6/user/usys.pl",
+        "role": "public",
+        "sha256": "377fa27e4f7c07436fb487be27ef6c004ba1ddc4f018da0a19139e8946653e58"
+      },
+      {
+        "path": "xv6/user/wc.c",
+        "role": "public",
+        "sha256": "89bdbe572fda16deee86b94365754db4e9834f50c7067a8aedac1b5a89edd769"
+      },
+      {
+        "path": "xv6/user/zombie.c",
+        "role": "public",
+        "sha256": "eae866f906bd4061737c2704e2e50d82cabc9ef7c0aec86fee3472354e752e4a"
+      },
+      {
+        "path": "xv6/xv6-source.tar.gz",
+        "role": "public",
+        "sha256": "ece349bbf5d784efd7719a76f9692a075df240eb5d8b6445046838deb51f4791"
+      }
+    ],
+    "controlledArtifacts": [
+      {
+        "name": "xv6-toolchain-image",
+        "locator": "private://evaluation/xv6-riscv64/toolchain-image",
+        "binding": "xv6-riscv64-toolchain-v1"
+      },
+      {
+        "name": "xv6-hidden-tests",
+        "locator": "private://evaluation/xv6-riscv64/hidden-tests",
+        "binding": "xv6-riscv64-hidden-v1"
+      },
+      {
+        "name": "xv6-reference-solution",
+        "locator": "private://evaluation/xv6-riscv64/reference",
+        "binding": "xv6-riscv64-reference-v1"
+      }
+    ]
+  }
+}

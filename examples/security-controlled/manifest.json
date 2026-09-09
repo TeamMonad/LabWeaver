@@ -1,0 +1,99 @@
+{
+  "apiVersion": "labweaver.io/problem-package/v1",
+  "kind": "ProblemPackage",
+  "metadata": {
+    "name": "offline-auth-remediation-lab",
+    "version": "1.0.0"
+  },
+  "spec": {
+    "runtime": {
+      "kind": "container",
+      "providerBinding": "kubernetes-work-local-hostpath",
+      "runnerImage": "registry.example.invalid/labweaver/evaluation-runner@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "security": {
+      "runAsNonRoot": true,
+      "readOnlyRootFilesystem": true,
+      "allowPrivilegeEscalation": false,
+      "capabilities": [],
+      "networkPolicyBinding": "security-lab-restricted-egress-v1"
+    },
+    "files": [
+      {
+        "path": "Dockerfile",
+        "role": "public",
+        "sha256": "45616844b02b8388cb1dd2ba8a07a2ee663eff8fd2576d8c9d4671a0ae65c39a"
+      },
+      {
+        "path": "README.md",
+        "role": "public",
+        "sha256": "d39e105ffe7207910f231f3e60a0fe9e2477806d3a3d5617984ff9689e71b44e"
+      },
+      {
+        "path": "environment.yaml",
+        "role": "public",
+        "sha256": "fb66f93d6a5d072a3035919339e0cd5401dbb77b8d7dd799fb896eeb613c5ec2"
+      },
+      {
+        "path": "evaluation.yaml",
+        "role": "public",
+        "sha256": "3af44262cd3729fbfe78af21ccaede5550f2d138f5c75f21c69cda512b629350"
+      },
+      {
+        "path": "profiles/security-cpp17.json",
+        "role": "public",
+        "sha256": "d26f1a29eee32d08b10c9601253522d00f74d99ced23af043317b0fc656c5dca"
+      },
+      {
+        "path": "reference/fixed_auth.c",
+        "role": "public",
+        "sha256": "7aa93ca22fb554ff74dec2613b1295ea2a6c117ac5ff2fae280a2f831856d27b"
+      },
+      {
+        "path": "reference/vulnerable_auth.c",
+        "role": "public",
+        "sha256": "c9b17fa1770d95d1065d7f362f77c81b35a364a62140fd70362c741b9373ecf1"
+      },
+      {
+        "path": "scripts/local-test.sh",
+        "role": "public",
+        "sha256": "cd38b942626c62fabe019752f2d1dac2c10294d0b167d550bf9ba57b4a8bfb57"
+      },
+      {
+        "path": "student/auth.c",
+        "role": "public",
+        "sha256": "c9b17fa1770d95d1065d7f362f77c81b35a364a62140fd70362c741b9373ecf1"
+      },
+      {
+        "path": "tests/security-controlled/authentication-bypass.in",
+        "role": "public",
+        "sha256": "d21e22f420abdbacaa5d0391469c00d7ef321241aa16d61c3145c39f1e68b6c4"
+      },
+      {
+        "path": "tests/security-controlled/authentication-bypass.out",
+        "role": "public",
+        "sha256": "d9f98a780823174fc57d7af82776b10dee0aee81ee050e22ce7e86d4800ca81e"
+      },
+      {
+        "path": "tests/security-controlled/parser-boundary.in",
+        "role": "public",
+        "sha256": "238dd048eb66642fd5b6989b225075a018784d9f099c3b4a1c965d342a4a005f"
+      },
+      {
+        "path": "tests/security-controlled/parser-boundary.out",
+        "role": "public",
+        "sha256": "076f2660d85b9a6f7aa4e1b13f995cbb64980d93e44afa6ef9e164f00461d947"
+      },
+      {
+        "path": "tests/security-controlled/valid-logins.in",
+        "role": "public",
+        "sha256": "011e60969021956c63251358b3b6f74c8b8d2e11f8dedeede9bc03bafd9dc46c"
+      },
+      {
+        "path": "tests/security-controlled/valid-logins.out",
+        "role": "public",
+        "sha256": "c4cbbca115e8836a3a4eadb377273947278fd2786feda817f944890d8feb7538"
+      }
+    ]
+  }
+}

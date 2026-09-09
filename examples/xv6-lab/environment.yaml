@@ -1,0 +1,41 @@
+apiVersion: environment.labweaver.io/v1
+kind: EnvironmentSpec
+name: xv6-riscv-user-lab
+class: experiment
+resources:
+  cpuMillicores: 500
+  memoryBytes: 536870912
+  storageBytes: 2147483648
+network:
+  mode: restricted
+  policyBinding: xv6-lab-deny-egress-v1
+entries:
+  - name: public-files
+    protocol: http
+    servicePort: 8080
+security:
+  userPolicy: non_root_required
+  rootFilesystemPolicy: read_only_required
+  privilegeEscalationPolicy: deny
+  publicExposurePolicy: deny
+  securityProfileBinding: xv6-lab-container-v1
+runtime:
+  kind: container
+  providerBinding: kubernetes-work-local-hostpath
+  buildContext:
+    artifactId: 01900000-0000-7000-8000-000000000011
+    storeBinding: problem-package-minio-v1
+    objectVersion: xv6-context-v1
+    sizeBytes: 1
+    mediaType: application/vnd.labweaver.build-context.v1+tar
+  servicePort: 8080
+  terminal:
+    executable: /bin/sh
+    args: []
+    workingDirectory: /workspace
+retention:
+  policyId: 01900000-0000-7000-8000-000000000012
+  policyRevision: 1
+  class: course_material
+  retainUntil: "2036-01-01T00:00:00.000Z"
+  disposition: delete

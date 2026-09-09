@@ -1,0 +1,77 @@
+apiVersion: evaluation.labweaver.io/v1
+kind: EvaluationSpec
+metadata:
+  name: xv6-riscv-user-lab
+  version: "1.0.0"
+spec:
+  submission:
+    collector:
+      kind: workspace_snapshot
+      include:
+        - student/student.c
+      exclude:
+        - build
+      maxBytes: 8388608
+    llmReadable: []
+  steps:
+    - role: gate
+      id: source-present
+      runner:
+        kind: file_assertion
+        requiredFiles:
+          - student/student.c
+      checker:
+        kind: exit_code
+        expected: 0
+      failurePolicy: stop
+    - role: gate
+      id: compile
+      dependsOn: [source-present]
+      runner:
+        kind: program
+        toolchainProfile: xv6-riscv64
+        phase: compile
+        input: student/student.c
+        limits:
+          wallTimeSeconds: 60
+          memoryBytes: 1073741824
+          outputBytes: 4194304
+      checker:
+        kind: exit_code
+        expected: 0
+      failurePolicy: stop
+    - role: score
+      id: smoke-tests
+      dependsOn: [compile]
+      runner:
+        kind: program
+        toolchainProfile: xv6-riscv64
+        phase: test
+        input: student/student.c
+        testGroups:
+          - name: smoke
+            source: evaluator://tests/xv6-riscv64/smoke
+            maxPoints: 30
+          - name: filesystem
+            source: evaluator://tests/xv6-riscv64/filesystem
+            maxPoints: 70
+        limits:
+          wallTimeSeconds: 5
+          memoryBytes: 268435456
+          outputBytes: 1048576
+      checker:
+        kind: token
+      score:
+        max: 100
+      failurePolicy: continue
+  aggregation:
+    kind: deterministic_sum
+    maxScore: 100
+    gates:
+      - step: compile
+        requiredStatus: passed
+  review:
+    teacherApprovalRequiredForRelease: true
+    forceManualWhen:
+      - infrastructureError
+      - invalidEvidence

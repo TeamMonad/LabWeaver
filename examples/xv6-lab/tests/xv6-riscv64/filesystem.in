@@ -1,0 +1,3 @@
+echo filesystem-ready > filesystem-check
+cat filesystem-check
+student

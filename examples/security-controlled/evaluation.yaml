@@ -1,0 +1,91 @@
+apiVersion: evaluation.labweaver.io/v1
+kind: EvaluationSpec
+metadata:
+  name: offline-auth-remediation-lab
+  version: "1.0.0"
+spec:
+  submission:
+    collector:
+      kind: workspace_snapshot
+      include:
+        - student/auth.c
+      exclude:
+        - build
+      maxBytes: 8388608
+    llmReadable:
+      - student/auth.c
+  steps:
+    - role: gate
+      id: source-present
+      runner:
+        kind: file_assertion
+        requiredFiles:
+          - student/auth.c
+      checker:
+        kind: exit_code
+        expected: 0
+      failurePolicy: stop
+    - role: gate
+      id: compile
+      dependsOn: [source-present]
+      runner:
+        kind: program
+        toolchainProfile: security-cpp17
+        phase: compile
+        input: student/auth.c
+        limits:
+          wallTimeSeconds: 30
+          memoryBytes: 536870912
+          outputBytes: 1048576
+      checker:
+        kind: exit_code
+        expected: 0
+      failurePolicy: stop
+    - role: score
+      id: controlled-cases
+      dependsOn: [compile]
+      runner:
+        kind: program
+        toolchainProfile: security-cpp17
+        phase: test
+        input: student/auth.c
+        testGroups:
+          - name: valid-logins
+            source: evaluator://tests/security-controlled/valid-logins
+            maxPoints: 30
+          - name: authentication-bypass
+            source: evaluator://tests/security-controlled/authentication-bypass
+            maxPoints: 50
+          - name: parser-boundary
+            source: evaluator://tests/security-controlled/parser-boundary
+            maxPoints: 20
+        limits:
+          wallTimeSeconds: 2
+          memoryBytes: 134217728
+          outputBytes: 1048576
+      checker:
+        kind: token
+      score:
+        max: 100
+      failurePolicy: continue
+    - role: advisory
+      id: safety-review
+      dependsOn: [source-present]
+      runner:
+        kind: llm_review
+        include:
+          - student/auth.c
+        rubric: evaluator://rubrics/security-boundary-review-v1.yaml
+        outputMode: goal_assessment
+      failurePolicy: continue_advisory
+  aggregation:
+    kind: deterministic_sum
+    maxScore: 100
+    gates:
+      - step: compile
+        requiredStatus: passed
+  review:
+    teacherApprovalRequiredForRelease: true
+    forceManualWhen:
+      - infrastructureError
+      - invalidEvidence
